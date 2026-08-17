@@ -1,0 +1,308 @@
+openapi: 3.0.3
+info:
+  title: slime 双栈契约（唯一双端共享真相源）
+  description: >
+    sidecar（Python 实现）与 core-ts/gateway-ts（Node 实现）共用此契约。
+    shared/gen/ 下 zod schemas 与 pydantic 模型由此文件机器生成，禁止手改。
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:19100
+    description: sidecar 默认端口（INFER_PORT 可覆盖）
+paths:
+  /health:
+    get:
+      summary: 心跳（Node 超时即判死）
+      responses:
+        "200":
+          description: 存活
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+  /chat/completions:
+    post:
+      summary: 流式/非流式推理（OpenAI 兼容）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatRequest" }
+      responses:
+        "200":
+          description: "非流式：ChatResponse；流式：SSE（data: ChatCompletionChunk 行，终止于 data: [DONE]）"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatResponse" }
+        "400": { description: 参数错误 }
+        "502": { description: 上游转发失败 }
+        "503": { description: 本地模型不可用（如 VRAM 不足/未加载） }
+  /embeddings:
+    post:
+      summary: BGE-M3 嵌入（OpenAI 格式）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmbeddingsRequest" }
+      responses:
+        "200":
+          description: 嵌入向量
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmbeddingsResponse" }
+        "400": { description: input 必填/非法 }
+        "503": { description: embedding 模型不可用 }
+  /v1/retrieve:
+    post:
+      summary: 四阶段检索（向量种子 → 链接遍历 → 标签过滤 → 艾宾浩斯权重排序）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RetrieveRequest" }
+      responses:
+        "200":
+          description: 检索结果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RetrieveResponse" }
+        "400": { description: agent_id 必填/非法 }
+  /stats:
+    get:
+      summary: 显存/实例/检索配置（直供 UI 监控面板）
+      responses:
+        "200":
+          description: 状态
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatsResponse" }
+  /models/load:
+    post:
+      summary: 加载推理/嵌入实例
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelLoadRequest" }
+      responses:
+        "200":
+          description: 加载结果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelLoadResponse" }
+        "400": { description: 未知 role }
+  /models/unload:
+    post:
+      summary: 卸载实例（persistent 拒绝）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelLoadRequest" }
+      responses:
+        "200":
+          description: 卸载结果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelUnloadResponse" }
+components:
+  schemas:
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content: { type: string }
+        name: { type: string }
+    ChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ChatMessage" }
+        stream: { type: boolean, default: false }
+        max_tokens: { type: integer, minimum: 1, maximum: 65536 }
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        top_p: { type: number, minimum: 0, maximum: 1 }
+        stop:
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+        presence_penalty: { type: number, minimum: -2, maximum: 2 }
+        frequency_penalty: { type: number, minimum: -2, maximum: 2 }
+    ChatUsage:
+      type: object
+      properties:
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        total_tokens: { type: integer }
+    ChatChoice:
+      type: object
+      properties:
+        index: { type: integer }
+        message: { $ref: "#/components/schemas/ChatMessage" }
+        finish_reason: { type: string, nullable: true }
+    ChatResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string }
+        object: { type: string, enum: [chat.completion] }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items: { $ref: "#/components/schemas/ChatChoice" }
+        usage: { $ref: "#/components/schemas/ChatUsage" }
+    ChatDelta:
+      type: object
+      properties:
+        role: { type: string }
+        content: { type: string }
+    ChatChunkChoice:
+      type: object
+      properties:
+        index: { type: integer }
+        delta: { $ref: "#/components/schemas/ChatDelta" }
+        finish_reason: { type: string, nullable: true }
+    ChatCompletionChunk:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string }
+        object: { type: string, enum: [chat.completion.chunk] }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items: { $ref: "#/components/schemas/ChatChunkChoice" }
+    EmbeddingsRequest:
+      type: object
+      required: [input]
+      properties:
+        model: { type: string, default: "bge-m3" }
+        input:
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+    EmbeddingData:
+      type: object
+      required: [object, index, embedding]
+      properties:
+        object: { type: string, enum: [embedding] }
+        index: { type: integer }
+        embedding: { type: array, items: { type: number } }
+    EmbeddingsResponse:
+      type: object
+      required: [object, data, model, usage]
+      properties:
+        object: { type: string, enum: [list] }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/EmbeddingData" }
+        model: { type: string }
+        usage: { $ref: "#/components/schemas/ChatUsage" }
+    RetrieveRequest:
+      type: object
+      required: [agent_id, query]
+      properties:
+        agent_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+        query: { type: string }
+        top_k: { type: integer, minimum: 1, maximum: 100, default: 10 }
+        max_hops: { type: integer, minimum: 0, maximum: 10, default: 2 }
+        tags:
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+    MemoryItem:
+      type: object
+      required: [id, content]
+      properties:
+        id: { type: string }
+        content: { type: string }
+        category: { type: string, default: fact }
+        tags: { type: array, items: { type: string } }
+        importance: { type: integer }
+        links: { type: array, items: { type: string } }
+        backlinks: { type: array, items: { type: string } }
+        weight: { type: number }
+    RetrieveStages:
+      type: object
+      properties:
+        seeds: { type: integer }
+        link_walked: { type: integer }
+        tag_filtered: { type: integer }
+        ranked: { type: integer }
+    RetrieveResponse:
+      type: object
+      required: [agent_id, query, count, items]
+      properties:
+        agent_id: { type: string }
+        query: { type: string }
+        count: { type: integer }
+        stages: { $ref: "#/components/schemas/RetrieveStages" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/MemoryItem" }
+    ModelInstance:
+      type: object
+      properties:
+        role: { type: string }
+        model: { type: string }
+        port: { type: integer }
+        pid: { type: integer, nullable: true }
+        state: { type: string }
+        persistent: { type: boolean }
+        external: { type: boolean }
+        vram_gb: { type: object }
+    VRAMInfo:
+      type: object
+      properties:
+        total_gb: { type: number }
+        free_gb: { type: number }
+        used_gb: { type: number }
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status: { type: string, enum: [ok] }
+        service: { type: string }
+        port: { type: integer }
+        vram: { $ref: "#/components/schemas/VRAMInfo" }
+        instances:
+          type: array
+          items: { $ref: "#/components/schemas/ModelInstance" }
+    StatsResponse:
+      type: object
+      properties:
+        vram: { $ref: "#/components/schemas/VRAMInfo" }
+        instances:
+          type: array
+          items: { $ref: "#/components/schemas/ModelInstance" }
+        memory:
+          type: object
+          properties:
+            dir: { type: string }
+            lancedb_enabled: { type: boolean }
+            lancedb_uri: { type: string }
+    ModelLoadRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { type: string, enum: [chat, embedding] }
+    ModelLoadResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        port: { type: integer, nullable: true }
+        state: { type: string }
+        error: { type: string }
+        detail: { type: string }
+    ModelUnloadResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        state: { type: string }
+        error: { type: string }
