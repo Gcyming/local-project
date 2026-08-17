@@ -1,0 +1,45 @@
+# 敏感文件（零夹带，§8.5）
+providers.enc.json
+*.slime_pass*
+auth_token.json
+auth_token.enc
+*.enc
+*.secret
+*.key
+
+# 模型资产（不入库，首次启动按需下载/手动指定）
+BGE-M3/
+llama.cpp/
+Local model/
+*.gguf
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+uv.lock
+
+# Node
+node_modules/
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# 本地数据 / 日志
+data/audit.jsonl
+data/qa_report.json
+data/qa_*.log
+data/model_servers.json
+data/generated/
+data/mcp/
+*.log
+
+# IDE / 工具残留
+.serena/
+.reasonix/
+.playwright-mcp/
+.vscode/
+.idea/
