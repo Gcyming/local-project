@@ -1,0 +1,209 @@
+# slime 配置文件
+# 功能开关与参数配置
+
+[memory]
+# 记忆系统开关
+enabled = true
+# 存储目录（相对项目根，支持绝对路径）
+dir = "Knowledge/Agent Memory"
+# 分类枚举（混合分类体系：固定主类 + 自由标签）
+categories = ["fact", "preference", "lesson", "rule", "skill", "insight", "user_profile"]
+# 存储后端: "json" | "lancedb"
+# 说明: 实际启用开关为下方 [memory.lancedb].enabled（server 仅检查该字段）
+# backend 字段仅记录存储后端语义，供文档/状态展示使用
+backend = "lancedb"
+# LanceDB 可选配置（enabled=true 即生效）
+[memory.lancedb]
+enabled = true
+uri = ""  # 默认 data/{agent_id}/lancedb
+
+[evolve]
+# 演化引擎开关
+enabled = true
+# 遗忘阈值（天），超过此天数未交互的 trait 可能被遗忘
+forget_threshold_days = 30
+
+[context]
+# 上下文压缩配置
+# 保留开头 N 条完整对话
+head = 3
+# 保留结尾 M 条完整对话
+tail = 10
+# 超过此阈值触发压缩
+window = 30
+
+[social]
+# 企业微信 webhook URL
+wechat_webhook_url = ""
+# 企业微信回调 verify_token（空=拒绝验签，填入即启用 SHA1 校验）
+wechat_verify_token = ""
+# 个人微信桥接服务地址（N10-L2）
+wechat_bridge_url = ""
+# 桥接服务认证 token
+wechat_bridge_token = ""
+
+# ── 沙箱配置 ──────────────────────────────────────────────
+
+[sandbox]
+# 全局默认策略: strict | moderated | relaxed
+default_level = "strict"
+
+# 工作目录隔离（空字符串=不限制）
+workspace = ""
+
+# 默认批准策略
+auto_approve_levels = [0, 1]    # L0/L1 自动批准
+require_approval_levels = [2, 3, 4]  # L2-L4 需确认
+deny_levels = [5]               # L5 强制拒绝
+
+# 工具级自动批准名单（A-002：支持 fnmatch 通配，如 "mcp_browser_*"）
+# MCP 工具缺省权限 network（L4），server 模式没有交互确认通道；
+# 不在此名单内的 L2-L4 工具会被沙箱拒绝（fail-closed）。
+# "mcp_*" 放行所有 MCP 桥接工具 —— 范围已被上方 [[mcp_servers]] 显式配置约束
+# （只有本地配置里列出的服务器才会桥接）。如需收紧可改为具体前缀如 "mcp_browser_*"。
+# 注意（A-088 漏洞清单 P1-9）：mcp_* 通配仅自动批准 read/write（L0-2），
+# network/terminal 级 MCP 工具（缺省 network=L4）仍需确认/拒绝。
+# "agnes_*" 放行同厂媒体生成工具（用户定制 2026-08-15：agnes_generate_image 等，
+# 密钥来自环境变量或加密 providers，不落明文）。
+# "file_write" 放行受控本地文件写入（A-041：仅项目根内/敏感文件屏蔽/5MB 上限，
+# 用户要求"保存到本地"能力；如不需要可移除）。
+# Agent 级 sandbox_override 与本名单取并集（互不覆盖）。
+# A-088 事故恢复：并集 = 原版（web_fetch/web_search/mcp_*/agnes_*/file_write）
+# + 重建版新增（file_read/file_list/skill_*）
+auto_approve_tools = ["web_fetch", "web_search", "mcp_*", "agnes_*", "file_write", "file_read", "file_list", "skill_*"]
+
+# 子 Agent 默认配置
+[sandbox.child_default]
+inherit_from_parent = true
+timeout_seconds = 300
+max_concurrent_permissions = 10
+
+# 异常行为检测
+[sandbox.anomaly_detection]
+enabled = true
+write_rate_limit = 100      # 次/分钟
+file_size_limit_mb = 50
+suspicious_patterns = [
+    "rm -rf /",
+    "chmod 777",
+    "curl | bash",
+]
+
+# 审计日志
+[sandbox.audit]
+enabled = true
+log_path = "data/audit.jsonl"
+retention_days = 90
+
+# ── 本地模型管理 ──────────────────────────────────────────
+
+[model_server]
+llama_bin = "D:\\tool\\slime\\llama.cpp\\llama-server.exe"
+startup_timeout = 60
+vram_budget_gb = 7.0
+chat_est_gb = 4.0
+
+[model_server.embedding]
+model_path = "D:\\tool\\slime\\BGE-M3\\bge-m3-q8_0.gguf"
+port = 8999
+gpu_layers = 99
+ctx_len = 2048
+persistent = true
+dim = 1024
+
+[model_server.chat]
+models_dir = "D:\\tool\\slime\\Local model"
+port_start = 18082
+gpu_layers = 99
+ctx_len = 8192
+persistent = false
+idle_unload_min = 10
+max_instances = 1
+
+# ── MCP 服务器配置 ──────────────────────────────────────────
+# 每个 [[mcp_servers]] 定义一个 MCP Server，两种传输二选一：
+#   stdio：command + args（本地子进程）
+#   HTTP：url + headers（远程 Streamable HTTP，MCP 2025 规范）
+# 工具/资源/提示分别桥接为 mcp_ / mcp_res_ / mcp_prompt_ 前缀工具
+# 可选字段 timeout（秒，默认 30）：重型工具（浏览器截图等）可调大，如 timeout = 60
+# 可选字段 tool_permissions：按 server 覆写工具权限（缺省 MCP 工具 = network）
+#   例：tool_permissions = { default = ["read"], screenshot = ["network"] }
+# 可选字段 inject_provider_keys：注入 LLM key 给第三方子进程（P1-10 最小权限）——
+#   true → 仅注入已知标准映射的 provider；["openai","deepseek"] → 白名单；"anthropic" → 单 provider
+
+# 本地 stdio 示例：
+# [[mcp_servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@anthropic-ai/mcp-server-filesystem", "D:\\workspace"]
+
+# 远程 HTTP 示例：
+# [[mcp_servers]]
+# name = "github"
+# url = "https://mcp.example.com/mcp"
+# headers = { Authorization = "Bearer <token>" }
+
+# 远程 HTTP + OAuth 2.1（P2-5）：受保护远程 MCP（GitHub/Figma 类）自动浏览器授权
+# [[mcp_servers]]
+# name = "github"
+# url = "https://api.github.com/mcp"
+# oauth = true                 # 无 headers 静态 token 时自动走 OAuth 2.1（PKCE + 本地回调）
+# oauth_scopes = ["read:user"] # 可选，不填则用 AS 默认 scope
+# oauth_client_id = "..."      # 可选，不填则尝试 DCR 自动注册（失败需手动配置）
+# oauth_redirect_port = 18091  # 可选，默认 18091（DCR redirect_uri 与 authorize 须一致）
+
+# 浏览器交互增强（search_engine.md 十三/十四 B2）：
+#   playwright-mcp 官方 stdio MCP Server，补齐 JS 渲染站 + 真验证码 + 点击/登录/截图
+#   客户端已升级双帧格式（JSONL/Content-Length）+ 协议 2025-11-25，无需降级
+#   浏览器用 msedge（Windows 自带 Edge；Chrome 未装，默认 chrome 频道会报 not found）
+[[mcp_servers]]
+name = "browser"
+command = "node"
+args = ["D:\\下载\\playwright-mcp-0.0.78\\cli.js", "--browser", "msedge"]
+
+# ── 从 D:\下载 导入的纯 MCP server（2026-08-14 接入，测试 MCP 功能）──
+
+# Context7 文档检索（本地 dist 直跑，零安装；A-092-R 配 key——官方限流随 key 提升）
+# key 直接配在段内 env（与系统环境变量等效，配置随 slime.toml 走；服务当前网络不可达待恢复）
+[[mcp_servers]]
+name = "context7"
+command = "node"
+args = ["D:\\下载\\context7--upstash-context7-mcp-3.2.4\\context7--upstash-context7-mcp-3.2.4\\packages\\mcp\\dist\\index.js"]
+timeout = 30
+env = { CONTEXT7_API_KEY = "ctx7sk-c48cf7df-befe-477d-a2fc-4eabd8615f7d" }
+
+# ── 以下 MCP 已删除（A-092-R：首启慢/价值低/工具名冲突）——如需恢复见对话记录 ──
+# serena（代码 LSP）、headroom（上下文压缩）、browser_use（LLM 浏览器，与 browser 工具名空间重叠）
+
+# agent-browser（Vercel 浏览器自动化 CLI，npx 首启下载原生二进制）
+# 注意 1：Windows 下 npx 须经 cmd /c（Popen 无法直接执行 .cmd）
+# 注意 2：本机 Codex 沙箱会锁死下载的 Chrome（ACL 排除当前用户），只能指向 Edge
+# 注意 3（实测 2026-08-15）：MCP 握手正常（29 工具），但浏览器实际操作挂起——
+#   agent-browser 的 daemon/CDP 连接 Edge 在本机失败（CLI 直测同样挂起，第三方工具自身兼容问题）。
+#   已注释禁用；如需重试：取消注释并确保 agent-browser 修复 Edge 兼容或解除 Codex 沙箱对 Chrome 的限制。
+# [[mcp_servers]]
+# name = "agent_browser"
+# command = "cmd"
+# args = ["/c", "npx", "-y", "agent-browser", "mcp"]
+# env = { AGENT_BROWSER_EXECUTABLE_PATH = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" }
+# timeout = 60
+
+# 已删除（A-092-R）：headroom 上下文压缩（uvx 拉 PyPI wheel，含 Rust 扩展）
+# 已删除（A-092-R）：browser-use 浏览器自动化（与 browser 工具名空间重叠，注入面收窄）
+
+# ── Agnes 媒体配置（A-088 事故恢复：原版无此段，重建版新增——显式配置优于代码默认）──
+
+[media]
+env_key = "HERMES_CUSTOM_API_AGNES_AI_CN_API_KEY"
+api_base = "https://api.agnes-ai.cn/v1"
+poll_base = "https://api.agnes-ai.cn/agnesapi"
+image_model = "agnes-image-2.1-flash"
+video_model = "agnes-video-v2.0"
+
+
+# ── Soul-Plan：情绪进化软开关（docs/soul-plan.md 修正条 3）──
+[emotion]
+ab_enabled = true          # A/B 影子模式
+ab_report_after = 50       # 每 Agent 满 50 次交互出对比报告
+tool_signal = true         # 环2 工具成败 → 情绪（默认开，可单独关）
+behavior_levers = true     # 三杠杆 + promote（默认开，可单独关）

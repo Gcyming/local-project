@@ -1,0 +1,14 @@
+name: webcrawler-deep-crawl
+version: '1.0'
+description: Deep-crawl any website from start URLs, return per-page LLM-ready text/markdown/HTML
+  plus metadata (title, description, author, language, canonical URL, OG) and in-scope
+  outbound links. Use when user mentions deep crawl website, recursive crawl, crawl
+  a whole site, scrape entire website, scrape docs site, scrape documentation, scrape
+  knowledge base, scrape blog, build RAG corpus, build vector database from website,
+  knowledge base for chatbot, GPT knowledge files, llms.txt, sitemap crawl, BFS cra
+permissions:
+  read: true
+  write: false
+  terminal: false
+  network: false
+tags: []
