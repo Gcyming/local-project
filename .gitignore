@@ -1,45 +1,52 @@
-# 敏感文件（零夹带，§8.5）
-providers.enc.json
-*.slime_pass*
-auth_token.json
-auth_token.enc
-*.enc
-*.secret
-*.key
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
 
-# 模型资产（不入库，首次启动按需下载/手动指定）
+# Runtime artifacts
+server.log
+data/
+Knowledge/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Secrets (encrypted or not)
+config/auth_token.json
+config/auth_token.enc
+config/providers.enc.json
+*.enc
+
+# Passphrase fallback
+.slime_pass
+
+# OS
+Thumbs.db
+.DS_Store
+
+# 数据区（三区分离 §8.1，不入库）
+config/agents.json
+config/history.jsonl
+
+# 二进制/模型资产（不入库）
+tools/ffmpeg/
 BGE-M3/
 llama.cpp/
 Local model/
 *.gguf
 
-# Python
-__pycache__/
-*.pyc
-.pytest_cache/
-.venv/
-venv/
-uv.lock
-
-# Node
+# Node（双栈新层）
 node_modules/
 dist/
 out/
 release/
 *.tsbuildinfo
+uv.lock
 
-# 本地数据 / 日志
-data/audit.jsonl
-data/qa_report.json
-data/qa_*.log
-data/model_servers.json
-data/generated/
-data/mcp/
-*.log
-
-# IDE / 工具残留
+# 工具残留
 .serena/
 .reasonix/
 .playwright-mcp/
-.vscode/
-.idea/
