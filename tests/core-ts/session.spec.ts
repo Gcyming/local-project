@@ -10,6 +10,7 @@ function makeSession(overrides: {
   nonStreamContent?: string;
   onDelta?: (d: string) => void;
   hooks?: InjectionHooks;
+  clientFactory?: (route: { name: string }) => ChatClient;
 } = {}) {
   const streamChunks = overrides.streamChunks ?? [];
   const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -30,9 +31,11 @@ function makeSession(overrides: {
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as unknown as typeof fetch;
   const client = new ChatClient({ baseUrl: "http://127.0.0.1:19100", fetchImpl });
-  const router = new ModelRouter([{ name: "sidecar", baseUrl: "http://127.0.0.1:19100", kind: "local", priority: 100, roles: ["chat"] }]);
+  const router = new ModelRouter(
+    [{ name: "sidecar", baseUrl: "http://127.0.0.1:19100", kind: "local", priority: 100, roles: ["chat"] }],
+    overrides.clientFactory ?? (() => client),
+  );
   const session = new Session({
-    client,
     router,
     hooks: overrides.hooks ?? NOOP_HOOKS,
   });
@@ -92,8 +95,7 @@ describe("Session（会话最小闭环）", () => {
   });
 
   it("无可用 chat 路由时抛出明确错误（不静默失败）", async () => {
-    const client = new ChatClient({ baseUrl: "http://127.0.0.1:19100" });
-    const session = new Session({ client, router: new ModelRouter() });
+    const session = new Session({ router: new ModelRouter() });
     await expect(session.chat({ agent: AGENT, agentId: "agent_x", history: [] })).rejects.toThrow("无可用 chat 路由");
   });
 
@@ -103,7 +105,12 @@ describe("Session（会话最小闭环）", () => {
       sent.push(JSON.parse(String(init?.body)));
       return new Response(JSON.stringify({ id: "x", object: "chat.completion", created: 1, model: "m", choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] }), { status: 200 });
     }) as unknown as typeof fetch;
-    const s2 = new Session({ client: new ChatClient({ baseUrl: "http://x", fetchImpl: fetchImpl2 }), router: new ModelRouter([{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }]) });
+    const s2 = new Session({
+      router: new ModelRouter(
+        [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+        () => new ChatClient({ baseUrl: "http://x", fetchImpl: fetchImpl2 }),
+      ),
+    });
     await s2.chat({
       agent: AGENT, agentId: "a1",
       history: [{ role: "user", content: "第一轮" }, { role: "assistant", content: "回复" }],
@@ -114,5 +121,11 @@ describe("Session（会话最小闭环）", () => {
     expect(payload.messages[0].role).toBe("system");
     expect(payload.messages[1].content).toBe("第一轮");
     expect(payload.messages[2].content).toBe("回复");
+  });
+
+  it("结果携带 routeName（路由可观测，不向用户暴露）", async () => {
+    const { session } = makeSession({ nonStreamContent: "你好" });
+    const r = await session.chat({ agent: AGENT, agentId: "agent_x", history: [], stream: false });
+    expect(r.routeName).toBe("sidecar");
   });
 });

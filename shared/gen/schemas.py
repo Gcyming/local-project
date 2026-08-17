@@ -10,6 +10,7 @@ class ChatMessage(BaseModel):
     name: Optional[str] = None
 
 class ChatRequest(BaseModel):
+    model: Optional[str] = None
     messages: List[ChatMessage]
     stream: Optional[bool] = None
     max_tokens: Optional[int] = None

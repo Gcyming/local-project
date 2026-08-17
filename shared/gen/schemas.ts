@@ -5,7 +5,7 @@ import { z } from "zod";
 export const ChatMessage = z.object({ role: z.enum(['system', 'user', 'assistant', 'tool']), content: z.string(), name: z.string().optional() });
 export type ChatMessage = z.infer<typeof ChatMessage>;
 
-export const ChatRequest = z.object({ messages: z.array(ChatMessage), stream: z.boolean().optional(), max_tokens: z.number().optional(), temperature: z.number().optional(), top_p: z.number().optional(), stop: z.union([z.string(), z.array(z.string())]).optional(), presence_penalty: z.number().optional(), frequency_penalty: z.number().optional() });
+export const ChatRequest = z.object({ model: z.string().optional(), messages: z.array(ChatMessage), stream: z.boolean().optional(), max_tokens: z.number().optional(), temperature: z.number().optional(), top_p: z.number().optional(), stop: z.union([z.string(), z.array(z.string())]).optional(), presence_penalty: z.number().optional(), frequency_penalty: z.number().optional() });
 export type ChatRequest = z.infer<typeof ChatRequest>;
 
 export const ChatUsage = z.object({ prompt_tokens: z.number().optional(), completion_tokens: z.number().optional(), total_tokens: z.number().optional() });

@@ -4,9 +4,9 @@
  * - 身份铁律区（"我是{name}，{role}"，不暴露模型名）
  * - 双路径注入骨架：固定段（L1 身份 + L2 规则/心智占位）+ 检索注入（L3，阶段 4 接入 sidecar /v1/retrieve）
  * - 诚实与验证铁律协议摘要（阶段 4 全量注入）
+ * - 路由：经 ModelRouter 统一路由（本地/云端 + OOM 降级链，阶段 3），不直接持有 ChatClient
  */
 
-import { ChatClient } from "./llm/client.js";
 import { ModelRouter } from "./router.js";
 import { ChatMessage } from "shared/schemas";
 import { OutputFilter, StreamFilter } from "./filter.js";
@@ -30,7 +30,6 @@ export const NOOP_HOOKS: InjectionHooks = {
 };
 
 export interface SessionOptions {
-  client: ChatClient;
   router: ModelRouter;
   filter?: OutputFilter;
   hooks?: InjectionHooks;
@@ -44,6 +43,7 @@ export interface SessionChatOptions {
   stream?: boolean;
   onDelta?: (delta: string) => void;
   maxTokens?: number;
+  model?: string;
 }
 
 export interface SessionChatResult {
@@ -51,6 +51,8 @@ export interface SessionChatResult {
   chunks: number;
   model: string;
   violations: number;
+  /** 本次实际使用的路由名（内部可观测；不向用户暴露） */
+  routeName: string;
 }
 
 const IDENTITY_CONSTRAINT = (
@@ -70,13 +72,11 @@ const HONESTY_PROTOCOL =
   `4. 不确定就说不知道。`;
 
 export class Session {
-  private client: ChatClient;
   private router: ModelRouter;
   private filter: OutputFilter;
   private hooks: InjectionHooks;
 
   constructor(opts: SessionOptions) {
-    this.client = opts.client;
     this.router = opts.router;
     this.filter = opts.filter ?? new OutputFilter();
     this.hooks = opts.hooks ?? NOOP_HOOKS;
@@ -92,37 +92,32 @@ export class Session {
   }
 
   /**
-   * 会话最小闭环：组装消息 → 路由 → 流式/非流式 → 身份铁律过滤。
+   * 会话最小闭环：组装消息 → 路由（本地/云端 + OOM 降级链）→ 身份铁律过滤。
    * 过滤在流式层跨 chunk 进行（StreamFilter），保证跨 chunk 匹配正确且不中断输出。
    */
   async chat(opts: SessionChatOptions): Promise<SessionChatResult> {
-    const route = this.router.select("chat");
-    if (!route) {
-      throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);
-    }
     const system = await this.buildSystemPrompt(opts.agent, opts.agentId);
     const messages: ChatMessage[] = [
       { role: "system", content: system },
       ...opts.history,
     ];
+    const payload = { messages, max_tokens: opts.maxTokens, model: opts.model };
 
     if (opts.stream === false) {
-      const resp = await this.client.chat({
-        messages,
-        max_tokens: opts.maxTokens,
-      });
-      const text = resp.choices[0]?.message?.content ?? "";
+      const { response, routeName } = await this.router.chat(payload);
+      const text = response.choices[0]?.message?.content ?? "";
       const result = this.filter.filter(text, opts.agent.name);
       return {
         text: result.filtered,
         chunks: 1,
-        model: resp.model,
+        model: response.model,
         violations: result.violations.length,
+        routeName,
       };
     }
 
     const streamFilter = new StreamFilter();
-    const chunks = await this.client.chatStream({ messages, max_tokens: opts.maxTokens }, (delta) => {
+    const streamed = await this.router.chatStream(payload, (delta) => {
       const emitted = streamFilter.push(delta, this.filter, opts.agent.name);
       if (emitted && opts.onDelta) {
         opts.onDelta(emitted);
@@ -132,6 +127,12 @@ export class Session {
     if (tail && opts.onDelta) {
       opts.onDelta(tail);
     }
-    return { text: chunks.text, chunks: chunks.chunks, model: chunks.model, violations: streamFilter.violations };
+    return {
+      text: streamed.text,
+      chunks: streamed.chunks,
+      model: streamed.model,
+      violations: streamFilter.violations,
+      routeName: streamed.routeName,
+    };
   }
 }

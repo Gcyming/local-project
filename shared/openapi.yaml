@@ -117,6 +117,7 @@ components:
       type: object
       required: [messages]
       properties:
+        model: { type: string, description: "路由 model 名（阶段 3：云端路由必填；本地由上游决定，可省略）" }
         messages:
           type: array
           items: { $ref: "#/components/schemas/ChatMessage" }

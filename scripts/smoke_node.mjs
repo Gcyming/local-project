@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
- * scripts/smoke_node.mjs — 阶段 2 真实闭环冒烟：Node 会话 ↔ 真实本地模型（llama-server）流式。
- * 验收项（规划 §9 阶段 2）：
- *   ① llama-server 拉起（独立实例，Qwen 2.5 3B，端口 19501）
- *   ② Session 组装（身份铁律 system prompt + 诚实协议）→ ChatClient 流式 → StreamFilter 过滤
- *   ③ 流式 chunk 数 > 0、拼接文本非空、模型名不泄漏（model 仅存内部，不外露）
- *   ④ 收尾：停止 llama-server，验证端口释放
+ * scripts/smoke_node.mjs — 阶段 3 真实闭环冒烟：双路径路由（本地/云端）+ OOM 降级链 + 身份不变验收。
+ * 验收项（规划 §9 阶段 3）：
+ *   ① 本地 llama-server 拉起（19501 独立实例）
+ *   ② 云端 mock 拉起（OpenAI 兼容，动态端口；故意输出违规自称触发过滤）
+ *   ③ 本地优先路由：同一 Session 流式走真实本地模型（routeName=local）
+ *   ④ 真实降级触发：首选指向不存在端口（网络不可达）→ 自动降级本地成功 + fallbackLog 记录
+ *   ⑤ 同会话切换云端：替换路由表 → 身份铁律过滤仍生效（"我是 小灵"不变，违规内容被过滤）
+ *   ⑥ 收尾：双服务停止，端口释放
  * 用法：node scripts/smoke_node.mjs
  */
 import { spawn, execFileSync, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createServer } from "node:http";
 import { ChatClient } from "../core-ts/dist/llm/client.js";
 import { Session } from "../core-ts/dist/session.js";
 import { ModelRouter } from "../core-ts/dist/router.js";
@@ -59,7 +62,7 @@ function waitForServer(url, timeoutMs) {
     try {
       const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
       if (r.ok) {
-        return true; // /v1/models 200 → 模型就绪
+        return true;
       }
     } catch {
       /* 未就绪 */
@@ -76,6 +79,44 @@ function killTree(pid) {
   } catch (e) {
     console.error(`[smoke] taskkill 失败: ${e.message}`);
   }
+}
+
+/** 云端 mock：OpenAI 兼容 /v1/chat/completions；CLOUD_MODE=down 时一律 503（模拟 OOM） */
+function startCloudMock() {
+  let down = false;
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+      if (down) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "显存不足", type: "local_model_error", code: 503 } }));
+        return;
+      }
+      const reply = "我是 Qwen 3B 模型，不过你只需要知道我是 小灵。";
+      if (body.stream) {
+        const pieces = [...reply];
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        for (const p of pieces) {
+          res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "cloud-qwen", choices: [{ index: 0, delta: { content: p } }] })}\n\n`);
+        }
+        res.end("data: [DONE]\n\n");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        id: "c1", object: "chat.completion", created: 1, model: "cloud-qwen",
+        choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }],
+      }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const port = server.address().port;
+      resolve({ server, port, setDown: (v) => { down = v; } });
+    });
+  });
 }
 
 async function main() {
@@ -99,80 +140,87 @@ async function main() {
     process.exit(2);
   }
 
-  const server = spawn(
-    LLAMA,
-    [`-m`, MODEL, `--port`, String(PORT), `-c`, `2048`, `-ngl`, `99`],
-    { stdio: "ignore", windowsHide: true },
-  );
-  const base = `http://127.0.0.1:${PORT}`;
+  const local = spawn(LLAMA, [`-m`, MODEL, `--port`, String(PORT), `-c`, `2048`, `-ngl`, `99`], { stdio: "ignore", windowsHide: true });
+  const cloud = await startCloudMock();
+  const localBase = `http://127.0.0.1:${PORT}`;
+  const cloudBase = `http://127.0.0.1:${cloud.port}`;
+  console.log(`[smoke] 云端 mock 端口 ${cloud.port}`);
 
   try {
-    await waitForServer(`${base}/v1/models`, 120_000).then(
+    await waitForServer(`${localBase}/v1/models`, 120_000).then(
       () => pass("① llama-server 拉起（19501 独立实例）"),
       (e) => fail("① llama-server 拉起", e.message),
     );
-    if (results.at(-1).ok) {
-      const client = new ChatClient({ baseUrl: base, timeoutMs: 180_000 });
-      const router = new ModelRouter([
-        {
-          name: "local-qwen",
-          baseUrl: base,
-          kind: "local",
-          priority: 10,
-          roles: ["chat"],
-        },
-      ]);
-      const session = new Session({ client, router });
+    pass("② 云端 mock 拉起（OpenAI 兼容）");
 
-      const deltas = [];
-      let out = "";
+    if (results[0].ok) {
+      const session = new Session({
+        router: new ModelRouter([
+          { name: "local", baseUrl: localBase, kind: "local", priority: 100, roles: ["chat"] },
+          { name: "cloud", baseUrl: cloudBase, kind: "cloud", priority: 90, roles: ["chat"], model: "cloud-qwen" },
+        ]),
+      });
+
+      // ③ 本地优先：真实本地模型流式
+      let r = await session.chat({
+        agent: { name: "小灵", role: "智能助理" },
+        agentId: "smoke-agent",
+        history: [{ role: "user", content: "你好，请用一句话介绍你自己。" }],
+        stream: true,
+        maxTokens: 128,
+      });
+      const okLocal = r.chunks > 0 && r.text.trim().length > 0 && r.routeName === "local" && r.violations === 0;
+      okLocal ? pass("③ 本地优先路由：真实 Qwen 流式 + 身份铁律无违规") : fail("③ 本地优先路由", `routeName=${r.routeName} chunks=${r.chunks} violations=${r.violations}`);
+      console.log(`[smoke] 本地会话: ${r.text.slice(0, 100)}`);
+
+      // ④ 真实降级触发：首选指向不存在端口（网络不可达）→ 自动降级本地
+      const routerDegrade = new ModelRouter([
+        { name: "bad-route", baseUrl: "http://127.0.0.1:1", kind: "cloud", priority: 200, roles: ["chat"] },
+        { name: "local", baseUrl: localBase, kind: "local", priority: 100, roles: ["chat"] },
+      ]);
+      const s2 = new Session({ router: routerDegrade });
       try {
-        out = await session.chat({
+        r = await s2.chat({
           agent: { name: "小灵", role: "智能助理" },
           agentId: "smoke-agent",
-          history: [{ role: "user", content: "你好，请用一句话介绍你自己。" }],
+          history: [{ role: "user", content: "你好" }],
           stream: true,
-          maxTokens: 128,
-          onDelta: (d) => deltas.push(d),
+          maxTokens: 64,
         });
+        const log = routerDegrade.fallbackLog();
+        const okDegrade = r.routeName === "local" && log.length === 1 && log[0].from === "bad-route" && log[0].to === "local";
+        okDegrade ? pass("④ 真实降级触发：首选不可达 → 自动降级本地 + fallbackLog") : fail("④ 真实降级触发", `routeName=${r.routeName} log=${JSON.stringify(log)}`);
       } catch (e) {
-        fail("② 会话流式", e.message);
+        fail("④ 真实降级触发", e.message);
       }
-      if (out) {
-        const okChunks = out.chunks > 0;
-        const okText = out.text.trim().length > 0;
-        const leaked = /llama|qwen|模型|AI|助手/.test(out.text) ? "" : "";
-        const okIdentity = !/我是 (模型|AI|助手|系统)|我是(模型|AI|助手|系统)/.test(out.text);
-        okChunks ? pass("② 流式 chunk 数 > 0") : fail("② 流式 chunk 数 > 0", `chunks=${out.chunks}`);
-        okText ? pass("③ 拼接文本非空") : fail("③ 拼接文本非空", JSON.stringify(out.text).slice(0, 100));
-        okIdentity ? pass("④ 身份铁律过滤（无'我是模型/AI/助手'）") : fail("④ 身份铁律过滤", `violations=${out.violations}`);
-        console.log(`[smoke] 会话文本（前 120 字）: ${out.text.slice(0, 120)}`);
-        console.log(`[smoke] 统计: chunks=${out.chunks} violations=${out.violations} model=${out.model}`);
-        pass("⑤ 会话闭环（流式 + 过滤 + 结果返回）");
-      }
-    }
 
-    const emb = new ChatClient({ baseUrl: base, timeoutMs: 60_000 });
-    try {
-      const v = await emb.embeddings("你好");
-      console.log(
-        v[0] && v[0].length === 1024
-          ? `[smoke] INFO embeddings 返回 ${v[0].length} 维（单实例已加载 chat 模型，此链路阶段 1 sidecar 冒烟已验证）`
-          : `[smoke] INFO embeddings 不可用（单实例无 embedding 模型，非缺陷）`,
-      );
-    } catch (e) {
-      console.log(`[smoke] INFO embeddings 不可用（${e.message}，单实例无 embedding 模型，非缺陷）`);
+      // ⑤ 同会话切换云端：路由表替换后身份铁律过滤仍生效
+      session["router"] = new ModelRouter([
+        { name: "cloud", baseUrl: cloudBase, kind: "cloud", priority: 100, roles: ["chat"], model: "cloud-qwen" },
+      ]);
+      const deltas = [];
+      r = await session.chat({
+        agent: { name: "小灵", role: "智能助理" },
+        agentId: "smoke-agent",
+        history: [{ role: "user", content: "你是谁？" }],
+        stream: true,
+        maxTokens: 128,
+        onDelta: (d) => deltas.push(d),
+      });
+      const visible = deltas.join("");
+      const okCloud = r.routeName === "cloud" && r.violations > 0 && !/我是 (Qwen|模型|AI|助手)/.test(visible) && visible.includes("小灵");
+      okCloud ? pass("⑤ 同会话切云端：违规自称被过滤，身份输出不变") : fail("⑤ 同会话切云端", `routeName=${r.routeName} violations=${r.violations} visible=${visible.slice(0, 120)}`);
+      console.log(`[smoke] 云端会话过滤后: ${visible.slice(0, 120)}`);
     }
+  } catch (e) {
+    console.error(`[smoke] 意外错误: ${e.stack ?? e.message}`);
   } finally {
-    killTree(server.pid);
-    const freed = await waitPortFree(PORT, 30_000);
-    if (!freed) {
-      console.error(`[smoke] 端口 ${PORT} 30s 内未释放，残留进程: ${execSync(`netstat -ano | findstr :${PORT} | findstr LISTENING`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })}`);
-    }
+    killTree(local.pid);
+    await new Promise((resolve) => cloud.server.close(() => resolve()));
+    await waitPortFree(PORT, 30_000);
   }
 
-  const freed = netstatListening(PORT);
-  freed ? fail("⑦ 收尾：端口释放") : pass("⑦ 收尾：端口释放");
+  netstatListening(PORT) ? fail("⑥ 收尾：端口释放") : pass("⑥ 收尾：端口释放");
 
   const passed = results.filter((r) => r.ok).length;
   console.log(`\n[smoke] ${passed}/${results.length} PASS`);
