@@ -8,7 +8,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "pnpm -r build",
-    "typecheck": "tsc -p tsconfig.base.json --noEmit"
+    "typecheck": "tsc -p tsconfig.base.json --noEmit",
+    "dev:gui": "pnpm --filter slime-gui dev",
+    "typecheck:gui": "pnpm --filter slime-gui type"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

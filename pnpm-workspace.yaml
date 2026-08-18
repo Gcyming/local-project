@@ -2,10 +2,12 @@ packages:
   - core-ts
   - gateway-ts
   - shared
+  - gui
 
 # pnpm 11：构建脚本显式放行（供应链接受清单，仅放行确有编译需求的包）
 allowBuilds:
   better-sqlite3: true
+  electron: true
   esbuild: true
   onnxruntime-node: true
   protobufjs: true
