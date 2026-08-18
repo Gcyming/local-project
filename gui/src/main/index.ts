@@ -22,6 +22,7 @@ import { AgentRegistry, type AgentState } from "../../../core-ts/src/services/ag
 import { createEngine } from "../../../core-ts/src/services/engine.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
 import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, SidecarStatus } from "../shared/ipc.js";
+import { initUpdater, registerUpdaterHandlers } from "./updater.js";
 
 let mainWindow: BrowserWindow | null = null;
 let chatService: ChatService | null = null;
@@ -408,6 +409,8 @@ function main(): void {
       registerProtocolHandler();
       createWindow();
       registerIpcHandlers();
+      registerUpdaterHandlers(); // 注册自动更新 IPC handler
+      initUpdater();             // 延迟检查更新（不阻塞首屏）
       mainWindow?.loadURL("slime://./index.html");
       mainWindow?.webContents.on("did-finish-load", () => {
         console.info("[gui:main] 渲染层已加载 (slime://)");

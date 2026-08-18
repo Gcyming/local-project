@@ -22,5 +22,11 @@
     "perMachine": false,
     "language": 2052,
     "shortcutName": "Slime"
+  },
+  "publish": {
+    "provider": "github",
+    "owner": "Gcyming",
+    "repo": "local-project",
+    "private": false
   }
 }
