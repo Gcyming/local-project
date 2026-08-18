@@ -1,13 +1,21 @@
 /**
- * gateway-ts/src/index.ts — Fastify 网关：Bearer 认证 / IP 滑动窗口限流 / CORS，转发到 sidecar。
- * 语义移植自 slime_server.py：
- * - Bearer 认证（auth_token，恒定时间比较）
- * - R5 限流：IP 滑动窗口 120 次/分（豁免 _AUTH_EXEMPT 健康检查类端点）
- * - 转发：/chat/completions /embeddings /v1/retrieve → sidecar（INFER_PORT），SSE 透传
+ * gateway-ts/src/index.ts — Fastify 网关（v2.6 边界定案：HTTP 适配薄壳，无独立调度逻辑）。
+ * - 认证：Bearer（auth_token，恒定时间比较，/health 豁免）
+ * - 限流：IP 滑动窗口 120/min
+ * - CORS 收窄（origin: false）
+ * - 端点集（5A.4）：/agents/:id/chat（非流式）、/agents/:id/chat/analyze、/agents/:id/chat/stream
+ *   （SSE {seq,type,data} + x-slime-stream-id + x-slime-resume 断线补漏）、/agents/:id/swarm、
+ *   /agents/:id/swarm/report、/agents、/stats（面板数据）
+ * - 业务逻辑全部在 core-ts Service API（ChatService/SwarmService/StatsService）——函数调用，非 HTTP 回环
  */
 
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import cors from "@fastify/cors";
+import { ChatService, ChatServiceError, ChatRequest } from "../../core-ts/src/services/chat.js";
+import { SwarmService, SwarmReportRequest } from "../../core-ts/src/services/swarm.js";
+import { StatsService } from "../../core-ts/src/services/stats.js";
+import { AgentRegistry } from "../../core-ts/src/services/agents.js";
+import { sseEncode } from "../../core-ts/src/services/events.js";
 
 export interface GatewayConfig {
   port: number;
@@ -16,6 +24,13 @@ export interface GatewayConfig {
   rateLimitPerMin?: number;
   rateLimitWindowMs?: number;
   authExempt?: string[];
+}
+
+export interface GatewayServices {
+  chat: ChatService;
+  swarm: SwarmService;
+  stats: StatsService;
+  agents: AgentRegistry;
 }
 
 const DEFAULT_AUTH_EXEMPT = ["/health"];
@@ -72,7 +87,18 @@ export class SlidingWindowRateLimiter {
   }
 }
 
-export function buildGateway(cfg: GatewayConfig): FastifyInstance {
+function toErrorBody(e: unknown): { error: { message: string; type: string } } {
+  if (e instanceof ChatServiceError) {
+    return { error: { message: e.message, type: e.status === 404 ? "not_found" : e.status === 400 ? "bad_request" : "error" } };
+  }
+  const msg = e instanceof Error ? e.message : String(e);
+  return { error: { message: msg, type: "error" } };
+}
+
+export function buildGateway(
+  cfg: GatewayConfig,
+  services?: GatewayServices,
+): FastifyInstance {
   const app = Fastify({ logger: false });
   const limiter = new SlidingWindowRateLimiter(
     cfg.rateLimitPerMin ?? 120,
@@ -101,6 +127,7 @@ export function buildGateway(cfg: GatewayConfig): FastifyInstance {
     }
   });
 
+  // ── sidecar 推理转发（保留阶段 2 语义）────────────────────
   const proxyPaths: Array<{ method: "POST"; path: string }> = [
     { method: "POST", path: "/chat/completions" },
     { method: "POST", path: "/embeddings" },
@@ -118,7 +145,6 @@ export function buildGateway(cfg: GatewayConfig): FastifyInstance {
         const raw = await upstream.text();
         reply.code(upstream.status).header("Content-Type", upstream.headers.get("content-type") ?? "application/json");
         if (p.path === "/chat/completions" && req.body && (req.body as { stream?: boolean }).stream) {
-          // SSE 透传：text/event-stream
           reply.header("Content-Type", "text/event-stream; charset=utf-8");
         }
         return reply.send(raw);
@@ -131,21 +157,157 @@ export function buildGateway(cfg: GatewayConfig): FastifyInstance {
 
   app.get("/health", async () => ({ status: "ok", service: "slime-gateway" }));
 
-  app.get("/stats", async () => {
-    try {
-      const resp = await fetch(`${sidecar}/stats`);
-      return { vram: (await resp.json()) };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { error: `sidecar 不可达: ${msg}` };
-    }
-  });
+  // ── core-ts 服务端点（5A.4；services 未注入时返回 501）──────
+  if (services) {
+    const { chat, swarm, stats, agents } = services;
+
+    app.get("/agents", async (_req, reply) => {
+      try {
+        const list = await agents.loadedAgents;
+        return list.map((a) => ({
+          id: a.id,
+          name: a.name,
+          role: a.role,
+          children: a.children ?? [],
+          parent_id: a.parent_id,
+          lifecycle: a.lifecycle ?? "growth",
+        }));
+      } catch (e) {
+        return replyError(reply, e, 500);
+      }
+    });
+
+    app.post<{ Params: { agentId: string } }>("/agents/:agentId/chat/analyze", async (req, reply) => {
+      try {
+        const message = String((req.body as { message?: unknown })?.message ?? "").trim();
+        if (!message) {
+          return reply.code(400).send({ error: { message: "message 不能为空", type: "bad_request" } });
+        }
+        return await chat.analyze(req.params.agentId, message);
+      } catch (e) {
+        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
+      }
+    });
+
+    app.post<{ Params: { agentId: string } }>("/agents/:agentId/chat", async (req, reply) => {
+      try {
+        const body = req.body as Partial<ChatRequest>;
+        const message = String(body.message ?? "").trim();
+        if (!message) {
+          return reply.code(400).send({ error: { message: "message 不能为空", type: "bad_request" } });
+        }
+        return await chat.chat(req.params.agentId, {
+          message,
+          history: Array.isArray(body.history) ? body.history : [],
+          retry: Boolean(body.retry),
+          maxTokens: typeof body.maxTokens === "number" ? body.maxTokens : undefined,
+        });
+      } catch (e) {
+        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
+      }
+    });
+
+    // SSE 流式：事件 {seq,type,data} + x-slime-stream-id + x-slime-resume（断线补漏）
+    app.post<{ Params: { agentId: string } }>("/agents/:agentId/chat/stream", async (req, reply) => {
+      try {
+        const body = req.body as Partial<ChatRequest> & { stream_id?: string };
+        const message = String(body.message ?? "").trim();
+        if (!message) {
+          return reply.code(400).send({ error: { message: "message 不能为空", type: "bad_request" } });
+        }
+        const resumeSeq = Number(req.headers["x-slime-resume"] ?? 0) || 0;
+        const streamId = typeof body.stream_id === "string" ? body.stream_id : "";
+        const request: ChatRequest = {
+          message,
+          history: Array.isArray(body.history) ? body.history : [],
+          retry: Boolean(body.retry),
+          maxTokens: typeof body.maxTokens === "number" ? body.maxTokens : undefined,
+        };
+
+        reply.raw.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+          "x-slime-stream-id": streamId,
+        });
+        for await (const ev of chat.stream(req.params.agentId, request, resumeSeq)) {
+          reply.raw.write(sseEncode(ev));
+        }
+        reply.raw.end();
+        return reply.raw;
+      } catch (e) {
+        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
+      }
+    });
+
+    app.post<{ Params: { agentId: string } }>("/agents/:agentId/swarm", async (req, reply) => {
+      try {
+        const body = req.body as { task?: unknown; max_workers?: unknown };
+        const task = String(body.task ?? "").trim();
+        if (!task) {
+          return reply.code(400).send({ error: { message: "task 不能为空", type: "bad_request" } });
+        }
+        const result = await swarm.dispatch(req.params.agentId, task, {
+          maxWorkers: typeof body.max_workers === "number" ? body.max_workers : undefined,
+        });
+        return {
+          ok: true,
+          task_id: result.task_id,
+          warnings: result.warnings,
+          agent_snapshots: result.agent_snapshots,
+          merge_result: result.merge_result,
+        };
+      } catch (e) {
+        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
+      }
+    });
+
+    app.post<{ Params: { agentId: string } }>("/agents/:agentId/swarm/report", async (req, reply) => {
+      try {
+        const body = req.body as Partial<SwarmReportRequest>;
+        return await swarm.report(req.params.agentId, {
+          task: String(body.task ?? ""),
+          summary: String(body.summary ?? ""),
+          results: Array.isArray(body.results) ? body.results : [],
+        });
+      } catch (e) {
+        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
+      }
+    });
+
+    app.get("/stats", async (_req, reply) => {
+      try {
+        return await stats.snapshot();
+      } catch (e) {
+        return replyError(reply, e, 500);
+      }
+    });
+  } else {
+    // 无 services（CLI/Electron 未接线）时仍提供面板空态（对齐 Python：无 provider 时 servers=[]）
+    app.get("/stats", async (_req, _reply) => {
+      return {
+        servers: [],
+        agents: { total: 0, roots: 0, leaves: 0, byLifecycle: {}, maxDepth: 0 },
+        sessions: { totalRecords: 0, recent: 0 },
+        alarms: [],
+        timestamp: new Date().toISOString(),
+      };
+    });
+  }
 
   return app;
+
+  function replyError(reply: FastifyReply, e: unknown, status: number) {
+    return reply.code(status).send(toErrorBody(e));
+  }
 }
 
-export async function startGateway(cfg: GatewayConfig): Promise<FastifyInstance> {
-  const app = buildGateway(cfg);
+export async function startGateway(
+  cfg: GatewayConfig,
+  services?: GatewayServices,
+): Promise<FastifyInstance> {
+  const app = buildGateway(cfg, services);
   await app.listen({ port: cfg.port, host: "127.0.0.1" });
   return app;
 }

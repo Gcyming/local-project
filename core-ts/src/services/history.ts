@@ -1,0 +1,196 @@
+/**
+ * core-ts/src/services/history.ts — 对话历史持久化（core/history.py 语义移植）。
+ * - config/history.jsonl JSONL 追加；记录 { agent_id, user, ai, success, timestamp }
+ * - BUG-027 轮转：超 10MB 只保留最近 5000 条
+ * - popLast：/retry 去重（锁内读改写；A-019 换行收尾防 "}{" 拼接行）
+ * - load：按 agent 过滤，最近 limit 条按时间升序
+ */
+
+import { randomUUID } from "node:crypto";
+import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export const HISTORY_PATH = join(PROJECT_ROOT, "config", "history.jsonl");
+
+const MAX_HISTORY_BYTES = 10 * 1024 * 1024;
+const KEEP_RECORDS = 5000;
+
+export interface HistoryRecord {
+  agent_id: string;
+  user: string;
+  ai: string;
+  success: boolean;
+  timestamp: string;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+async function ensureParent(): Promise<void> {
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(dirname(HISTORY_PATH), { recursive: true });
+}
+
+async function readLines(): Promise<string[]> {
+  try {
+    const raw = await readFile(HISTORY_PATH, "utf8");
+    return raw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+async function atomicRewrite(lines: string[]): Promise<void> {
+  await ensureParent();
+  const tmp = join(dirname(HISTORY_PATH), `${randomUUID().slice(0, 8)}.tmp`);
+  await writeFile(tmp, lines.join("\n") + "\n", "utf8"); // A-019: 换行收尾
+  await rename(tmp, HISTORY_PATH);
+}
+
+/** 进程内写锁（对齐 Python _write_lock：保护 append/popLast/removeAgent 读改写） */
+let writeChain: Promise<void> = Promise.resolve();
+function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(fn, fn);
+  writeChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+export async function appendHistory(
+  agentId: string,
+  userMsg: string,
+  aiReply: string,
+  success = true,
+): Promise<void> {
+  const record: HistoryRecord = {
+    agent_id: agentId,
+    user: userMsg,
+    ai: aiReply,
+    success,
+    timestamp: nowIso(),
+  };
+  await withWriteLock(async () => {
+    await ensureParent();
+    await appendFile(HISTORY_PATH, JSON.stringify(record) + "\n", "utf8");
+    await rotateIfNeeded();
+  });
+}
+
+export async function rotateIfNeeded(): Promise<void> {
+  let size: number;
+  try {
+    size = (await stat(HISTORY_PATH)).size;
+  } catch {
+    return;
+  }
+  if (size <= MAX_HISTORY_BYTES) {
+    return;
+  }
+  const lines = await readLines();
+  if (lines.length <= KEEP_RECORDS) {
+    return;
+  }
+  await atomicRewrite(lines.slice(-KEEP_RECORDS));
+}
+
+export async function popLastHistory(agentId: string): Promise<boolean> {
+  if (!(await stat(HISTORY_PATH).catch(() => null))) {
+    return false;
+  }
+  return withWriteLock(async () => {
+    const lines = await readLines();
+    if (lines.length === 0) {
+      return false;
+    }
+    const records: HistoryRecord[] = [];
+    for (const l of lines) {
+      try {
+        records.push(JSON.parse(l) as HistoryRecord);
+      } catch {
+        // 损坏行跳过（对齐 Python）
+      }
+    }
+    if (records.length === 0) {
+      return false;
+    }
+    let idx = -1;
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (records[i].agent_id === agentId) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) {
+      return false;
+    }
+    records.splice(idx, 1);
+    await atomicRewrite(records.map((r) => JSON.stringify(r)));
+    return true;
+  });
+}
+
+export async function removeAgentHistory(agentId: string): Promise<number> {
+  return withWriteLock(async () => {
+    const lines = await readLines();
+    if (lines.length === 0) {
+      return 0;
+    }
+    const kept: string[] = [];
+    let removed = 0;
+    for (const l of lines) {
+      try {
+        const r = JSON.parse(l) as HistoryRecord;
+        if (r.agent_id === agentId) {
+          removed++;
+          continue;
+        }
+        kept.push(JSON.stringify(r));
+      } catch {
+        kept.push(l); // 无法解析的行保留原文
+      }
+    }
+    await atomicRewrite(kept);
+    return removed;
+  });
+}
+
+export async function loadHistory(
+  agentId: string | null = null,
+  limit = 200,
+): Promise<HistoryRecord[]> {
+  const lines = await readLines();
+  const records: HistoryRecord[] = [];
+  for (const l of lines) {
+    try {
+      const r = JSON.parse(l) as HistoryRecord;
+      if (agentId === null || r.agent_id === agentId) {
+        records.push(r);
+      }
+    } catch {
+      // 损坏行跳过
+    }
+  }
+  return records.slice(-limit);
+}
+
+/** HistoryUserLoader 适配（novelty 检测注入点） */
+export const historyUserLoader: (
+  agentId: string,
+  limit: number,
+) => Promise<Array<{ user: string }>> = (agentId, limit) =>
+  loadHistory(agentId, limit).then((rs) => rs.map((r) => ({ user: r.user })));
+
+/** 历史存储接口（服务层注入点；测试可用内存实现） */
+export interface HistoryStore {
+  append(agentId: string, userMsg: string, aiReply: string, success?: boolean): Promise<void>;
+  load(agentId?: string | null, limit?: number): Promise<HistoryRecord[]>;
+  popLast(agentId: string): Promise<boolean>;
+}
+
+export const fileHistoryStore: HistoryStore = {
+  append: appendHistory,
+  load: loadHistory,
+  popLast: popLastHistory,
+};

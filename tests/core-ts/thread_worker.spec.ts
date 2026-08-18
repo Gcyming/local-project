@@ -10,9 +10,8 @@ import { ThreadWorker, makeThreadWorkerInput, THREAD_MAX_ROUNDS } from "../../co
 let server: Server | null = null;
 let baseUrl = "";
 let mode: "done" | "never" | "error" = "done";
-let serverCount = 0;
 
-function startServer(): { baseUrl: string; count: () => number } {
+function startServer(): Promise<{ baseUrl: string; count: () => number }> {
   let localCount = 0;
   return new Promise((resolve) => {
     server = createServer((req, res) => {
@@ -32,7 +31,6 @@ function startServer(): { baseUrl: string; count: () => number } {
     });
     server.listen(0, "127.0.0.1", () => {
       const addr = server!.address() as AddressInfo;
-      serverCount = localCount;
       baseUrl = `http://127.0.0.1:${addr.port}`;
       resolve({ baseUrl, count: () => localCount });
     });

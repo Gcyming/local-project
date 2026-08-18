@@ -3,6 +3,9 @@ sidecar/retrieve_api.py — 四阶段检索 API（全链路在 sidecar 闭环）
 
 阶段：① 向量种子 → ② 链接遍历（N 跳）→ ③ 标签过滤 → ④ 艾宾浩斯权重排序。
 Node 只发查询、收结果；禁止退化为纯向量 topK（§6.4）。
+
+@deprecated（5A.2 起）：四阶段检索已移植为 Node 侧闭环（core-ts/src/memory/retrieve.ts
+retrieveFromStore），本模块仅保留供旧调用方过渡，新代码一律走 Node 侧链路。
 """
 
 from __future__ import annotations

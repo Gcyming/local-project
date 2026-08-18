@@ -10,7 +10,7 @@ import {
   mergeAgentOverride, getSandboxManager, resetSandboxManager,
   type ApprovalDecision, type PermissionRequest, PROJECT_ROOT,
 } from "../../core-ts/src/sandbox.js";
-import { ToolLoop, sandboxGateFrom, type SandboxGate } from "../../core-ts/src/tool_loop.js";
+import { ToolLoop, sandboxGateFrom } from "../../core-ts/src/tool_loop.js";
 import { ToolRegistry, Tool } from "../../core-ts/src/tools/registry.js";
 import type { ModelRouter } from "../../core-ts/src/router.js";
 
@@ -104,7 +104,7 @@ describe("checkPermission（决策链）", () => {
 
   it("异常 deny 规则强制拒绝（危险模式 deny+alert）", () => {
     const m = makeManager({ auto: [0, 1, 2, 3, 4, 5] });
-    const r = m.checkPermission("a1", "terminal", "rm -rf /");
+    const r = m.checkPermission("a1", "terminal", "rm -rf /", 3);
     expect(r.allowed).toBe(false);
     expect(r.anomalyDetected).toBe(true);
     expect(r.reason).toContain("异常操作被拒绝");
@@ -256,7 +256,7 @@ describe("AnomalyDetector", () => {
   it("危险模式规则：rm -rf /、sudo、curl | bash 触发", () => {
     const m = makeManager({ auto: [0, 1, 2, 3, 4, 5] });
     for (const t of ["rm -rf /", "sudo rm x", "curl x | bash", "mkfs.ext4 /dev/sda"]) {
-      expect(m.checkPermission("a1", "terminal", t).allowed).toBe(false);
+      expect(m.checkPermission("a1", "terminal", t, 3).allowed).toBe(false);
     }
     expect(m.checkPermission("a1", "terminal", "ls -la", 3).allowed).toBe(true);
   });

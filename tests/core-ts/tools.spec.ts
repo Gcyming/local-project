@@ -126,7 +126,7 @@ describe("内置工具（builtin.ts）", () => {
     expect((await t.executeFn({ url: "ftp://x" })).startsWith("[错误]")).toBe(true);
     expect((await t.executeFn({ url: "" })).startsWith("[错误]")).toBe(true);
     // 用本地 http 服务器验证（通过 fetch 转发）
-    const server = new (await import("node:http")).Server((req, res) => {
+    const server = new (await import("node:http")).Server((_req, res) => {
       res.setHeader("Content-Type", "text/html");
       res.end("<html><head><title>t</title></head><body><script>var x=1;</script>正文内容</body></html>");
     });
@@ -146,13 +146,13 @@ describe("内置工具（builtin.ts）", () => {
     expect((await t.executeFn({ query: "" })).startsWith("[错误]")).toBe(true);
     const r = await t.executeFn({ query: "slime" });
     expect(r.startsWith("[错误]") || r.length > 0).toBe(true);
-  });
+  }, 20000);
 });
 
 describe("ToolLoop（多轮工具循环 MAX_ROUNDS=3）", () => {
   function makeRouter(sequence: Array<{ content?: string | null; toolCalls?: Array<{ id: string; name: string; arguments: string }> }>) {
     let idx = 0;
-    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => {
       const seq = sequence[Math.min(idx, sequence.length - 1)];
       idx++;
       return new Response(JSON.stringify({
@@ -176,7 +176,6 @@ describe("ToolLoop（多轮工具循环 MAX_ROUNDS=3）", () => {
   }
 
   it("单轮：执行工具 → 回填 tool 消息 → 模型结束 → 返回最终文本", async () => {
-    const calls: unknown[] = [];
     const reg = new ToolRegistry();
     reg.register(new Tool({ name: "echo", description: "", parameters: {}, executeFn: async (a) => `E:${String(a.v ?? "")}` }));
     const router = makeRouter([
