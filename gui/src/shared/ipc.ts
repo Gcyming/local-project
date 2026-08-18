@@ -27,6 +27,10 @@ export const IPC_CHANNELS = {
   sidecar_status: "slime:sidecar:status",
   sidecar_spawn: "slime:sidecar:spawn",
   sidecar_terminate: "slime:sidecar:terminate",
+  // 自动更新
+  update_check: "slime:update:check",
+  update_install: "slime:update:install",
+  update_status: "slime:update:status",
 } as const;
 
 export interface StreamChunk {

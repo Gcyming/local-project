@@ -69,6 +69,12 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     minimize: () => ipcRenderer.invoke("slime:window:minimize"),
     quit: () => ipcRenderer.invoke("slime:window:quit"),
   },
+  update: {
+    check: () => ipcRenderer.invoke("slime:update:check") as Promise<{ status: string; version?: string; error?: string }>,
+    install: () => ipcRenderer.invoke("slime:update:install") as Promise<{ ok: boolean }>,
+    onStatus: (cb: (status: { status: string; version?: string; releaseNotes?: string; error?: string }) => void) =>
+      onMessage<{ status: string; version?: string; releaseNotes?: string; error?: string }>("slime:update:status", cb),
+  },
 });
 
 declare global {
@@ -104,6 +110,11 @@ declare global {
         onStatus: (cb: (status: SidecarStatus) => void) => () => void;
       };
       window: { minimize: () => Promise<void>; quit: () => Promise<void> };
+      update: {
+        check: () => Promise<{ status: string; version?: string; error?: string }>;
+        install: () => Promise<{ ok: boolean }>;
+        onStatus: (cb: (status: { status: string; version?: string; releaseNotes?: string; error?: string }) => void) => () => void;
+      };
     };
   }
 }
