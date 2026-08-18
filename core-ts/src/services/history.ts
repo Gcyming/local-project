@@ -194,3 +194,71 @@ export const fileHistoryStore: HistoryStore = {
   load: loadHistory,
   popLast: popLastHistory,
 };
+
+/** P0: 清空指定 agent 的全部历史 */
+export async function clearHistoryForAgent(agentId: string): Promise<number> {
+  return withWriteLock(async () => {
+    const lines = await readLines();
+    if (lines.length === 0) {
+      return 0;
+    }
+    const kept: string[] = [];
+    let removed = 0;
+    for (const l of lines) {
+      try {
+        const r = JSON.parse(l) as HistoryRecord;
+        if (r.agent_id === agentId) {
+          removed++;
+          continue;
+        }
+        kept.push(JSON.stringify(r));
+      } catch {
+        kept.push(l);
+      }
+    }
+    await atomicRewrite(kept);
+    return removed;
+  });
+}
+
+/** P0: 弹出最后一条记录并返回（用于 retry 重发） */
+export async function popLastRecordForAgent(agentId: string): Promise<HistoryRecord | null> {
+  if (!(await stat(HISTORY_PATH).catch(() => null))) {
+    return null;
+  }
+  return withWriteLock(async () => {
+    const lines = await readLines();
+    if (lines.length === 0) {
+      return null;
+    }
+    const records: HistoryRecord[] = [];
+    for (const l of lines) {
+      try {
+        records.push(JSON.parse(l) as HistoryRecord);
+      } catch {
+        // 损坏行跳过
+      }
+    }
+    if (records.length === 0) {
+      return null;
+    }
+    let idx = -1;
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (records[i].agent_id === agentId) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) {
+      return null;
+    }
+    const record = records[idx];
+    records.splice(idx, 1);
+    await atomicRewrite(records.map((r) => JSON.stringify(r)));
+    return record;
+  });
+}
+
+/** P0: 辅助导出（主进程使用） */
+export { popLastRecordForAgent as popLastRecordForAgentExport };
+export { clearHistoryForAgent as clearHistoryForAgentExport };

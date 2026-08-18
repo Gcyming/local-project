@@ -8,6 +8,9 @@ export const IPC_CHANNELS = {
   // 聊天
   chat_stream: "slime:chat:stream",
   chat_send: "slime:chat:send",
+  // P0: 新对话 / 重试上条
+  chat_new: "slime:chat:new",
+  chat_retry: "slime:chat:retry",
   // 状态
   stats_snapshot: "slime:stats:snapshot",
   stats_poll: "slime:stats:poll",
@@ -15,6 +18,8 @@ export const IPC_CHANNELS = {
   agent_list: "slime:agents:list",
   agent_create: "slime:agents:create",
   agent_fork: "slime:agents:fork",
+  agent_select: "slime:agents:select",
+  agent_update: "slime:agents:update",
   // sidecar 生命周期
   sidecar_status: "slime:sidecar:status",
   sidecar_spawn: "slime:sidecar:spawn",
