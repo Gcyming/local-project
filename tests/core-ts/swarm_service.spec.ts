@@ -194,4 +194,49 @@ describe("SwarmService.dispatch", () => {
     expect(r.task_id).toBe("t1");
     expect(runner).toHaveBeenCalledWith(expect.objectContaining({ id: "agent_swarm1" }), expect.objectContaining({ task: "任务", maxWorkers: 3 }));
   });
+
+  it("engine 接线 → 真 SwarmExecutor 全流程（拆解→worker→合并）", async () => {
+    const { SlimeEngine } = await import("../../core-ts/src/services/engine.js");
+    const { ChatClient } = await import("../../core-ts/src/llm/client.js");
+    // 多轮响应：1)拆解 JSON 2)worker 完成 3)合并总结
+    const replies = [
+      JSON.stringify({ rounds: [{ subtasks: [{ desc: "子任务A", agent: "" }] }] }),
+      "子任务A完成<DONE>",
+      "整合完成",
+    ];
+    let call = 0;
+    const engine = new SlimeEngine({
+      registry: reg,
+      providers: { test: { api_base: "http://mock.local/v1", api_key: "k", model: "m1" } },
+      logger: quietLogger(),
+      clientFactory: (route) => new ChatClient({
+        baseUrl: route.baseUrl,
+        apiKey: route.apiKey,
+        fetchImpl: (async () => {
+          const body = replies[Math.min(call, replies.length - 1)];
+          call++;
+          return new Response(JSON.stringify({
+            id: "x", object: "chat.completion", created: 1, model: "m1",
+            choices: [{ index: 0, message: { role: "assistant", content: body }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }) as unknown as typeof fetch,
+      }),
+    });
+    const svc = new SwarmService({ registry: reg, engine, logger: quietLogger() });
+    const r = await svc.dispatch("agent_swarm1", "做个测试任务", { maxWorkers: 2 });
+    expect(r.task_id).toMatch(/^task_/);
+    expect(r.agent_snapshots).toHaveLength(1);
+    expect(r.agent_snapshots[0].state).toBe("done");
+    expect(r.merge_result?.summary).toContain("整合完成");
+    // 单 worker 场景：广播无接收方 → 如实产生 warning（非错误）
+    expect(r.warnings.some((w) => w.includes("无其他 Agent 在线"))).toBe(true);
+  });
+
+  it("engine 无 provider 路由 → 503 如实报错", async () => {
+    const { SlimeEngine } = await import("../../core-ts/src/services/engine.js");
+    const engine = new SlimeEngine({ registry: reg, providers: {}, logger: quietLogger() });
+    const svc = new SwarmService({ registry: reg, engine, logger: quietLogger() });
+    await expect(svc.dispatch("agent_swarm1", "任务")).rejects.toThrow("未配置可用模型路由");
+  });
 });

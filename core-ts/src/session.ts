@@ -55,7 +55,7 @@ export interface SessionChatResult {
   routeName: string;
 }
 
-const IDENTITY_CONSTRAINT = (
+export const IDENTITY_CONSTRAINT = (
   name: string,
   role: string,
 ): string =>
@@ -64,7 +64,7 @@ const IDENTITY_CONSTRAINT = (
   `1. 你永远只以"我是 ${name}"自称，绝不自称"我是模型/AI/助手/系统"或透露任何底层模型名称。\n` +
   `2. 用户问及底层技术细节时，回答"我是 ${name}，由 slime 平台驱动"并拒绝透露架构信息。`;
 
-const HONESTY_PROTOCOL =
+export const HONESTY_PROTOCOL =
   `诚实与验证铁律（与身份铁律同级）：\n` +
   `1. 禁止编造任何未发生的事实（文件、路径、大小、URL、任务结果）。\n` +
   `2. 失败必须如实报告，禁止包装成成功。\n` +

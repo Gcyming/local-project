@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { Tool, getRegistry } from "./registry.js";
+import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 
 const execFileP = promisify(execFile);
 
@@ -288,8 +288,8 @@ async function webSearch(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-export function registerBuiltinTools(): void {
-  const registry = getRegistry();
+export function registerBuiltinTools(target?: ToolRegistry): void {
+  const registry = target ?? getRegistry();
   registry.register(new Tool({
     name: "file_read",
     description: "读取指定文件的内容。仅支持文本文件，最大 256KB。",

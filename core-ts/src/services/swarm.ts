@@ -6,12 +6,14 @@
  * - dispatch：Swarm 任务调度封装（拆解 → SwarmExecutor.run → 合并），复用 core-ts executor/merger
  */
 
-import { RunOptions, RunResult } from "../executor.js";
+import { RunOptions, RunResult, SwarmExecutor, WorkerAgentSpec } from "../executor.js";
+import { sandboxGateFrom } from "../tool_loop.js";
 import { AgentRegistry, AgentState } from "./agents.js";
 import { detectNovelty } from "./novelty.js";
 import { historyUserLoader } from "./history.js";
 import { PostProcessHooks } from "./chat.js";
 import { ChatServiceError } from "./chat.js";
+import { SlimeEngine } from "./engine.js";
 
 export interface SwarmReportItem {
   name?: unknown;
@@ -35,8 +37,10 @@ export interface SwarmReportResult {
 
 export interface SwarmServiceOptions {
   registry: AgentRegistry;
-  /** 调度执行器（5A.4 封装 SwarmExecutor；Electron 主进程/CLI 注入） */
+  /** 调度执行器（缺省用 engine 组装 SwarmExecutor；Electron 主进程/CLI 注入覆盖） */
   dispatchRunner?: (agent: AgentState, opts: RunOptions) => Promise<RunResult>;
+  /** 真执行器（SlimeEngine）；未提供且无 dispatchRunner → 501 */
+  engine?: SlimeEngine;
   postProcess?: PostProcessHooks;
   /** 记忆提取开关（slime.toml memory.enabled；5B.3 接线配置读取，缺省 false） */
   memoryEnabled?: boolean;
@@ -83,13 +87,44 @@ export class SwarmService {
 
   constructor(opts: SwarmServiceOptions) {
     this.registry = opts.registry;
-    this.dispatchRunner = opts.dispatchRunner ?? (async () => {
-      throw new ChatServiceError(501, "Swarm 调度执行器未接线（5B.1 接线后启用）");
-    });
+    this.dispatchRunner =
+      opts.dispatchRunner ??
+      (opts.engine
+        ? ((agent: AgentState, runOpts: RunOptions) => this.runWithEngine(opts.engine!, agent, runOpts))
+        : (async () => {
+            throw new ChatServiceError(501, "Swarm 调度执行器未接线（注入 engine 或 dispatchRunner）");
+          }));
     this.postProcess = opts.postProcess ?? {};
     this.memoryEnabled = opts.memoryEnabled ?? false;
     this.dataDir = opts.dataDir;
     this.logger = opts.logger ?? console;
+  }
+
+  /** 默认调度：用 SlimeEngine 组装 SwarmExecutor（真执行器接线，A1 闭环） */
+  private async runWithEngine(engine: SlimeEngine, agent: AgentState, runOpts: RunOptions): Promise<RunResult> {
+    const router = await engine.routerFor(agent);
+    if (!router) {
+      throw new ChatServiceError(503, "主 Agent 未配置可用模型路由（provider 缺失），无法调度 Swarm");
+    }
+    // 持久子 Agent 名单（config/agents.json 其余 Agent，A-053 角色路由）
+    const roster: WorkerAgentSpec[] = this.registry.loadedAgents
+      .filter((a) => a.id !== agent.id)
+      .map((a) => ({
+        name: a.name,
+        role: a.role,
+        providerKey: a.model_choice.startsWith("api:") ? a.model_choice.slice(4) : undefined,
+        identityPrompt: a.identity_prompt,
+      }));
+    const executor = new SwarmExecutor({
+      providersCount: Math.max(1, engine.providersCount),
+      router,
+      registry: engine.toolRegistry,
+      sandbox: engine.sandboxManager ? sandboxGateFrom(engine.sandboxManager) : undefined,
+      agents: roster,
+      mainAgentName: agent.name,
+      mainIdentityPrompt: agent.identity_prompt,
+    });
+    return executor.run(runOpts);
   }
 
   /** Swarm 任务调度（CLI/Electron 入口；拆解/执行/合并全在 executor 内） */

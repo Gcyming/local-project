@@ -15,6 +15,7 @@ import { ChatService, ChatServiceError, ChatRequest } from "../../core-ts/src/se
 import { SwarmService, SwarmReportRequest } from "../../core-ts/src/services/swarm.js";
 import { StatsService } from "../../core-ts/src/services/stats.js";
 import { AgentRegistry } from "../../core-ts/src/services/agents.js";
+import { SocialService, SocialConfig, SocialAgentRef, SocialChatFn } from "../../core-ts/src/services/social.js";
 import { sseEncode } from "../../core-ts/src/services/events.js";
 
 export interface GatewayConfig {
@@ -31,9 +32,16 @@ export interface GatewayServices {
   swarm: SwarmService;
   stats: StatsService;
   agents: AgentRegistry;
+  social?: SocialService;
 }
 
-const DEFAULT_AUTH_EXEMPT = ["/health"];
+export interface SocialServiceConfig {
+  config: SocialConfig;
+  agentRef: SocialAgentRef;
+  chatFn: SocialChatFn;
+}
+
+const DEFAULT_AUTH_EXEMPT = ["/health", "/social/webhook"];
 
 function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) {
@@ -282,6 +290,31 @@ export function buildGateway(
       } catch (e) {
         return replyError(reply, e, 500);
       }
+    });
+
+    // ── 社交 webhook（对齐 Python _AUTH_EXEMPT 豁免 + /social/webhook）──────
+    // 企业微信 WeCom：官方 HTTP API → TS 原生 (SocialService)
+    // 个人微信：wechaty TS 长弃维护 → 回退 sidecar（v2.7 唯一例外），TS 不实现
+    if (services.social) {
+      app.post("/social/webhook", async (req, reply) => {
+        try {
+          const result = await services!.social!.handleWebhook(req.body as Record<string, unknown>);
+          if (!result.ok) {
+            return reply.code(result.status).send({ error: { message: result.error, type: "social_error" } });
+          }
+          return result;
+        } catch (e) {
+          return replyError(reply, e, 500);
+        }
+      });
+    } else {
+      app.post("/social/webhook", async (_req, reply) => {
+        return reply.code(503).send({ error: { message: "社交服务未配置", type: "social_error" } });
+      });
+    }
+    // 个人微信 webhook 路由（仅占位，TS 不实现—由 sidecar adapters/ 处理）
+    app.post("/social/wechat/personal/webhook", async (_req, reply) => {
+      return reply.code(501).send({ error: { message: "个人微信接入由 sidecar adapters/ 负责（wechaty TS 不可用）", type: "not_implemented" } });
     });
   } else {
     // 无 services（CLI/Electron 未接线）时仍提供面板空态（对齐 Python：无 provider 时 servers=[]）
