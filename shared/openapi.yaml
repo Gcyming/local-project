@@ -106,13 +106,45 @@ paths:
               schema: { $ref: "#/components/schemas/ModelUnloadResponse" }
 components:
   schemas:
+    ChatToolCall:
+      type: object
+      required: [id, type, function]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [function] }
+        function:
+          type: object
+          required: [name, arguments]
+          properties:
+            name: { type: string }
+            arguments: { type: string }
+    ChatToolSchema:
+      type: object
+      description: "阶段 4.5：请求体 tools 列表项（OpenAI 函数工具 schema，供模型主动发起调用）"
+      required: [type, function]
+      properties:
+        type: { type: string, enum: [function] }
+        function:
+          type: object
+          required: [name]
+          properties:
+            name: { type: string }
+            description: { type: string }
+            parameters:
+              type: object
+              description: "JSON Schema 参数定义（自由形式，不约束形状）"
     ChatMessage:
       type: object
       required: [role, content]
       properties:
         role: { type: string, enum: [system, user, assistant, tool] }
-        content: { type: string }
+        content: { type: string, nullable: true, description: "assistant 发起工具调用时可为 null" }
         name: { type: string }
+        tool_call_id: { type: string, description: "role=tool 时回填的目标调用 id" }
+        tool_calls:
+          type: array
+          description: "role=assistant 发起工具调用列表（阶段 4.3 工具轮）"
+          items: { $ref: "#/components/schemas/ChatToolCall" }
     ChatRequest:
       type: object
       required: [messages]
@@ -121,6 +153,10 @@ components:
         messages:
           type: array
           items: { $ref: "#/components/schemas/ChatMessage" }
+        tools:
+          type: array
+          description: "阶段 4.5：工具 schema 列表（模型可主动发起工具调用）"
+          items: { $ref: "#/components/schemas/ChatToolSchema" }
         stream: { type: boolean, default: false }
         max_tokens: { type: integer, minimum: 1, maximum: 65536 }
         temperature: { type: number, minimum: 0, maximum: 2 }

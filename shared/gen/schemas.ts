@@ -2,10 +2,22 @@
 
 import { z } from "zod";
 
-export const ChatMessage = z.object({ role: z.enum(['system', 'user', 'assistant', 'tool']), content: z.string(), name: z.string().optional() });
+export const ChatToolCallFunction = z.object({ name: z.string(), arguments: z.string() });
+export type ChatToolCallFunction = z.infer<typeof ChatToolCallFunction>;
+
+export const ChatToolCall = z.object({ id: z.string(), type: z.enum(['function']), function: ChatToolCallFunction });
+export type ChatToolCall = z.infer<typeof ChatToolCall>;
+
+export const ChatToolSchemaFunction = z.object({ name: z.string(), description: z.string().optional(), parameters: z.record(z.any()).optional() });
+export type ChatToolSchemaFunction = z.infer<typeof ChatToolSchemaFunction>;
+
+export const ChatToolSchema = z.object({ type: z.enum(['function']), function: ChatToolSchemaFunction });
+export type ChatToolSchema = z.infer<typeof ChatToolSchema>;
+
+export const ChatMessage = z.object({ role: z.enum(['system', 'user', 'assistant', 'tool']), content: z.string().nullable(), name: z.string().optional(), tool_call_id: z.string().optional(), tool_calls: z.array(ChatToolCall).optional() });
 export type ChatMessage = z.infer<typeof ChatMessage>;
 
-export const ChatRequest = z.object({ model: z.string().optional(), messages: z.array(ChatMessage), stream: z.boolean().optional(), max_tokens: z.number().optional(), temperature: z.number().optional(), top_p: z.number().optional(), stop: z.union([z.string(), z.array(z.string())]).optional(), presence_penalty: z.number().optional(), frequency_penalty: z.number().optional() });
+export const ChatRequest = z.object({ model: z.string().optional(), messages: z.array(ChatMessage), tools: z.array(ChatToolSchema).optional(), stream: z.boolean().optional(), max_tokens: z.number().optional(), temperature: z.number().optional(), top_p: z.number().optional(), stop: z.union([z.string(), z.array(z.string())]).optional(), presence_penalty: z.number().optional(), frequency_penalty: z.number().optional() });
 export type ChatRequest = z.infer<typeof ChatRequest>;
 
 export const ChatUsage = z.object({ prompt_tokens: z.number().optional(), completion_tokens: z.number().optional(), total_tokens: z.number().optional() });

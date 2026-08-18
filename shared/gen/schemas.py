@@ -4,14 +4,35 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
+class ChatToolCallFunction(BaseModel):
+    name: str
+    arguments: str
+
+class ChatToolCall(BaseModel):
+    id: str
+    type: Literal['function']
+    function: ChatToolCallFunction
+
+class ChatToolSchemaFunction(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+class ChatToolSchema(BaseModel):
+    type: Literal['function']
+    function: ChatToolSchemaFunction
+
 class ChatMessage(BaseModel):
     role: Literal['system', 'user', 'assistant', 'tool']
     content: str
     name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[ChatToolCall]] = None
 
 class ChatRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
+    tools: Optional[List[ChatToolSchema]] = None
     stream: Optional[bool] = None
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
