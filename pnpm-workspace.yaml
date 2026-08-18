@@ -8,7 +8,14 @@ packages:
 allowBuilds:
   better-sqlite3: true
   electron: true
+  electron-winstaller: true
   esbuild: true
   onnxruntime-node: true
   protobufjs: true
   sharp: true
+
+# 修复 app-builder-lib@26.15.3 ↔ @electron/get@3.0.0 不兼容：
+# 3.0.0 的 CJS 产物未导出 ElectronDownloadCacheMode（运行时 undefined → "reading 'ReadWrite'" 崩溃），
+# 3.1.0 已修复且在 ^3.0.0 语义范围内。仅覆盖 3.x 分支，不触及 electron 自身的 v2。
+overrides:
+  "@electron/get@^3.0.0": 3.1.0

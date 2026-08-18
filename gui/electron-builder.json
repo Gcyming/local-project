@@ -1,0 +1,26 @@
+{
+  "appId": "com.slime.gui",
+  "productName": "Slime",
+  "copyright": "Copyright © 2026 slime",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": ["out/**/*"],
+  "asar": true,
+  "asarUnpack": ["out/main/chunks/*.node"],
+  "compression": "maximum",
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "icon": "build/icon.png"
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": false,
+    "language": 2052,
+    "shortcutName": "Slime"
+  }
+}
