@@ -25,8 +25,16 @@ export default function AgentsPanel({
   const [forkParent, setForkParent] = React.useState("");
   const [forkName, setForkName] = React.useState("");
   const [forkRole, setForkRole] = React.useState("");
+  /** 身份移民协议 v1.2：导出/导入操作反馈（null=无消息） */
+  const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
 
   const api = React.useRef<any>(null);
+
+  /** 显示操作反馈，5 秒后自动清除 */
+  function showNotice(ok: boolean, text: string): void {
+    setNotice({ ok, text });
+    window.setTimeout(() => setNotice(null), 5000);
+  }
 
   const refresh = React.useCallback(async (): Promise<void> => {
     if (!api.current) { return; }
@@ -75,6 +83,46 @@ export default function AgentsPanel({
     onSelectAgent?.(agentId);
   }
 
+  /** 身份移民协议 v1.2 §4：导出当前 Agent 为 .slimeagent 身份包 */
+  async function exportAgent(agent: AgentInfo): Promise<void> {
+    if (!api.current) { return; }
+    setLoading(true);
+    try {
+      const res = await api.current.agents.exportAgent(agent.id);
+      if (res.ok) {
+        showNotice(true, `已导出「${agent.name}」→ ${res.path}`);
+      } else if (res.error !== "已取消导出") {
+        showNotice(false, `导出失败：${res.error}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** 身份移民协议 v1.2 §5：导入身份包（冲突时二次确认后走 overwrite） */
+  async function importPack(): Promise<void> {
+    if (!api.current) { return; }
+    setLoading(true);
+    try {
+      let res = await api.current.agents.importPack("abort");
+      if (!res.ok && typeof res.error === "string" && res.error.includes("已存在")) {
+        const overwrite = window.confirm(`${res.error}\n\n是否覆盖导入？（旧身份将被替换）`);
+        if (overwrite) {
+          res = await api.current.agents.importPack("overwrite");
+        }
+      }
+      if (res.ok) {
+        showNotice(true, `已导入「${res.agentName ?? res.agentId}」${res.warnings?.length ? `（警告：${res.warnings.join("；")}）` : ""}`);
+        await refresh();
+        if (res.agentId) { onSelectAgent?.(res.agentId); }
+      } else if (res.error !== "已取消导入") {
+        showNotice(false, `导入失败：${res.error}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
       {/* 左侧 Agent 列表 */}
@@ -82,13 +130,29 @@ export default function AgentsPanel({
         width: 220, borderRight: "1px solid #334155",
         display: "flex", flexDirection: "column", overflow: "hidden",
       }}>
-        <div style={{ padding: "10px 12px", borderBottom: "1px solid #334155" }}>
+        <div style={{ padding: "10px 12px", borderBottom: "1px solid #334155", display: "flex", gap: 6 }}>
           <button onClick={() => setShowCreate(!showCreate)}
-            style={{ width: "100%", padding: "6px 14px", borderRadius: 4, border: "none",
+            style={{ flex: 1, padding: "6px 14px", borderRadius: 4, border: "none",
               background: "#10b981", color: "#fff", cursor: "pointer", fontSize: 13 }}>
             创建 Agent
           </button>
+          <button onClick={importPack} disabled={loading}
+            style={{ flex: 1, padding: "6px 14px", borderRadius: 4, border: "none",
+              background: "#0ea5e9", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+            导入 Agent
+          </button>
         </div>
+
+        {notice && (
+          <div style={{
+            padding: "8px 12px", fontSize: 12, lineHeight: 1.5, wordBreak: "break-all",
+            borderBottom: "1px solid #334155",
+            background: notice.ok ? "rgba(16,185,129,0.12)" : "rgba(239,68,68,0.12)",
+            color: notice.ok ? "#34d399" : "#f87171",
+          }}>
+            {notice.text}
+          </div>
+        )}
 
         {showCreate && (
           <div style={{ padding: 8, borderBottom: "1px solid #334155", display: "flex", flexDirection: "column", gap: 4 }}>
@@ -146,6 +210,7 @@ export default function AgentsPanel({
               <th style={{ padding: 6 }}>生命周期</th>
               <th style={{ padding: 6 }}>孩子</th>
               <th style={{ padding: 6 }}>分裂</th>
+              <th style={{ padding: 6 }}>移民</th>
             </tr>
           </thead>
           <tbody>
@@ -168,6 +233,13 @@ export default function AgentsPanel({
                     style={{ padding: "2px 8px", borderRadius: 3, border: "none",
                       background: "#f59e0b", color: "#fff", cursor: "pointer", fontSize: 12 }}>
                     分裂
+                  </button>
+                </td>
+                <td style={{ padding: 6 }}>
+                  <button onClick={() => exportAgent(a)} disabled={loading}
+                    style={{ padding: "2px 8px", borderRadius: 3, border: "none",
+                      background: "#0ea5e9", color: "#fff", cursor: "pointer", fontSize: 12 }}>
+                    导出
                   </button>
                 </td>
               </tr>

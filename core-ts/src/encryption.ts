@@ -11,11 +11,11 @@
 
 import { pbkdf2Sync, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "./paths.js";
 import { resolve, dirname, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+export { PROJECT_ROOT };
 
 export const SALT_SIZE = 16;
 export const NONCE_SIZE = 12;

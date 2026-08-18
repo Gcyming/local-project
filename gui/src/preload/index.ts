@@ -7,6 +7,7 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from "electron";
 import type {
   StreamChunk, ChatInput, AgentInfo, StatsSnapshot, SidecarStatus,
+  AgentExportResult, AgentImportResult, AgentImportConflictStrategy,
 } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
@@ -51,6 +52,12 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:agents:update", { agentId, patch }) as Promise<{ ok: boolean }>,
     /** P0: 监听主进程推送的选中事件（创建/分裂后自动切换） */
     onAgentSelected: (cb: (agentId: string) => void) => onMessage<string>("slime:agents:selected", cb),
+    /** 身份移民协议 v1.2 §4：导出 Agent（主进程弹保存对话框） */
+    exportAgent: (agentId: string) =>
+      ipcRenderer.invoke("slime:agents:export", { agentId }) as Promise<AgentExportResult>,
+    /** 身份移民协议 v1.2 §5：导入身份包（主进程弹打开对话框；冲突策略默认 abort） */
+    importPack: (conflictStrategy?: AgentImportConflictStrategy) =>
+      ipcRenderer.invoke("slime:agents:import", { conflictStrategy }) as Promise<AgentImportResult>,
   },
   sidecar: {
     status: () => ipcRenderer.invoke("slime:sidecar:status") as Promise<SidecarStatus>,
@@ -87,6 +94,8 @@ declare global {
         select: (agentId: string) => Promise<void>;
         update: (agentId: string, patch: Record<string, unknown>) => Promise<{ ok: boolean }>;
         onAgentSelected: (cb: (agentId: string) => void) => () => void;
+        exportAgent: (agentId: string) => Promise<AgentExportResult>;
+        importPack: (conflictStrategy?: AgentImportConflictStrategy) => Promise<AgentImportResult>;
       };
       sidecar: {
         status: () => Promise<SidecarStatus>;

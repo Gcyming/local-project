@@ -8,9 +8,9 @@
 
 import { access, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, basename, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "./paths.js";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+export { PROJECT_ROOT };
 
 const CLAIM_VERBS = ["已保存", "保存到", "已生成", "已创建", "已写入", "已下载", "已导出"];
 const EVIDENCE_HINTS = ["字节", "kb", "mb", "文件大小", "完整路径", "时长"];

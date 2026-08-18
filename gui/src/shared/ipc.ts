@@ -20,6 +20,9 @@ export const IPC_CHANNELS = {
   agent_fork: "slime:agents:fork",
   agent_select: "slime:agents:select",
   agent_update: "slime:agents:update",
+  // 身份移民协议 v1.2：导出 / 导入
+  agent_export: "slime:agents:export",
+  agent_import: "slime:agents:import",
   // sidecar 生命周期
   sidecar_status: "slime:sidecar:status",
   sidecar_spawn: "slime:sidecar:spawn",
@@ -73,3 +76,22 @@ export type SidecarStatus = {
   vram?: number;
   pid?: number;
 };
+
+/** 身份移民协议 v1.2 — 导出结果（§4） */
+export interface AgentExportResult {
+  ok: boolean;
+  path?: string;
+  error?: string;
+}
+
+/** 身份移民协议 v1.2 — 冲突策略（§5.2） */
+export type AgentImportConflictStrategy = "abort" | "overwrite" | "keep-old";
+
+/** 身份移民协议 v1.2 — 导入结果（§5） */
+export interface AgentImportResult {
+  ok: boolean;
+  agentId?: string;
+  agentName?: string;
+  error?: string;
+  warnings?: string[];
+}

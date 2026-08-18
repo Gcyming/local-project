@@ -13,11 +13,11 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { join, relative, dirname, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "../paths.js";
 import JSZip from "jszip";
 import type { AgentState } from "./agents.js";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export { PROJECT_ROOT };
 
 /** 协议常量（§3 schema / 当前落盘布局 / 包版本） */
 export const SCHEMA_VERSION = "v1";

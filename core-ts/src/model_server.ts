@@ -16,10 +16,10 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "./paths.js";
 import { resolve, basename, dirname } from "node:path";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+export { PROJECT_ROOT };
 const DEFAULT_REGISTRY_PATH = resolve(PROJECT_ROOT, "data", "model_servers.json");
 
 export const IS_WINDOWS = process.platform === "win32";

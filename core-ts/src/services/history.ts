@@ -9,9 +9,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "../paths.js";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export { PROJECT_ROOT };
 export const HISTORY_PATH = join(PROJECT_ROOT, "config", "history.jsonl");
 
 const MAX_HISTORY_BYTES = 10 * 1024 * 1024;

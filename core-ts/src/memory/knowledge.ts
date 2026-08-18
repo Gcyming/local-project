@@ -8,10 +8,10 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "../paths.js";
 import { resolve, dirname, join } from "node:path";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export { PROJECT_ROOT };
 export const KNOWLEDGE_DIR = resolve(PROJECT_ROOT, "Knowledge", "Agent Memory");
 export const DATA_DIR = resolve(PROJECT_ROOT, "data");
 

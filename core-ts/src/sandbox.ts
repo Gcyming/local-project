@@ -11,10 +11,10 @@
 
 import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "./paths.js";
 import { randomUUID } from "node:crypto";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+export { PROJECT_ROOT };
 
 // ── 权限分级 ──────────────────────────────────────────────
 

@@ -13,11 +13,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "../paths.js";
 import { resolve, dirname } from "node:path";
 import { connect as lanceConnect, type Table } from "@lancedb/lancedb";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export { PROJECT_ROOT };
 export const DATA_DIR = resolve(PROJECT_ROOT, "data");
 export const KNOWLEDGE_MEMORY_DIR = resolve(PROJECT_ROOT, "Knowledge", "Agent Memory");
 

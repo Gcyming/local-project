@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "../paths.js";
 import JSZip from "jszip";
 import { AgentRegistry } from "./agents.js";
 import type { AgentState } from "./agents.js";
@@ -22,7 +22,7 @@ import { SCHEMA_VERSION, LAYOUT_VERSION, DEFAULT_REBUILD_HINTS } from "./export.
 import type { Manifest } from "./export.js";
 import type { MemoryStoreOptions } from "../memory/store.js";
 
-export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export { PROJECT_ROOT };
 
 export type ConflictStrategy = "abort" | "overwrite" | "keep-old";
 

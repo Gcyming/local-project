@@ -9,7 +9,7 @@
 
 import { readdir, readFile, stat, writeFile, rename, mkdir, realpath, lstat } from "node:fs/promises";
 import { dirname, isAbsolute, join, basename, extname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { PROJECT_ROOT } from "../paths.js";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -18,7 +18,7 @@ import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 const execFileP = promisify(execFile);
 
 /** 相对路径锚定项目根（core-ts/src/tools/ 与 dist/tools/ 上溯三层均指向项目根） */
-export const PROJECT_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export { PROJECT_ROOT };
 
 const MAX_READ_BYTES = 262_144;
 const MAX_WRITE_BYTES = 5 * 1024 * 1024;

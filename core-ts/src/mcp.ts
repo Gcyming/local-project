@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import { Tool, ToolRegistry, ToolPermission, getRegistry } from "./tools/registry.js";
+import { PROJECT_ROOT } from "./paths.js";
 
 const JSONRPC = "2.0";
 const PROTOCOL_VERSION = "2025-11-25";
@@ -24,8 +25,6 @@ const MAX_BRIDGED = 64;
 const MAX_RECONNECT = 10;
 const MEDIA_LABEL: Record<string, string> = { image: "图片", audio: "音频", video: "视频" };
 const VALID_PERMISSIONS: ToolPermission[] = ["read", "write", "terminal", "network"];
-
-const PROJECT_ROOT = process.cwd();
 
 // A-113：MCP 子进程环境白名单（不继承完整父环境，防窃取 API keys；slime.toml env 显式补充）
 const ENV_ALLOWLIST = [
