@@ -1,10 +1,11 @@
 /**
- * gui/src/main/index.ts — Electron 主进程（Phase 5 MVP）。
+ * gui/src/main/index.ts — Electron 主进程（Phase 5 MVP + P0 缺口补齐）。
  * - 窗口/生命周期管理
  * - slime:// 自定义协议加载渲染页面（v2.5 安全基线）
  * - 直接加载 core-ts 调度核心（函数调用，非 HTTP 回环）
  * - sidecar spawn/terminate 管理
  * - IPC 通道注册（sender 白名单验证 + contextBridge 封装回传）
+ * - P0: chat:new / chat:retry / agents:select / agents:update
  *
  * 非破坏性：仅新增于 gui/，不修改 core-ts/gateway-ts/sidecar/legacy。
  */
@@ -24,6 +25,8 @@ let chatService: ChatService | null = null;
 let statsService: StatsService | null = null;
 let agentRegistry: AgentRegistry | null = null;
 let statsPoll: NodeJS.Timeout | null = null;
+/** P0: 当前选中 Agent ID（渲染层通过 agents:select 设置） */
+let selectedAgentId: string | null = null;
 
 function isTrustedSender(sender: Electron.WebContents): boolean {
   if (!mainWindow) {
@@ -120,11 +123,21 @@ function createWindow(): void {
 }
 
 function registerIpcHandlers(): void {
+  /** 获取当前选中 Agent ID（优先渲染层传入，回退到第一个 root Agent） */
+  function resolveAgentId(inputAgentId: string | undefined): string {
+    if (inputAgentId) { return inputAgentId; }
+    if (selectedAgentId) { return selectedAgentId; }
+    // 回退：取第一个 root Agent
+    const roots = agentRegistry!.loadedAgents.filter((a) => !a.parent_id);
+    return roots[0]?.id ?? "primary";
+  }
+
   ipcMain.handle("slime:chat:stream", async (event, input: ChatInput) => {
     if (!isTrustedSender(event.sender)) {
       return { ok: false, error: "sender 校验失败" };
     }
     await ensureServices();
+    const agentId = resolveAgentId(input.agentId);
     const req: ChatRequest = {
       message: input.message,
       history: input.history ? (input.history as any) : [],
@@ -133,7 +146,7 @@ function registerIpcHandlers(): void {
     };
     const session = createStreamSession();
     void (async () => {
-      for await (const ev of chatService!.stream(input.agentId, req, input.resumeSeq ?? 0)) {
+      for await (const ev of chatService!.stream(agentId, req, input.resumeSeq ?? 0)) {
         const chunk: StreamChunk = { seq: ev.seq, type: ev.type as StreamChunk["type"], data: ev.data as StreamChunk["data"] };
         session.pushChunk(chunk);
         mainWindow?.webContents.send("slime:chat:chunk", chunk);
@@ -148,6 +161,50 @@ function registerIpcHandlers(): void {
       mainWindow?.webContents.send("slime:chat:error", { message: msg });
     });
     return { ok: true };
+  });
+
+  /** P0: 新对话 — 清空历史文件并重置本地状态 */
+  ipcMain.handle("slime:chat:new", async (_event, payload: { agentId: string }) => {
+    await ensureServices();
+    const agentId = payload.agentId || resolveAgentId(undefined);
+    const { clearHistoryForAgentExport } = await import("../../../core-ts/src/services/history.js");
+    await clearHistoryForAgentExport(agentId);
+    console.info(`[gui:main] 新对话: agent=${agentId}`);
+    return { ok: true };
+  });
+
+  /** P0: 重试上条 — 重发最后一条 user 消息 */
+  ipcMain.handle("slime:chat:retry", async (_event, payload: { agentId: string }) => {
+    await ensureServices();
+    const agentId = payload.agentId || resolveAgentId(undefined);
+    const { popLastRecordForAgentExport } = await import("../../../core-ts/src/services/history.js");
+    const last = await popLastRecordForAgentExport(agentId);
+    if (!last || !last.user) {
+      return { ok: false, error: "无历史可重试" };
+    }
+    const req: ChatRequest = { message: last.user, history: [], retry: true };
+    const session = createStreamSession();
+    return new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      void (async () => {
+        try {
+          for await (const ev of chatService!.stream(agentId, req, 0)) {
+            const chunk: StreamChunk = { seq: ev.seq, type: ev.type as StreamChunk["type"], data: ev.data as StreamChunk["data"] };
+            session.pushChunk(chunk);
+            mainWindow?.webContents.send("slime:chat:chunk", chunk);
+          }
+          mainWindow?.webContents.send("slime:chat:done", {
+            reply: session.fullReply, model: session.model,
+            elapsedMs: session.elapsedMs, timings: session.timings,
+          });
+          resolve({ ok: true });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error("[gui:main] chat retry error:", msg);
+          mainWindow?.webContents.send("slime:chat:error", { message: msg });
+          resolve({ ok: false, error: msg });
+        }
+      })();
+    });
   });
 
   ipcMain.handle("slime:stats:snapshot", async () => {
@@ -181,6 +238,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle("slime:agents:create", async (_event, params: { name: string; role: string }) => {
     await ensureServices();
     const a = await createAgent(params.name, params.role);
+    selectedAgentId = a.id;
+    mainWindow?.webContents.send("slime:agents:selected", a.id);
     return { id: a.id, name: a.name, role: a.role, children: [], parent_id: null, lifecycle: a.lifecycle ?? "unknown" } as AgentInfo;
   });
 
@@ -189,7 +248,24 @@ function registerIpcHandlers(): void {
     const parent = await agentRegistry!.findAgent(params.parentId);
     if (!parent) { throw new Error("父 Agent 不存在"); }
     const child = await forkAgent(parent, params.name, params.role);
+    selectedAgentId = child.id;
+    mainWindow?.webContents.send("slime:agents:selected", child.id);
     return { id: child.id, name: child.name, role: child.role, children: [], parent_id: parent.id, lifecycle: child.lifecycle ?? "unknown" } as AgentInfo;
+  });
+
+  /** P0: 选中 Agent */
+  ipcMain.handle("slime:agents:select", async (_event, payload: { agentId: string }) => {
+    selectedAgentId = payload.agentId;
+    console.info(`[gui:main] 选中 Agent: ${payload.agentId}`);
+    return { ok: true };
+  });
+
+  /** P0: 更新 Agent 配置 */
+  ipcMain.handle("slime:agents:update", async (_event, payload: { agentId: string; patch: Record<string, unknown> }) => {
+    await ensureServices();
+    const updated = await agentRegistry!.updateAgent(payload.agentId, payload.patch as Partial<AgentState>);
+    if (!updated) { throw new Error(`Agent ${payload.agentId} 不存在`); }
+    return { ok: true };
   });
 
   ipcMain.handle("slime:sidecar:status", async () => {
