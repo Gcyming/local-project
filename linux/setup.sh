@@ -129,15 +129,26 @@ else
   if [[ -x "$LLAMA_BIN" ]]; then
     echo "[setup] 已存在 $LLAMA_BIN，跳过"
   else
-    # 5a. 优先下载官方预编译 CPU 版
+    # 5a. 优先下载官方预编译 CPU 版（GitHub 直连失败 → 自动试国内代理前缀）
     DL_OK=0
     if need curl; then
       echo "[setup] 尝试下载 llama.cpp 预编译二进制..."
-      LATEST=$(curl -fsSL --max-time 30 https://api.github.com/repos/ggml-org/llama.cpp/releases/latest 2>/dev/null || true)
+      GH_BASE="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+      GH_PREFIX=""
+      LATEST=$(curl -fsSL --max-time 30 "$GH_BASE" 2>/dev/null || true)
+      if [[ -z "$LATEST" ]]; then
+        for proxy in "${GH_PROXY:-}" "https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/"; do
+          [[ -z "$proxy" ]] && continue
+          LATEST=$(curl -fsSL --max-time 30 "${proxy}${GH_BASE}" 2>/dev/null || true)
+          if [[ -n "$LATEST" ]]; then GH_PREFIX="$proxy"; break; fi
+        done
+      fi
       ASSET=$(printf '%s' "$LATEST" | grep -o '"browser_download_url": *"[^"]*bin-ubuntu-x64.zip"' | head -1 | cut -d'"' -f4 || true)
       if [[ -n "$ASSET" ]]; then
         TMPZIP="$(mktemp -d)/llama.zip"
-        if curl -fSL --max-time 300 -o "$TMPZIP" "$ASSET" 2>/dev/null; then
+        URL="$ASSET"
+        [[ -n "$GH_PREFIX" ]] && URL="${GH_PREFIX}${ASSET}"
+        if curl -fSL --max-time 300 -o "$TMPZIP" "$URL" 2>/dev/null; then
           python - "$TMPZIP" "$ROOT/llama.cpp/build/bin" <<'PY'
 import sys, zipfile, shutil, os
 zp, out = sys.argv[1], sys.argv[2]
@@ -152,7 +163,7 @@ PY
         fi
       fi
     fi
-    # 5b. 回退：源码编译
+    # 5b. 回退：源码编译（github 克隆失败 → gitee 官方镜像）
     if [[ "$DL_OK" -eq 0 ]]; then
       echo "[setup] 预编译下载失败，改源码编译..."
       if ! need git || ! need cmake || ! need make; then
@@ -160,6 +171,7 @@ PY
       else
         if [[ ! -d llama.cpp/.git ]]; then
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp 2>/dev/null \
+            || git clone --depth 1 https://gitee.com/mirrors/llama.cpp.git llama.cpp 2>/dev/null \
             || echo "[setup] 源码克隆失败（网络受限时请手动放置 llama-server 到 $LLAMA_BIN）" >&2
         fi
         if [[ -d llama.cpp/.git ]]; then

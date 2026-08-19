@@ -132,11 +132,22 @@ else
   mkdir -p "$KIT/llama.cpp/build/bin"
   LLAMA_BIN="$KIT/llama.cpp/build/bin/llama-server"
   DL_OK=0
-  LATEST=$(curl -fsSL --max-time 30 https://api.github.com/repos/ggml-org/llama.cpp/releases/latest 2>/dev/null || true)
+  GH_BASE="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+  GH_PREFIX=""
+  LATEST=$(curl -fsSL --max-time 30 "$GH_BASE" 2>/dev/null || true)
+  if [[ -z "$LATEST" ]]; then
+    for proxy in "${GH_PROXY:-}" "https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/"; do
+      [[ -z "$proxy" ]] && continue
+      LATEST=$(curl -fsSL --max-time 30 "${proxy}${GH_BASE}" 2>/dev/null || true)
+      if [[ -n "$LATEST" ]]; then GH_PREFIX="$proxy"; break; fi
+    done
+  fi
   ASSET=$(printf '%s' "$LATEST" | grep -o '"browser_download_url": *"[^"]*bin-ubuntu-x64.zip"' | head -1 | cut -d'"' -f4 || true)
   if [[ -n "$ASSET" ]]; then
     TMPZIP="$(mktemp -d)/llama.zip"
-    if curl -fSL --max-time 600 -o "$TMPZIP" "$ASSET" 2>/dev/null; then
+    URL="$ASSET"
+    [[ -n "$GH_PREFIX" ]] && URL="${GH_PREFIX}${ASSET}"
+    if curl -fSL --max-time 600 -o "$TMPZIP" "$URL" 2>/dev/null; then
       python - "$TMPZIP" "$KIT/llama.cpp/build/bin" <<'PY'
 import sys, zipfile, shutil, os
 zp, out = sys.argv[1], sys.argv[2]
@@ -153,7 +164,8 @@ PY
   if [[ "$DL_OK" -eq 0 ]]; then
     echo "[portable] 预编译下载失败 → 源码编译（需 gcc/cmake/git/make）..."
     if [[ ! -d "$KIT/llama.cpp/.git" ]]; then
-      git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$KIT/llama.cpp" 2>/dev/null || true
+      git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$KIT/llama.cpp" 2>/dev/null \
+        || git clone --depth 1 https://gitee.com/mirrors/llama.cpp.git "$KIT/llama.cpp" 2>/dev/null || true
     fi
     if [[ -d "$KIT/llama.cpp/.git" ]]; then
       cmake -S "$KIT/llama.cpp" -B "$KIT/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
