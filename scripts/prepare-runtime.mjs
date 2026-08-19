@@ -22,6 +22,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, statSync, createWriteStream } from "node:fs";
+import { stat as statAsync } from "node:fs/promises";
 import { resolve, join, basename } from "node:path";
 import { platform } from "node:os";
 
@@ -55,7 +56,7 @@ async function downloadWithRetry(url, dest, retries = 3, timeoutMs = 60000) {
       // 断点续传
       let startByte = 0;
       if (existsSync(dest)) {
-        const s = await stat(dest);
+        const s = await statAsync(dest);
         if (s.size > 0) startByte = s.size;
       }
 
