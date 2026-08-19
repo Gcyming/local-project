@@ -8,11 +8,11 @@
   },
   "files": [
     "out/**/*",
-    "core-ts/src/**",
-    "requirements.txt",
-    "slime_server.py",
-    "slime_cli.py",
-    "slime.toml"
+    "../core-ts/src/**/*",
+    "../requirements.txt",
+    "../slime_server.py",
+    "../slime_cli.py",
+    "../slime.toml"
   ],
   "extraFiles": [
     {
