@@ -53,6 +53,21 @@ tar -xzf dist/slime-linux-x64.tar.gz && cd slime-linux-x64
 ./run-cli.sh            # 日常用（run-server.sh 后端 / run-gui.sh GUI）
 ```
 
+**Windows 构建机**（x64 + py + node + pnpm）：
+
+```powershell
+pwsh -File windows/build-portable.ps1              # 含模型，约 3-4GB（开箱即用）
+pwsh -File windows/build-portable.ps1 -SkipModels  # 不含模型，约 800MB
+# 产出 dist/slime-win-x64.zip
+```
+
+**接收方**（任何 Windows x64，零依赖）：
+
+```powershell
+# 解压 zip → 双击 run-cli.bat（或 cmd 下 run-server.bat）
+# 首次运行自动初始化配置，无需任何安装
+```
+
 ## 分步使用（高级用户）
 
 ```bash
