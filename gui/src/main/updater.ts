@@ -45,6 +45,7 @@ export function initUpdater(): void {
     provider: "github",
     owner: "Gcyming",
     repo: "local-project",
+    private: true,
   });
 
   autoUpdater.autoDownload = true;

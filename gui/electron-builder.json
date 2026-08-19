@@ -27,7 +27,7 @@
     "provider": "github",
     "owner": "Gcyming",
     "repo": "local-project",
-    "private": false,
+    "private": true,
     "draft": false
   }
 }
