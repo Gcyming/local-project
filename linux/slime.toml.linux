@@ -1,0 +1,121 @@
+# slime 配置文件（Linux 可移植模板）
+# 由 linux/setup.sh 或 linux/scripts/gen-config.sh 生成：
+#   @PROJECT_ROOT@ 会被替换为仓库根目录绝对路径
+#   Windows 硬编码路径（D:\tool\...）已全部替换为相对仓库根的便携路径
+
+[memory]
+enabled = true
+dir = "Knowledge/Agent Memory"
+categories = ["fact", "preference", "lesson", "rule", "skill", "insight", "user_profile"]
+backend = "lancedb"
+[memory.lancedb]
+enabled = true
+uri = ""
+
+[evolve]
+enabled = true
+forget_threshold_days = 30
+
+[context]
+head = 3
+tail = 10
+window = 30
+
+[social]
+wechat_webhook_url = ""
+wechat_verify_token = ""
+wechat_bridge_url = ""
+wechat_bridge_token = ""
+
+# ── 沙箱配置 ──────────────────────────────────────────────
+
+[sandbox]
+default_level = "strict"
+workspace = ""
+auto_approve_levels = [0, 1]
+require_approval_levels = [2, 3, 4]
+deny_levels = [5]
+# 说明见 slime.toml（Windows 版）：mcp_* / agnes_* / file_write 等放行理由
+auto_approve_tools = ["web_fetch", "web_search", "mcp_*", "agnes_*", "file_write", "file_read", "file_list", "skill_*"]
+
+[sandbox.child_default]
+inherit_from_parent = true
+timeout_seconds = 300
+max_concurrent_permissions = 10
+
+[sandbox.anomaly_detection]
+enabled = true
+write_rate_limit = 100
+file_size_limit_mb = 50
+suspicious_patterns = [
+    "rm -rf /",
+    "chmod 777",
+    "curl | bash",
+]
+
+[sandbox.audit]
+enabled = true
+log_path = "data/audit.jsonl"
+retention_days = 90
+
+# ── 本地模型管理 ──────────────────────────────────────────
+# 目录约定（setup.sh 自动创建，请把模型文件放入对应目录）：
+#   @PROJECT_ROOT@/llama.cpp/build/bin/llama-server   llama.cpp 编译产物（setup.sh 自动构建/下载）
+#   @PROJECT_ROOT@/models/BGE-M3/bge-m3-q8_0.gguf     嵌入模型（BGE-M3 Q8 量化，来自 HuggingFace）
+#   @PROJECT_ROOT@/models/chat/*.gguf                 Chat 模型（Qwen3/DeepSeek 等任意 GGUF）
+
+[model_server]
+llama_bin = "@PROJECT_ROOT@/llama.cpp/build/bin/llama-server"
+startup_timeout = 60
+vram_budget_gb = 7.0
+chat_est_gb = 4.0
+
+[model_server.embedding]
+model_path = "@PROJECT_ROOT@/models/BGE-M3/bge-m3-q8_0.gguf"
+port = 8999
+gpu_layers = 99
+ctx_len = 2048
+persistent = true
+dim = 1024
+
+[model_server.chat]
+models_dir = "@PROJECT_ROOT@/models/chat"
+port_start = 18082
+gpu_layers = 99
+ctx_len = 8192
+persistent = false
+idle_unload_min = 10
+max_instances = 1
+
+# ── MCP 服务器配置 ──────────────────────────────────────────
+# Linux 示例：playwright-mcp 用系统 chromium（npx 安装，或 apt install chromium）
+# [[mcp_servers]]
+# name = "browser"
+# command = "npx"
+# args = ["-y", "@playwright/mcp@latest"]
+# env = { PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = "/usr/bin/chromium" }
+# timeout = 60
+
+# Context7 示例（node 需 >=18）：
+# [[mcp_servers]]
+# name = "context7"
+# command = "npx"
+# args = ["-y", "@upstash/context7-mcp@latest"]
+# timeout = 30
+# env = { CONTEXT7_API_KEY = "<你的 key>" }
+
+# ── Agnes 媒体配置（与 Windows 版一致）──
+
+[media]
+env_key = "HERMES_CUSTOM_API_AGNES_AI_CN_API_KEY"
+api_base = "https://api.agnes-ai.cn/v1"
+poll_base = "https://api.agnes-ai.cn/agnesapi"
+image_model = "agnes-image-2.1-flash"
+video_model = "agnes-video-v2.0"
+
+# ── Soul-Plan：情绪进化软开关 ──
+[emotion]
+ab_enabled = true
+ab_report_after = 50
+tool_signal = true
+behavior_levers = true
