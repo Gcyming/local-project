@@ -1,491 +1,269 @@
 /**
- * gui/src/renderer/pages/AgentsPanel.tsx — Agent 管理（A-C-C 属性面板风格参考）。
- * - 左侧：Agent 卡片列表（名称/角色/生命周期徽章/子代数量）
- * - 右侧：选中 Agent 的属性面板（PropsPanel 模式）：
- *   - 身份卡片：name（身份铁律不可改）+ role（可编辑）
- *   - 模型卡片：模式（inherit / api:<key> / local:<id>）+ 模型选择 + 推理强度 + 保存
- * - 顶部操作：创建 / 分裂 / 导出 / 导入
+ * gui/src/renderer/pages/AgentsPanel.tsx — Agent 管理面板（P0 补齐版）。
+ * - 列表展示（名称/角色/生命周期/父子关系）
+ * - P0: 点击行选中 Agent（高亮），通知主进程切换
+ * - 创建 Agent 入口
+ * - 分裂（fork）入口
  */
 import React, { type JSX } from "react";
+import type { AgentInfo } from "../../shared/ipc.js";
 
-interface AgentBrief {
-  id: string;
-  name: string;
-  role: string;
-  children: string[];
-  parent_id: string | null;
-  lifecycle: string;
-}
-
-interface AgentDetail {
-  id: string;
-  name: string;
-  role: string;
-  model_choice: string;
-  mode: string;
-  reasoning_effort: string;
-  max_context?: number;
-  max_output?: number;
-  lifecycle: string;
-}
-
-interface Props {
+interface AgentsPanelProps {
   selectedAgentId?: string;
-  onSelectAgent: (agentId: string) => void;
-  /** 删除/变更后通知 App 刷新（选中回落由本组件处理） */
-  onAgentsChanged?: () => void;
-  /** 供应商 key 列表（model_choice = api:<key>） */
-  providerKeys: string[];
-  /** 本地模型列表（model_choice = local:<id>） */
-  localModels: Array<{ id: string; label: string; path: string }>;
+  onSelectAgent?: (agentId: string) => void;
 }
 
-const REASONING_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "none", label: "关闭" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-];
-
-const MODE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "build", label: "build" },
-  { value: "grow", label: "grow" },
-  { value: "normal", label: "normal" },
-];
-
-export default function AgentsPanel(props: Props): JSX.Element {
-  const api = React.useRef<any>(null);
-  const [agents, setAgents] = React.useState<AgentBrief[]>([]);
-  const [detail, setDetail] = React.useState<AgentDetail | null>(null);
-  const [busy, setBusy] = React.useState(false);
-  const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
-
-  /* 创建弹窗 */
-  const [creating, setCreating] = React.useState(false);
+export default function AgentsPanel({
+  selectedAgentId,
+  onSelectAgent,
+}: AgentsPanelProps): JSX.Element {
+  const [agents, setAgents] = React.useState<AgentInfo[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [showCreate, setShowCreate] = React.useState(false);
   const [newName, setNewName] = React.useState("");
   const [newRole, setNewRole] = React.useState("");
+  const [forkParent, setForkParent] = React.useState("");
+  const [forkName, setForkName] = React.useState("");
+  const [forkRole, setForkRole] = React.useState("");
+  /** 身份移民协议 v1.2：导出/导入操作反馈（null=无消息） */
+  const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
 
-  const selectedId = props.selectedAgentId ?? null;
+  const api = React.useRef<any>(null);
 
-  /** 删除确认用（记录待删 id + 弹确认层） */
-  const [pendingDelete, setPendingDelete] = React.useState<AgentBrief | null>(null);
-
+  /** 显示操作反馈，5 秒后自动清除 */
   function showNotice(ok: boolean, text: string): void {
     setNotice({ ok, text });
     window.setTimeout(() => setNotice(null), 5000);
   }
 
-  const loadAgents = React.useCallback(async (): Promise<void> => {
+  const refresh = React.useCallback(async (): Promise<void> => {
     if (!api.current) { return; }
-    const list = await api.current.agents.list().catch((e: unknown) => {
-      console.error("[agents] list failed:", e);
-      return [];
-    });
+    const list = (await api.current.agents.list()) as AgentInfo[];
     setAgents(list);
   }, []);
 
   React.useEffect(() => {
     const w = window as unknown as { slimeAPI?: any };
     api.current = w.slimeAPI;
-    if (api.current) {
-      void loadAgents();
-      const off = api.current.agents.onAgentSelected(() => { void loadAgents(); });
-      return () => { off(); };
-    }
-  }, [loadAgents]);
+    if (api.current) { void refresh(); }
+  }, [refresh]);
 
-  /** 选中变化 → 拉取属性面板详情 */
-  React.useEffect(() => {
-    if (!selectedId || !api.current) { return; }
-    api.current.agents.detail(selectedId).then((d: AgentDetail | null) => setDetail(d)).catch(() => setDetail(null));
-  }, [selectedId, agents]);
-
-  /** 详情 → 同步 App 层 agentConfig（属性面板与 ChatPanel 头部一致） */
-  React.useEffect(() => {
-    if (!selectedId || !detail) { return; }
-    const w = window as unknown as { __onAgentDetail?: (id: string, d: AgentDetail) => void };
-    w.__onAgentDetail?.(selectedId, detail);
-  }, [selectedId, detail]);
-
-  function patchLocal(patch: Record<string, string>): void {
-    setDetail((prev) => (prev ? { ...prev, ...patch } : prev));
-  }
-
-  async function saveDetail(): Promise<void> {
-    if (!api.current || !detail) { return; }
-    setBusy(true);
-    try {
-      const patch: Record<string, unknown> = { role: detail.role, model_choice: detail.model_choice };
-      if (detail.reasoning_effort !== "none") {
-        patch.reasoning_effort = detail.reasoning_effort;
-      } else {
-        patch.reasoning_effort = "none";
-      }
-      if (detail.mode) { patch.mode = detail.mode; }
-      const res = await api.current.agents.update(detail.id, patch);
-      if (res.ok) {
-        showNotice(true, `「${detail.name}」配置已保存`);
-        await loadAgents();
-      } else {
-        showNotice(false, "保存失败");
-      }
-    } catch (e) {
-      showNotice(false, `保存失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleCreate(): Promise<void> {
+  async function createAgent(): Promise<void> {
     if (!api.current || !newName.trim()) { return; }
-    setBusy(true);
+    setLoading(true);
     try {
-      const a = await api.current.agents.create(newName.trim(), newRole.trim());
-      showNotice(true, `已创建 Agent「${a.name}」`);
-      setCreating(false);
+      const a = await api.current.agents.create(newName, newRole || "assistant");
+      await refresh();
+      setShowCreate(false);
       setNewName("");
       setNewRole("");
-      await loadAgents();
-      props.onSelectAgent(a.id);
-    } catch (e) {
-      showNotice(false, `创建失败：${e instanceof Error ? e.message : String(e)}`);
+      onSelectAgent?.(a.id);
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
-  async function handleFork(): Promise<void> {
-    if (!api.current || !selectedId) { return; }
-    if (!window.confirm(`以「${detail?.name ?? ""}」为父分裂出新 Agent（fork，最大深度 2）？`)) { return; }
-    setBusy(true);
+  async function forkAgent(): Promise<void> {
+    if (!api.current || !forkParent) { return; }
+    setLoading(true);
     try {
-      const a = await api.current.agents.fork(selectedId, `${detail?.name ?? "agent"}-子`, "");
-      showNotice(true, `已分裂出「${a.name}」`);
-      await loadAgents();
-      props.onSelectAgent(a.id);
-    } catch (e) {
-      showNotice(false, `分裂失败：${e instanceof Error ? e.message : String(e)}`);
+      const a = await api.current.agents.fork(forkParent, forkName || "child", forkRole || "worker");
+      await refresh();
+      setForkParent("");
+      setForkName("");
+      setForkRole("");
+      onSelectAgent?.(a.id);
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
-  async function handleExport(): Promise<void> {
-    if (!api.current || !selectedId) { return; }
-    const res = await api.current.agents.exportAgent(selectedId);
-    showNotice(res.ok, res.ok ? `已导出：${res.path}` : (res.error ?? "导出失败"));
+  function handleSelect(agentId: string): void {
+    api.current?.agents.select(agentId).catch(console.error);
+    onSelectAgent?.(agentId);
   }
 
-  async function handleImport(): Promise<void> {
+  /** 身份移民协议 v1.2 §4：导出当前 Agent 为 .slimeagent 身份包 */
+  async function exportAgent(agent: AgentInfo): Promise<void> {
     if (!api.current) { return; }
-    const res = await api.current.agents.importPack();
-    if (res.ok) {
-      showNotice(true, `已导入「${res.agentName ?? ""}」`);
-      await loadAgents();
-      if (res.agentId) { props.onSelectAgent(res.agentId); }
-    } else if (res.error && !res.error.includes("取消")) {
-      showNotice(false, res.error);
-    }
-  }
-
-  async function confirmDelete(): Promise<void> {
-    if (!api.current || !pendingDelete) { return; }
-    setBusy(true);
+    setLoading(true);
     try {
-      const res = await api.current.agents.remove(pendingDelete.id);
+      const res = await api.current.agents.exportAgent(agent.id);
       if (res.ok) {
-        showNotice(true, `已删除「${pendingDelete.name}」及其子树（${(res.deleted?.length ?? 1)} 个 Agent，历史已清理）`);
-        setPendingDelete(null);
-        await loadAgents();
-        props.onAgentsChanged?.();
-        if (selectedId === pendingDelete.id) {
-          // 选中回落：下一个或清空
-          const remaining = agents.filter((a) => a.id !== pendingDelete.id);
-          props.onSelectAgent(remaining[0]?.id ?? "");
-        }
-      } else {
-        showNotice(false, res.error ?? "删除失败");
-        setPendingDelete(null);
+        showNotice(true, `已导出「${agent.name}」→ ${res.path}`);
+      } else if (res.error !== "已取消导出") {
+        showNotice(false, `导出失败：${res.error}`);
       }
-    } catch (e) {
-      showNotice(false, `删除失败：${e instanceof Error ? e.message : String(e)}`);
-      setPendingDelete(null);
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   }
 
-  const mc = detail?.model_choice ?? "inherit";
-  const mcMode = mc === "inherit" ? "inherit" : mc.startsWith("api:") ? "api" : mc.startsWith("local:") ? "local" : "inherit";
-  const mcKey = mc.startsWith("api:") ? mc.slice(4) : "";
-  const mcLocal = mc.startsWith("local:") ? mc.slice(6) : "";
-
-  const lifecycleColor = (lifecycle: string): string => {
-    switch (lifecycle) {
-      case "active": return "var(--success)";
-      case "evolving": return "#f59e0b";
-      case "split": return "#8b5cf6";
-      default: return "var(--text-dim)";
+  /** 身份移民协议 v1.2 §5：导入身份包（冲突时二次确认后走 overwrite） */
+  async function importPack(): Promise<void> {
+    if (!api.current) { return; }
+    setLoading(true);
+    try {
+      let res = await api.current.agents.importPack("abort");
+      if (!res.ok && typeof res.error === "string" && res.error.includes("已存在")) {
+        const overwrite = window.confirm(`${res.error}\n\n是否覆盖导入？（旧身份将被替换）`);
+        if (overwrite) {
+          res = await api.current.agents.importPack("overwrite");
+        }
+      }
+      if (res.ok) {
+        showNotice(true, `已导入「${res.agentName ?? res.agentId}」${res.warnings?.length ? `（警告：${res.warnings.join("；")}）` : ""}`);
+        await refresh();
+        if (res.agentId) { onSelectAgent?.(res.agentId); }
+      } else if (res.error !== "已取消导入") {
+        showNotice(false, `导入失败：${res.error}`);
+      }
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
   return (
     <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
-      {/* ── 左：Agent 列表 ── */}
-      <div style={{ width: 280, minWidth: 280, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 14, fontWeight: 700, flex: 1 }}>Agents（{agents.length}）</span>
-          <button className="btn primary" style={{ padding: "2px 10px", fontSize: 12.5 }}
-            onClick={() => setCreating(true)}>＋ 创建</button>
+      {/* 左侧 Agent 列表 */}
+      <div style={{
+        width: 220, borderRight: "1px solid #334155",
+        display: "flex", flexDirection: "column", overflow: "hidden",
+      }}>
+        <div style={{ padding: "10px 12px", borderBottom: "1px solid #334155", display: "flex", gap: 6 }}>
+          <button onClick={() => setShowCreate(!showCreate)}
+            style={{ flex: 1, padding: "6px 14px", borderRadius: 4, border: "none",
+              background: "#10b981", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+            创建 Agent
+          </button>
+          <button onClick={importPack} disabled={loading}
+            style={{ flex: 1, padding: "6px 14px", borderRadius: 4, border: "none",
+              background: "#0ea5e9", color: "#fff", cursor: "pointer", fontSize: 13 }}>
+            导入 Agent
+          </button>
         </div>
+
         {notice && (
           <div style={{
-            margin: "0 12px 8px", padding: "6px 10px", fontSize: 12, lineHeight: 1.4, wordBreak: "break-all",
-            borderRadius: 6, border: "1px solid var(--border)",
-            background: notice.ok ? "var(--success-soft)" : "var(--danger-soft)",
-            color: notice.ok ? "var(--success)" : "#f87171",
+            padding: "8px 12px", fontSize: 12, lineHeight: 1.5, wordBreak: "break-all",
+            borderBottom: "1px solid #334155",
+            background: notice.ok ? "rgba(16,185,129,0.12)" : "rgba(239,68,68,0.12)",
+            color: notice.ok ? "#34d399" : "#f87171",
           }}>
             {notice.text}
           </div>
         )}
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
+
+        {showCreate && (
+          <div style={{ padding: 8, borderBottom: "1px solid #334155", display: "flex", flexDirection: "column", gap: 4 }}>
+            <input placeholder="名称" value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              style={inputStyle()} />
+            <input placeholder="角色（默认 assistant）" value={newRole}
+              onChange={(e) => setNewRole(e.target.value)}
+              style={inputStyle()} />
+            <button onClick={createAgent} disabled={loading || !newName.trim()}
+              style={btnStyle("#3b82f6")}>确认</button>
+          </div>
+        )}
+
+        <div style={{ flex: 1, overflowY: "auto" }}>
           {agents.map((a) => {
-            const active = a.id === selectedId;
+            const isSelected = a.id === selectedAgentId;
             return (
-              <button key={a.id}
-                onClick={() => props.onSelectAgent(a.id)}
+              <div key={a.id}
+                onClick={() => handleSelect(a.id)}
                 style={{
-                  display: "block", width: "100%", textAlign: "left",
-                  padding: "9px 10px", marginBottom: 4,
-                  borderRadius: 8, border: active ? "1px solid var(--accent)" : "1px solid transparent",
-                  background: active ? "var(--accent-soft)" : "transparent",
-                  cursor: "pointer",
-                }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{a.name}</span>
-                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: lifecycleColor(a.lifecycle), flexShrink: 0 }} />
-                  <span style={{ flex: 1 }} />
-                  {a.children.length > 0 && (
-                    <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{a.children.length} 子</span>
-                  )}
+                  padding: "8px 12px", cursor: "pointer",
+                  background: isSelected ? "#1e3a5f" : "transparent",
+                  borderBottom: "1px solid #1e293b",
+                  transition: "background 0.15s",
+                }}
+                onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = "#1e293b"; }}
+                onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = "transparent"; }}
+              >
+                <div style={{ fontSize: 14, fontWeight: isSelected ? 600 : 400, color: "#e2e8f0" }}>
+                  {a.name}
                 </div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, wordBreak: "break-all" }}>
-                  {a.role || "（无角色）"}
+                <div style={{ fontSize: 11, color: "#64748a" }}>
+                  {a.role} · {a.lifecycle}
                 </div>
-              </button>
+              </div>
             );
           })}
           {agents.length === 0 && (
-            <div style={{ color: "var(--text-dim)", textAlign: "center", padding: 24, fontSize: 12.5 }}>
-              暂无 Agent — 点击"＋ 创建"
+            <div style={{ padding: 16, color: "#475569", fontSize: 13, textAlign: "center" }}>
+              暂无 Agent
             </div>
           )}
         </div>
       </div>
 
-      {/* ── 右：属性面板（A-C-C PropsPanel 风格） ── */}
-      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-        {!detail ? (
-          <div style={{ color: "var(--text-dim)", textAlign: "center", paddingTop: 48, fontSize: 13 }}>
-            选择左侧 Agent 查看与编辑属性
-          </div>
-        ) : (
-          <>
-            {/* 身份卡片 */}
-            <div className="card" style={{ marginBottom: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-                <span style={{ fontSize: 18, fontWeight: 800 }}>{detail.name}</span>
-                <span style={chip(lifecycleColor(detail.lifecycle))}>{detail.lifecycle}</span>
-                <span style={{ flex: 1 }} />
-                <button className="btn success" onClick={saveDetail} disabled={busy} style={{ fontSize: 13 }}>
-                  {busy ? "保存中…" : "保存配置"}
-                </button>
-              </div>
-              <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
-                身份铁律：name 不可修改；回答始终自称「{detail.name}」
-              </div>
-              <div style={{ marginBottom: 6, fontSize: 12, color: "var(--text-muted)" }}>角色（role）</div>
-              <input className="input-field" value={detail.role} spellCheck={false}
-                placeholder="如：资深前端工程师"
-                onChange={(e) => patchLocal({ role: e.target.value })} />
-            </div>
-
-            {/* 模型卡片 */}
-            <div className="card" style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>模型配置</div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
-                model_choice：{mc} {mcMode === "api" && `→ api:<${mcKey}>（取该供应商默认模型）`}
-                {mcMode === "local" && `→ local:<${mcLocal}>（llama.cpp 本地模型）`}
-              </div>
-
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>模式</div>
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                {MODE_OPTIONS.map((o) => (
-                  <button key={o.value}
-                    className={`btn${detail.mode === o.value ? " primary" : ""}`}
-                    style={{ fontSize: 12.5, padding: "3px 12px" }}
-                    onClick={() => patchLocal({ mode: o.value })}>
-                    {o.label}
+      {/* 右侧：分裂操作区 */}
+      <div style={{ flex: 1, padding: 16, overflowY: "auto" }}>
+        <h2 style={{ fontSize: 18, marginTop: 0 }}>Agent 管理</h2>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+          <thead>
+            <tr style={{ textAlign: "left", color: "#94a388" }}>
+              <th style={{ padding: 6 }}>名称</th>
+              <th style={{ padding: 6 }}>角色</th>
+              <th style={{ padding: 6 }}>生命周期</th>
+              <th style={{ padding: 6 }}>孩子</th>
+              <th style={{ padding: 6 }}>分裂</th>
+              <th style={{ padding: 6 }}>移民</th>
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map((a) => (
+              <tr key={a.id} style={{ borderBottom: "1px solid #334155",
+                background: a.id === selectedAgentId ? "#1e293b" : "transparent" }}>
+                <td style={{ padding: 6, color: a.id === selectedAgentId ? "#93c5fd" : "#e2e8f0" }}>
+                  {a.name}
+                </td>
+                <td style={{ padding: 6 }}>{a.role}</td>
+                <td style={{ padding: 6 }}>{a.lifecycle}</td>
+                <td style={{ padding: 6 }}>{a.children.length}</td>
+                <td style={{ padding: 6 }}>
+                  <input placeholder="子名称" value={forkName}
+                    onChange={(e) => setForkName(e.target.value)}
+                    style={{ width: 110, padding: 4, marginRight: 4, borderRadius: 3,
+                      border: "1px solid #475569", background: "#0f172a", color: "#e2e8f0", fontSize: 12 }}
+                  />
+                  <button onClick={async () => { setForkParent(a.id); await forkAgent(); }}
+                    style={{ padding: "2px 8px", borderRadius: 3, border: "none",
+                      background: "#f59e0b", color: "#fff", cursor: "pointer", fontSize: 12 }}>
+                    分裂
                   </button>
-                ))}
-              </div>
-
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>模型来源</div>
-              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                {([
-                  { v: "inherit", label: "继承父级" },
-                  { v: "api", label: "API 供应商" },
-                  { v: "local", label: "本地模型" },
-                ] as const).map((o) => (
-                  <button key={o.v}
-                    className={`btn${mcMode === o.v ? " primary" : ""}`}
-                    style={{ fontSize: 12.5, padding: "3px 12px" }}
-                    onClick={() => {
-                      if (o.v === "inherit") { patchLocal({ model_choice: "inherit" }); }
-                      if (o.v === "api") {
-                        patchLocal({ model_choice: props.providerKeys.length > 0 ? `api:${props.providerKeys[0]}` : "inherit" });
-                      }
-                      if (o.v === "local") {
-                        patchLocal({ model_choice: props.localModels.length > 0 ? `local:${props.localModels[0].id}` : "inherit" });
-                      }
-                    }}>
-                    {o.label}
+                </td>
+                <td style={{ padding: 6 }}>
+                  <button onClick={() => exportAgent(a)} disabled={loading}
+                    style={{ padding: "2px 8px", borderRadius: 3, border: "none",
+                      background: "#0ea5e9", color: "#fff", cursor: "pointer", fontSize: 12 }}>
+                    导出
                   </button>
-                ))}
-              </div>
-
-              {mcMode === "api" && (
-                <>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>供应商</div>
-                  <select className="input-field" style={{ marginBottom: 10, padding: "5px 8px" }}
-                    value={mcKey}
-                    onChange={(e) => patchLocal({ model_choice: `api:${e.target.value}` })}>
-                    {props.providerKeys.length === 0 && <option value="">（无供应商 — 请到"供应商"页添加）</option>}
-                    {props.providerKeys.map((k) => <option key={k} value={k}>api:{k}</option>)}
-                  </select>
-                  <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10 }}>
-                    模型选择在"供应商"页的编辑界面中维护（每个供应商可调默认模型与多模型参数）
-                  </div>
-                </>
-              )}
-
-              {mcMode === "local" && (
-                <>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>本地模型</div>
-                  <select className="input-field" style={{ marginBottom: 10, padding: "5px 8px" }}
-                    value={mcLocal}
-                    onChange={(e) => patchLocal({ model_choice: `local:${e.target.value}` })}>
-                    {props.localModels.length === 0 && <option value="">（无本地模型 — 请到"供应商"页导入 GGUF）</option>}
-                    {props.localModels.map((m) => <option key={m.id} value={m.id}>{m.label}（local:{m.id}）</option>)}
-                  </select>
-                </>
-              )}
-
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>推理强度</div>
-              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                {REASONING_OPTIONS.map((o) => (
-                  <button key={o.value}
-                    className={`btn${detail.reasoning_effort === o.value ? " primary" : ""}`}
-                    style={{ fontSize: 12.5, padding: "3px 12px" }}
-                    onClick={() => patchLocal({ reasoning_effort: o.value })}>
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-
-              {detail.max_context !== undefined || detail.max_output !== undefined ? (
-                <div style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
-                  当前配置：{detail.max_context ? `上下文 ${detail.max_context}` : ""}
-                  {detail.max_output ? ` · 输出上限 ${detail.max_output}` : ""}
-                </div>
-              ) : null}
-            </div>
-
-            {/* 管理操作 */}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn" onClick={handleFork} disabled={busy} style={{ fontSize: 12.5 }}>
-                ⑂ 分裂（fork）
-              </button>
-              <button className="btn" onClick={handleExport} disabled={busy} style={{ fontSize: 12.5 }}>
-                ⤓ 导出身份
-              </button>
-              <button className="btn" onClick={handleImport} disabled={busy} style={{ fontSize: 12.5 }}>
-                ⤒ 导入身份
-              </button>
-              <span style={{ flex: 1 }} />
-              <button className="btn danger" onClick={() => setPendingDelete({ id: detail.id, name: detail.name, role: detail.role, children: [], parent_id: null, lifecycle: detail.lifecycle })}
-                disabled={busy} style={{ fontSize: 12.5 }}>
-                删除 Agent
-              </button>
-            </div>
-          </>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {agents.length === 0 && (
+          <p style={{ color: "#64748a", marginTop: 16 }}>暂无 Agent，点击"创建 Agent"添加。</p>
         )}
       </div>
-
-      {/* ── 创建弹窗 ── */}
-      {creating && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setCreating(false); } }}>
-          <div className="card" style={{ width: 420, maxWidth: "90vw" }}>
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
-              <h3 style={{ margin: 0, flex: 1 }}>创建 Agent</h3>
-              <button className="titlebar-btn" onClick={() => setCreating(false)}>✕</button>
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>名称（唯一，不可修改）</div>
-            <input className="input-field" value={newName} spellCheck={false}
-              placeholder="如：research-agent" style={{ marginBottom: 10 }}
-              onChange={(e) => setNewName(e.target.value)} />
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>角色（可后续修改）</div>
-            <input className="input-field" value={newRole} spellCheck={false}
-              placeholder="如：负责资料检索与总结" style={{ marginBottom: 14 }}
-              onChange={(e) => setNewRole(e.target.value)} />
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn success" onClick={handleCreate} disabled={busy || !newName.trim()}>
-                {busy ? "创建中…" : "创建"}
-              </button>
-              <button className="btn" onClick={() => setCreating(false)}>取消</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── 删除确认层 ── */}
-      {pendingDelete && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setPendingDelete(null); } }}>
-          <div className="card" style={{ width: 400, maxWidth: "90vw" }}>
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-              <h3 style={{ margin: 0, flex: 1 }}>删除 Agent</h3>
-              <button className="titlebar-btn" onClick={() => setPendingDelete(null)}>✕</button>
-            </div>
-            <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
-              确定删除 <b style={{ color: "#f87171" }}>{pendingDelete.name}</b> 及其全部子 Agent？
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
-                将同时清理对话历史与孤立数据引用（悬空 children 自动修复）。此操作不可撤销。
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn danger" onClick={confirmDelete} disabled={busy}>
-                {busy ? "删除中…" : "确认删除"}
-              </button>
-              <button className="btn" onClick={() => setPendingDelete(null)}>取消</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function chip(color: string): React.CSSProperties {
+function inputStyle(): React.CSSProperties {
   return {
-    display: "inline-block", marginLeft: 8, padding: "1px 8px", borderRadius: 8,
-    fontSize: 11, color, background: "var(--accent-soft)", border: `1px solid ${color}`,
+    width: "100%", padding: 6, borderRadius: 4,
+    border: "1px solid #475569", background: "#0f172a", color: "#e2e8f0", boxSizing: "border-box",
+  };
+}
+
+function btnStyle(bg: string): React.CSSProperties {
+  return {
+    padding: "6px 14px", borderRadius: 4, border: "none",
+    background: bg, color: "#fff", cursor: "pointer", fontSize: 13,
   };
 }

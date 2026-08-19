@@ -30,11 +30,12 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "type": "tsc -p tsconfig.json --noEmit",
-    "dist:win": "node ../scripts/build-safety-check.mjs --out-dir=release && electron-vite build && electron-builder --win --publish never",
-    "dist:win:publish": "node ../scripts/build-safety-check.mjs --out-dir=release && electron-vite build && electron-builder --win --publish always",
-    "dist:win:portable": "node ../scripts/build-safety-check.mjs --out-dir=release-win-portable && electron-vite build && electron-builder --win portable --publish never",
-    "dist:linux": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && electron-vite build && electron-builder --linux --publish never",
-    "dist:linux:publish": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && electron-vite build && electron-builder --linux --publish always"
+    "prepare-runtime": "node ../scripts/prepare-runtime.mjs",
+    "dist:win": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish never",
+    "dist:win:publish": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish always",
+    "dist:win:portable": "node ../scripts/build-safety-check.mjs --out-dir=release-win-portable && npm run prepare-runtime && electron-vite build && electron-builder --win portable --publish never",
+    "dist:linux": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish never",
+    "dist:linux:publish": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish always"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"

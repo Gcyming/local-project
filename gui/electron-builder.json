@@ -6,9 +6,47 @@
     "output": "release",
     "buildResources": "build"
   },
-  "files": ["out/**/*"],
+  "files": [
+    "out/**/*",
+    "core-ts/src/**/*",
+    "requirements.txt",
+    "slime_server.py",
+    "slime_cli.py",
+    "slime.toml"
+  ],
+  "extraFiles": [
+    {
+      "from": "runtime/venv",
+      "to": "runtime/venv",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "runtime/node",
+      "to": "runtime/node",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "models",
+      "to": "models",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "llama.cpp/build/bin",
+      "to": "llama.cpp/build/bin",
+      "filter": ["**/*"]
+    }
+  ],
   "asar": true,
-  "asarUnpack": ["out/main/chunks/*.node"],
+  "asarUnpack": [
+    "out/main/chunks/*.node",
+    "core-ts/**/*",
+    "runtime/venv/**/*",
+    "runtime/node/**/*",
+    "models/**/*",
+    "llama.cpp/**/*",
+    "slime_server.py",
+    "slime_cli.py"
+  ],
   "compression": "maximum",
   "win": {
     "target": [
