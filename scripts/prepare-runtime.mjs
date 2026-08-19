@@ -21,7 +21,7 @@
  *   - llama-server: GitHub release 直连，失败时 gh-proxy 镜像
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, createWriteStream } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { platform } from "node:os";
 
@@ -45,6 +45,63 @@ const venvDir = join(ROOT, "runtime", "venv");
 const venvPython = isWindows
   ? join(venvDir, "Scripts", "python.exe")
   : join(venvDir, "bin", "python");
+
+// —— 下载辅助函数：Node 原生 fetch + 重试 ——
+async function downloadWithRetry(url, dest, retries = 3, timeoutMs = 60000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      log(`下载 (尝试 ${attempt}/${retries}): ${basename(url)}`);
+
+      // 断点续传
+      let startByte = 0;
+      if (existsSync(dest)) {
+        const s = await stat(dest);
+        if (s.size > 0) startByte = s.size;
+      }
+
+      const res = await fetch(url, {
+        headers: startByte > 0 ? { Range: `bytes=${startByte}-` } : {},
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!res.ok && !(res.status === 416 && startByte > 0)) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      const fs = createWriteStream(dest, { flags: startByte > 0 ? "a" : "w" });
+
+      if (res.status === 416) {
+        // Server says "Range Not Satisfiable" — file already complete
+        log("文件已完整，跳过");
+        fs.close();
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("无法获取响应流");
+
+      const writer = fs;
+      let received = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!writer.write(value)) {
+          await new Promise((r) => writer.once("drain", r));
+        }
+        received += value.length;
+      }
+      writer.end();
+
+      log(`完成: ${Math.round((startByte + received) / 1024 / 1024)} MB`);
+      return;
+    } catch (err) {
+      log(`下载失败 (尝试 ${attempt}/${retries}): ${err.message}`);
+      if (attempt === retries) throw err;
+      await new Promise((r) => setTimeout(r, 3000 * attempt));
+    }
+  }
+}
 
 if (!existsSync(venvPython)) {
   log("创建 Python venv (--copies)");
@@ -97,38 +154,9 @@ if (!existsSync(llamaBin)) {
     for (const asset of release.assets) {
       if (asset.name.includes(pattern)) {
         const outZip = join(ROOT, "llama-win.zip");
-
-        // 重试下载
-        let downloaded = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          log(`下载 ${asset.name} (尝试 ${attempt}/3)`);
-          try {
-            exec("curl.exe", [
-              "-fL", "--retry", "3", "--retry-delay", "5",
-              "--max-time", "600", "-C", "-",  // 10分钟超时，断点续传
-              "-o", outZip, asset.browser_download_url,
-            ]);
-            downloaded = true;
-            break;
-          } catch {
-            log(`下载失败 (尝试 ${attempt}/3)`);
-          }
-        }
-
-        if (!downloaded && existsSync(outZip)) {
-          log("下载不完整，尝试从 gh-proxy 镜像...");
-          try {
-            exec("curl.exe", ["-fSL", "--retry", "3", "--max-time", "600", "-C", "-", "-o", outZip, "https://gh-proxy.com/" + asset.browser_download_url]);
-            downloaded = true;
-          } catch {
-            log("镜像下载也失败");
-          }
-        }
-
-        if (downloaded && existsSync(outZip)) {
-          const info = statSync(outZip);
-          log(`完成: llama-server (${Math.round(info.size / 1024 / 1024)} MB)`);
-        }
+        log(`下载 ${asset.name}`);
+        await downloadWithRetry(asset.browser_download_url, outZip, 3, 600_000);
+        log(`完成: llama-server (${Math.round((statSync(outZip).size / 1024 / 1024))} MB)`);
 
         if (isWindows) {
           const expandCmd = `Expand-Archive -Path '${outZip}' -DestinationPath '${llamaDir}' -Force`;
@@ -165,7 +193,9 @@ for (const m of models) {
   }
   mkdirSync(resolve(m.out, ".."), { recursive: true });
   log(`下载模型: ${basename(m.out)}`);
-  exec("curl.exe", ["-fL", "--retry", "5", "--retry-delay", "3", "-C", "-", "-o", m.out, m.url]);
+
+  // 下载模型：使用 Node 原生 fetch，自动重试，绕过 curl 在 Windows 下的稳定性问题
+  await downloadWithRetry(m.url, m.out, 3, 60_000);
 }
 
 log("运行时准备完成");
