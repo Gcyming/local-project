@@ -195,8 +195,8 @@ for (const m of models) {
   mkdirSync(resolve(m.out, ".."), { recursive: true });
   log(`下载模型: ${basename(m.out)}`);
 
-  // 下载模型：使用 Node 原生 fetch，自动重试，绕过 curl 在 Windows 下的稳定性问题
-  await downloadWithRetry(m.url, m.out, 3, 60_000);
+  // 下载模型：使用 Node 原生 fetch，自动重试，600s 超时
+  await downloadWithRetry(m.url, m.out, 3, 600_000);
 }
 
 log("运行时准备完成");
