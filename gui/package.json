@@ -1,6 +1,6 @@
 {
   "name": "slime-gui",
-  "version": "0.0.1",
+  "version": "0.2.1",
   "description": "slime Electron GUI MVP (Phase 5)",
   "author": "slime",
   "repository": {
@@ -32,10 +32,7 @@
     "type": "tsc -p tsconfig.json --noEmit",
     "prepare-runtime": "node ../scripts/prepare-runtime.mjs",
     "dist:win": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish never",
-    "dist:win:publish": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish always",
-    "dist:win:portable": "node ../scripts/build-safety-check.mjs --out-dir=release-win-portable && npm run prepare-runtime && electron-vite build && electron-builder --win portable --publish never",
-    "dist:linux": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish never",
-    "dist:linux:publish": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish always"
+    "dist:win:publish": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish always"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"

@@ -11,10 +11,13 @@
  * 非破坏性：仅新增于 gui/，不修改 core-ts/gateway-ts/sidecar/legacy。
  */
 import "./boot.js"; // 数据根引导：必须最先执行（在 core-ts 模块级常量求值前设置 SLIME_ROOT）
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, spawn } from "electron";
-import { join, resolve, sep, dirname } from "node:path";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
+import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { getModelServer } from "../../../core-ts/src/model_server.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
@@ -23,87 +26,39 @@ import { createEngine } from "../../../core-ts/src/services/engine.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
 import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, SidecarStatus } from "../shared/ipc.js";
 import { initUpdater, registerUpdaterHandlers, setStatusSink } from "./updater.js";
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, copyFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import {
+  listProviders, fetchModels, saveProvider, removeProvider,
+  listLocalModels, saveLocalModel, removeLocalModel, scanLocalModels,
+  type ProviderSummary, type LocalModelSpec,
+} from "./providers.js";
+import { overview as configOverview, readConfigFile, writeConfigFile } from "./config_files.js";
+import { SlimeEngine } from "../../../core-ts/src/services/engine.js";
+import { removeAgentHistory, loadHistory } from "../../../core-ts/src/services/history.js";
+import { SkillRegistry } from "../../../core-ts/src/skills.js";
+import { getRegistry } from "../../../core-ts/src/tools/registry.js";
+import { MemoryStore } from "../../../core-ts/src/memory/store.js";
+import { retrieveFromStore, formatMemoryItems } from "../../../core-ts/src/memory/retrieve.js";
+import { EmotionalState, topKForMood } from "../../../core-ts/src/mind/emotion.js";
+import { BehaviorStore } from "../../../core-ts/src/mind/behavior.js";
+import { buildMindSegments } from "../../../core-ts/src/mind/hooks.js";
+import { loadMindConfig, saveMindConfig, readDepStatus, detectLocalDeps, updateTomlKey } from "./mind_config.js";
+import {
+  startDownload, controlDownload, downloadSnapshot, setDownloadListener, tryRelocateDownloads,
+  type DownloadTarget, type DownloadProgress,
+} from "./downloader.js";
+import {
+  listSessions, getSession, createSession, renameSession, removeSession,
+  ensureDefaultSession, removeSessionsForAgent, touchSessionWithMessage,
+} from "../../../core-ts/src/services/sessions.js";
+import { loadHistoryForSession, clearSessionHistory } from "../../../core-ts/src/services/history.js";
+import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
 
 let mainWindow: BrowserWindow | null = null;
 let chatService: ChatService | null = null;
 let statsService: StatsService | null = null;
 let agentRegistry: AgentRegistry | null = null;
-
-// —— Backend sidecar (slime_server.py) bootstrap ——
-let pythonServer: import("node:child_process").ChildProcess | null = null;
-const SLIME_PORT = process.env.SLIME_PORT || "19000";
-
-function resolveResourcePath(relativePath: string): string {
-  if (app.isPackaged) {
-    return join(process.resourcesPath, relativePath);
-  }
-  return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", relativePath);
-}
-
-async function ensureAuthToken(): Promise<string> {
-  const tokenPath = resolveResourcePath("config/auth_token.json");
-  if (existsSync(tokenPath)) {
-    const content = await import("node:fs/promises").then((fs) => fs.readFile(tokenPath, "utf-8"));
-    const data = JSON.parse(content);
-    return data.token;
-  }
-  return "";
-}
-
-async function startPythonServer(): Promise<void> {
-  if (pythonServer) return;
-
-  // Locate Python venv inside the packaged app
-  let pythonExe: string;
-  if (app.isPackaged) {
-    pythonExe = join(process.resourcesPath, "runtime", "venv", "Scripts", "python.exe");
-  } else {
-    pythonExe = join(import.meta.dirname ?? ".", "venv", "Scripts", "python.exe");
-  }
-
-  const serverScript = resolveResourcePath("slime_server.py");
-
-  if (!existsSync(pythonExe) || !existsSync(serverScript)) {
-    console.warn("[gui:sidecar] Python backend not packaged — running without server");
-    return;
-  }
-
-  const env = { ...process.env, SLIME_PORT };
-  pythonServer = spawn(pythonExe, [serverScript], {
-    env,
-    detached: true,
-    windowsHide: true,
-  });
-
-  pythonServer.stdout?.on("data", (data) => {
-    console.info(`[slime-server] ${data.toString().trim()}`);
-  });
-  pythonServer.stderr?.on("data", (data) => {
-    console.error(`[slime-server:err] ${data.toString().trim()}`);
-  });
-
-  // Wait for server readiness (max 15s)
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    try {
-      const res = await fetch(`http://localhost:${SLIME_PORT}/health`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) {
-        console.info("[gui:sidecar] slime_server.py is ready");
-        return;
-      }
-    } catch {}
-  }
-  console.error("[gui:sidecar] slime_server.py failed to start within 15s");
-}
-
-function terminatePythonServer(): void {
-  if (pythonServer) {
-    pythonServer.kill();
-    pythonServer = null;
-  }
-}
+let engine: SlimeEngine | null = null;
+let sandbox: SandboxManager | null = null;
 let statsPoll: NodeJS.Timeout | null = null;
 /** P0: 当前选中 Agent ID（渲染层通过 agents:select 设置） */
 let selectedAgentId: string | null = null;
@@ -141,10 +96,160 @@ async function ensureServices(): Promise<void> {
   }
   agentRegistry = new AgentRegistry();
   await agentRegistry.load();
-  const engine = createEngine({ registry: agentRegistry });
+  sandbox = new SandboxManager();
+  // 审批确认弹窗（原生同步对话框；"需确认"档位 L2-L4 操作走这里，阻塞等待用户点选）
+  sandbox.setApprovalCallback((req) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) {
+      return {
+        requestId: req.requestId, approved: false, approvedActions: [], deniedActions: [req.actions[0].action],
+        reason: "无窗口", autoApproved: false,
+      };
+    }
+    const a = req.actions[0];
+    const choice = dialog.showMessageBoxSync(win, {
+      type: "warning",
+      title: `权限请求 — ${req.agentName}`,
+      message: `${req.agentName} 请求执行操作`,
+      detail: `${a.action}\n目标：${a.target}\n权限等级：L${a.level}${req.taskDescription ? `\n任务：${req.taskDescription}` : ""}`,
+      buttons: ["批准", "拒绝"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    return {
+      requestId: req.requestId, approved: choice === 0,
+      approvedActions: choice === 0 ? [a.action] : [],
+      deniedActions: choice === 0 ? [] : [a.action],
+      reason: choice === 0 ? "" : "用户拒绝",
+      autoApproved: false,
+    };
+  });
+  // 从 agents.json sandbox_override 恢复会话级沙箱配置（workspace/审批档位）
+  for (const a of agentRegistry.loadedAgents) {
+    if (a.sandbox_override && typeof a.sandbox_override === "object") {
+      try {
+        sandbox.setAgentConfig(a.id, sandboxConfigFromOverride(a.sandbox_override));
+      } catch (e) {
+        console.warn(`[gui:main] 恢复沙箱配置失败 ${a.id}:`, e);
+      }
+    }
+  }
+  engine = createEngine({
+    registry: agentRegistry,
+    sandbox,
+    hooks: {
+      fixedSegments: (agent) => {
+        try {
+          const a = agentRegistry!.loadedAgents.find((x) => x.name === agent.name);
+          const emotion = new EmotionalState((a?.emotion as Record<string, unknown>) ?? undefined);
+          const behavior = BehaviorStore.fromDict(a?.behavior ?? {});
+          return buildMindSegments(emotion, behavior);
+        } catch (e) {
+          console.warn(`[gui:mind] 心智固定段注入失败: ${e}`);
+          return [];
+        }
+      },
+      retrieveSegments: async (agentId: string, query: string) => {
+        try {
+          const agent = await agentRegistry!.findAgent(agentId);
+          const emotion = new EmotionalState((agent?.emotion as Record<string, unknown>) ?? undefined);
+          const res = await retrieveFromStore(memoryStoreFor(agentId), {
+            query,
+            topK: topKForMood(emotion.mood),
+            maxHops: 2,
+          });
+          const seg = formatMemoryItems(res.items);
+          return seg ? [seg] : [];
+        } catch (e) {
+          console.warn(`[gui:mind] 记忆检索失败（静默降级为空）: ${e}`);
+          return [];
+        }
+      },
+    },
+  });
   chatService = new ChatService({ registry: agentRegistry, engine });
   statsService = new StatsService(agentRegistry);
-  console.info("[gui:main] core-ts 服务已加载（ChatService/StatsService）");
+  // 依赖下载进度 → 渲染层（下载条 UI）
+  setDownloadListener((p: DownloadProgress) => {
+    mainWindow?.webContents.send("slime:mind:downloadProgress", p);
+  });
+  console.info("[gui:main] core-ts 服务已加载（ChatService/StatsService + SandboxManager）");
+}
+
+// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────
+
+/** BGE-M3 真实嵌入（llama-server 8999 /v1/embeddings，OpenAI 兼容；失败由 MemoryStore 降级哈希） */
+function bgeEmbed(): { embed: (text: string) => Promise<number[]> } {
+  return {
+    embed: async (text: string): Promise<number[]> => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const resp = await fetch("http://127.0.0.1:8999/v1/embeddings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "bge-m3", input: text }),
+          signal: ctrl.signal,
+        });
+        if (!resp.ok) {
+          throw new Error(`embeddings HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as { data?: Array<{ embedding?: number[] }> };
+        const vec = data.data?.[0]?.embedding;
+        if (!vec || vec.length === 0) {
+          throw new Error("embeddings 空响应");
+        }
+        return vec;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
+/** 每 Agent 记忆存储缓存（LanceDB 初始化失败自动降级 JSON；嵌入失败自动降级哈希） */
+const memoryStores = new Map<string, MemoryStore>();
+
+function memoryStoreFor(agentId: string): MemoryStore {
+  let s = memoryStores.get(agentId);
+  if (!s) {
+    const cfg = loadMindConfig();
+    s = new MemoryStore(agentId, {
+      lancedbEnabled: true,
+      dataDir: cfg.memoryRoot || undefined,
+      embed: cfg.vectorTool === "bge" ? bgeEmbed() : undefined,
+    });
+    memoryStores.set(agentId, s);
+    if (memoryStores.size > 40) {
+      memoryStores.clear();
+    }
+  }
+  return s;
+}
+
+/** 审批档位 → SandboxConfig（会话级持久化格式：sandbox_override 存 approval 档位 + workspace） */
+const APPROVAL_MODES = ["auto", "confirm", "strict"] as const;
+export type ApprovalMode = (typeof APPROVAL_MODES)[number];
+
+function sandboxConfigFromOverride(ov: Record<string, unknown>): SandboxConfig {
+  const cfg = defaultSandboxConfig();
+  const mode = (ov.approval as ApprovalMode) ?? "auto";
+  if (mode === "auto") {
+    cfg.auto_approve_levels = [0, 1, 2, 3, 4];
+    cfg.require_approval_levels = [];
+    cfg.deny_levels = [5];
+  } else if (mode === "confirm") {
+    cfg.auto_approve_levels = [0, 1];
+    cfg.require_approval_levels = [2, 3, 4];
+    cfg.deny_levels = [5];
+  } else {
+    cfg.auto_approve_levels = [0];
+    cfg.require_approval_levels = [1, 2, 3, 4];
+    cfg.deny_levels = [5];
+  }
+  cfg.workspace = typeof ov.workspace === "string" ? ov.workspace : "";
+  return cfg;
 }
 
 function buildAgentState(name: string, role: string, parentId: string | null = null): AgentState {
@@ -217,6 +322,9 @@ function createStreamSession() {
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1100, height: 720, minWidth: 800, minHeight: 560, show: false,
+    // Campanula 式自绘标题栏：隐藏系统标题栏，Windows overlay 渲染窗口按钮
+    titleBarStyle: "hidden",
+    titleBarOverlay: { color: "#1e293b", symbolColor: "#e2e8f0", height: 40 },
     webPreferences: {
       contextIsolation: true, sandbox: true, nodeIntegration: false,
       nodeIntegrationInSubFrames: false,
@@ -237,14 +345,39 @@ function registerIpcHandlers(): void {
     return roots[0]?.id ?? "primary";
   }
 
+  /** 会话上下文加载（注入聊天请求；会话隔离，旧记录归首个会话） */
+  async function loadSessionHistory(sessionId: string | undefined): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+    if (!sessionId) { return []; }
+    try {
+      const meta = await getSession(sessionId);
+      if (!meta) { return []; }
+      const agentSessions = (await listSessions()).filter((m) => m.agentId === meta.agentId);
+      const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
+      const records = await loadHistoryForSession(meta.agentId, meta.id, 50, firstSession);
+      return records.flatMap((r) => [
+        { role: "user" as const, content: r.user },
+        { role: "assistant" as const, content: r.ai },
+      ]);
+    } catch (e) {
+      console.warn("[gui:main] 会话上下文加载失败:", e);
+      return [];
+    }
+  }
+
   handleTrusted<ChatInput>("slime:chat:stream", async (_event, input: ChatInput) => {
     await ensureServices();
     const agentId = resolveAgentId(input.agentId);
+    let history = input.history ? (input.history as any) : [];
+    // 会话上下文注入：无显式 history 时按 session_id 加载
+    if (history.length === 0) {
+      history = await loadSessionHistory(input.sessionId);
+    }
     const req: ChatRequest = {
       message: input.message,
-      history: input.history ? (input.history as any) : [],
+      history,
       retry: false,
       maxTokens: input.maxTokens,
+      sessionId: input.sessionId,
     };
     const session = createStreamSession();
     void (async () => {
@@ -252,6 +385,9 @@ function registerIpcHandlers(): void {
         const chunk: StreamChunk = { seq: ev.seq, type: ev.type as StreamChunk["type"], data: ev.data as StreamChunk["data"] };
         session.pushChunk(chunk);
         mainWindow?.webContents.send("slime:chat:chunk", chunk);
+      }
+      if (input.sessionId) {
+        await touchSessionWithMessage(input.sessionId, input.message).catch(() => undefined);
       }
       mainWindow?.webContents.send("slime:chat:done", {
         reply: session.fullReply, model: session.model,
@@ -276,15 +412,20 @@ function registerIpcHandlers(): void {
   });
 
   /** P0: 重试上条 — 重发最后一条 user 消息 */
-  handleTrusted<{ agentId: string }>("slime:chat:retry", async (_event, payload) => {
+  handleTrusted<{ agentId: string; sessionId?: string }>("slime:chat:retry", async (_event, payload) => {
     await ensureServices();
     const agentId = payload.agentId || resolveAgentId(undefined);
     const { popLastRecordForAgentExport } = await import("../../../core-ts/src/services/history.js");
-    const last = await popLastRecordForAgentExport(agentId);
+    const last = await popLastRecordForAgentExport(agentId, payload.sessionId);
     if (!last || !last.user) {
       return { ok: false, error: "无历史可重试" };
     }
-    const req: ChatRequest = { message: last.user, history: [], retry: true };
+    const req: ChatRequest = {
+      message: last.user,
+      history: await loadSessionHistory(payload.sessionId),
+      retry: true,
+      sessionId: payload.sessionId,
+    };
     const session = createStreamSession();
     return new Promise<{ ok: boolean; error?: string }>((resolve) => {
       void (async () => {
@@ -309,9 +450,375 @@ function registerIpcHandlers(): void {
     });
   });
 
+  /* ── 会话管理（侧栏对话列表：项目 = Agent，项目内独立会话） ── */
+
+  /** 会话列表：sessions.json 元数据 ∪ history 记录（按 session_id 聚合） */
+  handleTrusted<void>("slime:sessions:list", async () => {
+    await ensureServices();
+    const [metas, records] = await Promise.all([
+      listSessions(),
+      loadHistory(null, 100000),
+    ]);
+    const names = new Map(agentRegistry!.loadedAgents.map((a) => [a.id, a.name]));
+    // 历史按 (agent_id, session_id ?? 默认会话) 聚合
+    const byKey = new Map<string, { agentId: string; count: number; firstUser: string; lastTime: string }>();
+    for (const r of records) {
+      const key = `${r.agent_id}::${r.session_id ?? "default"}`;
+      const agg = byKey.get(key) ?? { agentId: r.agent_id, count: 0, firstUser: "", lastTime: "" };
+      agg.count += 1;
+      if (!agg.firstUser) { agg.firstUser = r.user; }
+      if (r.timestamp > agg.lastTime) { agg.lastTime = r.timestamp; }
+      byKey.set(key, agg);
+    }
+    const items: Array<{ sessionId: string; agentId: string; agentName: string; title: string; count: number; lastTime: string }> = [];
+    for (const meta of metas) {
+      // 旧记录（无 session_id）按 "default" 聚合，归入该 Agent 首个会话
+      const agg = byKey.get(`${meta.agentId}::${meta.id}`) ?? byKey.get(`${meta.agentId}::default`);
+      items.push({
+        sessionId: meta.id,
+        agentId: meta.agentId,
+        agentName: names.get(meta.agentId) ?? meta.agentId,
+        title: meta.title,
+        count: agg?.count ?? 0,
+        lastTime: agg?.lastTime ?? meta.updatedAt,
+      });
+    }
+    // 无会话元数据的旧历史（惰性迁移：为该 Agent 建默认会话）
+    for (const [key, agg] of byKey) {
+      const agentId = key.split("::")[0];
+      if (!metas.some((m) => m.agentId === agentId)) {
+        const meta = await ensureDefaultSession(agentId);
+        items.push({
+          sessionId: meta.id,
+          agentId,
+          agentName: names.get(agentId) ?? agentId,
+          title: meta.title === "新对话" ? (agg.firstUser || "新对话").slice(0, 60) : meta.title,
+          count: agg.count,
+          lastTime: agg.lastTime,
+        });
+      }
+    }
+    return items.sort((a, b) => (a.lastTime < b.lastTime ? 1 : -1));
+  });
+
+  /** 新建会话（项目内独立会话，默认标题"新对话"） */
+  handleTrusted<{ agentId: string; title?: string }>("slime:sessions:create", async (_event, payload) => {
+    await ensureServices();
+    const agent = await agentRegistry!.findAgent(payload.agentId);
+    if (!agent) { throw new Error("Agent 不存在"); }
+    const meta = await createSession(payload.agentId, payload.title);
+    const names = new Map(agentRegistry!.loadedAgents.map((a) => [a.id, a.name]));
+    console.info(`[gui:main] 新建会话: agent=${payload.agentId} session=${meta.id}`);
+    return {
+      ok: true,
+      session: {
+        sessionId: meta.id,
+        agentId: meta.agentId,
+        agentName: names.get(meta.agentId) ?? meta.agentId,
+        title: meta.title,
+        count: 0,
+        lastTime: meta.updatedAt,
+      },
+    };
+  });
+
+  /** 重命名会话 */
+  handleTrusted<{ sessionId: string; title: string }>("slime:sessions:rename", async (_event, payload) => {
+    await ensureServices();
+    const meta = await renameSession(payload.sessionId, payload.title);
+    return { ok: !!meta };
+  });
+
+  /** 删除会话（清元数据 + 清该会话历史） */
+  handleTrusted<{ sessionId: string }>("slime:sessions:remove", async (_event, payload) => {
+    await ensureServices();
+    const meta = await getSession(payload.sessionId);
+    const removed = await removeSession(payload.sessionId);
+    if (meta) {
+      await clearSessionHistory(meta.agentId, meta.id);
+    }
+    console.info(`[gui:main] 会话已删除: session=${payload.sessionId}`);
+    return { ok: removed };
+  });
+
+  /** 加载某会话的完整消息（聊天面板显示历史） */
+  handleTrusted<{ sessionId: string }>("slime:sessions:load", async (_event, payload) => {
+    await ensureServices();
+    const meta = await getSession(payload.sessionId);
+    if (!meta) { return []; }
+    const metas = await listSessions();
+    const agentSessions = metas.filter((m) => m.agentId === meta.agentId);
+    // 旧记录（无 session_id）归入创建最早的会话
+    const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
+    const records = await loadHistoryForSession(meta.agentId, meta.id, 500, firstSession);
+    const messages: Array<{ role: "user" | "assistant"; content: string; time: string }> = [];
+    for (const r of records) {
+      if (r.user) {
+        messages.push({ role: "user", content: r.user, time: r.timestamp });
+      }
+      if (r.ai) {
+        messages.push({ role: "assistant", content: r.ai, time: r.timestamp });
+      }
+    }
+    return messages;
+  });
+
+  /** 清空会话历史（保留会话条目与标题） */
+  handleTrusted<{ sessionId: string }>("slime:sessions:clear", async (_event, payload) => {
+    await ensureServices();
+    const meta = await getSession(payload.sessionId);
+    if (!meta) { return { ok: false }; }
+    await clearSessionHistory(meta.agentId, meta.id);
+    console.info(`[gui:main] 会话已清空: session=${payload.sessionId}`);
+    return { ok: true };
+  });
+
+  /** 会话级配置：审批模式 + 工作目录（持久化到 agents.json sandbox_override + 内存沙箱同步） */
+  handleTrusted<{ agentId: string; approval?: ApprovalMode; workspace?: string | null }>(
+    "slime:sessions:config",
+    async (_event, payload) => {
+      await ensureServices();
+      const agent = await agentRegistry!.findAgent(payload.agentId);
+      if (!agent) { throw new Error("Agent 不存在"); }
+      const prev = (agent.sandbox_override && typeof agent.sandbox_override === "object")
+        ? { ...agent.sandbox_override }
+        : { approval: "auto" as ApprovalMode };
+      const next: Record<string, unknown> = { ...prev };
+      if (payload.approval) { next.approval = payload.approval; }
+      if (payload.workspace !== undefined) { next.workspace = payload.workspace ?? ""; }
+      await agentRegistry!.updateAgent(payload.agentId, { sandbox_override: next });
+      sandbox!.setAgentConfig(payload.agentId, sandboxConfigFromOverride(next));
+      return { ok: true, approval: next.approval as ApprovalMode, workspace: next.workspace as string };
+    },
+  );
+
+  /** 会话级配置读取（审批模式 + 工作目录） */
+  handleTrusted<{ agentId: string }>("slime:sessions:configGet", async (_event, payload) => {
+    await ensureServices();
+    const agent = await agentRegistry!.findAgent(payload.agentId);
+    const ov = agent?.sandbox_override;
+    if (!ov || typeof ov !== "object") {
+      return { approval: "auto" as ApprovalMode, workspace: "" };
+    }
+    return {
+      approval: (ov.approval as ApprovalMode) ?? "auto",
+      workspace: typeof ov.workspace === "string" ? ov.workspace : "",
+    };
+  });
+
+  /** 选择工作目录（项目文件夹） */
+  handleTrusted<void>("slime:sessions:pickFolder", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
+    const openOpts: Electron.OpenDialogOptions = {
+      title: "选择项目工作目录（Agent 的读写将限制在此目录内）",
+      properties: ["openDirectory", "createDirectory"],
+    };
+    const open = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, openOpts)
+      : await dialog.showOpenDialog(openOpts);
+    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
+    return { ok: true, path: open.filePaths[0] };
+  });
+
+  /** 删除 Agent 时清理其全部会话元数据 */
+  handleTrusted<{ agentId: string }>("slime:sessions:removeAgent", async (_event, payload) => {
+    await ensureServices();
+    const agentId = payload.agentId;
+    await removeSessionsForAgent(agentId);
+    await removeAgentHistory(agentId);
+    console.info(`[gui:main] 项目已删除（会话+历史清理）: agent=${agentId}`);
+    return { ok: true };
+  });
+
+  /** 加号/命令面板：技能 + MCP 工具列表 */
+  handleTrusted<void>("slime:extras:list", async () => {
+    await ensureServices();
+    const skills: Array<{ name: string; description: string }> = [];
+    try {
+      const skillReg = new SkillRegistry();
+      await skillReg.loadSkills();
+      for (const schema of skillReg.listSkills() as Array<{ function?: { name?: string; description?: string } }>) {
+        skills.push({
+          name: schema.function?.name ?? "?",
+          description: schema.function?.description ?? "",
+        });
+      }
+    } catch (e) {
+      console.warn("[gui:main] 技能列表加载失败:", e);
+    }
+    const mcpTools: Array<{ name: string; description: string }> = [];
+    try {
+      for (const schema of getRegistry().listTools() as Array<{ function?: { name?: string; description?: string } }>) {
+        const name = schema.function?.name ?? "";
+        if (name.startsWith("mcp_")) {
+          mcpTools.push({ name, description: schema.function?.description ?? "" });
+        }
+      }
+    } catch (e) {
+      console.warn("[gui:main] MCP 工具列表加载失败:", e);
+    }
+    return { skills, mcpTools };
+  });
+
+  /** 输入联想：检索历史会话中相似的用户消息 */
+  handleTrusted<{ text: string }>("slime:chat:suggest", async (_event, payload) => {
+    await ensureServices();
+    const text = (payload.text ?? "").trim();
+    if (!text) {
+      return [];
+    }
+    const records = await loadHistory(null, 1000);
+    const names = new Map(agentRegistry!.loadedAgents.map((a) => [a.id, a.name]));
+    const hits = records
+      .filter((r) => r.user && r.user.includes(text) && r.user !== text)
+      .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+      .slice(0, 6)
+      .map((r) => ({
+        content: r.user.slice(0, 140),
+        agentName: names.get(r.agent_id) ?? r.agent_id,
+        time: r.timestamp,
+      }));
+    return hits;
+  });
+
   handleTrusted<void>("slime:stats:snapshot", async () => {
     await ensureServices();
     return (await statsService!.snapshot()) as unknown as StatsSnapshot;
+  });
+
+  // ── 心智中枢 IPC ────────────────────────────────────────
+
+  /** 配置读取：向量工具 / 记忆位置 / 依赖状态（模型文件不在 git 仓库，换设备需手动就位） */
+  handleTrusted<void>("slime:mind:configGet", async () => {
+    // 收尾归位：downloads/ 下已完成的文件自动放到配置路径（含 llama_bin 自动改写）
+    try {
+      tryRelocateDownloads();
+    } catch (e) {
+      console.warn(`[gui:mind] 归位收尾异常: ${e}`);
+    }
+    const cfg = loadMindConfig();
+    return {
+      vectorTool: cfg.vectorTool,
+      memoryRoot: cfg.memoryRoot,
+      memoryPaths: {
+        knowledge: resolve(PROJECT_ROOT, "Knowledge", "Agent Memory"),
+        lance: resolve(PROJECT_ROOT, "data", "<agentId>", "lancedb"),
+      },
+      deps: readDepStatus(),
+    };
+  });
+
+  /** 配置保存：向量工具（bge=真实 BGE-M3 嵌入 / basic=哈希占位）+ 记忆根路径（重启生效） */
+  handleTrusted<{ vectorTool?: string; memoryRoot?: string }>("slime:mind:configSet", async (_event, payload) => {
+    const cfg = saveMindConfig({
+      vectorTool: payload.vectorTool === "basic" || payload.vectorTool === "bge" ? payload.vectorTool : undefined,
+      memoryRoot: payload.memoryRoot,
+    });
+    memoryStores.clear();
+    return { ok: true, vectorTool: cfg.vectorTool, memoryRoot: cfg.memoryRoot };
+  });
+
+  /** 依赖定位：auto=项目文件夹内自动检索；pick=手动选择文件/目录。命中即写入 slime.toml */
+  handleTrusted<{ mode: "auto" | "pick"; key: "llama_bin" | "model_path" | "models_dir" }>(
+    "slime:mind:locateDep",
+    async (_event, payload) => {
+      let picked: string | null = null;
+      if (payload.mode === "pick") {
+        const isDir = payload.key === "models_dir";
+        const opts: Electron.OpenDialogOptions = isDir
+          ? { title: "选择本地聊天模型目录", properties: ["openDirectory"] }
+          : {
+              title: payload.key === "llama_bin" ? "选择 llama-server.exe" : "选择嵌入模型 GGUF 文件",
+              properties: ["openFile"],
+              filters: payload.key === "llama_bin"
+                ? [{ name: "llama-server", extensions: ["exe"] }]
+                : [{ name: "GGUF 模型", extensions: ["gguf"] }],
+            };
+        const r = await dialog.showOpenDialog(mainWindow!, opts);
+        picked = r.canceled ? null : (r.filePaths[0] ?? null);
+      } else {
+        const found = detectLocalDeps();
+        picked = payload.key === "llama_bin" ? found.llamaBin : payload.key === "model_path" ? found.bgeModel : found.chatDir;
+      }
+      if (!picked) {
+        return { found: false, deps: readDepStatus() };
+      }
+      const written = updateTomlKey(payload.key, picked);
+      memoryStores.clear();
+      return { found: true, written, deps: readDepStatus() };
+    },
+  );
+
+  /** 情绪读取：Agent 当前 PAD/mood + 事件时间线 */
+  handleTrusted<{ agentId: string }>("slime:mind:emotionGet", async (_event, payload) => {
+    await ensureServices();
+    const agent = await agentRegistry!.findAgent(payload.agentId);
+    const emotion = new EmotionalState((agent?.emotion as Record<string, unknown>) ?? undefined);
+    return { ...emotion.toDict(), agentName: agent?.name ?? payload.agentId };
+  });
+
+  /** 情绪手动调节：写 PAD 基线并重算 mood（不影响自动演化与事件时间线） */
+  handleTrusted<{ agentId: string; valence: number; arousal: number; dominance: number }>(
+    "slime:mind:emotionSet",
+    async (_event, payload) => {
+      await ensureServices();
+      const agent = await agentRegistry!.findAgent(payload.agentId);
+      if (!agent) {
+        return { ok: false, error: "Agent 不存在" };
+      }
+      const emotion = new EmotionalState((agent.emotion as Record<string, unknown>) ?? undefined);
+      emotion.setBaseline(payload.valence, payload.arousal, payload.dominance);
+      agent.emotion = emotion.toDict() as unknown as typeof agent.emotion;
+      await agentRegistry!.save();
+      return { ok: true, emotion: emotion.toDict() };
+    },
+  );
+
+  /** book-to-skill：外部文档 → config/skills/<name>/SKILL.md（技能即装即用，不影响既有学习管线） */
+  handleTrusted<{ name: string; content: string }>("slime:mind:bookToSkill", async (_event, payload) => {
+    const name = (payload.name ?? "").trim().replace(/[^\w\u4e00-\u9fa5-]/g, "").slice(0, 60);
+    if (!name) {
+      return { ok: false, error: "技能名称无效（仅支持中文/字母/数字/短横线）" };
+    }
+    const content = (payload.content ?? "").trim();
+    if (!content) {
+      return { ok: false, error: "文档内容为空" };
+    }
+    const dir = resolve(PROJECT_ROOT, "config", "skills", name);
+    mkdirSync(dir, { recursive: true });
+    const desc = content.replace(/\s+/g, " ").slice(0, 120);
+    const md =
+      `---\nname: ${name}\ndescription: ${desc}\n---\n\n` +
+      `# ${name}\n\n> 由 book-to-skill 从外部文档转换生成。\n\n${content.slice(0, 12000)}\n`;
+    writeFileSync(resolve(dir, "SKILL.md"), md, "utf8");
+    return { ok: true, path: resolve(dir, "SKILL.md") };
+  });
+
+  /** 依赖下载链路（国内镜像：hf-mirror / gh-proxy 系列；应用内下载，断点续传） */
+  handleTrusted<{ target: string }>("slime:mind:download", async (_event, payload) => {
+    const target = payload.target as DownloadTarget;
+    if (target !== "llama" && target !== "bge") {
+      return { ok: false, error: "未知下载目标" };
+    }
+    return startDownload(target);
+  });
+
+  handleTrusted<{ target: string; action: "pause" | "cancel" | "resume" }>(
+    "slime:mind:downloadControl",
+    async (_event, payload) => {
+      const target = payload.target as DownloadTarget;
+      if (target !== "llama" && target !== "bge") {
+        return { ok: false };
+      }
+      return controlDownload(target, payload.action);
+    },
+  );
+
+  handleTrusted<{ target: string }>("slime:mind:downloadSnapshot", async (_event, payload) => {
+    const target = payload.target as DownloadTarget;
+    if (target !== "llama" && target !== "bge") {
+      return { ok: false };
+    }
+    return downloadSnapshot(target);
   });
 
   handleTrusted<boolean>("slime:stats:poll", async (_event, start: boolean) => {
@@ -360,6 +867,48 @@ function registerIpcHandlers(): void {
     selectedAgentId = payload.agentId;
     console.info(`[gui:main] 选中 Agent: ${payload.agentId}`);
     return { ok: true };
+  });
+
+  /** 删除 Agent（递归子树 + 悬空 children 清理 + 历史清理） */
+  handleTrusted<{ agentId: string }>("slime:agents:remove", async (_event, payload) => {
+    await ensureServices();
+    const deleted = await agentRegistry!.removeAgent(payload.agentId);
+    if (deleted.length === 0) {
+      return { ok: false, error: "Agent 不存在" };
+    }
+    for (const aid of deleted) {
+      try {
+        await removeAgentHistory(aid);
+      } catch (e) {
+        console.warn(`[gui:main] 历史清理失败 ${aid}:`, e);
+      }
+      try {
+        await removeSessionsForAgent(aid);
+      } catch (e) {
+        console.warn(`[gui:main] 会话清理失败 ${aid}:`, e);
+      }
+    }
+    if (selectedAgentId && deleted.includes(selectedAgentId)) {
+      selectedAgentId = null;
+    }
+    console.info(`[gui:main] 已删除 Agent 子树: ${deleted.join(", ")}`);
+    return { ok: true, deleted };
+  });
+
+  /** 属性面板：返回 Agent 完整状态（model_choice/role/reasoning_effort 等） */
+  handleTrusted<{ agentId: string }>("slime:agents:detail", async (_event, payload) => {
+    await ensureServices();
+    const a = await agentRegistry!.findAgent(payload.agentId);
+    if (!a) { return null; }
+    return {
+      id: a.id, name: a.name, role: a.role,
+      model_choice: a.model_choice ?? "inherit",
+      mode: a.mode ?? "build",
+      reasoning_effort: a.reasoning_effort ?? "none",
+      max_context: a.max_context ?? undefined,
+      max_output: a.max_output ?? undefined,
+      lifecycle: a.lifecycle ?? "unknown",
+    };
   });
 
   /** P0: 更新 Agent 配置 */
@@ -445,7 +994,77 @@ function registerIpcHandlers(): void {
     await mgr.shutdown();
   });
 
+  /** Provider 管理（加密存储；渲染层只接触脱敏摘要，明文 key 不出主进程） */
+  handleTrusted<void>("slime:providers:list", async (): Promise<ProviderSummary[]> => listProviders());
+
+  handleTrusted<{ baseUrl: string; apiKey: string }>("slime:providers:fetchModels", async (_event, p) =>
+    fetchModels(p.baseUrl, p.apiKey),
+  );
+
+  handleTrusted<{ key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }>(
+    "slime:providers:save",
+    async (_event, p) => {
+      const res = saveProvider(p);
+      if (res.ok) {
+        engine?.refreshProviders();
+        console.info(`[gui:main] Provider 已保存并热更新: ${p.key}`);
+      }
+      return res;
+    },
+  );
+
+  handleTrusted<{ key: string }>("slime:providers:remove", async (_event, p) => {
+    const res = removeProvider(p.key);
+    if (res.ok) {
+      engine?.refreshProviders();
+      console.info(`[gui:main] Provider 已删除并热更新: ${p.key}`);
+    }
+    return res;
+  });
+
+  /** 本地模型：列表 / 保存 / 删除 / 目录扫描 / 文件选择 */
+  handleTrusted<void>("slime:providers:localList", async (): Promise<LocalModelSpec[]> => listLocalModels());
+
+  handleTrusted<{ id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean }>(
+    "slime:providers:localSave",
+    async (_event, p) => {
+      const res = saveLocalModel(p);
+      if (res.ok) { console.info(`[gui:main] 本地模型已保存: ${p.id}`); }
+      return res;
+    },
+  );
+
+  handleTrusted<{ id: string }>("slime:providers:localRemove", async (_event, p) => removeLocalModel(p.id));
+
+  handleTrusted<{ dir: string }>("slime:providers:localScan", async (_event, p) => scanLocalModels(p.dir));
+
+  /** 弹出文件选择框挑选本地模型（.gguf） */
+  handleTrusted<void>("slime:providers:localPick", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
+    const openOpts: Electron.OpenDialogOptions = {
+      title: "选择本地模型文件（GGUF）",
+      properties: ["openFile"],
+      filters: [{ name: "GGUF 模型", extensions: ["gguf", "ggml"] }, { name: "全部文件", extensions: ["*"] }],
+    };
+    const open = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, openOpts)
+      : await dialog.showOpenDialog(openOpts);
+    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
+    return { ok: true, path: open.filePaths[0] };
+  });
+
+  /** 参数文件调试（折叠栏）：清单 / 读取 / 写入（白名单 + 备份原子写） */
+  handleTrusted<void>("slime:config:overview", async () => configOverview());
+
+  handleTrusted<{ name: string }>("slime:config:read", async (_event, p) => readConfigFile(p.name));
+
+  handleTrusted<{ name: string; content: string }>("slime:config:write", async (_event, p) =>
+    writeConfigFile(p.name, p.content),
+  );
+
   handleTrusted<void>("slime:window:minimize", () => mainWindow?.minimize());
+  handleTrusted<void>("slime:window:maximize", () => {
+    if (mainWindow?.isMaximized()) { mainWindow.unmaximize(); } else { mainWindow?.maximize(); }
+  });
   handleTrusted<void>("slime:window:quit", () => app.quit());
 }
 
@@ -483,8 +1102,7 @@ function main(): void {
   app.whenReady()
     .then(async () => {
       // 启动 Python 后端 sidecar（自包含安装包模式）
-      await startPythonServer();
-
+      await startPythonBackend();
       registerProtocolHandler();
       createWindow();
       registerIpcHandlers();
@@ -497,14 +1115,14 @@ function main(): void {
         console.info("[gui:main] 渲染层已加载 (slime://)");
       });
     })
-    .catch((e) => { console.error("[gui:main] 启动失败:", e); process.exit(1); });
+       .catch((e) => { console.error("[gui:main] 启动失败:", e); process.exit(1); });
 
   app.on("window-all-closed", () => {
-    terminatePythonServer();
+    terminatePythonBackend();
     if (process.platform !== "darwin") { app.quit(); }
   });
   app.on("before-quit", () => {
-    terminatePythonServer();
+    terminatePythonBackend();
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) { createWindow(); }
@@ -512,3 +1130,61 @@ function main(): void {
 }
 
 void main();
+
+// —— Python backend sidecar ——
+let pythonBackend: ChildProcess | null = null;
+const SLIME_PORT = process.env.SLIME_PORT || "19000";
+
+function resolveResourcePath(relativePath: string): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, relativePath);
+  }
+  return join(PROJECT_ROOT, relativePath);
+}
+
+async function startPythonBackend(): Promise<void> {
+  // 定位 Python venv
+  const venvPython = app.isPackaged
+    ? join(process.resourcesPath, "runtime", "venv", "Scripts", "python.exe")
+    : join(PROJECT_ROOT, "runtime", "venv", "Scripts", "python.exe");
+
+  const serverScript = resolveResourcePath("slime_server.py");
+  if (!existsSync(venvPython) || !existsSync(serverScript)) {
+    console.warn("[gui:backend] Python backend not found, running without server");
+    return;
+  }
+
+  const env = { ...process.env, SLIME_PORT };
+  pythonBackend = spawn(venvPython, [serverScript], {
+    env,
+    detached: true,
+    windowsHide: true,
+  });
+
+  pythonBackend.stdout?.on("data", (data) => {
+    console.info(`[slime-server] ${data.toString().trim()}`);
+  });
+  pythonBackend.stderr?.on("data", (data) => {
+    console.error(`[slime-server:err] ${data.toString().trim()}`);
+  });
+
+  // 等待服务就绪（最多15秒）
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await fetch(`http://localhost:${SLIME_PORT}/health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) {
+        console.info("[gui:backend] slime_server.py 已就绪");
+        return;
+      }
+    } catch {}
+  }
+  console.error("[gui:backend] slime_server.py 启动超时（15秒）");
+}
+
+function terminatePythonBackend(): void {
+  if (pythonBackend) {
+    pythonBackend.kill();
+    pythonBackend = null;
+  }
+}

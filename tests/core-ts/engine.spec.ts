@@ -112,6 +112,27 @@ describe("SlimeEngine 非流式 chat", () => {
     expect(estimateTokens("a".repeat(100))).toBe(60);
   });
 
+  it("refreshProviders：重载加密配置实现热更新（隔离 passFile/root）", async () => {
+    const { tmpdir } = await import("node:os");
+    const { mkdtemp } = await import("node:fs/promises");
+    const tmp = await mkdtemp(tmpdir() + "/slime-engine-");
+    const passFile = `${tmp}/pass`;
+    const encPath = "config/providers.enc.json";
+    const { encrypt } = await import("../../core-ts/src/encryption.js");
+    encrypt(
+      { fresh: { api_base: "http://fresh.local/v1", api_key: "k", model: "fresh-m" } },
+      encPath,
+      { projectRoot: tmp, passFile },
+    );
+    const engine = new SlimeEngine({ registry: reg, providers: { old: { api_base: "http://old.local/v1", api_key: "k", model: "m" } }, logger: quietLogger() });
+    expect(engine.providersCount).toBe(1);
+    engine.refreshProviders({ projectRoot: tmp, passFile });
+    expect(engine.providersCount).toBe(1);
+    expect(Object.keys(engine.providers)[0]).toBe("fresh");
+    const router = await engine.routerFor(makeAgent({ id: "ref", model_choice: "api:fresh" }));
+    expect(router).not.toBeNull();
+  });
+
   it("api:key 解析：请求带正确 baseUrl/模型 + A-090 过滤文/原文分离", async () => {
     let seenUrl = "";
     const engine = makeEngine((url, _init) => {

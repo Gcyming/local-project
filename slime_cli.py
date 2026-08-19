@@ -3081,7 +3081,6 @@ def wizard():
 
     model_choice = "inherit"
     provider_count = 0
-    pending_providers = []  # 暂存，Agent 创建成功后再批量写入（防中途退出丢进度）
 
     if choice == "1":
         console.print("[dim]可以连续输入多个 Provider（输入空标识名结束）[/]")
@@ -3136,14 +3135,17 @@ def wizard():
                 if selected_model is None:
                     console.print("[yellow]已取消[/]"); return
 
-            # 暂存到列表，待 Agent 创建成功后批量写入
-            pending_providers.append({
-                "key": provider_key,
-                "api_base": api_base,
-                "api_key": api_key_val,
-                "model": selected_model,
-            })
-            console.print(f"[green]    ✓ Provider '{provider_key}' 已暂存（模型: {selected_model}）[/]")
+            # 保存 Provider（加密存储）
+            try:
+                _api("POST", "/providers", json={
+                    "key": provider_key,
+                    "api_base": api_base,
+                    "api_key": api_key_val,
+                    "model": selected_model,
+                })
+                console.print(f"[green]    √ Provider '{provider_key}' 已保存（模型: {selected_model}）[/]")
+            except (Exception, SystemExit) as e:
+                console.print(f"[red]    保存 Provider 失败: {e}[/]"); return
 
             if not first_provider:
                 first_provider = provider_key
@@ -3165,22 +3167,7 @@ def wizard():
         })
     except (Exception, SystemExit) as e:
         console.print(f"[red]创建 Agent 失败: {e}[/]")
-        # 回滚：删除中途已暂存的 Provider（未关联到任何 Agent，属于孤儿）
-        for pp in pending_providers:
-            try:
-                _api("DELETE", f"/providers/{pp['key']}")
-            except Exception:
-                pass
-        console.print("[yellow]已回滚所有未完成的 Provider 配置[/]")
         return
-
-    # Agent 创建成功，批量写入 Provider
-    for pp in pending_providers:
-        try:
-            _api("POST", "/providers", json=pp)
-            console.print(f"[green]  ✓ Provider '{pp['key']}' 已保存（模型: {pp['model']}）[/]")
-        except (Exception, SystemExit) as e:
-            console.print(f"[red]  ✗ Provider '{pp['key']}' 保存失败: {e}[/]")
 
     console.print()
     console.print(f"[green bold]√ 配置完成！[/]")

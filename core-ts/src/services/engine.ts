@@ -90,6 +90,11 @@ export class SlimeEngine implements ChatEngine {
     return Object.keys(this.providers).length;
   }
 
+  /** 重载 providers（GUI 保存 Provider 后热更新，无需重启进程；测试可注入 projectRoot/passFile） */
+  public refreshProviders(opts: { projectRoot?: string; passFile?: string } = {}): void {
+    this.providers = (decrypt("config/providers.enc.json", { projectRoot: opts.projectRoot, passFile: opts.passFile }) ?? {}) as Record<string, ProviderConfig>;
+  }
+
   /** 工具注册表（SwarmExecutor 注入用） */
   get toolRegistry(): ToolRegistry {
     return this.tools;
