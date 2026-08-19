@@ -280,10 +280,29 @@ export function pidForPort(port: number): number | null {
   return null;
 }
 
-/** 查询父 PID。失败/非 Windows 返回 null（保守：不判定孤儿）。
- *  Windows 优先 wmic；wmic 缺失（Win11 24H2+）回退 PowerShell Get-CimInstance（与 Python 对照）。 */
+/** 查询父 PID。失败返回 null（保守：不判定孤儿）。
+ *  Windows 优先 wmic；wmic 缺失（Win11 24H2+）回退 PowerShell Get-CimInstance；
+ *  Unix 读 /proc/{pid}/status 的 PPid 字段（Linux 兼容；无 /proc 时回退 ps）。
+ *  （与 Python _parent_pid 对照） */
 export function parentPid(pid: number): number | null {
-  if (!IS_WINDOWS) return null;
+  if (!IS_WINDOWS) {
+    try {
+      const out = readFileSync(`/proc/${pid}/status`, "utf8");
+      const m = out.match(/^PPid:\s+(\d+)/m);
+      if (m) return parseInt(m[1], 10);
+    } catch {
+      /* /proc 不可用（macOS/BSD）→ ps 回退 */
+    }
+    try {
+      const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+        encoding: "utf8", timeout: 5000,
+      });
+      const nums = (out ?? "").split(/\s+/).map(Number).filter((n) => Number.isInteger(n));
+      return nums.length ? nums[0] : null;
+    } catch {
+      return null;
+    }
+  }
   try {
     let out = "";
     try {

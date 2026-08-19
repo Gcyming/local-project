@@ -640,25 +640,44 @@ def _pid_for_port(port: int) -> int | None:
 
 
 def _parent_pid(pid: int) -> int | None:
-    """查询父 PID。失败/非 Windows 返回 None（保守：不判定孤儿）。
+    """查询父 PID。失败返回 None（保守：不判定孤儿）。
 
-    Windows 优先 wmic；wmic 缺失（Win11 24H2+）回退 PowerShell Get-CimInstance。"""
-    if not IS_WINDOWS:
-        return None
+    Windows 优先 wmic；wmic 缺失（Win11 24H2+）回退 PowerShell Get-CimInstance；
+    Unix 读 /proc/{pid}/status 的 PPid 字段（Linux 兼容，与 _verify_llama_server_pid
+    的 /proc 读取一致；macOS 无 /proc，走 ps 回退）。"""
+    if IS_WINDOWS:
+        try:
+            if shutil.which("wmic"):
+                out = subprocess.run(
+                    ["wmic", "process", "where", f"ProcessId={pid}", "get", "ParentProcessId"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                ).stdout
+            else:
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                     f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId"],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                ).stdout
+            nums = [int(x) for x in out.split() if x.isdigit()]
+            return nums[0] if nums else None
+        except Exception:
+            return None
+    # Unix：优先 /proc/{pid}/status（Linux）；无 /proc 时回退 ps（macOS/BSD）
     try:
-        if shutil.which("wmic"):
-            out = subprocess.run(
-                ["wmic", "process", "where", f"ProcessId={pid}", "get", "ParentProcessId"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            ).stdout
-        else:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId"],
-                capture_output=True, text=True, timeout=8,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            ).stdout
+        status = Path(f"/proc/{pid}/status")
+        if status.exists():
+            for line in status.read_text(errors="replace").splitlines():
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
         nums = [int(x) for x in out.split() if x.isdigit()]
         return nums[0] if nums else None
     except Exception:

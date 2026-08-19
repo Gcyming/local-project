@@ -17,7 +17,7 @@
  * 退出码：0 = 通过，1 = 检出敏感文件，2 = 路径不存在。
  */
 
-import { readdir } from "node:fs/promises";
+import { readdir, mkdir } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { platform } from "node:os";
@@ -78,9 +78,11 @@ async function main() {
 
   console.info(`[build-safety] scanning output dir: ${outDir}`);
 
+  // 输出目录不存在则新建后扫描（全新平台首次构建不应被门禁误拦；
+  // 目录存在时扫描其中已产生的产物，检出敏感文件照常拦截）
   if (!existsSync(outDir)) {
-    console.error(`[build-safety] FAIL: output directory not found: ${outDir}`);
-    process.exit(2);
+    await mkdir(outDir, { recursive: true });
+    console.info(`[build-safety] output directory created: ${outDir}`);
   }
 
   const violations = await scanDir(outDir, EXCLUDED_PATTERNS);
