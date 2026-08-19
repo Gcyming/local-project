@@ -23,9 +23,15 @@ export interface UpdateStatus {
 }
 
 let currentStatus: UpdateStatus = { status: "up-to-date" };
+let statusSink: ((s: UpdateStatus) => void) | null = null;
 
 /** 事件名：主进程 → 渲染进程推送更新状态变化 */
 export const UPDATE_CHANNEL = "slime:update:status";
+
+/** 注册状态推送目标（主进程传入 webContents.send，避免循环依赖） */
+export function setStatusSink(fn: (s: UpdateStatus) => void): void {
+  statusSink = fn;
+}
 
 /** 启动更新检查（延迟 5s 避免阻塞首屏） */
 export function initUpdater(): void {
@@ -76,8 +82,9 @@ export function initUpdater(): void {
 
 /** 广播当前状态到所有渲染进程 */
 function broadcastStatus(): void {
-  // 通过 IPC 通知渲染进程
-  // 注意：实际使用时需要通过 mainWindow 发送
+  if (statusSink) {
+    statusSink(currentStatus);
+  }
   console.info(`[updater] status: ${currentStatus.status}`, currentStatus);
 }
 
