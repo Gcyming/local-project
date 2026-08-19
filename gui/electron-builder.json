@@ -12,7 +12,8 @@
   "compression": "maximum",
   "win": {
     "target": [
-      { "target": "nsis", "arch": ["x64"] }
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
     ],
     "icon": "build/icon.png"
   },
