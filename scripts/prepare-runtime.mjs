@@ -56,10 +56,7 @@ const pipExe = isWindows
   ? join(venvDir, "Scripts", "pip.exe")
   : join(venvDir, "bin", "pip");
 
-// --copies venv 不允许通过 pip.exe 自升级，改用 -m pip 内联调用
 log("pip install requirements.txt");
-exec(pipExe, ["install", "-q", "--disable-pip-version-check"]);
-exec(pipExe, ["-m", "pip", "install", "-q", "--upgrade", "--no-cache-dir"]);
 exec(pipExe, [
   "install",
   "-r", join(ROOT, "requirements.txt"),
