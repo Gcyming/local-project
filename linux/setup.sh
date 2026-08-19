@@ -170,9 +170,19 @@ PY
         echo "[setup] ERROR: 缺少 git/cmake/make，源码编译不可用（--skip-llama 可跳过）" >&2
       else
         if [[ ! -d llama.cpp/.git ]]; then
-          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp 2>/dev/null \
-            || git clone --depth 1 https://gitee.com/mirrors/llama.cpp.git llama.cpp 2>/dev/null \
-            || echo "[setup] 源码克隆失败（网络受限时请手动放置 llama-server 到 $LLAMA_BIN）" >&2
+          rm -rf .llama-src
+          echo "[setup] git clone llama.cpp（github 优先，gitee 兜底）..."
+          if git clone --depth 1 https://github.com/ggml-org/llama.cpp.git .llama-src 2>/dev/null \
+             || git clone --depth 1 https://gitee.com/mirrors/llama.cpp.git .llama-src 2>/dev/null; then
+            # llama.cpp/ 里已有 setup 预建的 build/bin 空目录，git clone 无法写入非空目录，
+            # 整体替换后再补回 build/bin
+            mv .llama-src llama.cpp.new
+            rm -rf llama.cpp
+            mv llama.cpp.new llama.cpp
+            mkdir -p llama.cpp/build/bin
+          else
+            echo "[setup] 源码克隆失败（网络受限时请手动放置 llama-server 到 $LLAMA_BIN）" >&2
+          fi
         fi
         if [[ -d llama.cpp/.git ]]; then
           cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
@@ -194,13 +204,11 @@ bash "$SCRIPT_DIR/scripts/gen-config.sh" --root "$ROOT" --force
 # ── 7. 模型放置指引 ────────────────────────────────────────────────
 echo ""
 echo "================================================================"
-echo "  下一步：放置模型文件"
-echo "  嵌入模型（必须，检索/记忆依赖）："
-echo "    $ROOT/models/BGE-M3/bge-m3-q8_0.gguf"
-echo "    建议来源：HuggingFace 的 bge-m3 量化仓库（Q8_0 版本，如 plamoai/bge-m3-gguf）"
-echo "  Chat 模型（对话推理，任选一个 GGUF）："
-echo "    $ROOT/models/chat/qwen3-1.7b-q8_0.gguf 等"
-echo "    建议来源：Qwen/Qwen3-1.7B-GGUF 等官方量化仓库"
+echo "  下一步：下载模型（一键脚本，hf-mirror 国内镜像 + 断点续传）"
+echo "    bash linux/fetch-models.sh"
+echo "  将下载："
+echo "    $ROOT/models/BGE-M3/bge-m3-q8_0.gguf    （嵌入模型 635MB，必需）"
+echo "    $ROOT/models/chat/qwen3-1.7b-q8_0.gguf  （对话模型 1.83GB）"
 echo ""
 echo "  启动方式（在仓库根执行）："
 echo "    后端:  python slime_server.py          # 或 bash linux/run-server.sh"
