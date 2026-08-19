@@ -21,13 +21,12 @@
 ### 方式 A：仓库直跑（开发用）
 
 ```bash
-# 1. 一键引导（自动装依赖：apt 系统包 / Node 22 / pnpm / venv / llama.cpp，全自动）
-bash linux/setup.sh
+# 1. 一键引导 + 模型全装（新用户首选）
+bash linux/setup.sh --with-models
 
-# 2. 下载模型（国内走 hf-mirror 镜像，支持断点续传；共约 2.5 GB）
-bash linux/fetch-models.sh
-#    models/BGE-M3/bge-m3-q8_0.gguf   （嵌入，检索/记忆必需）
-#    models/chat/qwen3-1.7b-q8_0.gguf （对话推理）
+# 2. 或者分步跑
+bash linux/setup.sh              # 环境引导
+bash linux/fetch-models.sh       # 单独下模型（可选）
 
 # 3. 启动
 bash linux/run-server.sh      # 后端（首启生成 config/auth_token.json）
@@ -38,19 +37,19 @@ bash linux/run-cli.sh wizard  # 首次向导
 bash linux/build-gui.sh       # 产物：gui/release-linux/Slime-*.AppImage / .deb
 ```
 
-### 方式 B：便携发行包（给别人用，零依赖）
+### 方式 B：便携发行包（给别人用，零依赖，开箱即用）
 
 ```bash
 # 构建机（linux x64 + python3 + curl + git）执行一次：
-bash linux/build-portable.sh
-# 产出 dist/slime-linux-x64.tar.gz —— 内置 Node 运行时 + Python 运行时 +
-# venv + 全部 node_modules（Linux 原生 lancedb/electron）+ llama-server + 源码
+bash linux/build-portable.sh              # 含模型（约 4GB tar.gz，零步骤）
+bash linux/build-portable.sh --skip-models  # 不含模型（约 1.5GB，接收方再跑 fetch-models.sh）
+
+# 产出 dist/slime-linux-x64.tar.gz —— 内置 Node+Python+依赖+llama-server+模型+源码
 
 # 接收方（任何 linux x64，不用装任何东西）：
-tar -xzf slime-linux-x64.tar.gz && cd slime-linux-x64
+tar -xzf dist/slime-linux-x64.tar.gz && cd slime-linux-x64
 ./run-cli.sh wizard     # 首次向导
 ./run-cli.sh            # CLI（run-server.sh 后端 / run-gui.sh GUI）
-# 唯一自备项：模型 GGUF（体积大不入包，models/ 内有说明）
 ```
 
 ## 目录结构
@@ -59,7 +58,7 @@ tar -xzf slime-linux-x64.tar.gz && cd slime-linux-x64
 linux/
 ├── README.md              本说明
 ├── setup.sh               一键引导（自动装系统依赖 / Node / pnpm / venv / llama.cpp / 配置生成）
-├── build-portable.sh      便携发行包构建（自包含 Node+Python+依赖，解压即用）
+├── build-portable.sh      便携发行包构建（自包含 Node+Python+依赖+模型，解压即用）
 ├── fetch-models.sh        一键下载模型（hf-mirror 国内镜像，断点续传）
 ├── build-gui.sh           Linux 版 Electron GUI 构建
 ├── run-server.sh          后端启动

@@ -13,6 +13,7 @@
 # 用法：
 #   bash linux/setup.sh                 # 完整引导（推荐）
 #   bash linux/setup.sh --skip-llama    # 跳过 llama.cpp 构建
+#   bash linux/setup.sh --with-models   # 环境 + 模型一次性装完（推荐新用户）
 #   bash linux/setup.sh --no-venv       # 不建 venv，直接用系统 python
 #   bash linux/setup.sh --no-system     # 不自动安装系统依赖（仅检测提示）
 set -euo pipefail
@@ -23,11 +24,13 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 SKIP_LLAMA=0
 USE_VENV=1
 AUTO_SYSTEM=1
+WITH_MODELS=0
 for arg in "$@"; do
   case "$arg" in
     --skip-llama) SKIP_LLAMA=1 ;;
     --no-venv) USE_VENV=0 ;;
     --no-system) AUTO_SYSTEM=0 ;;
+    --with-models) WITH_MODELS=1 ;;
   esac
 done
 
@@ -200,6 +203,11 @@ fi
 
 # ── 6. 生成 slime.toml ─────────────────────────────────────────────
 bash "$SCRIPT_DIR/scripts/gen-config.sh" --root "$ROOT" --force
+
+# ── 6.5 模型下载（--with-models）──────────────────────────────────
+if [[ "$WITH_MODELS" -eq 1 ]]; then
+  bash "$SCRIPT_DIR/fetch-models.sh"
+fi
 
 # ── 7. 模型放置指引 ────────────────────────────────────────────────
 echo ""
