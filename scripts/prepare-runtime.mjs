@@ -131,10 +131,8 @@ if (!existsSync(llamaBin)) {
         }
 
         if (isWindows) {
-          exec("powershell", [
-            "-NoProfile -Command",
-            `Expand-Archive -Path '${outZip}' -DestinationPath '${llamaDir}' -Force`,
-          ]);
+          const expandCmd = `Expand-Archive -Path '${outZip}' -DestinationPath '${llamaDir}' -Force`;
+          exec("powershell", ["-NoProfile", "-Command", expandCmd]);
         } else {
           exec("tar", ["-xf", outZip, "-C", llamaDir]);
         }
