@@ -81,6 +81,8 @@ export interface ChatRequest {
   history?: ChatMessage[];
   retry?: boolean;
   maxTokens?: number;
+  /** 会话 ID（GUI 项目内独立会话；缺省写入无 session_id 记录） */
+  sessionId?: string;
 }
 
 /** 引擎事件块（对齐 Python call_llm_stream chunk 协议） */
@@ -561,9 +563,9 @@ export class ChatService {
     const rawReply = result.replyRaw ?? reply;
 
     if (req.retry) {
-      await this.historyStore.popLast(agent.id);
+      await this.historyStore.popLast(agent.id, req.sessionId);
     }
-    await this.recordInteraction(agent, req.message, rawReply, success);
+    await this.recordInteraction(agent, req.message, rawReply, success, req.sessionId);
 
     void this.spawnPostProcess(agent, req.message, rawReply, success); // 后台派发，不阻塞响应
 
@@ -827,9 +829,9 @@ export class ChatService {
         }
         const success = !isFailReply(persistReply);
         if (req.retry) {
-          await this.historyStore.popLast(agent.id);
+          await this.historyStore.popLast(agent.id, req.sessionId);
         }
-        await this.recordInteraction(agent, req.message, persistReply, success);
+        await this.recordInteraction(agent, req.message, persistReply, success, req.sessionId);
         void this.spawnPostProcess(agent, req.message, persistReply, success);
       }
     }
@@ -914,11 +916,12 @@ export class ChatService {
     userMsg: string,
     reply: string,
     success: boolean,
+    sessionId?: string,
   ): Promise<void> {
     const persona = new PersonaModel(agent.persona);
     persona.addInteraction(userMsg, reply, success);
     agent.persona = persona.toDict();
-    await this.historyStore.append(agent.id, userMsg, reply, success);
+    await this.historyStore.append(agent.id, userMsg, reply, success, sessionId);
     await this.registry.save();
   }
 
