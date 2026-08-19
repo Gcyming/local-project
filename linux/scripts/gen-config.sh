@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(dirname "$SCRIPT_DIR")"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 if [[ "${1:-}" == "--root" ]]; then
   ROOT="$(cd "$2" && pwd)"
@@ -19,7 +19,7 @@ if [[ "${1:-}" == "--force" ]]; then
   FORCE=1
 fi
 
-TEMPLATE="$SCRIPT_DIR/slime.toml.linux"
+TEMPLATE="$(dirname "$SCRIPT_DIR")/slime.toml.linux"
 TARGET="$ROOT/slime.toml"
 
 if [[ ! -f "$TEMPLATE" ]]; then
