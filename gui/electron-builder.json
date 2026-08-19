@@ -28,6 +28,6 @@
     "owner": "Gcyming",
     "repo": "local-project",
     "private": true,
-    "draft": false
+    "releaseType": "release"
   }
 }
