@@ -14,6 +14,27 @@ bash linux/run-cli.sh wizard  # 终端 2：首次向导
 bash linux/run-cli.sh         # 终端 2：日常 CLI
 ```
 
+## Windows（PowerShell，与 Linux 路径对称）
+
+```powershell
+# 新用户一条命令搞定：环境 + llama-server + 模型
+pwsh -File windows/setup.ps1 -WithModels
+
+# 分步跑
+pwsh -File windows/setup.ps1             # 只装环境
+pwsh -File windows/fetch-models.ps1       # 单独下模型
+
+# 启动
+pwsh windows\run-server.ps1   # 终端 1：后端
+pwsh windows\run-cli.ps1      # 终端 2：CLI
+pwsh windows\run-cli.ps1 wizard  # 首次向导
+```
+
+**前置**：需已装 `py`（Python 3.10+）、`node >=20`、`pnpm`。三种安装方式：
+- Python：installer.microsoft.com（勾选 Add to PATH）
+- Node：nodejs.org 或 `winget install OpenJS.NodeJS.LTS`
+- pnpm：`npm i -g pnpm` 或 `corepack enable`
+
 ## 给别人用：一键出包，接收方解压即玩
 
 **构建机**（linux x64 + python3 + curl + git）：
