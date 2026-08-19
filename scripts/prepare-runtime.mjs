@@ -96,17 +96,44 @@ if (!existsSync(llamaBin)) {
     const pattern = isWindows ? "win-cpu-x64.zip" : "linux-cpu-x64.tar.gz";
     for (const asset of release.assets) {
       if (asset.name.includes(pattern)) {
-        log(`下载 ${asset.name}`);
         const outZip = join(ROOT, "llama-win.zip");
-        exec("curl.exe", ["-fSL", "--max-time", "180", "-o", outZip, asset.browser_download_url]);
+
+        // 重试下载
+        let downloaded = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          log(`下载 ${asset.name} (尝试 ${attempt}/3)`);
+          try {
+            exec("curl.exe", [
+              "-fL", "--retry", "3", "--retry-delay", "5",
+              "--max-time", "600", "-C", "-",  // 10分钟超时，断点续传
+              "-o", outZip, asset.browser_download_url,
+            ]);
+            downloaded = true;
+            break;
+          } catch {
+            log(`下载失败 (尝试 ${attempt}/3)`);
+          }
+        }
+
+        if (!downloaded && existsSync(outZip)) {
+          log("下载不完整，尝试从 gh-proxy 镜像...");
+          try {
+            exec("curl.exe", ["-fSL", "--retry", "3", "--max-time", "600", "-C", "-", "-o", outZip, "https://gh-proxy.com/" + asset.browser_download_url]);
+            downloaded = true;
+          } catch {
+            log("镜像下载也失败");
+          }
+        }
+
+        if (downloaded && existsSync(outZip)) {
+          const info = statSync(outZip);
+          log(`完成: llama-server (${Math.round(info.size / 1024 / 1024)} MB)`);
+        }
+
         if (isWindows) {
           exec("powershell", ["Expand-Archive", "-Path", outZip, "-DestinationPath", llamaDir, "-Force"]);
         } else {
           exec("tar", ["-xf", outZip, "-C", llamaDir]);
-        }
-        if (existsSync(outZip)) {
-          const info = statSync(outZip);
-          log(`完成: llama-server (${Math.round(info.size / 1024 / 1024)} MB)`);
         }
         break;
       }
