@@ -8,7 +8,7 @@
   },
   "files": [
     "out/**/*",
-    "core-ts/src/**/*",
+    "core-ts/src/**",
     "requirements.txt",
     "slime_server.py",
     "slime_cli.py",
@@ -16,22 +16,17 @@
   ],
   "extraFiles": [
     {
-      "from": "runtime/venv",
+      "from": "../runtime/venv",
       "to": "runtime/venv",
       "filter": ["**/*"]
     },
     {
-      "from": "runtime/node",
-      "to": "runtime/node",
-      "filter": ["**/*"]
-    },
-    {
-      "from": "models",
+      "from": "../models",
       "to": "models",
       "filter": ["**/*"]
     },
     {
-      "from": "llama.cpp/build/bin",
+      "from": "../llama.cpp/build/bin",
       "to": "llama.cpp/build/bin",
       "filter": ["**/*"]
     }
@@ -41,7 +36,6 @@
     "out/main/chunks/*.node",
     "core-ts/**/*",
     "runtime/venv/**/*",
-    "runtime/node/**/*",
     "models/**/*",
     "llama.cpp/**/*",
     "slime_server.py",
@@ -54,15 +48,6 @@
       { "target": "portable", "arch": ["x64"] }
     ],
     "icon": "build/icon.png"
-  },
-  "linux": {
-    "target": [
-      { "target": "AppImage", "arch": ["x64"] },
-      { "target": "deb", "arch": ["x64"] }
-    ],
-    "category": "Development",
-    "icon": "build/icon.png",
-    "executableName": "slime"
   },
   "nsis": {
     "oneClick": true,
