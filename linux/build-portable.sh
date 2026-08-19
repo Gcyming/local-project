@@ -164,8 +164,15 @@ PY
   if [[ "$DL_OK" -eq 0 ]]; then
     echo "[portable] 预编译下载失败 → 源码编译（需 gcc/cmake/git/make）..."
     if [[ ! -d "$KIT/llama.cpp/.git" ]]; then
-      git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$KIT/llama.cpp" 2>/dev/null \
-        || git clone --depth 1 https://gitee.com/mirrors/llama.cpp.git "$KIT/llama.cpp" 2>/dev/null || true
+      rm -rf "$KIT/.llama-src"
+      git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$KIT/.llama-src" 2>/dev/null \
+        || git clone --depth 1 https://gitee.com/mirrors/llama.cpp.git "$KIT/.llama-src" 2>/dev/null || true
+      if [[ -d "$KIT/.llama-src/.git" ]]; then
+        mv "$KIT/.llama-src" "$KIT/llama.cpp.new"
+        rm -rf "$KIT/llama.cpp"
+        mv "$KIT/llama.cpp.new" "$KIT/llama.cpp"
+        mkdir -p "$KIT/llama.cpp/build/bin"
+      fi
     fi
     if [[ -d "$KIT/llama.cpp/.git" ]]; then
       cmake -S "$KIT/llama.cpp" -B "$KIT/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF

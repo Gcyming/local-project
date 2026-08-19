@@ -24,9 +24,10 @@
 # 1. 一键引导（自动装依赖：apt 系统包 / Node 22 / pnpm / venv / llama.cpp，全自动）
 bash linux/setup.sh
 
-# 2. 放置模型（setup.sh 会提示路径）
+# 2. 下载模型（国内走 hf-mirror 镜像，支持断点续传；共约 2.5 GB）
+bash linux/fetch-models.sh
 #    models/BGE-M3/bge-m3-q8_0.gguf   （嵌入，检索/记忆必需）
-#    models/chat/*.gguf               （对话推理）
+#    models/chat/qwen3-1.7b-q8_0.gguf （对话推理）
 
 # 3. 启动
 bash linux/run-server.sh      # 后端（首启生成 config/auth_token.json）
@@ -59,6 +60,7 @@ linux/
 ├── README.md              本说明
 ├── setup.sh               一键引导（自动装系统依赖 / Node / pnpm / venv / llama.cpp / 配置生成）
 ├── build-portable.sh      便携发行包构建（自包含 Node+Python+依赖，解压即用）
+├── fetch-models.sh        一键下载模型（hf-mirror 国内镜像，断点续传）
 ├── build-gui.sh           Linux 版 Electron GUI 构建
 ├── run-server.sh          后端启动
 ├── run-cli.sh             CLI 启动
