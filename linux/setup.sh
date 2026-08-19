@@ -103,6 +103,18 @@ python -m pip install -r requirements.txt
 echo "[setup] Python 依赖 OK"
 
 # ── 4. pnpm install（Linux 原生二进制）──────────────────────────────
+# 国内镜像自动适配：apt 源是清华/阿里/中科大/华为等镜像 → 判定国内网络，
+# pnpm registry 换 npmmirror + electron 二进制走 npmmirror（防 npmjs 超时）
+if grep -rEq "mirrors\.(tuna|aliyun|ustc|huaweicloud)\.com" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+  echo "[setup] 检测到国内 apt 镜像源，pnpm registry → npmmirror（electron 镜像同步写入 ~/.bashrc）..."
+  pnpm config set registry https://registry.npmmirror.com || true
+  grep -q 'ELECTRON_MIRROR=' "$HOME/.bashrc" 2>/dev/null || \
+    echo 'export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"' >> "$HOME/.bashrc"
+  grep -q 'ELECTRON_BUILDER_BINARIES_MIRROR=' "$HOME/.bashrc" 2>/dev/null || \
+    echo 'export ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"' >> "$HOME/.bashrc"
+  export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
+  export ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
+fi
 echo "[setup] pnpm install（拉取 Linux 版 lancedb / electron）..."
 pnpm install
 echo "[setup] pnpm install OK"
