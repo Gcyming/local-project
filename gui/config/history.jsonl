@@ -1,0 +1,2 @@
+{"agent_id":"98109f0f63fe","user":"你好","ai":"你好，我是 test，A。\n\n当前未配置 API Provider，请先通过 CLI 向导或 API 配置模型服务。\n使用 `py slime_cli.py wizard` 或 `POST /providers` 添加 Provider。","success":true,"timestamp":"2026-08-19T02:49:51.732Z"}
+{"agent_id":"98109f0f63fe","user":"你好","ai":"你好，我是 test，A。\n\n当前未配置 API Provider，请先通过 CLI 向导或 API 配置模型服务。\n使用 `py slime_cli.py wizard` 或 `POST /providers` 添加 Provider。","success":true,"timestamp":"2026-08-19T03:10:02.092Z"}

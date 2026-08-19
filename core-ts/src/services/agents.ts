@@ -246,37 +246,6 @@ export class AgentRegistry {
     await this.save();
     return agent;
   }
-
-  /**
-   * 删除 Agent 及其全部子 Agent（对齐 Python delete_agent 语义）：
-   * 递归收集 + 清理其余 Agent 悬空 children 引用 + 原子落盘。
-   * 返回被删除的 id 集合（调用方可清理 history/data 等孤立数据）。
-   */
-  async removeAgent(agentId: string): Promise<string[]> {
-    await this.load();
-    const target = this.agents.find((a) => a.id === agentId);
-    if (!target) {
-      return [];
-    }
-    const toDelete = new Set<string>();
-    const collect = (a: AgentState, visited: Set<string>): void => {
-      if (visited.has(a.id)) { return; }
-      visited.add(a.id);
-      toDelete.add(a.id);
-      for (const childId of a.children ?? []) {
-        const child = this.agents.find((x) => x.id === childId);
-        if (child) { collect(child, visited); }
-      }
-    };
-    collect(target, new Set());
-    this.agents = this.agents.filter((a) => !toDelete.has(a.id));
-    // A-034 对齐：清理悬空 children 引用，防幽灵子 Agent
-    for (const a of this.agents) {
-      a.children = (a.children ?? []).filter((c) => !toDelete.has(c));
-    }
-    await this.save();
-    return [...toDelete];
-  }
 }
 
 /** 进程级单例（对齐 Python load_agents 全局态；服务层默认注入点） */

@@ -247,15 +247,6 @@ export class EmotionalState {
     return { ...(MOOD_BEHAVIOR_HINT[this.mood] ?? { caution_level: 0, promote_groups: [] }) };
   }
 
-  /** 手动调节情绪基线（GUI 心智中枢）：直接设 PAD 并重算 mood，不影响事件时间线/自动演化 */
-  setBaseline(valence: number, arousal: number, dominance: number): void {
-    this.valence = clamp(valence, -1.0, 1.0);
-    this.arousal = clamp(arousal, 0.0, 1.0);
-    this.dominance = clamp(dominance, 0.0, 1.0);
-    this.mood = this.nearestMood();
-    this.lastUpdated = nowIso();
-  }
-
   /** mood 判定：praise > violation > 连续失败≥3 > novelty > 最近邻+滞回 */
   private resolveMood(opts: { praise: boolean; violation: boolean; novelty: boolean }): void {
     if (opts.praise) {

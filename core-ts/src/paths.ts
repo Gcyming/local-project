@@ -9,35 +9,14 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { resolve } from "node:path";
 
 function resolveProjectRoot(): string {
   const env = process.env.SLIME_ROOT;
   if (env && env.trim()) {
     return resolve(env);
   }
-  return resolveProjectRootFrom(new URL("../../", import.meta.url).toString());
-}
-
-/**
- * 从 bundle 入口 URL 推导项目根：上溯查找 slime.toml（项目根标志）。
- * electron-vite 会把 core-ts 打包进 gui/out/main，../../ 只到 gui/out；
- * 上溯保证 Electron dev 模式数据根=项目根。找不到标志（打包后用户数据
- * 目录，boot.ts 的 SLIME_ROOT 已优先）则回退推导值。
- */
-export function resolveProjectRootFrom(entryUrl: string): string {
-  const derived = fileURLToPath(entryUrl);
-  let dir = resolve(derived);
-  for (;;) {
-    if (existsSync(join(dir, "slime.toml"))) {
-      return dir;
-    }
-    const parent = resolve(dir, "..");
-    if (parent === dir) { break; }
-    dir = parent;
-  }
-  return derived;
+  return fileURLToPath(new URL("../../", import.meta.url));
 }
 
 /** 项目根（config/、Knowledge/、data/ 所在目录） */

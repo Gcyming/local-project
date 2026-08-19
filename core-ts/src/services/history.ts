@@ -23,8 +23,6 @@ export interface HistoryRecord {
   ai: string;
   success: boolean;
   timestamp: string;
-  /** 会话 ID（GUI 项目内独立会话；旧记录无此字段归入该 Agent 首个会话） */
-  session_id?: string;
 }
 
 function nowIso(): string {
@@ -65,7 +63,6 @@ export async function appendHistory(
   userMsg: string,
   aiReply: string,
   success = true,
-  sessionId?: string,
 ): Promise<void> {
   const record: HistoryRecord = {
     agent_id: agentId,
@@ -73,7 +70,6 @@ export async function appendHistory(
     ai: aiReply,
     success,
     timestamp: nowIso(),
-    session_id: sessionId,
   };
   await withWriteLock(async () => {
     await ensureParent();
@@ -99,7 +95,7 @@ export async function rotateIfNeeded(): Promise<void> {
   await atomicRewrite(lines.slice(-KEEP_RECORDS));
 }
 
-export async function popLastHistory(agentId: string, sessionId?: string): Promise<boolean> {
+export async function popLastHistory(agentId: string): Promise<boolean> {
   if (!(await stat(HISTORY_PATH).catch(() => null))) {
     return false;
   }
@@ -121,8 +117,7 @@ export async function popLastHistory(agentId: string, sessionId?: string): Promi
     }
     let idx = -1;
     for (let i = records.length - 1; i >= 0; i--) {
-      const r = records[i];
-      if (r.agent_id === agentId && (sessionId === undefined || r.session_id === sessionId)) {
+      if (records[i].agent_id === agentId) {
         idx = i;
         break;
       }
@@ -164,7 +159,6 @@ export async function removeAgentHistory(agentId: string): Promise<number> {
 export async function loadHistory(
   agentId: string | null = null,
   limit = 200,
-  sessionId?: string,
 ): Promise<HistoryRecord[]> {
   const lines = await readLines();
   const records: HistoryRecord[] = [];
@@ -172,33 +166,6 @@ export async function loadHistory(
     try {
       const r = JSON.parse(l) as HistoryRecord;
       if (agentId === null || r.agent_id === agentId) {
-        if (sessionId === undefined || r.session_id === sessionId) {
-          records.push(r);
-        }
-      }
-    } catch {
-      // 损坏行跳过
-    }
-  }
-  return records.slice(-limit);
-}
-
-/** 按会话加载（旧记录无 session_id → 归入该 Agent 的首个会话） */
-export async function loadHistoryForSession(
-  agentId: string,
-  sessionId: string,
-  limit = 500,
-  firstSession = false,
-): Promise<HistoryRecord[]> {
-  const lines = await readLines();
-  const records: HistoryRecord[] = [];
-  for (const l of lines) {
-    try {
-      const r = JSON.parse(l) as HistoryRecord;
-      if (r.agent_id !== agentId) {
-        continue;
-      }
-      if (r.session_id === sessionId || (firstSession && !r.session_id)) {
         records.push(r);
       }
     } catch {
@@ -217,9 +184,9 @@ export const historyUserLoader: (
 
 /** 历史存储接口（服务层注入点；测试可用内存实现） */
 export interface HistoryStore {
-  append(agentId: string, userMsg: string, aiReply: string, success?: boolean, sessionId?: string): Promise<void>;
-  load(agentId?: string | null, limit?: number, sessionId?: string): Promise<HistoryRecord[]>;
-  popLast(agentId: string, sessionId?: string): Promise<boolean>;
+  append(agentId: string, userMsg: string, aiReply: string, success?: boolean): Promise<void>;
+  load(agentId?: string | null, limit?: number): Promise<HistoryRecord[]>;
+  popLast(agentId: string): Promise<boolean>;
 }
 
 export const fileHistoryStore: HistoryStore = {
@@ -254,34 +221,8 @@ export async function clearHistoryForAgent(agentId: string): Promise<number> {
   });
 }
 
-/** 清空指定会话的历史（保留会话条目与其余会话） */
-export async function clearSessionHistory(agentId: string, sessionId: string): Promise<number> {
-  return withWriteLock(async () => {
-    const lines = await readLines();
-    if (lines.length === 0) {
-      return 0;
-    }
-    const kept: string[] = [];
-    let removed = 0;
-    for (const l of lines) {
-      try {
-        const r = JSON.parse(l) as HistoryRecord;
-        if (r.agent_id === agentId && r.session_id === sessionId) {
-          removed++;
-          continue;
-        }
-        kept.push(JSON.stringify(r));
-      } catch {
-        kept.push(l);
-      }
-    }
-    await atomicRewrite(kept);
-    return removed;
-  });
-}
-
 /** P0: 弹出最后一条记录并返回（用于 retry 重发） */
-export async function popLastRecordForAgent(agentId: string, sessionId?: string): Promise<HistoryRecord | null> {
+export async function popLastRecordForAgent(agentId: string): Promise<HistoryRecord | null> {
   if (!(await stat(HISTORY_PATH).catch(() => null))) {
     return null;
   }
@@ -303,8 +244,7 @@ export async function popLastRecordForAgent(agentId: string, sessionId?: string)
     }
     let idx = -1;
     for (let i = records.length - 1; i >= 0; i--) {
-      const r = records[i];
-      if (r.agent_id === agentId && (sessionId === undefined || r.session_id === sessionId)) {
+      if (records[i].agent_id === agentId) {
         idx = i;
         break;
       }
