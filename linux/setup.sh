@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # linux/setup.sh — 一键 Linux 环境引导（在 Linux/WSL 中运行）。
 #
-# 作用：
-#   1. 检查基础工具链（python3/node/pnpm/git/cmake/gcc）
-#   2. 创建 Python venv 并安装 requirements.txt
-#   3. pnpm install（自动拉取 Linux 版 lancedb / electron 二进制）
-#   4. 构建/下载 llama.cpp llama-server（Linux 版本地推理引擎）
-#   5. 从模板生成 slime.toml（可移植路径）
-#   6. 输出模型放置指引与启动命令
+# 自动完成（无需手动装任何东西）：
+#   1. 系统依赖自动安装（Debian/Ubuntu：apt 装 python3/gcc/cmake/git/curl 等）
+#   2. Node.js >=20 自动安装（nodesource 官方源）
+#   3. pnpm 自动安装（corepack 优先，npm -g 兜底）
+#   4. Python venv + requirements.txt
+#   5. pnpm install（自动拉取 Linux 版 lancedb / electron 二进制）
+#   6. llama.cpp llama-server（预编译下载优先，源码编译回退）
+#   7. 从模板生成 slime.toml（可移植路径）
 #
 # 用法：
-#   bash linux/setup.sh                 # 完整引导
-#   bash linux/setup.sh --skip-llama    # 跳过 llama.cpp 构建（仅装依赖+生成配置）
+#   bash linux/setup.sh                 # 完整引导（推荐）
+#   bash linux/setup.sh --skip-llama    # 跳过 llama.cpp 构建
 #   bash linux/setup.sh --no-venv       # 不建 venv，直接用系统 python
+#   bash linux/setup.sh --no-system     # 不自动安装系统依赖（仅检测提示）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,10 +22,12 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 
 SKIP_LLAMA=0
 USE_VENV=1
+AUTO_SYSTEM=1
 for arg in "$@"; do
   case "$arg" in
     --skip-llama) SKIP_LLAMA=1 ;;
     --no-venv) USE_VENV=0 ;;
+    --no-system) AUTO_SYSTEM=0 ;;
   esac
 done
 
@@ -34,20 +38,59 @@ echo "  slime Linux 环境引导"
 echo "  仓库根: $ROOT"
 echo "================================================================"
 
-# ── 1. 工具链检查 ────────────────────────────────────────────────
-need() { command -v "$1" >/dev/null 2>&1 || { echo "[setup] 缺少 $1（$2）" >&2; return 1; }; }
-need python3 "Python 3.10+，如 apt install python3 python3-venv" || exit 1
-need node "Node.js 20.19+，如 https://nodejs.org 或 apt install nodejs" || exit 1
-need pnpm "pnpm 9+，如 npm i -g pnpm 或 corepack enable" || exit 1
+# ── 工具函数 ─────────────────────────────────────────────────────────
+need() { command -v "$1" >/dev/null 2>&1; }
 
-PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)')
-PY_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)')
-if [[ "$PY_MAJOR" -lt 3 || "$PY_MINOR" -lt 10 ]]; then
-  echo "[setup] ERROR: 需要 Python 3.10+，当前 $PY_MAJOR.$PY_MINOR" >&2
-  exit 1
+node_major() { node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0; }
+
+have_sudo() {
+  command -v sudo >/dev/null 2>&1
+}
+
+# ── 0. 系统依赖自动安装 ─────────────────────────────────────────────
+if [[ "$AUTO_SYSTEM" -eq 1 ]]; then
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "[setup] 安装系统依赖（apt-get: python3/gcc/cmake/git/curl ...）..."
+    if have_sudo; then
+      sudo apt-get update
+      sudo apt-get install -y python3 python3-venv python3-pip git cmake gcc g++ make curl
+    else
+      apt-get update
+      apt-get install -y python3 python3-venv python3-pip git cmake gcc g++ make curl
+    fi
+    echo "[setup] 系统依赖 OK"
+  else
+    echo "[setup] 非 Debian/Ubuntu 发行版，请自行安装：python3(3.10+) venv pip git cmake gcc g++ make curl"
+  fi
 fi
 
-# ── 2. Python 依赖 ───────────────────────────────────────────────
+# ── 1. Node.js（>=20）───────────────────────────────────────────────
+if ! need node || [[ "$(node_major)" -lt 20 ]]; then
+  echo "[setup] 安装 Node.js 22（nodesource 官方源）..."
+  if command -v apt-get >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+  else
+    echo "[setup] ERROR: 请手动安装 Node.js >=20（https://nodejs.org）" >&2
+    exit 1
+  fi
+fi
+echo "[setup] node: $(node -v)"
+
+# ── 2. pnpm ─────────────────────────────────────────────────────────
+if ! need pnpm; then
+  echo "[setup] 安装 pnpm（corepack 优先）..."
+  if need corepack; then
+    sudo corepack enable 2>/dev/null || corepack enable
+    corepack prepare pnpm@latest --activate || true
+  fi
+  if ! need pnpm; then
+    npm install -g pnpm
+  fi
+fi
+echo "[setup] pnpm: $(pnpm -v)"
+
+# ── 3. Python 依赖 ──────────────────────────────────────────────────
 if [[ "$USE_VENV" -eq 1 ]]; then
   python3 -m venv .venv
   # shellcheck disable=SC1091
@@ -59,12 +102,12 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 echo "[setup] Python 依赖 OK"
 
-# ── 3. pnpm install（Linux 原生二进制）─────────────────────────
+# ── 4. pnpm install（Linux 原生二进制）──────────────────────────────
 echo "[setup] pnpm install（拉取 Linux 版 lancedb / electron）..."
 pnpm install
 echo "[setup] pnpm install OK"
 
-# ── 4. llama.cpp ────────────────────────────────────────────────
+# ── 5. llama.cpp ────────────────────────────────────────────────────
 if [[ "$SKIP_LLAMA" -eq 1 ]]; then
   echo "[setup] --skip-llama：跳过 llama.cpp 构建"
 else
@@ -74,9 +117,9 @@ else
   if [[ -x "$LLAMA_BIN" ]]; then
     echo "[setup] 已存在 $LLAMA_BIN，跳过"
   else
-    # 4a. 优先下载官方预编译 CPU 版
+    # 5a. 优先下载官方预编译 CPU 版
     DL_OK=0
-    if need curl "curl（下载预编译包，如 apt install curl）" 2>/dev/null; then
+    if need curl; then
       echo "[setup] 尝试下载 llama.cpp 预编译二进制..."
       LATEST=$(curl -fsSL --max-time 30 https://api.github.com/repos/ggml-org/llama.cpp/releases/latest 2>/dev/null || true)
       ASSET=$(printf '%s' "$LATEST" | grep -o '"browser_download_url": *"[^"]*bin-ubuntu-x64.zip"' | head -1 | cut -d'"' -f4 || true)
@@ -97,19 +140,20 @@ PY
         fi
       fi
     fi
-    # 4b. 回退：源码编译
+    # 5b. 回退：源码编译
     if [[ "$DL_OK" -eq 0 ]]; then
       echo "[setup] 预编译下载失败，改源码编译..."
-      need git "git（源码编译用，如 apt install git）" || exit 1
-      need cmake "cmake（如 apt install cmake）" || exit 1
-      need make "make（如 apt install build-essential）" || exit 1
-      if [[ ! -d llama.cpp/.git ]]; then
-        git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp 2>/dev/null \
-          || { echo "[setup] 源码克隆失败（网络受限时请手动放置 llama-server 到 $LLAMA_BIN）" >&2; }
-      fi
-      if [[ -d llama.cpp/.git ]]; then
-        cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
-        cmake --build llama.cpp/build --target llama-server -j"$(nproc)"
+      if ! need git || ! need cmake || ! need make; then
+        echo "[setup] ERROR: 缺少 git/cmake/make，源码编译不可用（--skip-llama 可跳过）" >&2
+      else
+        if [[ ! -d llama.cpp/.git ]]; then
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp 2>/dev/null \
+            || echo "[setup] 源码克隆失败（网络受限时请手动放置 llama-server 到 $LLAMA_BIN）" >&2
+        fi
+        if [[ -d llama.cpp/.git ]]; then
+          cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+          cmake --build llama.cpp/build --target llama-server -j"$(nproc)"
+        fi
       fi
     fi
     if [[ -x "$LLAMA_BIN" ]]; then
@@ -120,15 +164,15 @@ PY
   fi
 fi
 
-# ── 5. 生成 slime.toml ─────────────────────────────────────────
+# ── 6. 生成 slime.toml ─────────────────────────────────────────────
 bash "$SCRIPT_DIR/scripts/gen-config.sh" --root "$ROOT" --force
 
-# ── 6. 模型放置指引 ────────────────────────────────────────────
+# ── 7. 模型放置指引 ────────────────────────────────────────────────
 echo ""
 echo "================================================================"
 echo "  下一步：放置模型文件"
 echo "  嵌入模型（必须，检索/记忆依赖）："
-echo "  $ROOT/models/BGE-M3/bge-m3-q8_0.gguf"
+echo "    $ROOT/models/BGE-M3/bge-m3-q8_0.gguf"
 echo "    建议来源：HuggingFace 的 bge-m3 量化仓库（Q8_0 版本，如 plamoai/bge-m3-gguf）"
 echo "  Chat 模型（对话推理，任选一个 GGUF）："
 echo "    $ROOT/models/chat/qwen3-1.7b-q8_0.gguf 等"
@@ -138,4 +182,6 @@ echo "  启动方式（在仓库根执行）："
 echo "    后端:  python slime_server.py          # 或 bash linux/run-server.sh"
 echo "    CLI:   python slime_cli.py             # 或 bash linux/run-cli.sh"
 echo "    GUI:   bash linux/build-gui.sh         # 构建 AppImage + deb"
+echo "  分发别人用时（免装任何依赖）："
+echo "    bash linux/build-portable.sh           # 产出 dist/slime-linux-x64.tar.gz"
 echo "================================================================"
