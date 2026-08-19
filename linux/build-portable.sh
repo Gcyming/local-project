@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # linux/build-portable.sh — 产出自包含便携发行包（免安装任何依赖）。
 #
-# 产物：dist/slime-linux-x64.tar.gz
+# 产物：dist/slime-linux-x64.tar.gz（约 4GB，含模型）
 # 解压即用：内置 Node 运行时 + Python 运行时 + venv（requirements 已装）+
-#          node_modules（Linux 原生 lancedb/electron 已装）+ llama-server + 源码。
-# 接收方只需：tar 解压 → ./run-cli.sh（或 ./run-server.sh / ./run-gui.sh）。
-# 唯一仍需自备：模型 GGUF 文件（体积大 + 许可证，不入包）。
+#          node_modules（Linux 原生 lancedb/electron 已装）+ llama-server +
+#          模型 GGUF（BGE-M3 嵌入 + Qwen3 对话）+ 源码。
+# 接收方只需：tar 解压 → ./run-cli.sh（或 ./run-server.sh / ./run-gui.sh）
 #
 # 构建机要求：linux x64 + python3(3.10+，解析 JSON/建 venv) + curl + git + tar + gcc/cmake（仅 llama 编译回退时）
 # 用法：
-#   bash linux/build-portable.sh                    # 完整构建
+#   bash linux/build-portable.sh                    # 完整构建（含模型）
 #   bash linux/build-portable.sh --skip-llama       # 跳过 llama-server（需自带）
+#   bash linux/build-portable.sh --skip-models      # 不打包模型（包约 1.5GB，接收方再跑 fetch-models.sh）
 #   bash linux/build-portable.sh --keep-staging     # 保留 dist/slime-linux-x64 便于调试
 set -euo pipefail
 
@@ -18,10 +19,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 
 SKIP_LLAMA=0
+SKIP_MODELS=0
 KEEP_STAGING=0
 for arg in "$@"; do
   case "$arg" in
     --skip-llama) SKIP_LLAMA=1 ;;
+    --skip-models) SKIP_MODELS=1 ;;
     --keep-staging) KEEP_STAGING=1 ;;
   esac
 done
@@ -184,11 +187,18 @@ fi
 
 # ── 9. 配置 + 模型目录 + 入口脚本 ─────────────────────────────────
 bash "$KIT/linux/scripts/gen-config.sh" --root "$KIT" --force
-mkdir -p "$KIT/models/BGE-M3" "$KIT/models/chat"
-echo "把模型放到这里后生效：" > "$KIT/models/README.txt"
-echo "  models/BGE-M3/bge-m3-q8_0.gguf   （嵌入模型，必需）" >> "$KIT/models/README.txt"
-echo "  models/chat/*.gguf               （对话模型）" >> "$KIT/models/README.txt"
 
+# ── 9.5 模型下载（默认打包；--skip-models 跳过，包约 1.5GB） ─────
+if [[ "$SKIP_MODELS" -eq 1 ]]; then
+  echo "[portable] --skip-models：模型不打包"
+else
+  echo "[portable] 下载模型（hf-mirror 镜像，断点续传）..."
+  bash "$KIT/linux/fetch-models.sh" || {
+    echo "[portable] WARNING: 模型下载失败（可能断网），可稍后手动跑 fetch-models.sh" >&2
+  }
+fi
+
+# ── 10. 入口脚本 ───────────────────────────────────────────────────
 cat > "$KIT/run-cli.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -241,8 +251,8 @@ echo "  构建完成: $DIST/slime-linux-x64.tar.gz"
 ls -lh "$DIST/slime-linux-x64.tar.gz"
 echo ""
 echo "  接收方使用（零依赖）："
-echo "    tar -xzf slime-linux-x64.tar.gz && cd slime-linux-x64"
+echo "    tar -xzf dist/slime-linux-x64.tar.gz && cd slime-linux-x64"
 echo "    ./run-cli.sh wizard      # 首次向导"
-echo "    ./run-cli.sh             # CLI"
-echo "    模型放入 models/ 后即可对话"
+echo "    ./run-cli.sh             # CLI（默认含模型）"
+echo "    无模型时加 --skip-models 可把包降到 ~1.5GB"
 echo "================================================================"
