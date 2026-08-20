@@ -96,7 +96,7 @@ function destDirFor(target: DownloadTarget): string {
   return dir;
 }
 
-/** 解析 llama.cpp 最新 win CPU x64 预编译包（兼容性最高：纯 CPU AVX2，任何模型/嵌入模型均可跑；GitHub API 失败抛错） */
+/** 解析 llama.cpp 最新预编译包（按平台：Windows=win CPU x64 zip，Linux=linux x64 zip；GitHub API 失败抛错） */
 async function resolveLlamaAsset(): Promise<{ name: string; url: string }> {
   const resp = await fetch("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", {
     headers: { Accept: "application/vnd.github+json", "User-Agent": "slime-gui" },
@@ -107,12 +107,13 @@ async function resolveLlamaAsset(): Promise<{ name: string; url: string }> {
   }
   const data = (await resp.json()) as { tag_name?: string; assets?: Array<{ name?: string; browser_download_url?: string }> };
   const assets = (data.assets ?? []).filter((a) => (a.name ?? "").endsWith(".zip"));
-  // 优先官方 "Windows x64 (CPU)" 包；无匹配回退任意 win zip
+  const isWin = process.platform === "win32";
+  // 优先官方 CPU x64 包（Windows: win-cpu-x64；Linux: linux-x64）；无匹配回退平台任意 zip
   const picked =
-    assets.find((a) => (a.name ?? "").includes("win-cpu-x64")) ??
-    assets.find((a) => (a.name ?? "").toLowerCase().includes("win"));
+    assets.find((a) => (a.name ?? "").includes(isWin ? "win-cpu-x64" : "linux-x64")) ??
+    assets.find((a) => (a.name ?? "").toLowerCase().includes(isWin ? "win" : "linux"));
   if (!picked?.browser_download_url) {
-    throw new Error("未找到 llama.cpp Windows 预编译包");
+    throw new Error(`未找到 llama.cpp ${process.platform} 预编译包`);
   }
   return { name: picked.name ?? "llama.cpp.zip", url: picked.browser_download_url };
 }
@@ -275,11 +276,15 @@ function relocateToConfiguredPath(task: Task): void {
   console.info(`[downloader] slime.toml llama_bin 已更新: ${exe}`);
 }
 
-/** llama.cpp zip 解压（Windows 内置 tar 支持 zip；完成后自动配置 llama_bin） */
+/** llama.cpp zip 解压（Windows 内置 tar 支持 zip；Linux 用 unzip，缺失时提示） */
 function extractLlamaZip(task: Task): void {
   const outDir = resolve(PROJECT_ROOT, "downloads", "llama.cpp");
   mkdirSync(outDir, { recursive: true });
-  const child = spawn("tar", ["-xf", task.dest, "-C", outDir], { windowsHide: true });
+  const args = process.platform === "win32"
+    ? ["-xf", task.dest, "-C", outDir]
+    : ["-q", "-o", task.dest, "-d", outDir];
+  const tool = process.platform === "win32" ? "tar" : "unzip";
+  const child = spawn(tool, args, { windowsHide: true });
   child.on("exit", (code) => {
     if (code === 0) {
       task.extractedDir = outDir;
@@ -296,15 +301,17 @@ function extractLlamaZip(task: Task): void {
   });
 }
 
-/** 递归查找 llama-server.exe */
+/** 递归查找 llama-server 可执行文件（Windows: llama-server.exe；Linux/macOS: llama-server） */
 function findLlamaServer(dir: string): string | null {
+  const isWin = process.platform === "win32";
+  const want = isWin ? "llama-server.exe" : "llama-server";
   try {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const p = resolve(dir, e.name);
       if (e.isDirectory()) {
         const r = findLlamaServer(p);
         if (r) return r;
-      } else if (e.name.toLowerCase() === "llama-server.exe") {
+      } else if (e.name.toLowerCase() === want) {
         return p;
       }
     }
@@ -330,13 +337,18 @@ export function tryRelocateDownloads(): void {
     }
     // llama：zip 未解压且配置路径缺失 → 解压 + 自动配置
     if (deps.llamaBin && !existsSync(deps.llamaBin)) {
-      const zips = readdirSync(dlDir).filter((f) => f.includes("win-cpu-x64") && f.endsWith(".zip"));
+      const isWin = process.platform === "win32";
+      const exeName = isWin ? "llama-server.exe" : "llama-server";
+      const zips = readdirSync(dlDir).filter((f) => f.includes(isWin ? "win-cpu-x64" : "linux-x64") && f.endsWith(".zip"));
       if (zips.length > 0) {
         const outDir = resolve(dlDir, "llama.cpp");
         const zip = resolve(dlDir, zips[0]);
-        if (!existsSync(resolve(outDir, "llama-server.exe"))) {
+        if (!existsSync(resolve(outDir, exeName))) {
           mkdirSync(outDir, { recursive: true });
-          const r = spawnSync("tar", ["-xf", zip, "-C", outDir], { windowsHide: true, timeout: 120_000 });
+          const args = isWin
+            ? ["-xf", zip, "-C", outDir]
+            : ["-q", "-o", zip, "-d", outDir];
+          const r = spawnSync(isWin ? "tar" : "unzip", args, { windowsHide: true, timeout: 120_000 });
           if (r.status !== 0) {
             console.warn(`[downloader] llama.zip 解压失败: ${r.stderr?.toString() ?? "?"}`);
           }

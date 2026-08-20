@@ -14,7 +14,7 @@ import "./boot.js"; // 数据根引导：必须最先执行（在 core-ts 模块
 import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
 import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
@@ -336,6 +336,9 @@ function createWindow(): void {
 }
 
 function registerIpcHandlers(): void {
+  // 启动状态查询（渲染层启动加载面板：错过 push 事件时拉取当前状态）
+  ipcMain.handle("slime:boot:status", () => bootQuery ?? { phase: "starting", backendReady: false, message: "正在初始化…" });
+
   /** 获取当前选中 Agent ID（优先渲染层传入，回退到第一个 root Agent） */
   function resolveAgentId(inputAgentId: string | undefined): string {
     if (inputAgentId) { return inputAgentId; }
@@ -1101,8 +1104,7 @@ function main(): void {
   registerSchemePrivileges(); // 必须先于 app ready
   app.whenReady()
     .then(async () => {
-      // 启动 Python 后端 sidecar（自包含安装包模式）
-      await startPythonBackend();
+      // 先建窗口立即出首屏，后端 sidecar 并行启动（渲染层启动加载面板展示进度）
       registerProtocolHandler();
       createWindow();
       registerIpcHandlers();
@@ -1110,6 +1112,9 @@ function main(): void {
       // 更新状态推送到渲染进程（StatusPanel 监听 slime:update:status）
       setStatusSink((s) => mainWindow?.webContents.send("slime:update:status", s));
       initUpdater();             // 延迟检查更新（不阻塞首屏）
+      // 启动状态推送到渲染进程（启动加载面板 slime:boot:event）
+      setBootSink((s) => mainWindow?.webContents.send("slime:boot:event", s));
+      void startPythonBackend(); // 并行启动，不阻塞窗口
       mainWindow?.loadURL("slime://./index.html");
       mainWindow?.webContents.on("did-finish-load", () => {
         console.info("[gui:main] 渲染层已加载 (slime://)");
@@ -1137,26 +1142,55 @@ const SLIME_PORT = process.env.SLIME_PORT || "19000";
 
 function resolveResourcePath(relativePath: string): string {
   if (app.isPackaged) {
+    // asarUnpack 的文件落在 resources/app.asar.unpacked/（不在 resources 根）
+    const unpacked = join(process.resourcesPath, "app.asar.unpacked", relativePath);
+    if (existsSync(unpacked)) {
+      return unpacked;
+    }
     return join(process.resourcesPath, relativePath);
   }
   return join(PROJECT_ROOT, relativePath);
 }
 
+/** 启动状态回调（渲染层启动加载面板消费） */
+type BootStatusSink = (s: { phase: string; backendReady: boolean; message?: string }) => void;
+let bootSink: BootStatusSink | null = null;
+/** 最近一次启动状态（渲染层 invoke 查询用；错过 push 事件时兜底） */
+let bootQuery: { phase: string; backendReady: boolean; message?: string } | null = null;
+export function setBootSink(fn: BootStatusSink | null): void {
+  bootSink = fn;
+}
+function emitBoot(s: { phase: string; backendReady: boolean; message?: string }): void {
+  bootQuery = s;
+  bootSink?.(s);
+}
+
+/** 打包模式下 electron-builder extraFiles 放到 app 根（与 resources/ 平级），这里统一解析 */
+function resolveExtra(subpath: string): string {
+  if (!app.isPackaged) { return join(PROJECT_ROOT, subpath); }
+  return join(app.getAppPath(), "..", subpath);
+}
+
 async function startPythonBackend(): Promise<void> {
+  emitBoot({ phase: "backend", backendReady: false, message: "正在启动本地后端服务…" });
   // 定位 Python venv（Windows: Scripts/python.exe，Linux/macOS: bin/python）
   const venvSub = process.platform === "win32" ? "Scripts" : "bin";
   const venvPyName = process.platform === "win32" ? "python.exe" : "python";
-  const venvPython = app.isPackaged
-    ? join(process.resourcesPath, "runtime", "venv", venvSub, venvPyName)
-    : join(PROJECT_ROOT, "runtime", "venv", venvSub, venvPyName);
+  const venvPython = resolveExtra(join("runtime", "venv", venvSub, venvPyName));
 
   const serverScript = resolveResourcePath("slime_server.py");
   if (!existsSync(venvPython) || !existsSync(serverScript)) {
     console.warn("[gui:backend] Python backend not found, running without server");
+    emitBoot({ phase: "degraded", backendReady: false, message: "后端组件缺失，将以受限模式运行" });
     return;
   }
 
-  const env = { ...process.env, SLIME_PORT };
+  const env: Record<string, string | undefined> = { ...process.env, SLIME_PORT };
+  if (process.platform !== "win32") {
+    // Linux/macOS：llama-server 动态库加载（extraFiles 布局：app 根/llama.cpp/build/bin）
+    const libDir = resolveExtra(join("llama.cpp", "build", "bin"));
+    env.LD_LIBRARY_PATH = libDir + (env.LD_LIBRARY_PATH ? `:${env.LD_LIBRARY_PATH}` : "");
+  }
   pythonBackend = spawn(venvPython, [serverScript], {
     env,
     detached: true,
@@ -1170,18 +1204,20 @@ async function startPythonBackend(): Promise<void> {
     console.error(`[slime-server:err] ${data.toString().trim()}`);
   });
 
-  // 等待服务就绪（最多15秒）
-  for (let i = 0; i < 30; i++) {
+  // 等待服务就绪（最多10秒；超时不再阻塞主窗口——渲染层加载面板展示中）
+  for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
       const res = await fetch(`http://localhost:${SLIME_PORT}/health`, { signal: AbortSignal.timeout(2000) });
       if (res.ok) {
         console.info("[gui:backend] slime_server.py 已就绪");
+        emitBoot({ phase: "ready", backendReady: true, message: "后端服务已就绪" });
         return;
       }
     } catch {}
   }
-  console.error("[gui:backend] slime_server.py 启动超时（15秒）");
+  console.error("[gui:backend] slime_server.py 启动超时（10秒）");
+  emitBoot({ phase: "degraded", backendReady: false, message: "后端服务启动超时（可用性受限）" });
 }
 
 function terminatePythonBackend(): void {

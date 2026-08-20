@@ -7,6 +7,7 @@ import AgentsPanel from "./AgentsPanel.js";
 import ProvidersPanel from "./ProvidersPanel.js";
 import StatusPanel from "./StatusPanel.js";
 import MindHubPanel from "./MindHubPanel.js";
+import type { DownloadProgressInfo } from "../../shared/ipc.js";
 
 export type SettingsTab = "mind" | "agents" | "providers" | "status";
 
@@ -25,6 +26,7 @@ interface Props {
   onAgentsChanged: () => void;
   providerKeys: string[];
   localModels: Array<{ id: string; label: string; path: string }>;
+  dl?: Record<string, DownloadProgressInfo>;
 }
 
 export default function SettingsDialog(props: Props): JSX.Element {
@@ -95,7 +97,7 @@ export default function SettingsDialog(props: Props): JSX.Element {
           </aside>
 
           <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-            {activeTab === "mind" && <MindHubPanel selectedAgentId={props.selectedAgentId} />}
+            {activeTab === "mind" && <MindHubPanel selectedAgentId={props.selectedAgentId} dl={props.dl} />}
             {activeTab === "agents" && (
               <AgentsPanel
                 selectedAgentId={props.selectedAgentId}

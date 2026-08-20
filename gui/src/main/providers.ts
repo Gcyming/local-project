@@ -6,7 +6,7 @@
  */
 import { decrypt, encrypt, PROJECT_ROOT } from "../../../core-ts/src/encryption.js";
 import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export interface ModelSpec {
   id: string;
@@ -56,7 +56,7 @@ export interface LocalModelSpec {
 
 const LOCAL_MODELS_KEY = "_local_models";
 
-const KEY_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const KEY_RE = /^[a-zA-Z0-9_\-\u4e00-\u9fa5]{1,64}$/;
 const MAX_MODELS = 200;
 const MAX_MODEL_ID = 256;
 const MAX_KEY_LEN = 512;
@@ -261,7 +261,7 @@ function persistTable(table: ProvidersTable): { ok: boolean; error?: string } {
 /** 校验 id 合法且未与 API provider key 冲突（model_choice=local:<id> 语义） */
 function validateLocalId(id: string, table: ProvidersTable): string | null {
   if (!KEY_RE.test(id)) {
-    return "本地模型名称仅限字母/数字/_/-（1-64 字符）";
+    return "本地模型名称仅限字母/数字/中文/_/-（1-64 字符）";
   }
   if (id in table && id !== LOCAL_MODELS_KEY) {
     return `「${id}」已被 API 供应商占用`;
@@ -275,8 +275,8 @@ export function saveLocalModel(input: { id: string; path: string; label?: string
   const table = loadTable();
   const err = validateLocalId(id, table);
   if (err) { return { ok: false, error: err }; }
-  if (!/^[a-zA-Z]:[\\/]/.test(path)) {
-    return { ok: false, error: "模型路径必须为绝对路径（如 D:\\models\\qwen.gguf）" };
+  if (!isAbsolute(path)) {
+    return { ok: false, error: "模型路径必须为绝对路径（Windows 如 D:\\models\\qwen.gguf；Linux 如 /home/user/models/qwen.gguf）" };
   }
   if (!existsSync(path)) {
     return { ok: false, error: `模型文件不存在：${path}` };

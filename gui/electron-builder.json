@@ -29,17 +29,24 @@
       "from": "../llama.cpp/build/bin",
       "to": "llama.cpp/build/bin",
       "filter": ["**/*"]
+    },
+    {
+      "from": "../slime_server.py",
+      "to": "slime_server.py"
+    },
+    {
+      "from": "../slime_cli.py",
+      "to": "slime_cli.py"
+    },
+    {
+      "from": "../slime.toml",
+      "to": "slime.toml"
     }
   ],
   "asar": true,
   "asarUnpack": [
     "out/main/chunks/*.node",
-    "core-ts/**/*",
-    "runtime/venv/**/*",
-    "models/**/*",
-    "llama.cpp/**/*",
-    "slime_server.py",
-    "slime_cli.py"
+    "../core-ts/src/**/*"
   ],
   "compression": "maximum",
   "win": {

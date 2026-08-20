@@ -8,6 +8,7 @@
 import React, { type JSX } from "react";
 import ChatPanel from "./pages/ChatPanel.js";
 import SettingsDialog, { type SettingsTab } from "./pages/SettingsDialog.js";
+import type { DownloadProgressInfo, BootStatus } from "../shared/ipc.js";
 
 interface AgentBrief {
   id: string;
@@ -44,6 +45,10 @@ export default function App(): JSX.Element {
   const [newProjectOpen, setNewProjectOpen] = React.useState(false);
   /** 行内重命名状态 */
   const [editingSession, setEditingSession] = React.useState<{ sessionId: string; draft: string } | null>(null);
+  /** 依赖下载任务状态（全局常驻订阅：切走设置页进度不丢失） */
+  const [dl, setDl] = React.useState<Record<string, DownloadProgressInfo>>({});
+  /** 启动引导状态（A-C-C 式启动加载面板） */
+  const [boot, setBoot] = React.useState<BootStatus | null>(null);
 
   const loadAgents = React.useCallback(async (): Promise<void> => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
@@ -119,6 +124,27 @@ export default function App(): JSX.Element {
     load();
     const timer = window.setInterval(load, 3000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  /** 依赖下载进度：常驻订阅（问题修复：MindHubPanel 切 tab 卸载会丢事件） */
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.mind) { return; }
+    void api.mind.downloadSnapshot("llama").then((p: DownloadProgressInfo) => setDl((prev) => ({ ...prev, llama: p }))).catch(() => {});
+    void api.mind.downloadSnapshot("bge").then((p: DownloadProgressInfo) => setDl((prev) => ({ ...prev, bge: p }))).catch(() => {});
+    const off = api.mind.onDownloadProgress((p: DownloadProgressInfo) => {
+      setDl((prev) => ({ ...prev, [p.target]: p }));
+    });
+    return () => { off(); };
+  }, []);
+
+  /** 启动引导：主进程推送后端就绪状态 → 启动加载面板淡出 */
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.boot) { return; }
+    void api.boot.status().then((s: BootStatus) => setBoot(s)).catch(() => {});
+    const off = api.boot.onEvent((s: BootStatus) => setBoot(s));
+    return () => { off(); };
   }, []);
 
   const selectedSession = sessions.find((s) => s.sessionId === selectedSessionId) ?? null;
@@ -227,6 +253,39 @@ export default function App(): JSX.Element {
 
   return (
     <div className="app">
+      {/* 启动加载面板（A-C-C 风格：等待后端等进程就绪后进入主界面） */}
+      {boot && (boot.phase === "starting" || boot.phase === "backend") && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 999,
+          background: "var(--bg)", display: "flex",
+          alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{
+              width: 64, height: 64, borderRadius: 16, margin: "0 auto 14px",
+              background: "linear-gradient(135deg, var(--accent), #6366f1)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 30, fontWeight: 900, color: "#fff",
+            }}>S</div>
+            <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: "var(--text)" }}>slime</div>
+            <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 14 }}>
+              {boot.message ?? "正在初始化…"}
+            </div>
+            <div style={{
+              width: 180, height: 5, borderRadius: 3, background: "var(--border)", margin: "0 auto",
+              overflow: "hidden",
+            }}>
+              <div style={{
+                width: "40%", height: "100%", borderRadius: 3,
+                background: "var(--accent)",
+                animation: "slime-boot-slide 1.1s ease-in-out infinite",
+              }} />
+            </div>
+            <style>{`@keyframes slime-boot-slide { 0% { transform: translateX(-120%);} 100% { transform: translateX(320%);} }`}</style>
+          </div>
+        </div>
+      )}
+
       {/* 自绘标题栏（右侧为系统窗口按钮 overlay） */}
       <header className="titlebar">
         <button className="titlebar-btn" onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -418,6 +477,7 @@ export default function App(): JSX.Element {
           onAgentsChanged={() => { void loadAgents(); void loadSessions(); }}
           providerKeys={providerKeys}
           localModels={localModels}
+          dl={dl}
         />
       )}
 

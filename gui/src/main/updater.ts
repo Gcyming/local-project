@@ -13,7 +13,19 @@
  * 注意：此模块仅在 production 构建下有效（dev 模式 updater 不可用）。
  */
 import { autoUpdater } from "electron-updater";
-import { ipcMain } from "electron";
+import { app, ipcMain } from "electron";
+
+/** 简单 semver 比较（数字点分段；不支持的字符按 0 处理）。a > b → 正数 */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n.replace(/\D+/g, ""), 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n.replace(/\D+/g, ""), 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
 
 export interface UpdateStatus {
   status: "checking" | "downloaded" | "error" | "available" | "up-to-date" | "skipped";
@@ -93,15 +105,20 @@ function broadcastStatus(): void {
 export async function checkForUpdate(): Promise<UpdateStatus> {
   try {
     const info = await autoUpdater.checkForUpdates();
-    if (info?.updateInfo) {
+    // 注意：checkForUpdates() 即使无新版本也会返回 updateInfo（远程当前版本），
+    // 必须显式比较版本号，否则永远误报"有更新"
+    const remote = info?.updateInfo?.version;
+    const current = app.getVersion();
+    if (remote && compareVersions(remote, current) > 0) {
       currentStatus = {
         status: "available",
-        version: info.updateInfo.version,
+        version: remote,
         releaseNotes: info.updateInfo.releaseNotes as string,
       };
     } else {
       currentStatus = { status: "up-to-date" };
     }
+    broadcastStatus();
     return currentStatus;
   } catch (err) {
     currentStatus = { status: "error", error: err instanceof Error ? err.message : String(err) };
