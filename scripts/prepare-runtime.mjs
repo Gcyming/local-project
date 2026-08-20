@@ -21,13 +21,16 @@
  *   - llama-server: GitHub release 直连，失败时 gh-proxy 镜像
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, statSync, createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, rmSync, statSync, createWriteStream, readFileSync, writeFileSync } from "node:fs";
 import { stat as statAsync } from "node:fs/promises";
 import { resolve, join, basename } from "node:path";
 import { platform } from "node:os";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const isWindows = platform() === "win32";
+const pythonCmd = isWindows ? "py" : "python3";
+const llamaZip = join(ROOT, `llama-${isWindows ? "win" : "linux"}.zip`);
 
 function log(msg) {
   console.info(`[prepare-runtime] ${msg}`);
@@ -46,6 +49,14 @@ const venvDir = join(ROOT, "runtime", "venv");
 const venvPython = isWindows
   ? join(venvDir, "Scripts", "python.exe")
   : join(venvDir, "bin", "python");
+
+// venv 幂等：requirements.txt 未变则跳过 pip install（P2）
+const reqFile = join(ROOT, "requirements.txt");
+const reqHashFile = join(venvDir, ".requirements.sha256");
+
+function sha256File(file) {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
 
 // —— 下载辅助函数：Node 原生 fetch + 重试 ——
 async function downloadWithRetry(url, dest, retries = 3, timeoutMs = 60000) {
@@ -107,22 +118,31 @@ async function downloadWithRetry(url, dest, retries = 3, timeoutMs = 60000) {
 if (!existsSync(venvPython)) {
   log("创建 Python venv (--copies)");
   if (existsSync(venvDir)) rmSync(venvDir, { recursive: true, force: true });
-  exec("py", ["-m", "venv", "--copies", venvDir]);
+  exec(pythonCmd, ["-m", "venv", "--copies", venvDir]);
 }
 
 const pipExe = isWindows
   ? join(venvDir, "Scripts", "pip.exe")
   : join(venvDir, "bin", "pip");
 
-log("pip install requirements.txt");
-exec(pipExe, [
-  "install",
-  "-r", join(ROOT, "requirements.txt"),
-  "-i", "https://pypi.tuna.tsinghua.edu.cn/simple",
-  "--extra-index-url", "https://pypi.org/simple",
-  "-q",
-  "--no-cache-dir",
-]);
+const reqHash = sha256File(reqFile);
+const reqHashStored = existsSync(reqHashFile)
+  ? readFileSync(reqHashFile, "utf8").trim()
+  : "";
+if (existsSync(venvPython) && reqHashStored === reqHash) {
+  log("requirements.txt 未变化，跳过 pip install");
+} else {
+  log("pip install requirements.txt");
+  exec(pipExe, [
+    "install",
+    "-r", reqFile,
+    "-i", "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "--extra-index-url", "https://pypi.org/simple",
+    "-q",
+    "--no-cache-dir",
+  ]);
+  writeFileSync(reqHashFile, reqHash);
+}
 
 // ── 2. llama-server ────────────────────────────────────
 const llamaDir = join(ROOT, "llama.cpp", "build", "bin");
@@ -151,19 +171,23 @@ if (!existsSync(llamaBin)) {
   }
 
   if (release?.assets) {
-    const pattern = isWindows ? "win-cpu-x64.zip" : "linux-cpu-x64.tar.gz";
+    const pattern = isWindows ? "win-cpu-x64.zip" : "bin-ubuntu-x64.zip";
     for (const asset of release.assets) {
       if (asset.name.includes(pattern)) {
-        const outZip = join(ROOT, "llama-win.zip");
         log(`下载 ${asset.name}`);
-        await downloadWithRetry(asset.browser_download_url, outZip, 3, 600_000);
-        log(`完成: llama-server (${Math.round((statSync(outZip).size / 1024 / 1024))} MB)`);
+        await downloadWithRetry(asset.browser_download_url, llamaZip, 3, 600_000);
+        log(`完成: llama-server (${Math.round((statSync(llamaZip).size / 1024 / 1024))} MB)`);
 
         if (isWindows) {
-          const expandCmd = `Expand-Archive -Path '${outZip}' -DestinationPath '${llamaDir}' -Force`;
+          const expandCmd = `Expand-Archive -Path '${llamaZip}' -DestinationPath '${llamaDir}' -Force`;
           exec("powershell", ["-NoProfile", "-Command", expandCmd]);
         } else {
-          exec("tar", ["-xf", outZip, "-C", llamaDir]);
+          exec(pythonCmd, [
+            "-c",
+            "import sys, zipfile; zp, out = sys.argv[1], sys.argv[2]; zipfile.ZipFile(zp).extractall(out)",
+            llamaZip,
+            llamaDir,
+          ]);
         }
         break;
       }

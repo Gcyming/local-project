@@ -90,6 +90,11 @@ export class SlimeEngine implements ChatEngine {
     return Object.keys(this.providers).length;
   }
 
+  /** 已配置 Provider 的 key 列表（只读；GUI/测试排障用） */
+  get providerKeys(): string[] {
+    return Object.keys(this.providers);
+  }
+
   /** 重载 providers（GUI 保存 Provider 后热更新，无需重启进程；测试可注入 projectRoot/passFile） */
   public refreshProviders(opts: { projectRoot?: string; passFile?: string } = {}): void {
     this.providers = (decrypt("config/providers.enc.json", { projectRoot: opts.projectRoot, passFile: opts.passFile }) ?? {}) as Record<string, ProviderConfig>;

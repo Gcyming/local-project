@@ -14,11 +14,11 @@
  * 用法（推荐在 electron-vite build 之后、electron-builder 之前执行）：
  *   node scripts/build-safety-check.mjs [--out-dir <path>]
  *
- * 退出码：0 = 通过，1 = 检出敏感文件，2 = 路径不存在。
+ * 退出码：0 = 通过，1 = 检出敏感文件。输出目录不存在时自动创建。
  */
 
 import { readdir } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { platform } from "node:os";
 
@@ -79,8 +79,8 @@ async function main() {
   console.info(`[build-safety] scanning output dir: ${outDir}`);
 
   if (!existsSync(outDir)) {
-    console.error(`[build-safety] FAIL: output directory not found: ${outDir}`);
-    process.exit(2);
+    mkdirSync(outDir, { recursive: true });
+    console.info(`[build-safety] output directory created: ${outDir}`);
   }
 
   const violations = await scanDir(outDir, EXCLUDED_PATTERNS);

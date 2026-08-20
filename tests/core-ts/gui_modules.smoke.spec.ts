@@ -72,7 +72,7 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
   });
 
   it("providers：加密保存/列表脱敏/保留 key/删除闭环（隔离沙箱）", async () => {
-    const dir = await makeSandbox();
+    await makeSandbox();
     const save = saveProvider({ key: "demo", api_base: "https://api.demo.com/v1", api_key: "sk-abcdef123456", models: [{ id: "m1", context_window: 8192, max_output: 2048, vision: true }] });
     expect(save.ok).toBe(true);
     const list = listProviders();

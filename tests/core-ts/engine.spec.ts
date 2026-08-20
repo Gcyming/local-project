@@ -128,7 +128,7 @@ describe("SlimeEngine 非流式 chat", () => {
     expect(engine.providersCount).toBe(1);
     engine.refreshProviders({ projectRoot: tmp, passFile });
     expect(engine.providersCount).toBe(1);
-    expect(Object.keys(engine.providers)[0]).toBe("fresh");
+    expect(engine.providerKeys[0]).toBe("fresh");
     const router = await engine.routerFor(makeAgent({ id: "ref", model_choice: "api:fresh" }));
     expect(router).not.toBeNull();
   });

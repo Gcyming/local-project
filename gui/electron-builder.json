@@ -49,6 +49,16 @@
     ],
     "icon": "build/icon.png"
   },
+  "linux": {
+    "target": [
+      { "target": "AppImage", "arch": ["x64"] },
+      { "target": "deb", "arch": ["x64"] }
+    ],
+    "icon": "build/icon.png",
+    "category": "Utility",
+    "maintainer": "slime",
+    "synopsis": "slime AI Agent platform"
+  },
   "nsis": {
     "oneClick": true,
     "perMachine": false,
