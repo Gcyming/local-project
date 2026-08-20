@@ -144,7 +144,7 @@ export function detectLocalDeps(): { llamaBin: string | null; bgeModel: string |
         continue;
       }
       const lower = name.toLowerCase();
-      if (lower === "llama-server.exe" && !res.llamaBin) {
+      if ((lower === "llama-server.exe" || lower === "llama-server") && !res.llamaBin) {
         res.llamaBin = p;
       } else if (lower.startsWith("bge-m3") && lower.endsWith(".gguf") && !res.bgeModel) {
         res.bgeModel = p;

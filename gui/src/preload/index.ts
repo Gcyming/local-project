@@ -11,7 +11,7 @@ import type {
   ProviderSummary, ModelSpec, ConfigOverview, LocalModelSpec, AgentDetail,
   SessionItem, ConversationMessage, SessionConfig, ApprovalMode,
   SuggestionItem, ExtrasList, MindConfigInfo, VectorTool, EmotionSnapshot,
-  DownloadTarget, DownloadProgressInfo, LocateDepResult,
+  DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus,
 } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
@@ -158,6 +158,10 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     onDownloadProgress: (cb: (p: DownloadProgressInfo) => void) =>
       onMessage<DownloadProgressInfo>("slime:mind:downloadProgress", cb),
   },
+  boot: {
+    status: () => ipcRenderer.invoke("slime:boot:status") as Promise<BootStatus>,
+    onEvent: (cb: (s: BootStatus) => void) => onMessage<BootStatus>("slime:boot:event", cb),
+  },
 });
 
 declare global {
@@ -242,6 +246,10 @@ chat: {
         downloadControl: (target: DownloadTarget, action: "pause" | "cancel" | "resume") => Promise<{ ok: boolean }>;
         downloadSnapshot: (target: DownloadTarget) => Promise<DownloadProgressInfo>;
         onDownloadProgress: (cb: (p: DownloadProgressInfo) => void) => () => void;
+      };
+      boot: {
+        status: () => Promise<BootStatus>;
+        onEvent: (cb: (s: BootStatus) => void) => () => void;
       };
     };
   }

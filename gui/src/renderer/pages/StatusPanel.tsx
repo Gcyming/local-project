@@ -291,15 +291,15 @@ export default function StatusPanel(): JSX.Element {
           )}
           {isAvailable && (
             <span style={{ color: "var(--success)", fontSize: 13 }}>
-              发现新版本: {updateStatus.version}
-              <button onClick={handleInstallUpdate} className="btn sky" style={{ marginLeft: 10, fontSize: 12.5 }}>
-                安装并重启
-              </button>
+              发现新版本: {updateStatus.version}（正在后台下载…）
             </span>
           )}
           {isDownloaded && (
             <span style={{ color: "var(--success)", fontSize: 13 }}>
-              新版本已下载 ({updateStatus.version})，重启后安装
+              新版本已下载 ({updateStatus.version})
+              <button onClick={handleInstallUpdate} className="btn sky" style={{ marginLeft: 10, fontSize: 12.5 }}>
+                安装并重启
+              </button>
             </span>
           )}
           {updateStatus?.status === "up-to-date" && (

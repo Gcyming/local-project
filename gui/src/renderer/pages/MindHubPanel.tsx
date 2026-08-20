@@ -132,7 +132,9 @@ function DownloadControls({
   );
 }
 
-export default function MindHubPanel({ selectedAgentId }: { selectedAgentId?: string }): JSX.Element {
+export default function MindHubPanel({
+  selectedAgentId, dl,
+}: { selectedAgentId?: string; dl?: Record<string, DownloadProgressInfo> }): JSX.Element {
   const [cfg, setCfg] = React.useState<MindConfigInfo | null>(null);
   const [agents, setAgents] = React.useState<Array<{ id: string; name: string }>>([]);
   const [agentId, setAgentId] = React.useState<string>(selectedAgentId ?? "");
@@ -147,8 +149,6 @@ export default function MindHubPanel({ selectedAgentId }: { selectedAgentId?: st
   const [skillFile, setSkillFile] = React.useState<{ name: string; content: string } | null>(null);
   const [skillResult, setSkillResult] = React.useState("");
   const [dragOver, setDragOver] = React.useState(false);
-  /** 依赖下载任务状态（按 target） */
-  const [dl, setDl] = React.useState<Record<string, DownloadProgressInfo>>({});
   /** 依赖定位反馈消息（按 key） */
   const [locateMsg, setLocateMsg] = React.useState<Record<string, string>>({});
 
@@ -191,19 +191,17 @@ export default function MindHubPanel({ selectedAgentId }: { selectedAgentId?: st
         }
       }).catch(console.error);
     }
-    // 下载状态：快照初始化 + 进度事件订阅
-    if (api?.mind) {
-      void api.mind.downloadSnapshot("llama").then((p: DownloadProgressInfo) => setDl((prev) => ({ ...prev, llama: p }))).catch(() => {});
-      void api.mind.downloadSnapshot("bge").then((p: DownloadProgressInfo) => setDl((prev) => ({ ...prev, bge: p }))).catch(() => {});
-      const off = api.mind.onDownloadProgress((p: DownloadProgressInfo) => {
-        setDl((prev) => ({ ...prev, [p.target]: p }));
-        if (p.state === "done") {
-          void api.mind.configGet().then((c: MindConfigInfo) => setCfg(c)).catch(() => {});
-        }
-      });
-      return off;
+    // 下载状态：App 层全局订阅（本组件卸载时进度不丢失，见 App.tsx）；未注入时本地拉快照兜底
+    if (api?.mind && !dl) {
+      void api.mind.downloadSnapshot("llama").then((p: DownloadProgressInfo) => setDl0((prev) => ({ ...prev, llama: p }))).catch(() => {});
+      void api.mind.downloadSnapshot("bge").then((p: DownloadProgressInfo) => setDl0((prev) => ({ ...prev, bge: p }))).catch(() => {});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAgentId]);
+
+  // 无全局 dl（未从 App 注入）时兜底：本地快照
+  const [dl0, setDl0] = React.useState<Record<string, DownloadProgressInfo>>({});
+  const dlMap = dl ?? dl0;
 
   React.useEffect(() => {
     if (!agentId || !api?.mind?.emotionGet) return;
@@ -333,9 +331,9 @@ export default function MindHubPanel({ selectedAgentId }: { selectedAgentId?: st
             <span style={{ color: d.ok ? "var(--ok, #4ade80)" : "var(--warning)" }}>{d.ok ? "✅" : "❌"}</span>
             <span style={{ width: 150, color: "var(--text-muted)" }}>{d.label}</span>
             <span style={{ flex: 1, color: "var(--text)", wordBreak: "break-all", fontSize: 11 }}>{d.path || "（未配置）"}</span>
-            {!d.ok && d.target && <DownloadControls target={d.target} dl={dl} />}
-            {d.ok && d.target === "llama" && dl.llama?.extractedDir && (
-              <span style={{ fontSize: 10, color: "var(--text-dim)" }} title={dl.llama.extractedDir}>已解压</span>
+            {!d.ok && d.target && <DownloadControls target={d.target} dl={dlMap} />}
+            {d.ok && d.target === "llama" && dlMap.llama?.extractedDir && (
+              <span style={{ fontSize: 10, color: "var(--text-dim)" }} title={dlMap.llama.extractedDir}>已解压</span>
             )}
             <button className="btn" title="扫描项目文件夹自动定位该依赖" style={{ fontSize: 10.5, padding: "1px 8px" }} onClick={() => void locateDep(d.key, "auto")}>自动检索</button>
             <button className="btn" title="手动选择文件/目录并写入 slime.toml" style={{ fontSize: 10.5, padding: "1px 8px" }} onClick={() => void locateDep(d.key, "pick")}>手动选择</button>

@@ -298,8 +298,16 @@ export interface EmotionSnapshot {
 
 /** 依赖下载任务状态（应用内下载，国内镜像） */
 export type DownloadTarget = "llama" | "bge";
+
 export type DownloadState = "idle" | "downloading" | "paused" | "done" | "error";
 
+/** 启动引导状态（A-C-C 式启动加载面板：等待后端等进程就绪再进入主界面） */
+export interface BootStatus {
+  phase: "starting" | "backend" | "ready" | "degraded";
+  /** 后端服务是否可用（degraded = 后端缺失/失败，不阻塞进入主界面） */
+  backendReady: boolean;
+  message?: string;
+}
 export interface DownloadProgressInfo {
   target: DownloadTarget;
   state: DownloadState;
