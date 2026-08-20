@@ -1143,10 +1143,12 @@ function resolveResourcePath(relativePath: string): string {
 }
 
 async function startPythonBackend(): Promise<void> {
-  // 定位 Python venv
+  // 定位 Python venv（Windows: Scripts/python.exe，Linux/macOS: bin/python）
+  const venvSub = process.platform === "win32" ? "Scripts" : "bin";
+  const venvPyName = process.platform === "win32" ? "python.exe" : "python";
   const venvPython = app.isPackaged
-    ? join(process.resourcesPath, "runtime", "venv", "Scripts", "python.exe")
-    : join(PROJECT_ROOT, "runtime", "venv", "Scripts", "python.exe");
+    ? join(process.resourcesPath, "runtime", "venv", venvSub, venvPyName)
+    : join(PROJECT_ROOT, "runtime", "venv", venvSub, venvPyName);
 
   const serverScript = resolveResourcePath("slime_server.py");
   if (!existsSync(venvPython) || !existsSync(serverScript)) {
