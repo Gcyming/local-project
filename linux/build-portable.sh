@@ -2,7 +2,7 @@
 # linux/build-portable.sh — 产出自包含便携发行包（免安装任何依赖）。
 #
 # 产物：dist/slime-linux-x64.tar.gz（约 4GB，含模型）
-# 解压即用：内置 Node 运行时 + Python 运行时 + venv（requirements 已装）+
+# 解压即用：内置 Node 运行时 + Python 运行时（standalone，依赖已装）+
 #          node_modules（Linux 原生 lancedb/electron 已装）+ llama-server +
 #          模型 GGUF（BGE-M3 嵌入 + Qwen3 对话）+ 源码。
 # 接收方只需：tar 解压 → ./run-cli.sh（或 ./run-server.sh / ./run-gui.sh）
@@ -74,8 +74,9 @@ rm -rf "$NODE_DIR/include" "$NODE_DIR/share" "$NODE_DIR/lib/node_modules/npm/doc
 echo "[portable] Node 就绪: $("$NODE_DIR/bin/node" -v)"
 
 # ── 3. pnpm（装进 runtime node 前缀，随包分发） ────────────────────
-"$NODE_DIR/bin/npm" install -g pnpm
 export PATH="$NODE_DIR/bin:$PATH"
+export npm_config_prefix="$NODE_DIR"
+"$NODE_DIR/bin/npm" install -g pnpm
 echo "[portable] pnpm 就绪: $(pnpm -v)"
 
 # ── 4. Python 运行时（python-build-standalone 可移植解释器） ────────
@@ -95,7 +96,7 @@ except Exception:
     pass
 PY
 )
-BASE_PY=python3   # venv 基础解释器（standalone 下载失败时回退系统 python）
+BASE_PY=python3   # 基础解释器（standalone 下载失败时回退系统 python）
 if [[ -n "$PY_URL" ]]; then
   echo "[portable] 下载便携 Python ..."
   curl -fSL --max-time 600 -o /tmp/py.tar.gz "$PY_URL" || PY_URL=""
@@ -108,12 +109,10 @@ if [[ -n "$PY_URL" ]]; then
   fi
 fi
 
-# ── 5. venv（--copies：standalone 解释器 + 完整拷贝 = 可迁移） ──────
-"$BASE_PY" -m venv --copies "$KIT/runtime/venv"
-export PATH="$KIT/runtime/venv/bin:$PATH"
-python -m pip install --upgrade pip
-python -m pip install -r "$KIT/requirements.txt"
-echo "[portable] venv 就绪: $(python --version)"
+# ── 5. Python 依赖（直接装进 standalone 解释器；不用 venv：其 pyvenv.cfg 绑定构建路径，解压到别处即失效） ──
+"$BASE_PY" -m pip install --upgrade pip
+"$BASE_PY" -m pip install -r "$KIT/requirements.txt"
+echo "[portable] Python 依赖就绪: $("$BASE_PY" --version)"
 
 # ── 6. pnpm install（Linux 原生二进制：lancedb/electron 等） ───────
 cd "$KIT"
@@ -124,7 +123,7 @@ echo "[portable] pnpm install OK"
 # ── 7. GUI 预构建（out/ 不入库，此处产出） ─────────────────────────
 echo "[portable] 构建 GUI 渲染产物（electron-vite build）..."
 cd "$KIT/gui"
-"$KIT/node_modules/.bin/electron-vite" build
+"$KIT/gui/node_modules/.bin/electron-vite" build
 cd "$KIT"
 
 # ── 8. llama-server（复用 setup.sh 策略：预编译优先，源码回退） ─────
@@ -203,37 +202,40 @@ cat > "$KIT/run-cli.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PATH="$KIT/runtime/node/bin:$KIT/runtime/venv/bin:$PATH"
+export PATH="$KIT/runtime/node/bin:$KIT/runtime/python/bin:$PATH"
+export LD_LIBRARY_PATH="$KIT/llama.cpp/build/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [[ ! -f "$KIT/slime.toml" ]]; then
   bash "$KIT/linux/scripts/gen-config.sh" --root "$KIT" --force
 fi
 cd "$KIT"
-exec python slime_cli.py "$@"
+exec python3 slime_cli.py "$@"
 EOF
 
 cat > "$KIT/run-server.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PATH="$KIT/runtime/node/bin:$KIT/runtime/venv/bin:$PATH"
+export PATH="$KIT/runtime/node/bin:$KIT/runtime/python/bin:$PATH"
+export LD_LIBRARY_PATH="$KIT/llama.cpp/build/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 if [[ ! -f "$KIT/slime.toml" ]]; then
   bash "$KIT/linux/scripts/gen-config.sh" --root "$KIT" --force
 fi
 cd "$KIT"
-exec python slime_server.py "$@"
+exec python3 slime_server.py "$@"
 EOF
 
 cat > "$KIT/run-gui.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PATH="$KIT/runtime/node/bin:$KIT/runtime/venv/bin:$PATH"
+export PATH="$KIT/runtime/node/bin:$KIT/runtime/python/bin:$PATH"
+export LD_LIBRARY_PATH="$KIT/llama.cpp/build/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export ELECTRON_DISABLE_SANDBOX=1
 if [[ ! -f "$KIT/slime.toml" ]]; then
   bash "$KIT/linux/scripts/gen-config.sh" --root "$KIT" --force
 fi
 cd "$KIT/gui"
-exec "$KIT/runtime/node/bin/node" "$KIT/node_modules/electron/cli.js" .
+exec "$KIT/runtime/node/bin/node" "$KIT/gui/node_modules/electron/cli.js" .
 EOF
 
 chmod +x "$KIT/run-cli.sh" "$KIT/run-server.sh" "$KIT/run-gui.sh"

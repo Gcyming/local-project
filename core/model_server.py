@@ -121,6 +121,10 @@ class ModelBackend:
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
                 kwargs["preexec_fn"] = os.setpgrp
+                lib_dir = str(Path(self._llama_bin).resolve().parent)
+                env = dict(os.environ)
+                env["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+                kwargs["env"] = env
 
             self._process = subprocess.Popen(args, **kwargs)
             self._pid = self._process.pid
