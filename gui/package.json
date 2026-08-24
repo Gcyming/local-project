@@ -9,7 +9,9 @@
   },
   "main": "out/main/index.js",
   "dependencies": {
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@electron/fuses": "^2.1.3",
@@ -31,8 +33,8 @@
     "preview": "electron-vite preview",
     "type": "tsc -p tsconfig.json --noEmit",
     "prepare-runtime": "node ../scripts/prepare-runtime.mjs",
-    "dist:win": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish never",
-    "dist:win:publish": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && electron-builder --win --publish always",
+    "dist:win": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs",
+    "dist:win:publish": "node ../scripts/build-safety-check.mjs --out-dir=release && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs --publish always",
     "dist:linux": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish never -c.directories.output=release-linux",
     "dist:linux:publish": "node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish always -c.directories.output=release-linux"
   },
