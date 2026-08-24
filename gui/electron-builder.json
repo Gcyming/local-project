@@ -3,26 +3,22 @@
   "productName": "Slime",
   "copyright": "Copyright © 2026 slime",
   "directories": {
-    "output": "release",
+    "output": "release-final",
     "buildResources": "build"
   },
+  "electronDist": "node_modules/electron/dist",
   "files": [
     "out/**/*",
     "../core-ts/src/**/*",
     "../requirements.txt",
     "../slime_server.py",
     "../slime_cli.py",
-    "../slime.toml"
+    "template/slime.toml"
   ],
   "extraFiles": [
     {
       "from": "../runtime/venv",
       "to": "runtime/venv",
-      "filter": ["**/*"]
-    },
-    {
-      "from": "../models",
-      "to": "models",
       "filter": ["**/*"]
     },
     {
@@ -39,9 +35,13 @@
       "to": "slime_cli.py"
     },
     {
-      "from": "../slime.toml",
+      "from": "template/slime.toml",
       "to": "slime.toml"
-    }
+    },
+    { "from": "build/icon.png", "to": "build/icon.png" },
+    { "from": "../core", "to": "core", "filter": ["**/*"] },
+    { "from": "../tools", "to": "tools", "filter": ["**/*"] },
+    { "from": "../social", "to": "social", "filter": ["**/*"] }
   ],
   "asar": true,
   "asarUnpack": [
@@ -67,10 +67,14 @@
     "synopsis": "slime AI Agent platform"
   },
   "nsis": {
-    "oneClick": true,
+    "oneClick": false,
     "perMachine": false,
     "language": 2052,
-    "shortcutName": "Slime"
+    "shortcutName": "Slime",
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "include": "installer.nsh"
   },
   "publish": {
     "provider": "github",
