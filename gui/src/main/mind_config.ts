@@ -14,6 +14,24 @@ export interface MindConfig {
   memoryRoot: string;
 }
 
+/** statSync 安全包装（文件不存在/无权限返回 null） */
+function statSyncSafe(p: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/** 目录内 .gguf 文件计数（本地模型目录就绪判定） */
+function countGguf(dir: string): number {
+  try {
+    return readdirSync(dir).filter((n) => n.toLowerCase().endsWith(".gguf")).length;
+  } catch {
+    return 0;
+  }
+}
+
 const MIND_PATH = resolve(PROJECT_ROOT, "config", "mind.json");
 
 const DEFAULT_CONFIG: MindConfig = { vectorTool: "bge", memoryRoot: "" };
@@ -89,14 +107,112 @@ export function readDepStatus(): DepStatus {
     bgeModel,
     localModelsDir,
     ok: {
-      llamaBin: Boolean(llamaBin) && existsSync(llamaBin),
-      bgeModel: Boolean(bgeModel) && existsSync(bgeModel),
-      localModelsDir: Boolean(localModelsDir) && existsSync(localModelsDir),
+      // 存在 + 最小大小校验：残缺/中断的下载文件（如 3KB 的 bge 残片）不得误判为就绪，
+      // 否则依赖状态显示"✅"、下载按钮消失，模型永远 idle 且无法重新下载。
+      llamaBin: Boolean(llamaBin) && existsSync(llamaBin) && (statSyncSafe(llamaBin)?.size ?? 0) >= 1 * 1024 * 1024,
+      bgeModel: Boolean(bgeModel) && existsSync(bgeModel) && (statSyncSafe(bgeModel)?.size ?? 0) >= 500 * 1024 * 1024,
+      localModelsDir: Boolean(localModelsDir) && existsSync(localModelsDir) && countGguf(localModelsDir) > 0,
     },
   };
 }
 
+/** ModelServerManager 配置键（对齐 slime.toml [model_server] 各子段的字段名） */
+export interface ModelServerToml {
+  llama_bin?: string;
+  startup_timeout?: number;
+  vram_budget_gb?: number;
+  chat_est_gb?: number;
+  embedding?: Record<string, unknown>;
+  chat?: Record<string, unknown>;
+}
+
+/**
+ * 解析 slime.toml 的 [model_server]（含 embedding/chat 子段）为 ModelServerManager 配置。
+ * 失败返回默认空配置（管理器可按子段缺省兜底）。
+ */
+export function readModelServerConfig(): ModelServerToml {
+  const cfg: ModelServerToml = {};
+  const sections: Record<string, Record<string, string>> = {};
+  try {
+    const tomlPath = resolve(PROJECT_ROOT, "slime.toml");
+    if (!existsSync(tomlPath)) { return cfg; }
+    let current = "root";
+    sections[current] = {};
+    for (const raw of readFileSync(tomlPath, "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      if (line.startsWith("[") && line.endsWith("]")) {
+        current = line.slice(1, -1).trim();
+        sections[current] ??= {};
+        continue;
+      }
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      const val = line.slice(eq + 1).trim().replace(/^"|"$/g, "").replace(/\\\\/g, "\\");
+      if (key) sections[current][key] = val;
+    }
+  } catch (e) {
+    console.warn(`[gui:mind] slime.toml 模型段解析失败: ${e}`);
+    return cfg;
+  }
+  const root = sections["model_server"] ?? {};
+  const pick = (v: string | undefined): unknown => {
+    if (v === undefined || v === "") return undefined;
+    if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+    if (v === "true") return true;
+    if (v === "false") return false;
+    return v;
+  };
+  if (root.llama_bin) cfg.llama_bin = root.llama_bin;
+  if (root.startup_timeout) cfg.startup_timeout = Number(root.startup_timeout);
+  if (root.vram_budget_gb) cfg.vram_budget_gb = Number(root.vram_budget_gb);
+  if (root.chat_est_gb) cfg.chat_est_gb = Number(root.chat_est_gb);
+  for (const sub of ["embedding", "chat"] as const) {
+    const s = sections[`model_server.${sub}`];
+    if (s) {
+      const map: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(s)) map[k] = pick(v);
+      cfg[sub] = map;
+    }
+  }
+  return cfg;
+}
+
 export type TomlKey = "llama_bin" | "model_path" | "models_dir";
+
+/** 自动更新配置（slime.toml [update] 段；默认关闭避免无发布源时反复报"检查失败"） */
+export interface UpdateConfig {
+  enabled: boolean;
+  feedUrl: string;
+}
+
+export function readUpdateConfig(): UpdateConfig {
+  let enabled = false;
+  let feedUrl = "";
+  try {
+    const tomlPath = resolve(PROJECT_ROOT, "slime.toml");
+    if (existsSync(tomlPath)) {
+      const lines = readFileSync(tomlPath, "utf8").split(/\r?\n/);
+      let inUpdate = false;
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || line.startsWith("#")) continue;
+        if (line === "[update]") { inUpdate = true; continue; }
+        if (line.startsWith("[") && line.endsWith("]")) { inUpdate = false; continue; }
+        if (!inUpdate) continue;
+        if (line.startsWith("enabled")) {
+          enabled = line.split("=", 2)[1]?.trim() === "true";
+        } else if (line.startsWith("feed_url")) {
+          feedUrl = (line.split("=", 2)[1] ?? "").trim().replace(/^"|"$/g, "").replace(/\\\\/g, "\\");
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`[gui:mind] slime.toml 更新段读取失败: ${e}`);
+  }
+  return { enabled, feedUrl };
+}
 
 /** 改写 slime.toml 单个键值（仅当键已存在；路径转义 TOML 反斜杠） */
 export function updateTomlKey(key: TomlKey, value: string): boolean {

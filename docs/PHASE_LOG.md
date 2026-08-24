@@ -183,7 +183,140 @@
 
 ---
 
+## 阶段 5｜会话创建流重构 + TasksTab 四面板布局 — ✅ 完成（2026-08-23）
+
+**背景**：续接阶段 5 收尾。会话创建流程：无 Agent 时自动选择/新建；右侧栏 TasksTab 重构为四面板布局。
+
+### 会话创建流重构
+- `gui/src/main/index.ts`：`sessions:create` handler 中 `payload.agentId` 改为可选，fallback 链：root agent → 首个现有 agent → 新建"助手"默认 agent
+- `gui/src/preload/index.ts`：`create` 方法签名 `agentId?: string, title?: string` 同步更新
+- `gui/src/renderer/App.tsx`：新增 `WelcomeChat` 组件（含 `handleWelcomeSend` + `startNewSessionDirect`）；`hasNoSession` 状态判断主内容区渲染；"+" 按钮改为直接创建新会话
+
+### TasksTab 四面板布局重构
+- **移除冗余元素**：删除 header `✕` 清除按钮（标签页自带 ×）；删除 agent 状态行末尾的 `· ○ 空闲` / `· ● 工作中` 双重指示；单一运行点 `●` 保留
+- **新增 PanelKey 类型**：`"events" | "context" | "metrics" | "usage"`，替代旧 `sub` boolean
+- **删除** `TaskSubTab` 类型与 `TaskSubTabBtn` 函数（旧双标签设计残余）
+- **四面板**：events（时间戳列表+类型徽章）/ context（上下文进度条+文件列表）/ metrics（会话指标网格）/ usage（用量分析+详情展开）
+
+**验证结果（2026-08-23）**：
+- `tsc --noEmit`（gui）：exit code 0，零错误 ✅
+- `npm run build`：out/renderer/assets/index-bhhl7IrU.js 964.56 KB ✅
+- `py qa.py`：compile ✅ / run_tests ✅ / **pytest 777 passed** ✅
+
+---
+
+## 阶段 5B｜RightSidebar 概览+待办重构 — ✅ 完成（2026-08-23）
+
+> 研究 Claude Code / Cursor / OpenCode / Codex CLI 等主流 Agent 的 Task Planner UI 后，为 slime 设计并实现一套原生任务规划与概览系统。
+
+### 设计调研结论
+- Claude Code：折叠式 Todo 列表，带 `TodoWrite` 工具交互，支持 pending/in_progress/completed 三态，实时进度条
+- Cursor：右侧边栏 Task 面板，任务卡片含状态徽章与完成计数 badge
+- OpenCode：左侧任务树 + 右侧执行日志分离，待办在独立面板
+- 定案：**右侧边栏内嵌 4 标签页**（概览/待办/事件/上下文），概览合并原指标+用量分析，待办独立面板
+
+### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `gui/src/renderer/components/Icon.tsx` | 新增 TodoListIcon / DashboardIcon / CheckboxIcon / CheckboxCheckedIcon / CirclePlusIcon / LoadingCircleIcon / BarChartIcon / PieChartIcon；LoadingCircleIcon 改用 SVG 旋转弧线路径 |
+| `gui/src/renderer/pages/RightSidebar.tsx` | PanelKey 改为 `"overview"|"todos"|"events"|"context"`；新增 TaskStatus/TodoItem 类型；TodoList 状态机（add/toggle/advance/delete）；概览面板（MetricsGrid+UsageBreakdown+ContextWindowBar 三合一）；待办面板（进度条+复选框+进行中旋转动画+添加输入框） |
+| `gui/src/renderer/index.css` | 新增 `@keyframes spin` + `.icon-spin` 类 |
+
+### 关键实现细节
+- **PanelKey 重定义**：旧 `"events"|"context"|"metrics"|"usage"` → 新 `"overview"|"todos"|"events"|"context"`，defaultPanel 从 `"events"` 改为 `"overview"`
+- **TodoItem 三态**：pending / in_progress / completed；advanceTodo 仅允许 pending→in_progress（防止跳状态）
+- **进度条**：`completedCount/todos.length` 实时计算，CSS transition 0.3s ease
+- **旋转图标**：LoadingCircleIcon 使用 SVG `stroke-dasharray` 半圆路径，配合 `.icon-spin` 动画
+- **侧边栏 header**：DashboardIcon + "会话概览"标题（替代旧"任务进度"）
+- **onNewConversation 重置**：切换会话时清空 todos
+
+### 验收
+- `tsc --noEmit`（gui）：exit code 0，零错误 ✅
+- `npm run build`：exit 0，产物 993.26 KB ✅
+- `py qa.py`：compile ✅ / run_tests ✅ / **pytest 777 passed** ✅
+
+---
+
+## 阶段 5B.1｜RightSidebar 单面板重排（概览→待办→上下文→事件流）— ✅ 完成（2026-08-23）
+
+> 用户反馈：原 4 标签页设计割裂了各信息区域，参考 Claude Code「任务摘要」面板，将概览/待办/上下文/事件流合并为单一垂直滚动面板。
+
+### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `gui/src/renderer/pages/RightSidebar.tsx` | 移除 `PanelKey` 类型与 `panel` 状态；删除 4 标签切换按钮栏；将内容从 `{panel === "xxx" && ...}` 条件渲染改为单一垂直布局（概览→待办→上下文→事件流）；移除未使用的 `OverviewCard` 辅助组件 |
+| `gui/src/main/index.ts` | dev 模式启用 CDP 调试端口 9222（`app.commandLine.appendSwitch("remote-debugging-port", "9222")`） |
+
+### 关键实现细节
+- **单面板垂直布局**：顶部标题栏（会话概览 + 脉冲点）→ Agent 标识 → 下载进度条 → 可滚动区域
+- **四个区块**：① 概览（MetricsGrid + UsageBreakdown + ContextWindowBar）→ ② 待办任务（可折叠 TodoList + 进度条 + 添加框）→ ③ 上下文文件（当前会话文件列表）→ ④ 活动记录/事件流（滚动列表，flex:1）
+- **顺序**：待办在上，上下文在中，事件流压底（用户明确指定的顺序）
+- **清理**：移除 `PanelKey`、`panel` state、`setPanel`，删除未使用的 `OverviewCard` 组件定义
+
+### 验收
+- `tsc --noEmit`（gui）：exit code 0，零错误 ✅
+- `npm run build`：exit 0，产物 990.28 KB ✅
+- `py qa.py`：compile ✅ / run_tests ✅ / **pytest 777 passed** ✅
+
+---
+
 ## §汇总（总日志报告）
 
 > 待全项目完成后生成：各阶段验收汇总表 + 回归趋势 + 遗留事项 + 验收门对照。
 > 当前进度：**阶段 1-5 主体完成，双栈 1888 tests green，主进程压测通过，可进入收尾期。**
+
+---
+
+## 2026-08-22｜聊天正文净化 + 设置默认页 + 卸载数据勾选（QA 记录）
+
+**改动**
+- `core-ts/src/services/chat.ts` `splitUntaggedThinking`（0.1.4 增强）：思考特征计权（强信号 +2 / 弱信号 +1，阈值 ≥3）+ 行内正文锚点切分（你好/以下是/总结是…）+ 列表项延续，修复「同行密集思考 / 思考与正文同行 / 第一人称分析型思考」剥不掉的实测案例。完成时经 `extractThinkingFromReply` 兜底剥离。
+- `tests/core-ts/chat_service.spec.ts`：新增 3 例实证回归（test1 问候同行 / Mybutler 长分析内嵌 / 思考句含「所以」不误切）。
+- `gui/src/renderer/App.tsx`：设置弹窗默认标签页 `mind → general`（打开即「通用设置」）。
+- `gui/installer.nsh`：卸载不再弹 MessageBox 询问，改为自定义卸载欢迎页勾选框（`customUnWelcomePage` + `UninstPage`，`un.slimeUninstallCheckPage/Leave` 包在 `!ifdef BUILD_UNINSTALLER` 内）；`customUnInstall` 按下一次卸载前勾选框结果决定是否 `RMDir` 用户数据，默认**保留**。
+
+**回归**
+- vitest 全量：**521 / 521 PASS（32 文件，含 chat_service 73 例）**，0 失败。
+- GUI `electron-vite build`：main / preload / renderer 三端编译成功。
+- `npm run dist:win` 全量打包：**exit 0**，NSIS 安装包 + 卸载器 + 便携版生成成功；NSIS `-WX` 严苛模式下 0 警告（此前依次修复 `create-page un.* 解析`→`6020 Uninstaller code`→`6001 未引用变量`，用 `UninstPage` + `!ifdef BUILD_UNINSTALLER` 收口）。
+- 产物内代码落位核验：renderer 包 `useState("general")` 已生效；main 包含 `splitUntaggedThinking`/`findBodyAnchor`。
+
+**产物**
+- `gui/release/Slime Setup 0.0.1.exe`（660 MB，安装版）、`Slime 0.0.1.exe`（659.6 MB，便携版）。
+- 迭代跑通 `dist:win` 全过程（build-safety-check 内容闸门 + prepare-runtime + electron-builder）。
+
+---
+
+## 阶段12｜联网搜索开关 + 文件查看器 + 思考格式重构 + "+"按钮外部关闭（2026-08-23）
+
+**用户需求**：
+1. 输入框加联网搜索开关（灰色默认，绿色激活）
+2. 右侧边栏支持打开所有格式文件，点击新建标签页
+3. 思考/工具调用展示格式重构（参考 Cursor/Copilot/Claude Code 折叠分组）
+4. "+"按钮点击外部区域关闭菜单
+
+**改动清单**：
+
+| 文件 | 改动 |
+|---|---|
+| `core-ts/src/tool_loop.ts` | `ToolLoopOptions` 新增 `networkEnabled?: boolean`；执行时拦截 `web_search`/`web_fetch` |
+| `gui/src/shared/ipc.ts` | `ChatInput` 新增 `networkEnabled`；新增 `FileMime` 类型；新增 `WorkspaceReadFileResult` 接口 |
+| `core-ts/src/services/engine.ts` | `stream()` 传 `networkEnabled` 给 ToolLoop |
+| `gui/src/renderer/pages/ChatPanel.tsx` | `send()` 传递 `networkEnabled`；**思考/工具展示完全重构**：折叠卡片+脉冲点动画 |
+| `gui/src/renderer/pages/RightSidebar.tsx` | `FileTab` 组件（文本/图片/二进制三种渲染）；`openFileTab` 异步懒加载；`menuRef` + `useEffect` 外部点击关闭；`detectLang` 修复 `??` 优先级 |
+| `gui/src/main/index.ts` | `workspace:readFile` handler；补全 `WorkspaceReadFileResult` 与 `readFileSync` 导入 |
+| `gui/src/renderer/index.css` | 新增 `@keyframes pulse` |
+
+**验证**：
+- `pnpm typecheck`：零错误
+- `pnpm build`：exit 0（产物含 pulse/FileTab/repairStreamingMarkdown）
+- vitest 全量：**521 passed**（32 files）
+- `py qa.py`：**777 passed**（QA ALL GREEN）
+
+**需用户实测**：
+- 联网开关灰/绿切换生效，关闭时 web 工具不被调用
+- 右侧边栏点击文件新建标签页正常渲染
+- "+"菜单外部点击/Escape 关闭
+- 思考/工具以折叠卡片呈现

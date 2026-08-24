@@ -7,13 +7,16 @@
  *   - 更新失败 → 降级重试（最多 3 次，间隔递增）
  *   - 用户可跳过当前版本（session 级别）
  *
- * 配置依赖：electron-builder publish 字段（github provider）+
- *           GITHUB_TOKEN（打包时注入，运行时无需）
+ * 配置依赖：slime.toml [update] 段（enabled + feed_url）。
+ *   - enabled=false（默认）：不发起任何网络请求，状态为 "disabled"，避免无发布源时反复报"检查失败"
+ *   - enabled=true + feed_url：使用自定义 feed（支持 https 直链 / GitHub release）
+ *   - enabled=true + 空 feed_url：回退 electron-builder publish 字段（github provider）
  *
  * 注意：此模块仅在 production 构建下有效（dev 模式 updater 不可用）。
  */
 import { autoUpdater } from "electron-updater";
 import { app, ipcMain } from "electron";
+import { readUpdateConfig } from "./mind_config.js";
 
 /** 简单 semver 比较（数字点分段；不支持的字符按 0 处理）。a > b → 正数 */
 function compareVersions(a: string, b: string): number {
@@ -28,13 +31,13 @@ function compareVersions(a: string, b: string): number {
 }
 
 export interface UpdateStatus {
-  status: "checking" | "downloaded" | "error" | "available" | "up-to-date" | "skipped";
+  status: "checking" | "downloaded" | "error" | "available" | "up-to-date" | "skipped" | "disabled";
   version?: string;
   releaseNotes?: string;
   error?: string;
 }
 
-let currentStatus: UpdateStatus = { status: "up-to-date" };
+let currentStatus: UpdateStatus = { status: "disabled" };
 let statusSink: ((s: UpdateStatus) => void) | null = null;
 
 /** 事件名：主进程 → 渲染进程推送更新状态变化 */
@@ -45,21 +48,39 @@ export function setStatusSink(fn: (s: UpdateStatus) => void): void {
   statusSink = fn;
 }
 
-/** 启动更新检查（延迟 5s 避免阻塞首屏） */
+/** 配置 feed URL（enabled 且 feed_url 非空时用自定义源，否则回退 github publish 字段） */
+function configureFeed(): void {
+  const cfg = readUpdateConfig();
+  if (cfg.feedUrl) {
+    autoUpdater.setFeedURL({ provider: "generic", url: cfg.feedUrl });
+  } else {
+    autoUpdater.setFeedURL({
+      provider: "github",
+      owner: "Gcyming",
+      repo: "local-project",
+      private: true,
+    });
+  }
+}
+
+/** 启动更新检查（延迟 5s 避免阻塞首屏；未启用时静默跳过但仍广播 disabled） */
 export function initUpdater(): void {
   if (process.env.NODE_ENV === "development") {
-    console.info("[updater] skipped in dev mode");
+    console.info("[updater] skipped in dev mode — 仍推送 disabled 状态供 UI 兜底显示");
+    currentStatus = { status: "disabled" };
+    broadcastStatus();
     return;
   }
 
-  // 配置 feed URL（从 electron-builder publish 字段推导）
-  autoUpdater.setFeedURL({
-    provider: "github",
-    owner: "Gcyming",
-    repo: "local-project",
-    private: true,
-  });
+  const cfg = readUpdateConfig();
+  if (!cfg.enabled) {
+    currentStatus = { status: "disabled" };
+    broadcastStatus();
+    console.info("[updater] 自动更新未启用（slime.toml [update].enabled=false），跳过检查");
+    return;
+  }
 
+  configureFeed();
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
@@ -103,6 +124,12 @@ function broadcastStatus(): void {
 
 /** 手动触发更新检查（可由渲染层调用） */
 export async function checkForUpdate(): Promise<UpdateStatus> {
+  const cfg = readUpdateConfig();
+  if (!cfg.enabled) {
+    currentStatus = { status: "disabled" };
+    broadcastStatus();
+    return currentStatus;
+  }
   try {
     const info = await autoUpdater.checkForUpdates();
     // 注意：checkForUpdates() 即使无新版本也会返回 updateInfo（远程当前版本），

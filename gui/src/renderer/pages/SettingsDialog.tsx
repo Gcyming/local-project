@@ -7,15 +7,25 @@ import AgentsPanel from "./AgentsPanel.js";
 import ProvidersPanel from "./ProvidersPanel.js";
 import StatusPanel from "./StatusPanel.js";
 import MindHubPanel from "./MindHubPanel.js";
+import SkillsPanel from "./SkillsPanel.js";
+import McpPanel from "./McpPanel.js";
+import PermissionsPanel from "./PermissionsPanel.js";
+import GeneralPanel from "./GeneralPanel.js";
 import type { DownloadProgressInfo } from "../../shared/ipc.js";
+import { SearchIcon, SettingsIcon } from "../components/Icon.js";
+import type { ThemeName } from "../theme.js";
 
-export type SettingsTab = "mind" | "agents" | "providers" | "status";
+export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "permissions" | "general";
 
-const SECTIONS: Array<{ id: SettingsTab; icon: string; label: string; keywords: string[] }> = [
-  { id: "mind", icon: "🧠", label: "心智中枢", keywords: ["记忆", "学习", "进化", "情绪", "向量", "embedding", "bge", "技能", "mind"] },
-  { id: "agents", icon: "🤖", label: "Agent 管理", keywords: ["代理", "分裂", "身份", "agents", "agent"] },
-  { id: "providers", icon: "🔑", label: "供应商", keywords: ["模型", "密钥", "api", "provider", "本地模型", "llama"] },
-  { id: "status", icon: "📊", label: "状态", keywords: ["统计", "监控", "显存", "服务器", "告警", "stats", "status"] },
+const SECTIONS: Array<{ id: SettingsTab; label: string; keywords: string[] }> = [
+  { id: "general", label: "通用", keywords: ["自启", "开机", "卸载", "启动", "general", "uninstall"] },
+  { id: "mind", label: "心智中枢", keywords: ["记忆", "学习", "进化", "情绪", "向量", "embedding", "bge", "mind"] },
+  { id: "agents", label: "Agent 管理", keywords: ["代理", "分裂", "身份", "agents", "agent"] },
+  { id: "skills", label: "技能库", keywords: ["技能", "skills", "skill"] },
+  { id: "mcp", label: "MCP 接入", keywords: ["mcp", "工具", "服务器", "连接"] },
+  { id: "permissions", label: "权限", keywords: ["权限", "授权", "审批", "沙箱", "sandbox", "全局"] },
+  { id: "providers", label: "供应商", keywords: ["模型", "密钥", "api", "provider", "本地模型", "llama"] },
+  { id: "status", label: "状态", keywords: ["统计", "监控", "显存", "服务器", "告警", "stats", "status"] },
 ];
 
 interface Props {
@@ -27,6 +37,8 @@ interface Props {
   providerKeys: string[];
   localModels: Array<{ id: string; label: string; path: string }>;
   dl?: Record<string, DownloadProgressInfo>;
+  theme?: ThemeName;
+  onThemeChange?: (t: ThemeName) => void;
 }
 
 export default function SettingsDialog(props: Props): JSX.Element {
@@ -55,7 +67,9 @@ export default function SettingsDialog(props: Props): JSX.Element {
         display: "flex", flexDirection: "column", overflow: "hidden",
       }} className="card">
         <div style={{ display: "flex", alignItems: "center", padding: "4px 16px", borderBottom: "1px solid var(--border)", minHeight: 44 }}>
-          <span style={{ fontSize: 14, fontWeight: 800, color: "var(--text)" }}>⚙ 设置</span>
+          <span style={{ fontSize: 14, fontWeight: 800, color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 7 }}>
+            <SettingsIcon size={18} /> 设置
+          </span>
           <span style={{ flex: 1 }} />
           <button className="titlebar-btn" title="关闭设置" onClick={props.onClose} style={{ fontSize: 16 }}>✕</button>
         </div>
@@ -65,13 +79,16 @@ export default function SettingsDialog(props: Props): JSX.Element {
             width: 224, minWidth: 224, borderRight: "1px solid var(--border)",
             display: "flex", flexDirection: "column", padding: "10px 8px",
           }}>
-            <input
-              className="input-field" autoFocus
-              style={{ width: "100%", marginBottom: 10, fontSize: 12.5 }}
-              placeholder="🔍 搜索设置（如：记忆 / 模型 / 状态）"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
+            <div style={{ position: "relative", marginBottom: 10 }}>
+              <SearchIcon size={16} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", opacity: 0.55, pointerEvents: "none" }} />
+              <input
+                className="input-field" autoFocus
+                style={{ width: "100%", fontSize: 12.5, paddingLeft: 28 }}
+                placeholder="搜索设置（如：记忆 / 模型 / 状态）"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
             <div style={{ flex: 1, overflowY: "auto" }}>
               {filtered.map((s) => (
                 <button key={s.id}
@@ -84,7 +101,6 @@ export default function SettingsDialog(props: Props): JSX.Element {
                     border: "none", color: activeTab === s.id ? "var(--accent-hover)" : "var(--text)",
                     fontWeight: activeTab === s.id ? 700 : 600,
                   }}>
-                  <span style={{ fontSize: 15 }}>{s.icon}</span>
                   {s.label}
                 </button>
               ))}
@@ -97,6 +113,7 @@ export default function SettingsDialog(props: Props): JSX.Element {
           </aside>
 
           <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+            {activeTab === "general" && <GeneralPanel theme={props.theme} onThemeChange={props.onThemeChange} />}
             {activeTab === "mind" && <MindHubPanel selectedAgentId={props.selectedAgentId} dl={props.dl} />}
             {activeTab === "agents" && (
               <AgentsPanel
@@ -107,6 +124,9 @@ export default function SettingsDialog(props: Props): JSX.Element {
                 localModels={props.localModels}
               />
             )}
+            {activeTab === "skills" && <SkillsPanel />}
+            {activeTab === "mcp" && <McpPanel />}
+            {activeTab === "permissions" && <PermissionsPanel />}
             {activeTab === "providers" && <ProvidersPanel />}
             {activeTab === "status" && <StatusPanel />}
           </div>
