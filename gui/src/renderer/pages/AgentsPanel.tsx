@@ -24,6 +24,7 @@ interface AgentDetail {
   model_choice: string;
   mode: string;
   reasoning_effort: string;
+  show_thinking?: string;
   max_context?: number;
   max_output?: number;
   lifecycle: string;
@@ -65,7 +66,19 @@ export default function AgentsPanel(props: Props): JSX.Element {
   const [newName, setNewName] = React.useState("");
   const [newRole, setNewRole] = React.useState("");
 
-  const selectedId = props.selectedAgentId ?? null;
+  /**
+   * 本组件内部选中态：设置是 Agent 配置的中枢，选中不再依赖会话（selectedAgentId 仅作初始值）。
+   * 未配置模型的新 Agent 也能直接点击进入属性面板配置。
+   */
+  const [localId, setLocalId] = React.useState<string | null>(null);
+
+  const selectedId = localId ?? props.selectedAgentId ?? null;
+
+  /** 选中 Agent：内部态优先（设置中枢），并上抛给 App（加载会话等副作用） */
+  const selectAgent = (id: string): void => {
+    setLocalId(id);
+    props.onSelectAgent(id);
+  };
 
   /** 删除确认用（记录待删 id + 弹确认层） */
   const [pendingDelete, setPendingDelete] = React.useState<AgentBrief | null>(null);
@@ -146,7 +159,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
       setNewName("");
       setNewRole("");
       await loadAgents();
-      props.onSelectAgent(a.id);
+      selectAgent(a.id);
     } catch (e) {
       showNotice(false, `创建失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -162,7 +175,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
       const a = await api.current.agents.fork(selectedId, `${detail?.name ?? "agent"}-子`, "");
       showNotice(true, `已分裂出「${a.name}」`);
       await loadAgents();
-      props.onSelectAgent(a.id);
+      selectAgent(a.id);
     } catch (e) {
       showNotice(false, `分裂失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -182,7 +195,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
     if (res.ok) {
       showNotice(true, `已导入「${res.agentName ?? ""}」`);
       await loadAgents();
-      if (res.agentId) { props.onSelectAgent(res.agentId); }
+      if (res.agentId) { selectAgent(res.agentId); }
     } else if (res.error && !res.error.includes("取消")) {
       showNotice(false, res.error);
     }
@@ -201,7 +214,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
         if (selectedId === pendingDelete.id) {
           // 选中回落：下一个或清空
           const remaining = agents.filter((a) => a.id !== pendingDelete.id);
-          props.onSelectAgent(remaining[0]?.id ?? "");
+          if (remaining[0]?.id) { selectAgent(remaining[0].id); } else { setLocalId(null); props.onSelectAgent(""); }
         }
       } else {
         showNotice(false, res.error ?? "删除失败");
@@ -253,7 +266,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
             const active = a.id === selectedId;
             return (
               <button key={a.id}
-                onClick={() => props.onSelectAgent(a.id)}
+                onClick={() => selectAgent(a.id)}
                 style={{
                   display: "block", width: "100%", textAlign: "left",
                   padding: "9px 10px", marginBottom: 4,

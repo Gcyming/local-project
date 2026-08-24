@@ -9,6 +9,7 @@
  */
 import React, { type JSX } from "react";
 import type { ProviderSummary, ModelSpec, ConfigOverview, ConfigFileInfo, SkillInfo, McpServerInfo, LocalModelSpec } from "../../shared/ipc.js";
+import { ChevronIcon } from "../components/Icon.js";
 
 interface DraftModel extends ModelSpec { selected: boolean; }
 
@@ -53,6 +54,8 @@ export default function ProvidersPanel(): JSX.Element {
   const [fetching, setFetching] = React.useState(false);
   const [scanDir, setScanDir] = React.useState("");
   const [scanned, setScanned] = React.useState<Array<{ path: string; label: string }> | null>(null);
+  /** 弹窗内错误横幅（保存/探测失败显示在弹窗内，用户直观可见，不误判为应用故障） */
+  const [modalError, setModalError] = React.useState<string | null>(null);
 
   /* 弹窗内：参数文件调试折叠区 */
   const [debugOpen, setDebugOpen] = React.useState(false);
@@ -64,6 +67,20 @@ export default function ProvidersPanel(): JSX.Element {
   function showNotice(ok: boolean, text: string): void {
     setNotice({ ok, text });
     window.setTimeout(() => setNotice(null), 5000);
+  }
+
+  /** 弹窗内错误：显示在弹窗界面顶部（问题修复：避免错误只出现在主页面） */
+  function showModalError(text: string): void {
+    setModalError(text);
+  }
+  function clearModalError(): void {
+    setModalError(null);
+  }
+  function closeModal(): void {
+    setEdit(null);
+    clearModalError();
+    setScanned(null);
+    setDebugOpen(false);
   }
 
   const refreshAll = React.useCallback(async (): Promise<void> => {
@@ -116,24 +133,29 @@ export default function ProvidersPanel(): JSX.Element {
   /* ── 弹窗操作 ── */
 
   function openApiAdd(): void {
+    setModalError(null);
     setEdit({ ...emptyEdit(), mode: "api-add" });
   }
 
   function openApiEdit(p: ProviderSummary): void {
+    setModalError(null);
     setEdit({
       mode: "api-edit", key: p.key, name: p.key,
       api_base: p.api_base, api_key: "", model: p.model ?? "",
-      models: p.models.map((m) => ({ ...m, selected: true })),
+      // 保留各模型的启用状态（旧记录无 selected → 视为启用）
+      models: p.models.map((m) => ({ ...m, selected: (m as DraftModel).selected !== false })),
       proto: "openai", manualIds: p.models.map((m) => m.id).join("\n"),
       localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false,
     });
   }
 
   function openLocalAdd(): void {
+    setModalError(null);
     setEdit({ ...emptyEdit(), mode: "local-add" });
   }
 
   function openLocalEdit(m: LocalModelSpec): void {
+    setModalError(null);
     setEdit({
       mode: "local-edit", key: m.id, name: m.id,
       api_base: "", api_key: "", model: "",
@@ -148,36 +170,44 @@ export default function ProvidersPanel(): JSX.Element {
 
   async function handleFetchModels(): Promise<void> {
     if (!api.current || !edit || !edit.api_base.trim() || !edit.api_key.trim()) {
-      showNotice(false, "请先填写 Base URL 与 API Key");
+      showModalError("请先填写 Base URL 与 API Key");
       return;
     }
+    setModalError(null);
     setFetching(true);
     try {
       const res = await api.current.providers.fetchModels(edit.api_base.trim(), edit.api_key.trim());
       if (res.ok && res.models) {
-        const models = res.models.map((m: ModelSpec) => ({ ...m, selected: true }));
-        setEdit({ ...edit, models, proto: "openai", model: edit.model || res.models[0]?.id || "" });
-        showNotice(true, `探测成功：发现 ${res.models.length} 个模型，已自动勾选，默认使用第一个「${res.models[0]?.id ?? ""}」（可改）`);
+        // 默认一个都不启用（用户按需用拨片开启；顶部提供「全选」）
+        const models = res.models.map((m: ModelSpec) => ({ ...m, selected: false }));
+        setEdit({ ...edit, models, proto: "openai", model: edit.model || "" });
+        showNotice(true, `探测成功：发现 ${res.models.length} 个模型（默认均未启用，可在列表中开启需要的模型）`);
       } else {
         setEdit({ ...edit, models: [] });
-        showNotice(false, res.error ?? "获取失败");
+        showModalError(res.error ?? "获取失败");
       }
     } catch (e) {
-      showNotice(false, `获取失败：${e instanceof Error ? e.message : String(e)}`);
+      showModalError(`获取失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setFetching(false);
     }
   }
 
-  /** 手动模式：文本行 → 模型草稿（每行一个模型 ID） */
+  /** 手动模式：文本行 → 模型草稿（每行一个模型 ID；新模型默认未启用） */
   function applyManualIds(): void {
     if (!edit) { return; }
     const ids = edit.manualIds.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     const merged: DraftModel[] = ids.map((id) => {
       const prev = edit.models.find((m) => m.id === id);
-      return prev ?? { id, selected: true };
+      return prev ?? { id, selected: false };
     });
     setEdit({ ...edit, models: merged, model: edit.model || merged[0]?.id || "" });
+  }
+
+  /** 全选/全不选（拨片列顶部开关） */
+  function toggleAllModels(on: boolean): void {
+    if (!edit) { return; }
+    setEdit({ ...edit, models: edit.models.map((m) => ({ ...m, selected: on })) });
   }
 
   function updateDraftModel(index: number, patch: Partial<DraftModel>): void {
@@ -192,10 +222,11 @@ export default function ProvidersPanel(): JSX.Element {
     if (!api.current) { return; }
     const res = await api.current.providers.localPick();
     if (res.ok && res.path) {
+      setModalError(null);
       setEdit((prev) => prev ? { ...prev, localPath: res.path, localLabel: prev.localLabel || (res.path.split(/[\\/]/).pop() ?? res.path) } : prev);
       setScanned(null);
     } else if (res.error && res.error !== "已取消选择") {
-      showNotice(false, res.error);
+      showModalError(res.error);
     }
   }
 
@@ -209,7 +240,7 @@ export default function ProvidersPanel(): JSX.Element {
         showNotice(true, `目录中发现 ${res.models.length} 个 GGUF 模型`);
       } else {
         setScanned([]);
-        showNotice(false, res.error ?? "扫描失败");
+        showModalError(res.error ?? "扫描失败");
       }
     } finally {
       setFetching(false);
@@ -221,6 +252,7 @@ export default function ProvidersPanel(): JSX.Element {
     if (edit.proto === "manual") {
       applyManualIds();
     }
+    setModalError(null);
     setLoading(true);
     try {
       const isLocal = edit.mode === "local-add" || edit.mode === "local-edit";
@@ -236,18 +268,20 @@ export default function ProvidersPanel(): JSX.Element {
         });
         if (res.ok) {
           showNotice(true, `已保存本地模型「${edit.name}」`);
-          setEdit(null);
+          closeModal();
           await refreshAll();
         } else {
-          showNotice(false, res.error ?? "保存失败");
+          showModalError(res.error ?? "保存失败");
         }
         return;
       }
-      const models = edit.models.filter((m) => m.selected).map((m) => ({
+      // 保存全部模型（含 selected 启用标记），供应商编辑界面展示全量、聊天界面只列启用项
+      const models = edit.models.map((m) => ({
         id: m.id,
         context_window: m.context_window || undefined,
         max_output: m.max_output || undefined,
         vision: m.vision === true,
+        selected: m.selected === true,
       }));
       const res = await api.current.providers.save({
         key: edit.name.trim(),
@@ -258,10 +292,10 @@ export default function ProvidersPanel(): JSX.Element {
       });
       if (res.ok) {
         showNotice(true, `已保存供应商「${edit.name}」并热更新 → ${res.path ?? ""}`);
-        setEdit(null);
+        closeModal();
         await refreshAll();
       } else {
-        showNotice(false, res.error ?? "保存失败");
+        showModalError(res.error ?? "保存失败");
       }
     } finally {
       setLoading(false);
@@ -336,7 +370,7 @@ export default function ProvidersPanel(): JSX.Element {
           background: "rgba(2, 6, 23, 0.66)",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setEdit(null); } }}>
+          onClick={(e) => { if (e.target === e.currentTarget) { closeModal(); } }}>
           <div className="card" style={{ width: 680, maxWidth: "94vw", maxHeight: "88vh", overflowY: "auto" }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
               <h3 style={{ margin: 0, flex: 1 }}>
@@ -345,8 +379,20 @@ export default function ProvidersPanel(): JSX.Element {
                 {edit.mode === "local-add" && "添加本地模型"}
                 {edit.mode === "local-edit" && `编辑本地模型「${edit.key}」`}
               </h3>
-              <button className="titlebar-btn" onClick={() => setEdit(null)} title="关闭">✕</button>
+              <button className="titlebar-btn" onClick={closeModal} title="关闭">✕</button>
             </div>
+
+            {/* 弹窗内错误横幅：保存/探测失败在此处直观展示，不落到主页面 */}
+            {modalError && (
+              <div style={{
+                marginBottom: 12, padding: "8px 12px", borderRadius: 8,
+                border: "1px solid var(--danger, #e5484d)",
+                background: "rgba(229, 72, 77, 0.12)", color: "var(--danger, #ff6b70)",
+                fontSize: 12.5, whiteSpace: "pre-wrap",
+              }}>
+                {modalError}
+              </div>
+            )}
 
             {edit.mode === "api-add" || edit.mode === "api-edit" ? (
               <>
@@ -415,7 +461,26 @@ export default function ProvidersPanel(): JSX.Element {
                       未获取模型列表 — 填写 Base URL 与 API Key 后点击"获取模型列表"，自动探测并预选默认选项
                     </div>
                   ) : (
-                    <div style={{ maxHeight: 240, overflowY: "auto", marginBottom: 10 }}>
+                    <div style={{ maxHeight: 260, overflowY: "auto", marginBottom: 10 }}>
+                      {/* 顶部全选：一键启用/取消全部模型（探测后默认一个都不选，按需用拨片开启） */}
+                      <div style={{
+                        display: "flex", alignItems: "center", gap: 8,
+                        padding: "5px 8px 7px", borderBottom: "1px solid var(--border)",
+                        position: "sticky", top: 0, background: "var(--bg-secondary, var(--bg-card))", zIndex: 1,
+                      }}>
+                        <ToggleSwitch
+                          checked={edit.models.length > 0 && edit.models.every((m) => m.selected)}
+                          onChange={(v) => toggleAllModels(v)}
+                          title="全选 / 全不选"
+                        />
+                        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>
+                          {edit.models.length === 0 ? "无模型"
+                            : edit.models.every((m) => m.selected) ? "全部启用"
+                            : edit.models.some((m) => m.selected) ? "部分启用" : "全部未启用"}
+                        </span>
+                        <span style={{ flex: 1 }} />
+                        <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>共 {edit.models.length} 个 · 聊天界面只显示已启用</span>
+                      </div>
                       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                         <thead>
                           <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
@@ -431,7 +496,11 @@ export default function ProvidersPanel(): JSX.Element {
                           {edit.models.map((m, i) => (
                             <tr key={m.id} style={{ borderTop: "1px solid var(--border)" }}>
                               <td style={{ padding: "4px 8px" }}>
-                                <input type="checkbox" checked={m.selected} onChange={(e) => updateDraftModel(i, { selected: e.target.checked })} />
+                                <ToggleSwitch
+                                  checked={m.selected}
+                                  onChange={(v) => updateDraftModel(i, { selected: v })}
+                                  title={`${m.selected ? "停用" : "启用"} ${m.id}`}
+                                />
                               </td>
                               <td style={{ padding: "4px 8px", wordBreak: "break-all" }}>{m.id}</td>
                               <td style={{ padding: "4px 8px" }}>
@@ -477,7 +546,7 @@ export default function ProvidersPanel(): JSX.Element {
                   <button className="btn" onClick={handlePickLocal} style={{ whiteSpace: "nowrap" }}>浏览…</button>
                 </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                  <input className="input-field" placeholder="扫描目录（如 D:\tool\slime\Local model）" value={scanDir}
+                  <input className="input-field" placeholder="扫描目录（如 D:\models\Local model）" value={scanDir}
                     onChange={(e) => setScanDir(e.target.value)} />
                   <button className="btn" onClick={handleScanDir} disabled={fetching} style={{ whiteSpace: "nowrap" }}>
                     {fetching ? "扫描中…" : "扫描 GGUF"}
@@ -533,8 +602,8 @@ export default function ProvidersPanel(): JSX.Element {
                   padding: "10px 12px", background: "var(--bg-secondary)", border: "none",
                   color: "var(--text)", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "left",
                 }}>
-                <span style={{ color: "var(--accent)", fontSize: 12, transition: "transform 0.15s", display: "inline-block", transform: debugOpen ? "rotate(90deg)" : "none" }}>
-                  ▶
+                <span style={{ color: "var(--accent)", fontSize: 12, display: "inline-flex", alignItems: "center" }}>
+                  <ChevronIcon size={14} rotate={debugOpen ? 90 : 0} />
                 </span>
                 参数文件调试（slime.toml / 全局配置 / MCP / 技能）
                 {debugOpen && <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>· 保存前自动备份 .bak</span>}
@@ -655,7 +724,7 @@ export default function ProvidersPanel(): JSX.Element {
           <div key={m.id} className="card">
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
               <span style={{ fontSize: 15, fontWeight: 700 }}>{m.id}</span>
-              {m.vision && <span style={chipStyle("var(--success-soft)", "var(--success)")}>🖼 视觉</span>}
+              {m.vision && <span style={chipStyle("var(--success-soft)", "var(--success)")}>视觉</span>}
               <span style={{ flex: 1 }} />
               <button className="btn" onClick={() => openLocalEdit(m)} style={{ padding: "2px 10px" }}>编辑</button>
               <button className="btn danger" onClick={() => handleRemoveLocal(m.id)} disabled={loading}
@@ -692,4 +761,50 @@ function cellInputStyle(): React.CSSProperties {
     border: "1px solid var(--border-hover)", background: "var(--bg-input)",
     color: "var(--text)", fontSize: 12, boxSizing: "border-box",
   };
+}
+
+/** 拨片开关（启用/停用）：悬停发光 + 点击缩放反馈，主题跟随 */
+function ToggleSwitch({ checked, onChange, title }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  title?: string;
+}): JSX.Element {
+  const w = 40;
+  const h = 22;
+  const knob = 18;
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      title={title}
+      onClick={(e) => { e.stopPropagation(); onChange(!checked); }}
+      style={{
+        position: "relative", display: "inline-flex", alignItems: "center", flexShrink: 0,
+        width: w, height: h, borderRadius: h, padding: 0, border: "none",
+        background: checked ? "var(--accent)" : "var(--border-hover)",
+        cursor: "pointer",
+        transition: "background 0.18s, box-shadow 0.12s, transform 0.08s",
+        boxShadow: checked ? "0 0 6px var(--accent-soft, rgba(56,189,248,0.35))" : "none",
+      }}
+      onMouseEnter={(e) => {
+        if (!checked) { e.currentTarget.style.background = "var(--border)"; }
+        e.currentTarget.style.boxShadow = "0 0 0 2px var(--accent-soft, rgba(56,189,248,0.28))";
+      }}
+      onMouseLeave={(e) => {
+        if (!checked) { e.currentTarget.style.background = "var(--border-hover)"; }
+        e.currentTarget.style.boxShadow = checked ? "0 0 6px var(--accent-soft, rgba(56,189,248,0.35))" : "none";
+      }}
+      onMouseDown={(e) => { e.currentTarget.style.transform = "scale(0.92)"; }}
+      onMouseUp={(e) => { e.currentTarget.style.transform = "scale(1)"; }}
+    >
+      <span style={{
+        position: "absolute", top: (h - knob) / 2, left: checked ? w - knob - 2 : 2,
+        width: knob, height: knob, borderRadius: "50%",
+        background: "#fff",
+        transition: "left 0.18s",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+      }} />
+    </button>
+  );
 }

@@ -5,9 +5,9 @@
  * - 断点续传：Range 请求 + received 字节数；暂停=中止保留断点，恢复=续传，取消=删除文件
  * - 进度事件经回调推给渲染层（下载条 UI）
  */
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readDepStatus, updateTomlKey } from "./mind_config.js";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 
@@ -45,11 +45,19 @@ const BGE_FILE = "bge-m3-q8_0.gguf";
 
 const CHUNK = 64 * 1024;
 
+/** 各目标的最小有效文件大小（字节）：小于此值视为残缺/中断的下载残片，强制重下 */
+const MIN_VALID_SIZE: Record<DownloadTarget, number> = {
+  bge: 500 * 1024 * 1024,   // bge-m3-q8_0.gguf 完整约 634MB
+  llama: 1 * 1024 * 1024,   // llama.cpp 预编译 zip 至少 1MB
+};
+
 interface Task {
   target: DownloadTarget;
   url: string;
   dest: string;
   fileName: string;
+  /** Windows CUDA 需要叠加的 CUDA 运行时 DLL 包（cudart-*），可为空 */
+  runtime?: { name: string; url: string } | null;
   received: number;
   total: number;
   state: DownloadState;
@@ -65,6 +73,13 @@ let listener: ProgressListener | null = null;
 
 export function setDownloadListener(fn: ProgressListener | null): void {
   listener = fn;
+}
+
+/** bge 嵌入模型下载完成回调（index.ts 注册 → 自动拉起 embedding 服务，免手动重试） */
+let bgeReadyCb: (() => void) | null = null;
+
+export function setBgeReadyCallback(fn: (() => void) | null): void {
+  bgeReadyCb = fn;
 }
 
 function emit(p: DownloadProgress): void {
@@ -84,20 +99,37 @@ function taskProgress(t: Task, error?: string): DownloadProgress {
   };
 }
 
-/** 下载目标目录：模型配置路径所在目录存在则用之（D:\tool\slime 生态），否则项目 downloads 兜底 */
+/**
+ * 下载目标目录：优先落到 slime.toml 配置路径所在目录（不存在则自动创建），
+ * 使 bge 下载完成后直接命中配置路径，依赖状态随即变绿；无配置才回退
+ * 项目 downloads 目录。此前只识别「已存在」的目录，URL 配到 AppData 下
+ * 尚未创建的目录时退到 downloads/，下载后无法归位、状态永远不变 —— 这是
+ * 用户反馈「进度不动/反复退出才显示正确」的根因。
+ */
 function destDirFor(target: DownloadTarget): string {
   const deps = readDepStatus();
   const prefer = target === "bge" ? deps.bgeModel : deps.llamaBin;
-  if (prefer && existsSync(dirname(prefer))) {
-    return dirname(prefer);
+  if (prefer) {
+    const dir = dirname(prefer);
+    try {
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    } catch (e) {
+      console.warn(`[downloader] 无法创建配置目录（${dir}），回退 downloads: ${e}`);
+    }
   }
   const dir = resolve(PROJECT_ROOT, "downloads");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-/** 解析 llama.cpp 最新预编译包（按平台：Windows=win CPU x64 zip，Linux=linux x64 zip；GitHub API 失败抛错） */
-async function resolveLlamaAsset(): Promise<{ name: string; url: string }> {
+/**
+ * 解析 llama.cpp 最新预编译包（按平台；GitHub API 失败抛错）。
+ * - Windows：优先 CUDA 12.4 —— llama.cpp 新版把 CUDA 拆成「二进制包」+「cudart 运行时 DLL 包」两张，
+ *   故返回二进制包为主 + runtime 运行时包；两者都解压到同一目录才自包含。CPU 单 zip 兜底。
+ * - Linux：官方不再发布 CUDA 预编译，其 NVIDIA/AMD GPU 加速走 Vulkan 单包（tar.gz），回退 CPU。
+ */
+async function resolveLlamaAsset(): Promise<{ name: string; url: string; runtime?: { name: string; url: string } | null }> {
   const resp = await fetch("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", {
     headers: { Accept: "application/vnd.github+json", "User-Agent": "slime-gui" },
     signal: AbortSignal.timeout(15000),
@@ -106,16 +138,31 @@ async function resolveLlamaAsset(): Promise<{ name: string; url: string }> {
     throw new Error(`GitHub API HTTP ${resp.status}`);
   }
   const data = (await resp.json()) as { tag_name?: string; assets?: Array<{ name?: string; browser_download_url?: string }> };
-  const assets = (data.assets ?? []).filter((a) => (a.name ?? "").endsWith(".zip"));
+  const assets = (data.assets ?? []) as Array<{ name: string; browser_download_url: string }>;
   const isWin = process.platform === "win32";
-  // 优先官方 CPU x64 包（Windows: win-cpu-x64；Linux: linux-x64）；无匹配回退平台任意 zip
-  const picked =
-    assets.find((a) => (a.name ?? "").includes(isWin ? "win-cpu-x64" : "linux-x64")) ??
-    assets.find((a) => (a.name ?? "").toLowerCase().includes(isWin ? "win" : "linux"));
-  if (!picked?.browser_download_url) {
+  if (!isWin) {
+    // Linux：Vulkan 单包（GPU）→ CPU 兜底
+    const vulkan =
+      assets.find((a) => a.name && a.name.endsWith(".tar.gz") && /vulkan-x64/.test(a.name)) ??
+      assets.find((a) => a.name && a.name.endsWith(".tar.gz") && a.name.includes("ubuntu-x64"));
+    if (!vulkan?.browser_download_url) {
+      throw new Error(`未找到 llama.cpp ${process.platform} 预编译包`);
+    }
+    return { name: vulkan.name, url: vulkan.browser_download_url };
+  }
+  // Windows：二进制包（win-cuda*，排除 cudart- 运行时包）→ 叠加 cudart 运行时包 → CPU 兜底
+  const bin =
+    assets.find((a) => a.name && a.name.endsWith(".zip") && /win-cuda/.test(a.name) && !a.name.startsWith("cudart-")) ??
+    assets.find((a) => a.name && a.name.endsWith(".zip") && a.name.includes("win-cpu-x64"));
+  if (!bin?.browser_download_url) {
     throw new Error(`未找到 llama.cpp ${process.platform} 预编译包`);
   }
-  return { name: picked.name ?? "llama.cpp.zip", url: picked.browser_download_url };
+  const runtime = assets.find((a) => a.name && a.name.endsWith(".zip") && a.name.startsWith("cudart-") && a.name.includes("win-cuda-12.4"));
+  return {
+    name: bin.name,
+    url: bin.browser_download_url,
+    runtime: runtime?.browser_download_url ? { name: runtime.name, url: runtime.browser_download_url } : null,
+  };
 }
 
 /** 获取下载任务（首次调用解析 URL 与目标路径） */
@@ -127,6 +174,7 @@ async function getOrCreateTask(target: DownloadTarget): Promise<Task> {
   const dir = destDirFor(target);
   let url = "";
   let fileName = "";
+  let runtime: { name: string; url: string } | null = null;
   if (target === "bge") {
     url = `${HF_MIRROR}/${BGE_REPO}/resolve/main/${BGE_FILE}`;
     fileName = BGE_FILE;
@@ -134,12 +182,14 @@ async function getOrCreateTask(target: DownloadTarget): Promise<Task> {
     const asset = await resolveLlamaAsset();
     url = asset.url;
     fileName = asset.name;
+    runtime = asset.runtime ?? null;
   }
   const task: Task = {
     target,
     url,
     dest: resolve(dir, fileName),
     fileName,
+    runtime,
     received: 0,
     total: 0,
     state: "idle",
@@ -155,6 +205,18 @@ async function getOrCreateTask(target: DownloadTarget): Promise<Task> {
 async function runTask(task: Task): Promise<void> {
   if (task.state === "downloading") {
     return;
+  }
+  // 残缺文件强制从头重下：上次中断留下的残片（如几 KB 的 bge）不得被断点续传拼接成损坏模型
+  if (existsSync(task.dest)) {
+    try {
+      const st = statSync(task.dest);
+      if (st.size > 0 && st.size < MIN_VALID_SIZE[task.target]) {
+        console.warn(`[downloader] ${task.target} 存在残缺文件（${st.size} 字节 < ${MIN_VALID_SIZE[task.target]}），删除并从头重下`);
+        rmSync(task.dest, { force: true });
+        task.received = 0;
+        task.total = 0;
+      }
+    } catch { /* 忽略 stat 失败 */ }
   }
   task.state = "downloading";
   emit(taskProgress(task));
@@ -206,22 +268,50 @@ async function runTask(task: Task): Promise<void> {
         throw new Error("空响应体");
       }
       const writeStream = createWriteStream(task.dest, { flags: task.received > 0 ? "a" : "w" });
+      // 进度实时推送：每 128KB 或 400ms 至少一次（修复进度条不实时更新）
+      let lastEmitAt = 0;
+      let lastDataAt = Date.now();
+      const STALL_MS = 30_000;
+      const stallTimer = setInterval(() => {
+        if (task.state !== "downloading") { clearInterval(stallTimer); return; }
+        if (Date.now() - lastDataAt > STALL_MS) {
+          clearInterval(stallTimer);
+          ctrl.abort();
+          task.state = "error";
+          emit(taskProgress(task, "下载连接超时（30 秒无数据），请重试"));
+        }
+      }, 5000);
       for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
         if (ctrl.signal.aborted) {
+          clearInterval(stallTimer);
           writeStream.destroy();
           return;
         }
         writeStream.write(chunk);
         task.received += (chunk as Uint8Array).byteLength;
-        if (task.received % (CHUNK * 8) === 0) {
+        lastDataAt = Date.now();
+        const now = Date.now();
+        if (task.received % (CHUNK * 2) === 0 || now - lastEmitAt > 400) {
+          lastEmitAt = now;
           emit(taskProgress(task));
         }
       }
+      clearInterval(stallTimer);
       await new Promise<void>((done) => writeStream.end(done));
+      // 完整性校验：下载完成但文件仍小于最小有效大小 → 视为失败（防镜像返回残缺内容）
+      let finalSize = 0;
+      try {
+        finalSize = statSync(task.dest).size;
+      } catch { /* 忽略 */ }
+      if (finalSize < MIN_VALID_SIZE[task.target]) {
+        task.state = "error";
+        emit(taskProgress(task, `下载不完整（${Math.round(finalSize / 1024 / 1024)}MB < 预期最小 ${Math.round(MIN_VALID_SIZE[task.target] / 1024 / 1024)}MB），请重试`));
+        return;
+      }
       task.state = "done";
       emit(taskProgress(task));
       if (task.target === "llama") {
-        extractLlamaZip(task);
+        void finishLlama(task);
       } else {
         relocateToConfiguredPath(task);
       }
@@ -257,6 +347,7 @@ function relocateToConfiguredPath(task: Task): void {
       task.dest = configured;
       emit(taskProgress(task));
       console.info(`[downloader] 嵌入模型已归位到配置路径: ${configured}`);
+      bgeReadyCb?.(); // 下载完成 → 自动拉起 embedding 服务
     } catch (e) {
       console.warn(`[downloader] 嵌入模型归位失败（可手动移动）: ${e}`);
     }
@@ -276,29 +367,75 @@ function relocateToConfiguredPath(task: Task): void {
   console.info(`[downloader] slime.toml llama_bin 已更新: ${exe}`);
 }
 
-/** llama.cpp zip 解压（Windows 内置 tar 支持 zip；Linux 用 unzip，缺失时提示） */
-function extractLlamaZip(task: Task): void {
+/** llama 收尾：Windows 先部署 CUDA 运行时 DLL 包（如需），再解压二进制包到同一目录，最后自动配置 llama_bin */
+async function finishLlama(task: Task): Promise<void> {
   const outDir = resolve(PROJECT_ROOT, "downloads", "llama.cpp");
   mkdirSync(outDir, { recursive: true });
-  const args = process.platform === "win32"
-    ? ["-xf", task.dest, "-C", outDir]
-    : ["-q", "-o", task.dest, "-d", outDir];
-  const tool = process.platform === "win32" ? "tar" : "unzip";
-  const child = spawn(tool, args, { windowsHide: true });
-  child.on("exit", (code) => {
-    if (code === 0) {
-      task.extractedDir = outDir;
-      emit(taskProgress(task));
-      relocateToConfiguredPath(task);
-    } else {
-      task.extractedDir = "";
-      emit(taskProgress(task, `解压失败（code ${code}），请手动解压 ${task.dest}`));
+  const isWin = process.platform === "win32";
+  const ext = isWin ? ".zip" : ".tar.gz";
+  try {
+    if (task.runtime) {
+      const rtDest = resolve(dirname(task.dest), "llama-cudart" + ext);
+      const ok = await downloadArchive(task.runtime.url, rtDest, task);
+      if (ok) {
+        const r = spawnSync("tar", isWin ? ["-xf", rtDest, "-C", outDir] : ["-xzf", rtDest, "-C", outDir], { windowsHide: true, timeout: 120_000 });
+        if (r.status !== 0) {
+          console.warn(`[downloader] CUDA 运行时解压失败: ${r.stderr?.toString() ?? "?"}`);
+        }
+      } else {
+        console.warn("[downloader] CUDA 运行时下载失败（二进制仍使用，缺 cudart 时可能需手动补）");
+      }
     }
-  });
-  child.on("error", (e) => {
-    task.extractedDir = "";
-    emit(taskProgress(task, `解压失败：${e.message}`));
-  });
+    const args = isWin ? ["-xf", task.dest, "-C", outDir] : ["-xzf", task.dest, "-C", outDir];
+    const r2 = spawnSync("tar", args, { windowsHide: true, timeout: 120_000 });
+    task.extractedDir = outDir;
+    emit(taskProgress(task, r2.status !== 0 ? `解压失败（code ${r2.status}），请手动解压 ${task.dest}` : undefined));
+    if (r2.status === 0) {
+      relocateToConfiguredPath(task);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    emit(taskProgress(task, `llama 安装失败：${msg}`));
+    console.error("[downloader] finishLlama", e);
+  }
+}
+
+/** 下载单个归档（带镜像与断点续传；进度并入宿主 task），返回是否成功 */
+async function downloadArchive(url: string, dest: string, task: Task): Promise<boolean> {
+  for (const base of ["", ...GH_MIRRORS]) {
+    const useUrl = base ? `${base}${url}` : url;
+    try {
+      let start = 0;
+      if (existsSync(dest)) {
+        start = statSync(dest).size;
+      }
+      const resp = await fetch(useUrl, { headers: start > 0 ? { Range: `bytes=${start}-` } : {} });
+      if (!resp.ok && !(resp.status === 416 && start > 0)) {
+        continue;
+      }
+      if (resp.status === 416) {
+        return true; // 已完整
+      }
+      if (start > 0 && resp.status === 200) {
+        start = 0; // 忽略 Range，重下
+      }
+      const ws = createWriteStream(dest, { flags: start > 0 ? "a" : "w" });
+      if (resp.body) {
+        for await (const chunk of resp.body as unknown as AsyncIterable<Uint8Array>) {
+          ws.write(chunk);
+          task.received += chunk.byteLength;
+          if (task.received % (CHUNK * 16) === 0) {
+            emit(taskProgress(task, undefined));
+          }
+        }
+      }
+      await new Promise<void>((done) => ws.end(done));
+      return true;
+    } catch (e) {
+      console.warn(`[downloader] 归档下载失败（${base || "直连"}: ${e instanceof Error ? e.message : e}）`);
+    }
+  }
+  return false;
 }
 
 /** 递归查找 llama-server 可执行文件（Windows: llama-server.exe；Linux/macOS: llama-server） */
@@ -335,22 +472,24 @@ export function tryRelocateDownloads(): void {
         console.info(`[downloader] 已归位嵌入模型: ${deps.bgeModel}`);
       }
     }
-    // llama：zip 未解压且配置路径缺失 → 解压 + 自动配置
+    // llama：归档未解压且配置路径缺失 → 解压 + 自动配置（Windows=zip，Linux=tar.gz）
     if (deps.llamaBin && !existsSync(deps.llamaBin)) {
       const isWin = process.platform === "win32";
       const exeName = isWin ? "llama-server.exe" : "llama-server";
-      const zips = readdirSync(dlDir).filter((f) => f.includes(isWin ? "win-cpu-x64" : "linux-x64") && f.endsWith(".zip"));
-      if (zips.length > 0) {
+      const ext = isWin ? ".zip" : ".tar.gz";
+      const marker = isWin ? "win" : "ubuntu";
+      const archives = readdirSync(dlDir).filter((f) => f.includes(marker) && f.endsWith(ext));
+      if (archives.length > 0) {
         const outDir = resolve(dlDir, "llama.cpp");
-        const zip = resolve(dlDir, zips[0]);
+        const archive = resolve(dlDir, archives[0]);
         if (!existsSync(resolve(outDir, exeName))) {
           mkdirSync(outDir, { recursive: true });
           const args = isWin
-            ? ["-xf", zip, "-C", outDir]
-            : ["-q", "-o", zip, "-d", outDir];
-          const r = spawnSync(isWin ? "tar" : "unzip", args, { windowsHide: true, timeout: 120_000 });
+            ? ["-xf", archive, "-C", outDir]
+            : ["-xzf", archive, "-C", outDir];
+          const r = spawnSync("tar", args, { windowsHide: true, timeout: 120_000 });
           if (r.status !== 0) {
-            console.warn(`[downloader] llama.zip 解压失败: ${r.stderr?.toString() ?? "?"}`);
+            console.warn(`[downloader] llama 归档解压失败: ${r.stderr?.toString() ?? "?"}`);
           }
         }
         const exe = findLlamaServer(outDir);

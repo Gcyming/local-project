@@ -1,54 +1,94 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+# =====================================================================
+# slime 项目 .gitignore
+#   黄金法则：凡能用工具再生成的东西（构建产物 / 运行时数据 / 模型资产 /
+#   依赖产物 / 缓存），一律不入库。
+#   核心知识产权策略：引擎源码（core/*、core-ts/*、tools/* 等）不随仓库
+#   发布，仓库仅保留 GUI 壳 / 文档 / 配置模板 / 部署脚本。
+# =====================================================================
 
-# Runtime artifacts
-server.log
-data/
-Knowledge/
+# ── 引擎源码（核心知识产权，不随仓库发布）──────────────────────────────
+core/
+core-ts/
+gateway-ts/
+tools/
+social/
+sidecar/
+shared/
+scripts/
+tests/
+slime_server.py
+slime_cli.py
+slime_launcher.py
+qa.py
+run_tests.py
+pytest.ini
+requirements.txt
+slime
+slime-server
+slime.cmd
+slime.ps1
+slime-server.ps1
 
-# Virtual env
-.venv/
-venv/
-env/
-
-# Secrets (encrypted or not)
+# ── 密钥 / 敏感配置（双重保险：即使放开 config/ 也拦得住）──────────────
 config/auth_token.json
 config/auth_token.enc
 config/providers.enc.json
 *.enc
-
-# Passphrase fallback
+*.secret
+*.key
 .slime_pass
 
-# OS
-Thumbs.db
-.DS_Store
+# ── 运行时数据 / 本地配置（可再生成，不入库）────────────────────────────
+config/
+data/
+Knowledge/
+# 本地实例配置（模板见 gui/template/slime.toml），可再生成，不入库
+slime.toml
+server.log
+# GUI 运行期生成的 providers/agents/history
+gui/config/
+*.tsbuildinfo
 
-# 数据区（三区分离 §8.1，不入库）
-config/agents.json
-config/history.jsonl
+# ── 虚拟环境 / 依赖产物 ────────────────────────────────────────────────
+.venv/
+venv/
+env/
+runtime/
+node_modules/
+dist/
+out/
+uv.lock
 
-# 二进制/模型资产（不入库）
+# ── 构建产物（electron-builder 输出，可再生成）──────────────────────────
+gui/release*/
+release/
+release-linux/
+*.blockmap
+
+# ── GUI 缓存资产（可重新下载，不入库）───────────────────────────────────
+gui/resources/
+
+# ── 二进制 / 模型资产（不入库）──────────────────────────────────────────
 tools/ffmpeg/
 BGE-M3/
 llama.cpp/
 Local model/
 *.gguf
 
-# Node（双栈新层）
-node_modules/
-dist/
-out/
-release/
-release-linux/
-runtime/
-*.tsbuildinfo
-uv.lock
-
-# 工具残留
+# ── OS / IDE / 工具残留 ────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+.trae/
 .serena/
 .reasonix/
 .playwright-mcp/
+
+# ── Agent Git 治理（P0，影子仓库等）─────────────────────────────────────
+.slime/
+.slime-worktrees/
+
+# ── Python 运行时缓存 ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

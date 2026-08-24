@@ -8,7 +8,7 @@
  * - 进化：规划占位
  */
 import React, { type JSX } from "react";
-import type { MindConfigInfo, VectorTool, EmotionSnapshot, DownloadProgressInfo } from "../../shared/ipc.js";
+import type { MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot, DownloadProgressInfo } from "../../shared/ipc.js";
 
 const MOOD_CN: Record<string, string> = {
   neutral: "平静", happy: "快乐", content: "满足", interested: "好奇",
@@ -28,6 +28,36 @@ const MOOD_DEFS: Array<{ key: string; cn: string; valence: number; arousal: numb
 ];
 
 const pct = (v: number, lo: number, hi: number): number => Math.round(((v - lo) / (hi - lo)) * 100);
+
+/** 自定义情绪存储键（localStorage，前端偏好） */
+const CUSTOM_MOODS_KEY = "slime.custom_moods";
+
+interface CustomMood {
+  key: string;
+  cn: string;
+  valence: number;
+  arousal: number;
+  dominance: number;
+}
+
+function loadCustomMoods(): CustomMood[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_MOODS_KEY);
+    if (!raw) { return []; }
+    const parsed = JSON.parse(raw) as CustomMood[];
+    return Array.isArray(parsed) ? parsed.filter((m) => m && typeof m.cn === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomMoods(list: CustomMood[]): void {
+  try {
+    localStorage.setItem(CUSTOM_MOODS_KEY, JSON.stringify(list));
+  } catch {
+    // localStorage 不可用时静默失败（自定义情绪仅本机偏好）
+  }
+}
 
 /** PAD → 最近情绪点（与 core-ts/mind/emotion.ts nearestMood 同逻辑） */
 function nearestMood(v: number, a: number, d: number): string {
@@ -69,6 +99,42 @@ function SectionCard({ title, children }: { title: string; children: React.React
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: "var(--text-muted)" }}>{title}</div>
       {children}
     </div>
+  );
+}
+
+/**
+ * 路径展示：短路径完整显示（允许在 `\` 处折行），长路径省略中间部分、末尾高亮文件名，
+ * 悬停 tooltip 显示完整路径。绝不在文件名中间拦腰截断。
+ * 关键：容器必须设 `minWidth: 0`（flex 子项默认 minWidth=auto 会强制溢出断行）。
+ */
+function DispPath({ path }: { path: string }): JSX.Element {
+  if (!path) {
+    return <span style={{ color: "var(--text-dim)" }}>（未配置）</span>;
+  }
+  const segs = path.split(/[\\/]/).filter(Boolean);
+  const fileName = segs[segs.length - 1] ?? path;
+  // 短路径（<=60 字符）：完整显示，用零宽空格让浏览器优先在 `\` 处折行
+  if (path.length <= 60) {
+    const withBreaks = path.replace(/[\\/]/g, (m) => `${m}\u200B`);
+    return (
+      <span
+        title={path}
+        style={{ wordBreak: "break-word", overflowWrap: "break-word" }}
+      >
+        {withBreaks}
+      </span>
+    );
+  }
+  // 长路径：显示 "C:\Users\MR\…\fileName"，文件名完整不截断
+  const head = segs.slice(0, 3).join("\\");
+  return (
+    <span
+      title={path}
+      style={{ display: "inline-flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}
+    >
+      <span style={{ color: "var(--text-muted)" }}>{head}\u200B…\u200B</span>
+      <span style={{ fontWeight: 600, color: "var(--text)", wordBreak: "break-word" }}>{fileName}</span>
+    </span>
   );
 }
 
@@ -151,6 +217,12 @@ export default function MindHubPanel({
   const [dragOver, setDragOver] = React.useState(false);
   /** 依赖定位反馈消息（按 key） */
   const [locateMsg, setLocateMsg] = React.useState<Record<string, string>>({});
+  /** 自定义情绪（localStorage 持久化） */
+  const [customMoods, setCustomMoods] = React.useState<CustomMood[]>(loadCustomMoods);
+  const [customAdding, setCustomAdding] = React.useState(false);
+  const [customName, setCustomName] = React.useState("");
+  /** 进化快照（生命周期 + 人格特质 + 行为/交互积累） */
+  const [evolution, setEvolution] = React.useState<EvolutionSnapshot | null>(null);
 
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
 
@@ -203,6 +275,46 @@ export default function MindHubPanel({
   const [dl0, setDl0] = React.useState<Record<string, DownloadProgressInfo>>({});
   const dlMap = dl ?? dl0;
 
+  // 下载中轮询兜底：即使推送事件偶发丢失，进度条也能实时刷新（1s 拉一次快照）
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.mind?.downloadSnapshot) return;
+    const active = (Object.values(dlMap) as DownloadProgressInfo[]).some((p) => p.state === "downloading" || p.state === "paused");
+    if (!active) return;
+    const timer = window.setInterval(() => {
+      void api.mind.downloadSnapshot("llama").then((p: DownloadProgressInfo) => {
+        setDl0((prev) => ({ ...prev, llama: p }));
+      }).catch(() => {});
+      void api.mind.downloadSnapshot("bge").then((p: DownloadProgressInfo) => {
+        setDl0((prev) => ({ ...prev, bge: p }));
+      }).catch(() => {});
+    }, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlMap.llama?.state, dlMap.bge?.state]);
+
+  // 下载完成 → 刷新依赖状态：左侧 ✅/❌ 图标跟随真实文件状态（此前 cfg 只在挂载时加载一次，
+  // 下载完成后图标仍停留 ❌ 而右侧已显示"已下载"）。立即刷一次 + 延迟 2s 再刷一次：
+  // bge 归位是同步的，llama 解压 + 改写 llama_bin 是异步的（finishLlama）。
+  const prevDoneRef = React.useRef<Record<string, boolean>>({});
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.mind?.configGet) return;
+    let timer: number | undefined;
+    for (const target of ["llama", "bge"] as const) {
+      const isDone = dlMap[target]?.state === "done";
+      if (isDone && !prevDoneRef.current[target]) {
+        void api.mind.configGet().then((c: MindConfigInfo) => setCfg(c)).catch(console.error);
+        timer = window.setTimeout(() => {
+          void api.mind.configGet().then((c: MindConfigInfo) => setCfg(c)).catch(console.error);
+        }, 2000);
+      }
+      prevDoneRef.current[target] = isDone;
+    }
+    return () => { if (timer) window.clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlMap.llama?.state, dlMap.bge?.state]);
+
   React.useEffect(() => {
     if (!agentId || !api?.mind?.emotionGet) return;
     void api.mind.emotionGet(agentId).then((e: EmotionSnapshot) => {
@@ -211,6 +323,14 @@ export default function MindHubPanel({
       setValence(pct(e.valence, -1, 1));
       setArousal(pct(e.arousal, 0, 1));
       setDominance(pct(e.dominance, 0, 1));
+    }).catch(console.error);
+  }, [agentId]);
+
+  /** 进化快照：随选中 Agent 加载（生命周期 + 特质权重 + 行为/交互积累） */
+  React.useEffect(() => {
+    if (!agentId || !api?.mind?.evolutionGet) return;
+    void api.mind.evolutionGet(agentId).then((e: EvolutionSnapshot) => {
+      setEvolution(e);
     }).catch(console.error);
   }, [agentId]);
 
@@ -226,16 +346,55 @@ export default function MindHubPanel({
     });
   }
 
-  /** 滑块微调：同步预览 mood（最近邻） */
+  /** 添加自定义情绪：以当前滑块 PAD 值为基线，保存到 localStorage */
+  function addCustomMood(): void {
+    const name = customName.trim();
+    if (!name) { return; }
+    const key = `custom_${name}`;
+    const next = [
+      ...customMoods.filter((m) => m.key !== key),
+      {
+        key,
+        cn: name,
+        valence: valence / 100 * 2 - 1,
+        arousal: arousal / 100,
+        dominance: dominance / 100,
+      },
+    ];
+    setCustomMoods(next);
+    saveCustomMoods(next);
+    setCustomName("");
+    setCustomAdding(false);
+    setSaved(`自定义情绪「${name}」已添加（可点击套用）`);
+    window.setTimeout(() => setSaved(""), 4000);
+  }
+
+  /** 删除自定义情绪 */
+  function removeCustomMood(key: string): void {
+    const next = customMoods.filter((m) => m.key !== key);
+    setCustomMoods(next);
+    saveCustomMoods(next);
+  }
+
+  /** 滑块微调：同步预览 mood（最近邻）；首拖（无 preview）时从当前 emotion 构造基线 */
   function onSliderChange(kind: "v" | "a" | "d", v: number): void {
     if (kind === "v") setValence(v);
     if (kind === "a") setArousal(v);
     if (kind === "d") setDominance(v);
     setPreview((prev) => {
-      const nv = kind === "v" ? v / 100 * 2 - 1 : (prev?.valence ?? emotion?.valence ?? 0);
-      const na = kind === "a" ? v / 100 : (prev?.arousal ?? emotion?.arousal ?? 0.3);
-      const nd = kind === "d" ? v / 100 : (prev?.dominance ?? emotion?.dominance ?? 0.5);
-      return prev ? { ...prev, valence: nv, arousal: na, dominance: nd, mood: nearestMood(nv, na, nd) } : prev;
+      const base = prev ?? {
+        valence: emotion?.valence ?? 0,
+        arousal: emotion?.arousal ?? 0.3,
+        dominance: emotion?.dominance ?? 0.5,
+        mood: emotion?.mood ?? "neutral",
+        relational_depth: emotion?.relational_depth ?? 0,
+        last_updated: null,
+        events: emotion?.events ?? [],
+      };
+      const nv = kind === "v" ? v / 100 * 2 - 1 : base.valence;
+      const na = kind === "a" ? v / 100 : base.arousal;
+      const nd = kind === "d" ? v / 100 : base.dominance;
+      return { ...base, valence: nv, arousal: na, dominance: nd, mood: nearestMood(nv, na, nd) };
     });
   }
 
@@ -277,6 +436,28 @@ export default function MindHubPanel({
     setCfg((prev) => (prev ? { ...prev, vectorTool: res.vectorTool } : prev));
   }
 
+  /** 重置本地数据（清空 Provider/Agent/会话与历史；记忆保留）。确认后执行并整页刷新 */
+  async function handleResetData(): Promise<void> {
+    const a = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!a?.data?.reset) { return; }
+    if (!window.confirm(
+      "确定要重置本地数据？\n\n" +
+      "将清除（仅应用数据目录 config/ 下的 4 个文件）：\n" +
+      "· providers.enc.json —— 所有 API Provider 及本地保存的密钥\n" +
+      "· agents.json —— 所有 Agent 及其配置\n" +
+      "· history.jsonl —— 全部对话历史\n" +
+      "· sessions.json —— 会话列表\n\n" +
+      "【保留】记忆文件（Knowledge/）、模型下载文件、slime.toml 配置、仓库与 Obsidian 笔记均不受影响。\n\n" +
+      "此操作不可撤销，是否继续？",
+    )) { return; }
+    const res = await a.data.reset().catch((e: unknown) => ({ ok: false as const, error: String(e) }));
+    if (res.ok) {
+      window.setTimeout(() => window.location.reload(), 400);
+    } else {
+      window.alert(`重置失败：${res.error ?? "未知错误"}`);
+    }
+  }
+
   async function convertToSkill(): Promise<void> {
     if (!skillName.trim() || !skillFile) return;
     const res = await api.mind.bookToSkill(skillName.trim(), skillFile.content)
@@ -314,7 +495,7 @@ export default function MindHubPanel({
   return (
     <div style={{ padding: 12, overflowY: "auto", height: "100%" }}>
       {/* 依赖状态 */}
-      <SectionCard title="🔌 依赖状态（换设备部署检查 + 一键下载）">
+      <SectionCard title="依赖状态（换设备部署检查 + 一键下载）">
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
           代码与依赖清单在 GitHub 仓库内（pnpm-lock.yaml / requirements.txt 锁版本），
           但 <b>模型文件与 llama.cpp 二进制不在仓库</b>。每条依赖可「自动检索」（扫描项目文件夹）
@@ -329,8 +510,8 @@ export default function MindHubPanel({
         ].map((d) => (
           <div key={d.label} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12 }}>
             <span style={{ color: d.ok ? "var(--ok, #4ade80)" : "var(--warning)" }}>{d.ok ? "✅" : "❌"}</span>
-            <span style={{ width: 150, color: "var(--text-muted)" }}>{d.label}</span>
-            <span style={{ flex: 1, color: "var(--text)", wordBreak: "break-all", fontSize: 11 }}>{d.path || "（未配置）"}</span>
+            <span style={{ width: 150, color: "var(--text-muted)", flexShrink: 0 }}>{d.label}</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 11 }}><DispPath path={d.path} /></span>
             {!d.ok && d.target && <DownloadControls target={d.target} dl={dlMap} />}
             {d.ok && d.target === "llama" && dlMap.llama?.extractedDir && (
               <span style={{ fontSize: 10, color: "var(--text-dim)" }} title={dlMap.llama.extractedDir}>已解压</span>
@@ -347,10 +528,17 @@ export default function MindHubPanel({
           兼容全部 GGUF 模型（含嵌入模型）；如需要 GPU 加速可自行另下 CUDA 版并在 slime.toml 更换 llama_bin。
           嵌入模型来自 llama.cpp 官方转换仓库（ggml-org/bge-m3-Q8_0-GGUF），635MB，下载后放置到 slime.toml 配置路径即可。
         </div>
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+          <button className="btn" style={{ fontSize: 12, color: "var(--warning)" }}
+            onClick={() => void handleResetData()}>
+            重置本地数据（清空 Provider / Agent / 会话与历史）
+          </button>
+          <span style={{ fontSize: 10.5, color: "var(--text-dim)", marginLeft: 8 }}>提示：安装包内不附带任何用户数据；此处用于清理应用数据目录（%APPDATA%\\slime-gui\\slime-data）中的旧数据。</span>
+        </div>
       </SectionCard>
 
       {/* 向量工具 */}
-      <SectionCard title="🧠 向量工具（记忆检索的嵌入方式）">
+      <SectionCard title="向量工具（记忆检索的嵌入方式）">
         <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
           {([
             { id: "bge" as VectorTool, name: "高优模式", desc: "真实语义嵌入（本地嵌入模型服务 :8999），相似记忆召回准确；需要嵌入模型与 llama.cpp 就位，失败自动降级基础模式" },
@@ -378,7 +566,7 @@ export default function MindHubPanel({
       </SectionCard>
 
       {/* 情绪调节 */}
-      <SectionCard title="🎭 情绪调节（手动拉情绪基线，不影响自动演化）">
+      <SectionCard title="情绪调节（手动拉情绪基线，不影响自动演化）">
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>目标 Agent：</span>
           <select
@@ -424,6 +612,61 @@ export default function MindHubPanel({
             </button>
           ))}
         </div>
+        {/* 自定义情绪：以当前滑块 PAD 值为基线保存 */}
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+          自定义情绪（先拖动上方滑块到目标 PAD 值，再命名添加；可一键套用 / 删除）：
+        </div>
+        {customMoods.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 8 }}>
+            {customMoods.map((m) => (
+              <div key={m.key}
+                title={`valence=${m.valence} arousal=${m.arousal} dominance=${m.dominance}`}
+                style={{
+                  position: "relative", borderRadius: 8, padding: "6px 8px",
+                  border: (shown?.mood === m.key) ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                  background: (shown?.mood === m.key) ? "var(--accent-soft)" : "var(--bg-input)",
+                  fontSize: 11.5, cursor: "pointer",
+                }}
+                onClick={() => applyMood(m)}>
+                <span style={{ fontWeight: 700, color: "var(--accent-hover)" }}>{m.cn}</span>
+                <span style={{ color: "var(--text-dim)", fontSize: 10.5, display: "block" }}>
+                  V{m.valence.toFixed(1)} A{m.arousal.toFixed(2)} D{m.dominance.toFixed(1)}
+                </span>
+                <button
+                  title="删除该自定义情绪"
+                  onClick={(e) => { e.stopPropagation(); removeCustomMood(m.key); }}
+                  style={{
+                    position: "absolute", top: 2, right: 4, border: "none", background: "transparent",
+                    color: "var(--text-dim)", fontSize: 11, cursor: "pointer", padding: "0 2px",
+                  }}>
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {customAdding ? (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <input
+              className="input-field" style={{ flex: 1, fontSize: 12.5 }}
+              placeholder="自定义情绪名称（如：雀跃）"
+              value={customName}
+              autoFocus
+              onChange={(e) => setCustomName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { addCustomMood(); }
+                if (e.key === "Escape") { setCustomAdding(false); setCustomName(""); }
+              }}
+            />
+            <button className="btn primary" style={{ fontSize: 12.5 }} disabled={!customName.trim()} onClick={addCustomMood}>保存</button>
+            <button className="btn" style={{ fontSize: 12.5 }} onClick={() => { setCustomAdding(false); setCustomName(""); }}>取消</button>
+          </div>
+        ) : (
+          <button className="btn" style={{ fontSize: 12.5, marginBottom: 8 }}
+            onClick={() => setCustomAdding(true)}>
+            ＋ 添加自定义情绪
+          </button>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button className="btn primary" style={{ fontSize: 12.5 }} onClick={() => void saveEmotion()}>保存情绪基线</button>
           <span style={{ fontSize: 11.5, color: "var(--ok, #4ade80)" }}>{saved}</span>
@@ -431,7 +674,7 @@ export default function MindHubPanel({
       </SectionCard>
 
       {/* 记忆 */}
-      <SectionCard title="🗄️ 记忆（存储位置）">
+      <SectionCard title="记忆（存储位置）">
         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
           <div><span style={{ color: "var(--text-muted)" }}>记忆本体（memory.json）：</span>
             <span style={{ fontSize: 11, wordBreak: "break-all" }}>{cfg?.memoryRoot || (cfg?.memoryPaths.knowledge ?? "读取中…")}</span>
@@ -451,7 +694,7 @@ export default function MindHubPanel({
       </SectionCard>
 
       {/* 学习：book-to-skill */}
-      <SectionCard title="📖 学习 · book-to-skill（文档 → 技能，化为己用）">
+      <SectionCard title="学习 · book-to-skill（文档 → 技能，化为己用）">
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
           拖入或选择一份文档（.md / .txt 等文本，≤2MB），生成专属技能（config/skills/&lt;名称&gt;/SKILL.md）。
           生成后 Agent 即能在对话中通过技能搜索调用——不影响既有自动学习（记忆提取/行为沉淀）管线，仅作拓展。
@@ -506,13 +749,81 @@ export default function MindHubPanel({
         )}
       </SectionCard>
 
-      {/* 进化（占位） */}
-      <SectionCard title="🧬 进化（规划中）">
-        <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
-          演化引擎（生命周期状态机 + trait 强化/弱化/遗忘）已在 core-ts 完整实现，
-          此处后续将提供：生命周期状态可视化、trait 调整、行为模式归档/唤醒、A/B 实验指标。
-          当前版本请先通过 CLI（/evolve）查看演化状态。
-        </div>
+      {/* 进化：生命周期 + 人格特质权重曲线 + 行为/交互积累 */}
+      <SectionCard title="进化（人格特质权重 + 行为沉淀）">
+        {!evolution?.ok ? (
+          <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
+            演化引擎（生命周期状态机 + trait 强化/弱化/遗忘）已在 core-ts 完整实现；
+            请先在「情绪调节」中选择目标 Agent 后查看其进化状态。
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>生命周期：</span>
+              <span style={{
+                padding: "2px 10px", borderRadius: 10, fontSize: 11.5, fontWeight: 700,
+                background: "var(--accent-soft)", color: "var(--accent-hover)",
+              }}>
+                {evolution.lifecycle ?? "unknown"}
+              </span>
+              {evolution.created_at && (
+                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                  创建于 {new Date(evolution.created_at).toLocaleDateString("zh-CN")}
+                </span>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 12 }}>
+              {[
+                { label: "人格特质", value: evolution.traits?.length ?? 0 },
+                { label: "行为沉淀", value: evolution.behaviorCount ?? 0 },
+                { label: "交互积累", value: evolution.interactionCount ?? 0 },
+              ].map((s) => (
+                <div key={s.label} style={{
+                  textAlign: "center", padding: "8px 4px", borderRadius: 10,
+                  background: "var(--bg-input)", border: "1px solid var(--border)",
+                }}>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: "var(--accent-hover)" }}>{s.value}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+              人格特质权重（0–1，越高代表该特质在交互中被强化得越稳固）：
+            </div>
+            {(evolution.traits ?? []).length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--text-dim)", padding: "6px 0" }}>
+                暂无已沉淀的人格特质 — 与 {evolution.agentName ?? "该 Agent"} 多轮对话后，高频行为模式会自动固化为特质。
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {(evolution.traits ?? []).map((t) => (
+                  <div key={t.name} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 90, fontSize: 11.5, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {t.name}
+                    </span>
+                    <div style={{
+                      flex: 1, height: 10, borderRadius: 5, background: "var(--border)",
+                      overflow: "hidden",
+                    }}>
+                      <div style={{
+                        width: `${Math.max(2, Math.min(100, (t.weight ?? 0) * 100))}%`, height: "100%",
+                        background: "linear-gradient(90deg, var(--accent-soft), var(--accent))",
+                        borderRadius: 5, transition: "width 0.4s",
+                      }} />
+                    </div>
+                    <span style={{ width: 40, textAlign: "right", fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
+                      {(t.weight ?? 0).toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.6 }}>
+              特质权重由演化引擎在对话中按成功/失败反馈强化或弱化（半衰期遗忘），行为沉淀将高频交互固化为稳定习惯；
+              完整演化状态可经 CLI（/evolve）查看。
+            </div>
+          </>
+        )}
       </SectionCard>
     </div>
   );

@@ -16,6 +16,8 @@ export interface ModelSpec {
   max_output?: number;
   /** 是否支持图片输入 */
   vision?: boolean;
+  /** 是否启用（聊天模型选择只列出启用项；旧记录无此字段视为启用） */
+  selected?: boolean;
 }
 
 export interface ProviderRecord {
@@ -84,24 +86,46 @@ function sanitizeModels(raw: unknown): ModelSpec[] | undefined {
   return raw
     .filter((m): m is ModelSpec => typeof m === "object" && m !== null && typeof (m as ModelSpec).id === "string")
     .slice(0, MAX_MODELS)
-    .map((m) => ({
-      id: (m.id as string).slice(0, MAX_MODEL_ID),
-      context_window: typeof m.context_window === "number" && m.context_window > 0 ? Math.floor(m.context_window) : undefined,
-      max_output: typeof m.max_output === "number" && m.max_output > 0 ? Math.floor(m.max_output) : undefined,
-      vision: m.vision === true,
-    }));
+    .map((rawM) => {
+      // 上游可能误存了 "<provider_key>::/<id>" 或 "<provider_key>:<id>" 全限定格式，
+      // 导致下拉显示重复拼接。这里兜底剥离所有常见前缀形式，只保留真实模型 ID。
+      let id = String((rawM as ModelSpec).id).slice(0, MAX_MODEL_ID);
+      // 反复尝试 ::/ 和单冒号前缀（最多 2 轮，防嵌套脏数据），前缀字符集与 KEY_RE 一致
+      for (let i = 0; i < 2; i++) {
+        const m1 = id.match(/^([a-zA-Z0-9_\-\u4e00-\u9fa5]{1,64})::\/(.+)$/);
+        if (m1) { id = m1[2]; continue; }
+        const m2 = id.match(/^([a-zA-Z0-9_\-\u4e00-\u9fa5]{1,64}):(.+)$/);
+        if (m2) { id = m2[2]; continue; }
+        break;
+      }
+      // 双重重复后缀（"公益模型公益模型" → 存储时 bug 的双写）
+      if (id.length > 4 && id.length % 2 === 0) {
+        const half = id.length / 2;
+        if (id.slice(0, half) === id.slice(half)) id = id.slice(0, half);
+      }
+      return {
+        id,
+        context_window: typeof (rawM as any).context_window === "number" && (rawM as any).context_window > 0 ? Math.floor((rawM as any).context_window) : undefined,
+        max_output: typeof (rawM as any).max_output === "number" && (rawM as any).max_output > 0 ? Math.floor((rawM as any).max_output) : undefined,
+        vision: (rawM as any).vision === true,
+        // 旧记录没有 selected 字段 → 视为启用（历史行为：保存的都是启用模型）
+        selected: (rawM as any).selected !== false,
+      };
+    });
 }
 
 export function listProviders(): ProviderSummary[] {
   const table = loadTable();
-  return Object.entries(table).map(([key, rec]) => ({
-    key,
-    api_base: rec.api_base ?? "",
-    has_key: Boolean(rec.api_key),
-    key_hint: maskKey(rec.api_key ?? ""),
-    model: rec.model ?? null,
-    models: sanitizeModels(rec.models) ?? [],
-  }));
+  return Object.entries(table)
+    .filter(([key]) => key !== LOCAL_MODELS_KEY)
+    .map(([key, rec]) => ({
+      key,
+      api_base: rec.api_base ?? "",
+      has_key: Boolean(rec.api_key),
+      key_hint: maskKey(rec.api_key ?? ""),
+      model: rec.model ?? null,
+      models: sanitizeModels(rec.models) ?? [],
+    }));
 }
 
 function normalizeBaseUrl(base: string): string {
@@ -229,6 +253,16 @@ export function removeProvider(key: string): { ok: boolean; error?: string } {
     return { ok: true };
   } catch (e) {
     return { ok: false, error: `删除失败：${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/** 清空全部 Provider 与本地模型注册（数据重置用；写入空表） */
+export function clearAllProviders(): { ok: boolean; error?: string } {
+  try {
+    encrypt({}, "config/providers.enc.json", rootOverride ? { projectRoot: rootOverride } : {});
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: `清空失败：${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
