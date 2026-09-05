@@ -74,7 +74,34 @@ tools/ffmpeg/
 BGE-M3/
 llama.cpp/
 Local model/
+models/
 *.gguf
+
+# ── 临时 / 调试 / 冒烟 / 环境残留（易泄露内部结构，一律不入库）────────────
+_fix_desc.py
+_fix_*.py
+_model_stage/
+_smoke_cloud/
+.slime_brain_patch.py
+.slime_silam_patch.py
+.slime_*_patch.py
+configs/
+*.log
+
+# ── 敏感扩展名兜底（双重保险：任何目录下出现即忽略）──────────────────────
+*.pem
+*.p12
+*.pfx
+*.token
+*.tokens
+*.cookie*
+*.c2
+credentials*
+*_credential*
+auth*.json
+.providers.enc*
+.whitelist.json
+.secret*
 
 # ── OS / IDE / 工具残留 ────────────────────────────────────────────────
 Thumbs.db
