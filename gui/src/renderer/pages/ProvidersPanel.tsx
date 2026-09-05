@@ -3,15 +3,35 @@
  * - Provider/本地模型卡片：简洁摘要；全部编辑/调试参数收敛在弹窗内
  * - 添加/编辑弹窗（向导式）：
  *   ① 接入协议选择（OpenAI 兼容自动探测 / 手动指定模型）
- *   ② 填 Base URL + API Key → 自动探测模型列表并预选默认选项
- *   ③ 每模型调上下文/最大输出/视觉 + 默认模型
+ *   ② 填 Base URL + API Key → 自动探测模型列表（默认均未启用，按需开启）
+ *   ③ 每模型调上下文/最大输出/视觉 + 启用拨片
  *   ④ 折叠区：参数文件调试（slime.toml / 全局配置 / MCP / 技能库）内嵌于弹窗
  */
 import React, { type JSX } from "react";
 import type { ProviderSummary, ModelSpec, ConfigOverview, ConfigFileInfo, SkillInfo, McpServerInfo, LocalModelSpec } from "../../shared/ipc.js";
-import { ChevronIcon } from "../components/Icon.js";
+import { ChevronIcon, PlusIcon, CheckIcon, CloseIcon, RefreshIcon } from "../components/Icon.js";
+import { confirmAsync } from "../dialog.js";
+import { REASONING_PRESETS, useReasoningPreset, saveReasoningPreset, EFFORT_LABEL, THINKING_PRESETS, useThinkingPreset, saveThinkingPreset } from "../reasoning.js";
 
 interface DraftModel extends ModelSpec { selected: boolean; }
+
+/** A-158：常用供应商预设库（对齐 LobeChat/Cherry Studio——选中即自动填充 base URL 与
+ *  端点格式，根治「加不上」= Base URL 手填错误/格式选错的高频诱因）。
+ *  模型列表仍按需「获取模型列表」/手动补充（各平台模型随版本变动，不宜硬编码）。 */
+const PRESET_PROVIDERS: Array<{ name: string; label: string; api_base: string; api_format: "openai" | "anthropic" | "auto"; hint?: string }> = [
+  { name: "deepseek", label: "DeepSeek（深度求索）", api_base: "https://api.deepseek.com", api_format: "auto", hint: "deepseek-chat / deepseek-reasoner" },
+  { name: "openai", label: "OpenAI", api_base: "https://api.openai.com/v1", api_format: "auto", hint: "gpt-4o / gpt-4o-mini" },
+  { name: "openrouter", label: "OpenRouter（聚合 300+）", api_base: "https://openrouter.ai/api/v1", api_format: "auto", hint: "免费模型池含大厂开源模型" },
+  { name: "siliconflow", label: "硅基流动 SiliconFlow", api_base: "https://api.siliconflow.cn/v1", api_format: "auto", hint: "Qwen / DeepSeek / GLM 等国内可达" },
+  { name: "moonshot", label: "Moonshot（Kimi）", api_base: "https://api.moonshot.cn/v1", api_format: "auto", hint: "kimi-k2 / moonshot-v1-*" },
+  { name: "zhipu", label: "智谱 GLM", api_base: "https://open.bigmodel.cn/api/paas/v4", api_format: "auto", hint: "glm-4 / glm-4-flash" },
+  { name: "dashscope", label: "阿里百炼（通义）", api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_format: "auto", hint: "qwen-plus / qwen-max" },
+  { name: "doubao", label: "火山引擎豆包", api_base: "https://ark.cn-beijing.volces.com/api/v3", api_format: "auto", hint: "doubao-*（需创建接入点）" },
+  { name: "groq", label: "Groq（极速推理）", api_base: "https://api.groq.com/openai/v1", api_format: "auto", hint: "llama-3.3 / meta-*" },
+  { name: "together", label: "Together AI", api_base: "https://api.together.xyz/v1", api_format: "auto", hint: "meta-llama / deepseek 等" },
+  { name: "anthropic", label: "Anthropic（Claude）", api_base: "https://api.anthropic.com", api_format: "anthropic", hint: "claude-*（Messages API）" },
+  { name: "agi-anyi", label: "AGI-Anyi（免费池）", api_base: "https://api.agi-anyi.com", api_format: "auto", hint: "免费模型池（需代理）" },
+];
 
 type EditMode = "api-add" | "api-edit" | "local-add" | "local-edit";
 type Proto = "openai" | "manual";
@@ -22,7 +42,7 @@ interface EditState {
   name: string;
   api_base: string;
   api_key: string;
-  model: string;
+  api_format: "openai" | "anthropic" | "auto";
   models: DraftModel[];
   proto: Proto;
   manualIds: string;
@@ -32,12 +52,14 @@ interface EditState {
   gpu_layers: string;
   max_output: string;
   vision: boolean;
+  thinking?: boolean;
+  thinking_efforts?: string[];
 }
 
 function emptyEdit(): EditState {
   return {
-    mode: "api-add", key: "", name: "", api_base: "", api_key: "", model: "",
-    models: [], proto: "openai", manualIds: "",
+    mode: "api-add", key: "", name: "", api_base: "", api_key: "",
+    api_format: "auto", models: [], proto: "openai", manualIds: "",
     localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false,
   };
 }
@@ -48,6 +70,8 @@ export default function ProvidersPanel(): JSX.Element {
   const [localModels, setLocalModels] = React.useState<LocalModelSpec[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
+  /** 各供应商的刷新中状态（key → boolean），防止重复点击 */
+  const [refreshing, setRefreshing] = React.useState<Record<string, boolean>>({});
 
   /* 编辑弹窗 */
   const [edit, setEdit] = React.useState<EditState | null>(null);
@@ -59,6 +83,9 @@ export default function ProvidersPanel(): JSX.Element {
 
   /* 弹窗内：参数文件调试折叠区 */
   const [debugOpen, setDebugOpen] = React.useState(false);
+  /** 推理等级模式（上游默认 / 预制供应商）：决定聊天输入框「推理配置」面板的可选等级集合 */
+  const reasonPreset = useReasoningPreset();
+  const thinkPreset = useThinkingPreset();
   const [overview, setOverview] = React.useState<ConfigOverview | null>(null);
   const [activeFile, setActiveFile] = React.useState<string>("slime.toml");
   const [fileContent, setFileContent] = React.useState("");
@@ -141,11 +168,12 @@ export default function ProvidersPanel(): JSX.Element {
     setModalError(null);
     setEdit({
       mode: "api-edit", key: p.key, name: p.key,
-      api_base: p.api_base, api_key: "", model: p.model ?? "",
+      api_base: p.api_base, api_key: "",
+      api_format: p.api_format ?? "auto",
       // 保留各模型的启用状态（旧记录无 selected → 视为启用）
       models: p.models.map((m) => ({ ...m, selected: (m as DraftModel).selected !== false })),
       proto: "openai", manualIds: p.models.map((m) => m.id).join("\n"),
-      localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false,
+    localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false, thinking: undefined, thinking_efforts: undefined,
     });
   }
 
@@ -158,13 +186,14 @@ export default function ProvidersPanel(): JSX.Element {
     setModalError(null);
     setEdit({
       mode: "local-edit", key: m.id, name: m.id,
-      api_base: "", api_key: "", model: "",
+      api_base: "", api_key: "",
+      api_format: "auto",
       models: [], proto: "openai", manualIds: "",
       localPath: m.path, localLabel: m.label,
-      ctx_len: m.ctx_len ? String(m.ctx_len) : "",
-      gpu_layers: m.gpu_layers !== undefined ? String(m.gpu_layers) : "",
-      max_output: m.max_output ? String(m.max_output) : "",
-      vision: m.vision === true,
+       ctx_len: m.ctx_len ? String(m.ctx_len) : "",
+       gpu_layers: m.gpu_layers !== undefined ? String(m.gpu_layers) : "",
+       max_output: m.max_output ? String(m.max_output) : "",
+       vision: m.vision === true,
     });
   }
 
@@ -180,7 +209,7 @@ export default function ProvidersPanel(): JSX.Element {
       if (res.ok && res.models) {
         // 默认一个都不启用（用户按需用拨片开启；顶部提供「全选」）
         const models = res.models.map((m: ModelSpec) => ({ ...m, selected: false }));
-        setEdit({ ...edit, models, proto: "openai", model: edit.model || "" });
+        setEdit({ ...edit, models, proto: "openai" });
         showNotice(true, `探测成功：发现 ${res.models.length} 个模型（默认均未启用，可在列表中开启需要的模型）`);
       } else {
         setEdit({ ...edit, models: [] });
@@ -201,7 +230,19 @@ export default function ProvidersPanel(): JSX.Element {
       const prev = edit.models.find((m) => m.id === id);
       return prev ?? { id, selected: false };
     });
-    setEdit({ ...edit, models: merged, model: edit.model || merged[0]?.id || "" });
+    setEdit({ ...edit, models: merged });
+  }
+
+  /** A-158 修复：手动模式模型同步合并（保存时直接调用，不再依赖异步 setState）——
+   *  此前 handleSave 里 applyManualIds() 是异步状态更新，立即读 edit.models 仍是旧值，
+   *  用户手填的模型 ID 从未真正保存（「加了但用不了」的直接根因之一）。 */
+  function manualModelsSync(): DraftModel[] {
+    if (!edit || edit.proto !== "manual") { return edit?.models ?? []; }
+    const ids = edit.manualIds.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    return ids.map((id) => {
+      const prev = edit.models.find((m) => m.id === id);
+      return prev ?? { id, selected: false };
+    });
   }
 
   /** 全选/全不选（拨片列顶部开关） */
@@ -249,9 +290,6 @@ export default function ProvidersPanel(): JSX.Element {
 
   async function handleSave(): Promise<void> {
     if (!api.current || !edit) { return; }
-    if (edit.proto === "manual") {
-      applyManualIds();
-    }
     setModalError(null);
     setLoading(true);
     try {
@@ -275,19 +313,24 @@ export default function ProvidersPanel(): JSX.Element {
         }
         return;
       }
+      // A-158：保存前同步合并手动填写的模型 ID（此前异步 setState 导致手动模型从未入库）
+      const modelsForSave = manualModelsSync();
       // 保存全部模型（含 selected 启用标记），供应商编辑界面展示全量、聊天界面只列启用项
-      const models = edit.models.map((m) => ({
+      const models = modelsForSave.map((m) => ({
         id: m.id,
         context_window: m.context_window || undefined,
         max_output: m.max_output || undefined,
         vision: m.vision === true,
         selected: m.selected === true,
+        price_in_usd: m.price_in_usd || undefined,
+        price_out_usd: m.price_out_usd || undefined,
       }));
       const res = await api.current.providers.save({
         key: edit.name.trim(),
         api_base: edit.api_base.trim(),
         api_key: edit.api_key.trim() || undefined,
-        model: edit.model || null,
+        // 默认模型字段保留旧值（底层 engine 的 api:<key> 无显式模型时使用；UI 不再提供修改入口）
+        api_format: edit.api_format,
         models,
       });
       if (res.ok) {
@@ -302,9 +345,33 @@ export default function ProvidersPanel(): JSX.Element {
     }
   }
 
+  /** 一键刷新供应商模型列表：用已保存的 API Key 重新探测上游，无需重新填写配置 */
+  async function handleRefreshProvider(p: ProviderSummary): Promise<void> {
+    if (!api.current || !p.has_key) {
+      showNotice(false, `「${p.key}」未配置 API Key，请先编辑填写后再刷新`);
+      return;
+    }
+    setRefreshing((prev) => ({ ...prev, [p.key]: true }));
+    try {
+      const res = await api.current.providers.refresh(p.key);
+      if (res.ok) {
+        const extra = (res.added ? `，新增 ${res.added} 个` : "") + (res.removed ? `，下架 ${res.removed} 个` : "");
+        showNotice(true, `已刷新「${p.key}」模型列表（共 ${res.total ?? 0} 个${extra}；原启用状态已保留，新增模型需手动启用）`);
+        await refreshAll();
+      } else {
+        showNotice(false, `刷新失败：${res.error ?? "未知错误"}`);
+      }
+    } catch (e) {
+      showNotice(false, `刷新失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRefreshing((prev) => ({ ...prev, [p.key]: false }));
+    }
+  }
+
   async function handleRemoveApi(key: string): Promise<void> {
     if (!api.current) { return; }
-    if (!window.confirm(`删除供应商「${key}」？\n（Agent 的 model_choice 若引用该 key 将失效）`)) { return; }
+    // A-151: window.confirm 同步阻塞渲染进程 JS，对话框显示异常时输入框全部失灵 → 走异步原生对话框
+    if (!(await confirmAsync(`删除供应商「${key}」？`, "Agent 的 model_choice 若引用该 key 将失效"))) { return; }
     setLoading(true);
     try {
       const res = await api.current.providers.remove(key);
@@ -317,7 +384,7 @@ export default function ProvidersPanel(): JSX.Element {
 
   async function handleRemoveLocal(id: string): Promise<void> {
     if (!api.current) { return; }
-    if (!window.confirm(`删除本地模型「${id}」？`)) { return; }
+    if (!(await confirmAsync(`删除本地模型「${id}」？`))) { return; }
     setLoading(true);
     try {
       const res = await api.current.providers.localRemove(id);
@@ -348,8 +415,8 @@ export default function ProvidersPanel(): JSX.Element {
     <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>模型供应商</h2>
-        <button className="btn sky" onClick={openLocalAdd} style={{ fontSize: 13 }}>＋ 本地模型</button>
-        <button className="btn primary" onClick={openApiAdd} style={{ fontSize: 13 }}>＋ API 供应商</button>
+        <button className="btn sky" onClick={openLocalAdd} style={{ fontSize: 13 }}><PlusIcon size={12} /> 本地模型</button>
+        <button className="btn primary" onClick={openApiAdd} style={{ fontSize: 13 }}><PlusIcon size={12} /> API 供应商</button>
       </div>
 
       {notice && (
@@ -371,15 +438,15 @@ export default function ProvidersPanel(): JSX.Element {
           display: "flex", alignItems: "center", justifyContent: "center",
         }}
           onClick={(e) => { if (e.target === e.currentTarget) { closeModal(); } }}>
-          <div className="card" style={{ width: 680, maxWidth: "94vw", maxHeight: "88vh", overflowY: "auto" }}>
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <div className="card" style={{ width: 680, maxWidth: "94vw", maxHeight: "78vh", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
               <h3 style={{ margin: 0, flex: 1 }}>
                 {edit.mode === "api-add" && "添加 API 供应商"}
                 {edit.mode === "api-edit" && `编辑供应商「${edit.key}」`}
                 {edit.mode === "local-add" && "添加本地模型"}
                 {edit.mode === "local-edit" && `编辑本地模型「${edit.key}」`}
               </h3>
-              <button className="titlebar-btn" onClick={closeModal} title="关闭">✕</button>
+              <button className="titlebar-btn" onClick={closeModal} title="关闭"><CloseIcon size={12} /></button>
             </div>
 
             {/* 弹窗内错误横幅：保存/探测失败在此处直观展示，不落到主页面 */}
@@ -394,6 +461,8 @@ export default function ProvidersPanel(): JSX.Element {
               </div>
             )}
 
+            {/* 可滚动内容区 */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingRight: 4 }}>
             {edit.mode === "api-add" || edit.mode === "api-edit" ? (
               <>
                 {/* ① 接入协议 */}
@@ -416,12 +485,48 @@ export default function ProvidersPanel(): JSX.Element {
                 </div>
 
                 {/* ② 连接信息 */}
+                {edit.mode === "api-add" && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+                    <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 80, whiteSpace: "nowrap" }}>常用供应商</span>
+                    <select className="tool-select" style={{ flex: 1 }}
+                      defaultValue=""
+                      onChange={(e) => {
+                        const p = PRESET_PROVIDERS.find((x) => x.name === e.target.value);
+                        if (!p) { return; }
+                        setEdit({
+                          ...edit,
+                          name: edit.name.trim() || p.name,
+                          api_base: p.api_base,
+                          api_format: p.api_format,
+                        });
+                        showNotice(true, `已填入「${p.label}」Base URL/格式（仍需填写 API Key，再获取/手动添加模型）`);
+                      }}>
+                      <option value="">选择预设自动填充…</option>
+                      {PRESET_PROVIDERS.map((p) => (
+                        <option key={p.name} value={p.name} title={p.hint}>{p.label} — {p.api_base}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 10, marginBottom: 10 }}>
                   <input className="input-field" placeholder="名称（如 deepseek，将作为 api:<名称>）" value={edit.name}
                     disabled={edit.mode === "api-edit"}
                     onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
                   <input className="input-field" placeholder="Base URL（https://api.example.com）" value={edit.api_base}
                     onChange={(e) => setEdit({ ...edit, api_base: e.target.value })} />
+                </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 80 }}>端点格式</span>
+                  <select className="tool-select" value={edit.api_format}
+                    onChange={(e) => setEdit({ ...edit, api_format: e.target.value as "openai" | "anthropic" | "auto" })}
+                    style={{ flex: 1, maxWidth: 320 }}>
+                    <option value="auto">自动检测（推荐）</option>
+                    <option value="openai">OpenAI — /v1/chat/completions + /v1/models</option>
+                    <option value="anthropic">Anthropic — /v1/messages + /v1/models</option>
+                  </select>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", flex: 1, overflowWrap: "break-word" }}>
+                    自动：按 base_url 智能选择；显式选则强制用对应格式
+                  </span>
                 </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                   <input className="input-field" type="password"
@@ -436,13 +541,13 @@ export default function ProvidersPanel(): JSX.Element {
                 </div>
 
                 {/* ③ 模型调试 */}
-                <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+                <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 8 }}>
-                    模型调试（勾选可用 · 调上下文/输出/视觉 · 选中默认模型）
+                    模型调试（勾选可用 · 调上下文/输出/视觉 · 保存后聊天界面按需选模型）
                   </div>
                   {edit.proto === "manual" ? (
                     <>
-                      <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 4 }}>
+                      <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 4, overflowWrap: "break-word" }}>
                         每行一个模型 ID（如 gpt-4o / deepseek-chat），切换为手动后生效
                       </div>
                       <textarea value={edit.manualIds} spellCheck={false}
@@ -457,11 +562,11 @@ export default function ProvidersPanel(): JSX.Element {
                         }} />
                     </>
                   ) : edit.models.length === 0 ? (
-                    <div style={{ color: "var(--text-dim)", fontSize: 12.5, padding: "6px 0 10px" }}>
+                    <div style={{ color: "var(--text-dim)", fontSize: 12.5, padding: "6px 0 10px", overflowWrap: "break-word" }}>
                       未获取模型列表 — 填写 Base URL 与 API Key 后点击"获取模型列表"，自动探测并预选默认选项
                     </div>
                   ) : (
-                    <div style={{ maxHeight: 260, overflowY: "auto", marginBottom: 10 }}>
+                    <div style={{ flex: 1, minHeight: 0, maxHeight: 260, overflowY: "auto", marginBottom: 10 }}>
                       {/* 顶部全选：一键启用/取消全部模型（探测后默认一个都不选，按需用拨片开启） */}
                       <div style={{
                         display: "flex", alignItems: "center", gap: 8,
@@ -479,19 +584,19 @@ export default function ProvidersPanel(): JSX.Element {
                             : edit.models.some((m) => m.selected) ? "部分启用" : "全部未启用"}
                         </span>
                         <span style={{ flex: 1 }} />
-                        <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>共 {edit.models.length} 个 · 聊天界面只显示已启用</span>
+                        <span style={{ fontSize: 11.5, color: "var(--text-dim)", overflowWrap: "break-word" }}>共 {edit.models.length} 个 · 聊天界面只显示已启用</span>
                       </div>
                       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                        <thead>
-                          <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
-                            <th style={{ padding: "4px 8px" }}>启用</th>
-                            <th style={{ padding: "4px 8px" }}>模型 ID</th>
-                            <th style={{ padding: "4px 8px", width: 110 }}>上下文</th>
-                            <th style={{ padding: "4px 8px", width: 110 }}>最大输出</th>
-                            <th style={{ padding: "4px 8px", width: 80 }}>图片</th>
-                            <th style={{ padding: "4px 8px", width: 70 }}>默认</th>
-                          </tr>
-                        </thead>
+                      <thead>
+                        <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
+                          <th style={{ padding: "4px 8px", width: 44, whiteSpace: "nowrap" }}>启用</th>
+                          <th style={{ padding: "4px 8px" }}>模型 ID</th>
+                          <th style={{ padding: "4px 8px", width: 80, whiteSpace: "nowrap" }}>上下文(K)</th>
+                          <th style={{ padding: "4px 8px", width: 80, whiteSpace: "nowrap" }}>最大输出(K)</th>
+                          <th style={{ padding: "4px 8px", width: 44, whiteSpace: "nowrap" }}>图片</th>
+                          <th style={{ padding: "4px 8px", width: 70, whiteSpace: "nowrap" }}>定价来源</th>
+                        </tr>
+                      </thead>
                         <tbody>
                           {edit.models.map((m, i) => (
                             <tr key={m.id} style={{ borderTop: "1px solid var(--border)" }}>
@@ -502,17 +607,23 @@ export default function ProvidersPanel(): JSX.Element {
                                   title={`${m.selected ? "停用" : "启用"} ${m.id}`}
                                 />
                               </td>
-                              <td style={{ padding: "4px 8px", wordBreak: "break-all" }}>{m.id}</td>
+                              <td style={{ padding: "4px 8px", overflowWrap: "break-word", wordBreak: "break-all" }}>{m.id}</td>
                               <td style={{ padding: "4px 8px" }}>
-                                <input type="number" min={0} placeholder="auto" title="上下文窗口 (token)"
-                                  value={m.context_window ?? ""}
-                                  onChange={(e) => updateDraftModel(i, { context_window: e.target.value ? Number(e.target.value) : undefined })}
+                                <input type="number" min={0} placeholder="auto" title="上下文窗口 (K token，输入 32 = 32768 token)"
+                                  value={m.context_window ? String(Math.round(m.context_window / 1024)) : ""}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    updateDraftModel(i, { context_window: v ? Number(v) * 1024 : undefined });
+                                  }}
                                   style={cellInputStyle()} />
                               </td>
                               <td style={{ padding: "4px 8px" }}>
-                                <input type="number" min={0} placeholder="auto" title="最大输出 (token)"
-                                  value={m.max_output ?? ""}
-                                  onChange={(e) => updateDraftModel(i, { max_output: e.target.value ? Number(e.target.value) : undefined })}
+                                <input type="number" min={0} placeholder="auto" title="最大输出 (K token，输入 8 = 8192 token)"
+                                  value={m.max_output ? String(Math.round(m.max_output / 1024)) : ""}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    updateDraftModel(i, { max_output: v ? Number(v) * 1024 : undefined });
+                                  }}
                                   style={cellInputStyle()} />
                               </td>
                               <td style={{ padding: "4px 8px" }}>
@@ -520,8 +631,11 @@ export default function ProvidersPanel(): JSX.Element {
                                   onChange={(e) => updateDraftModel(i, { vision: e.target.checked })} />
                               </td>
                               <td style={{ padding: "4px 8px" }}>
-                                <input type="radio" name="defaultModel" checked={edit.model === m.id}
-                                  onChange={() => setEdit({ ...edit, model: m.id })} />
+                                {m.price_in_usd !== undefined && m.price_in_usd > 0
+                                  ? <span style={{ fontSize: 10, color: "var(--success)", background: "var(--success-soft)", padding: "1px 5px", borderRadius: 3 }}>自动</span>
+                                  : m.context_window !== undefined
+                                    ? <span style={{ fontSize: 10, color: "var(--warning)", background: "rgba(210,153,34,0.12)", padding: "1px 5px", borderRadius: 3 }}>推断</span>
+                                    : <span style={{ fontSize: 10, color: "var(--text-dim)", overflowWrap: "break-word" }}>—</span>}
                               </td>
                             </tr>
                           ))}
@@ -572,9 +686,10 @@ export default function ProvidersPanel(): JSX.Element {
                 )}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 4 }}>
                   <div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>上下文 ctx_len</div>
-                    <input className="input-field" type="number" min={0} placeholder="auto（默认 8192）" value={edit.ctx_len}
-                      onChange={(e) => setEdit({ ...edit, ctx_len: e.target.value })} />
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>上下文 ctx_len (K)</div>
+                    <input className="input-field" type="number" min={0} placeholder="auto（默认 8192）"
+                      value={edit.ctx_len ? String(Math.round(Number(edit.ctx_len) / 1024)) : ""}
+                      onChange={(e) => setEdit({ ...edit, ctx_len: e.target.value ? String(Number(e.target.value) * 1024) : "" })} />
                   </div>
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>GPU 层数</div>
@@ -582,9 +697,10 @@ export default function ProvidersPanel(): JSX.Element {
                       onChange={(e) => setEdit({ ...edit, gpu_layers: e.target.value })} />
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>最大输出</div>
-                    <input className="input-field" type="number" min={0} placeholder="auto" value={edit.max_output}
-                      onChange={(e) => setEdit({ ...edit, max_output: e.target.value })} />
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>最大输出 (K)</div>
+                    <input className="input-field" type="number" min={0} placeholder="auto"
+                      value={edit.max_output ? String(Math.round(Number(edit.max_output) / 1024)) : ""}
+                      onChange={(e) => setEdit({ ...edit, max_output: e.target.value ? String(Number(e.target.value) * 1024) : "" })} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 18 }}>
                     <input type="checkbox" checked={edit.vision} onChange={(e) => setEdit({ ...edit, vision: e.target.checked })} />
@@ -594,6 +710,7 @@ export default function ProvidersPanel(): JSX.Element {
               </>
             )}
 
+            </div>
             {/* ④ 弹窗内：参数文件调试折叠区 */}
             <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
               <button onClick={() => { setDebugOpen(!debugOpen); if (!debugOpen && !overview && api.current) { void api.current.config.overview().then(setOverview).catch(console.error); } }}
@@ -610,6 +727,76 @@ export default function ProvidersPanel(): JSX.Element {
               </button>
               {debugOpen && (
                 <div style={{ padding: 12 }}>
+                  {/* 推理等级模式：上游默认 / 预制供应商。决定聊天输入框「推理配置」可选的等级集合；
+                      用户不选（默认「上游默认」）→ 聊天侧完全以上游模型返回为准 */}
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                    padding: "8px 10px", marginBottom: 10, borderRadius: 8,
+                    border: "1px solid var(--border)", background: "var(--bg-secondary)",
+                  }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      <span style={{ fontSize: 13 }}>🧠</span> 推理等级模式
+                    </span>
+                    <select className="input-field"
+                      value={reasonPreset}
+                      onChange={(e) => saveReasoningPreset(e.target.value)}
+                      title="选择聊天输入框「推理配置」面板提供的推理等级集合；不选则默认以上游模型返回为准"
+                      style={{ flex: "1 1 240px", minWidth: 0, maxWidth: 460, fontSize: 12, padding: "4px 8px" }}>
+                      {REASONING_PRESETS.map((p) => (
+                        <option key={p.value} value={p.value}>{p.label}</option>
+                      ))}
+                    </select>
+                    {reasonPreset !== "upstream" && (
+                      <button className="btn" style={{ fontSize: 11.5, padding: "3px 8px", whiteSpace: "nowrap" }}
+                        title="恢复默认：以上游模型返回为准"
+                        onClick={() => saveReasoningPreset("upstream")}>
+                        重置为上游默认
+                      </button>
+                    )}
+                    <span style={{ flex: 1 }} />
+                    {reasonPreset !== "upstream" ? (
+                      <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                        可选：{REASONING_PRESETS.find((p) => p.value === reasonPreset)?.efforts
+                          .map((e) => EFFORT_LABEL[e] ?? e).join(" / ")}
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+                        目前以模型返回为准，无需手动指定
+                      </span>
+                    )}
+                  </div>
+                  {/* 思考能力默认：聊天输入框「思考」开关在模型元数据缺失时的兜底默认（元数据明确则以上游为准）。
+                      原模型表「思考」勾选列已删除——思考能力按上游/供应商+模型 ID 推断，此处仅作缺失兜底，
+                      聊天界面的「思考」按钮是唯一主动开关。 */}
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                    padding: "8px 10px", marginBottom: 10, borderRadius: 8,
+                    border: "1px solid var(--border)", background: "var(--bg-secondary)",
+                  }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      <span style={{ fontSize: 13 }}>💭</span> 思考能力默认
+                    </span>
+                    <select className="input-field"
+                      value={thinkPreset}
+                      onChange={(e) => saveThinkingPreset(e.target.value)}
+                      title="模型未返回思考能力元数据时的兜底默认：上游检测=按供应商/模型推断（缺失时默认开启）；一律开启/一律关闭则强制聊天「思考」开关的默认可用性；元数据明确时始终以上游为准"
+                      style={{ flex: "1 1 240px", minWidth: 0, maxWidth: 460, fontSize: 12, padding: "4px 8px" }}>
+                      {THINKING_PRESETS.map((p) => (
+                        <option key={p.value} value={p.value}>{p.label}</option>
+                      ))}
+                    </select>
+                    {thinkPreset !== "upstream" && (
+                      <button className="btn" style={{ fontSize: 11.5, padding: "3px 8px", whiteSpace: "nowrap" }}
+                        title="恢复默认：以上游检测为准"
+                        onClick={() => saveThinkingPreset("upstream")}>
+                        重置为上游检测
+                      </button>
+                    )}
+                    <span style={{ flex: 1 }} />
+                    <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                      聊天「思考」按钮主动开关 · 元数据明确时此设置不生效
+                    </span>
+                  </div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
                     {writableFiles.map((f: ConfigFileInfo) => (
                       <button key={f.name}
@@ -624,7 +811,7 @@ export default function ProvidersPanel(): JSX.Element {
                         className={`btn${activeFile === f.name ? " primary" : ""}`}
                         onClick={() => { setActiveFile(f.name); void loadFile(f.name); }}
                         title={f.exists ? f.path : `${f.path}（不存在）`}>
-                        {f.name} 🔒 {f.exists ? "" : "（未创建）"}
+                        {f.name} <span style={{ opacity: 0.5, marginRight: 3 }}>🔒</span>{f.exists ? "" : "（未创建）"}
                       </button>
                     ))}
                   </div>
@@ -647,15 +834,15 @@ export default function ProvidersPanel(): JSX.Element {
                     {fileDirty && <span style={{ fontSize: 12, color: "var(--warning)" }}>有未保存修改</span>}
                     <span style={{ flex: 1 }} />
                     {!writableFiles.some((f) => f.name === activeFile) && (
-                      <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
-                        🔒 agents.json（服务权威）/ providers.enc.json（加密文件）只读
-                      </span>
+                        <span style={{ fontSize: 11.5, color: "var(--text-dim)", overflowWrap: "break-word" }}>
+                          🔒 agents.json（服务权威）/ providers.enc.json（加密文件）只读
+                        </span>
                     )}
                   </div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginTop: 10, marginBottom: 4 }}>
                     技能库（{overview?.skills.length ?? 0}） · MCP 服务器（{overview?.mcpServers.length ?? 0}）
                   </div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6 }}>
+                  <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6, overflowWrap: "break-word" }}>
                     {overview?.skills.map((s: SkillInfo) => s.name).join("、") || "未发现技能"}
                     {(overview?.skills.length ?? 0) > 0 && (overview?.mcpServers.length ?? 0) > 0 ? " ｜ " : ""}
                     {overview?.mcpServers.map((m: McpServerInfo) => `${m.name}(${m.enabled ? "启用" : "禁用"})`).join("、") || ""}
@@ -664,7 +851,7 @@ export default function ProvidersPanel(): JSX.Element {
               )}
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexShrink: 0 }}>
               <button className="btn success" onClick={handleSave} disabled={loading || !edit.name.trim()}
                 style={{ fontSize: 13 }}>
                 {loading ? "保存中…" : "保存"}
@@ -683,34 +870,48 @@ export default function ProvidersPanel(): JSX.Element {
       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", margin: "4px 0 8px" }}>
         API 供应商（{providers.length}）
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, minHeight: 0 }}>
         {providers.map((p) => (
-          <div key={p.key} className="card">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-              <span style={{ fontSize: 15, fontWeight: 700 }}>{p.key}</span>
+          <div key={p.key} className="card" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+            {/* 供应商名称作为卡片标题：独占首行、完整显示，不与配置/按钮挤在一行 */}
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", lineHeight: 1.4, marginBottom: 8, wordBreak: "break-all", overflowWrap: "break-word", flexShrink: 0 }}
+              title={p.key}>{p.key}</div>
+            {/* 配置情况：密钥状态 + Base URL */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4, flexShrink: 0 }}>
               {p.has_key ? (
-                <span style={chipStyle("var(--success-soft)", "var(--success)")}>密钥 ✓</span>
+                <span style={{ ...chipStyle("var(--success-soft)", "var(--success)"), flexShrink: 0, whiteSpace: "nowrap" }}><CheckIcon size={11} /> 密钥已配置</span>
               ) : (
-                <span style={chipStyle("var(--danger-soft)", "#f87171")}>密钥缺失</span>
+                <span style={{ ...chipStyle("var(--danger-soft)", "#f87171"), flexShrink: 0, whiteSpace: "nowrap" }}>密钥缺失</span>
               )}
-              <span style={{ flex: 1 }} />
-              <button className="btn" onClick={() => openApiEdit(p)} style={{ padding: "2px 10px" }}>编辑</button>
-              <button className="btn danger" onClick={() => handleRemoveApi(p.key)} disabled={loading}
-                style={{ padding: "2px 8px" }}>删除</button>
+              <span style={{ fontSize: 12, color: "var(--text-muted)", wordBreak: "break-all", overflowWrap: "break-word", flex: 1, minWidth: 160 }}>{p.api_base}</span>
             </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4, wordBreak: "break-all" }}>
-              {p.api_base}
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", flexShrink: 0 }}>
               模型 {p.models.length} 个
-              {p.model && <span style={{ color: "var(--accent-hover)" }}> · 默认 {p.model}</span>}
               {p.key_hint && <span style={{ color: "var(--text-dim)" }}> · {p.key_hint}</span>}
+            </div>
+            {/* 操作按钮区 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexShrink: 0 }}>
+              <span style={{ flex: 1 }} />
+              <button className="btn" style={{ padding: "2px 10px", flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 4 }}
+                title="刷新模型列表（上游更新时一键同步，无需重新填写配置）"
+                disabled={refreshing[p.key] || loading}
+                onClick={() => handleRefreshProvider(p)}>
+                {refreshing[p.key] ? (
+                  <span className="icon-spin" style={{ display: "inline-flex" }}><RefreshIcon size={13} /></span>
+                ) : (
+                  <RefreshIcon size={13} />
+                )}
+                刷新
+              </button>
+              <button className="btn" onClick={() => openApiEdit(p)} style={{ padding: "2px 10px", flexShrink: 0 }}>编辑</button>
+              <button className="btn danger" onClick={() => handleRemoveApi(p.key)} disabled={loading}
+                style={{ padding: "2px 8px", flexShrink: 0 }}>删除</button>
             </div>
           </div>
         ))}
         {providers.length === 0 && (
           <div style={{ gridColumn: "1 / -1", color: "var(--text-dim)", textAlign: "center", padding: 24, fontSize: 13 }}>
-            暂无 API 供应商 — 点击"＋ API 供应商"接入（如 DeepSeek / OpenAI / 兼容网关）
+            暂无 API 供应商 — 点击"<PlusIcon size={11} /> API 供应商"接入（如 DeepSeek / OpenAI / 兼容网关）
           </div>
         )}
       </div>
@@ -740,7 +941,7 @@ export default function ProvidersPanel(): JSX.Element {
         ))}
         {localModels.length === 0 && (
           <div style={{ gridColumn: "1 / -1", color: "var(--text-dim)", textAlign: "center", padding: 24, fontSize: 13 }}>
-            暂无本地模型 — 点击"＋ 本地模型"导入 GGUF 文件（将作为 local:&lt;名称&gt; 出现在模型切换中）
+            暂无本地模型 — 点击"<PlusIcon size={11} /> 本地模型"导入 GGUF 文件（将作为 local:&lt;名称&gt; 出现在模型切换中）
           </div>
         )}
       </div>

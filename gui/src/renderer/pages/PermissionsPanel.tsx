@@ -1,22 +1,23 @@
 /**
  * gui/src/renderer/pages/PermissionsPanel.tsx — 设置「权限」专栏（全局权限控制台）。
- * - 全局默认审批模式：作为会话未单独配置时的兜底
+ * - 全局默认审批模式（手动/自动/无需/自定义）：作为会话未单独配置时的兜底
+ * - 自定义审批白名单（custom 档生效）：预设目录/仓库命中免审批
  * - 工具权限类别开关 / MCP / 技能 全局开关：统一持久化到 gui_permissions.json
  */
 import React, { type JSX } from "react";
 import type { GuiPermissions, ApprovalMode } from "../../shared/ipc.js";
 
-const TOOL_ROWS: Array<{ key: "toolRead" | "toolWrite" | "toolTerminal" | "toolNetwork"; label: string; desc: string; warn: boolean }> = [
+const TOOL_ROWS: Array<{ key: "toolRead" | "toolWrite" | "toolTerminal"; label: string; desc: string; warn: boolean }> = [
   { key: "toolRead", label: "读（read）", desc: "检索本地文件 / 内存 / 知识库", warn: false },
   { key: "toolWrite", label: "写（write）", desc: "创建 / 修改本地文件与配置", warn: false },
   { key: "toolTerminal", label: "终端（terminal）", desc: "执行 shell / 命令，风险较高", warn: true },
-  { key: "toolNetwork", label: "网络（network）", desc: "访问外部 API / 互联网", warn: true },
 ];
 
 export default function PermissionsPanel(): JSX.Element {
   const [perms, setPerms] = React.useState<GuiPermissions | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
+  const [newPath, setNewPath] = React.useState("");
   const api = React.useRef<any>(null);
 
   const showNotice = (ok: boolean, text: string): void => {
@@ -50,6 +51,15 @@ export default function PermissionsPanel(): JSX.Element {
     }
   }
 
+  function addPath(raw: string): void {
+    const v = raw.trim().replace(/\\+$/, "");
+    if (!v || !perms) { return; }
+    if (!perms.approvalAllowPaths.includes(v)) {
+      void save({ approvalAllowPaths: [...perms.approvalAllowPaths, v] });
+    }
+    setNewPath("");
+  }
+
   return (
     <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>全局权限控制</h2>
@@ -77,16 +87,63 @@ export default function PermissionsPanel(): JSX.Element {
           <div className="card" style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>全局默认审批模式</div>
             <select
-              className="tool-select" style={{ width: "100%", maxWidth: 320 }}
+              className="tool-select" style={{ width: "100%", maxWidth: 360 }}
               value={perms.globalApproval}
               onChange={(e) => void save({ globalApproval: e.target.value as ApprovalMode })}
             >
-              <option value="auto">自动批准（沙箱 L0-L1 直过，风险操作自动放行于低档）</option>
-              <option value="confirm">需确认（L2-L4 操作弹窗审批）</option>
-              <option value="strict">严格（高风险操作一律拒绝）</option>
+              <option value="manual">手动 —— 一切访问/修改类操作均弹窗人工确认</option>
+              <option value="auto">自动 —— 智能体自行审批，仅系统级拒绝/权限不足才询问</option>
+              <option value="none">无需 —— 所有审批一律自动通过（不推荐）</option>
+              <option value="custom">自定义 —— 预设目录/仓库命中免审批，其余按手动</option>
             </select>
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6 }}>
               该模式作为会话配置的兜底：某会话若未单独设置审批模式，即采用它。
+            </div>
+          </div>
+
+          {/* 自定义白名单（custom 档生效）：目录/仓库命中免审批 */}
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>自定义审批白名单</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8 }}>
+              审批档位为「自定义」时生效：命中以下目录/仓库的访问与修改无需审批，其余操作按手动确认。
+            </div>
+            {perms.approvalAllowPaths.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--text-dim)", padding: "4px 0 8px" }}>
+                尚未设置放行目录。
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+                {perms.approvalAllowPaths.map((p) => (
+                  <div key={p} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <code style={{
+                      flex: 1, background: "var(--bg-hover)", padding: "4px 8px", borderRadius: 6,
+                      fontSize: 12, color: "var(--accent-hover)", wordBreak: "break-all",
+                    }}>{p}</code>
+                    <button
+                      className="btn" style={{ fontSize: 11.5, padding: "2px 8px", flexShrink: 0 }}
+                      title="移出白名单"
+                      onClick={() => void save({
+                        approvalAllowPaths: perms.approvalAllowPaths.filter((x) => x !== p),
+                      })}>移除</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                className="input-field" style={{ flex: 1 }}
+                placeholder="如 D:\projects\myrepo 或 /home/user/repo（绝对路径）"
+                value={newPath}
+                spellCheck={false}
+                onChange={(e) => setNewPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { addPath(newPath); }
+                }}
+              />
+              <button
+                className="btn primary" style={{ fontSize: 12, flexShrink: 0 }}
+                disabled={!newPath.trim()}
+                onClick={() => addPath(newPath)}>添加放行</button>
             </div>
           </div>
 

@@ -11,6 +11,7 @@
   --border: #334155;
   --border-hover: #475569;
   --text: #e2e8f0;
+  --text-primary: #e2e8f0;
   --text-secondary: #94a3b8;
   --text-muted: #64748a;
   --text-dim: #475569;
@@ -43,6 +44,7 @@
   --border: rgba(140, 246, 251, 0.16);
   --border-hover: rgba(140, 246, 251, 0.34);
   --text: #e6f1ff;
+  --text-primary: #e6f1ff;
   --text-secondary: #9db4d6;
   --text-muted: #6f89ad;
   --text-dim: #4c6286;
@@ -65,15 +67,18 @@
     var(--bg);
 }
 
-/* Beta 主题：毛玻璃面板（侧栏 / 标题栏 / 卡片 / 聊天工具栏 / 输入框 / 右侧栏） */
+/* Beta 主题：毛玻璃面板（只保留结构件：侧栏 / 标题栏 / 右侧栏）。
+   A-131 性能优化：去掉 .card / .glass-bar / .glass-input 上的 backdrop-filter——
+   ① 卡片被广泛用于滚动列表内（StatusPanel / ProvidersPanel / SkillsPanel 等），
+      内容滚过卡片下方时会强制逐帧重模糊整块背景，是滚动掉帧的合成成本大头；
+   ② 多层嵌套毛玻璃（毛玻璃面板里叠毛玻璃卡片）会触发 GPU 逐层重新 lamination，成本爆炸。
+   移除后卡片/输入条保留半透明底色（rgba 变量不变），视觉仍通透，但不再每帧重算模糊。
+   结构件 blur 10px 稳定不动，毛玻璃质感不变。 */
 :root[data-theme="beta"] .sidebar,
 :root[data-theme="beta"] .titlebar,
-:root[data-theme="beta"] .card,
-:root[data-theme="beta"] .glass-bar,
-:root[data-theme="beta"] .glass-input,
 :root[data-theme="beta"] .right-sidebar {
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 /* Beta 主题：主内容区透出基底渐变，让上层毛玻璃面板有可折射的光源 */
@@ -92,6 +97,41 @@ html, body, #root {
 }
 
 * { box-sizing: border-box; }
+
+/* ── 全局禁止非必要文本选中（A-121 体验优化）：
+     之前拖动面板/点击界面会残留蓝色选中框，需点空地取消，体验差。
+     现在全站默认不可选中，仅「聊天正文、代码块、输入框/终端」等确实需要
+     选中/复制/编辑的区域放行，其余界面拖动、点击不再产生选择态。 ── */
+body,
+#root,
+.app {
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* 聊天栏目：整行 Agent/用户消息 + 思考过程可选中复制（渲染不套 .markdown-body 类，“选中”范围限定在此） */
+.msg-row {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* 流式输出中的部分正文（未落库的临时输出块）同样允许选中 */
+.stream-partial {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* 需要选中/编辑的区域：表单输入、可编辑元素、代码块、终端、网页内容等 */
+input,
+textarea,
+[contenteditable="true"],
+pre,
+code,
+.markdown-body pre,
+.markdown-body code,
+.terminal-content,
+.xterm-helper-textarea,
+.browser-content {
+  -webkit-user-select: text;
+  user-select: text;
+}
 
 /* ── 应用骨架 ── */
 .app {
@@ -1183,3 +1223,153 @@ body.slime-resizing {
 .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
 .markdown-body img { max-width: 100%; border-radius: 6px; }
 .markdown-body input[type="checkbox"] { margin-right: 0.4em; vertical-align: middle; }
+
+/* 消息行：悬停时显示元信息/操作（时间·模型·回滚·复制）；隐藏时不可点击 */
+.msg-row .msg-hover { opacity: 0; transition: opacity 0.12s; pointer-events: none; }
+.msg-row:hover .msg-hover { opacity: 1; pointer-events: auto; }
+
+/* ─ 思考过程展开区：TRAE 风格——分层卡片 + 可折叠工具行（A-170） ── */
+.think-card {
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin: 8px 0 2px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.think-card-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.3px;
+  color: var(--text-muted); margin-bottom: 6px;
+}
+.think-card-title .think-count {
+  font-size: 11px; font-weight: 400; color: var(--text-dim);
+}
+.think-card-body {
+  font-size: 12.5px; line-height: 1.7; color: var(--text-muted);
+  word-break: break-word;
+}
+.think-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 2px 0;
+  word-break: break-all;
+}
+.think-item .t-file { color: var(--accent); }
+.think-item .t-link { color: var(--accent-hover); text-decoration: none; }
+.think-item .t-link:hover { text-decoration: underline; }
+.think-tool-row {
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 12px; padding: 4px 8px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  color: var(--text-muted);
+  transition: background 0.15s;
+}
+.think-tool-row:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.think-tool-name {
+  color: var(--accent-hover); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.think-tool-detail {
+  font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.think-divider {
+  border: none; border-top: 1px solid var(--border);
+  margin: 10px 0; opacity: 0.7;
+}
+/* ── A-171：交错时间线（思考段落正文 + 工具调用小节点 + 参考内容独立折叠） ── */
+.think-timeline {
+  display: flex; flex-direction: column;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  margin: 2px 0 4px 7px;
+  padding-left: 14px;
+}
+.think-step {
+  position: relative;
+  margin: 2px 0 6px;
+}
+.think-step-mark {
+  position: absolute; left: -20px; top: 8px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.think-step-text {
+  font-size: 12.5px; line-height: 1.7; color: var(--text-muted);
+  word-break: break-word;
+  white-space: pre-line; /* A-174：配合 normalizeThinkingText 规范化后的文本，保留段落换行，合并多余空白 */
+}
+.think-step-text > *:first-child { margin-top: 0; }
+.think-step-text > *:last-child { margin-bottom: 0; }
+.think-tool-node {
+  position: relative;
+  margin: 2px 0 6px;
+}
+.think-tool-mark {
+  position: absolute; left: -20px; top: 9px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-dim);
+}
+.think-tool-btn {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; text-align: left;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 12px; color: var(--text-muted);
+  transition: background 0.15s;
+}
+.think-tool-btn:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.think-tool-name {
+  color: var(--accent-hover); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex-shrink: 0; max-width: 30%;
+}
+.think-tool-detail {
+  font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1; min-width: 0;
+}
+.think-tool-status {
+  font-size: 10px; font-weight: 700;
+  padding: 0 5px; border-radius: 6px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.think-tool-detail-line {
+  display: flex; align-items: flex-start; gap: 5px;
+  font-size: 11px; line-height: 1.5;
+  color: var(--text-muted); word-break: break-all;
+}
+.think-tool-detail-box {
+  margin: 4px 0 0 20px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border-radius: 6px;
+  font-size: 11px; line-height: 1.6;
+  color: var(--text-muted); word-break: break-all;
+}
+.think-clickable {
+  cursor: pointer;
+  color: var(--accent-hover);
+  text-decoration: underline dotted;
+  word-break: break-all;
+}
+.think-clickable:hover { text-decoration: underline; }
+/* 正文：跟随 TRAE 风格，正文区内不设多余边框；消息间用更淡的分隔过渡 */
+.msg-body-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0 12px;
+  opacity: 0.55;
+}
+
+/* 性能优化（A-129）：长会话滚动时跳过视口外消息行的渲染/布局，
+   滚动帧率显著提升；contain-intrinsic-size 提供行高估算避免滚动条跳动 */
+.msg-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-row .msg-hover { transition: none; }
+}

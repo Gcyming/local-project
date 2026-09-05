@@ -8,10 +8,15 @@ import {
   ChevronIcon, SidebarLeftIcon, TaskIcon, GlobeIcon,
   GitIcon, PlusIcon, TodoListIcon, DashboardIcon,
   CheckboxIcon, CheckboxCheckedIcon, CirclePlusIcon, LoadingCircleIcon,
-  TerminalIcon, FolderIcon,
+  TerminalIcon, FolderIcon, ArrowLeftIcon, ArrowRightIcon2,
+  CloseIcon, RefreshIcon, CheckIcon, RepeatIcon, PaperclipIcon, EditIcon,
 } from "../components/Icon.js";
+import { alertAsync, confirmAsync } from "../dialog.js";
+import { SIDEBAR_OPEN_EVENT, type SidebarOpenPayload } from "./Markdown.js";
+import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
+import { onCtxUpdate } from "./ChatPanel.js";
 
-type TabType = "tasks" | "terminal" | "browser" | "git" | "file";
+type TabType = "tasks" | "subagents" | "terminal" | "browser" | "git" | "file";
 
 interface TabInstance {
   id: string;
@@ -19,6 +24,8 @@ interface TabInstance {
   title: string;
   url?: string;
   fileRel?: string;
+  /** A-173：绝对路径（聊天消息内打开的文件） */
+  fileAbs?: string;
   fileContent?: string;
   fileMime?: "text" | "image" | "binary";
   fileError?: string;
@@ -32,11 +39,22 @@ interface TabTypeMeta {
 
 const TAB_TYPE_META: TabTypeMeta[] = [
   { type: "tasks", label: "任务", icon: TaskIcon },
+  { type: "subagents", label: "子代理", icon: AgentIcon },
   { type: "terminal", label: "终端", icon: TerminalIcon },
   { type: "browser", label: "浏览器", icon: GlobeIcon },
   { type: "git", label: "Git仓库", icon: GitIcon },
   { type: "file", label: "文件查看", icon: FileIcon },
 ];
+
+function AgentIcon(props: { size?: number; style?: React.CSSProperties }): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width={props.size ?? 14} height={props.size ?? 14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" style={props.style ?? { display: "inline-block", flexShrink: 0 }}>
+      <circle cx="12" cy="9" r="4" />
+      <path d="M4 20c1.6-3.2 4.4-4.8 8-4.8s6.4 1.6 8 4.8" />
+      <circle cx="18" cy="5" r="1.3" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
 
 function FileIcon(props: { size?: number }): JSX.Element {
   return (
@@ -109,9 +127,13 @@ const STATUS_GLYPH: Record<string, { label: string; color: string }> = {
 
 export default function RightSidebar(props: {
   open: boolean;
+
+  /** 运行时已探测的上游模型元数据（App 透传嵌套结构，含 context_window）——右栏上下文上限兜底用 */
+  providerModels?: Array<{ key?: string; models?: Array<{ id: string; context_window?: number }> }>;
   onToggle: () => void;
   agentId: string | null;
   agentName: string;
+  sessionId?: string;
   workspace: string;
   dl: Record<string, DownloadProgressInfo>;
   width?: number;
@@ -120,6 +142,25 @@ export default function RightSidebar(props: {
   const initTab = React.useMemo(() => createTab("tasks"), []);
   const [tabs, setTabs] = React.useState<TabInstance[]>([initTab]);
   const [activeId, setActiveId] = React.useState<string>(initTab.id);
+  // A-920：每会话一套「完全独立」的右侧边栏——切换会话时把 tabs（已打开的浏览器/文件/Git 页）+ 活动页
+  // 快照进 per-session 槽位，切回时原样还原；配合任务区按 sessionId 隔离（A-919），多会话绝不串联
+  const sidebarSnapRef = React.useRef<Record<string, { tabs: TabInstance[]; activeId: string }>>({});
+  const prevSidRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const sid = props.sessionId ?? "";
+    if (prevSidRef.current !== null && prevSidRef.current !== sid) {
+      sidebarSnapRef.current[prevSidRef.current] = { tabs: [...tabs], activeId };
+    }
+    if (sid) {
+      const snap = sidebarSnapRef.current[sid];
+      if (snap) {
+        setTabs(snap.tabs);
+        setActiveId(snap.activeId);
+      }
+    }
+    prevSidRef.current = sid || null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.sessionId]);
   const [menuOpen, setMenuOpen] = React.useState(false);
   const menuRef = React.useRef<HTMLDivElement>(null);
   const workspaceRef = React.useRef(props.workspace);
@@ -156,6 +197,54 @@ export default function RightSidebar(props: {
     setTabs((prev) => [...prev, tab]);
     setActiveId(tab.id);
   };
+
+  /** A-173：按绝对路径打开文件到新标签页（聊天消息内点击文件链接） */
+  const openFileAbs = (abs: string, name?: string): void => {
+    const clean = (abs ?? "").trim().replace(/^["']|["']$/g, "");
+    if (!clean) { return; }
+    const fname = (name ?? clean.split(/[\\/]/).pop() ?? clean).trim();
+    const tab: TabInstance = {
+      id: uid(), type: "file", title: fname,
+      fileRel: clean, fileAbs: clean,
+    };
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    void api?.workspace?.readFileAbs?.(clean).then((res: WorkspaceReadFileResult) => {
+      if (!res?.ok || !res.content) {
+        updateTab(tab.id, { fileError: res?.error ?? "读取失败" });
+        return;
+      }
+      updateTab(tab.id, { fileContent: res.content, fileMime: res.mime });
+    }).catch((e: unknown) => {
+      updateTab(tab.id, { fileError: e instanceof Error ? e.message : String(e) });
+    });
+    setTabs((prev) => [...prev, tab]);
+    setActiveId(tab.id);
+  };
+
+  /** A-173：监听聊天消息里的「在右侧栏打开」事件（文件/网址） */
+  React.useEffect(() => {
+    const onOpen = (e: Event): void => {
+      const d = (e as CustomEvent<SidebarOpenPayload>).detail;
+      if (!d) { return; }
+      if (d.kind === "file" && d.rel) {
+        openFileAbs(d.rel, d.name);
+      } else if (d.kind === "url" && d.url) {
+        // 在原浏览器标签直接改址；若还没有浏览器标签则新建一个
+        const existing = tabs.find((t) => t.type === "browser");
+        if (existing) {
+          updateTab(existing.id, { url: d.url, title: d.name ?? d.url });
+          setActiveId(existing.id);
+        } else {
+          const tab = createTab("browser");
+          setTabs((prev) => [...prev, { ...tab, url: d.url, title: d.name ?? tab.title }]);
+          setActiveId(tab.id);
+        }
+      }
+    };
+    window.addEventListener(SIDEBAR_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(SIDEBAR_OPEN_EVENT, onOpen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs]);
 
   const closeTab = (id: string): void => {
     setTabs((prev) => {
@@ -272,7 +361,7 @@ export default function RightSidebar(props: {
                   onMouseDown={(e) => e.stopPropagation()}
                   disabled={tabs.length <= 1}
                 >
-                  ×
+                  <CloseIcon size={12} />
                 </button>
               </div>
             );
@@ -333,7 +422,10 @@ export default function RightSidebar(props: {
       {/* ── 内容区 ── */}
       <div className="right-body" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
         {activeTab && activeTab.type === "tasks" && (
-          <TasksTab agentName={props.agentName} workspace={props.workspace} dl={props.dl} />
+          <TasksTab agentId={props.agentId ?? ""} sessionId={props.sessionId ?? ""} agentName={props.agentName} workspace={props.workspace} dl={props.dl} providerModels={props.providerModels} />
+        )}
+        {activeTab && activeTab.type === "subagents" && (
+          <SubAgentsTab />
         )}
         {activeTab && activeTab.type === "terminal" && (
           <TerminalTab workspace={props.workspace} />
@@ -570,10 +662,10 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
           setFileExpanded((prev) => ({ ...prev, [newItemPrompt.parentRel]: true }));
         }
       } else {
-        alert("创建失败：" + (res?.error ?? "未知错误"));
+        void alertAsync("创建失败：" + (res?.error ?? "未知错误"));
       }
     } catch (e) {
-      alert("创建失败：" + (e instanceof Error ? e.message : String(e)));
+      void alertAsync("创建失败：" + (e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -584,9 +676,9 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
     setCtxMenu(null);
     try {
       const res = await api?.workspace?.rename(browseRoot, ctxMenu.rel, oldName);
-      if (!res?.ok) { alert("重命名失败：" + (res?.error ?? "未知错误")); }
+      if (!res?.ok) { void alertAsync("重命名失败：" + (res?.error ?? "未知错误")); }
       else { void loadDir(""); }
-    } catch (e) { alert("重命名失败：" + (e instanceof Error ? e.message : String(e))); }
+    } catch (e) { void alertAsync("重命名失败：" + (e instanceof Error ? e.message : String(e))); }
   }, [api, browseRoot, ctxMenu, loadDir]);
 
   React.useEffect(() => {
@@ -783,10 +875,10 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
           style={{ position: "fixed", left: ctxMenu.x, top: ctxMenu.y, zIndex: 9999, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 4px 12px rgba(0,0,0,0.3)", minWidth: 160, padding: "4px 0" }}>
           <div style={{ fontSize: 11, color: "var(--text-dim)", padding: "4px 12px 6px", borderBottom: "1px solid var(--border)", marginBottom: 4, wordBreak: "break-all" }}>{ctxMenu.name}</div>
           <div className="ctx-menu-item" onClick={() => { props.onFileClick?.(ctxMenu.rel, ctxMenu.name); setCtxMenu(null); }}>
-            <span style={{ marginRight: 8 }}>📂</span>在新标签打开
+            <span style={{ marginRight: 8 }}><FolderIcon size={13} /></span>在新标签打开
           </div>
           <div className="ctx-menu-item" onClick={() => { void handleCopyPath(ctxMenu.rel); setCtxMenu(null); }}>
-            <span style={{ marginRight: 8 }}>📋</span>复制路径
+            <span style={{ marginRight: 8 }}><PaperclipIcon size={13} /></span>复制路径
           </div>
           <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
           {ctxMenu.isDir && <>
@@ -794,15 +886,15 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
               <span style={{ marginRight: 8 }}></span>新建文件…
             </div>
             <div className="ctx-menu-item" onClick={() => void handleNewFileOrFolder(true)}>
-              <span style={{ marginRight: 8 }}>📁</span>新建文件夹…
+              <span style={{ marginRight: 8 }}><FolderIcon size={13} /></span>新建文件夹…
             </div>
           </>}
           <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
           <div className="ctx-menu-item" onClick={() => void handleRename()}>
-            <span style={{ marginRight: 8 }}>✏️</span>重命名…
+            <span style={{ marginRight: 8 }}><EditIcon size={13} /></span>重命名…
           </div>
           <div className="ctx-menu-item" style={{ color: "var(--danger)" }} onClick={() => {
-            if (confirm(`确定删除 ${ctxMenu.name}？`)) { alert("删除功能待实现"); setCtxMenu(null); }
+            void (async () => { if (await confirmAsync(`确定删除 ${ctxMenu.name}？`)) { void alertAsync("删除功能待实现"); setCtxMenu(null); } })();
           }}>
             <span style={{ marginRight: 8 }}>️</span>删除
           </div>
@@ -841,9 +933,9 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
         {loading && !initialized && <span style={{ color: "var(--accent)", fontSize: 11, opacity: 0.8 }}>加载中…</span>}
         <div ref={moreWrapRef} style={{ marginLeft: "auto", position: "relative" }}>
           {initialized && (
-            <button className="right-mini-btn" title="刷新" onClick={() => { if (repoPath) { void loadGitInfo(repoPath); } }} style={{ marginRight: 4 }}>↻</button>
+            <button className="right-mini-btn" title="刷新" onClick={() => { if (repoPath) { void loadGitInfo(repoPath); } }} style={{ marginRight: 4 }}><RefreshIcon size={12} /></button>
           )}
-          <button className="right-mini-btn" title="仓库菜单" onClick={() => setMoreOpen((v) => !v)} style={{ fontWeight: 700 }}>▾</button>
+          <button className="right-mini-btn" title="仓库菜单" onClick={() => setMoreOpen((v) => !v)} style={{ fontWeight: 700 }}><ChevronIcon size={12} rotate={90} /></button>
           {moreOpen && (
             <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 30, minWidth: 230, background: "var(--panel-bg, #1c2128)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 10px 24px rgba(0,0,0,0.35)", padding: 4, fontSize: 12 }}>
               <MenuItem label="切回工作目录" disabled={!hasWorkspace || loading} hint="（自动关联）" onClick={() => props.workspace && void bindWorkspace(props.workspace)} />
@@ -856,9 +948,9 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
         </div>
       </div>
 
-      {repoPath && !detecting && (
-        <div className="right-pane-head-sub" title={repoPath} style={{ cursor: "default" }}>📁 {repoPath}</div>
-      )}
+        {repoPath && !detecting && (
+          <div className="right-pane-head-sub" title={repoPath} style={{ cursor: "default", display: "flex", alignItems: "center", gap: 4 }}><FolderIcon size={13} style={{ color: "var(--text-muted)", flexShrink: 0 }} /><span>{repoPath}</span></div>
+        )}
 
       {error && (
         <div style={{ padding: "6px 10px", background: "var(--danger-soft, rgba(248,81,73,0.1))", color: "var(--danger, #f85149)", fontSize: 12, borderBottom: "1px solid var(--border)" }}>{error}</div>
@@ -871,11 +963,11 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
           {/* 工具条：上级 + 打开文件夹（系统对话框互通） */}
           <div style={{ display: "flex", gap: 4, padding: "6px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
             <button className="right-mini-btn" title="上级目录" onClick={() => void handleGoParent()} disabled={!browseRoot} style={{ padding: "2px 7px", fontSize: 12, fontWeight: 700 }}>⬆</button>
-            <button className="right-mini-btn" title="打开系统文件夹（可访问任意位置）" onClick={() => void handlePickBrowseRoot()} style={{ flex: 1, justifyContent: "center", fontSize: 11 }}>📁 打开文件夹…</button>
+            <button className="right-mini-btn" title="打开系统文件夹（可访问任意位置）" onClick={() => void handlePickBrowseRoot()} style={{ flex: 1, justifyContent: "center", fontSize: 11 }}><FolderIcon size={13} /> 打开文件夹…</button>
           </div>
           {/* 当前浏览根路径 */}
           {browseRoot && (
-            <div title={browseRoot} style={{ padding: "4px 8px", fontSize: 10, color: "var(--text-muted)", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>📂 {browseRoot}</div>
+            <div title={browseRoot} style={{ padding: "4px 8px", fontSize: 10, color: "var(--text-muted)", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}><FolderIcon size={11} style={{ flexShrink: 0 }} />{browseRoot}</div>
           )}
           {/* 目录树滚动区 */}
           <div style={{ overflowY: "auto", flex: 1, minHeight: 0, padding: "4px 0" }}>
@@ -963,8 +1055,8 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                     onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { doCommit(); } }}
                     rows={2} style={{ width: "100%", resize: "none", boxSizing: "border-box", padding: "5px 8px", background: "transparent", border: "none", outline: "none", color: "var(--text-primary)", fontSize: 12, fontFamily: "inherit", lineHeight: 1.5 }} />
                   <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                    <button onClick={doCommit} disabled={loading || !commitMsg.trim() || totalChanges === 0} title="提交暂存更改（Ctrl+Enter）" style={{ flex: "1 1 auto", minWidth: 60, padding: "5px 12px", background: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--input-bg, #21262d)" : "var(--accent, #238636)", color: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--text-muted)" : "#fff", border: "none", borderRadius: 4, cursor: (loading || !commitMsg.trim() || totalChanges === 0) ? "not-allowed" : "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>提交 ✓</button>
-                    <button onClick={doSync} disabled={loading} title="拉取 + 推送" style={{ padding: "5px 12px", background: "var(--accent, #1f6feb)", color: "#fff", border: "none", borderRadius: 4, cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap" }}>同步 ⇅</button>
+                    <button onClick={doCommit} disabled={loading || !commitMsg.trim() || totalChanges === 0} title="提交暂存更改（Ctrl+Enter）" style={{ flex: "1 1 auto", minWidth: 60, padding: "5px 12px", background: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--input-bg, #21262d)" : "var(--accent, #238636)", color: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--text-muted)" : "#fff", border: "none", borderRadius: 4, cursor: (loading || !commitMsg.trim() || totalChanges === 0) ? "not-allowed" : "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4 }}><CheckIcon size={12} />提交</button>
+                    <button onClick={doSync} disabled={loading} title="拉取 + 推送" style={{ padding: "5px 12px", background: "var(--accent, #1f6feb)", color: "#fff", border: "none", borderRadius: 4, cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4 }}><RepeatIcon size={12} />同步</button>
                     <button onClick={doPull} disabled={loading} title="拉取远端更改" style={{ padding: "5px 10px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-secondary)", cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap" }}>拉取</button>
                     <button onClick={doPush} disabled={loading} title="推送到远端" style={{ padding: "5px 10px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-secondary)", cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap" }}>推送</button>
                   </div>
@@ -974,7 +1066,7 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                 <div style={{ marginBottom: 16 }}>
                   {totalChanges === 0 ? (
                     <div style={{ fontSize: 12, color: "var(--success, #7ee787)", padding: "8px 0", display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ fontSize: 14 }}>✓</span> 工作区干净，无需提交
+                      <span style={{ fontSize: 14 }}><CheckIcon size={14} /></span> 工作区干净，无需提交
                     </div>
                   ) : (
                     <div>
@@ -1206,6 +1298,22 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.workspace]);
 
+  /** A-173：聊天消息内打开的文件（fileAbs/fileContent 异步预读完成）→ 内容回来即渲染预览 */
+  React.useEffect(() => {
+    if (!props.tab.fileAbs) { return; }
+    if (props.tab.fileContent) {
+      setPreview({
+        rel: props.tab.fileAbs, name: props.tab.title ?? props.tab.fileAbs.split(/[\\/]/).pop() ?? props.tab.fileAbs,
+        mime: props.tab.fileMime ?? "text", content: props.tab.fileContent, size: 0, truncated: false,
+      });
+    } else if (props.tab.fileError) {
+      setPreview({ rel: props.tab.fileAbs, name: props.tab.title ?? "", mime: "text", content: "", size: 0, error: props.tab.fileError });
+    }
+    // A-174：依赖 fileContent/fileError——openFileAbs 是异步的，内容回来后 updateTab 才更新 tab 对象，
+    // 必须监听这两个字段变化重新渲染预览，否则永远停在「尚未选择文件位置/打开文件夹」空态
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.tab.fileContent, props.tab.fileError]);
+
   /** 打开系统文件夹选择对话框，选择后展示所选目录的内容列表（进入文件资源管理器模式） */
   const handlePickFolder = React.useCallback(async (): Promise<void> => {
     if (!api?.workspace?.pickBrowseRoot) { return; }
@@ -1259,9 +1367,11 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
 
   const crumbPath = curRel ? curRel : browseRoot ? browseRoot : "（尚未选择文件夹）";
   const inBrowse = !!browseRoot;
+  /** A-174：聊天消息打开的绝对路径文件（fileAbs 预读完成）→ 即使没有工作目录也要直接渲染预览，不落入"打开文件夹"空态 */
+  const isChatOpenedFile = !!props.tab.fileAbs;
 
-  /* ── 空状态：尚未选择任何文件夹 ── */
-  if (!inBrowse) {
+  /* ── 空状态：尚未选择任何文件夹（仅普通浏览 tab；聊天打开的文件直接显示内容） ── */
+  if (!inBrowse && !isChatOpenedFile) {
     return (
       <div className="right-tab-pane" style={{ padding: "36px 20px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%" }}>
         <div style={{ width: 56, height: 56, marginBottom: 16, color: "var(--text-muted)", opacity: 0.7, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -1276,7 +1386,7 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
           disabled={pickingFolder}
           style={{ padding: "8px 18px", background: "var(--accent)", color: "#fff", border: "none", borderRadius: 6, cursor: pickingFolder ? "not-allowed" : "pointer", fontSize: 13, fontWeight: 600, opacity: pickingFolder ? 0.6 : 1 }}
         >
-          {pickingFolder ? "选择中…" : "📁 打开文件夹"}
+          {pickingFolder ? "选择中…" : <><FolderIcon size={13} /> 打开文件夹</>}
         </button>
       </div>
     );
@@ -1285,9 +1395,18 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   /* ── 右侧内容预览（与左侧列表同屏分栏展示） ── */
   const renderPreviewBody = (): JSX.Element => {
     if (!preview) {
+      // A-174：聊天打开的文件正在读取时给加载提示，而不是空态"从左侧选择文件"
+      if (isChatOpenedFile && !props.tab.fileError) {
+        return (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, color: "var(--text-dim)", fontSize: 12, textAlign: "center", padding: 20 }}>
+            <div style={{ fontSize: 24, opacity: 0.7 }}><LoadingCircleIcon size={24} className="icon-spin" /></div>
+            <div>正在读取文件内容…</div>
+          </div>
+        );
+      }
       return (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, color: "var(--text-dim)", fontSize: 12, textAlign: "center", padding: 20 }}>
-          <div style={{ fontSize: 26, opacity: 0.6 }}>👈</div>
+          <div style={{ fontSize: 26, opacity: 0.6 }}><ArrowLeftIcon size={26} /></div>
           <div>从左侧选择一个文件查看内容预览</div>
           <div style={{ fontSize: 11, opacity: 0.8 }}>压缩包 / 二进制文件会以安全方式展示，不会解析</div>
         </div>
@@ -1361,9 +1480,9 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     <div className="right-tab-pane" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* 顶栏：← 返回上级 + 路径 + 打开文件夹 */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-        <button onClick={goBack} title={canGoUp ? "返回上一级" : "返回 Git 仓库"} disabled={!canGoUp} style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: canGoUp ? "pointer" : "not-allowed", color: canGoUp ? "var(--text-secondary)" : "var(--text-dim)", fontSize: 12, opacity: canGoUp ? 1 : 0.5 }}>←</button>
-        <span style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }} title={crumbPath}>📂 {crumbPath}</span>
-        <button onClick={() => void handlePickFolder()} disabled={pickingFolder} title="打开系统文件夹（可访问任意位置）" style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: "var(--text-secondary)", fontSize: 11, flexShrink: 0 }}>{pickingFolder ? "选择中…" : "📁 打开文件夹"}</button>
+        <button onClick={goBack} title={canGoUp ? "返回上一级" : "返回 Git 仓库"} disabled={!canGoUp} style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: canGoUp ? "pointer" : "not-allowed", color: canGoUp ? "var(--text-secondary)" : "var(--text-dim)", fontSize: 12, opacity: canGoUp ? 1 : 0.5 }}><ArrowLeftIcon size={14} /></button>
+        <span style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 3 }} title={crumbPath}><FolderIcon size={11} style={{ flexShrink: 0 }} />{crumbPath}</span>
+        <button onClick={() => void handlePickFolder()} disabled={pickingFolder} title="打开系统文件夹（可访问任意位置）" style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: "var(--text-secondary)", fontSize: 11, flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3 }}>{pickingFolder ? "选择中…" : <><FolderIcon size={12} /> 打开文件夹</>}</button>
       </div>
 
       {/* 左右分栏容器 */}
@@ -1423,7 +1542,7 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
                   </div>
                 )}
                 {preview.mime === "text" && (
-                  <button onClick={() => void handleCopy(preview.content)} title={copied ? "已复制" : "复制内容"} style={{ background: copied ? "rgba(34,197,94,0.15)" : "transparent", border: `1px solid ${copied ? "#22c55e" : "var(--border)"}`, borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: copied ? "#22c55e" : "var(--text-secondary)", fontSize: 11, flexShrink: 0 }}>{copied ? "✓ 已复制" : "复制"}</button>
+                  <button onClick={() => void handleCopy(preview.content)} title={copied ? "已复制" : "复制内容"} style={{ background: copied ? "rgba(34,197,94,0.15)" : "transparent", border: `1px solid ${copied ? "#22c55e" : "var(--border)"}`, borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: copied ? "#22c55e" : "var(--text-secondary)", fontSize: 11, flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3 }}>{copied ? <><CheckIcon size={11} /> 已复制</> : "复制"}</button>
                 )}
                 {preview.truncated && (
                   <span style={{ fontSize: 10, color: "var(--warning)", flexShrink: 0 }}>内容过长已截断</span>
@@ -1448,7 +1567,7 @@ function fmtSize(n: number): string {
 
 /* ══════════════ 任务进度 ══════════════ */
 
-interface AccumUsage {
+   interface AccumUsage {
   requests: number;
   elapsedMs: number;
   promptTokens: number;
@@ -1456,6 +1575,11 @@ interface AccumUsage {
   reasoningTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+}
+
+interface ModelPriceInfo {
+  price_in_usd?: number;
+  price_out_usd?: number;
 }
 
 const EMPTY_USAGE: AccumUsage = { requests: 0, elapsedMs: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, costUsd: 0 };
@@ -1470,21 +1594,59 @@ export interface TodoItem {
   blocks?: string[];
 }
 
-function useAgentMaxContext(agentName: string): number {
+/** 上下文上限：优先 Agent.max_context，其次 Provider 模型规格中的 context_window，最后运行时上游探测元数据 */
+function useAgentMaxContext(agentName: string, fallback: Array<{ id: string; context_window?: number }> = []): number {
   const [cap, setCap] = React.useState(0);
   React.useEffect(() => {
     let cancelled = false;
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api?.agents?.list || !api.agents.detail) { return; }
     api.agents.list()
-      .then((list: Array<{ id: string; name: string }>) => {
+      .then((list: Array<{ id: string; name: string; model_choice?: string }>) => {
         if (cancelled) { return; }
         const hit = list.find((a) => a.name === agentName) || list[0];
         if (!hit) { return; }
-        return api.agents.detail(hit.id) as Promise<{ max_context?: number } | null>;
+        return api.agents.detail(hit.id) as Promise<{ max_context?: number; model_choice?: string } | null>;
       })
-      .then((d: { max_context?: number } | null) => {
+      .then(async (d: { max_context?: number; model_choice?: string } | null) => {
         if (cancelled || !d) { return; }
+        if (d.max_context && d.max_context > 0) { setCap(d.max_context); return; }
+        // 兜底：从 Provider 模型规格中读取 context_window
+        try {
+          const choice = d.model_choice ?? "";
+          if (!choice) { return; }
+          const isLocal = choice.startsWith("local:");
+          let ctx: number | undefined;
+          if (isLocal) {
+            const id = choice.slice("local:".length);
+            const list2 = await api.providers.localList().catch(() => [] as Array<{ id: string; ctx_len?: number }>);
+            const m = list2.find((x: { id: string; ctx_len?: number }) => x.id === id);
+            ctx = m?.ctx_len;
+          } else {
+            // api:<provider_key>[:model_id] 或纯粹 model_id
+            const parts = choice.split(":");
+            const modelId = parts[parts.length - 1];
+            const key = parts.length >= 2 ? parts[0] : null;
+            if (key && api.providers.list) {
+               const providers = await api.providers.list().catch(() => [] as Array<{ key: string; models?: Array<{ id: string; context_window?: number }> }>);
+               const prov = providers.find((p: { key: string; models?: Array<{ id: string; context_window?: number }> }) => p.key === key);
+              const m = prov?.models?.find((x: { id: string; context_window?: number }) => x.id === modelId);
+              ctx = m?.context_window;
+            } else if (!key && api.providers.list) {
+              // 无 key 时尝试在全部 provider 中查找
+              const providers = await api.providers.list().catch(() => [] as Array<{ key: string; models?: Array<{ id: string; context_window?: number }> }>);
+               for (const p of providers) {
+                 const m = p.models?.find((x: { id: string; context_window?: number }) => x.id === modelId);
+                if (m) { ctx = m.context_window; break; }
+              }
+            }
+          }
+          if (ctx && ctx > 0) { setCap(ctx); return; }
+          // 运行时上游元数据兜底（App 已实时探测并透传，优先于未回写的存储规格）
+          const fbId = choice.includes(":") ? choice.split(":").pop()! : choice;
+          const fallbackHit = fallback.find((m) => m.id === fbId);
+          if (fallbackHit?.context_window && fallbackHit.context_window > 0) { setCap(fallbackHit.context_window); return; }
+        } catch { /* ignore */ }
         setCap(d.max_context ?? 0);
       })
       .catch(() => undefined);
@@ -1493,17 +1655,126 @@ function useAgentMaxContext(agentName: string): number {
   return cap;
 }
 
-function TasksTab(props: { agentName: string; workspace: string; dl: Record<string, DownloadProgressInfo> }): JSX.Element {
+function computeModelCost(modelId: string, promptTokens: number, completionTokens: number, cache: Map<string, ModelPriceInfo>): number {
+  if (!modelId) { return 0; }
+  const spec = cache.get(modelId);
+  if (!spec?.price_in_usd || !spec.price_out_usd) { return 0; }
+  return (promptTokens * spec.price_in_usd + completionTokens * spec.price_out_usd) / 1_000_000;
+}
+
+function TasksTab(props: { agentId: string; sessionId: string; agentName: string; workspace: string; dl: Record<string, DownloadProgressInfo>; providerModels?: Array<{ key?: string; models?: Array<{ id: string; context_window?: number }> }> }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+  const modelPricesRef = React.useRef<Map<string, ModelPriceInfo>>(new Map());
+  /** 定期刷新模型定价缓存 */
+  React.useEffect(() => {
+    let cancelled = false;
+    const refresh = async (): Promise<void> => {
+      try {
+        const ps = await api.providers.list();
+        if (cancelled) { return; }
+        const m = new Map<string, ModelPriceInfo>();
+        for (const p of ps) {
+          for (const mod of (p.models ?? [])) {
+            if (mod.price_in_usd || mod.price_out_usd) {
+              m.set(mod.id, { price_in_usd: mod.price_in_usd, price_out_usd: mod.price_out_usd });
+            }
+          }
+        }
+        modelPricesRef.current = m;
+      } catch { /* ignore */ }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
   const [events, setEvents] = React.useState<TaskEvent[]>([]);
   const [running, setRunning] = React.useState(false);
   const idRef = React.useRef(0);
-  const [usage, setUsage] = React.useState<AccumUsage>(EMPTY_USAGE);
+  /** 从 localStorage 持久化恢复：key 按「agentId + sessionId」聚合（会话级），
+   *  会话切换时重新读取，避免多会话任务串联混淆（A-919） */
+  const loadPersisted = React.useCallback(() => {
+    try {
+      const raw = localStorage.getItem(`slime_tasks_${props.agentId}_${props.sessionId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { usage: AccumUsage; todos: TodoItem[] };
+        return parsed;
+      }
+    } catch { /* 忽略 */ }
+    return null;
+  }, [props.agentId, props.sessionId]);
+  const persisted = loadPersisted();
+  const [usage, setUsage] = React.useState<AccumUsage>(persisted?.usage ?? EMPTY_USAGE);
+  /** A-933：窗口占用（右栏 ContextWindowBar）与右上角 ContextRing **同源**——最近一次 done 的
+   *  输入侧 tokens（prompt + cache read）与权威 windowCap（主进程按 Agent/模型解析下发）。
+   *  与 usage（四项累计，配 MetricsGrid 费用/消耗统计）语义分离，互不混用。 */
+  const [liveUsed, setLiveUsed] = React.useState(0);
+  const [liveCap, setLiveCap] = React.useState(0);
+  /** A-935：会话 ID 实时引用——订阅闭包读 ref 而非陈旧 props（根治切会话后 done/事件被旧值误过滤，
+   *  导致右栏不更新/慢于圆环的根因）；组件随会话切换不重建本闭包也不受影响 */
+  const sessionIdRef = React.useRef(props.sessionId);
+  React.useEffect(() => { sessionIdRef.current = props.sessionId; }, [props.sessionId]);
+  /** A-935：订阅上下文占用单一事件源（发送估算 / done 真实校准）——与右上角环严格同源同时变更 */
+  React.useEffect(() => {
+    const off = onCtxUpdate((p) => {
+      if (p.sessionId !== sessionIdRef.current) { return; }
+      if (p.used > 0) { setLiveUsed(p.used); }
+      if (p.cap > 0) { setLiveCap(p.cap); }
+    });
+    return off;
+  }, []);
+  /** A-934：重启恢复——右栏窗口占用随会话元数据还原（与右上角环同源读取同一 key）；
+   *  无持久化占用 → 显式置 0，防残留上一会话数值（切会话不同步的根因） */
+  React.useEffect(() => {
+    const meta = readSessionCtxMeta(props.agentId, props.sessionId);
+    setLiveUsed(restoreUsed(meta));
+    if (meta?.cap && meta.cap > 0) { setLiveCap(meta.cap); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.agentId, props.sessionId]);
   const [detailOpen, setDetailOpen] = React.useState(false);
-  const maxCtx = useAgentMaxContext(props.agentName);
-  const [todos, setTodos] = React.useState<TodoItem[]>([]);
+  const flatFallback = React.useMemo(
+    () => (props.providerModels ?? []).flatMap((p) => (p.models ?? []).map((m) => ({ id: m.id, context_window: m.context_window }))),
+    [props.providerModels],
+  );
+  const maxCtx = useAgentMaxContext(props.agentName, flatFallback);
+  const [todos, setTodos] = React.useState<TodoItem[]>(persisted?.todos ?? []);
   const [collapsedTodos, setCollapsedTodos] = React.useState(false);
+  /** A-937：底部「活动记录 / 会话文件」双 tab */
+  const [logTab, setLogTab] = React.useState<"activity" | "files">("activity");
   const [todoInput, setTodoInput] = React.useState("");
+    // 变更时写回 localStorage（防抖：React state 更新周期内仅落盘一次）；key 会话级
+    const persistTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const flushPersist = React.useCallback(() => {
+      if (persistTimerRef.current !== null) { clearTimeout(persistTimerRef.current); }
+      persistTimerRef.current = setTimeout(() => {
+        persistTimerRef.current = null;
+        try { localStorage.setItem(`slime_tasks_${props.agentId}_${props.sessionId}`, JSON.stringify({ usage, todos })); } catch { /* 忽略 */ }
+      }, 300);
+    }, [props.agentId, props.sessionId, usage, todos]);
+    React.useEffect(() => { void flushPersist(); }, [flushPersist]);
+    // A-919：会话切换联动——切到新会话立即重读该会话任务并主动向主进程拉取
+    // （todo_write 落盘 data/todos_<sessionId>.json；广播 slime:tasks:todos 双保险）
+    React.useEffect(() => {
+      const p = loadPersisted();
+      if (p) { setTodos(p.todos); setUsage(p.usage); } else { setTodos([]); setUsage(EMPTY_USAGE); }
+      const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+      void api?.tasks?.loadTodos?.(props.sessionId).catch(() => {});
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [props.sessionId]);
+    // 订阅主进程推送的任务列表（todo_write 工具写入后由主进程广播；按 sessionId 过滤）
+    React.useEffect(() => {
+      const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+      if (!api?.tasks?.onTodos) { return; }
+      const off = api.tasks.onTodos((data: { sessionId: string; todos: Array<{ id: string; content: string; status: string }> }) => {
+        if (props.sessionId && data.sessionId !== props.sessionId) { return; }
+        const mapped: TodoItem[] = data.todos.map((t) => ({
+          id: t.id ?? `auto-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          content: t.content,
+          status: (t.status as TaskStatus) ?? "pending",
+        }));
+        setTodos(mapped);
+      });
+      return () => { off(); };
+    }, [props.sessionId]);
 
   const toggleTodoCollapse = React.useCallback(() => setCollapsedTodos((v) => !v), []);
 
@@ -1550,19 +1821,25 @@ function TasksTab(props: { agentName: string; workspace: string; dl: Record<stri
       else if (t === "progress") { pushEvent("progress", c.data?.progress ?? c.data?.content ?? "子任务进行中…"); }
       else if (t === "chunk") { setRunning(true); }
     });
-    const off2 = api.chat.onDone((m: { interrupted?: boolean; timings?: Record<string, number> }) => {
+    const off2 = api.chat.onDone((m: { interrupted?: boolean; timings?: Record<string, number>; model?: string; sessionId?: string; windowCap?: number }) => {
+      // A-933 会话隔离：本面板只记账当前会话的流（用实时 ref，杜绝陈旧 props 误过滤）
+      if (m.sessionId != null && m.sessionId !== sessionIdRef.current) { return; }
       setRunning(false);
       pushEvent("done", m?.interrupted ? "⏹ 已中断" : "✓ 回复完成");
-      setUsage((prev) => {
-        const t = m?.timings ?? {};
-        const pt = typeof t.promptTokens === "number" ? t.promptTokens : 0;
-        const ct = typeof t.completionTokens === "number" ? t.completionTokens : 0;
-        const rt = typeof t.reasoningTokens === "number" ? t.reasoningTokens : 0;
-        const cr = typeof t.cacheReadTokens === "number" ? t.cacheReadTokens : 0;
-        const em = typeof t.elapsedMs === "number" ? t.elapsedMs : 0;
-        const cost = (pt * 3.0 + ct * 15.0 + rt * 60.0) / 1_000_000;
-        return { requests: prev.requests + 1, elapsedMs: prev.elapsedMs + em, promptTokens: prev.promptTokens + pt, completionTokens: prev.completionTokens + ct, reasoningTokens: prev.reasoningTokens + rt, cacheReadTokens: prev.cacheReadTokens + cr, costUsd: prev.costUsd + cost };
-      });
+      const t = m?.timings ?? {};
+      const pt = typeof t.promptTokens === "number" ? t.promptTokens : 0;
+      const ct = typeof t.completionTokens === "number" ? t.completionTokens : 0;
+      const rt = typeof t.reasoningTokens === "number" ? t.reasoningTokens : 0;
+      const cr = typeof t.cacheReadTokens === "number" ? t.cacheReadTokens : 0;
+      const em = typeof t.elapsedMs === "number" ? t.elapsedMs : 0;
+      // 费用计算：从模型缓存读取定价；无定价时 cost=0
+      const cost = computeModelCost(m?.model ?? "", pt, ct, modelPricesRef.current);
+      setUsage((prev) => ({
+        requests: prev.requests + 1, elapsedMs: prev.elapsedMs + em,
+        promptTokens: prev.promptTokens + pt, completionTokens: prev.completionTokens + ct,
+        reasoningTokens: prev.reasoningTokens + rt, cacheReadTokens: prev.cacheReadTokens + cr,
+        costUsd: prev.costUsd + cost,
+      }));
     });
     const off3 = api.chat.onError((e: { message?: string }) => {
       setRunning(false);
@@ -1572,8 +1849,14 @@ function TasksTab(props: { agentName: string; workspace: string; dl: Record<stri
     if (api.chat.onNewConversation) {
       off4 = api.chat.onNewConversation(() => { setEvents([]); setUsage(EMPTY_USAGE); setTodos([]); });
     }
-    return () => { off1(); off2(); off3(); off4?.(); };
-  }, [api, pushEvent]);
+    // 会话切换时重置持久化（新会话从零开始）
+    const off5 = api.conversations?.onChanged?.(() => {
+      // 当前选中的 sessionId 通过 props 不可得，但 onNewConversation 已处理重置逻辑；
+      // 切会话时 onNewConversation 会触发（ChatPanel 切换 sessionId）——若未触发，则切会话
+      // 本身也会卸载本组件；卸载时 flushPersist 已保存旧值，新挂载会从 localStorage 加载。
+    });
+    return () => { off1(); off2(); off3(); off4?.(); off5?.(); };
+  }, [api, pushEvent, modelPricesRef]);
 
   const badge = (k: TaskEvent["kind"]): { color: string; bg: string; text: string } => {
     switch (k) {
@@ -1628,10 +1911,6 @@ function TasksTab(props: { agentName: string; workspace: string; dl: Record<stri
         <div style={{ borderBottom: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)" }}>会话指标</div>
           <MetricsGrid usage={usage} />
-          <UsageBreakdown usage={usage} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />
-          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-            <ContextWindowBar used={usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens} cap={maxCtx} compressCount={0} />
-          </div>
         </div>
 
         <div style={{ borderBottom: "1px solid var(--border)", padding: "8px 10px", flexShrink: 0 }}>
@@ -1663,7 +1942,7 @@ function TasksTab(props: { agentName: string; workspace: string; dl: Record<stri
                       {todo.status === "in_progress" ? <LoadingCircleIcon size={13} className="icon-spin" style={{ color: "var(--accent)" }} /> : <span style={{ width: 13, height: 13, display: "inline-block" }} />}
                     </button>
                     <span style={{ flex: 1, fontSize: 11.5, color: todo.status === "completed" ? "var(--text-muted)" : "var(--text-primary)", textDecoration: todo.status === "completed" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{todo.content}</span>
-                    <button onClick={() => deleteTodo(todo.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 3px", fontSize: 10, color: "var(--text-muted)", lineHeight: 1 }} title="删除">×</button>
+                    <button onClick={() => deleteTodo(todo.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 3px", fontSize: 10, color: "var(--text-muted)", lineHeight: 1 }} title="删除"><CloseIcon size={10} /></button>
                   </div>
                 );
               })}
@@ -1677,25 +1956,123 @@ function TasksTab(props: { agentName: string; workspace: string; dl: Record<stri
           </div>
         </div>
 
-        <div style={{ borderBottom: "1px solid var(--border)", padding: "8px 10px", flexShrink: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>当前会话文件</div>
-          <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.8 }}>App.tsx<br />RightSidebar.tsx<br />package.json<br />index.ts<br />ChatPanel.tsx</div>
+        {/* A-937：上下文消耗进度条 + token 构成 + 明细折叠（取代原"Metrics 下明细 / 已用 标签位"） */}
+        <div style={{ borderBottom: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
+          <ContextWindowBar
+            used={liveUsed}
+            cap={liveCap > 0 ? liveCap : maxCtx}
+            compressCount={0}
+            compose={{ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, reasoningTokens: usage.reasoningTokens, cacheReadTokens: usage.cacheReadTokens }}
+            detailOpen={detailOpen}
+            onToggleDetail={() => setDetailOpen((v) => !v)}
+          />
+          {detailOpen && <UsageBreakdown usage={usage} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />}
         </div>
 
-        <div style={{ padding: "8px 10px 16px", flexShrink: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>活动记录</div>
-          {events.length === 0 && <div className="tree-hint">暂无活动 — Agent 开始工作后，工具调用 / 思考 / 进度会实时显示在这里</div>}
-          {events.map((ev) => {
-            const b = badge(ev.kind);
-            return (
-              <div key={ev.id} className="task-row">
-                <span className="task-time">{ev.time}</span>
-                <span className="task-badge" style={{ color: b.color, background: b.bg }}>{b.text}</span>
-                <span className="task-label" title={ev.label}>{ev.label}</span>
-              </div>
-            );
-          })}
+        {/* A-937：分隔线 + 活动记录 / 会话文件 并列 tab（横向收纳） */}
+        <div style={{ borderTop: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", gap: 2, padding: "6px 10px 0" }}>
+            {(["activity", "files"] as const).map((t) => (
+              <button key={t} onClick={() => setLogTab(t)} style={{ padding: "5px 12px", fontSize: 11.5, borderRadius: "6px 6px 0 0", border: "none", cursor: "pointer", background: "none", color: logTab === t ? "var(--accent)" : "var(--text-muted)", borderBottom: logTab === t ? "2px solid var(--accent)" : "2px solid transparent", fontWeight: logTab === t ? 700 : 500 }}>
+                {t === "activity" ? "活动记录" : "会话文件"}
+                {t === "activity" && <span style={{ marginLeft: 4, fontSize: 10, opacity: 0.8 }}>{events.length}</span>}
+              </button>
+            ))}
+          </div>
+          <div style={{ padding: "8px 10px 16px" }}>
+            {logTab === "activity" ? (
+              <>
+                {events.length === 0 && <div className="tree-hint">暂无活动 — Agent 开始工作后，工具调用 / 思考 / 进度会实时显示在这里</div>}
+                {events.map((ev) => {
+                  const b = badge(ev.kind);
+                  return (
+                    <div key={ev.id} className="task-row">
+                      <span className="task-time">{ev.time}</span>
+                      <span className="task-badge" style={{ color: b.color, background: b.bg }}>{b.text}</span>
+                      <span className="task-label" title={ev.label}>{ev.label}</span>
+                    </div>
+                  );
+                })}
+              </>
+            ) : (
+              (() => {
+                // A-937：当前会话文件 = 事件流中真实访问过的文件（去重），替换原写死占位
+                const seen = new Set<string>();
+                const files: string[] = [];
+                for (const ev of events) {
+                  const m = ev.label?.match(/([\w./\-\\\u4e00-\u9fa5]+\.(?:tsx?|jsx?|py|json|md|ya?ml|toml|css|html|sh|rs|go|cpp|c|h|txt|log|ini|env))(?=$|[,\s;]|"|')/i);
+                  if (m?.[1] && !seen.has(m[1])) { seen.add(m[1]); files.push(m[1]); }
+                }
+                return files.length > 0
+                  ? files.map((f) => <div key={f} style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.8, wordBreak: "break-all" }}>{f}</div>)
+                  : <div className="tree-hint">暂无文件记录 — 会话中访问文件后自动收集</div>;
+              })()
+            )}
+          </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** A-937：子代理工作台——并行派发的 subagent 目标/状态/摘要（对标 Claude Code Agent View，
+ *  4s 轻轮询 slime:resident:state；每个 subagent 独立上下文，主会话只见摘要）。 */
+function SubAgentsTab(): JSX.Element {
+  const [runs, setRuns] = React.useState<Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>>([]);
+  React.useEffect(() => {
+    let alive = true;
+    const refresh = (): void => {
+      const w = window as unknown as { slimeAPI?: any };
+      void w.slimeAPI?.resident?.state?.().then((s: { subagents?: Array<Record<string, unknown>> }) => {
+        if (alive && Array.isArray(s?.subagents)) { setRuns(s.subagents as Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>); }
+      }).catch(() => {});
+    };
+    refresh();
+    const iv = window.setInterval(refresh, 4000);
+    return () => { alive = false; window.clearInterval(iv); };
+  }, []);
+
+  const stMeta: Record<string, { txt: string; c: string; bg: string }> = {
+    pending: { txt: "排队中", c: "var(--text-muted)", bg: "rgba(139,148,158,0.14)" },
+    running: { txt: "执行中", c: "#d29922", bg: "rgba(210,153,34,0.15)" },
+    done: { txt: "已完成", c: "#2ea043", bg: "rgba(46,160,67,0.15)" },
+    fail: { txt: "失败", c: "#f85149", bg: "rgba(248,81,73,0.16)" },
+  };
+
+  return (
+    <div className="right-tab-pane" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div className="right-pane-head">
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <AgentIcon size={13} style={{ color: "var(--text-muted)" }} />
+          <span className="right-pane-title">子代理工作台</span>
+        </span>
+      </div>
+      <div className="right-scroll" style={{ flex: 1, minHeight: 0 }}>
+        <div style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, borderBottom: "1px solid var(--border)" }}>
+          主 Agent 派发的子代理在此**并行执行**，每个子代理拥有独立上下文窗口——原始产出只以摘要回到主会话，主上下文不被污染。
+        </div>
+        {runs.length === 0 && (
+          <div className="tree-hint" style={{ padding: "16px 12px", lineHeight: 1.6 }}>
+            暂无子代理任务。<br />可到 [设置 → 后台任务] 手动/定时派发；对话中让 Agent 调用子代理工具时也会在此展示进度与目标。
+          </div>
+        )}
+        {runs.map((r, i) => {
+          const st = stMeta[r.status ?? ""] ?? stMeta.pending;
+          return (
+            <div key={r.id ?? i} style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", maxWidth: "60%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name || "子代理"}</span>
+                <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, color: st.c, background: st.bg, fontWeight: 700 }}>{st.txt}</span>
+                {r.status === "running" && <span className="icon-spin" style={{ fontSize: 11, color: "var(--accent)", marginLeft: "auto" }}>●</span>}
+              </div>
+              {r.task && <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.task}</div>}
+              {r.status === "done" && r.result && (
+                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 6, borderLeft: "2px solid var(--border)", paddingLeft: 8, maxHeight: 96, overflowY: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.result}</div>
+              )}
+              {r.status === "fail" && <div style={{ fontSize: 11, color: "#f85149", marginTop: 6 }}>任务失败，详见摘要/日志</div>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1703,7 +2080,12 @@ function TasksTab(props: { agentName: string; workspace: string; dl: Record<stri
 
 /* ── 任务页辅助组件 ── */
 
-function ContextWindowBar({ used, cap, compressCount }: { used: number; cap: number; compressCount: number }): JSX.Element {
+function ContextWindowBar({ used, cap, compressCount, compose, detailOpen, onToggleDetail }: {
+  used: number; cap: number; compressCount: number;
+  /** A-937：token 构成（四项累计）→ 进度条下方 4 色构成微条 + 图例，让"已用"不再是黑盒 */
+  compose?: { promptTokens: number; completionTokens: number; reasoningTokens: number; cacheReadTokens: number };
+  detailOpen?: boolean; onToggleDetail?: () => void;
+}): JSX.Element {
   const pct = cap > 0 ? Math.max(0, Math.min(1, used / cap)) : 0;
   const pctLabel = Math.round(pct * 100);
   const status = cap === 0
@@ -1712,6 +2094,16 @@ function ContextWindowBar({ used, cap, compressCount }: { used: number; cap: num
       : pct < 0.85 ? { txt: "接近上限", cls: "#d29922", bg: "rgba(210,153,34,0.15)" }
         : { txt: "逼近硬阈值", cls: "#f85149", bg: "rgba(248,81,73,0.16)" };
   const color = pct < 0.6 ? "var(--success)" : pct < 0.85 ? "var(--warning)" : "var(--danger)";
+  // token 构成占比（分母防零）
+  const tot = Math.max(1, (compose?.promptTokens ?? 0) + (compose?.completionTokens ?? 0) + (compose?.reasoningTokens ?? 0) + (compose?.cacheReadTokens ?? 0));
+  const seg = (n?: number): number => ((n ?? 0) / tot) * 100;
+  const hasCompose = (compose?.promptTokens ?? 0) + (compose?.completionTokens ?? 0) + (compose?.reasoningTokens ?? 0) + (compose?.cacheReadTokens ?? 0) > 0;
+  const comps: Array<{ label: string; pct: number; color: string; n: number }> = [
+    { label: "输入", pct: seg(compose?.promptTokens), color: "#4b9eff", n: compose?.promptTokens ?? 0 },
+    { label: "缓存", pct: seg(compose?.cacheReadTokens), color: "#2ea8dc", n: compose?.cacheReadTokens ?? 0 },
+    { label: "输出", pct: seg(compose?.completionTokens), color: "#9a7bff", n: compose?.completionTokens ?? 0 },
+    { label: "思考", pct: seg(compose?.reasoningTokens), color: "#d29922", n: compose?.reasoningTokens ?? 0 },
+  ];
 
   return (
     <div>
@@ -1728,8 +2120,27 @@ function ContextWindowBar({ used, cap, compressCount }: { used: number; cap: num
         <div style={{ position: "absolute", right: 4, top: -18, fontSize: 10.5, color: "var(--text-muted)", fontWeight: 600 }}>80%</div>
         {pct > 0 && <div style={{ width: `${pct * 100}%`, height: "100%", background: color, borderRadius: 999, transition: "width .25s ease" }} />}
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
-        <span>已用</span>
+      {/* A-937：token 构成微条（四项占比）——"已用"不再是黑盒 */}
+      {hasCompose && (
+        <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 4 }}>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", flexShrink: 0 }}>构成</span>
+          <div style={{ flex: 1, display: "flex", height: 4, borderRadius: 999, overflow: "hidden", background: "var(--input-bg)" }}>
+            {comps.map((c) => c.pct > 0 && <div key={c.label} title={`${c.label} ${fmtK(c.n)}`} style={{ width: `${c.pct}%`, background: c.color }} />)}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {comps.filter((c) => c.n > 0).map((c) => (
+              <span key={c.label} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 9.5, color: "var(--text-muted)" }}>
+                <span style={{ width: 6, height: 6, borderRadius: 2, background: c.color }} />{c.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
+        <button onClick={onToggleDetail} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", cursor: "pointer", padding: "1px 4px", fontSize: 10.5, color: "var(--text-secondary)" }} title={detailOpen ? "收起明细" : "展开 token 明细"}>
+          <span style={{ fontSize: 8, transform: detailOpen ? "rotate(90deg)" : "none", transition: "transform .2s", color: "var(--text-muted)" }}>▶</span>
+          明细 {detailOpen ? "收起" : "展开"}
+        </button>
         <span>距压缩 {compressCount}</span>
       </div>
     </div>
@@ -1743,7 +2154,7 @@ function MetricsGrid({ usage }: { usage: AccumUsage }): JSX.Element {
     ["平均命中", usage.requests === 0 ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
     ["运行时间", fmtMsSmart(usage.elapsedMs)],
     ["累计 tokens", fmtK(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens)],
-    ["会话费用", usage.requests === 0 ? "费用不可估算" : `¥${(usage.costUsd * 7.25).toFixed(usage.costUsd < 0.0001 ? 4 : 4)}`],
+    ["会话费用", usage.requests === 0 ? "—（未配置单价）" : usage.costUsd === 0 ? "—" : `¥${(usage.costUsd * 7.25).toFixed(4)}`],
     ["请求数", String(usage.requests)],
     ["", "—"],
   ];
@@ -1923,6 +2334,15 @@ function BrowserTabInstance(props: { tabId: string; url: string; onUrlChange: (u
   const [loading, setLoading] = React.useState(false);
   const [active, setActive] = React.useState(false);
 
+  // A-173：外部（聊天消息链接点击）修改 url 后，自动导航到新地址
+  React.useEffect(() => {
+    if (props.url && props.url !== navUrl) {
+      setInputUrl(props.url);
+      setNavUrl(props.url);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.url]);
+
   React.useEffect(() => {
     const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
     if (!wv) { return; }
@@ -1950,10 +2370,10 @@ function BrowserTabInstance(props: { tabId: string; url: string; onUrlChange: (u
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%", background: "var(--bg, #fff)" }}>
       <div className="right-pane-head browser-bar" style={{ flexShrink: 0 }}>
         <button className="right-mini-btn" title="后退" disabled={!canBack} onClick={() => { wv?.goBack(); }}>‹</button>
-        <button className="right-mini-btn" title="前进" disabled={!canFwd} onClick={() => { wv?.goForward(); }}>›</button>
-        <button className="right-mini-btn" title="刷新" disabled={!active} onClick={() => { wv?.reload(); }}>⟳</button>
+        <button className="right-mini-btn" title="前进" disabled={!canFwd} onClick={() => { wv?.goForward(); }}><ChevronIcon size={12} rotate={90} /></button>
+        <button className="right-mini-btn" title="刷新" disabled={!active} onClick={() => { wv?.reload(); }}><RefreshIcon size={12} /></button>
         <input className="term-input browser-url" value={inputUrl} placeholder="输入网址，回车访问" onChange={(e) => setInputUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { go(); } }} />
-        <button className="right-mini-btn" title="访问" onClick={go}>→</button>
+        <button className="right-mini-btn" title="访问" onClick={go}><ArrowRightIcon2 size={12} /></button>
       </div>
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {!active && !navUrl && (
@@ -2012,7 +2432,7 @@ function ChangeGroup(props: { title: string; files: string[]; glyph: string; col
         onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--hover-bg, rgba(255,255,255,0.05))"; }}
         onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
         title={props.collapsed ? "展开" : "折叠"}>
-        <span style={{ display: "inline-block", transition: "transform 0.15s", transform: props.collapsed ? "rotate(-90deg)" : "rotate(0deg)", fontSize: 10, opacity: 0.7 }}>▾</span>
+        <span style={{ display: "inline-block", transition: "transform 0.15s", transform: props.collapsed ? "rotate(-90deg)" : "rotate(0deg)", fontSize: 10, opacity: 0.7 }}><ChevronIcon size={10} rotate={props.collapsed ? 0 : 90} /></span>
         <span style={{ fontWeight: 500 }}>{props.title}</span>
         <span style={{ fontSize: 10, color: "var(--text-muted)", background: "var(--input-bg, #161b22)", borderRadius: 8, padding: "0 6px" }}>{props.files.length}</span>
       </div>

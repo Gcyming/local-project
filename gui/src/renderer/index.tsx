@@ -5,6 +5,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.js";
+import ErrorBoundary from "./ErrorBoundary.js";
 import "./index.css";
 import { getTheme, applyTheme } from "./theme.js";
 
@@ -14,6 +15,8 @@ applyTheme(getTheme());
 const root = ReactDOM.createRoot(document.getElementById("root")!);
 root.render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

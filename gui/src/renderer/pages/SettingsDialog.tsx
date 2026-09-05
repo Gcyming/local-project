@@ -11,16 +11,18 @@ import SkillsPanel from "./SkillsPanel.js";
 import McpPanel from "./McpPanel.js";
 import PermissionsPanel from "./PermissionsPanel.js";
 import GeneralPanel from "./GeneralPanel.js";
+import ResidentPanel from "./ResidentPanel.js";
 import type { DownloadProgressInfo } from "../../shared/ipc.js";
-import { SearchIcon, SettingsIcon } from "../components/Icon.js";
+import { SearchIcon, SettingsIcon, CloseIcon } from "../components/Icon.js";
 import type { ThemeName } from "../theme.js";
 
-export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "permissions" | "general";
+export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "permissions" | "general" | "resident";
 
 const SECTIONS: Array<{ id: SettingsTab; label: string; keywords: string[] }> = [
   { id: "general", label: "通用", keywords: ["自启", "开机", "卸载", "启动", "general", "uninstall"] },
   { id: "mind", label: "心智中枢", keywords: ["记忆", "学习", "进化", "情绪", "向量", "embedding", "bge", "mind"] },
   { id: "agents", label: "Agent 管理", keywords: ["代理", "分裂", "身份", "agents", "agent"] },
+  { id: "resident", label: "后台任务", keywords: ["定时", "cron", "子代理", "subagent", "后台", "resident", "常驻", "schedule"] },
   { id: "skills", label: "技能库", keywords: ["技能", "skills", "skill"] },
   { id: "mcp", label: "MCP 接入", keywords: ["mcp", "工具", "服务器", "连接"] },
   { id: "permissions", label: "权限", keywords: ["权限", "授权", "审批", "沙箱", "sandbox", "全局"] },
@@ -65,13 +67,17 @@ export default function SettingsDialog(props: Props): JSX.Element {
       <div style={{
         width: 980, maxWidth: "94vw", height: "78vh", maxHeight: "86vh",
         display: "flex", flexDirection: "column", overflow: "hidden",
+        // A-911：设置弹窗可读性修复——磨砂玻璃（近实色底 + 背景模糊），避免半透明内容透出看不清
+        background: "rgba(10, 16, 32, 0.9)",
+        backdropFilter: "blur(20px) saturate(160%)",
+        WebkitBackdropFilter: "blur(20px) saturate(160%)",
       }} className="card">
         <div style={{ display: "flex", alignItems: "center", padding: "4px 16px", borderBottom: "1px solid var(--border)", minHeight: 44 }}>
           <span style={{ fontSize: 14, fontWeight: 800, color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 7 }}>
             <SettingsIcon size={18} /> 设置
           </span>
           <span style={{ flex: 1 }} />
-          <button className="titlebar-btn" title="关闭设置" onClick={props.onClose} style={{ fontSize: 16 }}>✕</button>
+          <button className="titlebar-btn" title="关闭设置" onClick={props.onClose}><CloseIcon size={14} /></button>
         </div>
 
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -112,8 +118,9 @@ export default function SettingsDialog(props: Props): JSX.Element {
             </div>
           </aside>
 
-          <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+          <div style={{ flex: 1, minWidth: 0, overflowY: "auto", overflowX: "hidden", paddingRight: 2 }}>
             {activeTab === "general" && <GeneralPanel theme={props.theme} onThemeChange={props.onThemeChange} />}
+            {activeTab === "resident" && <ResidentPanel />}
             {activeTab === "mind" && <MindHubPanel selectedAgentId={props.selectedAgentId} dl={props.dl} />}
             {activeTab === "agents" && (
               <AgentsPanel

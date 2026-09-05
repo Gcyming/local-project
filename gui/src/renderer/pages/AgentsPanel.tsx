@@ -3,10 +3,13 @@
  * - 左侧：Agent 卡片列表（名称/角色/生命周期徽章/子代数量）
  * - 右侧：选中 Agent 的属性面板（PropsPanel 模式）：
  *   - 身份卡片：name（身份铁律不可改）+ role（可编辑）
- *   - 模型卡片：模式（inherit / api:<key> / local:<id>）+ 模型选择 + 推理强度 + 保存
+ *   - 模型卡片：模式（inherit / api:<key> / local:<id>）+ 模型选择 + 保存
+ *     （推理强度的选择已移出设置：由聊天输入框「推理配置」面板 + 供应商「参数文件调试」的推理等级模式控制）
  * - 顶部操作：创建 / 分裂 / 导出 / 导入
  */
 import React, { type JSX } from "react";
+import { CloseIcon } from "../components/Icon.js";
+import { confirmAsync } from "../dialog.js";
 
 interface AgentBrief {
   id: string;
@@ -40,13 +43,6 @@ interface Props {
   /** 本地模型列表（model_choice = local:<id>） */
   localModels: Array<{ id: string; label: string; path: string }>;
 }
-
-const REASONING_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "none", label: "关闭" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-];
 
 const MODE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "build", label: "build" },
@@ -129,12 +125,8 @@ export default function AgentsPanel(props: Props): JSX.Element {
     setBusy(true);
     try {
       const patch: Record<string, unknown> = { role: detail.role, model_choice: detail.model_choice };
-      if (detail.reasoning_effort !== "none") {
-        patch.reasoning_effort = detail.reasoning_effort;
-      } else {
-        patch.reasoning_effort = "none";
-      }
       if (detail.mode) { patch.mode = detail.mode; }
+      if (detail.show_thinking !== undefined) { patch.show_thinking = detail.show_thinking; }
       const res = await api.current.agents.update(detail.id, patch);
       if (res.ok) {
         showNotice(true, `「${detail.name}」配置已保存`);
@@ -169,7 +161,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
 
   async function handleFork(): Promise<void> {
     if (!api.current || !selectedId) { return; }
-    if (!window.confirm(`以「${detail?.name ?? ""}」为父分裂出新 Agent（fork，最大深度 2）？`)) { return; }
+    if (!(await confirmAsync(`以「${detail?.name ?? ""}」为父分裂出新 Agent？`, "fork，最大深度 2"))) { return; }
     setBusy(true);
     try {
       const a = await api.current.agents.fork(selectedId, `${detail?.name ?? "agent"}-子`, "");
@@ -327,7 +319,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
             <div className="card" style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>模型配置</div>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
-                model_choice：{mc} {mcMode === "api" && `→ api:<${mcKey}>（取该供应商默认模型）`}
+                model_choice：{mc} {mcMode === "api" && `→ api:<${mcKey}>（供应商 API，聊天时按需选模型）`}
                 {mcMode === "local" && `→ local:<${mcLocal}>（llama.cpp 本地模型）`}
               </div>
 
@@ -346,7 +338,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>模型来源</div>
               <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                 {([
-                  { v: "inherit", label: "继承父级" },
+                  { v: "silam", label: "SILAM" },
                   { v: "api", label: "API 供应商" },
                   { v: "local", label: "本地模型" },
                 ] as const).map((o) => (
@@ -354,12 +346,15 @@ export default function AgentsPanel(props: Props): JSX.Element {
                     className={`btn${mcMode === o.v ? " primary" : ""}`}
                     style={{ fontSize: 12.5, padding: "3px 12px" }}
                     onClick={() => {
-                      if (o.v === "inherit") { patchLocal({ model_choice: "inherit" }); }
+                      if (o.v === "silam") {
+                        // 默认本地自研 SILAM，成长模式（grow）；已有模式则保留
+                        patchLocal({ model_choice: "silam", mode: detail.mode || "grow" });
+                      }
                       if (o.v === "api") {
-                        patchLocal({ model_choice: props.providerKeys.length > 0 ? `api:${props.providerKeys[0]}` : "inherit" });
+                        patchLocal({ model_choice: props.providerKeys.length > 0 ? `api:${props.providerKeys[0]}` : "silam" });
                       }
                       if (o.v === "local") {
-                        patchLocal({ model_choice: props.localModels.length > 0 ? `local:${props.localModels[0].id}` : "inherit" });
+                        patchLocal({ model_choice: props.localModels.length > 0 ? `local:${props.localModels[0].id}` : "silam" });
                       }
                     }}>
                     {o.label}
@@ -377,7 +372,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
                     {props.providerKeys.map((k) => <option key={k} value={k}>api:{k}</option>)}
                   </select>
                   <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10 }}>
-                    模型选择在"供应商"页的编辑界面中维护（每个供应商可调默认模型与多模型参数）
+                    模型选择在"供应商"页的编辑界面中维护（每个供应商可维护多模型参数与启用状态，聊天时按需选模型）
                   </div>
                 </>
               )}
@@ -393,18 +388,6 @@ export default function AgentsPanel(props: Props): JSX.Element {
                   </select>
                 </>
               )}
-
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>推理强度</div>
-              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                {REASONING_OPTIONS.map((o) => (
-                  <button key={o.value}
-                    className={`btn${detail.reasoning_effort === o.value ? " primary" : ""}`}
-                    style={{ fontSize: 12.5, padding: "3px 12px" }}
-                    onClick={() => patchLocal({ reasoning_effort: o.value })}>
-                    {o.label}
-                  </button>
-                ))}
-              </div>
 
               {detail.max_context !== undefined || detail.max_output !== undefined ? (
                 <div style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
@@ -445,7 +428,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
           <div className="card" style={{ width: 420, maxWidth: "90vw" }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
               <h3 style={{ margin: 0, flex: 1 }}>创建 Agent</h3>
-              <button className="titlebar-btn" onClick={() => setCreating(false)}>✕</button>
+              <button className="titlebar-btn" onClick={() => setCreating(false)}><CloseIcon size={12} /></button>
             </div>
             <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>名称（唯一，不可修改）</div>
             <input className="input-field" value={newName} spellCheck={false}
@@ -475,7 +458,7 @@ export default function AgentsPanel(props: Props): JSX.Element {
           <div className="card" style={{ width: 400, maxWidth: "90vw" }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
               <h3 style={{ margin: 0, flex: 1 }}>删除 Agent</h3>
-              <button className="titlebar-btn" onClick={() => setPendingDelete(null)}>✕</button>
+              <button className="titlebar-btn" onClick={() => setPendingDelete(null)}><CloseIcon size={12} /></button>
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
               确定删除 <b style={{ color: "#f87171" }}>{pendingDelete.name}</b> 及其全部子 Agent？

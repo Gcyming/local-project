@@ -6,6 +6,7 @@
  */
 import React, { type JSX } from "react";
 import type { ThemeName } from "../theme.js";
+import { confirmAsync } from "../dialog.js";
 
 interface Props {
   theme?: ThemeName;
@@ -29,8 +30,12 @@ const THEMES: Array<{ id: ThemeName; name: string; desc: string; swatch: string[
 
 export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props): JSX.Element {
   const [autostart, setAutostart] = React.useState<boolean | null>(null);
+  const [exitMode, setExitModeState] = React.useState<"quit" | "background">("quit");
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
+  // A-916：请求频率（并发上限 / 断流重连基间隔）
+  const [reqCfg, setReqCfg] = React.useState<{ concurrency: number; reconnectBaseMs: number }>({ concurrency: 2, reconnectBaseMs: 3000 });
+  const [reqBusy, setReqBusy] = React.useState(false);
   const api = React.useRef<any>(null);
 
   const showNotice = (ok: boolean, text: string): void => {
@@ -43,10 +48,34 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
     api.current = w.slimeAPI;
     if (api.current?.settings?.autostartGet) {
       void api.current.settings.autostartGet().then((r: { ok: boolean; enabled: boolean }) => {
-        setAutostart(Boolean(r.enabled));
-      }).catch(console.error);
+        setAutostart(r.enabled);
+      });
+    }
+    if (api.current?.window?.getExitMode) {
+      void api.current.window.getExitMode().then((r: { mode: "quit" | "background" }) => setExitModeState(r.mode));
+    }
+    if (api.current?.requests?.get) {
+      void api.current.requests.get().then((r: { concurrency?: number; reconnectBaseMs?: number }) => {
+        setReqCfg({
+          concurrency: typeof r?.concurrency === "number" ? r.concurrency : 2,
+          reconnectBaseMs: typeof r?.reconnectBaseMs === "number" ? r.reconnectBaseMs : 3000,
+        });
+      }).catch(() => {});
     }
   }, []);
+
+  async function saveRequests(): Promise<void> {
+    if (!api.current?.requests?.set || reqBusy) { return; }
+    setReqBusy(true);
+    try {
+      const r = await api.current.requests.set(reqCfg);
+      showNotice(Boolean(r.ok), r.ok ? "请求频率已保存（新增任务/下次重连生效）" : (r.error ?? "保存失败"));
+    } catch (e) {
+      showNotice(false, `保存失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setReqBusy(false);
+    }
+  }
 
   async function toggleAutostart(next: boolean): Promise<void> {
     if (!api.current?.settings?.autostartSet || busy) { return; }
@@ -64,8 +93,9 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
 
   async function handleUninstall(): Promise<void> {
     if (!api.current?.settings?.uninstall) { return; }
-    const sure = window.confirm(
-      "确定要卸载 Slime 吗？\n\n将启动卸载程序，应用会立即退出。\n卸载过程中可另行选择是否保留用户数据（API 密钥、Agent、会话历史）。",
+    const sure = await confirmAsync(
+      "确定要卸载 Slime 吗？",
+      "将启动卸载程序，应用会立即退出。卸载过程中可另行选择是否保留用户数据（API 密钥、Agent、会话历史）。",
     );
     if (!sure) { return; }
     setBusy(true);
@@ -99,6 +129,55 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
           {notice.text}
         </div>
       )}
+
+      {/* A-916：请求频率调节（并发上限 / 断流重连基间隔） */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>请求频率</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
+          用于匹配不同供应商的限流档位（RPM/并发）。若经常「生成到一半标红报错/被中断」，通常是上游节流——把并发调低、把重连间隔调大即可缓解。
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5 }}>
+            并发上限（同时发起的请求数）
+            <select className="input-field" value={reqCfg.concurrency}
+              onChange={(e) => setReqCfg((p) => ({ ...p, concurrency: Number(e.target.value) }))}>
+              <option value={1}>1（最保守）</option>
+              <option value={2}>2（默认，推荐）</option>
+              <option value={3}>3</option>
+              <option value={5}>5</option>
+              <option value={8}>8（高吞吐，需高 Tier）</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5 }}>
+            断流自动重连基间隔
+            <select className="input-field" value={reqCfg.reconnectBaseMs}
+              onChange={(e) => setReqCfg((p) => ({ ...p, reconnectBaseMs: Number(e.target.value) }))}>
+              <option value={1000}>1 秒（激进）</option>
+              <option value={2000}>2 秒</option>
+              <option value={3000}>3 秒（默认，推荐）</option>
+              <option value={5000}>5 秒（温柔）</option>
+            </select>
+          </label>
+          <button
+            style={{
+              borderRadius: 8,
+              height: 34,
+              padding: "0 18px",
+              fontSize: 12.5,
+              fontWeight: 600,
+              cursor: "pointer",
+              background: "var(--bg-hover)",
+              border: "1px solid var(--border)",
+              color: "var(--accent-hover)",
+            }}
+            disabled={reqBusy} onClick={() => void saveRequests()}>
+            {reqBusy ? "保存中…" : "保存"}
+          </button>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8 }}>
+          每次重连按「基间隔 × 已尝试次数」指数递增并加抖动（避免惊群）；并发上限同时约束 Swarm 并行。
+        </div>
+      </div>
 
       {/* 主题选择 */}
       <div className="card" style={{ marginBottom: 14 }}>
@@ -162,6 +241,37 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
             {autostart === null ? "…" : (autostart ? "已开启" : "已关闭")}
           </button>
         </div>
+      </div>
+
+      {/* A-937：退出行为——直接退出 / 最小化到后台保留 */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>关闭应用时的行为</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, marginBottom: 10, lineHeight: 1.5 }}>
+          选择直接退出，或最小化到系统托盘在后台保留（后台可继续执行定时任务 / 子代理，随时点击托盘图标恢复）。
+        </div>
+        {(["quit", "background"] as const).map((m) => (
+          <button
+            key={m}
+            onClick={() => {
+              if (exitMode === m || busy) { return; }
+              setBusy(true);
+              void (api.current?.window?.setExitMode?.(m).then((r: { ok: boolean; mode: "quit" | "background" }) => {
+                setExitModeState(r.mode ?? m);
+                showNotice(true, r.mode === "background" ? "已启用：关闭时最小化到后台托盘" : "已启用：关闭时直接退出");
+              }).finally(() => setBusy(false)));
+            }}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8, marginRight: 18, marginBottom: 4,
+              background: "none", border: "none", cursor: "pointer", padding: "4px 0", fontSize: 12.5,
+              color: exitMode === m ? "var(--accent-hover)" : "var(--text-muted)",
+            }}
+          >
+            <span style={{ width: 14, height: 14, borderRadius: 999, border: `2px solid ${exitMode === m ? "var(--accent)" : "var(--border)"}`, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+              {exitMode === m && <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--accent)" }} />}
+            </span>
+            {m === "quit" ? "直接退出" : "最小化到后台保留（托盘常驻）"}
+          </button>
+        ))}
       </div>
 
       {/* 卸载 */}
