@@ -22,6 +22,8 @@ export const IPC_CHANNELS = {
   sessions_config_get: "slime:sessions:configGet",
   sessions_pick_folder: "slime:sessions:pickFolder",
   sessions_remove_agent: "slime:sessions:removeAgent",
+  sessions_remove_workspace: "slime:sessions:removeWorkspace",
+  sessions_set_members: "slime:sessions:setMembers",
   // 加号/命令面板 + 输入联想
   extras_list: "slime:extras:list",
   chat_suggest: "slime:chat:suggest",
@@ -86,16 +88,26 @@ export const IPC_CHANNELS = {
 
 export interface StreamChunk {
   seq: number;
-  type: "chunk" | "tool" | "reasoning" | "progress" | "done" | "error" | "heartbeat";
+  type: "chunk" | "tool" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member";
   data: {
     content?: string;
     name?: string;
+    /** A-162: 工具调用的参数原文（tool 事件；前端提取网址/文件路径展示细节行） */
+    args?: string;
+    /** 工具执行结果（tool 事件；供阶段卡展示/留痕） */
+    result?: string;
+    /** SILAM 大脑思考过程（type="done"/"chunk" 事件携带，折叠展示） */
+    reasoning?: string;
+    /** 团队会话：成员发言事件（type="member"）的发声 Agent ID */
+    agentId?: string;
     model?: string;
     promptTokens?: number;
     completionTokens?: number;
     elapsedMs?: number;
     timings?: Record<string, number>;
     message?: string;
+    /** 该流所属会话（main 进程注入；渲染层据此过滤，杜绝切会话后旧流串扰） */
+    sessionId?: string;
   };
 }
 
@@ -109,6 +121,8 @@ export interface ChatInput {
   sessionId?: string;
   /** 联网搜索开关：false 时 web_search/web_fetch 工具被静默拒绝 */
   networkEnabled?: boolean;
+  /** 识图图片（data URL 列表，data:image/png;base64,...） */
+  images?: string[];
 }
 
 /** 本地模型加载进度（主进程 → 渲染层，slime:model:loading） */
@@ -128,14 +142,20 @@ export interface AgentInfo {
   lifecycle: string;
 }
 
-/** 侧栏会话项（项目 = Agent，项目内独立会话） */
+/** 侧栏会话项（以目标工作文件夹为主分组；会话内指定调用 Agent，可随时切换） */
 export interface SessionItem {
   sessionId: string;
   agentId: string;
   agentName: string;
+  /** 目标工作文件夹（会话级；旧数据可能为空 → 归入「未绑定文件夹」组） */
+  workspace?: string;
   title: string;
   count: number;
   lastTime: string;
+  /** 团队会话成员 Agent id 列表（组长 = agentId；不含组长；空/缺省 = 单人会话） */
+  memberIds?: string[];
+  /** 团队会话成员 Agent 名称（与 memberIds 同序，渲染徽章用） */
+  memberNames?: string[];
 }
 
 /** 会话消息（历史加载） */
@@ -147,10 +167,15 @@ export interface ConversationMessage {
   reasoning?: string;
   /** 该条回复的耗时（毫秒，assistant；旧记录无此字段） */
   elapsedMs?: number;
+  /** 发言人 Agent 名称（团队会话成员发言；缺省 = 会话组长/当前 Agent） */
+  agentName?: string;
+  /** 发言人 Agent ID（团队会话成员发言） */
+  agentId?: string;
 }
 
 /** 会话级审批模式（映射沙箱档位） */
-export type ApprovalMode = "auto" | "confirm" | "strict";
+/** 审批档位：manual 手动 / auto 自动 / none 无需 / custom 自定义（旧值 strict/confirm 兼容为 manual） */
+export type ApprovalMode = "manual" | "auto" | "none" | "custom";
 
 /** 权限请求选项（渲染层选择题 UI：列出每个选项的结果，供用户抉择） */
 export interface PermissionOption {
@@ -172,6 +197,8 @@ export interface PermissionRequestUI {
   actions: Array<{ action: string; target: string; level: number }>;
   /** 选择题选项（含各选项结果） */
   options: PermissionOption[];
+  /** 触发该请求的流所属会话（main 注入；切会话后旧会话残留请求可据此丢弃，避免输入框被无关选择题卡住） */
+  sessionId?: string;
 }
 
 /** 渲染层 → 主进程：用户对权限请求的决策 */
@@ -191,8 +218,16 @@ export interface AskUserRequestUI {
   agentName: string;
   /** 问题正文（模型给出，含各选项后果说明） */
   question: string;
-  /** 建议选项（可为空数组，此时展示自填输入） */
+  /** 决策分类徽章（如"部署方案"/"架构取舍"） */
+  header?: string;
+  /** 建议选项 = 各方向主体（可为空数组，此时展示自填输入） */
   options: string[];
+  /** 与 options 平行的后果说明（选择该选项的影响） */
+  consequences?: string[];
+  /** 模型自评推荐项下标（UI 标注「⭐ 推荐」） */
+  recommendation?: number;
+  /** 触发该请求的流所属会话（main 注入；切会话后旧会话残留提问可据此丢弃，避免输入框被无关提问卡住） */
+  sessionId?: string;
 }
 
 /** 渲染层 → 主进程：用户对 ask_user 的回答 */
@@ -207,6 +242,8 @@ export interface AskUserDecision {
 /** 全局权限控制（设置「权限」专栏；gui_permissions.json 持久化） */
 export interface GuiPermissions {
   globalApproval: ApprovalMode;
+  /** 自定义审批白名单（目录/仓库命中免审批，custom 档生效） */
+  approvalAllowPaths: string[];
   toolRead: boolean;
   toolWrite: boolean;
   toolTerminal: boolean;
@@ -291,6 +328,10 @@ export interface ModelSpec {
   context_window?: number;
   max_output?: number;
   vision?: boolean;
+  thinking?: boolean;
+  thinking_efforts?: string[];
+  price_in_usd?: number;
+  price_out_usd?: number;
 }
 
 /** 渲染层可见的脱敏 Provider 摘要（绝不含明文 api_key） */
@@ -300,6 +341,7 @@ export interface ProviderSummary {
   has_key: boolean;
   key_hint: string;
   model: string | null;
+  api_format: "openai" | "anthropic" | "auto";
   models: ModelSpec[];
 }
 
@@ -565,4 +607,35 @@ export interface GitCloneResult {
   ok: boolean;
   path?: string;
   error?: string;
+}
+
+/** 后台常驻：定时任务视图（ResidentPanel 消费，A-910） */
+export interface ResidentJobView {
+  id: string;
+  name: string;
+  cron: string;
+  prompt: string;
+  agentId?: string;
+  nextRun?: number;
+  lastRun?: number;
+  lastResult?: string;
+  paused?: boolean;
+  running?: boolean;
+}
+
+/** 后台常驻：子代理运行视图 */
+export interface SubAgentRunView {
+  id: string;
+  name: string;
+  status: "pending" | "running" | "done" | "fail";
+  startedAt?: number;
+  finishedAt?: number;
+  result?: string;
+  error?: string;
+}
+
+/** 后台常驻：整体快照 */
+export interface ResidentState {
+  scheduler: ResidentJobView[];
+  subagents: SubAgentRunView[];
 }

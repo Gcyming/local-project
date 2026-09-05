@@ -16,6 +16,7 @@ import type {
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
   GitDetect, GitInfo, GitAction, GitCloneResult, WorkspaceReadFileResult,
   ContextMenuItem, WorkspaceContextMenuParams, WorkspaceCreateResult,
+  ResidentState, SubAgentRunView,
 } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
@@ -28,6 +29,9 @@ function onMessage<T>(channel: string, cb: (payload: T) => void) {
 contextBridge.exposeInMainWorld("slimeAPI", {
   chat: {
     stream: (input: ChatInput) => ipcRenderer.invoke("slime:chat:stream", input),
+    /** A-161: 回滚持久化 —— 截断该会话历史到目标用户消息之前（回滚后重启不再复现旧消息） */
+    truncateFrom: (agentId: string, sessionId: string | undefined, userMsg: string) =>
+      ipcRenderer.invoke("slime:history:truncateFrom", { agentId, sessionId, userMsg }) as Promise<{ ok: boolean; removed?: number; error?: string }>,
     /** P0: 新对话（重置历史，返回空 OK） */
     newConversation: (agentId: string) =>
       ipcRenderer.invoke("slime:chat:new", { agentId }) as Promise<{ ok: boolean }>,
@@ -38,12 +42,13 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     cancel: (key: string) =>
       ipcRenderer.invoke("slime:chat:cancel", { key }) as Promise<{ ok: boolean; error?: string; active?: number }>,
     onChunk: (cb: (chunk: StreamChunk) => void) => onMessage<StreamChunk>("slime:chat:chunk", cb),
-    onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean }) => void) =>
-      onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean }>(
+    onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => void) =>
+      onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }>(
         "slime:chat:done", cb,
       ),
-    onError: (cb: (err: { message: string }) => void) =>
-      onMessage<{ message: string }>("slime:chat:error", cb),
+    onError: (cb: (err: { message: string; sessionId?: string }) => void) => onMessage<{ message: string; sessionId?: string }>("slime:chat:error", cb),
+    /** A-918：流终态广播（done/error/取消统一出口）——渲染层校准 per-session 流快照，防"切回仍在生成"假活跃 */
+    onStreamEnded: (cb: (ev: { sessionId?: string }) => void) => onMessage<{ sessionId?: string }>("slime:chat:streamEnded", cb),
   },
   model: {
     /** 本地模型加载进度（渲染层弹出 slime 主题加载弹窗） */
@@ -56,22 +61,37 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     list: () => ipcRenderer.invoke("slime:sessions:list") as Promise<SessionItem[]>,
     load: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:load", { sessionId }) as Promise<ConversationMessage[]>,
-    create: (agentId?: string, title?: string) =>
-      ipcRenderer.invoke("slime:sessions:create", { agentId, title }) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** 新建会话：以目标工作文件夹为主（workspace），会话内指定调用 Agent（agentId）；memberIds=可选团队成员 */
+    create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: string[] }) =>
+      ipcRenderer.invoke("slime:sessions:create", opts) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** 会话内切换调用的 Agent（保留工作文件夹/标题/历史） */
+    setAgent: (sessionId: string, agentId: string) =>
+      ipcRenderer.invoke("slime:sessions:setAgent", { sessionId, agentId }) as Promise<{ ok: boolean }>,
+    /** 团队会话成员更新（组长=会话当前 agentId；空数组=退回单人会话） */
+    setMembers: (sessionId: string, memberIds: string[]) =>
+      ipcRenderer.invoke("slime:sessions:setMembers", { sessionId, memberIds }) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** 会话级工作目录更新（以文件夹为主：绑定/更换工作文件夹） */
+    setWorkspace: (sessionId: string, workspace: string | null) =>
+      ipcRenderer.invoke("slime:sessions:setWorkspace", { sessionId, workspace }) as Promise<{ ok: boolean; workspace?: string }>,
     rename: (sessionId: string, title: string) =>
       ipcRenderer.invoke("slime:sessions:rename", { sessionId, title }) as Promise<{ ok: boolean }>,
     remove: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:remove", { sessionId }) as Promise<{ ok: boolean }>,
     clear: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:clear", { sessionId }) as Promise<{ ok: boolean }>,
-    config: (input: { agentId: string; approval?: ApprovalMode; workspace?: string | null }) =>
+    config: (input: { agentId: string; sessionId?: string; approval?: ApprovalMode; workspace?: string | null }) =>
       ipcRenderer.invoke("slime:sessions:config", input) as Promise<{ ok: boolean; approval: ApprovalMode; workspace: string }>,
-    configGet: (agentId: string) =>
-      ipcRenderer.invoke("slime:sessions:configGet", { agentId }) as Promise<SessionConfig>,
+    configGet: (input: { agentId: string; sessionId?: string }) =>
+      ipcRenderer.invoke("slime:sessions:configGet", input) as Promise<SessionConfig>,
     pickFolder: () =>
       ipcRenderer.invoke("slime:sessions:pickFolder") as Promise<{ ok: boolean; path?: string; error?: string }>,
     removeAgent: (agentId: string) =>
       ipcRenderer.invoke("slime:sessions:removeAgent", { agentId }) as Promise<{ ok: boolean }>,
+    /** 删除工作文件夹分组：清除该 workspace 下全部会话与历史（文件夹与 Agent 保留） */
+    removeWorkspace: (workspace: string) =>
+      ipcRenderer.invoke("slime:sessions:removeWorkspace", { workspace }) as Promise<{ ok: boolean; count?: number }>,
+    loadTodos: (sessionId: string) =>
+      ipcRenderer.invoke("slime:sessions:loadTodos", { sessionId }) as Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string }> }>,
   },
   extras: {
     list: () => ipcRenderer.invoke("slime:extras:list") as Promise<ExtrasList>,
@@ -104,6 +124,14 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 导入文件对话框：返回本地路径（聊天输入区附件） */
     pick: () => ipcRenderer.invoke("slime:files:pick") as Promise<{ ok: boolean; path?: string; error?: string }>,
   },
+  images: {
+    /** 识图：选择图片（多选≤4）→ 主进程编码 data URL（给聊天输入区附件 / 直接发送） */
+    pick: () => ipcRenderer.invoke("slime:images:pick") as Promise<{
+      ok: boolean;
+      images?: Array<{ name: string; mime: string; dataUrl: string }>;
+      error?: string;
+    }>,
+  },
   permissions: {
     get: () => ipcRenderer.invoke("slime:permissions:get") as Promise<GuiPermissions>,
     set: (patch: Partial<Record<keyof GuiPermissions, unknown>>) =>
@@ -131,6 +159,14 @@ contextBridge.exposeInMainWorld("slimeAPI", {
   },
   suggest: (text: string) =>
     ipcRenderer.invoke("slime:chat:suggest", { text }) as Promise<SuggestionItem[]>,
+  dialog: {
+    /** 异步确认框（A-151）：主进程原生对话框，不阻塞渲染层 JS——替代 window.confirm */
+    confirm: (message: string, detail?: string) =>
+      ipcRenderer.invoke("slime:dialog:confirm", { message, detail }) as Promise<{ ok: boolean; confirmed: boolean; error: string | null }>,
+    /** 异步提示框（A-151）：替代 window.alert */
+    alert: (message: string, detail?: string) =>
+      ipcRenderer.invoke("slime:dialog:alert", { message, detail }) as Promise<{ ok: boolean; error: string | null }>,
+  },
   stats: {
     snapshot: () => ipcRenderer.invoke("slime:stats:snapshot") as Promise<StatsSnapshot>,
     poll: (start: boolean) => ipcRenderer.invoke("slime:stats:poll", start),
@@ -181,7 +217,10 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     list: () => ipcRenderer.invoke("slime:providers:list") as Promise<ProviderSummary[]>,
     fetchModels: (baseUrl: string, apiKey: string) =>
       ipcRenderer.invoke("slime:providers:fetchModels", { baseUrl, apiKey }) as Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }>,
-    save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }) =>
+    /** 一键刷新：用已保存的密钥重新探测上游模型列表并就地更新（无需重新填写配置） */
+    refresh: (key: string) =>
+      ipcRenderer.invoke("slime:providers:refresh", { key }) as Promise<{ ok: boolean; total?: number; added?: number; removed?: number; error?: string }>,
+    save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "auto"; models?: unknown[] }) =>
       ipcRenderer.invoke("slime:providers:save", input) as Promise<{ ok: boolean; error?: string }>,
     remove: (key: string) =>
       ipcRenderer.invoke("slime:providers:remove", { key }) as Promise<{ ok: boolean; error?: string }>,
@@ -253,6 +292,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 右侧栏「工作树」：读取文件内容（支持 text/image/binary，主进程校验锚定） */
     readFile: (root: string, rel: string) =>
       ipcRenderer.invoke("slime:workspace:readFile", { root, rel }) as Promise<WorkspaceReadFileResult>,
+    /** A-173：按绝对路径读取文件（聊天消息内点击文件链接在右侧栏打开） */
+    readFileAbs: (path: string) =>
+      ipcRenderer.invoke("slime:workspace:readFileAbs", { path }) as Promise<WorkspaceReadFileResult>,
     /** 构建右键菜单模板（主进程侧校验路径） */
     contextmenu: (root: string, params: WorkspaceContextMenuParams) =>
       ipcRenderer.invoke("slime:workspace:contextmenu", { root, params }) as Promise<{ ok: boolean; items?: ContextMenuItem[]; error?: string }>,
@@ -301,18 +343,42 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 重置本地数据（清空 Provider / Agent / 会话与历史；记忆文件保留） */
     reset: () => ipcRenderer.invoke("slime:data:reset") as Promise<{ ok: boolean; error?: string }>,
   },
+  resident: {
+    /** 后台常驻快照（定时任务 + 子代理，A-910） */
+    state: () => ipcRenderer.invoke("slime:resident:state") as Promise<ResidentState>,
+    /** 新增定时任务（写回 data/schedules.json + 运行态落盘） */
+    schedulerAdd: (p: { name: string; cron: string; prompt: string; agentId?: string }) =>
+      ipcRenderer.invoke("slime:resident:scheduler:add", p) as Promise<{ ok: boolean; id?: string; error?: string }>,
+    /** 删除定时任务（同步从 schedules.json 移除） */
+    schedulerRemove: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:remove", { id }) as Promise<{ ok: boolean }>,
+    schedulerPause: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:pause", { id }) as Promise<{ ok: boolean }>,
+    schedulerResume: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:resume", { id }) as Promise<{ ok: boolean }>,
+    /** 立即触发一次（事件/手动） */
+    schedulerTrigger: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:trigger", { id }) as Promise<{ ok: boolean }>,
+    /** 派发后台子代理（fire-and-forget；结果落盘 subagent-*.md） */
+    subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) =>
+      ipcRenderer.invoke("slime:resident:subagent:spawn", p) as Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>,
+  },
+  requests: {
+    /** 读请求频率配置（并发上限 / 断流重连基间隔，A-916） */
+    get: () => ipcRenderer.invoke("slime:requests:get") as Promise<{ concurrency: number; reconnectBaseMs: number }>,
+    set: (p: { concurrency?: number; reconnectBaseMs?: number }) =>
+      ipcRenderer.invoke("slime:requests:set", p) as Promise<{ ok: boolean; concurrency?: number; reconnectBaseMs?: number; error?: string }>,
+  },
 });
 
 declare global {
   interface Window {
     slimeAPI: {
-chat: {
+      chat: {
         stream: (input: ChatInput) => Promise<unknown>;
+        truncateFrom: (agentId: string, sessionId: string | undefined, userMsg: string) => Promise<{ ok: boolean; removed?: number; error?: string }>;
         newConversation: (agentId: string) => Promise<{ ok: boolean }>;
         retryLast: (agentId: string, sessionId?: string) => Promise<{ ok: boolean; error?: string }>;
         onChunk: (cb: (chunk: StreamChunk) => void) => () => void;
-        onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number> }) => void) => () => void;
-        onError: (cb: (err: { message: string }) => void) => () => void;
+        onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => void) => () => void;
+        onError: (cb: (err: { message: string; sessionId?: string }) => void) => () => void;
+        onStreamEnded: (cb: (ev: { sessionId?: string }) => void) => () => void;
       };
       model: {
         onLoading: (cb: (s: ModelLoadingStatus) => void) => () => void;
@@ -321,14 +387,19 @@ chat: {
       conversations: {
         list: () => Promise<SessionItem[]>;
         load: (sessionId: string) => Promise<ConversationMessage[]>;
-        create: (agentId?: string, title?: string) => Promise<{ ok: boolean; session?: SessionItem }>;
+        create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: string[] }) => Promise<{ ok: boolean; session?: SessionItem }>;
+        setAgent: (sessionId: string, agentId: string) => Promise<{ ok: boolean }>;
+        setMembers: (sessionId: string, memberIds: string[]) => Promise<{ ok: boolean; session?: SessionItem }>;
+        setWorkspace: (sessionId: string, workspace: string | null) => Promise<{ ok: boolean; workspace?: string }>;
         rename: (sessionId: string, title: string) => Promise<{ ok: boolean }>;
         remove: (sessionId: string) => Promise<{ ok: boolean }>;
         clear: (sessionId: string) => Promise<{ ok: boolean }>;
-        config: (input: { agentId: string; approval?: ApprovalMode; workspace?: string | null }) => Promise<{ ok: boolean; approval: ApprovalMode; workspace: string }>;
-        configGet: (agentId: string) => Promise<SessionConfig>;
+        config: (input: { agentId: string; sessionId?: string; approval?: ApprovalMode; workspace?: string | null }) => Promise<{ ok: boolean; approval: ApprovalMode; workspace: string }>;
+        configGet: (input: { agentId: string; sessionId?: string }) => Promise<SessionConfig>;
         pickFolder: () => Promise<{ ok: boolean; path?: string; error?: string }>;
         removeAgent: (agentId: string) => Promise<{ ok: boolean }>;
+        removeWorkspace: (workspace: string) => Promise<{ ok: boolean; count?: number }>;
+        loadTodos: (sessionId: string) => Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string }> }>;
       };
       extras: {
         list: () => Promise<ExtrasList>;
@@ -343,6 +414,9 @@ chat: {
         mcpDelete: (name: string) => Promise<{ ok: boolean; error?: string }>;
       };
       files: { pick: () => Promise<{ ok: boolean; path?: string; error?: string }> };
+      images: {
+        pick: () => Promise<{ ok: boolean; images?: Array<{ name: string; mime: string; dataUrl: string }>; error?: string }>;
+      };
       permissions: {
         get: () => Promise<GuiPermissions>;
         set: (patch: Partial<Record<keyof GuiPermissions, unknown>>) => Promise<{ ok: boolean; permissions: GuiPermissions; error?: string }>;
@@ -351,6 +425,10 @@ chat: {
         onRequest: (cb: (req: PermissionRequestUI) => void) => () => void;
         onTimeout: (cb: (req: { requestId: string }) => void) => () => void;
         resolve: (decision: PermissionDecision) => Promise<{ ok: boolean }>;
+      };
+      tasks: {
+        loadTodos: (sessionId: string) => Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string }> }>;
+        onTodos: (cb: (data: { sessionId: string; todos: Array<{ id: string; content: string; status: string }> }) => void) => () => void;
       };
       askUser: {
         onRequest: (cb: (req: AskUserRequestUI) => void) => () => void;
@@ -381,12 +459,13 @@ chat: {
         terminate: () => Promise<void>;
         onStatus: (cb: (status: SidecarStatus) => void) => () => void;
       };
-      window: { minimize: () => Promise<void>; maximize: () => Promise<void>; quit: () => Promise<void> };
+      window: { minimize: () => Promise<void>; maximize: () => Promise<void>; quit: () => Promise<void>; setExitMode: (mode: "quit" | "background") => Promise<{ ok: boolean; mode: "quit" | "background" }>; getExitMode: () => Promise<{ mode: "quit" | "background" }> };
       theme: { set: (theme: string) => Promise<void> };
       providers: {
         list: () => Promise<ProviderSummary[]>;
         fetchModels: (baseUrl: string, apiKey: string) => Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }>;
-        save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }) => Promise<{ ok: boolean; error?: string }>;
+        refresh: (key: string) => Promise<{ ok: boolean; total?: number; added?: number; removed?: number; error?: string }>;
+        save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "auto"; models?: unknown[] }) => Promise<{ ok: boolean; error?: string }>;
         remove: (key: string) => Promise<{ ok: boolean; error?: string }>;
         localList: () => Promise<LocalModelSpec[]>;
         localSave: (input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean }) => Promise<{ ok: boolean; error?: string }>;
@@ -428,6 +507,7 @@ chat: {
       workspace: {
         list: (root: string, rel: string) => Promise<WorkspaceListResult>;
         readFile: (root: string, rel: string) => Promise<WorkspaceReadFileResult>;
+        readFileAbs: (path: string) => Promise<WorkspaceReadFileResult>;
         /** 构建右键菜单模板（主进程侧校验路径） */
         contextmenu: (root: string, params: WorkspaceContextMenuParams) => Promise<{ ok: boolean; items?: ContextMenuItem[]; error?: string }>;
         /** 新建文件/文件夹 */
@@ -448,6 +528,23 @@ chat: {
       };
       data: {
         reset: () => Promise<{ ok: boolean; error?: string }>;
+      };
+      dialog: {
+        confirm: (message: string, detail?: string) => Promise<{ ok: boolean; confirmed: boolean; error: string | null }>;
+        alert: (message: string, detail?: string) => Promise<{ ok: boolean; error: string | null }>;
+      };
+      resident: {
+        state: () => Promise<ResidentState>;
+        schedulerAdd: (p: { name: string; cron: string; prompt: string; agentId?: string }) => Promise<{ ok: boolean; id?: string; error?: string }>;
+        schedulerRemove: (id: string) => Promise<{ ok: boolean }>;
+        schedulerPause: (id: string) => Promise<{ ok: boolean }>;
+        schedulerResume: (id: string) => Promise<{ ok: boolean }>;
+        schedulerTrigger: (id: string) => Promise<{ ok: boolean }>;
+        subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
+      };
+      requests: {
+        get: () => Promise<{ concurrency: number; reconnectBaseMs: number }>;
+        set: (p: { concurrency?: number; reconnectBaseMs?: number }) => Promise<{ ok: boolean; concurrency?: number; reconnectBaseMs?: number; error?: string }>;
       };
     };
   }

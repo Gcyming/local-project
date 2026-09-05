@@ -7,6 +7,7 @@
  */
 import React, { type JSX } from "react";
 import type { StatsSnapshot } from "../../shared/ipc.js";
+import { alertAsync } from "../dialog.js";
 
 interface UpdateStatus {
   status: string;
@@ -25,6 +26,18 @@ interface TrendPoint {
 const ACCENT = "#38bdf8";
 const WARN = "#fbbf24";
 const DANGER = "#f87171";
+
+/** 加载等待秒数时钟（A-129）：自持 1s 计时只重渲染自身 span，
+    去掉之前每秒 setNowTick 触发的整面板重渲染（含柱状图/折线图/表格） */
+function LoadingClock({ since }: { since: number }): JSX.Element {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const sec = Math.max(0, Math.round((now - since) / 1000));
+  return <span style={{ fontSize: 11, color: WARN, marginLeft: 6 }}>已等待 {sec}s</span>;
+}
 
 /** 迷你折线图（SVG polyline + 网格线） */
 function TrendLine({ data, color, height = 110 }: { data: number[]; color: string; height?: number }): JSX.Element {
@@ -76,7 +89,6 @@ export default function StatusPanel(): JSX.Element {
   const [trend, setTrend] = React.useState<TrendPoint[]>([]);
   /** 各角色进入 loading 的时刻（展示「已等待 N 秒」，区分加载中与卡死） */
   const [loadingSince, setLoadingSince] = React.useState<Record<string, number>>({});
-  const [, setNowTick] = React.useState(0);
   const api = React.useRef<any>(null);
 
   React.useEffect(() => {
@@ -119,13 +131,7 @@ export default function StatusPanel(): JSX.Element {
     };
   }, []);
 
-  /** 有角色处于 loading 时每秒重渲染，让「已等待 N 秒」实时跳动 */
-  const anyLoading = (stats?.servers ?? []).some((s) => s.state === "loading");
-  React.useEffect(() => {
-    if (!anyLoading) return;
-    const t = window.setInterval(() => setNowTick((n) => n + 1), 1000);
-    return () => window.clearInterval(t);
-  }, [anyLoading]);
+  /** 「已等待 N 秒」实时跳动已由 LoadingClock 自计时完成（A-129），面板不再每秒重渲染 */
 
   async function handleCheckUpdate() {
     const res = await api.current?.update?.check();
@@ -140,7 +146,7 @@ export default function StatusPanel(): JSX.Element {
   async function handleRetryEmbedding() {
     const res = await api.current?.model?.startEmbedding?.();
     if (res?.error) {
-      window.alert(`向量模型启动失败：${res.error}`);
+      void alertAsync(`向量模型启动失败：${res.error}`);
     }
     void api.current?.stats?.snapshot?.().then(setStats);
   }
@@ -277,9 +283,7 @@ export default function StatusPanel(): JSX.Element {
                           : s.state}
                       </span>
                       {s.state === "loading" && loadingSince[s.role] && (
-                        <span style={{ fontSize: 11, color: WARN, marginLeft: 6 }}>
-                          已等待 {Math.max(0, Math.round((Date.now() - loadingSince[s.role]) / 1000))}s
-                        </span>
+                        <LoadingClock since={loadingSince[s.role]} />
                       )}
                       {typeof s.error === "string" && s.error && (
                         <div style={{

@@ -9,6 +9,8 @@
  */
 import React, { type JSX } from "react";
 import type { MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot, DownloadProgressInfo } from "../../shared/ipc.js";
+import { CheckIcon, CloseIcon, PlusIcon } from "../components/Icon.js";
+import { confirmAsync, alertAsync } from "../dialog.js";
 
 const MOOD_CN: Record<string, string> = {
   neutral: "平静", happy: "快乐", content: "满足", interested: "好奇",
@@ -179,7 +181,7 @@ function DownloadControls({
   if (t.state === "done") {
     return (
       <span style={{ fontSize: 11, color: "var(--ok, #4ade80)", display: "inline-flex", alignItems: "center", gap: 6 }}>
-        ✅ 已下载
+        <CheckIcon size={13} /> 已下载
         <span style={{ fontSize: 10, color: "var(--text-dim)", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={t.path}>
           {t.path}
         </span>
@@ -440,21 +442,21 @@ export default function MindHubPanel({
   async function handleResetData(): Promise<void> {
     const a = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!a?.data?.reset) { return; }
-    if (!window.confirm(
-      "确定要重置本地数据？\n\n" +
+    if (!(await confirmAsync(
+      "确定要重置本地数据？",
       "将清除（仅应用数据目录 config/ 下的 4 个文件）：\n" +
       "· providers.enc.json —— 所有 API Provider 及本地保存的密钥\n" +
       "· agents.json —— 所有 Agent 及其配置\n" +
       "· history.jsonl —— 全部对话历史\n" +
       "· sessions.json —— 会话列表\n\n" +
       "【保留】记忆文件（Knowledge/）、模型下载文件、slime.toml 配置、仓库与 Obsidian 笔记均不受影响。\n\n" +
-      "此操作不可撤销，是否继续？",
-    )) { return; }
+      "此操作不可撤销",
+    ))) { return; }
     const res = await a.data.reset().catch((e: unknown) => ({ ok: false as const, error: String(e) }));
     if (res.ok) {
       window.setTimeout(() => window.location.reload(), 400);
     } else {
-      window.alert(`重置失败：${res.error ?? "未知错误"}`);
+      void alertAsync(`重置失败：${res.error ?? "未知错误"}`);
     }
   }
 
@@ -509,7 +511,7 @@ export default function MindHubPanel({
           { label: "本地聊天模型目录", path: cfg.deps.localModelsDir, ok: cfg.deps.ok.localModelsDir, target: null as null, key: "models_dir" as const },
         ].map((d) => (
           <div key={d.label} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12 }}>
-            <span style={{ color: d.ok ? "var(--ok, #4ade80)" : "var(--warning)" }}>{d.ok ? "✅" : "❌"}</span>
+            <span style={{ color: d.ok ? "var(--ok, #4ade80)" : "var(--warning)" }}>{d.ok ? <CheckIcon size={13} /> : <CloseIcon size={13} style={{ color: "var(--warning)" }} />}</span>
             <span style={{ width: 150, color: "var(--text-muted)", flexShrink: 0 }}>{d.label}</span>
             <span style={{ flex: 1, minWidth: 0, fontSize: 11 }}><DispPath path={d.path} /></span>
             {!d.ok && d.target && <DownloadControls target={d.target} dl={dlMap} />}
@@ -639,7 +641,7 @@ export default function MindHubPanel({
                     position: "absolute", top: 2, right: 4, border: "none", background: "transparent",
                     color: "var(--text-dim)", fontSize: 11, cursor: "pointer", padding: "0 2px",
                   }}>
-                  ✕
+                   <CloseIcon size={11} />
                 </button>
               </div>
             ))}
@@ -664,7 +666,7 @@ export default function MindHubPanel({
         ) : (
           <button className="btn" style={{ fontSize: 12.5, marginBottom: 8 }}
             onClick={() => setCustomAdding(true)}>
-            ＋ 添加自定义情绪
+            <PlusIcon size={12} /> 添加自定义情绪
           </button>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -726,8 +728,8 @@ export default function MindHubPanel({
           }}
         >
           {skillFile
-            ? `✅ 已载入：${skillFile.name}（${(skillFile.content.length / 1024).toFixed(1)} KB）— 再次点击可更换`
-            : "＋ 点击选择文件，或将文档拖放到此处"}
+            ? <><CheckIcon size={13} /> 已载入：{skillFile.name}（{(skillFile.content.length / 1024).toFixed(1)} KB）— 再次点击可更换</>
+            : <><PlusIcon size={13} /> 点击选择文件，或将文档拖放到此处</>}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input

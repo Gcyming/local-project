@@ -5,6 +5,7 @@
  */
 import React, { type JSX } from "react";
 import type { McpServerInfo } from "../../shared/ipc.js";
+import { confirmAsync } from "../dialog.js";
 
 export default function McpPanel(): JSX.Element {
   const api = React.useRef<any>(null);
@@ -66,7 +67,7 @@ export default function McpPanel(): JSX.Element {
   /** 删除 MCP 服务器（从 slime.toml 移除块） */
   async function remove(m: McpServerInfo): Promise<void> {
     if (!api.current?.extras?.mcpDelete) { return; }
-    if (!window.confirm(`确定删除 MCP 服务器「${m.name}」？其 [[mcp_servers]] 配置块将从 slime.toml 移除（自动备份 .bak）。`)) { return; }
+    if (!(await confirmAsync(`确定删除 MCP 服务器「${m.name}」？`, "其 [[mcp_servers]] 配置块将从 slime.toml 移除（自动备份 .bak）。"))) { return; }
     setBusy(m.name);
     try {
       const res = await api.current.extras.mcpDelete(m.name);

@@ -4,6 +4,7 @@
  */
 import React, { type JSX } from "react";
 import type { SkillInfo } from "../../shared/ipc.js";
+import { confirmAsync } from "../dialog.js";
 
 export default function SkillsPanel(): JSX.Element {
   const api = React.useRef<any>(null);
@@ -74,7 +75,7 @@ export default function SkillsPanel(): JSX.Element {
   /** 删除技能（递归删除目录） */
   async function remove(s: SkillInfo): Promise<void> {
     if (!api.current?.extras?.skillDelete) { return; }
-    if (!window.confirm(`确定删除技能「${s.name}」？其目录（含 manifest/SKILL.md）将被永久删除，不可恢复。`)) { return; }
+    if (!(await confirmAsync(`确定删除技能「${s.name}」？`, "其目录（含 manifest/SKILL.md）将被永久删除，不可恢复。"))) { return; }
     setBusy(s.name);
     try {
       const res = await api.current.extras.skillDelete(s.name);
