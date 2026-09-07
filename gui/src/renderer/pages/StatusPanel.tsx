@@ -8,6 +8,8 @@
 import React, { type JSX } from "react";
 import type { StatsSnapshot } from "../../shared/ipc.js";
 import { alertAsync } from "../dialog.js";
+import PlanPanel from "./PlanPanel.js";
+import TraceViewer from "./TraceViewer.js";
 
 interface UpdateStatus {
   status: string;
@@ -319,6 +321,16 @@ export default function StatusPanel(): JSX.Element {
           </>
         )}
       </section>
+
+      {/* E: 任务进度（Plan 一等对象）+ D: 链路视图（trace 可观测） */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14, alignItems: "start" }}>
+        <section className="card">
+          <PlanPanel />
+        </section>
+        <section className="card">
+          <TraceViewer />
+        </section>
+      </div>
 
       {/* 告警表 */}
       <section className="card" style={{ marginBottom: 14, borderColor: alarms.length > 0 ? "var(--danger-soft)" : undefined }}>
