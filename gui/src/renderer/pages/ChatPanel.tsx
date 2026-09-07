@@ -9,9 +9,10 @@
  */
 import React, { type CSSProperties, type JSX } from "react";
 import { createPortal } from "react-dom";
-import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision } from "../../shared/ipc.js";
+import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets } from "../../shared/ipc.js";
+import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
-import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, ForkIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, CheckboxIcon, CheckboxCheckedIcon, RefFileIcon, BrainThinkingIcon, FileMiniIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, type IconProps } from "../components/Icon.js";
+import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FileMiniIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, type IconProps } from "../components/Icon.js";
 import { confirmAsync, alertAsync } from "../dialog.js";
 import { useReasoningPreset, presetEffortsOf, presetLabelOf, useThinkingPreset, thinkingForcedOff } from "../reasoning.js";
 
@@ -48,6 +49,20 @@ function parseModelChoice(choice: string): { type: "inherit" | "api" | "local"; 
     return { type: "local", modelId: rest.join(":") || undefined };
   }
   return { type: "inherit" };
+}
+
+/** A-969 上下文自动压缩：GUI 发送前触发的配置（localStorage 持久化；GeneralPanel 可调） */
+interface AutoCompressCfg { enabled: boolean; ratio: number; mode: "animated" | "silent"; }
+function readAutoCompressCfg(): AutoCompressCfg {
+  try {
+    const raw = localStorage.getItem("slime_auto_compress");
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<AutoCompressCfg>;
+      const ratio = typeof p.ratio === "number" && p.ratio >= 0.5 && p.ratio <= 0.97 ? p.ratio : 0.85;
+      return { enabled: p.enabled !== false, ratio, mode: p.mode === "silent" ? "silent" : "animated" };
+    }
+  } catch { /* 配置损坏 → 默认 */ }
+  return { enabled: true, ratio: 0.85, mode: "animated" };
 }
 
 /** 工具类型标签映射：将内部 tool name 转为用户友好的中文名 + 图标库 SVG 组件（A-1xx：弃用 emoji） */
@@ -134,19 +149,13 @@ interface TimelineStep {
  *  历史落库只存 reasoning 文本（无交错顺序/无 token 统计），重启后思考历程退化为文本平铺、上下文清零；
  *  此处把 timelineSteps（按 assistant 消息序数）与最近一次窗口占用快照随会话存下来，
  *  加载会话时按序数回填交错时间线、恢复环与右栏占用值。 */
-import {
-  readSessionCtxMeta,
-  clearSessionCtxMeta,
-  updateSessionCtxMeta,
-  attachTimelineToHistory,
-  restoreUsed,
-  type TimelineStepLite,
-} from "./sessionCtxMeta.js";
+import { readSessionCtxMeta, clearSessionCtxMeta, updateSessionCtxMeta, attachTimelineToHistory, restoreUsed, type TimelineStepLite } from "./sessionCtxMeta.js";
+import { contextRatio, contextPct, ringLevel } from "./contextMath.js";
 
 /** A-935：上下文占用**单一事件源**——发送时估算 / done 收到真实 usage 校准都经此广播，
  *  右上角 ContextRing 与右侧栏 ContextWindowBar 订阅同一事件按 sessionId 过滤 →
  *  两端数值严格同源同时变更（根治"右栏慢于圆环/不同步"）。 */
-export interface CtxUpdatePayload { sessionId: string; used: number; cap: number }
+export interface CtxUpdatePayload { sessionId: string; used: number; cap: number; buckets?: CtxBuckets }
 export function dispatchCtxUpdate(payload: CtxUpdatePayload): void {
   window.dispatchEvent(new CustomEvent<CtxUpdatePayload>("slime:ctx:update", { detail: payload }));
 }
@@ -357,6 +366,12 @@ interface ChatPanelProps {
   memberNames?: string[];
   /** 成员名单变更（App 层持久化 setMembers 并刷新侧栏） */
   onMembersChanged?: (memberIds: string[]) => void;
+  /** A-943：会话模式（brainstorm = 群聊头脑风暴；缺省 normal） */
+  sessionType?: "normal" | "brainstorm";
+  /** A-947：群聊成员总数（含会话归属 Agent；不含 = 0，群聊标题/徽章显示用） */
+  memberCount?: number;
+  /** A-943：会话模式切换（App 层持久化 setType 并刷新侧栏） */
+  onTypeChanged?: (type: "normal" | "brainstorm") => void;
 }
 
 /** GUI 指令表（CLI 语义迁移） */
@@ -376,6 +391,21 @@ const COMMANDS: Array<{ cmd: string; desc: string; group: string; action: "deleg
 function nowTime(): string {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** A-955 兜底：一次性剔除文本中的 <thinking>…</thinking> 思考段（main 已流式剥离，此为非流式/历史场景保险） */
+function stripThinkingText(s: string): string {
+  if (!s || !/<thinking/i.test(s)) { return s; }
+  return s.replace(/<thinking(?:\s[^>]*)?>[\s\S]*?<\/thinking\s*>/gi, "").replace(/<thinking(?:\s[^>]*)?>[\s\S]*$/i, "");
+}
+
+/** A-966 渲染层兜底：正文展示前剥离思考标签 + 工具调用 XML 泄漏（<dots_function_call>/<invoke>/<parameter>）。
+ *  流式途中标签可能跨 chunk 断裂，此处在单条 chunk 内尽力剥离；完整剥离由 done 全量清洗兜底。
+ *  注意：本地正则实现（renderer 不引入 core-ts 依赖，避免浏览器构建打包主进程图谱）。 */
+const TOOL_CALL_XML_RE = /<[a-z0-9_]*function_call[\s\S]*?<\/[a-z0-9_]*function_call\s*>|<invoke\b[\s\S]*?<\/invoke\s*>|<parameter\b[^>]*>[\s\S]*?<\/parameter\s*>|<(ignore|result|output|tool)\b[^>]*>\s*<\/\1\s*>/gi;
+function stripPanelText(s: string): string {
+  if (!s) { return s; }
+  return stripThinkingText(s).replace(TOOL_CALL_XML_RE, "");
 }
 
 /** 路径 → 目录名（工具栏工作文件夹徽标；Windows 反斜杠/正斜杠均处理） */
@@ -400,9 +430,9 @@ function fmtMs(ms: number): string {
 
 /** 上下文消耗圆环（参考 A-C-C ContextRing）：绿 <60% / 黄 60-85% / 红 >85%，中心显示百分比 */
 function ContextRing({ used, cap, loading }: { used: number; cap: number; loading: boolean }): JSX.Element {
-  const ratio = cap > 0 ? Math.max(0, Math.min(1, used / cap)) : 0;
-  const pct = Math.round(ratio * 100);
-  const color = ratio < 0.6 ? "var(--success)" : ratio < 0.85 ? "var(--warning)" : "var(--danger)";
+  const ratio = contextRatio(used, cap);
+  const pct = contextPct(ratio);
+  const color = ringLevel(ratio).color;
   const R = 15;
   const C = 2 * Math.PI * R;
   const filled = C * ratio;
@@ -1074,9 +1104,9 @@ export default function ChatPanel({
   workspace,
   agents = [],
   onAgentSwitch,
-  memberIds = [],
+  sessionType,
+  memberCount,
   memberNames = [],
-  onMembersChanged,
 }: ChatPanelProps): JSX.Element {
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [input, setInput] = React.useState("");
@@ -1097,6 +1127,15 @@ export default function ChatPanel({
       setReasoningTmp(reasoningTmpRef.current);
       // A-xxx：交错时间线快照同步（增量 steps 数组——引用不可变，必须快照新数组触发渲染）
       setLiveTimeline(timelineStepsRef.current);
+      // A-968：切回恢复的占位气泡随 partial 实时续长——冻结的"（恢复中…）"会造成
+      // "中断 + 底部重新输出一遍"的观感；此处把占位气泡内容绑定实际流内容
+      const liveId = snapshotMsgIdRef.current;
+      if (liveId !== null) {
+        setMessages((prev) => {
+          if (!prev.some((m) => m.id === liveId)) { return prev; }
+          return prev.map((m) => (m.id === liveId ? { ...m, content: partialRef.current || "（恢复中…）" } : m));
+        });
+      }
     }, 50);
   }, []);
   const resetPartial = React.useCallback(() => {
@@ -1166,6 +1205,13 @@ export default function ChatPanel({
   const pendingTailErrorRef = React.useRef<{ content: string; reason: string } | null>(null);
   /** A-162：切回恢复的「进行中」消息 id（onDone 时替换为完整文本而非新增，防半截+完整重复） */
   const snapshotMsgIdRef = React.useRef<number | null>(null);
+  /** A-968：切回恢复的占位气泡 id（state 版）——供渲染层抑制底部独立 partial 区，避免"恢复中…"气泡 + partial 双份输出 */
+  const [resumeMsgId, setResumeMsgId] = React.useState<number | null>(null);
+  /** A-969：上下文自动压缩过渡动画（发送前触发；prep=整理 / summarize=生成摘要 / done=完成 / trunc=降级裁剪） */
+  const [compressUi, setCompressUi] = React.useState<null | { stage: "prep" | "summarize" | "done" | "trunc"; dropped?: number; summary?: string }>(null);
+  const compressBusyRef = React.useRef(false);
+  /** 每轮只压一次（发送前触发压缩后，本轮发送结束前不再重复触发；onDone 复位允许下一轮再体检） */
+  const didCompressTurnRef = React.useRef(false);
   /** A-162：插入指令待发队列 —— 中断旧流后，等旧流 done/error 收尾再续发的新消息 */
   const interruptQueueRef = React.useRef<Array<{ agentId: string; message: string; sessionId?: string; networkEnabled?: boolean; images?: string[] }>>([]);
   /** 当前面板展示的会话（每渲染同步，供订阅回调闭包比较，避免闭包捕获旧 sessionId） */
@@ -1191,6 +1237,9 @@ export default function ChatPanel({
     setReconnectInfo(null);
     setStreamErrorBanner(null); // A-917：复位时一并清就地错误横幅
     setStreamModel("");
+    setResumeMsgId(null); // A-968：复位（切走/停止/失败）时清占位气泡标记，保证下一次恢复重建
+    setCompressUi(null); // A-969：复位时收起压缩过渡浮层（残留浮层会挡住 input）
+    compressBusyRef.current = false;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -1210,26 +1259,31 @@ export default function ChatPanel({
   const [sessionConfig, setSessionConfig] = React.useState<SessionConfig>({ approval: "auto", workspace: "" });
   const [renaming, setRenaming] = React.useState(false);
   const [renameDraft, setRenameDraft] = React.useState("");
-  const [coopOpen, setCoopOpen] = React.useState(false);
-  const [splitName, setSplitName] = React.useState("");
-  const [splitRole, setSplitRole] = React.useState("");
-  const [splitBusy, setSplitBusy] = React.useState(false);
-  /** 团队管理弹窗（团队会话：一个会话 = 一个团队；组长派单、成员各司其职） */
-  const [teamOpen, setTeamOpen] = React.useState(false);
-  /** 团队管理草稿：勾选的成员 id 列表（未保存前不生效） */
-  const [teamDraft, setTeamDraft] = React.useState<string[]>([]);
+  /** 自分裂（fork）GUI 已移除并并入子代理体系（A-943）——子代理派发见「设置→后台任务」 */
   // 指令面板 + 联想 + 加号栏
   const [cmdOpen, setCmdOpen] = React.useState(false);
   const [cmdFilter, setCmdFilter] = React.useState("");
   const [suggestions, setSuggestions] = React.useState<SuggestionItem[]>([]);
   const [plusOpen, setPlusOpen] = React.useState(false);
+  /** A-951：@成员选择器（brainstorm 输入 @ 弹出团队成员列表） */
+  const [atOpen, setAtOpen] = React.useState(false);
+  const [atSel, setAtSel] = React.useState(0);
+  const [atFilter, setAtFilter] = React.useState("");
+  const atRangeRef = React.useRef<{ start: number; end: number } | null>(null);
+  /** 群聊可 @ 名单：组长（会话归属 Agent）+ 团队成员（与 main 层 roster 对齐） */
+  const teamRoster = React.useMemo(() => {
+    if (sessionType !== "brainstorm") { return [] as string[]; }
+    const names = [agentName, ...memberNames];
+    return names.filter((n, i, arr) => Boolean(n) && arr.indexOf(n) === i);
+  }, [sessionType, agentName, memberNames]);
   /**
    * 输入框配置：推理等级改为无框下拉（GhostSelect）直接弹出可选等级，不再需要折叠面板
    */
   const [extras, setExtras] = React.useState<ExtrasList | null>(null);
-  /** 联网搜索开关：默认关（灰色），勾选后变绿色，未启用时 web_search/web_fetch 被静默拒绝；从 localStorage 持久化恢复 */
+  /** 联网搜索开关：默认开（A-966 用户实测"群聊搜不了"——默认关使 web_search/web_fetch 被静默拒绝）；
+   *  未显式存过 "0" 即视为开（可手动关闭后持久化），从 localStorage 恢复 */
   const [networkEnabled, setNetworkEnabled] = React.useState(() => {
-    try { return localStorage.getItem("slime_network_enabled") === "1"; } catch { return false; }
+    try { return localStorage.getItem("slime_network_enabled") !== "0"; } catch { return true; }
   });
   // 网络开关变化时同步写入 localStorage
   React.useEffect(() => {
@@ -1344,7 +1398,7 @@ export default function ChatPanel({
       const reqSid = req.sessionId !== undefined ? req.sessionId : streamSessionRef.current;
       if (reqSid !== sessionRef.current) { return; }
       setPendingAsk(req);
-      setAskOption(req.options.length > 0 ? req.options[0] : "__custom");
+      setAskOption(initialAskSelection(req.options));
       setAskCustom("");
       setAskSubmitting(false);
     });
@@ -1364,12 +1418,7 @@ export default function ChatPanel({
     if (!pendingAsk || askSubmitting) { return; }
     setAskSubmitting(true);
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    const text = choice === "__custom" ? (custom ?? "").trim() : choice;
-    const decision: AskUserDecision = {
-      requestId: pendingAsk.requestId,
-      answer: text || "（未填写）",
-      skipped: false,
-    };
+    const decision: AskUserDecision = buildAskDecision(pendingAsk.requestId, choice, custom);
     try {
       await api.askUser.resolve(decision);
     } finally {
@@ -1447,13 +1496,17 @@ export default function ChatPanel({
     if (prevSessionIdRef.current && prevSessionIdRef.current !== sessionId) {
       const prevKey = prevSessionIdRef.current;
       if (streamActiveRef.current || partialRef.current || reasoningTmpRef.current || toolEventsRef.current.length > 0) {
+        // A-968：快照必须【合并】既有条目而非整体替换——doSend 写入的乐观用户消息
+        // （snap.messages）就在这里，整体覆盖会把它丢掉 → 切回后"用户文本直接消失"
+        const existing = perSessionStreamCache.current[prevKey] ?? {};
         perSessionStreamCache.current[prevKey] = {
+          ...existing,
           partial: partialRef.current,
           reasoning: reasoningTmpRef.current,
           toolEvents: toolEventsRef.current,
           timeline: timelineStepsRef.current,
           hasActive: streamActiveRef.current,
-          tailError: pendingTailErrorRef.current ?? undefined,
+          tailError: pendingTailErrorRef.current ?? existing.tailError,
         };
       }
     }
@@ -1500,9 +1553,10 @@ export default function ChatPanel({
       if (cached.hasActive) {
         streamActiveRef.current = true;
         setLoading(true);
+        // A-968：占位气泡内容绑定 partial——后续 chunk 到达时由 schedulePartialRender 实时续长，
+        // 杜绝冻结的"（恢复中…）"+底部 partial 双份输出造成的"中断后重新输出一遍"观感
         liveMsg = makeMessage("assistant", partialRef.current || "（恢复中…）", {
           reasoning: reasoningTmpRef.current || undefined,
-          // A-924：恢复现场时一并携带思考时间线（此前缺失 → 切回/收尾后思考历程时间线丢失）
           stages: {
             reads: [], urls: [],
             tools: toolEventsRef.current,
@@ -1511,10 +1565,25 @@ export default function ChatPanel({
           },
         });
         snapshotMsgIdRef.current = liveMsg.id;
+        setResumeMsgId(liveMsg.id);
       } else {
         // 流已真实终态（停止/失败/完成）→ 切回不带"生成中"，避免假活跃
         streamActiveRef.current = false;
         setLoading(false);
+      }
+      // A-968：多模态连续识图——从快照消息重建会话内图片记忆（此前切走即清空，
+      // 回来"记不住上一张图"；此处恢复最近 ≤4 张）
+      const restoredImages: Array<{ name: string; dataUrl: string }> = [];
+      for (const m of cached.messages ?? []) {
+        for (const u of (m as { images?: string[] }).images ?? []) {
+          if (u) { restoredImages.push({ name: "", dataUrl: u }); }
+        }
+      }
+      if (restoredImages.length > 0) {
+        const seenSet = new Set<string>();
+        sessionImagesRef.current = restoredImages
+          .filter((i) => (seenSet.has(i.dataUrl) ? false : (seenSet.add(i.dataUrl), true)))
+          .slice(-4);
       }
       delete perSessionStreamCache.current[sessionId];
     }
@@ -1552,7 +1621,11 @@ export default function ChatPanel({
       });
       assistantOrdinalRef.current = aiOrd;
       // 底 = 历史（已落库）；叠加未落库乐观用户消息；再叠进行中现场消息（onDone 到达时替换为完整文本）
-      setMessages([...hist, ...optimisticMsgs, ...(liveMsg ? [liveMsg] : [])]);
+      // A-968：乐观用户消息去重——流在后台跑完已落库（切回时历史含该 user 记录）时，
+      // 只保留历史里还没有的乐观消息，避免"用户文本重复出现"（曾有切走→done→切回双份的复现）
+      const histSeen = new Set(hist.map((h) => `${h.role}|${h.content}`));
+      const optimisticMsgs2 = optimisticMsgs.filter((m) => m.role !== "user" || !histSeen.has(`user|${m.content}`));
+      setMessages([...hist, ...optimisticMsgs2, ...(liveMsg ? [liveMsg] : [])]);
     }).catch(() => {
       setMessages([...optimisticMsgs, ...(liveMsg ? [liveMsg] : [])]);
     });
@@ -1628,22 +1701,27 @@ export default function ChatPanel({
         onConversationsChanged?.();
         return;
       }
-      // 团队会话：成员发言（type="member"）→ 追加为独立"成员发言"消息（群聊展示），
-      // 与组长整合回复并列；不进入组长正文流（正文流仍由 chunk 累积）
+      // 团队会话：成员发言（type="member"）→ 台内流式累积（同一 Agent 期间的 chunk 追加到同一条消息），
+      // 切换发言者后开启新消息；与组长整合回复并列（A-950 逐字流式，避免每 chunk 一条刷屏）
       if (c.type === "member") {
-        const content = c.data?.content ?? "";
+        // A-955 兜底剔除思考段；A-956 正文排版归一：换行收成空格（群聊正文规范为"一段"，模型常多发 \n 造成碎行乱排版）
+        const content = stripPanelText(c.data?.content ?? "")
+          .replace(/\r?\n+/g, " ")
+          .replace(/[ \t]{2,}/g, " ")
+          .trim();
         const memberId = c.data?.agentId;
         const memberName = (memberId
           ? agents.find((a) => a.id === memberId)?.name
           : undefined) ?? c.data?.name ?? "成员";
-        if (content) {
-          setMessages((prev) => [...prev,
-            makeMessage("assistant", content, {
-              agentName: memberName,
-              agentId: memberId,
-            }),
-          ]);
-        }
+        if (!content) { return; }
+        setMessages((prev) => {
+          const last = prev.length > 0 ? prev[prev.length - 1] : undefined;
+          const isSameSpeaker = last?.role === "assistant" && last.agentId === memberId && !(last as { error?: boolean }).error;
+          if (isSameSpeaker && last && typeof last.content === "string") {
+            return prev.map((mm, i) => (i === prev.length - 1 ? { ...mm, content: mm.content + content } : mm));
+          }
+          return [...prev, makeMessage("assistant", content, { agentName: memberName, agentId: memberId })];
+        });
         return;
       }
       if (c.type === "tool" && c.data?.name) {
@@ -1707,7 +1785,7 @@ export default function ChatPanel({
       partialRef.current += c.data?.content ?? "";
       schedulePartialRender();
     });
-    const off2 = api.chat.onDone((m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => {
+    const off2 = api.chat.onDone((m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => {
       // 事件过滤：切会话/切 Agent 后旧流的 done 一律丢弃，避免串扰到当前会话
       if (m.sessionId != null) {
         if (m.sessionId !== sessionRef.current) { return; }
@@ -1716,6 +1794,7 @@ export default function ChatPanel({
       streamActiveRef.current = false;
       retryCountRef.current = 0;
       stoppingRef.current = false;
+      didCompressTurnRef.current = false; // A-969：本轮发送结束，允许下一轮再压缩体检
       setReconnectInfo(null);
       setStreamErrorBanner(null); // A-917：流正常收尾（含重连成功）即清就地错误横幅
       if (reconnectTimerRef.current !== null) {
@@ -1747,13 +1826,14 @@ export default function ChatPanel({
       // A-162：切回恢复的进行中消息 → 替换为完整文本（而非新增一条，防"半截+完整"重复）
       const snapshotId = snapshotMsgIdRef.current;
       snapshotMsgIdRef.current = null;
+      setResumeMsgId(null); // A-968：占位气泡已被完整文本替换 → 恢复底部独立 partial 区的正常渲染
       if (snapshotId !== null && !(errorDisplayed && !m.reply)) {
         setMessages((prev) => prev.map((mm) =>
           mm.id === snapshotId
             ? { ...makeMessage("assistant", doneText, { reasoning: finalReasoning || undefined, elapsedMs: m.elapsedMs, model: m.model || undefined, mode, stages }), id: mm.id }
             : mm,
         ));
-      } else if (!(errorDisplayed && !m.reply)) {
+      } else if (!(errorDisplayed && !m.reply) && (snapshotId !== null || (m.reply && m.reply.trim()))) {
         setMessages((prev) => [
           ...prev,
           makeMessage(
@@ -1806,10 +1886,12 @@ export default function ChatPanel({
       if (inputSide > 0) { setCtxUsed(inputSide); }
       if (typeof m.windowCap === "number" && m.windowCap > 0) { setCtxCap(m.windowCap); }
       // A-935：单一事件源广播——right 栏与环同一次 done 触发、同值变更
+      // A-939：上下文分桶随事件透传（渲染层 ContextWindowBar / ContextRing 可消费 buckets）
       dispatchCtxUpdate({
         sessionId: sessionRef.current,
         used: inputSide > 0 ? inputSide : ctxUsed,
         cap: (typeof m.windowCap === "number" && m.windowCap > 0) ? m.windowCap : ctxCap,
+        buckets: m.ctxBuckets,
       });
       // A-934：持久化会话级「时间线 + 窗口占用」——重启后思考历程（交错时间线）与上下文占用可恢复
       if (!(errorDisplayed && !m.reply)) {
@@ -1822,6 +1904,15 @@ export default function ChatPanel({
           cap: wc > 0 ? wc : (ctxCap > 0 ? ctxCap : undefined),
           timeline: stages?.timeline ?? undefined,
         });
+        // A-966：同时把时间线回填 history.jsonl（重启恢复时间线不依赖 localStorage 存活）
+        if (stages?.timeline?.length) {
+          const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
+          void attachApi?.chat?.attachTimeline?.(agentId, sessionRef.current, stages.timeline as unknown[]);
+        } else {
+          // 无时间线（如纯文本回复）也记录空数组，幂等覆盖旧值而非残留上次
+          const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
+          void attachApi?.chat?.attachTimeline?.(agentId, sessionRef.current, []);
+        }
       }
       onConversationsChanged?.();
       // A-918：流已落库（done）→ 移除该会话的现场快照，释放内存且防止切回后再残留"生成中"
@@ -1953,6 +2044,31 @@ export default function ChatPanel({
     ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
   }
 
+  /** A-951：@成员候选（按输入前缀过滤，前缀为空 = 全部） */
+  const atList = React.useMemo(() => {
+    if (!atOpen) { return [] as string[]; }
+    const q = atFilter.toLowerCase();
+    if (!q) { return teamRoster; }
+    return teamRoster.filter((n) => n.toLowerCase().includes(q));
+  }, [atOpen, atFilter, teamRoster]);
+
+  /** A-951：确认选中成员 → 替换光标处的 @前缀 为 @名字 */
+  const pickMember = React.useCallback((name: string): void => {
+    const r = atRangeRef.current;
+    setAtOpen(false);
+    if (!r) { return; }
+    const next = `${input.slice(0, r.start)}@${name} ${input.slice(r.end)}`;
+    setInput(next);
+    requestAnimationFrame(() => {
+      const ta = inputRef.current;
+      if (ta) {
+        const caret = r.start + 1 + name.length + 1; // @名字 后补一个空格，光标停在空格后
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      }
+    });
+  }, [input]);
+
   /** 输入联想：≥1 字防抖检索历史会话 */
   React.useEffect(() => {
     if (!input.trim() || input.startsWith("/") || loading) {
@@ -1983,7 +2099,8 @@ export default function ChatPanel({
     setCmdFilter("");
     switch (c.action) {
       case "fork":
-        setCoopOpen(true);
+        // A-943：自分裂（fork）已并入子代理体系——GUI 独立入口移除，改用「设置→后台任务→子代理」/ delegate_subagent 工具
+        void alertAsync("自分裂已并入子代理：请在「设置 → 后台任务」派发子代理，或对话中委派（delegate_subagent 工具）。子代理拥有独立上下文、并行执行，能力等价且更可控。");
         break;
       case "thinking": {
         // 快捷键循环：以「推理配置」面板当前可选等级为准（none + 手动等级集，
@@ -2100,10 +2217,64 @@ export default function ChatPanel({
     doSend(text);
   }
 
+  /** A-969：发送前上下文压缩体检（maybeAutoCompress 由 doSend 开头 await）。
+   *  - 仅发送侧（非打断插入）触发：ctxUsed/cap 超过阈值且本轮未压过；
+   *  - 动画版：prep（整理）→ summarize（生成摘要）→ done/trunc 过渡浮层，遇失败短暂展示后一律继续发送（绝不卡用户）；
+   *  - 静默版：同流程无动画，await 完成直接发送；
+   *  - 压缩由主进程执行（engine.summarizeContext 摘要轮），失败自动降级硬裁剪并写回会话 meta。 */
+  async function maybeAutoCompress(sid: string): Promise<void> {
+    if (compressBusyRef.current || didCompressTurnRef.current || loading || stopping) { return; }
+    if (ctxUsed <= 0 || ctxCap <= 0) { return; }
+    const cfg = readAutoCompressCfg();
+    if (!cfg.enabled) { return; }
+    if (ctxUsed < ctxCap * cfg.ratio) { return; } // 未达触发占比，不压缩
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.chat?.compress) { return; }
+    const animated = cfg.mode !== "silent";
+    compressBusyRef.current = true;
+    didCompressTurnRef.current = true;
+    try {
+      if (animated) {
+        setCompressUi({ stage: "prep" });
+        await new Promise((r) => setTimeout(r, 420));
+        setCompressUi({ stage: "summarize" });
+      }
+      const res = await api.chat.compress(sid, cfg.ratio);
+      if (animated && res) {
+        if (res.skipped) {
+          setCompressUi(null);
+        } else if (res.truncated) {
+          setCompressUi({ stage: "trunc", dropped: res.dropped ?? 0 });
+          await new Promise((r) => setTimeout(r, 1500));
+          setCompressUi(null);
+        } else if (res.ok && res.summary) {
+          setCompressUi({ stage: "done", dropped: res.dropped ?? 0, summary: res.summary });
+          await new Promise((r) => setTimeout(r, 1400));
+          setCompressUi(null);
+        } else {
+          setCompressUi(null);
+        }
+      }
+      // 压缩生效 → 本地占用镜像回落（真实值由本轮 done 的 promptTokens 校准；此处仅即时反馈）
+      if (res?.ok && (res.summary || res.truncated) && res.cap && res.cap > 0) {
+        const next = Math.max(1, Math.round(res.cap * 0.5));
+        setCtxUsed(next);
+        dispatchCtxUpdate({ sessionId: sid, used: next, cap: ctxCap > 0 ? ctxCap : res.cap });
+      }
+    } catch {
+      setCompressUi(null); // 压缩失败不阻塞发送
+    } finally {
+      compressBusyRef.current = false;
+    }
+  }
+
   /** A-162/A-164：真正执行发送（含输入框清空/历史追加/流式初始化/入参记录）。send() 与插入指令续发共用。
    *  注意：本函数总是清空输入框（调用方只管把内容传进来）——此前重构遗漏 setInput("")，
    *  导致「消息发出后文本仍留在输入框」的用户实测回归（A-164）。 */
-  function doSend(text: string, targetSessionId?: string): void {
+  async function doSend(text: string, targetSessionId?: string): Promise<void> {
+    // A-969：发送前上下文压缩体检（对齐 Claude Code「每次 query 前 context 检查」）——
+    // 输入侧占用 ≥ cap×ratio 且本轮未压过 → 先跑摘要轮并展示过渡动画，再继续正常发送
+    await maybeAutoCompress(targetSessionId ?? sessionId);
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     // 识图：本轮待发图片 + 会话内已发送图片（多轮识图），合并取最近 ≤4 张
     const imagesToSend = [
@@ -2114,6 +2285,7 @@ export default function ChatPanel({
     if (!api || (!text && imagesToSend.length === 0)) { return; }
     const sid = targetSessionId ?? sessionId;
     setInput(""); // 受控清空输入框（textarea value={input}）；不直写 DOM，避免与 React 渲染竞态
+    setAtOpen(false); // A-951：发送后收起 @ 选择器
     const modelLabel = !modelChoice || modelChoice === "inherit" ? "inherit" : (modelChoice.split(":").pop() || modelChoice);
     setMessages((prev) => [...prev, makeMessage("user", text, {
       model: modelLabel, mode,
@@ -2151,8 +2323,13 @@ export default function ChatPanel({
     // 数值与既有占用取大（窗口单调不缩），真实 usage 在该轮 done 时校准覆盖。
     // 估算只作"发送后即时反馈"，不为精确（厂商 Claude Code 状态栏同为估算 + usage 校准式）。
     {
-      const estChars = (messages ?? []).reduce((s, m) => s + ((m as { content?: string }).content?.length ?? 0), 0)
-        + (text?.length ?? 0) + 2500; // ≈系统提示/工具定义近似
+      // A-968：上下文估算排除图片 dataURL 原始字符——base64 字符串会把估算 token 数打到
+      // 几个 M（环直接爆满/红）；图片按 ~2000 token 计（对齐 Claude Code 图片占用口径）
+      const estChars = (messages ?? []).reduce((s, m) => {
+        const textLen = ((m as { content?: string }).content?.length) ?? 0;
+        const imgs = (((m as { images?: string[] }).images) ?? []).length;
+        return s + textLen + imgs * 2000;
+      }, 0) + (text?.length ?? 0) + 2500; // ≈系统提示/工具定义近似
       const estimate = Math.round(estChars / 3);
       const capNow = ctxCap > 0 ? ctxCap : (curProviderModel?.context_window ?? 0);
       if (capNow > 0) { setCtxCap(capNow); }
@@ -2260,29 +2437,6 @@ export default function ChatPanel({
     if (res.ok && res.path) {
       await setSessionConfigField({ workspace: res.path });
     }
-  }
-
-  async function handleFork(): Promise<void> {
-    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api || !splitName.trim()) { return; }
-    setSplitBusy(true);
-    try {
-      const child = await api.agents.fork(agentId, splitName.trim(), splitRole.trim());
-      console.info(`[chat] 自分裂完成：新实例「${child.name}」可并行工作（fork 深度上限 2）`);
-      setCoopOpen(false);
-      setSplitName("");
-      setSplitRole("");
-      onConversationsChanged?.();
-    } catch (e) {
-      console.error("[chat] fork failed:", e);
-    } finally {
-      setSplitBusy(false);
-    }
-  }
-
-  /** 打开协作面板（自分裂入口） */
-  function openCoop(): void {
-    setCoopOpen(true);
   }
 
   /** A2A 委派（团队协作保留：组长通过 <DELEGATE> 消息路由委派给已有 Agent；独立传唤入口已移除） */
@@ -2519,7 +2673,7 @@ export default function ChatPanel({
             background: "var(--accent-soft)",
             display: "flex", alignItems: "center", gap: 4, maxWidth: 300,
           }}>
-            {agents.length > 0 ? (
+            {agents.length > 0 && sessionType !== "brainstorm" ? (
               <GhostSelect
                 value={agentId}
                 options={agents.map((a) => ({ value: a.id, label: a.name, title: a.role || "无角色" }))}
@@ -2530,8 +2684,8 @@ export default function ChatPanel({
                 style={{ maxWidth: 140, fontSize: 12.5, fontWeight: 700 }}
               />
             ) : (
-              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {agentName}
+              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontSize: 12.5, fontWeight: 700 }}>
+                {sessionType === "brainstorm" ? `群聊 · 成员 ${(memberCount ?? 0)}` : agentName}
               </span>
             )}
             <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -2564,26 +2718,6 @@ export default function ChatPanel({
         <button onClick={handleRetry} disabled={!canRetry}
           className="btn primary" title="重试上一条（重发最后一条用户消息）">
           重试
-        </button>
-        <button onClick={openCoop} disabled={loading}
-          className="btn" title="自分裂：创建子 Agent 实例多进程并行工作（fork 深度上限 2）">
-          <ForkIcon size={14} /> 自分裂
-        </button>
-        <button
-          onClick={() => {
-            // 仅回填当前仍存在的成员（已删除 Agent 的孤儿 id 不进入草稿，保存即清理）
-            setTeamDraft(memberIds.filter((id) => agents.some((a) => a.id === id)));
-            setTeamOpen(true);
-          }}
-          className="btn"
-          title="团队管理：一个会话 = 一个团队；设置成员 Agent（各司其职，由组长派单指挥），成员答复以群聊方式汇入本会话">
-          <SitemapIcon size={14} /> 团队
-          {memberIds.length > 0 && (
-            <span style={{
-              marginLeft: 4, fontSize: 10.5, background: "var(--accent-soft)",
-              color: "var(--accent-hover)", borderRadius: 8, padding: "0 5px", lineHeight: "14px",
-            }}>{memberIds.length}</span>
-          )}
         </button>
         <button onClick={() => {
           const nextThinking = !showThinking;
@@ -2760,16 +2894,19 @@ export default function ChatPanel({
               })()}
 
               <div className="msg-body-divider" style={{ margin: "8px 0 10px" }} />
-              {/* 部分输出：流式 Markdown 渲染（补全未闭合语法，避免暴露原始符号） */}
-              <div className="stream-partial" style={{ lineHeight: 1.7, fontSize: 14, color: "var(--text)", wordBreak: "break-word" }}>
-                {deferredPartial ? <Markdown text={deferredPartial} streaming /> : partial ? (<Markdown text={partial} streaming />) : (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 13 }}>
-                    <LoadingCircleIcon size={12} className="icon-spin" />
-                    生成中…
-                  </span>
-                )}
-                {partial && <span style={{ display: "inline-block", width: 8, height: 16, background: "var(--accent)", marginLeft: 2, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite" }} />}
-              </div>
+              {/* 部分输出：流式 Markdown 渲染（补全未闭合语法，避免暴露原始符号）。
+                  A-968：切回恢复的流由占位气泡内实时续长，此处抑制独立 partial 区（否则"恢复中…"气泡+底部输出双份） */}
+              {resumeMsgId === null && (
+                <div className="stream-partial" style={{ lineHeight: 1.7, fontSize: 14, color: "var(--text)", wordBreak: "break-word" }}>
+                  {deferredPartial ? <Markdown text={deferredPartial} streaming /> : partial ? (<Markdown text={partial} streaming />) : (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 13 }}>
+                      <LoadingCircleIcon size={12} className="icon-spin" />
+                      生成中…
+                    </span>
+                  )}
+                  {partial && <span style={{ display: "inline-block", width: 8, height: 16, background: "var(--accent)", marginLeft: 2, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite" }} />}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -2864,6 +3001,39 @@ export default function ChatPanel({
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
                 <span style={{ color: "var(--accent-hover)", fontWeight: 600, marginRight: 6 }}>{s.agentName}</span>
                 {s.content}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* A-951：@成员选择器（brainstorm 输入 @ 弹出团队成员候选） */}
+        {atOpen && atList.length > 0 && (
+          <div style={{
+            position: "absolute", bottom: "100%", left: 16, right: 16, marginBottom: 4,
+            background: "var(--bg-input)", border: "1px solid var(--border-hover)",
+            borderRadius: 10, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+            zIndex: 41, maxHeight: 260, overflowY: "auto",
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", padding: "6px 12px 2px" }}>
+              团队成员（{atList.length}）— 点击或 ↑↓ + Enter 选择；@ 名字 后输入其他内容即发送
+            </div>
+            {atList.map((n, i) => (
+              <button key={n}
+                onClick={() => pickMember(n)}
+                onMouseEnter={() => setAtSel(i)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
+                  cursor: "pointer", padding: "6px 12px", border: "none",
+                  background: i === atSel ? "var(--bg-hover)" : "transparent",
+                  fontSize: 12.5, color: "var(--text)", lineHeight: 1.4, whiteSpace: "nowrap",
+                }}>
+                <span style={{
+                  width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  background: "var(--accent-soft)", color: "var(--accent-hover)", fontSize: 10.5, fontWeight: 800,
+                }}>{n.slice(0, 1)}</span>
+                <span style={{ fontWeight: 700 }}>{n}</span>
+                <span style={{ color: "var(--text-dim)", fontSize: 11, fontWeight: 400 }}>@ 点名后仅该成员回复</span>
               </button>
             ))}
           </div>
@@ -3131,7 +3301,7 @@ export default function ChatPanel({
                 <button
                   className="btn primary"
                   style={{ fontSize: 12.5 }}
-                  disabled={askSubmitting || (askOption === "__custom" && !askCustom.trim())}
+                  disabled={!canSubmitAsk(askSubmitting, askOption, askCustom)}
                   onClick={() => void resolveAsk(askOption, askCustom)}>
                   {askSubmitting ? "提交中…" : "确认"}
                 </button>
@@ -3288,6 +3458,47 @@ export default function ChatPanel({
               )}
             </div>
           )}
+          {/* A-969：上下文自动压缩过渡动画（发送前触发；prep→summarize→done/trunc，完成后自动收起并继续发送） */}
+          {compressUi && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "8px 14px",
+              borderTop: "1px solid var(--border)",
+              background: "var(--bg-secondary)",
+              fontSize: 12, color: "var(--text-secondary)",
+              flexShrink: 0,
+              animation: "fadeIn 0.18s ease",
+            }}>
+              {compressUi.stage === "prep" && (
+                <><LoadingCircleIcon size={13} className="icon-spin" /><span>正在整理会话上下文…</span></>
+              )}
+              {compressUi.stage === "summarize" && (
+                <>
+                  <LoadingCircleIcon size={13} className="icon-spin" />
+                  <span style={{ fontWeight: 600, color: "var(--text)" }}>上下文接近窗口上限，自动压缩中</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>生成摘要（任务 / 成果 / 决策 / 下一步）</span>
+                  <div style={{ flex: 1, height: 4, borderRadius: 2, background: "var(--bg-hover)", overflow: "hidden", minWidth: 80 }}>
+                    <div className="compress-bar" style={{ height: "100%", background: "var(--accent)", borderRadius: 2 }} />
+                  </div>
+                </>
+              )}
+              {compressUi.stage === "done" && (
+                <>
+                  <span style={{ color: "var(--success)", fontWeight: 700 }}>✓</span>
+                  <span style={{ color: "var(--text)" }}>已压缩 {compressUi.dropped ?? 0} 轮对话，继续发送</span>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }} title={compressUi.summary}>
+                    摘要：{(compressUi.summary ?? "").slice(0, 60)}{(compressUi.summary ?? "").length > 60 ? "…" : ""}
+                  </span>
+                </>
+              )}
+              {compressUi.stage === "trunc" && (
+                <>
+                  <span style={{ color: "var(--warning)", fontWeight: 700 }}>⚠</span>
+                  <span style={{ color: "var(--text)" }}>摘要生成不可用，已保留最近 {compressUi.dropped ?? 0} 轮对话并继续发送</span>
+                </>
+              )}
+            </div>
+          )}
           {/* ── 识图：待发送图片附件行（缩略图 + 移除 + 数量提示）── */}
           {pendingImages.length > 0 && (
             <div style={{
@@ -3318,18 +3529,46 @@ export default function ChatPanel({
           <textarea ref={inputRef} value={input}
             onPaste={handlePasteImages}
             onChange={(e) => {
-              setInput(e.target.value);
+              const next = e.target.value;
+              setInput(next);
               autoResize();
-              if (e.target.value.startsWith("/")) {
+              if (next.startsWith("/")) {
                 setCmdOpen(true);
-                setCmdFilter(e.target.value);
+                setCmdFilter(next);
                 setPlusOpen(false);
-              } else {
-                setCmdOpen(false);
-                setCmdFilter("");
+                setAtOpen(false);
+                return;
+              }
+              setCmdOpen(false);
+              setCmdFilter("");
+              // A-951：@成员选择器——光标前最近的 "@" 到光标之间是一个成员名前缀时弹出候选
+              if (sessionType === "brainstorm" && teamRoster.length > 0) {
+                const pos = e.target.selectionStart ?? next.length;
+                const tail = next.slice(0, pos);
+                const lastAt = tail.lastIndexOf("@");
+                if (lastAt >= 0 && !/[\s@（)]/.test(tail.slice(lastAt + 1))) {
+                  const seg = tail.slice(lastAt + 1);
+                  const hits = teamRoster.filter((n) => n.toLowerCase().includes(seg.toLowerCase()));
+                  if (hits.length > 0) {
+                    setAtOpen(true);
+                    setAtFilter(seg);
+                    setAtSel(0);
+                    atRangeRef.current = { start: lastAt, end: pos };
+                    setSuggestions([]);
+                    return;
+                  }
+                }
+                setAtOpen(false);
               }
             }}
             onKeyDown={(e) => {
+              // A-951：@选择器键盘导航优先于发送/指令
+              if (atOpen && atList.length > 0) {
+                if (e.key === "ArrowDown") { e.preventDefault(); setAtSel((s) => (s + 1) % atList.length); return; }
+                if (e.key === "ArrowUp") { e.preventDefault(); setAtSel((s) => (s - 1 + atList.length) % atList.length); return; }
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); pickMember(atList[atSel] ?? atList[0]); return; }
+                if (e.key === "Escape") { e.preventDefault(); setAtOpen(false); return; }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 if (cmdOpen && filteredCmd.length === 1) {
@@ -3342,9 +3581,12 @@ export default function ChatPanel({
                 setCmdOpen(false);
                 setSuggestions([]);
                 setPlusOpen(false);
+                setAtOpen(false);
               }
             }}
-            placeholder="输入消息（Enter 发送，/ 展开指令，Shift+Enter 换行；可粘贴 / 拖拽图片识图）"
+            placeholder={sessionType === "brainstorm"
+              ? "发消息即议题：@成员名 点名回复；@全体/不 @ 全员抢答（先想好先发言）；全程实时流式…"
+              : "输入消息（Enter 发送，/ 展开指令，Shift+Enter 换行；可粘贴 / 拖拽图片识图）"}
             rows={1}
             // A-164：不再 disabled={loading} —— loading 时输入框必须可编辑，
             // 否则「停止后输入框出现已发信息且无法更改」（用户实测）；loading 时发送走插入
@@ -3372,6 +3614,9 @@ export default function ChatPanel({
               onMouseUp={(e) => { e.currentTarget.style.transform = "scale(1)"; }}>
               <PlusIcon size={16} />
             </button>
+            {/* A-943：群聊头脑风暴 = 输入框退化为"普通聊天 APP 只发消息"；AI 配置（审批/模式/模型/推理/联网）全部收起 */}
+            {sessionType === "brainstorm" ? null : (
+            <>
             {/* 操作审批 */}
             <GhostSelect
               value={sessionConfig.approval}
@@ -3411,15 +3656,34 @@ export default function ChatPanel({
                 { value: "silam", label: "silam", group: "默认", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" },
                 ...(providerModels ?? []).flatMap((p) => {
                   const enabled = (p.models ?? []).filter((m) => m.selected !== false);
-                  return enabled.map((m) => {
-                    const label = prettyModelLabel(m.id, p.key);
-                    return {
-                      value: `api:${p.key}:${m.id}`,
-                      label: label || m.id || "（未命名）",
+                  if (enabled.length === 0) {
+                    return [{
+                      value: `api:${p.key}`,
+                      label: `${p.key} · 自动`,
                       group: p.key,
-                      title: `${p.key} :: ${m.id}`,
-                    };
-                  }) as GhostSelectOption[];
+                      title: `${p.key} — 无已启用模型，仍可按默认配置调用`,
+                    } as GhostSelectOption];
+                  }
+                  const first = prettyModelLabel(enabled[0].id, p.key) || enabled[0].id || "";
+                  // A-968：保留 api:<key>「供应商自动/默认」入口——角色创建时只选了供应商（无具体模型）
+                  // 也能在对话面板精确匹配显示，不再误落到「silam」，无需二次选择
+                  return [
+                    {
+                      value: `api:${p.key}`,
+                      label: `${p.key} · 自动（${first}）`,
+                      group: p.key,
+                      title: `${p.key} — 使用其默认模型「${first}」，点击可选择具体模型`,
+                    },
+                    ...enabled.map((m) => {
+                      const label = prettyModelLabel(m.id, p.key);
+                      return {
+                        value: `api:${p.key}:${m.id}`,
+                        label: label || m.id || "（未命名）",
+                        group: p.key,
+                        title: `${p.key} :: ${m.id}`,
+                      };
+                    }),
+                  ] as GhostSelectOption[];
                 }),
                 ...providerKeys
                   .filter((k) => !(providerModels ?? []).some((pm) => pm.key === k))
@@ -3480,6 +3744,8 @@ export default function ChatPanel({
               <InternetIcon size={14} style={{ color: networkEnabled ? "#22c55e" : "var(--text-dim)" }} />
               联网搜索
             </button>
+            </>
+            )}
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8, display: loading ? "none" : "block" }}>
               {input ? `${input.length} 字` : ""}
@@ -3529,125 +3795,6 @@ export default function ChatPanel({
           )}
         </div>
       </div>
-
-      {/* ── 协作弹窗：自分裂 / A2A 传唤 双 Tab ── */}
-      {coopOpen && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setCoopOpen(false); } }}>
-          <div className="card" style={{ width: 460, maxWidth: "92vw" }}>
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-              <h3 style={{ margin: 0, flex: 1 }}>会话内协作</h3>
-              <button className="titlebar-btn" onClick={() => setCoopOpen(false)}><CloseIcon size={12} /></button>
-            </div>
-            <>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
-                  {agentName} 自分裂出一个新实例（同模型、独立进程并行工作），子实例可用
-                  <b style={{ color: "var(--accent-hover)" }}> &lt;DELEGATE&gt;</b> 传唤协作，结果整合回本会话。分裂深度上限 2。
-                </div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>子 Agent 名称</div>
-                <input className="input-field" value={splitName} spellCheck={false}
-                  placeholder="如：research-helper" style={{ marginBottom: 10 }}
-                  onChange={(e) => setSplitName(e.target.value)} />
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>角色（可选）</div>
-                <input className="input-field" value={splitRole} spellCheck={false}
-                  placeholder="如：负责资料检索与总结" style={{ marginBottom: 14 }}
-                  onChange={(e) => setSplitRole(e.target.value)} />
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn success" onClick={handleFork} disabled={splitBusy || !splitName.trim()}>
-                    {splitBusy ? "分裂中…" : "创建子实例"}
-                  </button>
-                  <button className="btn" onClick={() => setCoopOpen(false)}>取消</button>
-                </div>
-              </>
-          </div>
-        </div>
-      )}
-
-      {/* ── 团队管理弹窗：一个会话 = 一个团队（组长派单，成员各司其职） ── */}
-      {teamOpen && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setTeamOpen(false); } }}>
-          <div className="card" style={{ width: 480, maxWidth: "92vw" }}>
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-              <h3 style={{ margin: 0, flex: 1 }}>
-                <SitemapIcon size={16} style={{ marginRight: 6, verticalAlign: "middle" }} />
-                团队管理
-              </h3>
-              <button className="titlebar-btn" onClick={() => setTeamOpen(false)}><CloseIcon size={12} /></button>
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
-              组长 <b style={{ color: "var(--accent-hover)" }}>{agentName}</b> 统筹规划，通过{" "}
-              <b style={{ color: "var(--accent-hover)" }}>&lt;DELEGATE&gt;</b> 派单指挥成员；各成员各司其职、并行执行，
-              答复以「群聊」方式汇入本会话，由组长整合成最终回复。成员可在下方随时增删。
-            </div>
-
-            {memberNames.length > 0 && (
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
-                当前成员（已保存）：{memberNames.map((n, i) => (
-                  <span key={i} style={{
-                    display: "inline-block", margin: "0 4px 4px 0", padding: "1px 8px",
-                    background: "var(--accent-soft)", color: "var(--accent-hover)",
-                    border: "1px solid var(--border)", borderRadius: 10, fontSize: 11.5,
-                  }}>{n}</span>
-                ))}
-              </div>
-            )}
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, maxHeight: 300, overflowY: "auto", marginBottom: 12 }}>
-              {agents.filter((a) => a.id !== agentId).map((a) => {
-                const sel = teamDraft.includes(a.id);
-                return (
-                  <button key={a.id}
-                    onClick={() => setTeamDraft((prev) =>
-                      sel ? prev.filter((id) => id !== a.id) : [...prev, a.id])}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 8, textAlign: "left",
-                      padding: "7px 9px", borderRadius: 10, cursor: "pointer",
-                      background: sel ? "var(--accent-soft)" : "var(--bg-input)",
-                      border: sel ? "1px solid var(--accent)" : "1px solid var(--border)",
-                      color: "var(--text)", transition: "background 0.12s, border-color 0.12s",
-                    }}>
-                    <span style={{ flexShrink: 0, display: "flex" }}>
-                      {sel
-                        ? <CheckboxCheckedIcon size={16} />
-                        : <CheckboxIcon size={16} />}
-                    </span>
-                    <span style={{ minWidth: 0, flex: 1 }}>
-                      <span style={{ display: "block", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {a.name}
-                      </span>
-                      {a.role && (
-                        <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {a.role}
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button
-                className="btn success"
-                disabled={agents.filter((a) => a.id !== agentId).length === 0}
-                onClick={() => {
-                  onMembersChanged?.(teamDraft);
-                  setTeamOpen(false);
-                }}>
-                保存成员（{teamDraft.length}）
-              </button>
-              <button className="btn" onClick={() => setTeamOpen(false)}>取消</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
