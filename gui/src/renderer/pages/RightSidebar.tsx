@@ -2,7 +2,7 @@ import React, { type JSX, type CSSProperties } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
-  DownloadProgressInfo, WorkspaceEntry, WorkspaceReadFileResult,
+  DownloadProgressInfo, WorkspaceEntry, WorkspaceReadFileResult, CtxBuckets, GitDiffFile,
 } from "../../shared/ipc.js";
 import {
   ChevronIcon, SidebarLeftIcon, TaskIcon, GlobeIcon,
@@ -14,9 +14,22 @@ import {
 import { alertAsync, confirmAsync } from "../dialog.js";
 import { SIDEBAR_OPEN_EVENT, type SidebarOpenPayload } from "./Markdown.js";
 import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
+import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
+import BrainstormPanel from "./BrainstormPanel.js";
 import { onCtxUpdate } from "./ChatPanel.js";
 
 type TabType = "tasks" | "subagents" | "terminal" | "browser" | "git" | "file";
+
+/** A-968：图片预览用真实 MIME（data:image/* 通配 MIME 在 Chromium 下不渲染，导致右栏看不了图） */
+const IMG_MIME: Record<string, string> = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+  ".gif": "image/gif", ".bmp": "image/bmp", ".svg": "image/svg+xml",
+};
+function imageDataUrl(name: string, base64: string): string {
+  const ext = (name.split(/[\\/]/).pop() ?? "").toLowerCase().split(".").pop();
+  const mime = ext ? IMG_MIME[`.${ext}`] ?? "image/png" : "image/png";
+  return `data:${mime};base64,${base64}`;
+}
 
 interface TabInstance {
   id: string;
@@ -138,13 +151,24 @@ export default function RightSidebar(props: {
   dl: Record<string, DownloadProgressInfo>;
   width?: number;
   onResize?: (e: React.MouseEvent) => void;
+  /** A-949：群聊（brainstorm）默认不新建「任务」页——配套侧页另行设计；仍可手动新建文件/终端等页 */
+  sessionType?: "normal" | "brainstorm";
+  /** A-954：群聊成员 id 列表（含组长=agentId；BrainstormPanel 建群即预填成员卡） */
+  memberIds?: string[];
+  /** A-954：成员入群模型（memberId → model 串）与组长入群模型 */
+  memberModels?: Record<string, string>;
+  leaderModel?: string;
 }): JSX.Element {
-  const initTab = React.useMemo(() => createTab("tasks"), []);
-  const [tabs, setTabs] = React.useState<TabInstance[]>([initTab]);
-  const [activeId, setActiveId] = React.useState<string>(initTab.id);
+  // 群聊下初始 tabs 为空（任务页不默认建）；普通会话初始仍默认「任务」
+  const [tabs, setTabs] = React.useState<TabInstance[]>(() =>
+    props.sessionType === "brainstorm" ? [] : [createTab("tasks")],
+  );
+  const [activeId, setActiveId] = React.useState<string | undefined>(() =>
+    props.sessionType === "brainstorm" ? undefined : "tasks",
+  );
   // A-920：每会话一套「完全独立」的右侧边栏——切换会话时把 tabs（已打开的浏览器/文件/Git 页）+ 活动页
   // 快照进 per-session 槽位，切回时原样还原；配合任务区按 sessionId 隔离（A-919），多会话绝不串联
-  const sidebarSnapRef = React.useRef<Record<string, { tabs: TabInstance[]; activeId: string }>>({});
+  const sidebarSnapRef = React.useRef<Record<string, { tabs: TabInstance[]; activeId?: string }>>({});
   const prevSidRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     const sid = props.sessionId ?? "";
@@ -156,6 +180,12 @@ export default function RightSidebar(props: {
       if (snap) {
         setTabs(snap.tabs);
         setActiveId(snap.activeId);
+      } else if (prevSidRef.current !== sid) {
+        // A-952：新建会话无快照 → 按会话类型给默认页（群聊=tabs 空 → BrainstormPanel；
+        // 普通=[任务]），否则会残留上一个会话的 tabs（群聊新会话显示成任务默认页）
+        const fresh = props.sessionType === "brainstorm" ? [] : [createTab("tasks")];
+        setTabs(fresh);
+        setActiveId(props.sessionType === "brainstorm" ? undefined : "tasks");
       }
     }
     prevSidRef.current = sid || null;
@@ -421,6 +451,25 @@ export default function RightSidebar(props: {
 
       {/* ── 内容区 ── */}
       <div className="right-body" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+        {!activeTab && props.sessionType === "brainstorm" && (
+          <BrainstormPanel
+            sessionId={props.sessionId ?? ""}
+            memberIds={props.memberIds ?? []}
+            memberModels={props.memberModels ?? {}}
+            leaderModel={props.leaderModel}
+            leaderId={props.agentId ?? ""}
+            providerModels={props.providerModels}
+          />
+        )}
+        {!activeTab && props.sessionType !== "brainstorm" && (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" }}>
+            <div style={{ fontSize: 26, opacity: 0.6 }}>🗩</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)" }}>右侧栏暂无打开的页面</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.7 }}>
+              可用「新建」菜单打开任务、文件、终端、浏览器等页。
+            </div>
+          </div>
+        )}
         {activeTab && activeTab.type === "tasks" && (
           <TasksTab agentId={props.agentId ?? ""} sessionId={props.sessionId ?? ""} agentName={props.agentName} workspace={props.workspace} dl={props.dl} providerModels={props.providerModels} />
         )}
@@ -469,6 +518,11 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
   const [moreOpen, setMoreOpen] = React.useState(false);
   const [modal, setModal] = React.useState<null | "clone" | "manual">(null);
   const [manualInput, setManualInput] = React.useState("");
+  /** A-968：文件变更 diff（红绿标注）——点击变更文件时加载 */
+  const [diffFile, setDiffFile] = React.useState<string | null>(null);
+  const [diff, setDiff] = React.useState<GitDiffFile | null>(null);
+  const [diffLoading, setDiffLoading] = React.useState(false);
+  const [diffError, setDiffError] = React.useState("");
 
   /* ── 文件资源管理器状态 ── */
   const [fileCache, setFileCache] = React.useState<Record<string, WorkspaceEntry[]>>({});
@@ -512,6 +566,29 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
       setLoading(false);
     }
   }, [api]);
+
+  /** A-968：加载指定文件的变更 diff（红绿标注渲染）；切换文件/仓库时旧 diff 自动清空 */
+  const loadDiff = React.useCallback(async (file: string): Promise<void> => {
+    if (!repoPath || !api?.git?.diff) { return; }
+    setDiffFile(file);
+    setDiffLoading(true);
+    setDiffError("");
+    setDiff(null);
+    try {
+      const res = await api.git.diff(repoPath, file);
+      if (res?.ok) {
+        const df = res.files?.[0] ?? null;
+        if (df) { setDiff(df); }
+        else { setDiffError("该文件暂无可见的代码变更"); }
+      } else {
+        setDiffError(res?.error ?? "读取 diff 失败");
+      }
+    } catch (e) {
+      setDiffError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiffLoading(false);
+    }
+  }, [api, repoPath]);
 
   const bindWorkspace = React.useCallback(async (ws: string): Promise<void> => {
     const clean = (ws ?? "").trim().replace(/^['"\s]+|['"\s]+$/g, "");
@@ -687,7 +764,8 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
   }, [browseRoot]);
 
   React.useEffect(() => {
-    if (!browseRoot || fileCache[""]?.length === 0) { return; }
+    // 守卫必须覆盖「目录尚未加载」（fileCache[""] 为 undefined）——否则 line749 flexbox find 崩
+    if (!browseRoot || !fileCache[""]?.length) { return; }
     const firstFile = fileCache[""].find((e) => !e.isDir);
     if (firstFile && !selectedFile) {
       setSelectedFile(firstFile.rel);
@@ -959,7 +1037,7 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
       {/* ── 内容区：左侧文件树 + 右侧预览/Git ── */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}>
         {/* ── 左侧文件树（内嵌文件资源管理器，可切换任意浏览根） ── */}
-        <div style={{ width: "40%", minWidth: 140, maxWidth: 220, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0, background: "var(--bg-secondary)", borderRight: "1px solid var(--border)" }}>
+        <div style={{ width: "40%", minWidth: 140, maxWidth: 340, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0, background: "var(--bg-secondary)", borderRight: "1px solid var(--border)" }}>
           {/* 工具条：上级 + 打开文件夹（系统对话框互通） */}
           <div style={{ display: "flex", gap: 4, padding: "6px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
             <button className="right-mini-btn" title="上级目录" onClick={() => void handleGoParent()} disabled={!browseRoot} style={{ padding: "2px 7px", fontSize: 12, fontWeight: 700 }}>⬆</button>
@@ -1055,7 +1133,7 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                     onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { doCommit(); } }}
                     rows={2} style={{ width: "100%", resize: "none", boxSizing: "border-box", padding: "5px 8px", background: "transparent", border: "none", outline: "none", color: "var(--text-primary)", fontSize: 12, fontFamily: "inherit", lineHeight: 1.5 }} />
                   <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                    <button onClick={doCommit} disabled={loading || !commitMsg.trim() || totalChanges === 0} title="提交暂存更改（Ctrl+Enter）" style={{ flex: "1 1 auto", minWidth: 60, padding: "5px 12px", background: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--input-bg, #21262d)" : "var(--accent, #238636)", color: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--text-muted)" : "#fff", border: "none", borderRadius: 4, cursor: (loading || !commitMsg.trim() || totalChanges === 0) ? "not-allowed" : "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4 }}><CheckIcon size={12} />提交</button>
+                    <button onClick={doCommit} disabled={loading || !commitMsg.trim() || totalChanges === 0} title="提交全部更改（Ctrl+Enter）" style={{ flex: "1 1 auto", minWidth: 60, padding: "5px 12px", background: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--input-bg, #21262d)" : "var(--accent, #238636)", color: (loading || !commitMsg.trim() || totalChanges === 0) ? "var(--text-muted)" : "#fff", border: "none", borderRadius: 4, cursor: (loading || !commitMsg.trim() || totalChanges === 0) ? "not-allowed" : "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4 }}><CheckIcon size={12} />提交</button>
                     <button onClick={doSync} disabled={loading} title="拉取 + 推送" style={{ padding: "5px 12px", background: "var(--accent, #1f6feb)", color: "#fff", border: "none", borderRadius: 4, cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4 }}><RepeatIcon size={12} />同步</button>
                     <button onClick={doPull} disabled={loading} title="拉取远端更改" style={{ padding: "5px 10px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-secondary)", cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap" }}>拉取</button>
                     <button onClick={doPush} disabled={loading} title="推送到远端" style={{ padding: "5px 10px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-secondary)", cursor: loading ? "not-allowed" : "pointer", fontSize: 12, whiteSpace: "nowrap" }}>推送</button>
@@ -1070,13 +1148,66 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                     </div>
                   ) : (
                     <div>
-                      <ChangeGroup title="暂存的更改" files={status.staged} glyph="M" collapsed={!!collapsed.staged} onToggle={() => setCollapsed((p) => ({ ...p, staged: !p.staged }))} />
-                      <ChangeGroup title="更改" files={status.modified} glyph="M" collapsed={!!collapsed.modified} onToggle={() => setCollapsed((p) => ({ ...p, modified: !p.modified }))} />
-                      <ChangeGroup title="未跟踪" files={status.untracked} glyph="?" collapsed={!!collapsed.untracked} onToggle={() => setCollapsed((p) => ({ ...p, untracked: !p.untracked }))} />
-                      <ChangeGroup title="已删除" files={status.deleted} glyph="D" collapsed={!!collapsed.deleted} onToggle={() => setCollapsed((p) => ({ ...p, deleted: !p.deleted }))} />
+                      <ChangeGroup title="暂存的更改" files={status.staged} glyph="M" collapsed={!!collapsed.staged} onToggle={() => setCollapsed((p) => ({ ...p, staged: !p.staged }))} onFileClick={(f) => void loadDiff(f)} />
+                      <ChangeGroup title="更改" files={status.modified} glyph="M" collapsed={!!collapsed.modified} onToggle={() => setCollapsed((p) => ({ ...p, modified: !p.modified }))} onFileClick={(f) => void loadDiff(f)} />
+                      <ChangeGroup title="未跟踪" files={status.untracked} glyph="?" collapsed={!!collapsed.untracked} onToggle={() => setCollapsed((p) => ({ ...p, untracked: !p.untracked }))} onFileClick={(f) => void loadDiff(f)} />
+                      <ChangeGroup title="已删除" files={status.deleted} glyph="D" collapsed={!!collapsed.deleted} onToggle={() => setCollapsed((p) => ({ ...p, deleted: !p.deleted }))} onFileClick={(f) => void loadDiff(f)} />
                     </div>
                   )}
                 </div>
+
+                {/* A-968：文件变更 diff（红绿标注）——点击「变更分组」里的文件后展示 */}
+                {diffFile && (
+                  <div style={{ marginBottom: 16, border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden", background: "var(--bg-input, #161b22)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", fontSize: 12 }}>
+                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600, fontFamily: "Consolas, 'Courier New', monospace" }} title={diffFile}>{diffFile}</span>
+                      {diff && (
+                        <>
+                          <span style={{ color: "#7ee787", fontSize: 11, flexShrink: 0 }} title="新增行">+{diff.additions}</span>
+                          <span style={{ color: "#ff7b72", fontSize: 11, flexShrink: 0 }} title="删除行">-{diff.deletions}</span>
+                        </>
+                      )}
+                      <button onClick={() => setDiffFile(null)} title="关闭 diff" style={{ background: "transparent", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 14, lineHeight: 1, flexShrink: 0 }}>×</button>
+                    </div>
+                    {diffLoading && (
+                      <div style={{ padding: "14px 12px", fontSize: 11.5, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                        <LoadingCircleIcon size={12} className="icon-spin" /> 正在生成 diff…
+                      </div>
+                    )}
+                    {diffError && (
+                      <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--danger, #f85149)" }}>⚠ {diffError}</div>
+                    )}
+                    {diff && diff.hunks.length === 0 && (
+                      <div style={{ padding: "12px", fontSize: 11.5, color: "var(--text-muted)" }}>
+                        {diff.status === "untracked" ? "未跟踪文件 · 二进制内容未展示" : diff.status === "deleted" ? "文件已删除" : "该文件无可展示的代码变更"}
+                      </div>
+                    )}
+                    {diff && diff.hunks.length > 0 && (
+                      <div style={{ maxHeight: 280, overflow: "auto", background: "var(--bg)" }}>
+                        {diff.hunks.map((h, i) => (
+                          <div key={i}>
+                            <div style={{ padding: "2px 10px", background: "rgba(56,139,253,0.12)", color: "var(--accent-hover, #58a6ff)", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11 }}>{h.header}</div>
+                            {h.lines.map((l, j) => (
+                              <div key={j} style={{
+                                display: "flex",
+                                fontFamily: "Consolas, 'Courier New', monospace",
+                                fontSize: 11.5,
+                                lineHeight: 1.6,
+                                background: l.type === "add" ? "rgba(46,160,67,0.16)" : l.type === "del" ? "rgba(248,81,73,0.16)" : "transparent",
+                              }}>
+                                <span style={{
+                                  width: 22, flexShrink: 0, textAlign: "right", paddingRight: 6, userSelect: "none",
+                                  color: l.type === "add" ? "#7ee787" : l.type === "del" ? "#ff7b72" : "var(--text-dim)",
+                                }}>{l.type === "add" ? "+" : l.type === "del" ? "-" : " "}</span>
+                                <span style={{ flex: 1, whiteSpace: "pre", color: l.type === "add" ? "#7ee787" : l.type === "del" ? "#ff7b72" : "var(--text-secondary)" }}>{l.text}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* ── 提交历史 ── */}
                 <div>
@@ -1105,7 +1236,7 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
               <div style={{ borderTop: "1px solid var(--border)", marginTop: 12, paddingTop: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>📄 {selectedName}</div>
                 {selectedContent.mime === "image" && selectedContent.content ? (
-                  <img src={`data:image/*;base64,${selectedContent.content}`} alt={selectedName} style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid var(--border)" }} />
+                  <img src={imageDataUrl(selectedName, selectedContent.content)} alt={selectedName} style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid var(--border)" }} />
                 ) : (
                   <pre style={{ fontSize: 11, fontFamily: "Consolas, monospace", color: "var(--text-secondary)", padding: 10, background: "var(--bg-hover)", borderRadius: 6, overflow: "auto", maxHeight: 300, whiteSpace: "pre" }}>{(selectedContent.content ?? "").slice(0, 4096)}</pre>
                 )}
@@ -1449,7 +1580,7 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     if (isImage) {
       return (
         <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
-          <img src={`data:image/*;base64,${preview.content}`} alt={preview.rel} style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid var(--border)" }} />
+          <img src={imageDataUrl(preview.rel, preview.content)} alt={preview.rel} style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid var(--border)" }} />
         </div>
       );
     }
@@ -1709,6 +1840,8 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
    *  与 usage（四项累计，配 MetricsGrid 费用/消耗统计）语义分离，互不混用。 */
   const [liveUsed, setLiveUsed] = React.useState(0);
   const [liveCap, setLiveCap] = React.useState(0);
+  // A-939：上下文分桶（随 done 事件/单一事件源传入；缺省 undefined 回退到 compose 的旧展示）
+  const [liveBuckets, setLiveBuckets] = React.useState<CtxBuckets | undefined>(undefined);
   /** A-935：会话 ID 实时引用——订阅闭包读 ref 而非陈旧 props（根治切会话后 done/事件被旧值误过滤，
    *  导致右栏不更新/慢于圆环的根因）；组件随会话切换不重建本闭包也不受影响 */
   const sessionIdRef = React.useRef(props.sessionId);
@@ -1719,6 +1852,8 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       if (p.sessionId !== sessionIdRef.current) { return; }
       if (p.used > 0) { setLiveUsed(p.used); }
       if (p.cap > 0) { setLiveCap(p.cap); }
+      // A-939：单事件源里带分桶数据，同步落状态
+      if (p.buckets) { setLiveBuckets(p.buckets); }
     });
     return off;
   }, []);
@@ -1821,7 +1956,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       else if (t === "progress") { pushEvent("progress", c.data?.progress ?? c.data?.content ?? "子任务进行中…"); }
       else if (t === "chunk") { setRunning(true); }
     });
-    const off2 = api.chat.onDone((m: { interrupted?: boolean; timings?: Record<string, number>; model?: string; sessionId?: string; windowCap?: number }) => {
+    const off2 = api.chat.onDone((m: { interrupted?: boolean; timings?: Record<string, number>; model?: string; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => {
       // A-933 会话隔离：本面板只记账当前会话的流（用实时 ref，杜绝陈旧 props 误过滤）
       if (m.sessionId != null && m.sessionId !== sessionIdRef.current) { return; }
       setRunning(false);
@@ -1963,6 +2098,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
             cap={liveCap > 0 ? liveCap : maxCtx}
             compressCount={0}
             compose={{ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, reasoningTokens: usage.reasoningTokens, cacheReadTokens: usage.cacheReadTokens }}
+            buckets={liveBuckets}
             detailOpen={detailOpen}
             onToggleDetail={() => setDetailOpen((v) => !v)}
           />
@@ -2019,25 +2155,51 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
  *  4s 轻轮询 slime:resident:state；每个 subagent 独立上下文，主会话只见摘要）。 */
 function SubAgentsTab(): JSX.Element {
   const [runs, setRuns] = React.useState<Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>>([]);
-  React.useEffect(() => {
-    let alive = true;
-    const refresh = (): void => {
+  const [delegateInput, setDelegateInput] = React.useState("");
+  const [delegating, setDelegating] = React.useState(false);
+  const refreshRef = React.useRef<() => void>(() => {});
+  if (!refreshRef.current) {
+    refreshRef.current = (): void => {
       const w = window as unknown as { slimeAPI?: any };
       void w.slimeAPI?.resident?.state?.().then((s: { subagents?: Array<Record<string, unknown>> }) => {
-        if (alive && Array.isArray(s?.subagents)) { setRuns(s.subagents as Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>); }
+        if (Array.isArray(s?.subagents)) { setRuns(s.subagents as Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>); }
       }).catch(() => {});
     };
-    refresh();
-    const iv = window.setInterval(refresh, 4000);
-    return () => { alive = false; window.clearInterval(iv); };
+  }
+  React.useEffect(() => {
+    refreshRef.current();
+    const iv = window.setInterval(() => refreshRef.current(), 4000);
+    return () => window.clearInterval(iv);
   }, []);
+
+  /** 取消运行中/排队中的子代理（A-938 preload 转发 slime:resident:subagent:cancel） */
+  const handleCancel = (id: string | undefined): void => {
+    if (!id) { return; }
+    const w = window as unknown as { slimeAPI?: any };
+    void w.slimeAPI?.resident?.subagentCancel?.(id).then(() => refreshRef.current()).catch(() => {});
+  };
+  /** 手动按 description 自动委派（命中 代码审查/调研/数据分析 专家） */
+  const handleDelegate = (): void => {
+    const task = delegateInput.trim();
+    if (!task || delegating) { return; }
+    setDelegating(true);
+    const w = window as unknown as { slimeAPI?: any };
+    void w.slimeAPI?.resident?.subagentDelegate?.({ task })
+      .then(() => { setDelegateInput(""); refreshRef.current(); })
+      .catch(() => {})
+      .finally(() => setDelegating(false));
+  };
 
   const stMeta: Record<string, { txt: string; c: string; bg: string }> = {
     pending: { txt: "排队中", c: "var(--text-muted)", bg: "rgba(139,148,158,0.14)" },
     running: { txt: "执行中", c: "#d29922", bg: "rgba(210,153,34,0.15)" },
     done: { txt: "已完成", c: "#2ea043", bg: "rgba(46,160,67,0.15)" },
     fail: { txt: "失败", c: "#f85149", bg: "rgba(248,81,73,0.16)" },
+    timeout: { txt: "超时", c: "#d29922", bg: "rgba(210,153,34,0.15)" },
+    cancelled: { txt: "已取消", c: "var(--text-muted)", bg: "rgba(139,148,158,0.14)" },
   };
+
+  const active = (s: string | undefined): boolean => s === "pending" || s === "running";
 
   return (
     <div className="right-tab-pane" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -2051,6 +2213,24 @@ function SubAgentsTab(): JSX.Element {
         <div style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, borderBottom: "1px solid var(--border)" }}>
           主 Agent 派发的子代理在此**并行执行**，每个子代理拥有独立上下文窗口——原始产出只以摘要回到主会话，主上下文不被污染。
         </div>
+        {/* 手动按 description 自动委派（命中 代码审查/调研/数据分析 专家，A-938 preload 已转发 delegate IPC） */}
+        <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)", display: "flex", gap: 4 }}>
+          <input
+            value={delegateInput}
+            onChange={(e) => setDelegateInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { handleDelegate(); } }}
+            placeholder="委派任务描述…（自动匹配专家）"
+            style={{ flex: 1, background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 8px", fontSize: 11.5, color: "var(--text-primary)", outline: "none" }}
+          />
+          <button
+            onClick={handleDelegate}
+            disabled={!delegateInput.trim() || delegating}
+            style={{ background: "var(--accent-soft)", border: "none", borderRadius: 4, cursor: delegateInput.trim() && !delegating ? "pointer" : "default", padding: "4px 10px", fontSize: 11.5, fontWeight: 700, color: delegateInput.trim() && !delegating ? "var(--accent-hover)" : "var(--text-muted)", whiteSpace: "nowrap" }}
+            title="按描述自动匹配专家子代理并后台执行"
+          >
+            {delegating ? "委派中…" : "委派"}
+          </button>
+        </div>
         {runs.length === 0 && (
           <div className="tree-hint" style={{ padding: "16px 12px", lineHeight: 1.6 }}>
             暂无子代理任务。<br />可到 [设置 → 后台任务] 手动/定时派发；对话中让 Agent 调用子代理工具时也会在此展示进度与目标。
@@ -2061,9 +2241,18 @@ function SubAgentsTab(): JSX.Element {
           return (
             <div key={r.id ?? i} style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", maxWidth: "60%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name || "子代理"}</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", maxWidth: "50%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name || "子代理"}</span>
                 <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, color: st.c, background: st.bg, fontWeight: 700 }}>{st.txt}</span>
-                {r.status === "running" && <span className="icon-spin" style={{ fontSize: 11, color: "var(--accent)", marginLeft: "auto" }}>●</span>}
+                {r.status === "running" && <span className="icon-spin" style={{ fontSize: 11, color: "var(--accent)" }}>●</span>}
+                {active(r.status) && (
+                  <button
+                    onClick={() => handleCancel(r.id)}
+                    style={{ marginLeft: "auto", background: "none", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer", padding: "1px 7px", fontSize: 10, color: "var(--text-muted)" }}
+                    title="取消该子代理（运行中中断 / 排队中直接取消）"
+                  >
+                    取消
+                  </button>
+                )}
               </div>
               {r.task && <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.task}</div>}
               {r.status === "done" && r.result && (
@@ -2080,30 +2269,58 @@ function SubAgentsTab(): JSX.Element {
 
 /* ── 任务页辅助组件 ── */
 
-function ContextWindowBar({ used, cap, compressCount, compose, detailOpen, onToggleDetail }: {
+/** A-939 上下文分桶构成（对齐引擎 computeContextBuckets 的 8 来源；色标取自 Cursor 3.3 Context Buckets 配色惯例） */
+function bucketComps(b: CtxBuckets): Array<{ label: string; pct: number; color: string; n: number }> {
+  const B = [
+    { label: "身份", n: b.system },
+    { label: "规则", n: b.rules },
+    { label: "记忆", n: b.memory },
+    { label: "工作区", n: b.workspace },
+    { label: "规划", n: b.planning },
+    { label: "工具", n: b.tools },
+    { label: "历史", n: b.history },
+    { label: "消息", n: b.message },
+  ];
+  const CP = "#60a5fa";  // system
+  const CR = "#34d399";  // rules
+  const CM = "#f472b6";  // memory
+  const CW = "#fbbf24";  // workspace
+  const CPL = "#a78bfa"; // planning
+  const CT = "#fb923c"; // tools
+  const CH = "#94a3b8"; // history
+  const CMSG = "#38bdf8"; // message
+  const palette = [CP, CR, CM, CW, CPL, CT, CH, CMSG];
+  // 归一分桶占比由 contextMath.bucketsSegments 统一保证（F 单测锁定），此处取色板拼装
+  const { segments } = bucketsSegments(B.map((x) => ({ key: x.label, tokens: x.n })));
+  return B.map((x, i) => {
+    const s = segments.find((q) => q.key === x.label);
+    return { ...x, pct: s?.pct ?? 0, color: palette[i] };
+  });
+}
+
+function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOpen, onToggleDetail }: {
   used: number; cap: number; compressCount: number;
   /** A-937：token 构成（四项累计）→ 进度条下方 4 色构成微条 + 图例，让"已用"不再是黑盒 */
   compose?: { promptTokens: number; completionTokens: number; reasoningTokens: number; cacheReadTokens: number };
+  /** A-939：上下文分桶（按注入来源切分，对齐 Cursor Context Buckets 理念） */
+  buckets?: CtxBuckets;
   detailOpen?: boolean; onToggleDetail?: () => void;
 }): JSX.Element {
-  const pct = cap > 0 ? Math.max(0, Math.min(1, used / cap)) : 0;
-  const pctLabel = Math.round(pct * 100);
+  const pct = contextRatio(used, cap);
+  const pctLabel = contextPct(pct);
   const status = cap === 0
     ? { txt: "上限未配置", cls: "var(--text-muted)", bg: "rgba(139,148,158,0.14)" }
     : pct < 0.6 ? { txt: "上下文充足", cls: "#2ea043", bg: "rgba(46,160,67,0.15)" }
       : pct < 0.85 ? { txt: "接近上限", cls: "#d29922", bg: "rgba(210,153,34,0.15)" }
         : { txt: "逼近硬阈值", cls: "#f85149", bg: "rgba(248,81,73,0.16)" };
-  const color = pct < 0.6 ? "var(--success)" : pct < 0.85 ? "var(--warning)" : "var(--danger)";
-  // token 构成占比（分母防零）
-  const tot = Math.max(1, (compose?.promptTokens ?? 0) + (compose?.completionTokens ?? 0) + (compose?.reasoningTokens ?? 0) + (compose?.cacheReadTokens ?? 0));
-  const seg = (n?: number): number => ((n ?? 0) / tot) * 100;
-  const hasCompose = (compose?.promptTokens ?? 0) + (compose?.completionTokens ?? 0) + (compose?.reasoningTokens ?? 0) + (compose?.cacheReadTokens ?? 0) > 0;
-  const comps: Array<{ label: string; pct: number; color: string; n: number }> = [
-    { label: "输入", pct: seg(compose?.promptTokens), color: "#4b9eff", n: compose?.promptTokens ?? 0 },
-    { label: "缓存", pct: seg(compose?.cacheReadTokens), color: "#2ea8dc", n: compose?.cacheReadTokens ?? 0 },
-    { label: "输出", pct: seg(compose?.completionTokens), color: "#9a7bff", n: compose?.completionTokens ?? 0 },
-    { label: "思考", pct: seg(compose?.reasoningTokens), color: "#d29922", n: compose?.reasoningTokens ?? 0 },
-  ];
+  const color = ringLevel(pct).color;
+  // token 构成占比（经 contextMath 纯函数，F 单测锁定）
+  const { segments: comps, any: hasCompose } = composeSegments({
+    promptTokens: compose?.promptTokens ?? 0,
+    cacheReadTokens: compose?.cacheReadTokens ?? 0,
+    completionTokens: compose?.completionTokens ?? 0,
+    reasoningTokens: compose?.reasoningTokens ?? 0,
+  });
 
   return (
     <div>
@@ -2131,6 +2348,22 @@ function ContextWindowBar({ used, cap, compressCount, compose, detailOpen, onTog
             {comps.filter((c) => c.n > 0).map((c) => (
               <span key={c.label} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 9.5, color: "var(--text-muted)" }}>
                 <span style={{ width: 6, height: 6, borderRadius: 2, background: c.color }} />{c.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {/* A-939：上下文分桶（按注入来源）——"已用"各来源细目，对齐 Cursor Context Buckets 理念 */}
+      {buckets && (buckets.system + buckets.rules + buckets.memory + buckets.workspace + buckets.planning + buckets.tools + buckets.history + buckets.message) > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 4, marginTop: 2 }}>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", flexShrink: 0 }}>来源</span>
+          <div style={{ flex: 1, display: "flex", height: 4, borderRadius: 999, overflow: "hidden", background: "var(--input-bg)" }}>
+            {bucketComps(buckets).map((c) => c.pct > 0 && <div key={c.label} title={c.label + " " + fmtK(c.n)} style={{ width: c.pct + "%", background: c.color }} />)}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0, overflow: "hidden" }}>
+            {bucketComps(buckets).filter((c) => c.n > 0).map((c) => (
+              <span key={c.label} title={c.label + ": " + c.n.toLocaleString()} style={{ display: "inline-flex", alignItems: "center", gap: 2, fontSize: 9, color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                <span style={{ width: 5, height: 5, borderRadius: 2, background: c.color, flexShrink: 0 }} />{c.label}
               </span>
             ))}
           </div>
@@ -2423,7 +2656,7 @@ function NoChangesGlyph(): JSX.Element {
 
 /* ═══════════════ Git 变更分组 ═══════════════ */
 
-function ChangeGroup(props: { title: string; files: string[]; glyph: string; collapsed: boolean; onToggle: () => void }): JSX.Element | null {
+function ChangeGroup(props: { title: string; files: string[]; glyph: string; collapsed: boolean; onToggle: () => void; onFileClick?: (f: string) => void }): JSX.Element | null {
   if (props.files.length === 0) { return null; }
   const g = STATUS_GLYPH[props.glyph] ?? STATUS_GLYPH.M;
   return (
@@ -2439,11 +2672,14 @@ function ChangeGroup(props: { title: string; files: string[]; glyph: string; col
       {!props.collapsed && (
         <div style={{ paddingLeft: 6 }}>
           {props.files.map((f) => (
-            <div key={f} style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 6px", borderRadius: 4, fontSize: 11 }}
+            <div key={f} onClick={() => props.onFileClick?.(f)}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 6px", borderRadius: 4, fontSize: 11, cursor: props.onFileClick ? "pointer" : "default" }}
               onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--hover-bg, rgba(255,255,255,0.05))"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}>
+              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+              title={"点击查看该文件的代码变更（红绿标注）"}>
               <span style={{ width: 16, textAlign: "center", fontFamily: "Consolas, monospace", fontSize: 11, fontWeight: 700, color: g.color, flexShrink: 0 }}>{g.label}</span>
               <span style={{ flex: 1, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "Consolas, 'Courier New', monospace" }} title={f}>{f}</span>
+              <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, opacity: 0.7 }}>查看</span>
             </div>
           ))}
         </div>
