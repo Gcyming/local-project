@@ -60,7 +60,11 @@ export default function SettingsDialog(props: Props): JSX.Element {
 
   return (
     <div style={{
-      position: "fixed", inset: 0, zIndex: 90, background: "rgba(2, 6, 23, 0.66)",
+      position: "fixed", inset: 0, zIndex: 90,
+      // A-955：遮罩磨砂化（与新建会话弹窗一致），中和高透明观感
+      background: "rgba(2, 6, 23, 0.74)",
+      backdropFilter: "blur(14px) saturate(1.2)",
+      WebkitBackdropFilter: "blur(14px) saturate(1.2)",
       display: "flex", alignItems: "center", justifyContent: "center",
     }}
       onClick={(e) => { if (e.target === e.currentTarget) { props.onClose(); } }}>

@@ -87,11 +87,43 @@ export default function ResidentPanel(): React.JSX.Element {
   const [saAgentId, setSaAgentId] = React.useState("");
   const [presetId, setPresetId] = React.useState<string | null>(null);
 
+  // ── A-942：全局子代理默认模型（贵模型统筹、廉价/免费模型执行档位）──
+  const [defaultModel, setDefaultModel] = React.useState("");
+  const [modelOptions, setModelOptions] = React.useState<Array<{ value: string; label: string }>>([
+    { value: "inherit", label: "继承（沿用目标 Agent 模型）" },
+  ]);
+
+  // 加载可选的子代理执行模型：全部供应商的启用模型 + 本地模型
+  React.useEffect(() => {
+    const w = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!w?.providers?.list) { return; }
+    void w.providers.list().then((list: Array<{ key?: string; models?: Array<{ id?: string; selected?: boolean }> }>) => {
+      const opts: Array<{ value: string; label: string }> = [{ value: "inherit", label: "继承（沿用目标 Agent 模型）" }];
+      for (const p of Array.isArray(list) ? list : []) {
+        if (!p?.key) { continue; }
+        const enabled = Array.isArray(p.models) ? p.models.filter((m) => m?.selected !== false) : [];
+        if (enabled.length === 0) {
+          opts.push({ value: `api:${p.key}`, label: `${p.key}（默认模型）` });
+        }
+        for (const m of enabled) {
+          if (m?.id) { opts.push({ value: `api:${p.key}:${m.id}`, label: `${p.key} · ${m.id}` }); }
+        }
+      }
+      void w.providers.localList?.().then((locals: Array<{ id?: string; label?: string }>) => {
+        for (const lm of Array.isArray(locals) ? locals : []) {
+          if (lm?.id) { opts.push({ value: `local:${lm.id}`, label: `本地 · ${lm.label ?? lm.id}` }); }
+        }
+        setModelOptions(opts);
+      }).catch(() => setModelOptions(opts));
+    }).catch(() => { /* 未配置供应商时仅保留继承 */ });
+  }, []);
+
   const refresh = React.useCallback(() => {
     api.resident?.state?.().then((s: any) => {
       if (!s) { return; }
       setJobs(Array.isArray(s.scheduler) ? s.scheduler : []);
       setRuns(Array.isArray(s.subagents) ? s.subagents : []);
+      if (typeof s.defaultModel === "string") { setDefaultModel(s.defaultModel); }
     }).catch(() => { /* 服务未就绪 */ });
     api.agents?.list?.().then((list: AgentBrief[]) => {
       if (Array.isArray(list)) {
@@ -228,6 +260,31 @@ export default function ResidentPanel(): React.JSX.Element {
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
           子代理
           <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（最多 3 个并发），结果落盘 data/generated/subagent-*.md</span>
+        </div>
+
+        {/* A-942：全局子代理默认模型档位（贵模型统筹、廉价/免费模型执行） */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10,
+          padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
+          <span style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>子代理默认模型</span>
+          <select style={{ ...input, width: "auto", flex: 1, minWidth: 220 }} value={defaultModel}
+            onChange={(e) => void (async () => {
+              const r: any = await api.resident?.subagentSetDefaultModel?.(e.target.value);
+              if (r?.ok && typeof r.defaultModel === "string") {
+                setDefaultModel(r.defaultModel);
+                setNotice(`子代理默认模型已设为 ${r.defaultModel || "继承"}`);
+              } else {
+                setNotice(`设置失败：${r?.error ?? "未知"}`);
+              }
+            })()}
+            title="主 Agent 负责统筹规划（沿用其自身模型）；此处指定子代理执行模型。对话中也可直接说「用 XX 执行子任务」临时覆盖">
+            {modelOptions.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6, lineHeight: 1.7 }}>
+          优先级：对话中临时指定（如「用 XX 执行」）&gt; 专家子代理自身定义 &gt; 此处全局默认 &gt; 继承（沿用目标 Agent 模型）。
+          建议用便宜的/免费模型执行机械子任务，贵的模型专司统筹规划与评审。
         </div>
 
         {/* 预设模板：点选即填，仍可自定义调整 */}
