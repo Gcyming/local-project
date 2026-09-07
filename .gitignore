@@ -88,6 +88,16 @@ _smoke_cloud/
 configs/
 *.log
 
+# ── 打包产物 / 性能分析 / 一次性调试脚本（可再生成，不入库）──────────────
+gui/dist-v9/
+gui/dist-v*/
+*.prof
+_nf.txt
+.tools/*.py
+.tools/test_*.mjs
+# 打包后校验工具为正式验收资产（A-962），放行入库
+!.tools/verify_package.py
+
 # ── 敏感扩展名兜底（双重保险：任何目录下出现即忽略）──────────────────────
 *.pem
 *.p12
