@@ -36,11 +36,35 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
   // A-916：请求频率（并发上限 / 断流重连基间隔）
   const [reqCfg, setReqCfg] = React.useState<{ concurrency: number; reconnectBaseMs: number }>({ concurrency: 2, reconnectBaseMs: 3000 });
   const [reqBusy, setReqBusy] = React.useState(false);
+  // A-969：上下文自动压缩（发送前触发；开启 + 触发占比 + 动画/静默）
+  const [acCfg, setAcCfg] = React.useState<{ enabled: boolean; ratio: number; mode: "animated" | "silent" }>(() => {
+    try {
+      const raw = localStorage.getItem("slime_auto_compress");
+      if (raw) {
+        const p = JSON.parse(raw) as Partial<{ enabled: boolean; ratio: number; mode: "animated" | "silent" }>;
+        const ratio = typeof p.ratio === "number" && p.ratio >= 0.5 && p.ratio <= 0.97 ? p.ratio : 0.85;
+        return { enabled: p.enabled !== false, ratio, mode: p.mode === "silent" ? "silent" : "animated" };
+      }
+    } catch { /* ignore */ }
+    return { enabled: true, ratio: 0.85, mode: "animated" };
+  });
   const api = React.useRef<any>(null);
 
   const showNotice = (ok: boolean, text: string): void => {
     setNotice({ ok, text });
     window.setTimeout(() => setNotice(null), 4000);
+  };
+
+  /** A-969：保存自动压缩配置（localStorage 内存态；ChatPanel 每次发送前实时读取） */
+  const saveAutoCompress = (next: { enabled?: boolean; ratio?: number; mode?: "animated" | "silent" }): void => {
+    setAcCfg((prev) => {
+      const merged = { ...prev, ...next };
+      try {
+        localStorage.setItem("slime_auto_compress", JSON.stringify(merged));
+      } catch { /* ignore */ }
+      return merged;
+    });
+    showNotice(true, "上下文自动压缩配置已保存（聊天发送前自动生效）");
   };
 
   React.useEffect(() => {
@@ -218,6 +242,53 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
         </div>
       </div>
 
+      {/* A-969：上下文自动压缩阈值设定 */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>上下文自动压缩</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.5 }}>
+              对话接近窗口上限时，发送前自动把早期对话压缩为摘要（摘要头 + 最近 N 轮），避免上下文被撑爆后模型遗忘或报错。
+            </div>
+          </div>
+          <button
+            onClick={() => saveAutoCompress({ enabled: !acCfg.enabled })}
+            style={{
+              height: 26, padding: "0 14px", borderRadius: 13, cursor: "pointer",
+              border: `1px solid ${acCfg.enabled ? "var(--accent)" : "var(--border)"}`,
+              background: acCfg.enabled ? "var(--accent-soft)" : "transparent",
+              color: acCfg.enabled ? "var(--accent-hover)" : "var(--text-muted)",
+              fontSize: 12, fontWeight: 700,
+            }}>
+            {acCfg.enabled ? "已开启" : "已关闭"}
+          </button>
+        </div>
+        {acCfg.enabled && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5 }}>
+              触发占比（占用达到窗口上限的多少时压缩）
+              <select className="input-field" value={acCfg.ratio}
+                onChange={(e) => saveAutoCompress({ ratio: Math.min(0.97, Math.max(0.5, Number(e.target.value))) })}>
+                <option value={0.6}>60%（提前压缩，最保守）</option>
+                <option value={0.7}>70%</option>
+                <option value={0.8}>80%（推荐）</option>
+                <option value={0.85}>85%（默认）</option>
+                <option value={0.9}>90%</option>
+                <option value={0.95}>95%（窗口快满才压）</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5 }}>
+              压缩过程展示
+              <select className="input-field" value={acCfg.mode}
+                onChange={(e) => saveAutoCompress({ mode: e.target.value === "silent" ? "silent" : "animated" })}>
+                <option value="animated">过渡动画（整理→摘要→完成）</option>
+                <option value="silent">静默压缩（后台完成，无界面打扰）</option>
+              </select>
+            </label>
+          </div>
+        )}
+      </div>
+
       {/* 开机自启 */}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -229,7 +300,7 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
           </div>
           <button
             onClick={() => void toggleAutostart(autostart !== true)}
-            disabled={autostart === null || busy}
+            disabled={busy}
             title={autostart ? "点击关闭开机自启" : "点击开启开机自启"}
             style={{
               height: 26, padding: "0 14px", borderRadius: 13, cursor: "pointer",
@@ -254,11 +325,18 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
             key={m}
             onClick={() => {
               if (exitMode === m || busy) { return; }
+              // A-967：preload 必须暴露 setExitMode，缺失时兜底报错复位，绝不卡死按钮
+              if (!api.current?.window?.setExitMode) {
+                showNotice(false, "当前版本不支持该设置，请升级应用");
+                return;
+              }
               setBusy(true);
-              void (api.current?.window?.setExitMode?.(m).then((r: { ok: boolean; mode: "quit" | "background" }) => {
+              void api.current.window.setExitMode(m).then((r: { ok: boolean; mode: "quit" | "background" }) => {
                 setExitModeState(r.mode ?? m);
                 showNotice(true, r.mode === "background" ? "已启用：关闭时最小化到后台托盘" : "已启用：关闭时直接退出");
-              }).finally(() => setBusy(false)));
+              }).catch((e: unknown) => {
+                showNotice(false, `设置失败：${e instanceof Error ? e.message : String(e)}`);
+              }).finally(() => setBusy(false));
             }}
             style={{
               display: "inline-flex", alignItems: "center", gap: 8, marginRight: 18, marginBottom: 4,

@@ -319,8 +319,8 @@ export default function AgentsPanel(props: Props): JSX.Element {
             <div className="card" style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>模型配置</div>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
-                model_choice：{mc} {mcMode === "api" && `→ api:<${mcKey}>（供应商 API，聊天时按需选模型）`}
-                {mcMode === "local" && `→ local:<${mcLocal}>（llama.cpp 本地模型）`}
+                model_choice：{mc}{mcMode === "api" && ` → api:<${mcKey}>（保存后对话/群聊会直接沿用此供应商，无需再次选择；聊天区模型下拉可随时改具体模型）`}
+                {mcMode === "local" && ` → local:<${mcLocal}>（llama.cpp 本地模型）`}
               </div>
 
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>模式</div>
