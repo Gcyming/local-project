@@ -171,3 +171,13 @@ behavior_levers = true     # 三杠杆 + promote（默认开，可单独关）
 [update]
 enabled = false
 feed_url = ""
+
+# ── SILAM 自研离线大脑（A-962：随包 sidecar/ + models/ 资产；exe 同级定位）──
+# 随发行版内置：情感脑 backbone_80m.npz + 对话脑 lang_core_d16.npz + 词表 vocab.v3.1-6921.json，
+# 位于安装根 models/ 与 configs/（extraFiles 自带，首启无需下载）。
+# 成长脑持久化于用户数据目录 ~/.slimeagent/silam-default/brain/（启动自动恢复，群聊/对话自动观察落盘）。
+
+[silam]
+enabled = true
+as_brain = true
+agent_id = "silam-default"
