@@ -12,6 +12,10 @@ import RightSidebar from "./pages/RightSidebar.js";
 import { SIDEBAR_OPEN_EVENT } from "./pages/Markdown.js";
 import type { DownloadProgressInfo, BootStatus } from "../shared/ipc.js";
 import { ChevronIcon, EditIcon, MenuIcon, PlusIcon, SettingsIcon, SidebarLeftIcon, SidebarRightIcon } from "./components/Icon.js";
+/** A-943 群聊头脑风暴图标（用户选定 D:\下载\团队.svg） */
+import teamSvg from "./assets/team.svg";
+/** A-945 会话列表图标（用户选定 D:\下载\当前会话.svg） */
+import currentSessionSvg from "./assets/current-session.svg";
 import { getTheme, applyTheme, type ThemeName } from "./theme.js";
 import { confirmAsync } from "./dialog.js";
 
@@ -58,6 +62,12 @@ interface SessionItem {
   memberIds?: string[];
   /** 团队会话成员 Agent 名称（与 memberIds 同序，渲染徽章用） */
   memberNames?: string[];
+  /** A-954：成员入群模型（memberId → model_choice 串；群聊右栏成员卡与上下文 cap 用） */
+  memberModels?: Record<string, string>;
+  /** A-954：群聊组长（会话归属 Agent）入群模型 */
+  leaderModel?: string;
+  /** A-943：会话模式（brainstorm = 群聊头脑风暴，左侧特殊渲染） */
+  type?: "normal" | "brainstorm";
 }
 
 interface WelcomeChatProps {
@@ -275,10 +285,10 @@ export default function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<SettingsTab>("general");
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
-  const [sidebarWidth, setSidebarWidth] = React.useState(() => parseInt(localStorage.getItem('slime_sidebar_w') || '200'));
+  const [sidebarWidth, setSidebarWidth] = React.useState(() => parseInt(localStorage.getItem('slime_sidebar_w') || '280'));
   /** 右侧栏（工作树/任务/终端/浏览器）展开状态 */
   const [rightOpen, setRightOpen] = React.useState(true);
-  const [rightWidth, setRightWidth] = React.useState(() => parseInt(localStorage.getItem('slime_rightbar_w') || '320'));
+  const [rightWidth, setRightWidth] = React.useState(() => parseInt(localStorage.getItem('slime_rightbar_w') || '360'));
   /** A-173：点击聊天消息里的文件/网址链接 → 自动展开右侧栏（由 RightSidebar 新建对应页） */
   React.useEffect(() => {
     const onOpen = (): void => setRightOpen(true);
@@ -326,12 +336,42 @@ export default function App(): JSX.Element {
   const [newDraftLeader, setNewDraftLeader] = React.useState<string | null>(null);
   /** 新建会话草稿：团队成员 Agent id 列表（③多选，可选；组长统筹指挥、成员各司其职） */
   const [newDraftMemberIds, setNewDraftMemberIds] = React.useState<string[]>([]);
+  /** A-943：新建会话草稿聊天形式（normal 普通对话 / brainstorm 群聊头脑风暴） */
+  const [newDraftType, setNewDraftType] = React.useState<"normal" | "brainstorm">("normal");
+  /** A-954：群聊成员三步入群——{ id, name, model }（model 选定才正式入群） */
+  const [draftMembers, setDraftMembers] = React.useState<Array<{ id: string; name: string; model: string }>>([]);
+  /** A-954：群聊左列选中的待配置 agent（null=收起右侧配置面板） */
+  const [draftCfgAgent, setDraftCfgAgent] = React.useState<string | null>(null);
+  /** A-954：群聊右侧当前选中的供应商（下一步展开其模型） */
+  const [draftCfgProvider, setDraftCfgProvider] = React.useState<string | null>(null);
+  /** A-954：自研 SILAM 脑是否可用（sidecar 拉起成功才列入供应商） */
+  const [silamOk, setSilamOk] = React.useState(false);
+  /** A-954：群聊可配置供应商（API 供应商 + 本地 + SILAM）与各供应商标记 */
+  const draftProviders = React.useMemo(() => {
+    const list: Array<{ key: string; label: string; kind: "api" | "local" | "silam"; models: Array<{ id: string; label: string; ctx?: number }> }> = [];
+    for (const p of providerModels ?? []) {
+      if (!p.key || (p.models?.length ?? 0) === 0) { continue; }
+      list.push({ key: p.key, label: p.key, kind: "api", models: (p.models ?? []).map((m) => ({ id: m.id, label: m.id, ctx: m.context_window })) });
+    }
+    for (const l of localModels ?? []) {
+      const entry = { id: `local:${l.id}`, label: l.label || l.id };
+      const hit = list.find((x) => x.key === "local");
+      if (hit) { hit.models.push(entry); }
+      else { list.push({ key: "local", label: "本地模型", kind: "local", models: [entry] }); }
+    }
+    if (silamOk) {
+      list.push({ key: "silam", label: "SILAM 自研", kind: "silam", models: [{ id: "silam", label: "silam（离线情感脑+语言脑兑底）" }] });
+    }
+    return list;
+  }, [providerModels, localModels, silamOk]);
   /** 行内重命名状态 */
   const [editingSession, setEditingSession] = React.useState<{ sessionId: string; draft: string } | null>(null);
   /** 依赖下载任务状态（全局常驻订阅：切走设置页进度不丢失） */
   const [dl, setDl] = React.useState<Record<string, DownloadProgressInfo>>({});
   /** 启动引导状态（A-C-C 式启动加载面板） */
   const [boot, setBoot] = React.useState<BootStatus | null>(null);
+  /** A-966b：首屏数据（Agent/会话列表）是否就绪——启动面板要等到它完成才隐藏 */
+  const [uiReady, setUiReady] = React.useState(false);
   /** 本地模型加载进度（slime 主题弹窗；llama-server 首次加载可能数十秒） */
   const [modelLoading, setModelLoading] = React.useState<{ loading: boolean; message?: string; key?: string }>({ loading: false });
   /** 主题（alpha=既有 / beta=毛玻璃黑里透蓝），localStorage 持久化 */
@@ -403,6 +443,7 @@ export default function App(): JSX.Element {
       return [];
     });
     setSessions(items);
+    setUiReady(true); // A-966b：会话首拉完成 → 允许启动面板隐藏
   }, []);
 
   // 初始化：Agent 列表 + 会话列表 + 默认选中第一个会话
@@ -585,14 +626,67 @@ export default function App(): JSX.Element {
     }).catch(() => setSessionWorkspace(""));
   }, [selectedSessionId, selectedAgentId]);
 
-  /** 新建项目：选文件夹（①）+ 组长（②）+ 成员（③）→ 建团队/单人会话并切换（"以文件夹为主"模型） */
-  async function startNewProject(agentId: string, memberIds: string[] = []): Promise<void> {
+  /** A-954：探活自研 SILAM 脑（sidecar 拉起成功才在供应商面板出现）——启动 + 每次打开新建会话弹窗时重查 */
+  const refreshSilamStatus = React.useCallback((): void => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    api?.silam?.status?.().then((r: { enabled: boolean }) => setSilamOk(r.enabled === true)).catch(() => setSilamOk(false));
+  }, []);
+  React.useEffect(() => { refreshSilamStatus(); }, [refreshSilamStatus]);
+
+  /** A-954：群聊成员入群/退群/换模特方（model 选定的瞬间即正式入群；第一个入群者 = 组长/会话归属） */
+  const joinDraftMember = React.useCallback((a: { id: string; name: string }, model: string): void => {
+    setDraftMembers((prev) => {
+      const idx = prev.findIndex((m) => m.id === a.id);
+      const entry = { id: a.id, name: a.name, model };
+      return idx >= 0 ? prev.map((m, i) => (i === idx ? entry : m)) : [...prev, entry];
+    });
+  }, []);
+  const leaveDraftMember = React.useCallback((id: string): void => {
+    setDraftMembers((prev) => prev.filter((m) => m.id !== id));
+    if (draftCfgAgent === id) { setDraftCfgAgent(null); setDraftCfgProvider(null); }
+  }, [draftCfgAgent]);
+
+  /** A-968：把成员「已保存的 model_choice」解析成 draftProviders 里可入群的具体模型值（null=无/不可解析）。
+   *  群聊三步入群时直接沿用角色保存的供应商/模型，无需重复选择。 */
+  const resolveSavedModel = React.useCallback((agentId: string): string | null => {
+    const choice = agentConfig[agentId]?.model_choice;
+    if (!choice) { return null; }
+    if (choice === "silam" || choice.startsWith("silam:")) { return silamOk ? "silam" : null; }
+    if (choice.startsWith("local:")) {
+      const id = choice.slice(6);
+      const local = draftProviders.find((p) => p.kind === "local")?.models.find((m) => m.id === `local:${id}`);
+      return local ? local.id : null;
+    }
+    if (choice.startsWith("api:")) {
+      const rest = choice.slice(4);
+      const sep = rest.indexOf(":");
+      const key = sep >= 0 ? rest.slice(0, sep) : rest;
+      const modelId = sep >= 0 ? rest.slice(sep + 1) : "";
+      const prov = draftProviders.find((p) => p.kind === "api" && p.key === key);
+      if (!prov || prov.models.length === 0) { return null; }
+      if (!modelId) { return `api:${key}:${prov.models[0].id}`; } // 只选了供应商 → 用其首个启用模型
+      const m = prov.models.find((x) => x.id === modelId);
+      return m ? `api:${key}:${modelId}` : null;
+    }
+    return null;
+  }, [agentConfig, draftProviders, silamOk]);
+
+  /** 新建项目：选文件夹（①）+ 群聊成员三步入群（②，各带模型）+ 聊天形式 → 建团队/单人会话并切换（"以文件夹为主"模型）
+   *  A-954：入群必须选定模型——成员条目 { id, model } 持久化；组长模型经 leaderModel 单独下传 */
+  async function startNewProject(
+    agentId: string,
+    memberIds: Array<string | { id: string; model?: string }> = [],
+    type: "normal" | "brainstorm" = "normal",
+    leaderModel?: string,
+  ): Promise<void> {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api) { return; }
     const res = await api.conversations.create({
       agentId,
       workspace: newDraftWorkspace === null ? null : (newDraftWorkspace || null),
       memberIds,
+      leaderModel,
+      type,
     }).catch((e: unknown) => {
       console.error("[app] create session failed:", e);
       return null;
@@ -603,19 +697,11 @@ export default function App(): JSX.Element {
       setNewDraftWorkspace(null);
       setNewDraftLeader(null);
       setNewDraftMemberIds([]);
+      setDraftMembers([]);
+      setDraftCfgAgent(null);
+      setDraftCfgProvider(null);
       await loadSessions();
     }
-  }
-
-  /** 团队会话成员更新（组长=会话当前 agentId；空数组=退回单人会话） */
-  async function updateSessionMembers(memberIds: string[]): Promise<void> {
-    if (!selectedSessionId) { return; }
-    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api?.conversations?.setMembers) { return; }
-    await api.conversations.setMembers(selectedSessionId, memberIds).catch((e: unknown) => {
-      console.error("[app] set session members failed:", e);
-    });
-    await loadSessions();
   }
 
   /** 选择目标工作文件夹（新建会话第一步；以文件夹为主的会话模型） */
@@ -647,7 +733,13 @@ export default function App(): JSX.Element {
     setNewDraftWorkspace(prefillWorkspace === undefined ? null : prefillWorkspace);
     setNewDraftLeader(null);
     setNewDraftMemberIds([]);
+    setNewDraftType("normal");
+    setDraftMembers([]); // A-954：弹窗重开清空入群草稿，避免残留上个群聊的成员/模型
+    setDraftCfgAgent(null);
+    setDraftCfgProvider(null);
     setNewProjectOpen(true);
+    // A-955 epoll：弹窗打开时刷新 SILAM 可用性（sidecar 冷启动成功后再探），确保供应商面板及时出现
+    refreshSilamStatus();
     // 弹窗打开时刷新 Agent 列表，避免创建 Agent 后弹窗仍显示"暂无"
     void loadAgents();
   }
@@ -755,8 +847,8 @@ export default function App(): JSX.Element {
 
   return (
     <div className="app">
-      {/* 启动加载面板（A-C-C 风格：等待后端等进程就绪后进入主界面） */}
-      {boot && (boot.phase === "starting" || boot.phase === "backend") && (
+      {/* 启动加载面板（A-C-C 风格）：backend / 首屏数据就绪前持续显示，加载动画不停 */}
+      {boot && (boot.phase === "starting" || boot.phase === "backend" || (boot.phase === "ready" && !uiReady)) && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 999,
           background: "var(--bg)", display: "flex",
@@ -771,7 +863,7 @@ export default function App(): JSX.Element {
             }}>S</div>
             <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: "var(--text)" }}>slime</div>
             <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 14 }}>
-              {boot.message ?? "正在初始化…"}
+              {boot.phase === "ready" && !uiReady ? "正在加载工作区与会话…" : (boot.message ?? "正在初始化…")}
             </div>
             <div style={{
               width: 180, height: 5, borderRadius: 3, background: "var(--border)", margin: "0 auto",
@@ -859,8 +951,11 @@ export default function App(): JSX.Element {
       </header>
 
       <div className="body">
-        {/* 左侧导航侧栏 */}
-        <aside className={`sidebar${sidebarOpen ? "" : " collapsed"}`} style={{ width: sidebarWidth }}>
+        {/* 左侧导航侧栏 —— A-946：侧栏不参与整体挤压（flexShrink:0），展开态最小 140px，防止变窄时按钮/文本被吞 */}
+        <aside
+          className={`sidebar${sidebarOpen ? "" : " collapsed"}`}
+          style={{ width: sidebarWidth, flexShrink: 0, minWidth: sidebarOpen ? 280 : 0 }}
+        >
           {sidebarOpen && <div className="sidebar-resizer" onMouseDown={handleSidebarResize} />}
           <div className="brand">
             <div className="brand-icon">S</div>
@@ -941,17 +1036,31 @@ export default function App(): JSX.Element {
                           />
                         ) : (
                           <>
-                            {/* Agent 徽标（会话组长，可切换） */}
+                            {/* A-945：会话图标（用户选定）——群聊用团队图标、普通会话用当前会话图标 */}
+                        <img
+                          src={s.type === "brainstorm" ? teamSvg : currentSessionSvg}
+                          alt=""
+                          style={{
+                            width: 14, height: 14, flexShrink: 0, borderRadius: 3,
+                            opacity: active ? 1 : 0.72,
+                          }}
+                        />
+                        {/* Agent 徽标：群聊显示「群聊」（组长是用户，不展示单一 Agent 名）；普通显示会话归属 Agent */}
                             <span style={{
                               fontSize: 10, fontWeight: 700, flexShrink: 0,
                               padding: "1px 6px", borderRadius: 8,
-                              background: "var(--accent-soft)", color: "var(--accent-hover)",
+                              background: s.type === "brainstorm" ? "var(--bg-hover)" : "var(--accent-soft)",
+                              color: s.type === "brainstorm" ? "var(--text-secondary)" : "var(--accent-hover)",
                               maxWidth: 64, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                            }} title={s.agentName}>{s.agentName}</span>
-                            {/* 团队成员徽章（团队会话：一个会话 = 一个团队，成员各司其职） */}
-                            {Array.isArray(s.memberNames) && s.memberNames.length > 0 && (
+                            }} title={s.type === "brainstorm" ? "群聊（你收束讨论）" : s.agentName}>
+                              {s.type === "brainstorm" ? "群聊" : s.agentName}
+                            </span>
+                            {/* 团队成员徽章：群聊=含归属 Agent 在内的全部参与数；普通旧团队会话=既有成员数 */}
+                            {(s.type === "brainstorm" || (Array.isArray(s.memberNames) && s.memberNames.length > 0)) && (
                               <span
-                                title={`团队成员：${s.memberNames.join("、")}`}
+                                title={s.type === "brainstorm"
+                                  ? `群聊共 ${(s.memberNames?.length ?? 0) + 1} 人（会话归属 Agent 仅内部路由，无领导）`
+                                  : `团队成员：${s.memberNames!.join("、")}`}
                                 style={{
                                   display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0,
                                   fontSize: 9.5, color: "var(--text-muted)",
@@ -959,7 +1068,7 @@ export default function App(): JSX.Element {
                                   borderRadius: 8, padding: "1px 5px",
                                   maxWidth: 84, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                                 }}>
-                                成员 {s.memberNames.length}
+                                {s.type === "brainstorm" ? `成员 ${(s.memberNames?.length ?? 0) + 1}` : `成员 ${s.memberNames!.length}`}
                               </span>
                             )}
                             <span style={{
@@ -1032,6 +1141,9 @@ export default function App(): JSX.Element {
             <ChatPanel
               sessionId={selectedSession.sessionId}
               sessionTitle={selectedSession.title}
+              sessionType={selectedSession.type}
+              memberCount={selectedSession.type === "brainstorm" ? (selectedSession.memberIds?.length ?? 0) + 1 : 0}
+              memberNames={selectedSession.memberNames ?? []}
               agentId={selectedAgentId}
               agentName={selectedSession.agentName}
               workspace={selectedSession.workspace}
@@ -1044,9 +1156,6 @@ export default function App(): JSX.Element {
               localModels={localModels}
               agents={agents}
               onAgentSwitch={(agentId) => { void switchSessionAgent(agentId); }}
-              memberIds={selectedSession.memberIds ?? []}
-              memberNames={selectedSession.memberNames ?? []}
-              onMembersChanged={(ids) => { void updateSessionMembers(ids); }}
               onModelChange={(v) => updateAgentConfig({ model_choice: v })}
               onModeChange={(v) => updateAgentConfig({ mode: v })}
               onReasoningChange={(v) => updateAgentConfig({ reasoning_effort: v })}
@@ -1076,6 +1185,10 @@ export default function App(): JSX.Element {
           agentId={selectedAgentId}
           agentName={selectedSession?.agentName ?? ""}
           sessionId={selectedSession?.sessionId}
+          sessionType={selectedSession?.type}
+          memberIds={selectedSession?.memberIds ?? []}
+          memberModels={selectedSession?.memberModels ?? {}}
+          leaderModel={selectedSession?.leaderModel}
           workspace={sessionWorkspace}
           providerModels={providerModels}
           dl={dl}
@@ -1103,11 +1216,22 @@ export default function App(): JSX.Element {
       {/* ── 新建会话弹窗（以目标工作文件夹为主：先选文件夹 → 再选调用的 Agent） ── */}
       {newProjectOpen && (
         <div style={{
-          position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",
+          position: "fixed", inset: 0, zIndex: 100,
+          // A-955：弹窗遮罩磨砂化——半透明基础上加 backdrop blur，中和过透观感
+          background: "rgba(2, 6, 23, 0.74)",
+          backdropFilter: "blur(14px) saturate(1.2)",
+          WebkitBackdropFilter: "blur(14px) saturate(1.2)",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}
           onClick={(e) => { if (e.target === e.currentTarget) { setNewProjectOpen(false); } }}>
-          <div className="card" style={{ width: 480, maxWidth: "92vw", maxHeight: "76vh", display: "flex", flexDirection: "column" }}>
+          <div className="card" style={{
+            width: 480, maxWidth: "92vw", maxHeight: "76vh",
+            display: "flex", flexDirection: "column",
+            // 面板本体：更高不透明度 + 微 blur，磨砂面板观感
+            background: "var(--bg-card, rgba(22, 30, 56, 0.9))",
+            backdropFilter: "blur(18px) saturate(1.15)",
+            WebkitBackdropFilter: "blur(18px) saturate(1.15)",
+          }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
               <h3 style={{ margin: 0, flex: 1 }}>新建会话</h3>
               <button className="titlebar-btn" onClick={() => setNewProjectOpen(false)}></button>
@@ -1143,13 +1267,216 @@ export default function App(): JSX.Element {
                 </button>
               </div>
             )}
-            {/* 第二步：选择组长 Agent（单选，点击选中；组长统筹规划、拆解派单） */}
-            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700 }}>
-              ② 选择组长 Agent（统筹规划、拆解派单；会话内可随时切换）
+            {/* A-943：聊天形式选择（普通对话 ⇔ 群聊头脑风暴；群聊为独立聊天形式） */}
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700, marginTop: 10 }}>
+              聊天形式
             </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+              <button
+                onClick={() => setNewDraftType("normal")}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+                  padding: "9px 11px", borderRadius: 10, cursor: "pointer",
+                  border: newDraftType === "normal" ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                  background: newDraftType === "normal" ? "var(--accent-soft)" : "var(--bg-input)",
+                }}>
+                {/* A-945：普通对话卡片图标 = 用户选定的「当前会话」图标（无背景，纯图标） */}
+                <img src={currentSessionSvg} alt="普通对话" style={{
+                  width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                }} />
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: newDraftType === "normal" ? "var(--accent-hover)" : "var(--text)" }}>普通对话</span>
+                  <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>一对一；子任务自动委派子代理</span>
+                </span>
+              </button>
+              <button
+                onClick={() => setNewDraftType("brainstorm")}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+                  padding: "9px 11px", borderRadius: 10, cursor: "pointer",
+                  border: newDraftType === "brainstorm" ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                  background: newDraftType === "brainstorm" ? "var(--accent-soft)" : "var(--bg-input)",
+                }}>
+                <img src={teamSvg} alt="群聊" style={{
+                  width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                  background: newDraftType === "brainstorm" ? "var(--bg-hover)" : "transparent",
+                }} />
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: newDraftType === "brainstorm" ? "var(--accent-hover)" : "var(--text)" }}>群聊头脑风暴</span>
+                  <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>全员并行发言、互相纠错</span>
+                </span>
+              </button>
+            </div>
+            {/* 第二步：普通 = 选择对话 Agent（单聊，子代理自动委派）；群聊 = 成员三步入群（a 成员 → b 供应商 → c 模型，A-954） */}
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700 }}>
+              {newDraftType === "brainstorm"
+                ? "② 群成员三步入群（点成员 → 选供应商 → 选模型即入群，第一个入群者为组长；已入群 ≥2 可创建）"
+                : "② 选择对话的 Agent（单击选中；子任务会自动委派子代理）"}
+            </div>
+            {newDraftType === "brainstorm" ? (
+              <div style={{ display: "flex", gap: 10 }}>
+                {/* 左列：成员候选（点击展开右侧配置面板；已入群显示模型徽章） */}
+                <div style={{ flex: 1, minWidth: 0, maxHeight: 214, overflowY: "auto" }}>
+                  {agents.map((a) => {
+                    const joined = draftMembers.find((m) => m.id === a.id);
+                    const cfg = draftCfgAgent === a.id;
+                    return (
+                      <button key={a.id}
+                        onClick={() => {
+                          if (cfg) { setDraftCfgAgent(null); setDraftCfgProvider(null); return; }
+                          // A-968：该角色已保存过供应商/模型 → 直接沿用入群（无需重选）；无保存则保持手动两步
+                          const saved = resolveSavedModel(a.id);
+                          if (saved) {
+                            joinDraftMember(a, saved);
+                            const key = saved.startsWith("api:")
+                              ? saved.split(":")[1]
+                              : saved.startsWith("local:")
+                                ? "local"
+                                : saved === "silam"
+                                  ? "silam"
+                                  : undefined;
+                            if (key) { setDraftCfgProvider(key); }
+                          }
+                          setDraftCfgAgent(a.id);
+                          if (!saved) { setDraftCfgProvider(null); }
+                        }}
+                        style={{
+                          display: "block", width: "100%", textAlign: "left",
+                          padding: "6px 10px", marginBottom: 4, borderRadius: 8, cursor: "pointer",
+                          border: joined || cfg ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                          background: cfg ? "var(--bg-hover)" : joined ? "var(--accent-soft)" : "var(--bg-input)",
+                        }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: joined || cfg ? "var(--accent-hover)" : "var(--text)", whiteSpace: "nowrap" }}>{a.name}</span>
+                          {joined ? (
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, color: "var(--success)",
+                              background: "var(--success-soft)", borderRadius: 8, padding: "0 6px",
+                              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 120,
+                              flexShrink: 1,
+                            }}>
+                              已入群 · {joined.model}
+                            </span>
+                          ) : cfg ? (
+                            <span style={{ fontSize: 10, color: "var(--warning)", whiteSpace: "nowrap" }}>待选模型</span>
+                          ) : null}
+                        </div>
+                        {a.role && (
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {a.role}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {agents.length === 0 && (
+                    <div style={{ fontSize: 12, color: "var(--text-dim)", textAlign: "center", padding: "20px 14px" }}>
+                      暂无可调用的 Agent，请先创建
+                    </div>
+                  )}
+                </div>
+                {/* 右列：供应商 → 模型 两步配置面板 */}
+                <div style={{
+                  flex: 1, minWidth: 0, maxHeight: 214, overflowY: "auto",
+                  border: "1px solid var(--border)", borderRadius: 8, padding: 8, background: "var(--bg-input)",
+                }}>
+                  {!draftCfgAgent ? (
+                    <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.7 }}>
+                      点击左侧成员，为其选择入群模型：<br />① 供应商 → ② 模型（选定即入群）。<br />
+                      <span style={{ color: "var(--accent-hover)" }}>已配置过供应商/模型的角色会直接沿用自动入群</span>。
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>
+                        配置「{agents.find((a) => a.id === draftCfgAgent)?.name ?? ""}」· 供应商
+                      </div>
+                      {draftProviders.length === 0 ? (
+                        <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.7 }}>
+                          暂无可用供应商/模型。<br />请到「管理 Agent →」的供应商设置中添加并启用模型。
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+                            {draftProviders.map((p) => {
+                              const sel = draftCfgProvider === p.key;
+                              const kindStyle = p.kind === "silam" ? { color: "var(--success)", background: "var(--success-soft)" } : p.kind === "local" ? { color: "var(--warning)", background: "var(--bg-hover)" } : { color: "var(--accent-hover)", background: "var(--accent-soft)" };
+                              return (
+                                <button key={p.key}
+                                  onClick={() => setDraftCfgProvider(p.key)}
+                                  style={{
+                                    fontSize: 11, padding: "3px 9px", borderRadius: 8, cursor: "pointer",
+                                    border: sel ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                                    ...(sel ? { color: "var(--accent-hover)", background: "var(--accent-soft)" } : kindStyle),
+                                  }}>
+                                  {p.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {(() => {
+                            const prov = draftCfgProvider ? draftProviders.find((p) => p.key === draftCfgProvider) : null;
+                            if (!prov) {
+                              return <div style={{ fontSize: 11, color: "var(--text-dim)" }}>选择供应商后展示其可选模型</div>;
+                            }
+                            return (
+                              <>
+                                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>
+                                  模型（点击即入群）
+                                </div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                                  {prov.models.map((m) => {
+                                    const modelVal = prov.kind === "api" ? `api:${prov.key}:${m.id}` : m.id;
+                                    const joined = draftMembers.find((x) => x.id === draftCfgAgent);
+                                    const active = joined?.model === modelVal;
+                                    const target = agents.find((a) => a.id === draftCfgAgent);
+                                    return (
+                                      <button key={m.id}
+                                        onClick={() => target && joinDraftMember(target, modelVal)}
+                                        style={{
+                                          display: "flex", alignItems: "center", gap: 6, textAlign: "left",
+                                          fontSize: 11.5, padding: "5px 9px", borderRadius: 7, cursor: "pointer",
+                                          border: active ? "1.5px solid var(--success)" : "1px solid var(--border)",
+                                          background: active ? "var(--success-soft)" : "transparent",
+                                          color: "var(--text)",
+                                        }}>
+                                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.label}</span>
+                                        {typeof m.ctx === "number" && m.ctx > 0 && (
+                                          <span style={{ fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{m.ctx} ctx</span>
+                                        )}
+                                        {active && <span style={{ fontSize: 10.5, color: "var(--success)", marginLeft: "auto" }}>✓ 已选</span>}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </>
+                            );
+                          })()}
+                        </>
+                      )}
+                      {(() => {
+                        const joined = draftMembers.find((x) => x.id === draftCfgAgent);
+                        if (!joined) { return null; }
+                        return (
+                          <div style={{ marginTop: 8, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                            <span style={{ fontSize: 11, color: "var(--success)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              已入群：{joined.model}
+                            </span>
+                            <button className="btn" style={{ fontSize: 11, padding: "2px 10px", whiteSpace: "nowrap", flexShrink: 0 }}
+                              onClick={() => leaveDraftMember(joined.id)}>
+                              退出群聊
+                            </button>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : (
             <div style={{ maxHeight: 168, overflowY: "auto" }}>
               {agents.map((a) => {
                 const isLeader = newDraftLeader === a.id;
+                const selected = isLeader;
                 return (
                   <button key={a.id}
                     onClick={() => {
@@ -1161,13 +1488,21 @@ export default function App(): JSX.Element {
                       display: "block", width: "100%", textAlign: "left",
                       padding: "7px 12px", marginBottom: 4,
                       borderRadius: 8, cursor: "pointer",
-                      border: isLeader ? "1.5px solid var(--accent)" : "1px solid var(--border)",
-                      background: isLeader ? "var(--accent-soft)" : "var(--bg-input)",
-                      boxShadow: isLeader ? "0 0 0 1px var(--accent-soft)" : "none",
+                      border: selected ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                      background: selected ? "var(--accent-soft)" : "var(--bg-input)",
+                      boxShadow: selected ? "0 0 0 1px var(--accent-soft)" : "none",
                     }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, color: isLeader ? "var(--accent-hover)" : "var(--text)" }}>{a.name}</span>
-                      {isLeader && <span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--accent-hover)", background: "var(--bg-input)", borderRadius: 8, padding: "0 6px" }}>组长</span>}
+                      <span style={{ fontSize: 13, fontWeight: 700, color: selected ? "var(--accent-hover)" : "var(--text)" }}>{a.name}</span>
+                      {selected && (
+                        <span style={{
+                          fontSize: 10.5, fontWeight: 700,
+                          color: "var(--accent-hover)",
+                          background: "var(--bg-input)", borderRadius: 8, padding: "0 6px",
+                        }}>
+                          已选
+                        </span>
+                      )}
                     </div>
                     {a.role && (
                       <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -1183,44 +1518,6 @@ export default function App(): JSX.Element {
                 </div>
               )}
             </div>
-            {/* 第三步：选择团队成员（多选，可选；成员各司其职，由组长派单指挥 — 一个会话 = 一个团队） */}
-            {newDraftLeader && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700 }}>
-                  ③ 选择团队成员（可多选，可选 — 成员各司其职，由组长派单指挥）
-                </div>
-                <div style={{ maxHeight: 128, overflowY: "auto", display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {agents.filter((a) => a.id !== newDraftLeader).map((a) => {
-                    const sel = newDraftMemberIds.includes(a.id);
-                    return (
-                      <button key={a.id}
-                        onClick={() => setNewDraftMemberIds((prev) =>
-                          sel ? prev.filter((id) => id !== a.id) : [...prev, a.id])}
-                        title={a.role || "无角色"}
-                        style={{
-                          display: "inline-flex", alignItems: "center", gap: 5,
-                          padding: "4px 10px", borderRadius: 12, cursor: "pointer",
-                          border: sel ? "1px solid var(--accent)" : "1px solid var(--border)",
-                          background: sel ? "var(--accent-soft)" : "var(--bg-input)",
-                          color: sel ? "var(--accent-hover)" : "var(--text-muted)",
-                          fontSize: 12, fontWeight: sel ? 700 : 600, whiteSpace: "nowrap",
-                        }}>
-                        <span style={{
-                          width: 10, height: 10, borderRadius: 3, flexShrink: 0,
-                          background: sel ? "var(--accent)" : "transparent",
-                          border: sel ? "none" : "1px solid var(--border)",
-                        }} />
-                        {a.name}
-                      </button>
-                    );
-                  })}
-                </div>
-                {newDraftMemberIds.length > 0 && (
-                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                    已选 {newDraftMemberIds.length} 名成员 — 组长会将任务拆解后派单给对应成员，成员答复在本会话内群聊展示
-                  </div>
-                )}
-              </div>
             )}
             {/* 创建按钮 */}
             <div style={{ marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -1228,24 +1525,35 @@ export default function App(): JSX.Element {
                 onClick={() => { setNewProjectOpen(false); setSettingsTab("agents"); setSettingsOpen(true); }}>
                 管理 Agent →
               </button>
-              {newDraftLeader && (
+              {(newDraftType === "brainstorm" ? draftMembers.length >= 2 : Boolean(newDraftLeader)) && (
                 <button
                   className="btn primary"
-                  disabled={agents.length === 0}
+                  disabled={agents.length === 0 || (newDraftType === "brainstorm" && draftMembers.length < 2)}
                   style={{ fontSize: 13, padding: "6px 20px", whiteSpace: "nowrap" }}
-                  onClick={() => void startNewProject(newDraftLeader, newDraftMemberIds)}
-                  title={newDraftMemberIds.length > 0
-                    ? `创建团队会话：组长 ${agents.find((a) => a.id === newDraftLeader)?.name} + ${newDraftMemberIds.length} 名成员`
-                    : "创建单人会话"}
+                  onClick={() => void (newDraftType === "brainstorm"
+                    ? startNewProject(draftMembers[0].id, draftMembers.slice(1).map((m) => ({ id: m.id, model: m.model })), "brainstorm", draftMembers[0].model)
+                    : startNewProject(newDraftLeader!, [], "normal"))}
+                  title={newDraftType === "brainstorm"
+                    ? `创建群聊（${draftMembers.length} 人已选模型入群，第一位为组长）`
+                    : (newDraftMemberIds.length > 0
+                      ? `创建团队会话：组长 ${agents.find((a) => a.id === newDraftLeader)?.name} + ${newDraftMemberIds.length} 名成员`
+                      : "创建单人会话")}
                 >
-                  {newDraftMemberIds.length > 0
-                    ? `创建团队（组长 1 · 成员 ${newDraftMemberIds.length}）`
-                    : "创建会话"}
+                  {newDraftType === "brainstorm"
+                    ? `创建群聊（${draftMembers.length} 人 · 已选模型）`
+                    : (newDraftMemberIds.length > 0
+                      ? `创建团队（组长 1 · 成员 ${newDraftMemberIds.length}）`
+                      : "创建会话")}
                 </button>
               )}
-              {!newDraftLeader && (
+              {newDraftType === "normal" && !newDraftLeader && (
                 <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                  选择组长后创建（同一文件夹可建多个团队/会话）
+                  选择组长后创建（同一文件夹可建多个团队/群聊/会话）
+                </span>
+              )}
+              {newDraftType === "brainstorm" && draftMembers.length < 2 && (
+                <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+                  {draftMembers.length === 0 ? "请先为至少 2 名成员选好模型入群" : "再入群 1 名成员即满 2 人，可创建"}
                 </span>
               )}
             </div>
@@ -1272,7 +1580,7 @@ export default function App(): JSX.Element {
     let lastW = startWidth;
     const onMove = (ev: MouseEvent): void => {
       // 左栏：鼠标向右 → 变宽
-      lastW = Math.max(140, Math.min(500, ev.clientX - startX + startWidth));
+      lastW = Math.max(280, Math.min(520, ev.clientX - startX + startWidth));
       setSidebarWidth(lastW);
     };
     const onUp = (): void => {
@@ -1295,8 +1603,8 @@ export default function App(): JSX.Element {
     const startWidth = rightWidthRef.current;
     let lastW = startWidth;
     const onMove = (ev: MouseEvent): void => {
-      // 右栏：鼠标向左 → 变宽（范围 260–600 与 CSS/项目规格一致）
-      lastW = Math.max(260, Math.min(600, startX - ev.clientX + startWidth));
+      // 右栏：鼠标向左 → 变宽（范围 260–900；A-968 放宽上限以支撑 diff/图片/长文件完整观察）
+      lastW = Math.max(260, Math.min(900, startX - ev.clientX + startWidth));
       setRightWidth(lastW);
     };
     const onUp = (): void => {

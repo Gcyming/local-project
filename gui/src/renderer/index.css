@@ -139,6 +139,8 @@ code,
   flex-direction: column;
   height: 100vh;
   background: var(--bg);
+  min-width: 1100px; /* A-948：固定基准最小宽度——能完整容纳侧栏+主区+右栏的全部按钮/文本；窗口更小时内容不压缩，整体横向滚动 */
+  overflow-x: auto;
 }
 
 /* ── 标题栏（frameless + titleBarOverlay） ── */
@@ -192,8 +194,9 @@ code,
 .body {
   display: flex;
   flex: 1;
-  min-width: 0;
+  min-width: 640px; /* A-947：固定最窄宽度（侧栏可收起）；窗口更窄时整体出现横向滚动，内容不被截断 */
   min-height: 0;
+  overflow-x: auto;
 }
 
 /* ── 侧栏 ── */
@@ -201,8 +204,8 @@ code,
   display: flex;
   flex-direction: column;
   width: var(--sidebar-w);
-  min-width: 140px;
-  max-width: 500px;
+  min-width: 280px; /* A-949：侧栏最小宽度扩大一倍（原 140）——保证会话项/按钮完整可读 */
+  max-width: 520px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   transition: width 0.18s ease;
@@ -559,13 +562,19 @@ code,
 /* 活动状态脉冲点 */
 @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
 
+/* A-969：上下文压缩过渡动画——整理/摘要阶段的进度条 + 浮层淡入 */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes compressBar { 0% { width: 6%; opacity: 0.6; } 40% { width: 55%; } 70% { width: 72%; opacity: 1; } 100% { width: 92%; opacity: 0.75; } }
+.compress-bar { animation: compressBar 2.2s ease-in-out infinite; }
+
 /* ── 右侧栏（工作树 / 任务 / 终端 / 浏览器 / Git） ── */
 .right-sidebar {
   display: flex;
   flex-direction: column;
   width: var(--right-sidebar-w, 320px);
   min-width: 260px;
-  max-width: 600px;
+  /* A-968：放宽硬上限（600px 在高分屏/Git diff、图片预览场景偏窄），上限对齐拖拽实现与 localStorage */
+  max-width: 900px;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   transition: width 0.18s ease;
