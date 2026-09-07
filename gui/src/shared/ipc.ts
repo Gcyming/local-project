@@ -111,6 +111,50 @@ export interface StreamChunk {
   };
 }
 
+// ── D：全链路可观测（trace/span，LangSmith/LangGraph 语义） ────────────────
+export type TraceEventKind =
+  | "route_select" | "memory_retrieve" | "tool_call" | "tool_result"
+  | "reasoning_chunk" | "reply_chunk" | "done" | "eval";
+
+export interface TraceSpan {
+  id: string;
+  name: string;
+  kind: TraceEventKind;
+  parentId?: string;
+  startedAt: number;
+  endedAt?: number;
+  data?: Record<string, unknown>;
+}
+
+export interface TraceSnapshot {
+  id: string;
+  sessionId?: string;
+  spans: TraceSpan[];
+  startedAt: number;
+  endedAt?: number;
+}
+
+// ── E：Plan 一等对象（plan_create/plan_update/todo_write → 会话级 Plan） ─────
+export type PlanStageStatus = "pending" | "in_progress" | "done" | "failed" | "skipped";
+export type PlanStatus = "planning" | "active" | "done" | "failed";
+
+export interface PlanStage {
+  id: string;
+  label: string;
+  detail?: string;
+  status: PlanStageStatus;
+}
+
+export interface PlanInfo {
+  id: string;
+  sessionId?: string;
+  description: string;
+  stages: PlanStage[];
+  createdAt: number;
+  updatedAt: number;
+  status: PlanStatus;
+}
+
 export interface ChatInput {
   agentId: string;
   message: string;
@@ -156,6 +200,8 @@ export interface SessionItem {
   memberIds?: string[];
   /** 团队会话成员 Agent 名称（与 memberIds 同序，渲染徽章用） */
   memberNames?: string[];
+  /** A-943 会话模式：brainstorm = 群聊头脑风暴（左侧特殊渲染）；缺省 normal */
+  type?: "normal" | "brainstorm";
 }
 
 /** 会话消息（历史加载） */
@@ -167,6 +213,8 @@ export interface ConversationMessage {
   reasoning?: string;
   /** 该条回复的耗时（毫秒，assistant；旧记录无此字段） */
   elapsedMs?: number;
+  /** A-966：交错思考时间线（思考/工具调用顺序；随历史落库，重启恢复时间线展示） */
+  timeline?: Array<{ kind: string; text?: string; name?: string; label?: string; detail?: string; result?: string }>;
   /** 发言人 Agent 名称（团队会话成员发言；缺省 = 会话组长/当前 Agent） */
   agentName?: string;
   /** 发言人 Agent ID（团队会话成员发言） */
@@ -609,6 +657,58 @@ export interface GitCloneResult {
   error?: string;
 }
 
+/* ── Git 变更 diff（红绿标注渲染，A-968） ── */
+
+/** diff 单行（add=新增绿 / del=删除红 / ctx=上下文） */
+export interface GitDiffLine {
+  type: "add" | "del" | "ctx";
+  text: string;
+}
+
+/** diff 块（@@ 头 + 行序列） */
+export interface GitDiffHunk {
+  header: string;
+  lines: GitDiffLine[];
+}
+
+/** 单文件变更 diff */
+export interface GitDiffFile {
+  /** 相对仓库根的文件路径 */
+  file: string;
+  /** modified=已跟踪文件修改 / untracked=未跟踪（整体视为新增）/ deleted=已删除 */
+  status: "modified" | "untracked" | "deleted";
+  additions: number;
+  deletions: number;
+  hunks: GitDiffHunk[];
+}
+
+/** git diff 读取结果（file 参数传单个文件；留空 = 全工作区） */
+export interface GitDiffResult {
+  ok: boolean;
+  files?: GitDiffFile[];
+  error?: string;
+}
+
+/* ── 上下文自动压缩（A-969） ── */
+
+/** 上下文自动压缩结果（GUI 发送前调用；动画展示后继续原消息发送） */
+export interface CompressResult {
+  ok: boolean;
+  /** skipped：未达触发阈值 / 历史过短，未执行压缩 */
+  skipped?: boolean;
+  /** truncated：摘要轮失败 / 无模型可用，降级硬裁剪（保留最近 K 轮） */
+  truncated?: boolean;
+  /** 模型生成的摘要文本（truncated/skipped 时无） */
+  summary?: string;
+  /** 本次压缩剔除的历史轮次数 */
+  dropped?: number;
+  /** 压缩前输入侧估算 tokens */
+  used?: number;
+  /** 当前窗口上限 tokens */
+  cap?: number;
+  error?: string;
+}
+
 /** 后台常驻：定时任务视图（ResidentPanel 消费，A-910） */
 export interface ResidentJobView {
   id: string;
@@ -638,4 +738,18 @@ export interface SubAgentRunView {
 export interface ResidentState {
   scheduler: ResidentJobView[];
   subagents: SubAgentRunView[];
+  /** A-942：全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
+  defaultModel?: string;
+}
+
+/** A-939 上下文分桶（引擎 done 事件携带，随 slime:chat:done 透传渲染层） */
+export interface CtxBuckets {
+  system: number;
+  rules: number;
+  memory: number;
+  workspace: number;
+  planning: number;
+  tools: number;
+  history: number;
+  message: number;
 }

@@ -14,9 +14,11 @@ import type {
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
-  GitDetect, GitInfo, GitAction, GitCloneResult, WorkspaceReadFileResult,
+  GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, WorkspaceReadFileResult,
   ContextMenuItem, WorkspaceContextMenuParams, WorkspaceCreateResult,
   ResidentState, SubAgentRunView,
+  CtxBuckets,
+  TraceSnapshot, PlanInfo, CompressResult,
 } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
@@ -29,6 +31,9 @@ function onMessage<T>(channel: string, cb: (payload: T) => void) {
 contextBridge.exposeInMainWorld("slimeAPI", {
   chat: {
     stream: (input: ChatInput) => ipcRenderer.invoke("slime:chat:stream", input),
+    /** A-966：done 后把该条回复的交错思考时间线回填 history.jsonl（重启保持时间线展示） */
+    attachTimeline: (agentId: string, sessionId: string | undefined, timeline: unknown[]) =>
+      ipcRenderer.invoke("slime:chat:attachTimeline", { agentId, sessionId, timeline }) as Promise<{ ok: boolean }>,
     /** A-161: 回滚持久化 —— 截断该会话历史到目标用户消息之前（回滚后重启不再复现旧消息） */
     truncateFrom: (agentId: string, sessionId: string | undefined, userMsg: string) =>
       ipcRenderer.invoke("slime:history:truncateFrom", { agentId, sessionId, userMsg }) as Promise<{ ok: boolean; removed?: number; error?: string }>,
@@ -41,9 +46,12 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 主动中断当前 Agent 输出（key=sessionId ?? agentId） */
     cancel: (key: string) =>
       ipcRenderer.invoke("slime:chat:cancel", { key }) as Promise<{ ok: boolean; error?: string; active?: number }>,
+    /** A-969：上下文自动压缩（GUI 发送前触发；摘要写回会话 meta，后续发送自动用摘要头+最近 N 轮） */
+    compress: (sessionId: string, ratio: number) =>
+      ipcRenderer.invoke("slime:chat:compress", { sessionId, ratio }) as Promise<CompressResult>,
     onChunk: (cb: (chunk: StreamChunk) => void) => onMessage<StreamChunk>("slime:chat:chunk", cb),
-    onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => void) =>
-      onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }>(
+    onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => void) =>
+      onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }>(
         "slime:chat:done", cb,
       ),
     onError: (cb: (err: { message: string; sessionId?: string }) => void) => onMessage<{ message: string; sessionId?: string }>("slime:chat:error", cb),
@@ -61,12 +69,15 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     list: () => ipcRenderer.invoke("slime:sessions:list") as Promise<SessionItem[]>,
     load: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:load", { sessionId }) as Promise<ConversationMessage[]>,
-    /** 新建会话：以目标工作文件夹为主（workspace），会话内指定调用 Agent（agentId）；memberIds=可选团队成员 */
-    create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: string[] }) =>
+    /** 新建会话：以目标工作文件夹为主（workspace），会话内指定调用 Agent（agentId）；memberIds=可选团队成员；type=brainstorm 群聊头脑风暴 */
+    create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: string[]; type?: "normal" | "brainstorm" }) =>
       ipcRenderer.invoke("slime:sessions:create", opts) as Promise<{ ok: boolean; session?: SessionItem }>,
     /** 会话内切换调用的 Agent（保留工作文件夹/标题/历史） */
     setAgent: (sessionId: string, agentId: string) =>
       ipcRenderer.invoke("slime:sessions:setAgent", { sessionId, agentId }) as Promise<{ ok: boolean }>,
+    /** A-943：切换会话模式（normal 普通 / brainstorm 群聊头脑风暴） */
+    setType: (sessionId: string, type: "normal" | "brainstorm") =>
+      ipcRenderer.invoke("slime:sessions:setType", { sessionId, type }) as Promise<{ ok: boolean; type?: string }>,
     /** 团队会话成员更新（组长=会话当前 agentId；空数组=退回单人会话） */
     setMembers: (sessionId: string, memberIds: string[]) =>
       ipcRenderer.invoke("slime:sessions:setMembers", { sessionId, memberIds }) as Promise<{ ok: boolean; session?: SessionItem }>,
@@ -172,6 +183,20 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     poll: (start: boolean) => ipcRenderer.invoke("slime:stats:poll", start),
     onPoll: (cb: (snapshot: StatsSnapshot) => void) => onMessage<StatsSnapshot>("slime:stats:update", cb),
   },
+  /** D：全链路可观测（引擎事件轨迹，TraceViewer 用） */
+  trace: {
+    get: (sessionId: string) =>
+      ipcRenderer.invoke("slime:trace:get", sessionId) as Promise<TraceSnapshot | null>,
+    onUpdate: (cb: (payload: { sessionId: string; trace: TraceSnapshot }) => void) =>
+      onMessage<{ sessionId: string; trace: TraceSnapshot }>("slime:trace:update", cb),
+  },
+  /** E：Plan 一等对象（任务进度卡片 / PlanPanel 用） */
+  plan: {
+    get: (sessionId: string) =>
+      ipcRenderer.invoke("slime:plan:get", sessionId) as Promise<PlanInfo | null>,
+    onUpdate: (cb: (payload: { sessionId: string; plan: PlanInfo }) => void) =>
+      onMessage<{ sessionId: string; plan: PlanInfo }>("slime:plan:update", cb),
+  },
   agents: {
     list: () => ipcRenderer.invoke("slime:agents:list") as Promise<AgentInfo[]>,
     create: (name: string, role: string) =>
@@ -208,6 +233,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     minimize: () => ipcRenderer.invoke("slime:window:minimize"),
     maximize: () => ipcRenderer.invoke("slime:window:maximize"),
     quit: () => ipcRenderer.invoke("slime:window:quit"),
+    /** A-967：退出模式——直接退出 / 最小化到后台托盘常驻 */
+    setExitMode: (mode: "quit" | "background") =>
+      ipcRenderer.invoke("slime:window:setExitMode", mode) as Promise<{ ok: boolean; mode: "quit" | "background" }>,
+    getExitMode: () =>
+      ipcRenderer.invoke("slime:window:getExitMode") as Promise<{ mode: "quit" | "background" }>,
   },
   theme: {
     /** 主题切换：同步标题栏系统按钮 overlay 配色 */
@@ -233,6 +263,15 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:providers:localScan", { dir }) as Promise<{ ok: boolean; models?: Array<{ path: string; label: string }>; error?: string }>,
     localPick: () =>
       ipcRenderer.invoke("slime:providers:localPick") as Promise<{ ok: boolean; path?: string; error?: string }>,
+  },
+  silam: {
+    /** A-954：自研 SILAM 脑可用性（供应商选择面板用它决定是否展示 silam） */
+    status: () => ipcRenderer.invoke("slime:silam:status") as Promise<{ enabled: boolean }>,
+    /** A-963：读取某 Agent 的 SILAM 情感/成长态（fear/desire/树节点/step） */
+    getState: (agentId: string) =>
+      ipcRenderer.invoke("slime:silam:state", { agentId }) as Promise<{
+        fear?: number; desire?: number; n_nodes?: number; step?: number; langLoaded?: boolean;
+      } | null>,
   },
   config: {
     overview: () => ipcRenderer.invoke("slime:config:overview") as Promise<ConfigOverview>,
@@ -338,6 +377,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 克隆远程仓库 */
     clone: (url: string) =>
       ipcRenderer.invoke("slime:git:clone", { url }) as Promise<GitCloneResult>,
+    /** A-968：读取指定文件的变更 diff（红绿标注渲染用） */
+    diff: (path: string, file: string) =>
+      ipcRenderer.invoke("slime:git:diff", { path, file }) as Promise<GitDiffResult>,
   },
   data: {
     /** 重置本地数据（清空 Provider / Agent / 会话与历史；记忆文件保留） */
@@ -358,6 +400,20 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 派发后台子代理（fire-and-forget；结果落盘 subagent-*.md） */
     subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) =>
       ipcRenderer.invoke("slime:resident:subagent:spawn", p) as Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>,
+    /** 取消后台子代理（运行中 → Abort 中断；排队中 → 直接标记 cancelled） */
+    subagentCancel: (id: string) =>
+      ipcRenderer.invoke("slime:resident:subagent:cancel", { id }) as Promise<{ ok: boolean }>,
+    /** 按 description 自动委派子代理（命中 代码审查/调研/数据分析 专家，后台并行执行） */
+    subagentDelegate: (p: { task: string; agentId?: string }) =>
+      ipcRenderer.invoke("slime:resident:subagent:delegate", p) as Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>,
+    /** A-942：设置全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
+    subagentSetDefaultModel: (model: string) =>
+      ipcRenderer.invoke("slime:resident:subagent:setDefaultModel", { model }) as Promise<{ ok: boolean; defaultModel?: string; error?: string }>,
+  },
+  /** A-950：群聊状态事件（成员 thinking/speaking/done + 思考增量）——群聊专属右侧栏用 */
+  brainstorm: {
+    onEvent: (cb: (payload: { sessionId: string; memberId: string; name: string; state?: string; chunk?: string; content?: string }) => void) =>
+      onMessage<{ sessionId: string; memberId: string; name: string; state?: string; chunk?: string; content?: string }>("slime:brainstorm:event", cb),
   },
   requests: {
     /** 读请求频率配置（并发上限 / 断流重连基间隔，A-916） */
@@ -375,6 +431,8 @@ declare global {
         truncateFrom: (agentId: string, sessionId: string | undefined, userMsg: string) => Promise<{ ok: boolean; removed?: number; error?: string }>;
         newConversation: (agentId: string) => Promise<{ ok: boolean }>;
         retryLast: (agentId: string, sessionId?: string) => Promise<{ ok: boolean; error?: string }>;
+        cancel: (key: string) => Promise<{ ok: boolean; error?: string; active?: number }>;
+        compress: (sessionId: string, ratio: number) => Promise<CompressResult>;
         onChunk: (cb: (chunk: StreamChunk) => void) => () => void;
         onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => void) => () => void;
         onError: (cb: (err: { message: string; sessionId?: string }) => void) => () => void;
@@ -387,7 +445,7 @@ declare global {
       conversations: {
         list: () => Promise<SessionItem[]>;
         load: (sessionId: string) => Promise<ConversationMessage[]>;
-        create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: string[] }) => Promise<{ ok: boolean; session?: SessionItem }>;
+        create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: Array<string | { id: string; model?: string }>; leaderModel?: string; type?: "normal" | "brainstorm" }) => Promise<{ ok: boolean; session?: SessionItem }>;
         setAgent: (sessionId: string, agentId: string) => Promise<{ ok: boolean }>;
         setMembers: (sessionId: string, memberIds: string[]) => Promise<{ ok: boolean; session?: SessionItem }>;
         setWorkspace: (sessionId: string, workspace: string | null) => Promise<{ ok: boolean; workspace?: string }>;
@@ -525,6 +583,7 @@ declare global {
         pull: (path: string) => Promise<GitAction>;
         checkout: (path: string, branch: string) => Promise<GitAction>;
         clone: (url: string) => Promise<GitCloneResult>;
+        diff: (path: string, file: string) => Promise<GitDiffResult>;
       };
       data: {
         reset: () => Promise<{ ok: boolean; error?: string }>;
@@ -541,6 +600,8 @@ declare global {
         schedulerResume: (id: string) => Promise<{ ok: boolean }>;
         schedulerTrigger: (id: string) => Promise<{ ok: boolean }>;
         subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
+        subagentCancel: (id: string) => Promise<{ ok: boolean }>;
+        subagentDelegate: (p: { task: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
       };
       requests: {
         get: () => Promise<{ concurrency: number; reconnectBaseMs: number }>;
