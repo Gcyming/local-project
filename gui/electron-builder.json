@@ -34,19 +34,24 @@
       "from": "../slime_cli.py",
       "to": "slime_cli.py"
     },
-    {
-      "from": "template/slime.toml",
-      "to": "slime.toml"
-    },
+    { "from": "template/slime.toml", "to": "slime.toml" },
     { "from": "build/icon.png", "to": "build/icon.png" },
     { "from": "../core", "to": "core", "filter": ["**/*"] },
     { "from": "../tools", "to": "tools", "filter": ["**/*"] },
-    { "from": "../social", "to": "social", "filter": ["**/*"] }
+    { "from": "../social", "to": "social", "filter": ["**/*"] },
+    { "from": "../sidecar", "to": "sidecar", "filter": ["**/*", "!__pycache__/**"] },
+    { "from": "../models/情感脑-silam-sigma-80m/backbone_80m.npz", "to": "models/情感脑-silam-sigma-80m/backbone_80m.npz" },
+    { "from": "../models/对话脑-v3.1L-6921词表/lang_core_d16.npz", "to": "models/对话脑-v3.1L-6921词表/lang_core_d16.npz" },
+    { "from": "../configs/vocab.v3.1-6921.json", "to": "configs/vocab.v3.1-6921.json" },
+    { "from": "../_model_stage/silam_core", "to": "_model_stage/silam_core", "filter": ["**/*"] },
+    { "from": "../_model_stage/tools/lang_core.py", "to": "_model_stage/tools/lang_core.py" }
   ],
   "asar": true,
   "asarUnpack": [
     "out/main/chunks/*.node",
-    "../core-ts/src/**/*"
+    "../core-ts/src/**/*",
+    "node_modules/@lancedb/lancedb-win32-x64-msvc/**/*",
+    "node_modules/@lancedb/lancedb/node_modules/**/*"
   ],
   "compression": "maximum",
   "win": {
