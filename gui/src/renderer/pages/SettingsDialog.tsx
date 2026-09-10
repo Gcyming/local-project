@@ -12,14 +12,16 @@ import McpPanel from "./McpPanel.js";
 import PermissionsPanel from "./PermissionsPanel.js";
 import GeneralPanel from "./GeneralPanel.js";
 import ResidentPanel from "./ResidentPanel.js";
+import RuntimePanel from "./RuntimePanel.js";
 import type { DownloadProgressInfo } from "../../shared/ipc.js";
 import { SearchIcon, SettingsIcon, CloseIcon } from "../components/Icon.js";
 import type { ThemeName } from "../theme.js";
 
-export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "permissions" | "general" | "resident";
+export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "permissions" | "general" | "resident" | "runtime";
 
 const SECTIONS: Array<{ id: SettingsTab; label: string; keywords: string[] }> = [
   { id: "general", label: "通用", keywords: ["自启", "开机", "卸载", "启动", "general", "uninstall"] },
+  { id: "runtime", label: "运行环境", keywords: ["node", "python", "git", "运行时", "附件", "配套", "runtime", "venv", "环境"] },
   { id: "mind", label: "心智中枢", keywords: ["记忆", "学习", "进化", "情绪", "向量", "embedding", "bge", "mind"] },
   { id: "agents", label: "Agent 管理", keywords: ["代理", "分裂", "身份", "agents", "agent"] },
   { id: "resident", label: "后台任务", keywords: ["定时", "cron", "子代理", "subagent", "后台", "resident", "常驻", "schedule"] },
@@ -43,7 +45,7 @@ interface Props {
   onThemeChange?: (t: ThemeName) => void;
 }
 
-export default function SettingsDialog(props: Props): JSX.Element {
+const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Element {
   const [tab, setTab] = React.useState<SettingsTab>(props.initialTab);
   const [query, setQuery] = React.useState("");
 
@@ -61,20 +63,19 @@ export default function SettingsDialog(props: Props): JSX.Element {
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 90,
-      // A-955：遮罩磨砂化（与新建会话弹窗一致），中和高透明观感
-      background: "rgba(2, 6, 23, 0.74)",
-      backdropFilter: "blur(14px) saturate(1.2)",
-      WebkitBackdropFilter: "blur(14px) saturate(1.2)",
+      // A-918+ 性能修复：遮罩去 backdrop-filter（滚动面板时遮罩重新采样，叠加面板模糊双倍开销）；
+      // 改为纯色遮罩 rgba(2,6,23,0.78)，视觉无损失，滚动流畅。
+      background: "rgba(2, 6, 23, 0.78)",
       display: "flex", alignItems: "center", justifyContent: "center",
     }}
       onClick={(e) => { if (e.target === e.currentTarget) { props.onClose(); } }}>
       <div style={{
         width: 980, maxWidth: "94vw", height: "78vh", maxHeight: "86vh",
         display: "flex", flexDirection: "column", overflow: "hidden",
-        // A-911：设置弹窗可读性修复——磨砂玻璃（近实色底 + 背景模糊），避免半透明内容透出看不清
-        background: "rgba(10, 16, 32, 0.9)",
-        backdropFilter: "blur(20px) saturate(160%)",
-        WebkitBackdropFilter: "blur(20px) saturate(160%)",
+        // A-918+ 性能修复：面板本体去掉 backdropFilter blur——面板已是 rgba(10,16,32,0.9) 高不透明度，
+        // backdrop-filter 每帧对面板区域模糊采样，滚动/切换 tab 时 GPU 持续重绘 → 设置面板卡成 PPT 的根因。
+        // 改用纯实色底，视觉无损失（背景已几乎不透明），性能大幅提升。
+        background: "rgba(10, 16, 32, 0.96)",
       }} className="card">
         <div style={{ display: "flex", alignItems: "center", padding: "4px 16px", borderBottom: "1px solid var(--border)", minHeight: 44 }}>
           <span style={{ fontSize: 14, fontWeight: 800, color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 7 }}>
@@ -124,6 +125,7 @@ export default function SettingsDialog(props: Props): JSX.Element {
 
           <div style={{ flex: 1, minWidth: 0, overflowY: "auto", overflowX: "hidden", paddingRight: 2 }}>
             {activeTab === "general" && <GeneralPanel theme={props.theme} onThemeChange={props.onThemeChange} />}
+            {activeTab === "runtime" && <RuntimePanel />}
             {activeTab === "resident" && <ResidentPanel />}
             {activeTab === "mind" && <MindHubPanel selectedAgentId={props.selectedAgentId} dl={props.dl} />}
             {activeTab === "agents" && (
@@ -145,4 +147,6 @@ export default function SettingsDialog(props: Props): JSX.Element {
       </div>
     </div>
   );
-}
+});
+
+export default SettingsDialog;

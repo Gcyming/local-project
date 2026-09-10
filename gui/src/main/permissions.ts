@@ -18,11 +18,10 @@ export interface GuiPermissions {
   globalApproval: ApprovalMode;
   /** 自定义审批白名单（设置·权限·预设放行目录/仓库）：命中路径免审批 */
   approvalAllowPaths: string[];
-  /** 工具权限类别（对应 Tool.permissions ∈ {read,write,terminal,network}） */
+  /** 工具权限类别（对应 Tool.permissions ∈ {read,write,terminal}；network 开关见 networkEnabled） */
   toolRead: boolean;
   toolWrite: boolean;
   toolTerminal: boolean;
-  toolNetwork: boolean;
   /** 全局功能开关 */
   mcpEnabled: boolean;
   skillsEnabled: boolean;
@@ -34,7 +33,6 @@ const DEFAULTS: GuiPermissions = {
   toolRead: true,
   toolWrite: true,
   toolTerminal: false,
-  toolNetwork: false,
   mcpEnabled: true,
   skillsEnabled: true,
 };
@@ -87,7 +85,6 @@ export function getPermissions(): GuiPermissions {
       toolRead: typeof o.toolRead === "boolean" ? o.toolRead : DEFAULTS.toolRead,
       toolWrite: typeof o.toolWrite === "boolean" ? o.toolWrite : DEFAULTS.toolWrite,
       toolTerminal: typeof o.toolTerminal === "boolean" ? o.toolTerminal : DEFAULTS.toolTerminal,
-      toolNetwork: typeof o.toolNetwork === "boolean" ? o.toolNetwork : DEFAULTS.toolNetwork,
       mcpEnabled: typeof o.mcpEnabled === "boolean" ? o.mcpEnabled : DEFAULTS.mcpEnabled,
       skillsEnabled: typeof o.skillsEnabled === "boolean" ? o.skillsEnabled : DEFAULTS.skillsEnabled,
     };
@@ -111,7 +108,7 @@ export function setPermissions(patch: Partial<GuiPermissions>): { ok: boolean; p
     }
     next.approvalAllowPaths = patch.approvalAllowPaths.filter((x) => typeof x === "string");
   }
-  for (const k of ["toolRead", "toolWrite", "toolTerminal", "toolNetwork", "mcpEnabled", "skillsEnabled"] as const) {
+  for (const k of ["toolRead", "toolWrite", "toolTerminal", "mcpEnabled", "skillsEnabled"] as const) {
     if (patch[k] !== undefined) {
       next[k] = Boolean(patch[k]);
     }
