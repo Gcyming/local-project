@@ -9,9 +9,10 @@ import pythonIcon from "../../../icon/icon_fpbc119q3rk/python.svg";
 import gitIcon from "../../../icon/icon_fpbc119q3rk/git.svg";
 import cpuIcon from "../../../icon/icon_fpbc119q3rk/cpu.svg";
 import foldersIcon from "../../../icon/icon_fpbc119q3rk/folders.svg";
+import adbIcon from "../../../icon/icon_fpbc119q3rk/plug-connected.svg";
 
 interface RuntimeItem {
-  kind: "node" | "python" | "git" | "llama" | "models";
+  kind: "node" | "python" | "git" | "llama" | "models" | "adb";
   label: string;
   path?: string;
   version?: string;
@@ -28,6 +29,7 @@ const KIND_META: Record<RuntimeItem["kind"], { icon: string; brief: string }> = 
   git: { icon: gitIcon, brief: "Git" },
   llama: { icon: cpuIcon, brief: "llama.cpp 本地推理" },
   models: { icon: foldersIcon, brief: "本地模型" },
+  adb: { icon: adbIcon, brief: "Android 调试桥（ADB）" },
 };
 
 /** SVG 单色图标 → 主题亮灰（配合深色 UI） */
