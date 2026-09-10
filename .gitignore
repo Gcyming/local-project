@@ -7,16 +7,17 @@
 # =====================================================================
 
 # ── 引擎源码（核心知识产权，不随仓库发布）──────────────────────────────
-core/
-core-ts/
-gateway-ts/
-tools/
-social/
-sidecar/
-shared/
-skills/
-scripts/
-tests/
+# A-918++：加前导 / 限定为「仓库根」目录，避免误伤 gui/src/shared、gui/src/skills 等同名子目录
+/core/
+/core-ts/
+/gateway-ts/
+/tools/
+/social/
+/sidecar/
+/shared/
+/skills/
+/scripts/
+/tests/
 slime_server.py
 slime_cli.py
 slime_launcher.py
