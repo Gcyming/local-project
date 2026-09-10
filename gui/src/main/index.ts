@@ -119,7 +119,7 @@ import { getModelServer, ModelServerManager, setModelServer } from "../../../cor
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer } from "../../../core-ts/src/tools/builtin.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setSidebarOpener } from "../../../core-ts/src/tools/builtin.js";
 import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
 import { adbService, type AdbDetect, type AdbDevice, type AdbCmdResult, type AdbScreencapResult, type AdbDownloadProgress } from "./adb.js";
 import { httpServer } from "./httpServer.js";
@@ -2610,6 +2610,11 @@ function registerIpcHandlers(): void {
   /* ═══════════════ HTTP 静态服务搭建（A-918++） ═══════════════ */
   /** 注入 HttpStaticServer 给 core-ts 工具层（对齐 setAdbService 注入模式） */
   setHttpServer(httpServer);
+
+  /** A-918++：生成网页应用后，由 core-ts 工具层回调 → 主进程通知渲染层在右侧栏浏览器自动打开 */
+  setSidebarOpener((url: string, name?: string): void => {
+    mainWindow?.webContents.send("slime:sidebar:open", { kind: "url", url, name });
+  });
 
   /** A-918++：HTTP —— 把本地目录作为静态服务启动（默认 0.0.0.0，端口自动选） */
   handleTrusted<{ dir: string; port?: number; host?: string; spa?: boolean }>("slime:http:serve", async (_event, p): Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }> => {
