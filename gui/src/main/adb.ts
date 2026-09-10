@@ -427,6 +427,19 @@ export class AdbService {
     const args = s ? ["-s", s, "reboot"] : ["reboot"];
     return this.run(args, { timeout: TIMEOUT_NORMAL });
   }
+
+  /** A-918++：启动 ADB 服务（adb start-server）——连模拟器前需服务在跑；返回版本与状态 */
+  async startServer(): Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }> {
+    const res = await this.run(["start-server"], { timeout: TIMEOUT_NORMAL });
+    const v = await this.run(["version"], { timeout: TIMEOUT_NORMAL });
+    const version = v.stdout?.split("\n")[0]?.trim();
+    return { ok: res.ok, version, stdout: res.stdout, stderr: res.stderr, error: res.error };
+  }
+
+  /** A-918++：停止 ADB 服务（adb kill-server） */
+  async killServer(): Promise<AdbCmdResult> {
+    return this.run(["kill-server"], { timeout: TIMEOUT_NORMAL });
+  }
 }
 
 /** 模块级单例（main 启动时实例化并注入工具层） */

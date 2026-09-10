@@ -92,6 +92,21 @@ export default function RuntimePanel(): JSX.Element {
       }, 1500);
       return;
     }
+    // A-918++：ADB —— 下载 platform-tools（缺失时）
+    if (a.kind === "adbDownload" && api?.adb?.download) {
+      showNotice(true, "开始下载 platform-tools…");
+      const res = await api.adb.download().catch((e: unknown) => ({ ok: false, error: String(e) }));
+      if (res?.ok) { showNotice(true, "platform-tools 下载完成"); await load(); }
+      else { setError(res?.error ?? "下载失败"); }
+      return;
+    }
+    // A-918++：ADB —— 启动服务（adb start-server）
+    if (a.kind === "adbStart" && api?.adb?.startServer) {
+      const res = await api.adb.startServer().catch((e: unknown) => ({ ok: false, error: String(e) }));
+      if (res?.ok) { showNotice(true, `ADB 服务已启动${res.version ? `（${res.version}）` : ""}`); await load(); }
+      else { setError(res?.error ?? "ADB 服务启动失败（检查 platform-tools 是否完整）"); }
+      return;
+    }
     // 其他动作（打开官网/目录）
     if (!api?.runtime?.open) { return; }
     const res = await api.runtime.open(a).catch((e: unknown) => ({ ok: false, error: String(e) }));
@@ -116,7 +131,8 @@ export default function RuntimePanel(): JSX.Element {
   }
 
   const renderAction = (it: RuntimeItem): JSX.Element | null => {
-    if (it.ok || !it.action) { return null; }
+    // A-918++：不再限"未就绪"——ADB 就绪时也要显示「启动 ADB 服务」按钮
+    if (!it.action) { return null; }
     const a = it.action;
     const d = a.kind === "download" && a.target ? downloading[a.target] : undefined;
     const mainBtn = (
