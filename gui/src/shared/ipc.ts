@@ -295,7 +295,6 @@ export interface GuiPermissions {
   toolRead: boolean;
   toolWrite: boolean;
   toolTerminal: boolean;
-  toolNetwork: boolean;
   mcpEnabled: boolean;
   skillsEnabled: boolean;
 }
@@ -378,6 +377,8 @@ export interface ModelSpec {
   vision?: boolean;
   thinking?: boolean;
   thinking_efforts?: string[];
+  /** 是否启用（聊天模型选择只列出启用项；旧记录无此字段视为启用） */
+  selected?: boolean;
   price_in_usd?: number;
   price_out_usd?: number;
 }

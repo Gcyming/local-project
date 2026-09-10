@@ -120,6 +120,24 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 删除技能（递归删除目录） */
     skillDelete: (name: string) =>
       ipcRenderer.invoke("slime:extras:skillDelete", { name }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：GUI 表单新建技能（生成 config/skills/<name>/SKILL.md） */
+    skillAdd: (input: { name: string; description: string; content?: string }) =>
+      ipcRenderer.invoke("slime:extras:skillAdd", input) as Promise<{ ok: boolean; error?: string; name?: string }>,
+    /** A-918++：联网搜索技能市场（anthropics/skills 官方仓库） */
+    skillMarketSearch: (query?: string) =>
+      ipcRenderer.invoke("slime:extras:skillMarketSearch", { query }) as Promise<{ ok: boolean; skills?: Array<{ name: string; description: string }>; error?: string }>,
+    /** A-918++：从官方仓库安装技能 */
+    skillMarketInstall: (name: string) =>
+      ipcRenderer.invoke("slime:extras:skillMarketInstall", { name }) as Promise<{ ok: boolean; error?: string; name?: string }>,
+    /** A-918++：读取数据源认证（GitHub Token） */
+    registryAuthGet: () =>
+      ipcRenderer.invoke("slime:extras:registryAuthGet") as Promise<{ githubToken?: string }>,
+    /** A-918++：保存数据源认证（GitHub Token，加密） */
+    registryAuthSet: (auth: { githubToken?: string }) =>
+      ipcRenderer.invoke("slime:extras:registryAuthSet", auth) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：内嵌 BrowserWindow 打开 GitHub Token 生成页 */
+    openGithubAuth: () =>
+      ipcRenderer.invoke("slime:extras:openGithubAuth") as Promise<{ ok: boolean; error?: string }>,
     /** MCP 服务器状态列表（含已禁用的） */
     mcpList: () => ipcRenderer.invoke("slime:extras:mcpList") as Promise<McpServerInfo[]>,
     /** 启用/禁用 MCP 服务器 */
@@ -130,6 +148,30 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 删除 MCP 服务器（从 slime.toml 移除块） */
     mcpDelete: (name: string) =>
       ipcRenderer.invoke("slime:extras:mcpDelete", { name }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：GUI 表单新增 MCP 服务器（追加 [[mcp_servers]] 块） */
+    mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) =>
+      ipcRenderer.invoke("slime:extras:mcpAdd", input) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：MCP 官方 registry 联网搜索 */
+    mcpRegistrySearch: (query?: string) =>
+      ipcRenderer.invoke("slime:mcpRegistrySearch", { query }) as Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; error?: string }>,
+    /** A-918++：从官方 registry 安装 MCP */
+    mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) =>
+      ipcRenderer.invoke("slime:mcpRegistryInstall", { card }) as Promise<{ ok: boolean; error?: string }>,
+  },
+  runtime: {
+    /** A-918++：运行环境一览（node/python/git/llama/models 状态） */
+    list: () => ipcRenderer.invoke("slime:runtime:list") as Promise<{
+      ok: boolean; items?: Array<{
+        kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string;
+        action?: { label: string; kind: string; url?: string; path?: string; target?: string };
+      }>; error?: string;
+    }>,
+    /** A-918++：缺失项动作（打开官网/目录） */
+    open: (action: { label?: string; kind?: string; url?: string; path?: string }) =>
+      ipcRenderer.invoke("slime:runtime:open", { action }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：重建 Python venv（系统 Python → venv → pip install -r requirements.txt） */
+    installPython: () =>
+      ipcRenderer.invoke("slime:runtime:installPython") as Promise<{ ok: boolean; log?: string; error?: string }>,
   },
   files: {
     /** 导入文件对话框：返回本地路径（聊天输入区附件） */
@@ -380,6 +422,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-968：读取指定文件的变更 diff（红绿标注渲染用） */
     diff: (path: string, file: string) =>
       ipcRenderer.invoke("slime:git:diff", { path, file }) as Promise<GitDiffResult>,
+    /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用） */
+    showFile: (rel: string, workspace: string, ref?: string) =>
+      ipcRenderer.invoke("slime:git:showFile", { rel, workspace, ref }) as Promise<{ ok: boolean; content?: string; error?: string }>,
   },
   data: {
     /** 重置本地数据（清空 Provider / Agent / 会话与历史；记忆文件保留） */
@@ -409,6 +454,14 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-942：设置全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
     subagentSetDefaultModel: (model: string) =>
       ipcRenderer.invoke("slime:resident:subagent:setDefaultModel", { model }) as Promise<{ ok: boolean; defaultModel?: string; error?: string }>,
+    /** A-918+：读取用户选定的子代理（自建 agent id 列表） */
+    subagentGetSelection: () =>
+      ipcRenderer.invoke("slime:resident:subagent:getSelection") as Promise<{ ok: boolean; selectedAgentIds?: string[] }>,
+    /** A-918+：保存用户选定的子代理（自建 agent id 列表） */
+    subagentSetSelection: (selectedAgentIds: string[]) =>
+      ipcRenderer.invoke("slime:resident:subagent:setSelection", { selectedAgentIds }) as Promise<{ ok: boolean; selectedAgentIds?: string[]; error?: string }>,
+    /** A-918++：订阅后台实时推送（subagent start/complete/error、定时任务触发、监控状态等），返回 cleanup */
+    onUpdate: (cb: (payload: unknown) => void) => onMessage<unknown>("slime:resident:update", cb),
   },
   /** A-950：群聊状态事件（成员 thinking/speaking/done + 思考增量）——群聊专属右侧栏用 */
   brainstorm: {
@@ -466,10 +519,29 @@ declare global {
         skillOpen: (name: string) => Promise<{ ok: boolean; error?: string }>;
         skillsRootOpen: () => Promise<{ ok: boolean; error?: string }>;
         skillDelete: (name: string) => Promise<{ ok: boolean; error?: string }>;
+        skillAdd: (input: { name: string; description: string; content?: string }) => Promise<{ ok: boolean; error?: string; name?: string }>;
+        skillMarketSearch: (query?: string) => Promise<{ ok: boolean; skills?: Array<{ name: string; description: string }>; error?: string }>;
+        skillMarketInstall: (name: string) => Promise<{ ok: boolean; error?: string; name?: string }>;
+        registryAuthGet: () => Promise<{ githubToken?: string }>;
+        registryAuthSet: (auth: { githubToken?: string }) => Promise<{ ok: boolean; error?: string }>;
+        openGithubAuth: () => Promise<{ ok: boolean; error?: string }>;
         mcpList: () => Promise<McpServerInfo[]>;
         mcpToggle: (name: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
         mcpOpen: () => Promise<{ ok: boolean; error?: string }>;
         mcpDelete: (name: string) => Promise<{ ok: boolean; error?: string }>;
+        mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+        mcpRegistrySearch: (query?: string) => Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; error?: string }>;
+        mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) => Promise<{ ok: boolean; error?: string }>;
+      };
+      runtime: {
+        list: () => Promise<{
+          ok: boolean; items?: Array<{
+            kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string;
+            action?: { label: string; kind: string; url?: string; path?: string; target?: string };
+          }>; error?: string;
+        }>;
+        open: (action: { label?: string; kind?: string; url?: string; path?: string }) => Promise<{ ok: boolean; error?: string }>;
+        installPython: () => Promise<{ ok: boolean; log?: string; error?: string }>;
       };
       files: { pick: () => Promise<{ ok: boolean; path?: string; error?: string }> };
       images: {
@@ -602,6 +674,9 @@ declare global {
         subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
         subagentCancel: (id: string) => Promise<{ ok: boolean }>;
         subagentDelegate: (p: { task: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
+        subagentGetSelection: () => Promise<{ ok: boolean; selectedAgentIds?: string[] }>;
+        subagentSetSelection: (selectedAgentIds: string[]) => Promise<{ ok: boolean; selectedAgentIds?: string[]; error?: string }>;
+        onUpdate: (cb: (payload: unknown) => void) => () => void;
       };
       requests: {
         get: () => Promise<{ concurrency: number; reconnectBaseMs: number }>;

@@ -39,6 +39,10 @@ function classifyPermissions(actions: Array<{ action: string; target: string }>)
       r = assessAction({ kind: "terminal", command, commandArgs });
     } else if (/write|save|append|create|patch|modify/.test(name)) {
       r = assessAction({ kind: "write", path: target });
+      // 引擎源码/契约/宿主目录写入一律 block（防 Agent 自我改写护栏），仅锚定 PROJECT_ROOT 内不误伤用户工作区
+      if (r.level !== "block" && isProtectedSourcePath(target, PROJECT_ROOT)) {
+        r = { level: "block", reason: `受保护源码目录禁止写入：${target.slice(0, 60)}`, matched: "protected-dir" };
+      }
     } else if (/fetch|search|http|web|request/.test(name)) {
       r = assessAction({ kind: "network", url: target });
     } else {
@@ -68,6 +72,21 @@ try {
 const saveSubagentDefaultModel = (model: string): void => {
   subagentDefaultModel = model;
   try { writeFileSync(subagentModelPath(), model, "utf8"); } catch { /* 落盘失败不阻断 */ }
+};
+
+// 用户选定的子代理（设置→子代理菜单勾选的自建 agent，A-918+）
+// 持久化 userData/subagent-selection.json；自动派发优先级 = 用户选定子代理 > slime 自建专家
+let subagentSelectedAgentIds: string[] = [];
+const subagentSelectionPath = () => join(app.getPath("userData"), "subagent-selection.json");
+try {
+  const rawSel = JSON.parse(readFileSync(subagentSelectionPath(), "utf8")) as { selectedAgentIds?: unknown };
+  if (Array.isArray(rawSel.selectedAgentIds)) {
+    subagentSelectedAgentIds = rawSel.selectedAgentIds.filter((x): x is string => typeof x === "string");
+  }
+} catch { subagentSelectedAgentIds = []; }
+const saveSubagentSelection = (ids: string[]): void => {
+  subagentSelectedAgentIds = ids;
+  try { writeFileSync(subagentSelectionPath(), JSON.stringify({ selectedAgentIds: ids }), "utf8"); } catch { /* 落盘失败不阻断 */ }
 };
 const ensureTray = (): void => {
   if (tray) { return; }
@@ -99,9 +118,9 @@ import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { getModelServer, ModelServerManager, setModelServer } from "../../../core-ts/src/model_server.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
-import { SubAgentManager } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager } from "../../../core-ts/src/tools/builtin.js";
-import { assessAction, splitCommand } from "../../../core-ts/src/tools/classifier.js";
+import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
+import { setSubagentManager, setMemoryStoreProvider } from "../../../core-ts/src/tools/builtin.js";
+import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
 import { createServer } from "node:http";
 import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
@@ -115,7 +134,7 @@ import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, SidecarStatus, P
 import { parseUnifiedDiff } from "./git_diff.js";
 import { initUpdater, registerUpdaterHandlers, setStatusSink } from "./updater.js";
 import {
-  listProviders, fetchModels, saveProvider, removeProvider, clearAllProviders, refreshProviderModels,
+  listProviders, enrichModels, saveProvider, removeProvider, clearAllProviders, refreshProviderModels,
   listLocalModels, saveLocalModel, removeLocalModel, scanLocalModels,
   type ProviderSummary, type LocalModelSpec,
 } from "./providers.js";
@@ -131,6 +150,12 @@ import { MemoryStore } from "../../../core-ts/src/memory/store.js";
 import { createTrace, beginSpan, endSpan, emitEvent, attachEval, type Trace, type TraceEventKind } from "../../../core-ts/src/observability/trace.js";
 import { parsePlan, type Plan, type PlanStageStatus } from "../../../core-ts/src/planning/plan.js";
 import { runGroupTalk, parseMentions, type GroupTalkParticipant, type StreamEmit, type TranscriptLine } from "../../../core-ts/src/services/grouptalk.js";
+
+// 全局兜底：任何未捕获的 Promise rejection 不得终止主进程——Node 默认 throw 模式会让
+// 整个应用直接退出（用户感知为"软件自己关了"）。记录后继续运行；具体逻辑错误仍由各调用点 try/catch 处理。
+process.on("unhandledRejection", (reason) => {
+  console.error("[gui:main] 未捕获的 Promise rejection（已拦截，主进程继续运行）:", reason);
+});
 
 // ── D：全链路可观测（引擎 stream 真实事件点 → trace spans → 渲染层 TraceViewer） ──
 // sessionId → 最近一次请求的 Trace 快照（内存驻留；流结束经 slime:trace:update 广播）
@@ -819,6 +844,7 @@ async function ensureServices(): Promise<void> {
       console.log(`[scheduler] 后台常驻定时唤醒已就绪（${scheduler.list().length} 个任务）`);
 
       // Phase 3 子代理管理器：后台独立上下文并行执行（Claude Code subagent 对标），结果落盘 subagent-*.md
+      // A-918++：注册生命周期钩子 → 实时推送 subagent start/complete/error 事件到 renderer（修复"用户从没见过 subagent 活动"）
       const subagents = new SubAgentManager(async (def, ctx) => {
         const ag = def.agentId
           ? (await agentRegistry?.findAgent(def.agentId))
@@ -844,9 +870,19 @@ async function ensureServices(): Promise<void> {
       }, {
         concurrency: 3,
         hooks: {
-          onStart: (run) => console.log(`[subagent] 开始 ${run.name} (${run.id})`),
-          onComplete: (run) => console.log(`[subagent] 完成 ${run.name}${run.structured ? "（含结构化结果）" : ""}`),
-          onError: (run) => console.warn(`[subagent] ${run.status} ${run.name}: ${run.error ?? ""}`),
+          onStart: (run) => {
+            console.log(`[subagent] 开始 ${run.name} (${run.id})`);
+            // A-918+：派发即推送，让右侧栏「子代理」区立即看到（不等 4s 轮询）
+            mainWindow?.webContents.send("slime:resident:update", null);
+          },
+          onComplete: (run) => {
+            console.log(`[subagent] 完成 ${run.name}${run.structured ? "（含结构化结果）" : ""}`);
+            mainWindow?.webContents.send("slime:resident:update", null);
+          },
+          onError: (run) => {
+            console.warn(`[subagent] ${run.status} ${run.name}: ${run.error ?? ""}`);
+            mainWindow?.webContents.send("slime:resident:update", null);
+          },
         },
       });
 
@@ -875,6 +911,31 @@ async function ensureServices(): Promise<void> {
         timeoutMs: 120_000,
         outputSchema: true,
       });
+
+      // A-918+：注册用户选定的自建 agent 作为子代理（派发优先级 = 用户选定 > 内置专家）。
+      // 读 subagent-selection.json → findAgent → 包装成 SubagentDefinition（description=role 作路由键，
+      // systemPrompt=identity_prompt，agentId 绑定具体持久 agent），打 userSelected:true。
+      const syncUserSelectedSubagents = async (): Promise<void> => {
+        const defs: SubagentDefinition[] = [];
+        for (const id of subagentSelectedAgentIds) {
+          const ag = await agentRegistry?.findAgent(id).catch(() => undefined);
+          if (!ag) { continue; }
+          defs.push({
+            name: ag.name,
+            description: `${ag.name}：${ag.role}`,
+            systemPrompt: ag.identity_prompt?.trim() || `你是「${ag.name}」，负责：${ag.role}。`,
+            agentId: ag.id,
+            model: "inherit",
+            timeoutMs: 180_000,
+            outputSchema: true,
+          });
+        }
+        subagents.setUserSelected(defs);
+        if (defs.length > 0) {
+          console.log(`[subagent] 已登记 ${defs.length} 个用户选定子代理：${defs.map((d) => d.name).join("、")}`);
+        }
+      };
+      void syncUserSelectedSubagents();
 
       // 自动委派注入：把管理器挂到 delegate_subagent 工具（模型对话中可自行委派）
       setSubagentManager(subagents);
@@ -959,14 +1020,43 @@ async function ensureServices(): Promise<void> {
       });
       // A-942：全局子代理默认模型（贵模型统筹、廉价模型执行档位；持久化 + 即时生效）
       ipcMain.handle("slime:resident:subagent:setDefaultModel", (_e, p: { model?: string }) => {
-        const model = typeof p?.model === "string" ? p.model.trim() : "";
-        if (!/^(api:[A-Za-z0-9_-]+(:[^\s:]+)?|local:[A-Za-z0-9_-]+|inherit|)$/.test(model)) {
-          return { ok: false, error: `非法模型格式：${model}（应为 api:<key>[:<model>] / local:<id> / inherit / 空）` };
+        const raw = typeof p?.model === "string" ? p.model.trim() : "";
+        // A-918++ 兼容用户常见写错：api:<key>.<model>（点号分隔）自动转 api:<key>:<model>（冒号）
+        // 原生支持中文 key（之前 [A-Za-z0-9_-]+ 限制让"小红书"等中文供应商名被拒）
+        const normalized = raw && raw.startsWith("api:") && !raw.includes(":")
+          ? (() => {
+              const rest = raw.slice(4);
+              const dotIdx = rest.lastIndexOf(".");
+              if (dotIdx > 0 && /[A-Za-z0-9_.\-\u4e00-\u9fa5]+$/.test(rest)) {
+                return `api:${rest.slice(0, dotIdx)}:${rest.slice(dotIdx + 1)}`;
+              }
+              return raw;
+            })()
+          : raw;
+        if (!/^(api:[A-Za-z0-9_.\-\u4e00-\u9fa5]+(:[^\s:]+)?|local:[A-Za-z0-9_.\-\u4e00-\u9fa5]+|inherit|)$/.test(normalized)) {
+          return {
+            ok: false,
+            error: `非法模型格式：${raw}\n\n正确格式示例：\n  api:供应商名:模型名（如 api:openai:gpt-5）\n  api:供应商名（用该供应商默认模型）\n  api:小红书:dots3-note-prev（中文 key + 模型名）\n  local:本地模型名\n  inherit（沿用父 Agent 模型）\n  留空（不设置）`,
+          };
         }
-        subagents.setDefaultModel(model);
-        saveSubagentDefaultModel(model);
+        subagents.setDefaultModel(normalized);
+        saveSubagentDefaultModel(normalized);
         mainWindow?.webContents.send("slime:resident:update", null);
-        return { ok: true, defaultModel: model };
+        return { ok: true, defaultModel: normalized };
+      });
+      // A-918+：用户选定子代理（设置→子代理菜单勾选的自建 agent）读写
+      ipcMain.handle("slime:resident:subagent:getSelection", () => ({
+        ok: true,
+        selectedAgentIds: [...subagentSelectedAgentIds],
+      }));
+      ipcMain.handle("slime:resident:subagent:setSelection", async (_e, p: { selectedAgentIds?: unknown }) => {
+        const ids = Array.isArray(p?.selectedAgentIds)
+          ? p!.selectedAgentIds.filter((x): x is string => typeof x === "string")
+          : [];
+        saveSubagentSelection(ids);
+        await syncUserSelectedSubagents();
+        mainWindow?.webContents.send("slime:resident:update", null);
+        return { ok: true, selectedAgentIds: [...subagentSelectedAgentIds] };
       });
 
       // A-916：请求频率调节（config/requests.json）——并发上限 + 断流重连基间隔，双端（TS/Python）均可读
@@ -1018,6 +1108,8 @@ async function ensureServices(): Promise<void> {
           mainWindow?.webContents.send("slime:stats:update", snap);
         }).catch(() => {});
       }
+    }).catch((e) => {
+      console.warn("[gui:main] 自动拉起 embedding 失败（不阻断，可在状态面板手动重试）:", e);
     });
   });
   console.info("[gui:main] core-ts 服务已加载（ChatService/StatsService + SandboxManager）");
@@ -1073,6 +1165,10 @@ function memoryStoreFor(agentId: string): MemoryStore {
   }
   return s;
 }
+
+// 记忆自管理注入：把 per-Agent 记忆存储缓存挂到 memory_insert/search/forget 工具
+// （对齐 setSubagentManager 模式；工具循环按注入的 _agent_id 定位对应 MemoryStore）。
+setMemoryStoreProvider(memoryStoreFor);
 
 /** 审批档位 → SandboxConfig（会话级持久化格式：sandbox_override 存 approval 档位 + workspace）
  *  四档：manual 手动 / auto 自动 / none 无需 / custom 自定义。
@@ -1315,6 +1411,14 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
       mergedTimings.cacheReadTokens = (d as any).cacheReadTokens;
     } else {
       mergedTimings.cacheReadTokens = 0;
+    }
+  }
+  // 缓存写入 token（prompt caching 的 cache_creation；可选透传，供用量分析展示）
+  if (typeof mergedTimings.cacheCreationTokens !== "number") {
+    if (typeof (d as any).cache_creation_tokens === "number") {
+      mergedTimings.cacheCreationTokens = (d as any).cache_creation_tokens;
+    } else if (typeof (d as any).cacheCreationTokens === "number") {
+      mergedTimings.cacheCreationTokens = (d as any).cacheCreationTokens;
     }
   }
   // reasoning tokens：按 timings 中常见键兜底 0（DeepSeek / o1 系列引擎会回填）
@@ -2276,6 +2380,239 @@ function registerIpcHandlers(): void {
     return deleteMcp(p.name);
   });
 
+  /** A-918++：GUI 表单新增 MCP 服务器（追加 [[mcp_servers]] 块，不再要求手动编辑 slime.toml） */
+  handleTrusted<{ name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string> }>(
+    "slime:extras:mcpAdd",
+    async (_event, p) => {
+      const { addMcp } = await import("./config_files.js");
+      return addMcp(p);
+    },
+  );
+
+  /** A-918++：GUI 表单新建技能（生成 config/skills/<name>/SKILL.md） */
+  handleTrusted<{ name: string; description: string; content?: string }>(
+    "slime:extras:skillAdd",
+    async (_event, p) => {
+      const { addSkill } = await import("./config_files.js");
+      return addSkill(p);
+    },
+  );
+
+  /** A-918++：联网搜索技能市场（anthropics/skills 官方仓库） */
+  handleTrusted<{ query?: string }>("slime:extras:skillMarketSearch", async (_event, p) => {
+    const { searchSkillMarket } = await import("./config_files.js");
+    return searchSkillMarket(p?.query ?? "");
+  });
+
+  /** A-918++：从官方仓库安装技能（下载 SKILL.md 写入 config/skills/） */
+  handleTrusted<{ name: string }>("slime:extras:skillMarketInstall", async (_event, p) => {
+    const { installSkillFromMarket } = await import("./config_files.js");
+    return installSkillFromMarket(p?.name ?? "");
+  });
+
+  /** A-918++：读取数据源认证（GitHub Token，加密） */
+  handleTrusted<void>("slime:extras:registryAuthGet", async () => {
+    const { getRegistryAuth } = await import("./config_files.js");
+    return getRegistryAuth();
+  });
+
+  /** A-918++：保存数据源认证（GitHub Token，加密） */
+  handleTrusted<{ githubToken?: string }>("slime:extras:registryAuthSet", async (_event, p) => {
+    const { setRegistryAuth } = await import("./config_files.js");
+    return setRegistryAuth({ githubToken: p?.githubToken });
+  });
+
+  /** A-918++：内嵌 BrowserWindow 打开 GitHub Token 生成页（利用 Electron Chromium 内核，用户应用内登录生成 token） */
+  handleTrusted<void>("slime:extras:openGithubAuth", async () => {
+    try {
+      const win = new BrowserWindow({
+        width: 920, height: 720, minWidth: 640, minHeight: 480,
+        title: "GitHub 授权 — 登录后生成 Token 并复制，回到 slime 粘贴保存",
+        autoHideMenuBar: true,
+        backgroundColor: "#0d1117",
+        webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
+      });
+      void win.loadURL("https://github.com/settings/tokens/new?scopes=repo&description=slime-agent");
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: `打开授权窗口失败：${e instanceof Error ? e.message : String(e)}` };
+    }
+  });
+
+  /** A-918++：运行环境一览（node/python/git/llama/models 的路径·版本·大小·就绪状态，供 RuntimePanel） */  handleTrusted<void>("slime:runtime:list", async (): Promise<{
+    ok: boolean; items?: Array<{
+      kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string;
+      action?: { label: string; kind: string; url?: string; path?: string; target?: string };
+    }>; error?: string;
+  }> => {
+    const fmtBytes = (n: number): string => {
+      if (n >= 1073741824) return `${(n / 1073741824).toFixed(1)} GB`;
+      if (n >= 1048576) return `${(n / 1048576).toFixed(0)} MB`;
+      if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+      return `${n} B`;
+    };
+    const fileSize = (p: string): string | undefined => {
+      try { if (!existsSync(p)) { return undefined; } return fmtBytes(statSync(p).size); } catch { return undefined; }
+    };
+    const items: Array<{ kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string; action?: { label: string; kind: string; url?: string; path?: string; target?: string } }> = [];
+    try {
+      // Node（Electron 内嵌）
+      items.push({ kind: "node", label: "Node.js", version: `v${process.versions.node}`, ok: true, source: "bundled", note: "GUI 由 Electron 内嵌 Node 驱动" });
+      // Python venv（随包）
+      const pyExe = process.platform === "win32"
+        ? resolveExtra("runtime/venv/Scripts/python.exe")
+        : resolveExtra("runtime/venv/bin/python");
+      const pyOk = existsSync(pyExe);
+      items.push({ kind: "python", label: "Python（随包 venv）", path: pyExe, sizeText: fileSize(pyExe), ok: pyOk, source: pyOk ? "bundled" : "missing", ...(pyOk ? {} : { note: "缺少随包 venv——请重新运行 prepare-runtime 或重装" }) });
+      // Git（系统）
+      await new Promise<void>((resolveP) => {
+        execFile("git", ["--version"], { timeout: 4000 }, (err, stdout) => {
+          if (err || !stdout) {
+            items.push({ kind: "git", label: "Git", ok: false, source: "missing", note: "未检测到 git——请安装 Git for Windows（https://git-scm.com）后重开" });
+          } else {
+            const ver = stdout.trim().replace(/^git version\s*/i, "");
+            items.push({ kind: "git", label: "Git", version: ver, ok: true, source: "system" });
+          }
+          resolveP();
+        });
+      });
+      // llama.cpp（随包二进制）
+      const llamaExe = process.platform === "win32"
+        ? resolveExtra("llama.cpp/build/bin/llama-server.exe")
+        : resolveExtra("llama.cpp/build/bin/llama-server");
+      const llamaOk = existsSync(llamaExe);
+      items.push({
+        kind: "llama", label: "llama.cpp（本地推理）", path: llamaExe, sizeText: fileSize(llamaExe), ok: llamaOk,
+        source: llamaOk ? "bundled" : "missing",
+        ...(llamaOk ? {} : { note: "缺失——重新运行 prepare-runtime 下载或到 设置→供应商→本地模型 配置" }),
+      });
+      // 模型目录（随包 npz + 按需 GGUF）
+      const modelRoot = resolveExtra("models");
+      const ggufFiles: Array<{ p: string; n: string }> = [];
+      try {
+        const scan = (dir: string, depth: number): void => {
+          if (depth > 2 || !existsSync(dir)) { return; }
+          for (const e of readdirSync(dir, { withFileTypes: true })) {
+            const full = join(dir, e.name);
+            if (e.isDirectory()) { scan(full, depth + 1); }
+            else if (e.name.endsWith(".gguf") || e.name.endsWith(".npz")) { ggufFiles.push({ p: full, n: e.name }); }
+          }
+        };
+        scan(modelRoot, 0);
+      } catch { /* 忽略 */ }
+      if (ggufFiles.length > 0) {
+        items.push({
+          kind: "models", label: "本地模型", path: modelRoot,
+          version: `${ggufFiles.length} 个文件`, sizeText: ggufFiles[0] ? fileSize(ggufFiles[0].p) : undefined,
+          ok: true, source: ggufFiles[0]?.n.includes("bge") ? "bundled" : "download",
+          note: ggufFiles.map((f) => f.n).join("、").slice(0, 120),
+        });
+      } else {
+        items.push({ kind: "models", label: "本地模型", path: modelRoot, ok: false, source: "download", note: "暂无模型文件——首次使用本地推理时自动下载" });
+      }
+      // 缺失项补动作：llama/bge 走内置下载器；python 缺失走官网（要求用户装 Python 后重建 venv，避免打包 Python 解释器）；
+      // git 缺失走官网；action.kind = "download" → renderer 调 mind.download；"openExternal"/"openPath" 走 slime:runtime:open
+      for (const it of items) {
+        if (it.ok) { continue; }
+        if (it.kind === "llama") { it.action = { label: "下载 llama.cpp", kind: "download", target: "llama" }; }
+        else if (it.kind === "models") { it.action = { label: "下载 BGE 模型", kind: "download", target: "bge" }; }
+        else if (it.kind === "git") { it.action = { label: "下载 Git", kind: "openExternal", url: "https://git-scm.com/downloads" }; }
+        // python 缺失：官网装 Python 后点"重建 venv"（vbox 真实路径在项目根 runtime/venv，不在 gui/runtime）
+        else if (it.kind === "python") { it.action = { label: "下载 Python（装后再重建）", kind: "openExternal", url: "https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe" }; }
+      }
+      return { ok: true, items };
+    } catch (e) {
+      return { ok: false, error: `读取运行环境失败：${e instanceof Error ? e.message : String(e)}` };
+    }
+  });
+
+  /** A-918++：重建 Python venv（系统 Python → INSTALL_ROOT/../runtime/venv → pip install -r requirements.txt）。
+   *  走 spawn 系统 Python（PATH 的 python.exe）。完成后 renderer 调 load() 刷新。 */
+  handleTrusted<void>("slime:runtime:installPython", async (): Promise<{ ok: boolean; log?: string; error?: string }> => {
+    const venvDir = resolveExtra("../runtime/venv");
+    const reqFile = resolveExtra("../requirements.txt");
+    // Windows 下 vbox 路径用 resolveExtra("../runtime/venv")（gui/runtime/venv 错误）
+    const isWin = process.platform === "win32";
+    const venvPip = isWin ? join(venvDir, "Scripts", "pip.exe") : join(venvDir, "bin", "pip");
+    const sysPy = isWin ? "python.exe" : "python3";
+    const log: string[] = [];
+    try {
+      log.push(`创建 venv：${venvDir}`);
+      await new Promise<void>((resolveP, rejectP) => {
+        execFile(sysPy, ["-m", "venv", "--copies", venvDir], { timeout: 120_000 }, (err, stdout, stderr) => {
+          log.push(stdout || ""); log.push(stderr || "");
+          err ? rejectP(err) : resolveP();
+        });
+      });
+      log.push(`pip install：${reqFile}`);
+      await new Promise<void>((resolveP, rejectP) => {
+        execFile(venvPip, ["install", "-r", reqFile], { timeout: 600_000 }, (err, stdout, stderr) => {
+          log.push(stdout || ""); log.push(stderr || "");
+          err ? rejectP(err) : resolveP();
+        });
+      });
+      log.push("✅ venv 重建完成");
+      return { ok: true, log: log.join("\n").slice(-4000) };
+    } catch (e) {
+      log.push(`✗ 失败：${e instanceof Error ? e.message : String(e)}`);
+      return { ok: false, log: log.join("\n").slice(-4000), error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  /** A-918++：运行环境缺失项的动作（打开官网下载 / 打开本地目录） */
+  handleTrusted<{ action?: { label?: string; kind?: string; url?: string; path?: string } }>(
+    "slime:runtime:open",
+    async (_event, p): Promise<{ ok: boolean; error?: string }> => {
+      const a = p?.action;
+      if (!a) { return { ok: false, error: "缺少动作参数" }; }
+      try {
+        if (a.kind === "openExternal" && a.url) {
+          await shell.openExternal(a.url);
+          return { ok: true };
+        }
+        if (a.kind === "openPath" && a.path) {
+          const err = await shell.openPath(a.path);
+          return err ? { ok: false, error: err } : { ok: true };
+        }
+        return { ok: false, error: "未知动作" };
+      } catch (e) {
+        return { ok: false, error: `执行动作失败：${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
+  );
+
+  /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用；rel 相对仓库根） */
+  handleTrusted<{ rel: string; workspace: string; ref?: string }>(
+    "slime:git:showFile",
+    async (_event, p): Promise<{ ok: boolean; content?: string; error?: string }> => {
+      const rel = (p?.rel ?? "").trim();
+      const ws = (p?.workspace ?? "").trim();
+      const ref = p?.ref || "HEAD";
+      if (!rel || !ws) { return { ok: false, error: "缺少参数" }; }
+      const r = await runGit(["show", `${ref}:${rel}`], ws);
+      if (r.code !== 0) {
+        // 若文件在 HEAD 不存在（新增文件）→ 空内容 diff 全新增
+        if (/exists on disk, but not in|did not match any file|path .* unknown revision/i.test(r.stderr)) {
+          return { ok: true, content: "" };
+        }
+        return { ok: false, error: r.stderr.slice(0, 300) || `git show 失败（${r.code}）` };
+      }
+      return { ok: true, content: r.stdout };
+    },
+  );
+
+  /** A-918++：MCP 官方 registry 联网搜索（registry.modelcontextprotocol.io） */
+  handleTrusted<{ query?: string }>("slime:mcpRegistrySearch", async (_event, p) => {
+    const { searchMcpRegistry } = await import("./config_files.js");
+    return searchMcpRegistry(p?.query ?? "");
+  });
+
+  /** A-918++：从官方 registry 安装 MCP（写 slime.toml） */
+  handleTrusted<{ card: import("./config_files.js").RegistryServerCard }>("slime:mcpRegistryInstall", async (_event, p) => {
+    const { installFromMcpRegistry } = await import("./config_files.js");
+    return installFromMcpRegistry(p?.card);
+  });
+
   /** 导入文件（对话框）：返回本地路径，供聊天输入区引用为附件 */
   handleTrusted<void>("slime:files:pick", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
     const openOpts: Electron.OpenDialogOptions = {
@@ -2541,9 +2878,17 @@ function registerIpcHandlers(): void {
   handleTrusted<boolean>("slime:stats:poll", async (_event, start: boolean) => {
     if (start) {
       if (statsPoll) clearInterval(statsPoll);
-      statsPoll = setInterval(async () => {
-        const snap = await statsService!.snapshot();
-        mainWindow?.webContents.send("slime:stats:update", snap);
+      statsPoll = setInterval(() => {
+        void (async () => {
+          try {
+            const svc = statsService;
+            if (!svc) return; // ensureServices 尚未完成，本轮跳过（原 statsService! 非空断言会同步 TypeError）
+            const snap = await svc.snapshot();
+            mainWindow?.webContents.send("slime:stats:update", snap);
+          } catch (e) {
+            console.warn("[gui:main] statsPoll snapshot 失败（本轮跳过）:", e);
+          }
+        })();
       }, 3000);
     } else if (statsPoll) {
       clearInterval(statsPoll);
@@ -2741,7 +3086,9 @@ function registerIpcHandlers(): void {
   handleTrusted<void>("slime:providers:list", async (): Promise<ProviderSummary[]> => listProviders());
 
   handleTrusted<{ baseUrl: string; apiKey: string }>("slime:providers:fetchModels", async (_event, p) =>
-    fetchModels(p.baseUrl, p.apiKey),
+    // A-918+：探测即 enrich 填充元数据（context_window/max_output/vision/think/pricing），
+    // 让「探测成功」一步到位，渲染层拿到完整 model spec 而非仅 ID
+    enrichModels(p.baseUrl, p.apiKey),
   );
 
   handleTrusted<{ key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }>(
@@ -3474,13 +3821,33 @@ function registerProtocolHandler(): void {
   });
 
   app.on("web-contents-created", (_event, webContents) => {
-    webContents.on("will-navigate", (e) => e.preventDefault());
-    webContents.setWindowOpenHandler(() => ({ action: "deny", overrideLevel: "no" as const }));
+    webContents.on("will-navigate", (e, url) => {
+      // A-918++ 修复「GitHub 登录输入密码后无响应」：此前对所有 webContents 无条件 preventDefault，
+      // 把 GitHub 授权窗口/内嵌 webview 的登录成功重定向也拦死了（停在原地看似无响应）。
+      // 现在仅阻止【主窗口】导航到非 slime:// 的外部地址；webview / 授权子窗口放行。
+      if (webContents === mainWindow?.webContents && !url.startsWith("slime://")) {
+        e.preventDefault();
+      }
+    });
+    webContents.setWindowOpenHandler(() => {
+      // 仅主窗口禁止 window.open（安全）；授权窗口/webview 放行（GitHub 登录可能触发弹窗）
+      if (webContents === mainWindow?.webContents) {
+        return { action: "deny" };
+      }
+      return { action: "allow", overrideBrowserWindowOptions: { webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } } };
+    });
   });
 }
 
 function main(): void {
   registerSchemePrivileges(); // 必须先于 app ready
+
+  // A-918++：去掉 User-Agent 里的 Electron/slime 标识（伪装标准 Chrome），
+  // 避免 GitHub 等站点检测到非标准浏览器而阻断登录/授权
+  app.userAgentFallback = (app.userAgentFallback || "")
+    .replace(/\sElectron\/[\d.]+/g, "")
+    .replace(/\sslime\/[\d.]+/g, "")
+    .trim();
 
   // V8 字节码缓存（VS Code 同款策略）：把首次编译的渲染层 bundle 结果落盘复用，
   // 跳过重复启动时的重新编译，明显缩短二次启动时间
@@ -3513,8 +3880,10 @@ function main(): void {
     }
   });
 
-  // CDP 远程调试端口（仅 dev 模式开启，便于 agent-browser 自动化接入）
-  if (process.env.NODE_ENV !== "production") {
+  // CDP 远程调试端口（仅开发环境开启，便于 agent-browser 自动化接入）。
+  // 安全：以 app.isPackaged 判定——构建产物中 process.env.NODE_ENV 不做静态替换且运行时未设置，
+  // 旧判定会让正式包默认开放 9222，本机任意进程可附到渲染层执行任意 JS、读取全部 IPC 流量。
+  if (!app.isPackaged) {
     app.commandLine.appendSwitch("remote-debugging-port", "9222");
   }
 

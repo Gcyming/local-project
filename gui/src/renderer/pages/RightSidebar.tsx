@@ -42,6 +42,9 @@ interface TabInstance {
   fileContent?: string;
   fileMime?: "text" | "image" | "binary";
   fileError?: string;
+  /** A-918++：默认页标记——任务页（tasks）设为默认页不可删除（类似群聊专属页常驻），
+      其他页（浏览器/文件/Git/终端等）可删到 0，无需"至少保留1个"限制 */
+  isDefault?: boolean;
 }
 
 interface TabTypeMeta {
@@ -82,7 +85,8 @@ const uid = (): string => Math.random().toString(36).slice(2, 10);
 const createTab = (type: TabType, index?: number): TabInstance => {
   const meta = TAB_TYPE_META.find((m) => m.type === type)!;
   const title = index !== undefined ? `${meta.label} ${index + 1}` : meta.label;
-  return { id: uid(), type, title, url: type === "browser" ? "" : undefined };
+  // A-918++：任务页（tasks）设为默认页——常驻 mount 不可删除，类似群聊专属页
+  return { id: uid(), type, title, url: type === "browser" ? "" : undefined, isDefault: type === "tasks" };
 };
 
 const createFileTab = (_root: string, rel: string, name: string): TabInstance => ({
@@ -126,12 +130,12 @@ interface GitStatus {
   deleted: string[];
 }
 
-/** 文件行状态字 */
+/** 文件行状态字（VS Code 范式：绿=新增、蓝=修改、红=删除、黄=未跟踪、灰=未知） */
 const STATUS_GLYPH: Record<string, { label: string; color: string }> = {
-  M: { label: "M", color: "#58a6ff" },
-  A: { label: "A", color: "#7ee787" },
-  D: { label: "D", color: "#f85149" },
-  R: { label: "R", color: "#58a6ff" },
+  M: { label: "M", color: "var(--diff-mod, #58a6ff)" },
+  A: { label: "A", color: "var(--diff-add, #7ee787)" },
+  D: { label: "D", color: "var(--diff-del, #f85149)" },
+  R: { label: "R", color: "var(--diff-mod, #58a6ff)" },
   U: { label: "U", color: "#d29922" },
   "?": { label: "?", color: "#8b949e" },
 };
@@ -278,7 +282,9 @@ export default function RightSidebar(props: {
 
   const closeTab = (id: string): void => {
     setTabs((prev) => {
-      if (prev.length <= 1) { return prev; }
+      const target = prev.find((t) => t.id === id);
+      // A-918++：默认页（任务页 isDefault）不可删除；其他页可删到 0，去掉"至少保留1个"限制
+      if (target?.isDefault) { return prev; }
       const idx = prev.findIndex((t) => t.id === id);
       const next = prev.filter((t) => t.id !== id);
       if (id === activeId && next.length > 0) {
@@ -377,6 +383,10 @@ export default function RightSidebar(props: {
               >
                 <Icon size={14} />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", flex: "1", minWidth: 0 }}>{tab.title}</span>
+                {/* A-918++：默认页（任务页）显示「固定」徽标不可删；其他页可删到 0 */}
+                {tab.isDefault ? (
+                  <span style={{ fontSize: 10, color: "var(--text-dim)", padding: "1px 6px", borderRadius: 5, background: "var(--bg-hover)", flexShrink: 0, fontWeight: 600 }}>固定</span>
+                ) : (
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                   title="关闭标签页"
@@ -384,15 +394,15 @@ export default function RightSidebar(props: {
                     display: "flex", alignItems: "center", justifyContent: "center",
                     width: 16, height: 16, borderRadius: 3, border: "none",
                     background: "transparent", color: "inherit",
-                    cursor: tabs.length <= 1 ? "not-allowed" : "pointer",
-                    opacity: tabs.length <= 1 ? 0.3 : 0.6,
+                    cursor: "pointer",
+                    opacity: 0.6,
                     fontSize: 12, lineHeight: 1, flexShrink: 0, padding: 0,
                   }}
                   onMouseDown={(e) => e.stopPropagation()}
-                  disabled={tabs.length <= 1}
                 >
                   <CloseIcon size={12} />
                 </button>
+                )}
               </div>
             );
           })}
@@ -470,9 +480,11 @@ export default function RightSidebar(props: {
             </div>
           </div>
         )}
-        {activeTab && activeTab.type === "tasks" && (
-          <TasksTab agentId={props.agentId ?? ""} sessionId={props.sessionId ?? ""} agentName={props.agentName} workspace={props.workspace} dl={props.dl} providerModels={props.providerModels} />
-        )}
+        {/* A-918++：任务页常驻 mount（display 控制显隐）——切换 tab 时 state 不丢，切回立即看到原数据；
+            active=false 时轮询 useEffect 提前 return，不浪费资源 */}
+        <div style={{ display: activeTab?.type === "tasks" ? "flex" : "none", flexDirection: "column", height: "100%", minHeight: 0 }}>
+          <TasksTab active={activeTab?.type === "tasks"} agentId={props.agentId ?? ""} sessionId={props.sessionId ?? ""} agentName={props.agentName} workspace={props.workspace} dl={props.dl} providerModels={props.providerModels} />
+        </div>
         {activeTab && activeTab.type === "subagents" && (
           <SubAgentsTab />
         )}
@@ -1193,13 +1205,15 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                                 fontFamily: "Consolas, 'Courier New', monospace",
                                 fontSize: 11.5,
                                 lineHeight: 1.6,
-                                background: l.type === "add" ? "rgba(46,160,67,0.16)" : l.type === "del" ? "rgba(248,81,73,0.16)" : "transparent",
+                                background: l.type === "add" ? "var(--diff-add-bg)" : l.type === "del" ? "var(--diff-del-bg)" : "transparent",
+                                // 左侧状态条（VS Code gutter 范式）：绿=新增、红=删除，增强行级视觉辨识、降低纯色疲劳
+                                boxShadow: l.type === "add" ? "inset 2px 0 0 var(--diff-add)" : l.type === "del" ? "inset 2px 0 0 var(--diff-del)" : "none",
                               }}>
                                 <span style={{
                                   width: 22, flexShrink: 0, textAlign: "right", paddingRight: 6, userSelect: "none",
-                                  color: l.type === "add" ? "#7ee787" : l.type === "del" ? "#ff7b72" : "var(--text-dim)",
+                                  color: l.type === "add" ? "var(--diff-add)" : l.type === "del" ? "var(--diff-del)" : "var(--text-dim)",
                                 }}>{l.type === "add" ? "+" : l.type === "del" ? "-" : " "}</span>
-                                <span style={{ flex: 1, whiteSpace: "pre", color: l.type === "add" ? "#7ee787" : l.type === "del" ? "#ff7b72" : "var(--text-secondary)" }}>{l.text}</span>
+                                <span style={{ flex: 1, whiteSpace: "pre", color: l.type === "add" ? "var(--diff-add)" : l.type === "del" ? "var(--diff-del)" : "var(--text-secondary)" }}>{l.text}</span>
                               </div>
                             ))}
                           </div>
@@ -1356,10 +1370,78 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
   const workspaceRoot = props.workspace?.trim() || "";
 
+  /** A-918++：行级 diff（LCS）——供 FileTab diff 模式渲染 VS Code 风格行 */
+  const diffLinesFn = (a: string, b: string): Array<{ op: "=" | "+" | "-"; text: string }> => {
+    const aL = a.length ? a.split("\n") : [""];
+    const bL = b.length ? b.split("\n") : [""];
+    const n = aL.length, m = bL.length;
+    if (n * m > 200000) {
+      return [...aL.map((t) => ({ op: "-" as const, text: t })), ...bL.map((t) => ({ op: "+" as const, text: t }))];
+    }
+    const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = 1; i <= n; i++) { for (let j = 1; j <= m; j++) { dp[i][j] = aL[i - 1] === bL[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]); } }
+    const out: Array<{ op: "=" | "+" | "-"; text: string }> = [];
+    let i = n, j = m;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && aL[i - 1] === bL[j - 1]) { out.push({ op: "=", text: aL[i - 1] }); i--; j--; }
+      else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { out.push({ op: "+", text: bL[j - 1] }); j--; }
+      else { out.push({ op: "-", text: aL[i - 1] }); i--; }
+    }
+    return out.reverse();
+  };
+
   /** 识别文件名中的扩展名（小写） */
   const extOf = (name: string): string => {
     const m = /\.([a-z0-9]+)$/i.exec(name.trim());
     return m ? `.${m[1].toLowerCase()}` : "";
+  };
+
+  /** A-918++：简易语法高亮（关键字/字符串/注释/数字，4 色 token；按扩展名选语言集） */
+  const PY_KW = "def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|in|not|and|or|None|True|False|self|lambda|yield|raise|pass|break|continue|async|await|print|len|range|open|isinstance|hasattr|getattr|setattr";
+  const JS_KW = "function|class|const|let|var|return|if|else|for|while|do|switch|case|break|continue|new|this|true|false|null|undefined|async|await|import|export|from|as|of|try|catch|finally|throw|interface|type|enum|public|private|protected|readonly|void|number|string|boolean|any|unknown|never";
+  const langKw = (lang: string): string => {
+    if (lang === "py" || lang === "python") return PY_KW;
+    if (lang === "js" || lang === "ts" || lang === "jsx" || lang === "tsx") return JS_KW;
+    return "";
+  };
+  const langOf = (name: string): string => {
+    const e = extOf(name).slice(1);
+    if (e === "py") return "py";
+    if (e === "js" || e === "jsx") return "js";
+    if (e === "ts" || e === "tsx") return "ts";
+    return "";
+  };
+  const highlightCode = (text: string, lang: string): React.ReactNode[] => {
+    const kw = langKw(lang);
+    // 优先识别字符串/注释（避免字符串内的 # 被误判为注释）
+    const re = new RegExp(
+      "(#[^\\n]*|//[^\\n]*|/\\*[\\s\\S]*?\\*/|'[^'\\n]*(?:\\\\.[^'\\n]*)*'|\"(?:[^\"\\\\\\n]|\\\\.)*\"|\\b\\d+\\.?\\d*\\b" + (kw ? "|\\b(?:" + kw + ")\\b" : "") + ")",
+      "g",
+    );
+    const lines = text.split("\n");
+    const out: React.ReactNode[] = [];
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      const segs: React.ReactNode[] = [];
+      let last = 0;
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(line)) !== null) {
+        if (m.index > last) { segs.push(line.slice(last, m.index)); }
+        const t = m[0];
+        let cls = "";
+        if (t.startsWith("#") || t.startsWith("//") || t.startsWith("/*")) cls = "hl-c";
+        else if (t[0] === "'" || t[0] === "\"") cls = "hl-s";
+        else if (/^\d/.test(t)) cls = "hl-n";
+        else cls = "hl-k";
+        segs.push(<span key={segs.length} className={cls}>{t}</span>);
+        last = m.index + t.length;
+      }
+      if (last < line.length) { segs.push(line.slice(last)); }
+      out.push(<div key={li} style={{ minHeight: "1.4em" }}>{segs.length ? segs : "\u00A0"}</div>);
+      re.lastIndex = 0;
+    }
+    return out;
   };
 
   /* ── 文件浏览导航状态 ── */
@@ -1377,6 +1459,13 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   const [copied, setCopied] = React.useState(false);
   /** Markdown 预览模式：preview=渲染预览（默认）/ source=源码 */
   const [mdMode, setMdMode] = React.useState<"preview" | "source">("preview");
+  // A-918++：diff 模式（当前文件 vs Git HEAD，VS Code 风格红绿行）
+  const [diffMode, setDiffMode] = React.useState(false);
+  const [diffHead, setDiffHead] = React.useState<string | null>(null);
+  const [diffLoading, setDiffLoading] = React.useState(false);
+  const [diffError, setDiffError] = React.useState("");
+  // A-918++：切换查看的文件时重置 diff（避免把上一个文件的 HEAD 版本误贴到新文件）
+  React.useEffect(() => { setDiffMode(false); setDiffHead(null); setDiffError(""); }, [preview?.rel]);
   /** 左右分栏：左侧文件列表宽度占比（%） */
   const [split, setSplit] = React.useState(40);
   const splitRef = React.useRef<HTMLDivElement>(null);
@@ -1585,7 +1674,7 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
       );
     }
     // Markdown：默认渲染预览；可切到源码查看
-    if (isMd && mdMode === "preview") {
+    if (!diffMode && isMd && mdMode === "preview") {
       return (
         <div style={{ flex: 1, overflow: "auto", padding: "12px 16px" }}>
           {preview.content?.trim() ? (
@@ -1598,13 +1687,75 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
         </div>
       );
     }
+    const lang = langOf(preview.name);
+    // A-918++：diff 模式 → 当前文件 vs Git HEAD（VS Code 风格行）
+    if (diffMode) {
+      if (diffLoading) {
+        return <div style={{ flex: 1, padding: 16, color: "var(--text-dim)", fontSize: 12 }}>读取 Git HEAD 版本…</div>;
+      }
+      if (diffHead === null) {
+        return (
+          <div style={{ flex: 1, padding: 16, fontSize: 12, color: diffError ? "var(--danger)" : "var(--text-dim)" }}>
+            {diffError || "（此文件未纳入 Git / HEAD 无此版本）"}
+            <div style={{ marginTop: 8 }}>
+              <button className="btn" style={{ padding: "4px 12px", fontSize: 12 }} onClick={() => void toggleDiff()}>返回原文件</button>
+            </div>
+          </div>
+        );
+      }
+      const dRows = diffLinesFn(diffHead, preview.content);
+      let addN = 0, delN = 0;
+      for (const r of dRows) { if (r.op === "+") addN++; else if (r.op === "-") delN++; }
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, flexShrink: 0 }}>
+            <span style={{ color: "var(--success)", fontWeight: 600 }}>+{addN}</span>
+            <span style={{ color: "var(--danger)", fontWeight: 600 }}>−{delN}</span>
+            <span style={{ color: "var(--text-dim)" }}>Git HEAD → 当前</span>
+            <span style={{ flex: 1 }} />
+            <button className="btn" style={{ padding: "2px 10px", fontSize: 11 }} onClick={() => void toggleDiff()}>返回原文件</button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflow: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.6, background: "var(--bg)" }}>
+            {dRows.map((r, i) => (
+              <div key={i} className={`think-diff-row diff-${r.op === "=" ? "eq" : r.op === "+" ? "add" : "del"}`} style={{ display: "flex", padding: "0 10px" }}>
+                <span className="think-diff-mark" style={{ width: 18, flexShrink: 0, userSelect: "none", fontWeight: 700, color: r.op === "+" ? "var(--diff-add)" : r.op === "-" ? "var(--diff-del)" : "var(--text-dim)" }}>{r.op === "=" ? " " : r.op === "+" ? "+" : "−"}</span>
+                <span style={{ whiteSpace: "pre", flex: 1, minWidth: 0, wordBreak: "break-all" }}>{r.text || "\u00A0"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
     return (
-      <pre style={{ flex: 1, margin: 0, padding: "12px 14px", fontSize: 13, fontFamily: "Consolas, 'Courier New', monospace", lineHeight: 1.6, color: "var(--text)", overflow: "auto", whiteSpace: "pre", tabSize: 2 }}>{preview.content}</pre>
+      <pre style={{ flex: 1, margin: 0, padding: "12px 14px", fontSize: 13, fontFamily: "Consolas, 'Courier New', monospace", lineHeight: 1.6, color: "var(--text)", overflow: "auto", whiteSpace: "pre", tabSize: 2 }}>
+        {lang ? highlightCode(preview.content, lang) : preview.content}
+      </pre>
     );
   };
 
   const selectedIsMd = !!preview && preview.mime === "text" && extOf(preview.name) === ".md";
   const canGoUp = dirStack.length > 0;
+
+  /** A-918++：对比改动切换（当前文件 vs Git HEAD）；仅文本文件可用 */
+  const toggleDiff = async (): Promise<void> => {
+    if (!preview || preview.mime !== "text") { return; }
+    if (diffMode) { setDiffMode(false); return; }
+    if (!workspaceRoot) { setDiffMode(true); setDiffError("未设置工作目录，无法对比 Git HEAD"); setDiffHead(null); return; }
+    setDiffMode(true); setDiffLoading(true); setDiffError(""); setDiffHead(null);
+    try {
+      const rel = preview.rel ?? "";
+      if (!rel) { setDiffError("文件不在工作区内，无法对比 Git"); }
+      else {
+        const res = await api?.git?.showFile?.(rel, workspaceRoot);
+        if (res?.ok) { setDiffHead(res.content ?? ""); }
+        else { setDiffError(res?.error ?? "git show 失败"); }
+      }
+    } catch (e) {
+      setDiffError(`对比失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDiffLoading(false);
+    }
+  };
 
   /* ── 统一布局：顶栏 + 左右分栏（左：文件列表 / 右：内容预览） ── */
   return (
@@ -1614,6 +1765,9 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
         <button onClick={goBack} title={canGoUp ? "返回上一级" : "返回 Git 仓库"} disabled={!canGoUp} style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: canGoUp ? "pointer" : "not-allowed", color: canGoUp ? "var(--text-secondary)" : "var(--text-dim)", fontSize: 12, opacity: canGoUp ? 1 : 0.5 }}><ArrowLeftIcon size={14} /></button>
         <span style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 3 }} title={crumbPath}><FolderIcon size={11} style={{ flexShrink: 0 }} />{crumbPath}</span>
         <button onClick={() => void handlePickFolder()} disabled={pickingFolder} title="打开系统文件夹（可访问任意位置）" style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: "var(--text-secondary)", fontSize: 11, flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3 }}>{pickingFolder ? "选择中…" : <><FolderIcon size={12} /> 打开文件夹</>}</button>
+        {preview && preview.mime === "text" && preview.rel && (
+          <button onClick={() => void toggleDiff()} title="对比当前文件与 Git HEAD 的改动（红绿 diff）" style={{ background: "transparent", border: `1px solid ${diffMode ? "var(--accent)" : "var(--border)"}`, borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: diffMode ? "var(--accent-hover)" : "var(--text-secondary)", fontSize: 11, flexShrink: 0 }}>{diffMode ? "✓ 对比中" : "对比改动"}</button>
+        )}
       </div>
 
       {/* 左右分栏容器 */}
@@ -1725,8 +1879,13 @@ export interface TodoItem {
   blocks?: string[];
 }
 
-/** 上下文上限：优先 Agent.max_context，其次 Provider 模型规格中的 context_window，最后运行时上游探测元数据 */
-function useAgentMaxContext(agentName: string, fallback: Array<{ id: string; context_window?: number }> = []): number {
+/** 上下文上限：优先 Agent.max_context，其次 Provider 模型规格中的 context_window，最后运行时上游探测元数据。
+ *  modelChoice 变化时重算（切模型不重置是 A-4b 修复点）。 */
+function useAgentMaxContext(
+  agentName: string,
+  modelChoice: string | undefined,
+  fallback: Array<{ id: string; context_window?: number }> = [],
+): number {
   const [cap, setCap] = React.useState(0);
   React.useEffect(() => {
     let cancelled = false;
@@ -1742,10 +1901,10 @@ function useAgentMaxContext(agentName: string, fallback: Array<{ id: string; con
       .then(async (d: { max_context?: number; model_choice?: string } | null) => {
         if (cancelled || !d) { return; }
         if (d.max_context && d.max_context > 0) { setCap(d.max_context); return; }
-        // 兜底：从 Provider 模型规格中读取 context_window
+        // 优先用 caller 传入的 modelChoice（更即时的切模型信号），回退到 detail 返回值
+        const choice = modelChoice || d.model_choice || "";
+        if (!choice) { setCap(d.max_context ?? 0); return; }
         try {
-          const choice = d.model_choice ?? "";
-          if (!choice) { return; }
           const isLocal = choice.startsWith("local:");
           let ctx: number | undefined;
           if (isLocal) {
@@ -1782,7 +1941,7 @@ function useAgentMaxContext(agentName: string, fallback: Array<{ id: string; con
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
-  }, [agentName]);
+  }, [agentName, modelChoice]);
   return cap;
 }
 
@@ -1793,10 +1952,39 @@ function computeModelCost(modelId: string, promptTokens: number, completionToken
   return (promptTokens * spec.price_in_usd + completionTokens * spec.price_out_usd) / 1_000_000;
 }
 
-function TasksTab(props: { agentId: string; sessionId: string; agentName: string; workspace: string; dl: Record<string, DownloadProgressInfo>; providerModels?: Array<{ key?: string; models?: Array<{ id: string; context_window?: number }> }> }): JSX.Element {
+function TasksTab(props: { agentId: string; sessionId: string; agentName: string; workspace: string; dl: Record<string, DownloadProgressInfo>; providerModels?: Array<{ key?: string; models?: Array<{ id: string; context_window?: number }> }>; active?: boolean }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
   const modelPricesRef = React.useRef<Map<string, ModelPriceInfo>>(new Map());
-  /** 定期刷新模型定价缓存 */
+  /** 当前 Agent 的 model_choice（切模型时重算 ctx 上限 + 定价，A-4b 修复点） */
+  const [modelChoice, setModelChoice] = React.useState<string | undefined>(undefined);
+  const active = props.active !== false;
+  // A-918++：流式输出监测——仅流式时显示"会话指标"，平时隐藏（订阅 chat onChunk/onDone/onError）
+  const [isStreaming, setIsStreaming] = React.useState(false);
+  React.useEffect(() => {
+    const off1 = api.chat?.onChunk?.(() => setIsStreaming(true));
+    const off2 = api.chat?.onDone?.(() => setIsStreaming(false));
+    const off3 = api.chat?.onError?.(() => setIsStreaming(false));
+    return () => { off1?.(); off2?.(); off3?.(); };
+  }, [api]);
+  React.useEffect(() => {
+    if (!active) { return; }
+    let cancelled = false;
+    const refreshModel = async (): Promise<void> => {
+      try {
+        const list = await api.agents.list?.();
+        if (cancelled || !list) { return; }
+        const hit = (list as Array<{ id: string; name: string }>).find((a) => a.name === props.agentName) || (list as Array<{ id: string }>)[0];
+        if (!hit) { return; }
+        const d = await api.agents.detail(hit.id) as { model_choice?: string } | null;
+        if (cancelled) { return; }
+        if (d?.model_choice !== undefined) { setModelChoice(d.model_choice); }
+      } catch { /* ignore */ }
+    };
+    void refreshModel();
+    const timer = setInterval(() => { void refreshModel(); }, 5_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [props.agentName, active]);
+  /** 定期刷新模型定价缓存；切模型时由 modelChoice 变化主动 refresh 一次（A-4b） */
   React.useEffect(() => {
     let cancelled = false;
     const refresh = async (): Promise<void> => {
@@ -1817,7 +2005,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     void refresh();
     const timer = setInterval(() => { void refresh(); }, 30_000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, []);
+  }, [modelChoice]);
   const [events, setEvents] = React.useState<TaskEvent[]>([]);
   const [running, setRunning] = React.useState(false);
   const idRef = React.useRef(0);
@@ -1870,7 +2058,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     () => (props.providerModels ?? []).flatMap((p) => (p.models ?? []).map((m) => ({ id: m.id, context_window: m.context_window }))),
     [props.providerModels],
   );
-  const maxCtx = useAgentMaxContext(props.agentName, flatFallback);
+  const maxCtx = useAgentMaxContext(props.agentName, modelChoice, flatFallback);
   const [todos, setTodos] = React.useState<TodoItem[]>(persisted?.todos ?? []);
   const [collapsedTodos, setCollapsedTodos] = React.useState(false);
   /** A-937：底部「活动记录 / 会话文件」双 tab */
@@ -2043,9 +2231,19 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       )}
 
       <div className="right-scroll" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {/* A-918++：会话指标仅在流式输出时显示（用户要"输出监测时显示，不是平时显示"）；平时显示占位 */}
         <div style={{ borderBottom: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)" }}>会话指标</div>
-          <MetricsGrid usage={usage} />
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: 6 }}>
+            <span>会话指标</span>
+            {isStreaming && <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", animation: "thinkGlow 1.4s ease-in-out infinite", flexShrink: 0 }} />}
+          </div>
+          {isStreaming ? (
+            <MetricsGrid usage={usage} />
+          ) : (
+            <div style={{ fontSize: 11.5, color: "var(--text-dim)", padding: "6px 0", lineHeight: 1.6 }}>
+              空闲中 · 流式输出时实时显示 token / 命中 / 耗时等指标
+            </div>
+          )}
         </div>
 
         <div style={{ borderBottom: "1px solid var(--border)", padding: "8px 10px", flexShrink: 0 }}>
@@ -2168,8 +2366,11 @@ function SubAgentsTab(): JSX.Element {
   }
   React.useEffect(() => {
     refreshRef.current();
+    // A-918++：订阅后台实时推送（subagent start/complete 立即触发，4s 轮询作兜底）
+    const w = window as unknown as { slimeAPI?: any };
+    const off = w.slimeAPI?.resident?.onUpdate?.(() => { refreshRef.current(); });
     const iv = window.setInterval(() => refreshRef.current(), 4000);
-    return () => window.clearInterval(iv);
+    return () => { off?.(); window.clearInterval(iv); };
   }, []);
 
   /** 取消运行中/排队中的子代理（A-938 preload 转发 slime:resident:subagent:cancel） */
@@ -2381,8 +2582,9 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
 }
 
 function MetricsGrid({ usage }: { usage: AccumUsage }): JSX.Element {
-  const totalCacheDenom = Math.max(1, usage.promptTokens + usage.cacheReadTokens);
-  const cacheHit = (usage.cacheReadTokens / totalCacheDenom) * 100;
+  // 分母用 promptTokens 本身：Anthropic/OpenAI 的 input_tokens 已包含 cache_read 部分，
+  // 避免「promptTokens + cacheReadTokens」重复计入导致命中率低估。
+  const cacheHit = usage.promptTokens > 0 ? (usage.cacheReadTokens / usage.promptTokens) * 100 : 0;
   const items: Array<[string, string, boolean?]> = [
     ["平均命中", usage.requests === 0 ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
     ["运行时间", fmtMsSmart(usage.elapsedMs)],
