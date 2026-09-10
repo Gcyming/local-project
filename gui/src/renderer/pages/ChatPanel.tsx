@@ -3745,11 +3745,12 @@ export default function ChatPanel({
             </div>
           ) : (
           <>
-          {/* ─ A-918++ 实时监测栏：流式显示 token/耗时/吞吐/context；空闲显示动态激励语（4s 切换）── */}
-          <div style={{
-            display: "flex", alignItems: "center", gap: 12,
-            padding: "6px 14px",
-            borderTop: "1px solid var(--border)",
+          {/* ─ 流式实时监测栏：token 计数 / 耗时 / 吞吐速率 / 模型 ── */}
+          {loading && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12,
+              padding: "6px 14px",
+              borderTop: "1px solid var(--border)",
             background: "var(--bg-secondary)",
             fontSize: 11, color: "var(--text-muted)",
             flexShrink: 0,
@@ -3760,15 +3761,15 @@ export default function ChatPanel({
                 {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
               </span>
             </span>
-            {true && (<>
+            {loading && (<>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
-                <span style={{ color: streamTokens > 0 ? "var(--text)" : "var(--text-dim)", fontWeight: 600 }}>{streamTokens > 0 ? streamTokens.toLocaleString() : "—"}</span>
+                <span style={{ color: "var(--text)", fontWeight: 600 }}>{streamTokens.toLocaleString()}</span>
                 <span style={{ color: "var(--text-dim)", marginLeft: 2 }}>tokens</span>
               </span>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
-                <span style={{ color: streamElapsed > 0 ? "var(--text)" : "var(--text-dim)", fontWeight: 600 }}>{streamElapsed > 0 ? fmtMs(streamElapsed) : "—"}</span>
+                <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtMs(streamElapsed)}</span>
                 <span style={{ color: "var(--text-dim)", marginLeft: 2 }}>耗时</span>
               </span>
               <span style={{ color: "var(--text-dim)" }}>|</span>
@@ -3795,6 +3796,7 @@ export default function ChatPanel({
               )}
             </>)}
           </div>
+          )}
           {/* A-969：上下文自动压缩过渡动画（发送前触发；prep→summarize→done/trunc，完成后自动收起并继续发送） */}
           {compressUi && (
             <div style={{

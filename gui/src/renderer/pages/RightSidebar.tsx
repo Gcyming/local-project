@@ -17,6 +17,7 @@ import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
 import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
 import BrainstormPanel from "./BrainstormPanel.js";
 import { onCtxUpdate } from "./ChatPanel.js";
+import { IDLE_PHRASES } from "../idlePhrases.js";
 
 type TabType = "tasks" | "subagents" | "terminal" | "browser" | "git" | "file";
 
@@ -1978,6 +1979,12 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     const off3 = api.chat?.onError?.(() => setIsStreaming(false));
     return () => { off1?.(); off2?.(); off3?.(); };
   }, [api]);
+  // A-918++：空闲态动态激励语（「会话指标」框内轮播，4s 一句；复用 idlePhrases 单一数据源）
+  const [idlePhraseIdx, setIdlePhraseIdx] = React.useState(0);
+  React.useEffect(() => {
+    const iv = window.setInterval(() => { setIdlePhraseIdx((i) => (i + 1) % IDLE_PHRASES.length); }, 4000);
+    return () => window.clearInterval(iv);
+  }, []);
   React.useEffect(() => {
     if (!active) { return; }
     let cancelled = false;
@@ -2252,8 +2259,8 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
           {isStreaming ? (
             <MetricsGrid usage={usage} />
           ) : (
-            <div style={{ fontSize: 11.5, color: "var(--text-dim)", padding: "6px 0", lineHeight: 1.6 }}>
-              空闲中 · 流式输出时实时显示 token / 命中 / 耗时等指标
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", padding: "6px 0", lineHeight: 1.6, opacity: 0.9 }}>
+              {IDLE_PHRASES[idlePhraseIdx]}
             </div>
           )}
         </div>
