@@ -119,8 +119,9 @@ import { getModelServer, ModelServerManager, setModelServer } from "../../../cor
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager, setMemoryStoreProvider } from "../../../core-ts/src/tools/builtin.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService } from "../../../core-ts/src/tools/builtin.js";
 import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
+import { adbService, type AdbDetect, type AdbDevice, type AdbCmdResult, type AdbScreencapResult, type AdbDownloadProgress } from "./adb.js";
 import { createServer } from "node:http";
 import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
@@ -2600,6 +2601,72 @@ function registerIpcHandlers(): void {
       return { ok: true, content: r.stdout };
     },
   );
+
+  /* ═══════════════ ADB 设备管理（A-918++） ═══════════════ */
+  /** 注入 AdbService 给 core-ts 工具层（对齐 setSubagentManager 注入模式） */
+  setAdbService(adbService);
+
+  /** A-918++：ADB —— 检测 adb 是否就绪（含版本/来源） */
+  handleTrusted<void>("slime:adb:detect", async (): Promise<AdbDetect> => {
+    return adbService.detect();
+  });
+
+  /** A-918++：ADB —— 下载官方 platform-tools 便携包（进度经 webContents 推渲染层） */
+  handleTrusted<void>("slime:adb:download", async (): Promise<AdbCmdResult & { progress?: AdbDownloadProgress }> => {
+    return adbService.downloadPlatformTools((p) => {
+      mainWindow?.webContents.send("slime:adb:downloadProgress", p);
+    });
+  });
+
+  /** A-918++：ADB —— 列出已连接设备 */
+  handleTrusted<void>("slime:adb:devices", async (): Promise<{ ok: boolean; devices?: AdbDevice[]; error?: string }> => {
+    return adbService.devices();
+  });
+
+  /** A-918++：ADB —— 无线连接设备（host 形如 192.168.1.10:5555） */
+  handleTrusted<{ host: string }>("slime:adb:connect", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.connect(p?.host ?? "");
+  });
+
+  /** A-918++：ADB —— 断开无线连接 */
+  handleTrusted<{ host: string }>("slime:adb:disconnect", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.disconnect(p?.host ?? "");
+  });
+
+  /** A-918++：ADB —— 在指定设备执行 shell 命令 */
+  handleTrusted<{ serial: string; command: string }>("slime:adb:shell", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.shell(p?.serial ?? "", p?.command ?? "");
+  });
+
+  /** A-918++：ADB —— 安装 APK（serial + 本地 apk 路径） */
+  handleTrusted<{ serial: string; apkPath: string }>("slime:adb:install", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.install(p?.serial ?? "", p?.apkPath ?? "");
+  });
+
+  /** A-918++：ADB —— 卸载应用（serial + 包名） */
+  handleTrusted<{ serial: string; pkg: string }>("slime:adb:uninstall", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.uninstall(p?.serial ?? "", p?.pkg ?? "");
+  });
+
+  /** A-918++：ADB —— 截图（返回 PNG base64） */
+  handleTrusted<{ serial: string }>("slime:adb:screencap", async (_event, p): Promise<AdbScreencapResult> => {
+    return adbService.screencap(p?.serial ?? "");
+  });
+
+  /** A-918++：ADB —— 从设备拉取文件到本地 */
+  handleTrusted<{ serial: string; remote: string; local: string }>("slime:adb:pull", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.pull(p?.serial ?? "", p?.remote ?? "", p?.local ?? "");
+  });
+
+  /** A-918++：ADB —— 推送本地文件到设备 */
+  handleTrusted<{ serial: string; local: string; remote: string }>("slime:adb:push", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.push(p?.serial ?? "", p?.local ?? "", p?.remote ?? "");
+  });
+
+  /** A-918++：ADB —— 重启设备 */
+  handleTrusted<{ serial: string }>("slime:adb:reboot", async (_event, p): Promise<AdbCmdResult> => {
+    return adbService.reboot(p?.serial ?? "");
+  });
 
   /** A-918++：MCP 官方 registry 联网搜索（registry.modelcontextprotocol.io） */
   handleTrusted<{ query?: string }>("slime:mcpRegistrySearch", async (_event, p) => {

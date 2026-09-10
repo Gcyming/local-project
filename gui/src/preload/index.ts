@@ -474,6 +474,34 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     set: (p: { concurrency?: number; reconnectBaseMs?: number }) =>
       ipcRenderer.invoke("slime:requests:set", p) as Promise<{ ok: boolean; concurrency?: number; reconnectBaseMs?: number; error?: string }>,
   },
+  adb: {
+    /** A-918++：检测 adb 是否就绪（含版本/来源） */
+    detect: () => ipcRenderer.invoke("slime:adb:detect") as Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>,
+    /** A-918++：下载官方 platform-tools 便携包（进度经 onDownloadProgress 监听） */
+    download: () => ipcRenderer.invoke("slime:adb:download") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string } }>,
+    /** A-918++：列出已连接设备 */
+    devices: () => ipcRenderer.invoke("slime:adb:devices") as Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>,
+    /** A-918++：无线连接设备（host 形如 192.168.1.10:5555） */
+    connect: (host: string) => ipcRenderer.invoke("slime:adb:connect", { host }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：断开无线连接 */
+    disconnect: (host: string) => ipcRenderer.invoke("slime:adb:disconnect", { host }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：在指定设备执行 shell 命令 */
+    shell: (serial: string, command: string) => ipcRenderer.invoke("slime:adb:shell", { serial, command }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：安装 APK（serial + 本地 apk 路径） */
+    install: (serial: string, apkPath: string) => ipcRenderer.invoke("slime:adb:install", { serial, apkPath }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：卸载应用（serial + 包名） */
+    uninstall: (serial: string, pkg: string) => ipcRenderer.invoke("slime:adb:uninstall", { serial, pkg }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：截图（返回 PNG base64） */
+    screencap: (serial: string) => ipcRenderer.invoke("slime:adb:screencap", { serial }) as Promise<{ ok: boolean; pngBase64?: string; error?: string }>,
+    /** A-918++：从设备拉取文件到本地 */
+    pull: (serial: string, remote: string, local: string) => ipcRenderer.invoke("slime:adb:pull", { serial, remote, local }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：推送本地文件到设备 */
+    push: (serial: string, local: string, remote: string) => ipcRenderer.invoke("slime:adb:push", { serial, local, remote }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：重启设备 */
+    reboot: (serial: string) => ipcRenderer.invoke("slime:adb:reboot", { serial }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：下载进度监听（主进程 → 渲染层） */
+    onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => onMessage<{ state: string; percent: number; receivedMB: number; totalMB: number; error?: string }>("slime:adb:downloadProgress", cb),
+  },
 });
 
 declare global {
@@ -681,6 +709,21 @@ declare global {
       requests: {
         get: () => Promise<{ concurrency: number; reconnectBaseMs: number }>;
         set: (p: { concurrency?: number; reconnectBaseMs?: number }) => Promise<{ ok: boolean; concurrency?: number; reconnectBaseMs?: number; error?: string }>;
+      };
+      adb: {
+        detect: () => Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>;
+        download: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string } }>;
+        devices: () => Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>;
+        connect: (host: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        disconnect: (host: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        shell: (serial: string, command: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        install: (serial: string, apkPath: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        uninstall: (serial: string, pkg: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        screencap: (serial: string) => Promise<{ ok: boolean; pngBase64?: string; error?: string }>;
+        pull: (serial: string, remote: string, local: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        push: (serial: string, local: string, remote: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        reboot: (serial: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => () => void;
       };
     };
   }
