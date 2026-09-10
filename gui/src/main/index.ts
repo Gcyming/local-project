@@ -119,9 +119,10 @@ import { getModelServer, ModelServerManager, setModelServer } from "../../../cor
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager, setMemoryStoreProvider, setAdbService } from "../../../core-ts/src/tools/builtin.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer } from "../../../core-ts/src/tools/builtin.js";
 import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
 import { adbService, type AdbDetect, type AdbDevice, type AdbCmdResult, type AdbScreencapResult, type AdbDownloadProgress } from "./adb.js";
+import { httpServer } from "./httpServer.js";
 import { createServer } from "node:http";
 import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
@@ -2606,6 +2607,43 @@ function registerIpcHandlers(): void {
   /** 注入 AdbService 给 core-ts 工具层（对齐 setSubagentManager 注入模式） */
   setAdbService(adbService);
 
+  /* ═══════════════ HTTP 静态服务搭建（A-918++） ═══════════════ */
+  /** 注入 HttpStaticServer 给 core-ts 工具层（对齐 setAdbService 注入模式） */
+  setHttpServer(httpServer);
+
+  /** A-918++：HTTP —— 把本地目录作为静态服务启动（默认 0.0.0.0，端口自动选） */
+  handleTrusted<{ dir: string; port?: number; host?: string; spa?: boolean }>("slime:http:serve", async (_event, p): Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }> => {
+    return httpServer.serve({ dir: p?.dir ?? "", port: p?.port, host: p?.host, spa: p?.spa });
+  });
+
+  /** A-918++：HTTP —— 停止指定服务 */
+  handleTrusted<{ id: string }>("slime:http:stop", async (_event, p): Promise<{ ok: boolean; error?: string }> => {
+    return httpServer.stop(p?.id ?? "");
+  });
+
+  /** A-918++：HTTP —— 停止全部服务 */
+  handleTrusted<void>("slime:http:stopAll", async (): Promise<{ ok: boolean; stopped: number }> => {
+    return httpServer.stopAll();
+  });
+
+  /** A-918++：HTTP —— 列出运行中的服务 */
+  handleTrusted<void>("slime:http:list", async (): Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>> => {
+    return httpServer.list();
+  });
+
+  /** A-918++：HTTP —— 用系统默认浏览器打开某个访问地址 */
+  handleTrusted<{ url: string }>("slime:http:open", async (_event, p): Promise<{ ok: boolean; error?: string }> => {
+    const url = (p?.url ?? "").trim();
+    if (!url) { return { ok: false, error: "url 不能为空" }; }
+    try {
+      await shell.openExternal(url);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+
   /** A-918++：ADB —— 检测 adb 是否就绪（含版本/来源） */
   handleTrusted<void>("slime:adb:detect", async (): Promise<AdbDetect> => {
     return adbService.detect();
@@ -4000,6 +4038,8 @@ function main(): void {
     silamBrain?.close();
     silamBrain = null;
     void terminateModelServer();
+    // A-918++：退出前清理所有 HTTP 静态服务，释放端口
+    try { httpServer.stopAll(); } catch { /* 忽略清理异常 */ }
   });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) { createWindow(); }

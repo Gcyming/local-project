@@ -17,9 +17,10 @@ import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
 import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
 import BrainstormPanel from "./BrainstormPanel.js";
 import AdbPanel from "./AdbPanel.js";
+import HttpPanel from "./HttpPanel.js";
 import { onCtxUpdate } from "./ChatPanel.js";
 
-type TabType = "tasks" | "subagents" | "terminal" | "browser" | "git" | "file" | "adb";
+type TabType = "tasks" | "subagents" | "terminal" | "browser" | "git" | "file" | "adb" | "http";
 
 /** A-968：图片预览用真实 MIME（data:image/* 通配 MIME 在 Chromium 下不渲染，导致右栏看不了图） */
 const IMG_MIME: Record<string, string> = {
@@ -62,6 +63,7 @@ const TAB_TYPE_META: TabTypeMeta[] = [
   { type: "git", label: "Git仓库", icon: GitIcon },
   { type: "file", label: "文件查看", icon: FileIcon },
   { type: "adb", label: "ADB", icon: AdbIcon },
+  { type: "http", label: "HTTP", icon: HttpIcon },
 ];
 
 function AgentIcon(props: { size?: number; style?: React.CSSProperties }): JSX.Element {
@@ -89,6 +91,17 @@ function AdbIcon(props: { size?: number }): JSX.Element {
       <rect x="7" y="2.5" width="10" height="19" rx="2.2" />
       <line x1="11" y1="18.5" x2="13" y2="18.5" />
       <line x1="10.5" y1="5.5" x2="13.5" y2="5.5" />
+    </svg>
+  );
+}
+
+/** A-918++：HTTP 标签页图标（地球 + 经纬线） */
+function HttpIcon(props: { size?: number }): JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width={props.size ?? 14} height={props.size ?? 14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" style={{ display: "inline-block", flexShrink: 0 }}>
+      <circle cx="12" cy="12" r="9" />
+      <ellipse cx="12" cy="12" rx="4" ry="9" />
+      <line x1="3" y1="12" x2="21" y2="12" />
     </svg>
   );
 }
@@ -518,6 +531,9 @@ export default function RightSidebar(props: {
         )}
         {activeTab && activeTab.type === "adb" && (
           <AdbPanel workspace={props.workspace} />
+        )}
+        {activeTab && activeTab.type === "http" && (
+          <HttpPanel workspace={props.workspace} />
         )}
       </div>
     </aside>
