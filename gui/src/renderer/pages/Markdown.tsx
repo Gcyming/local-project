@@ -297,7 +297,16 @@ export function normalizeBrokenLines(text: string): string {
   if (!text) { return text; }
   const lines = text.split("\n");
   if (lines.length >= 3) {
-    const contentLines = lines.filter((l) => l.trim().length > 0 && !STRUCTURAL_LINE_RE.test(l));
+    const contentLines = lines.filter((l) => {
+      const t = l.trim();
+      if (t.length === 0) { return false; }
+      if (STRUCTURAL_LINE_RE.test(l)) { return false; }
+      // A-918++：列表项（- / * / + / 1. 开头）是 markdown 结构，天然短行，**不算 token 碎片**。
+      // 否则「优点：/- 快/- 稳」这类短列表会被误判为碎片换行 → 整段折叠成一行，列表退化为原始文本
+      // （用户实测「Markdown 渲染时常失效、退化为原始文本」的根因）。
+      if (/^[-*+]\s+/.test(t) || /^\d+[.)]\s+/.test(t)) { return false; }
+      return true;
+    });
     if (contentLines.length >= 2) {
       const frags = contentLines.filter((l) => l.length <= 4).length;
       if (frags / contentLines.length >= 0.5) {

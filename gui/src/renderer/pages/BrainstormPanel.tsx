@@ -97,6 +97,20 @@ export default function BrainstormPanel({
   const [members, setMembers] = React.useState<MemberView[]>([]);
   const [flow, setFlow] = React.useState<Array<{ id: number; name: string; text: string; kind: "thinking" | "idea" }>>([]);
   const [agentMeta, setAgentMeta] = React.useState<Record<string, { role?: string; provider?: string; model?: string; maxContext?: number }>>({});
+  /** A-968：thinking/idea 事件高频节流——每 100ms 最多 flush 一次，避免 50-100Hz 的逐 chunk setState 把 renderer 压爆 */
+  const flowBatchRef = React.useRef<Array<{ id: number; name: string; text: string; kind: "thinking" | "idea" }>>([]);
+  const flowRafRef = React.useRef<number | null>(null);
+  const flushFlow = React.useCallback((next: Array<{ id: number; name: string; text: string; kind: "thinking" | "idea" }>): void => {
+    flowBatchRef.current.push(...next);
+    if (flowBatchRef.current.length > 240) { flowBatchRef.current = flowBatchRef.current.slice(-120); }
+    if (flowRafRef.current !== null) { return; }
+    flowRafRef.current = window.requestAnimationFrame(() => {
+      flowRafRef.current = null;
+      const snap = flowBatchRef.current.slice(-120);
+      flowBatchRef.current = [];
+      setFlow(snap);
+    });
+  }, []);
   /** A-954：建群即预填成员卡所需的 agent 名字/角色（一次拉取缓存） */
   const [agentNames, setAgentNames] = React.useState<Record<string, string>>({});
 
@@ -146,7 +160,7 @@ export default function BrainstormPanel({
           return [...prev.slice(-120), { id: Date.now() + Math.random(), name: ev.name, text: t.slice(0, 200), kind: "thinking" }];
         });
       } else if (ev.state === "done") {
-        setFlow((prev) => [...prev.slice(-120), { id: Date.now() + Math.random(), name: ev.name, text: (ev.content ?? "").slice(0, 160), kind: "idea" }]);
+        flushFlow([{ id: Date.now() + Math.random(), name: ev.name, text: (ev.content ?? "").slice(0, 160), kind: "idea" }]);
       }
     });
     return off;

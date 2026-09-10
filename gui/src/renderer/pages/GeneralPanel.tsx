@@ -28,7 +28,7 @@ const THEMES: Array<{ id: ThemeName; name: string; desc: string; swatch: string[
   },
 ];
 
-export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props): JSX.Element {
+const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onThemeChange }: Props): JSX.Element {
   const [autostart, setAutostart] = React.useState<boolean | null>(null);
   const [exitMode, setExitModeState] = React.useState<"quit" | "background">("quit");
   const [busy, setBusy] = React.useState(false);
@@ -375,4 +375,6 @@ export default function GeneralPanel({ theme = "alpha", onThemeChange }: Props):
       </div>
     </div>
   );
-}
+});
+
+export default GeneralPanel;

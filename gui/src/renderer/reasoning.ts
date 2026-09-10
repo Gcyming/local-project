@@ -5,6 +5,7 @@
  * 持久化于 localStorage（slime_reasoning_preset），跨组件经 useSyncExternalStore 实时同步。
  */
 import React from "react";
+import { MODEL_CAPABILITIES, sortEfforts } from "../../../shared/gen/model-capabilities.js";
 
 /** 推理强度等级 → 中文名（展示标签；未收录的未知等级原样显示） */
 export const EFFORT_LABEL: Record<string, string> = {
@@ -47,14 +48,15 @@ export const REASONING_PRESET_KEY = "slime_reasoning_preset";
  */
 export const REASONING_PRESETS: ReasoningPreset[] = [
   { value: "upstream", label: "上游默认（以上游模型返回为准）", efforts: [] },
-  { value: "openai", label: "OpenAI（GPT-5 / o 系列）", efforts: ["minimal", "low", "medium", "high", "xhigh", "max"] },
-  { value: "claude", label: "Anthropic Claude", efforts: ["low", "medium", "high", "xhigh", "max"] },
-  { value: "deepseek", label: "DeepSeek（V4）", efforts: ["low", "high", "max"] },
-  { value: "gemini", label: "Google Gemini 3", efforts: ["minimal", "low", "medium", "high"] },
-  { value: "grok", label: "xAI Grok", efforts: ["low", "medium", "high", "xhigh"] },
-  { value: "kimi", label: "Moonshot Kimi（kimi-k3）", efforts: ["low", "high", "max"] },
-  { value: "qwen", label: "通义千问 Qwen", efforts: ["low", "medium", "xhigh"] },
-  { value: "minimax", label: "MiniMax（M2.x）", efforts: ["low", "medium", "high"] },
+  // A-918+ 单源合并：efforts 从 shared/model-capabilities.ts 的 MODEL_CAPABILITIES 派生（取该供应商
+  // 所有模型的等级并集 + 共识排序），与 main 端 inferThinkingSupport 共用同一数据源，杜绝双份漂移。
+  ...MODEL_CAPABILITIES.map((v) => {
+    const union = new Set<string>();
+    for (const m of v.models) {
+      for (const e of m.efforts ?? []) { union.add(e); }
+    }
+    return { value: v.key, label: v.label, efforts: sortEfforts([...union]) };
+  }),
 ];
 
 /** 读取当前推理等级模式；未设置或非法值一律回落「上游默认」 */

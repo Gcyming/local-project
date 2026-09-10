@@ -50,7 +50,7 @@ const MODE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "normal", label: "normal" },
 ];
 
-export default function AgentsPanel(props: Props): JSX.Element {
+const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
   const api = React.useRef<any>(null);
   const [agents, setAgents] = React.useState<AgentBrief[]>([]);
   const [detail, setDetail] = React.useState<AgentDetail | null>(null);
@@ -477,11 +477,13 @@ export default function AgentsPanel(props: Props): JSX.Element {
       )}
     </div>
   );
-}
+});
 
-function chip(color: string): React.CSSProperties {
+const chip = (color: string): React.CSSProperties => {
   return {
     display: "inline-block", marginLeft: 8, padding: "1px 8px", borderRadius: 8,
     fontSize: 11, color, background: "var(--accent-soft)", border: `1px solid ${color}`,
   };
-}
+};
+
+export default AgentsPanel;

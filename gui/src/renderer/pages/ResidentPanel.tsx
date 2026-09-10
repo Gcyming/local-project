@@ -6,13 +6,42 @@
  * - 布局：卡片分区 + 按钮恒横排 + 内容可滚动（A-911/A-912 保留）。
  * 数据经主进程（core-ts SchedulerService / SubAgentManager），4s 轻轮询刷新。
  */
-import React from "react";
+import React, { type JSX } from "react";
 
 type ResJob = { id: string; name: string; cron: string; prompt: string; agentId?: string; nextRun?: number; lastRun?: number; lastResult?: string; paused?: boolean; running?: boolean };
 type SubRun = { id: string; name: string; status: string; result?: string; error?: string; startedAt?: number; finishedAt?: number };
 type AgentBrief = { id: string; name: string; role?: string };
 
 const fmtTime = (ts?: number): string => (ts ? new Date(ts).toLocaleString() : "—");
+
+/** A-918++：子代理字母头像（名字 hash → 颜色 + 首字母；用户准备好的 D:\pilot project\gui\icon\icon_1cdszr8as42
+ *  系列 SVG 下一轮集成到 SubagentAvatar 形成"有自定义用自定义，无则字母兜底"的分级渲染） */
+const AVATAR_COLORS = ["#f87171", "#fb923c", "#fbbf24", "#a3e635", "#34d399", "#22d3ee", "#60a5fa", "#a78bfa", "#f472b6", "#94a3b8", "#fb7185", "#facc15", "#4ade80", "#38bdf8", "#818cf8", "#c084fc", "#e879f9", "#fda4af", "#fcd34d", "#86efac"];
+const AVATAR_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"]; // 21 个，对应 icon_1cdszr8as42 的 A-T 系列
+function SubagentAvatar({ name, size = 24, running = false }: { name: string; size?: number; running?: boolean }): JSX.Element {
+  const sum = [...name].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const color = AVATAR_COLORS[Math.abs(sum) % AVATAR_COLORS.length];
+  const initial = AVATAR_LETTERS[Math.abs(sum) % AVATAR_LETTERS.length] || (name[0] ?? "?").toUpperCase();
+  return (
+    <div style={{ position: "relative", flexShrink: 0 }}>
+      <div style={{
+        width: size, height: size, borderRadius: Math.max(4, size * 0.22),
+        background: color, color: "#fff",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: size * 0.42, fontWeight: 800, lineHeight: 1,
+        boxShadow: running ? `0 0 0 2px rgba(34,197,94,0.4), 0 0 10px ${color}80` : "none",
+        transition: "box-shadow 0.4s",
+      }}>{initial}</div>
+      {running && (
+        <span style={{
+          position: "absolute", right: -2, bottom: -2, width: 10, height: 10, borderRadius: "50%",
+          background: "#22c55e", border: "2px solid var(--bg)",
+          animation: "liveDot 1.2s ease-in-out infinite", willChange: "opacity, box-shadow, transform" as const,
+        }} />
+      )}
+    </div>
+  );
+}
 
 /** 子代理预设模板（点选填充表单，仍可修改） */
 const SUBAGENT_PRESETS = [
@@ -92,6 +121,8 @@ export default function ResidentPanel(): React.JSX.Element {
   const [modelOptions, setModelOptions] = React.useState<Array<{ value: string; label: string }>>([
     { value: "inherit", label: "继承（沿用目标 Agent 模型）" },
   ]);
+  // ── A-918+：用户选定的子代理（自建 agent id 列表；派发优先级 = 用户选定 > 内置专家）──
+  const [selectedAgentIds, setSelectedAgentIds] = React.useState<string[]>([]);
 
   // 加载可选的子代理执行模型：全部供应商的启用模型 + 本地模型
   React.useEffect(() => {
@@ -130,6 +161,10 @@ export default function ResidentPanel(): React.JSX.Element {
         setAgents(list);
         if (list.length === 0) { setJAgentId(""); setSaAgentId(""); }
       }
+    }).catch(() => { /* 忽略 */ });
+    // A-918+：回显用户选定子代理
+    api.resident?.subagentGetSelection?.().then((r: any) => {
+      if (r?.ok && Array.isArray(r.selectedAgentIds)) { setSelectedAgentIds(r.selectedAgentIds); }
     }).catch(() => { /* 忽略 */ });
   }, [api]);
 
@@ -287,6 +322,46 @@ export default function ResidentPanel(): React.JSX.Element {
           建议用便宜的/免费模型执行机械子任务，贵的模型专司统筹规划与评审。
         </div>
 
+        {/* A-918+：用户选定子代理——勾选自建 agent 作为子代理；任务自动派发时优先于内置专家，不足才自动创建补充 */}
+        <div style={{ marginTop: 10, padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
+          <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 2 }}>用户选定子代理（优先派发）</div>
+          <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8, lineHeight: 1.6 }}>
+            勾选的自建 Agent 将在任务自动派发时优先被选用；未勾选或无匹配时回退内置专家（代码审查/调研/数据分析），仍不足才自动创建通用子代理。
+          </div>
+          {agents.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>暂无自建 Agent，可到「Agent 管理」页创建后回来勾选。</div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {agents.map((a) => {
+                const checked = selectedAgentIds.includes(a.id);
+                return (
+                  <label key={a.id}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                      padding: "4px 10px", borderRadius: 16, fontSize: 12,
+                      border: `1px solid ${checked ? "var(--accent)" : "var(--border)"}`,
+                      background: checked ? "var(--accent-soft)" : "var(--bg-hover)",
+                      color: checked ? "var(--accent-hover)" : "var(--text-muted)",
+                    }}>
+                    <input type="checkbox" checked={checked}
+                      onChange={() => void (async () => {
+                        const next = checked
+                          ? selectedAgentIds.filter((id) => id !== a.id)
+                          : [...selectedAgentIds, a.id];
+                        setSelectedAgentIds(next);
+                        const r: any = await api.resident?.subagentSetSelection?.(next);
+                        setNotice(r?.ok ? "子代理选定已保存" : `保存失败：${r?.error ?? "未知"}`);
+                      })()}
+                      style={{ cursor: "pointer" }} />
+                    <span>{a.name}</span>
+                    {a.role ? <span style={{ fontSize: 11, opacity: 0.7 }}>{a.role}</span> : null}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         {/* 预设模板：点选即填，仍可自定义调整 */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8, marginTop: 10 }}>
           {SUBAGENT_PRESETS.map((p) => (
@@ -318,22 +393,29 @@ export default function ResidentPanel(): React.JSX.Element {
           <div style={{ color: "var(--text-dim)", fontSize: 12.5, marginTop: 10, padding: "12px", background: "var(--bg)", borderRadius: 8 }}>暂无子代理运行记录。选一个预设（或自己填）直接派发。</div>
         ) : (
           <div style={{ marginTop: 10, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", maxHeight: 240, overflowY: "auto", background: "var(--bg)" }}>
-            {[...runs].reverse().map((r) => (
-              <div key={r.id} style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)" }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontWeight: 600, fontSize: 12.5 }}>{r.name}</span>
-                  <span style={{ fontSize: 11.5, padding: "1px 8px", borderRadius: 8,
-                    background: r.status === "done" ? "rgba(0,200,120,.15)" : r.status === "fail" ? "rgba(255,80,80,.15)" : "var(--bg-hover)",
-                    color: r.status === "done" ? "#22c55e" : r.status === "fail" ? "#f87171" : "var(--text-muted)" }}>
-                    {r.status === "done" ? "完成" : r.status === "fail" ? "失败" : r.status === "running" ? "执行中" : "排队"}
-                  </span>
-                  <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{fmtTime(r.startedAt)}</span>
+            {[...runs].reverse().map((r) => {
+              const isRunning = r.status === "running";
+              const isDone = r.status === "done";
+              const isFail = r.status === "fail";
+              return (
+                <div key={r.id} style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)", background: isRunning ? "rgba(34,197,94,0.04)" : "transparent" }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <SubagentAvatar name={r.name} size={26} running={isRunning} />
+                    <span style={{ fontWeight: 600, fontSize: 12.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                    <span style={{ fontSize: 11.5, padding: "2px 9px", borderRadius: 8, flexShrink: 0,
+                      background: isDone ? "rgba(0,200,120,.15)" : isFail ? "rgba(255,80,80,.15)" : isRunning ? "rgba(34,197,94,.15)" : "var(--bg-hover)",
+                      color: isDone ? "#22c55e" : isFail ? "#f87171" : isRunning ? "#22c55e" : "var(--text-muted)",
+                      fontWeight: isRunning ? 700 : 500 }}>
+                      {isDone ? "✓ 完成" : isFail ? "✗ 失败" : isRunning ? "● 执行中" : "排队"}
+                    </span>
+                    <span style={{ color: "var(--text-dim)", fontSize: 11, flexShrink: 0 }}>{fmtTime(r.startedAt)}</span>
+                  </div>
+                  <div style={{ color: "var(--text-muted)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 3, paddingLeft: 34 }}>
+                    {isFail ? `✗ ${r.error ?? ""}` : isRunning ? "（运行中…）" : (r.result?.slice(0, 300) || "—")}
+                  </div>
                 </div>
-                <div style={{ color: "var(--text-muted)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 3 }}>
-                  {r.status === "fail" ? `✗ ${r.error ?? ""}` : r.result?.slice(0, 300)}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
