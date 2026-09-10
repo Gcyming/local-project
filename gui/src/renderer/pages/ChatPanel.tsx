@@ -3760,15 +3760,15 @@ export default function ChatPanel({
                 {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
               </span>
             </span>
-            {loading && (<>
+            {true && (<>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
-                <span style={{ color: "var(--text)", fontWeight: 600 }}>{streamTokens.toLocaleString()}</span>
+                <span style={{ color: streamTokens > 0 ? "var(--text)" : "var(--text-dim)", fontWeight: 600 }}>{streamTokens > 0 ? streamTokens.toLocaleString() : "—"}</span>
                 <span style={{ color: "var(--text-dim)", marginLeft: 2 }}>tokens</span>
               </span>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
-                <span style={{ color: "var(--text)", fontWeight: 600 }}>{fmtMs(streamElapsed)}</span>
+                <span style={{ color: streamElapsed > 0 ? "var(--text)" : "var(--text-dim)", fontWeight: 600 }}>{streamElapsed > 0 ? fmtMs(streamElapsed) : "—"}</span>
                 <span style={{ color: "var(--text-dim)", marginLeft: 2 }}>耗时</span>
               </span>
               <span style={{ color: "var(--text-dim)" }}>|</span>
