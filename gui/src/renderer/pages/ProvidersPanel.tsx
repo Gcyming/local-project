@@ -18,18 +18,20 @@ interface DraftModel extends ModelSpec { selected: boolean; }
 /** A-158：常用供应商预设库（对齐 LobeChat/Cherry Studio——选中即自动填充 base URL 与
  *  端点格式，根治「加不上」= Base URL 手填错误/格式选错的高频诱因）。
  *  模型列表仍按需「获取模型列表」/手动补充（各平台模型随版本变动，不宜硬编码）。 */
-const PRESET_PROVIDERS: Array<{ name: string; label: string; api_base: string; api_format: "openai" | "anthropic" | "auto"; hint?: string }> = [
-  { name: "deepseek", label: "DeepSeek（深度求索）", api_base: "https://api.deepseek.com", api_format: "auto", hint: "deepseek-chat / deepseek-reasoner" },
-  { name: "openai", label: "OpenAI", api_base: "https://api.openai.com/v1", api_format: "auto", hint: "gpt-4o / gpt-4o-mini" },
-  { name: "openrouter", label: "OpenRouter（聚合 300+）", api_base: "https://openrouter.ai/api/v1", api_format: "auto", hint: "免费模型池含大厂开源模型" },
-  { name: "siliconflow", label: "硅基流动 SiliconFlow", api_base: "https://api.siliconflow.cn/v1", api_format: "auto", hint: "Qwen / DeepSeek / GLM 等国内可达" },
-  { name: "moonshot", label: "Moonshot（Kimi）", api_base: "https://api.moonshot.cn/v1", api_format: "auto", hint: "kimi-k2 / moonshot-v1-*" },
-  { name: "zhipu", label: "智谱 GLM", api_base: "https://open.bigmodel.cn/api/paas/v4", api_format: "auto", hint: "glm-4 / glm-4-flash" },
-  { name: "dashscope", label: "阿里百炼（通义）", api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_format: "auto", hint: "qwen-plus / qwen-max" },
+const PRESET_PROVIDERS: Array<{ name: string; label: string; api_base: string; api_format: "openai" | "anthropic" | "auto"; hint?: string; models?: string[] }> = [
+  { name: "deepseek", label: "DeepSeek（深度求索）", api_base: "https://api.deepseek.com", api_format: "auto", hint: "deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp", models: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"] },
+  { name: "openai", label: "OpenAI", api_base: "https://api.openai.com/v1", api_format: "auto", hint: "gpt-4o / gpt-4o-mini", models: ["gpt-4o", "gpt-4o-mini"] },
+  { name: "openrouter", label: "OpenRouter（聚合 300+）", api_base: "https://openrouter.ai/api/v1", api_format: "auto", hint: "免费模型池含大厂开源模型", models: ["deepseek/deepseek-chat", "meta-llama/llama-3.3-70b-instruct"] },
+  { name: "siliconflow", label: "硅基流动 SiliconFlow", api_base: "https://api.siliconflow.cn/v1", api_format: "auto", hint: "Qwen / DeepSeek / GLM 等国内可达", models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"] },
+  { name: "moonshot", label: "Moonshot（Kimi）", api_base: "https://api.moonshot.cn/v1", api_format: "auto", hint: "kimi-k2 / moonshot-v1-*", models: ["kimi-k2-0711-preview", "moonshot-v1-8k"] },
+  { name: "zhipu", label: "智谱 GLM", api_base: "https://open.bigmodel.cn/api/paas/v4", api_format: "auto", hint: "glm-5.3 / glm-5.2 / glm-5.3-flash", models: ["glm-5.3", "glm-5.2", "glm-5.3-flash"] },
+  { name: "dashscope", label: "阿里百炼（通义）", api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_format: "auto", hint: "qwen3.7-max / qwen-plus / qwen3-8b", models: ["qwen3.7-max", "qwen-plus", "qwen3-8b"] },
   { name: "doubao", label: "火山引擎豆包", api_base: "https://ark.cn-beijing.volces.com/api/v3", api_format: "auto", hint: "doubao-*（需创建接入点）" },
-  { name: "groq", label: "Groq（极速推理）", api_base: "https://api.groq.com/openai/v1", api_format: "auto", hint: "llama-3.3 / meta-*" },
-  { name: "together", label: "Together AI", api_base: "https://api.together.xyz/v1", api_format: "auto", hint: "meta-llama / deepseek 等" },
-  { name: "anthropic", label: "Anthropic（Claude）", api_base: "https://api.anthropic.com", api_format: "anthropic", hint: "claude-*（Messages API）" },
+  { name: "groq", label: "Groq（极速推理）", api_base: "https://api.groq.com/openai/v1", api_format: "auto", hint: "llama-3.3 / meta-*", models: ["llama-3.3-70b-versatile"] },
+  { name: "together", label: "Together AI", api_base: "https://api.together.xyz/v1", api_format: "auto", hint: "meta-llama / deepseek 等", models: ["meta-llama/Llama-3.3-70B-Instruct-Turbo"] },
+  { name: "anthropic", label: "Anthropic（Claude）", api_base: "https://api.anthropic.com", api_format: "anthropic", hint: "claude-*（Messages API）", models: ["claude-sonnet-4-20250514"] },
+  { name: "opencode-zen", label: "OpenCode Zen（聚合网关）", api_base: "https://opencode.ai/zen/v1", api_format: "auto", hint: "deepseek-v4-flash / glm / kimi / claude / gpt 等（opencode.ai/auth 拿 key）", models: ["deepseek-v4-flash", "glm-5.3", "kimi-k3", "claude-sonnet-5", "gpt-5.5"] },
+  { name: "agnes", label: "Agnes AI（国内）", api_base: "https://api.agnes-ai.cn/v1", api_format: "auto", hint: "agnes-2.5-flash（512K 上下文·支持思考+工具调用）", models: ["agnes-2.5-flash"] },
   { name: "agi-anyi", label: "AGI-Anyi（免费池）", api_base: "https://api.agi-anyi.com", api_format: "auto", hint: "免费模型池（需代理）" },
 ];
 
@@ -207,13 +209,20 @@ export default function ProvidersPanel(): JSX.Element {
     try {
       const res = await api.current.providers.fetchModels(edit.api_base.trim(), edit.api_key.trim());
       if (res.ok && res.models) {
-        // 默认一个都不启用（用户按需用拨片开启；顶部提供「全选」）
-        const models = res.models.map((m: ModelSpec) => ({ ...m, selected: false }));
+        // A-918+：探测即 enrich（IPC 层已用 enrichModels）+ 默认 selected:true（自动选用），
+        // 满足「添加即用」的 UX 期望；用户仍可在拨片列关掉不想用的模型
+        const models = res.models.map((m: ModelSpec) => ({ ...m, selected: m.selected !== false }));
         setEdit({ ...edit, models, proto: "openai" });
-        showNotice(true, `探测成功：发现 ${res.models.length} 个模型（默认均未启用，可在列表中开启需要的模型）`);
+        showNotice(true, `探测成功：发现 ${res.models.length} 个模型（已自动启用，元数据已填充，可在列表中调整）`);
       } else {
-        setEdit({ ...edit, models: [] });
-        showModalError(res.error ?? "获取失败");
+        // A-918++：上游拉取失败 → 用官方文档核对过的预设模型兜底（严禁再出现 agnes/opencode/deepseek 这类 baseUrl 或模型名错误）
+        const preset = PRESET_PROVIDERS.find((p) => p.name === edit.name);
+        const fallbackIds = preset?.models ?? [];
+        const fallbackModels: DraftModel[] = fallbackIds.map((id) => ({ id, selected: true }));
+        setEdit({ ...edit, models: fallbackModels, proto: "openai" });
+        showModalError(
+          `${res.error ?? "获取失败"}——已用预设模型兜底：${fallbackIds.join("、") || "（该供应商无内置预设，请手动添加模型 ID）"}`,
+        );
       }
     } catch (e) {
       showModalError(`获取失败：${e instanceof Error ? e.message : String(e)}`);
