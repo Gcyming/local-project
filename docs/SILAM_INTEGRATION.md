@@ -118,12 +118,17 @@ max_nodes = 200000                # 树突节点上限
 
 ---
 
-## 下一步：4D 持久化联调
+## 4D 阶段：持久化（WAL + 检查点 + 崩溃恢复）✅ 已完成
 
-当前 save 端点实现最小版（直接写 .npy），4D 阶段需要：
-1. 接入 WAL（Write-Ahead Log）
-2. 实现崩溃恢复（检查点 + WAL 重放）
-3. 支持 split 克隆（Swarm 功能）
+4D 在 4C 基础上补齐大脑状态持久化（原 `save` 端点为最小版直接写 .npy）：
+
+- **新增**：`silam_core/persistence.py`（WAL + 检查点 + 崩溃恢复）+ `tests/test_persistence.py`（5 项）。
+- **WAL**：节点变化 → `WAL.append(op, step, idx, payload)` 写 `wal.log`（JSON 行），超 10MB 触发强制检查点。
+- **检查点**：`should_save(step)` 命中时 `Checkpointer.save` 写 `keys/values/fears/dormant_*/forgotten_buffer.npy` + `meta.json`，随后 `WAL.clear()`。
+- **崩溃恢复**：启动时 `Checkpointer.load()`（有则加载 .npy，无则从头）→ `WAL.replay()` 重放未持久化操作 → 恢复 `step_count` 与 `fear_history`。
+- **验证**：`pytest tests/test_persistence.py` 5 passed；回归 42 passed（37 原有 + 5 新增）。
+
+**下一步（4E 灰度上线）**：Arbiter 仲裁器（合并 SILAM 与 Qwen 输出）、状态显示行集成 CLI、GUI 监控面板。
 
 ---
 

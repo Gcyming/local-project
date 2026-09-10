@@ -175,7 +175,7 @@ target_str = str(args.get("url") or args.get("path") or args.get("file") or args
 | 5 | core/llm.py:442 | target_str 加 url 字段（1 行） |
 | 6 | config/agents.json | Elysia 加 sandbox_override.auto_approve_tools |
 | 7 | tests/test_tools.py | 45 用例全 mock（含 DNS Rebinding 钉扎断言、沙箱 workspace 兼容、Host 头断言） |
-| 8 | docs/BUGS.md | 新增 BUG-033 |
+| 8 | docs/漏洞修复清单.md | 记录 web_fetch/web_search 落地（对应 BUG-033） |
 
 建议实施顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 
