@@ -1705,6 +1705,12 @@ function registerIpcHandlers(): void {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("[gui:main] chat stream error:", msg);
+        // A-918++：中断类错误落盘（data/logs/chat-errors.log），便于事后归因"刚要开始就中断"
+        try {
+          const logDir = resolveExtra("../data/logs");
+          mkdirSync(logDir, { recursive: true });
+          writeFileSync(join(logDir, "chat-errors.log"), `${new Date().toISOString()}\t${cancelKey}\t${msg}\n`, { flag: "a" });
+        } catch { /* 落盘失败不影响主流程 */ }
         mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: cancelKey });
         mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: cancelKey });
         // D：失败轨迹也收敛广播（TraceViewer 见失败归因 eval=false + 错误摘要）
@@ -2512,6 +2518,15 @@ function registerIpcHandlers(): void {
       } else {
         items.push({ kind: "models", label: "本地模型", path: modelRoot, ok: false, source: "download", note: "暂无模型文件——首次使用本地推理时自动下载" });
       }
+      // A-918++：ADB（Android 调试桥）—— 检测安装情况（缺失给下载动作，就绪给启动服务动作）
+      try {
+        const ad = await adbService.detect();
+        if (ad.ok) {
+          items.push({ kind: "adb", label: "ADB（Android 调试桥）", path: ad.path, version: ad.version, ok: true, source: ad.source || "system", note: "已就绪——可连接模拟器/安卓设备；服务未启动时可点右侧按钮" });
+        } else {
+          items.push({ kind: "adb", label: "ADB（Android 调试桥）", ok: false, source: "missing", note: "未检测到 adb——下载 platform-tools 后即可连接安卓设备/模拟器" });
+        }
+      } catch { /* 忽略 */ }
       // 缺失项补动作：llama/bge 走内置下载器；python 缺失走官网（要求用户装 Python 后重建 venv，避免打包 Python 解释器）；
       // git 缺失走官网；action.kind = "download" → renderer 调 mind.download；"openExternal"/"openPath" 走 slime:runtime:open
       for (const it of items) {
@@ -2521,6 +2536,12 @@ function registerIpcHandlers(): void {
         else if (it.kind === "git") { it.action = { label: "下载 Git", kind: "openExternal", url: "https://git-scm.com/downloads" }; }
         // python 缺失：官网装 Python 后点"重建 venv"（vbox 真实路径在项目根 runtime/venv，不在 gui/runtime）
         else if (it.kind === "python") { it.action = { label: "下载 Python（装后再重建）", kind: "openExternal", url: "https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe" }; }
+      }
+      // A-918++：ADB —— 缺失给「下载 platform-tools」，就绪给「启动 ADB 服务」
+      for (const it of items) {
+        if (it.kind !== "adb") { continue; }
+        if (!it.ok) { it.action = { label: "下载 platform-tools", kind: "adbDownload" }; }
+        else { it.action = { label: "启动 ADB 服务", kind: "adbStart" }; }
       }
       return { ok: true, items };
     } catch (e) {
@@ -2709,6 +2730,14 @@ function registerIpcHandlers(): void {
   /** A-918++：ADB —— 重启设备 */
   handleTrusted<{ serial: string }>("slime:adb:reboot", async (_event, p): Promise<AdbCmdResult> => {
     return adbService.reboot(p?.serial ?? "");
+  });
+
+  /** A-918++：ADB —— 启动服务（连模拟器前需在跑）+ 停止服务 */
+  handleTrusted<void>("slime:adb:startServer", async () => {
+    return adbService.startServer();
+  });
+  handleTrusted<void>("slime:adb:killServer", async () => {
+    return adbService.killServer();
   });
 
   /** A-918++：MCP 官方 registry 联网搜索（registry.modelcontextprotocol.io） */

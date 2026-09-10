@@ -499,6 +499,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     push: (serial: string, local: string, remote: string) => ipcRenderer.invoke("slime:adb:push", { serial, local, remote }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
     /** A-918++：重启设备 */
     reboot: (serial: string) => ipcRenderer.invoke("slime:adb:reboot", { serial }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：启动/停止 ADB 服务（连模拟器前需 start-server） */
+    startServer: () => ipcRenderer.invoke("slime:adb:startServer") as Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>,
+    killServer: () => ipcRenderer.invoke("slime:adb:killServer") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
     /** A-918++：下载进度监听（主进程 → 渲染层） */
     onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => onMessage<{ state: string; percent: number; receivedMB: number; totalMB: number; error?: string }>("slime:adb:downloadProgress", cb),
   },
@@ -739,6 +742,8 @@ declare global {
         pull: (serial: string, remote: string, local: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         push: (serial: string, local: string, remote: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         reboot: (serial: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        startServer: () => Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>;
+        killServer: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => () => void;
       };
       http: {

@@ -3745,23 +3745,22 @@ export default function ChatPanel({
             </div>
           ) : (
           <>
-          {/* ─ 流式实时监测栏：token 计数 / 耗时 / 吞吐速率 / 模型 ── */}
-          {loading && (
-            <div style={{
-              display: "flex", alignItems: "center", gap: 12,
-              padding: "6px 14px",
-              borderTop: "1px solid var(--border)",
-              background: "var(--bg-secondary)",
-              fontSize: 11, color: "var(--text-muted)",
-              flexShrink: 0,
-            }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: loading ? "var(--accent)" : "var(--success)", animation: loading ? "thinkGlow 1.4s ease-in-out infinite" : "none", flexShrink: 0 }} />
-                <span className="thinking-hint-text" style={{ fontWeight: 600, color: "var(--text)" }}>
-                  {/* A-918++：流式状态显示层级——loading + 工具调用 / loading + 思考中 / 空闲复用力输入区下方的动态激励语（4s 切换） */}
-                  {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
-                </span>
+          {/* ─ A-918++ 实时监测栏：流式显示 token/耗时/吞吐/context；空闲显示动态激励语（4s 切换）── */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 12,
+            padding: "6px 14px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-secondary)",
+            fontSize: 11, color: "var(--text-muted)",
+            flexShrink: 0,
+          }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: loading ? "var(--accent)" : "var(--success)", animation: loading ? "thinkGlow 1.4s ease-in-out infinite" : "none", flexShrink: 0 }} />
+              <span className="thinking-hint-text" style={{ fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
               </span>
+            </span>
+            {loading && (<>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
                 <span style={{ color: "var(--text)", fontWeight: 600 }}>{streamTokens.toLocaleString()}</span>
@@ -3794,8 +3793,8 @@ export default function ChatPanel({
                   </span>
                 </>
               )}
-            </div>
-          )}
+            </>)}
+          </div>
           {/* A-969：上下文自动压缩过渡动画（发送前触发；prep→summarize→done/trunc，完成后自动收起并继续发送） */}
           {compressUi && (
             <div style={{
@@ -3862,12 +3861,6 @@ export default function ChatPanel({
                 </div>
               ))}
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{pendingImages.length}/4 张 · 模型将识别图中内容</span>
-            </div>
-          )}
-          {/* A-918++：输入框上方动态激励/调侃语（独立行，输入为空且未聚焦时显示，输入即消失避免和文本冲突） */}
-          {!input && !inputFocused && (
-            <div style={{ fontSize: 12.5, color: "var(--text-secondary)", padding: "2px 6px 6px", lineHeight: 1.5, opacity: 0.85, transition: "opacity 0.18s", pointerEvents: "none" }}>
-              {PLACEHOLDER_PHRASES[placeholderIndex]}
             </div>
           )}
           <textarea ref={inputRef} value={input}
