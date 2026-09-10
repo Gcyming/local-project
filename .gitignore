@@ -130,3 +130,10 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# ── 工具临时残留（A-918++，可再生成）────────────────────────────────────
+.workbuddy/
+*.bak
+*.backup
+vitest.config.ts.timestamp-*.mjs
+*.timestamp-*.mjs
