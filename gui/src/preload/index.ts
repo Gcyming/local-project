@@ -515,6 +515,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-918++：用系统默认浏览器打开某个访问地址 */
     open: (url: string) => ipcRenderer.invoke("slime:http:open", { url }) as Promise<{ ok: boolean; error?: string }>,
   },
+  /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
+  onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string }) => void) =>
+    onMessage<{ kind: "url"; url: string; name?: string }>("slime:sidebar:open", cb),
 });
 
 declare global {
@@ -745,6 +748,8 @@ declare global {
         list: () => Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>>;
         open: (url: string) => Promise<{ ok: boolean; error?: string }>;
       };
+      /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
+      onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string }) => void) => () => void;
     };
   }
 }
