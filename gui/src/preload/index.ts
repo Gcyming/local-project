@@ -502,6 +502,19 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-918++：下载进度监听（主进程 → 渲染层） */
     onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => onMessage<{ state: string; percent: number; receivedMB: number; totalMB: number; error?: string }>("slime:adb:downloadProgress", cb),
   },
+  http: {
+    /** A-918++：把本地目录作为静态服务启动（默认 0.0.0.0，端口留空自动选） */
+    serve: (p: { dir: string; port?: number; host?: string; spa?: boolean }) =>
+      ipcRenderer.invoke("slime:http:serve", p) as Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }>,
+    /** A-918++：停止指定服务 */
+    stop: (id: string) => ipcRenderer.invoke("slime:http:stop", { id }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：停止全部服务 */
+    stopAll: () => ipcRenderer.invoke("slime:http:stopAll") as Promise<{ ok: boolean; stopped: number }>,
+    /** A-918++：列出运行中的服务 */
+    list: () => ipcRenderer.invoke("slime:http:list") as Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>>,
+    /** A-918++：用系统默认浏览器打开某个访问地址 */
+    open: (url: string) => ipcRenderer.invoke("slime:http:open", { url }) as Promise<{ ok: boolean; error?: string }>,
+  },
 });
 
 declare global {
@@ -724,6 +737,13 @@ declare global {
         push: (serial: string, local: string, remote: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         reboot: (serial: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => () => void;
+      };
+      http: {
+        serve: (p: { dir: string; port?: number; host?: string; spa?: boolean }) => Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }>;
+        stop: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        stopAll: () => Promise<{ ok: boolean; stopped: number }>;
+        list: () => Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>>;
+        open: (url: string) => Promise<{ ok: boolean; error?: string }>;
       };
     };
   }
