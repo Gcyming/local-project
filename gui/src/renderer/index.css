@@ -24,6 +24,15 @@
   --danger: #ef4444;
   --danger-soft: rgba(239, 68, 68, 0.14);
 
+  /* ── 代码增删 diff 配色（VS Code diffEditor 范式：绿=新增、红=删除、蓝=修改） ── */
+  --diff-add: #3fb950;
+  --diff-add-bg: rgba(46, 160, 67, 0.16);
+  --diff-add-line: rgba(46, 160, 67, 0.28);
+  --diff-del: #f85149;
+  --diff-del-bg: rgba(248, 81, 73, 0.14);
+  --diff-del-line: rgba(248, 81, 73, 0.24);
+  --diff-mod: #58a6ff;
+
   /* ── 尺寸 ── */
   --titlebar-h: 40px;
   --sidebar-w: 200px;
@@ -36,49 +45,75 @@
 
 /* ── Beta 主题：毛玻璃质感、黑里透蓝（史莱姆品牌配色：天蓝/紫/深蓝） ── */
 :root[data-theme="beta"] {
-  --bg: #0a0e1c;
-  --bg-secondary: rgba(18, 26, 48, 0.72);
-  --bg-card: rgba(22, 30, 56, 0.66);
-  --bg-input: rgba(13, 18, 36, 0.6);
-  --bg-hover: rgba(56, 189, 248, 0.14);
-  --border: rgba(140, 246, 251, 0.16);
-  --border-hover: rgba(140, 246, 251, 0.34);
-  --text: #e6f1ff;
-  --text-primary: #e6f1ff;
-  --text-secondary: #9db4d6;
-  --text-muted: #6f89ad;
-  --text-dim: #4c6286;
+  --bg: #05070e;
+  --bg-secondary: rgba(15, 22, 40, 0.6);
+  --bg-card: rgba(20, 28, 52, 0.5);
+  --bg-input: rgba(10, 15, 30, 0.55);
+  --bg-hover: rgba(56, 189, 248, 0.12);
+  --border: rgba(140, 246, 251, 0.14);
+  --border-hover: rgba(56, 189, 248, 0.35);
+  --text: #eef4ff;
+  --text-primary: #eef4ff;
+  --text-secondary: #9fb3d4;
+  --text-muted: #6c84a8;
+  --text-dim: #46597a;
   --accent: #38bdf8;
   --accent-hover: #7dd3fc;
-  --accent-soft: rgba(56, 189, 248, 0.16);
+  --accent-soft: rgba(56, 189, 248, 0.12);
   --success: #34d399;
-  --success-soft: rgba(16, 185, 129, 0.14);
+  --success-soft: rgba(16, 185, 129, 0.12);
   --warning: #fbbf24;
   --danger: #f87171;
-  --danger-soft: rgba(239, 68, 68, 0.16);
+  --danger-soft: rgba(239, 68, 68, 0.15);
+
+  /* ── 代码增删 diff 配色（beta 主题适配） ── */
+  --diff-add: #56d364;
+  --diff-add-bg: rgba(46, 160, 67, 0.16);
+  --diff-add-line: rgba(46, 160, 67, 0.28);
+  --diff-del: #ff7b72;
+  --diff-del-bg: rgba(248, 81, 73, 0.14);
+  --diff-del-line: rgba(248, 81, 73, 0.24);
+  --diff-mod: #79c0ff;
 }
 
-/* Beta 主题：基底黑里透蓝（径向渐变模拟史莱姆折射光） */
+/* Beta 主题：基底黑里透蓝——A-918+ 克制晕影（从 0.16/0.12/0.18 收窄），主体更黑，天蓝只作边缘光晕 */
 :root[data-theme="beta"] .app {
   background:
-    radial-gradient(1100px 760px at 12% -12%, rgba(56, 189, 248, 0.16), transparent 58%),
-    radial-gradient(900px 640px at 108% 18%, rgba(208, 152, 255, 0.12), transparent 55%),
-    radial-gradient(1000px 900px at 50% 125%, rgba(60, 45, 203, 0.18), transparent 62%),
+    radial-gradient(900px 620px at 14% -14%, rgba(56, 189, 248, 0.10), transparent 55%),
+    radial-gradient(760px 520px at 106% 12%, rgba(147, 130, 255, 0.07), transparent 52%),
+    radial-gradient(820px 760px at 50% 128%, rgba(38, 50, 150, 0.12), transparent 60%),
     var(--bg);
 }
 
-/* Beta 主题：毛玻璃面板（只保留结构件：侧栏 / 标题栏 / 右侧栏）。
-   A-131 性能优化：去掉 .card / .glass-bar / .glass-input 上的 backdrop-filter——
-   ① 卡片被广泛用于滚动列表内（StatusPanel / ProvidersPanel / SkillsPanel 等），
-      内容滚过卡片下方时会强制逐帧重模糊整块背景，是滚动掉帧的合成成本大头；
-   ② 多层嵌套毛玻璃（毛玻璃面板里叠毛玻璃卡片）会触发 GPU 逐层重新 lamination，成本爆炸。
-   移除后卡片/输入条保留半透明底色（rgba 变量不变），视觉仍通透，但不再每帧重算模糊。
-   结构件 blur 10px 稳定不动，毛玻璃质感不变。 */
+/* Beta 主题：结构件毛玻璃（A-918++：blur 12px→4px，12px 每帧重模糊是全屏常驻 3 区域
+   持续 GPU 重活的主因；4px 视觉仍毛玻璃但 GPU 负担降 60%+，卡顿/撕裂显著改善） */
 :root[data-theme="beta"] .sidebar,
 :root[data-theme="beta"] .titlebar,
 :root[data-theme="beta"] .right-sidebar {
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* A-918++ Beta：卡片伪磨砂质感（顶部内高光模拟玻璃厚度 + 半透明底 + 细边框 + 天蓝微晕影）。
+   A-918++ 撕裂修复：去掉 box-shadow inset + hover glow（box-shadow 每帧重算导致撕裂），
+   改用 border + 渐变底（无 shadow 重算，流畅）。 */
+:root[data-theme="beta"] .card {
+  background: linear-gradient(180deg, rgba(38, 52, 92, 0.42), rgba(17, 24, 46, 0.5));
+  border: 1px solid rgba(140, 246, 251, 0.12);
+}
+/* 卡片 hover：仅变 border-color（无 box-shadow 重算，不撕裂） */
+:root[data-theme="beta"] .card:hover {
+  border-color: rgba(56, 189, 248, 0.32);
+}
+
+/* A-918++ Beta：主按钮天蓝晕影（静态 glow，去"蓝屏"式大面积纯蓝填充） */
+:root[data-theme="beta"] .btn.primary {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.28), rgba(14, 116, 200, 0.28));
+  border: 1px solid rgba(125, 211, 252, 0.5);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+:root[data-theme="beta"] .btn.primary:hover {
+  box-shadow: 0 0 22px rgba(56, 189, 248, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 /* Beta 主题：主内容区透出基底渐变，让上层毛玻璃面板有可折射的光源 */
@@ -557,15 +592,81 @@ code,
 
 /* 旋转动画（加载图标） */
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.icon-spin { animation: spin 1s linear infinite; }
+.icon-spin { animation: spin 1s linear infinite; will-change: transform; } /* A-918++：will-change 提示 GPU 合成层 */
 
 /* 活动状态脉冲点 */
 @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
+
+/* A-918++：思考中呼吸光晕（GPU 合成：opacity + transform + drop-shadow 光晕，不触发 paint，流畅） */
+@keyframes thinkGlow {
+  0%, 100% { opacity: 0.45; transform: scale(0.75); filter: drop-shadow(0 0 2px var(--accent)); }
+  50% { opacity: 1; transform: scale(1.25); filter: drop-shadow(0 0 9px var(--accent)); }
+}
+/* 思考时间线节点呼吸光晕（同样 GPU 合成） */
+@keyframes breatheGlow {
+  0%, 100% { opacity: 0.5; filter: drop-shadow(0 0 1px var(--accent)); }
+  50% { opacity: 1; filter: drop-shadow(0 0 6px var(--accent)); }
+}
+
+/* A-918++：思考提示语字体呼吸（opacity + text-shadow 光晕，GPU 合成） */
+@keyframes textBreathe {
+  0%, 100% { opacity: 0.62; text-shadow: 0 0 1px transparent; }
+  50% { opacity: 1; text-shadow: 0 0 8px var(--accent); }
+}
+.thinking-hint-text {
+  animation: textBreathe 2.2s ease-in-out infinite;
+  display: inline-block;
+  will-change: opacity, text-shadow;
+}
+
+/* A-918++：子代理活跃指示脉冲点（右下角小绿点，让用户直观看到哪些子代理正在跑） */
+@keyframes liveDot {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(34,197,94,0.5); }
+  50% { transform: scale(1.15); box-shadow: 0 0 0 4px rgba(34,197,94,0); }
+}
+
+/* A-918++：流式打字机末字光标闪烁（partial 末尾 2×16 矩形 + 1s step-start 步进） */
+@keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+/* 流式"正在思考"三点跳动（partial 空时显示，3 个点轮跳 1.2s 周期） */
+@keyframes streamDotJump { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-4px); opacity: 1; } }
+.stream-dot-row { display: inline-flex; gap: 3px; align-items: center; }
+.stream-dot { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: streamDotJump 1.2s ease-in-out infinite; will-change: transform, opacity; }
+
+/* A-918++：文字扫光（用户要的光效，业界 shimmer 变体）— 仅用于思考历程的文本（非正文/表格/代码）。
+   高亮斜带从文字左扫到右，4.5s 循环；高亮带用低透明度 rgba 柔和不刺眼 */
+@keyframes textScanLight { 0% { background-position: 200% 50%; } 100% { background-position: -200% 50%; } }
+.text-scan-light {
+  background: linear-gradient(90deg, var(--text) 0%, var(--text) 42%, rgba(147, 197, 253, 0.55) 50%, var(--text) 58%, var(--text) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: textScanLight 4.5s linear infinite;
+  will-change: background-position;
+}
 
 /* A-969：上下文压缩过渡动画——整理/摘要阶段的进度条 + 浮层淡入 */
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes compressBar { 0% { width: 6%; opacity: 0.6; } 40% { width: 55%; } 70% { width: 72%; opacity: 1; } 100% { width: 92%; opacity: 0.75; } }
 .compress-bar { animation: compressBar 2.2s ease-in-out infinite; }
+
+/* A-918++：代码语法高亮（VS Code Dark+ 主流配色：注释绿灰/字符串橙红/数字浅绿/关键字紫红） */
+.hl-c { color: #6a9955; font-style: italic; }     /* comment 绿灰斜（VS Code） */
+.hl-s { color: #ce9178; }                        /* string 橙红（VS Code） */
+.hl-n { color: #b5cea8; }                        /* number 浅绿（VS Code） */
+.hl-k { color: #c586c0; font-weight: 500; }      /* keyword 紫红（VS Code） */
+.hl-f { color: #dcdcaa; }                        /* function/method 名 浅黄（VS Code） */
+.hl-t { color: #4ec9b0; }                        /* type/class 青绿（VS Code） */
+.hl-v { color: #9cdcfe; }                        /* variable 浅蓝（VS Code） */
+
+/* A-918+：呼吸光效——仅 opacity 明暗（GPU 合成，不触发 paint）。
+ * 此前含 box-shadow 扩散：box-shadow 动画每帧触发 paint，思考时间线节点多时导致主线程占用（卡顿）。 */
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
 
 /* ── 右侧栏（工作树 / 任务 / 终端 / 浏览器 / Git） ── */
 .right-sidebar {
@@ -608,7 +709,7 @@ body.slime-resizing .right-sidebar {
   transition: none;
 }
 body.slime-resizing {
-  cursor: col-resize;
+  cursor: col-resize !important; /* A-918+：!important 兜底（避免被其他选择器覆盖导致拖动结束后 cursor 卡死） */
   user-select: none;
   -webkit-user-select: none;
 }
@@ -1155,9 +1256,16 @@ body.slime-resizing {
 /* ── Markdown 预览（右侧文件查看器 .md 渲染） ── */
 .markdown-body {
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 15px; /* A-918++：14→15，正文再放大；中文宋体 fallback 太细，提高字号+字重 + 黑体优先 */
+  font-weight: 500;
+  line-height: 1.85;
   word-wrap: break-word;
+  /* A-918++：强制黑体/无衬线优先（避免 chromium 中文回退到宋体 SimSun 极细）
+     - 苹方/雅黑/Hiragino Sans GB（macOS）/ Noto Sans CJK SC（Linux）皆可 */
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", "Source Han Sans CN", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
@@ -1168,21 +1276,21 @@ body.slime-resizing {
 .markdown-body h5,
 .markdown-body h6 {
   margin: 1.1em 0 0.5em;
-  line-height: 1.35;
+  line-height: 1.4;
   font-weight: 700;
   color: var(--text);
 }
-.markdown-body h1 { font-size: 1.7em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
-.markdown-body h2 { font-size: 1.4em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
-.markdown-body h3 { font-size: 1.2em; }
-.markdown-body h4 { font-size: 1.05em; }
-.markdown-body p { margin: 0.6em 0; }
+.markdown-body h1 { font-size: 1.9em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.markdown-body h2 { font-size: 1.55em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+.markdown-body h3 { font-size: 1.3em; }
+.markdown-body h4 { font-size: 1.15em; }
+.markdown-body p { margin: 0.7em 0; }
 .markdown-body a { color: var(--accent-hover); text-decoration: none; }
 .markdown-body a:hover { text-decoration: underline; }
 .markdown-body strong { color: var(--text); font-weight: 700; }
 .markdown-body ul,
-.markdown-body ol { margin: 0.6em 0; padding-left: 1.6em; }
-.markdown-body li { margin: 0.25em 0; }
+.markdown-body ol { margin: 0.7em 0; padding-left: 1.6em; }
+.markdown-body li { margin: 0.3em 0; }
 .markdown-body li > ul,
 .markdown-body li > ol { margin: 0.2em 0; }
 .markdown-body blockquote {
@@ -1194,8 +1302,9 @@ body.slime-resizing {
   border-radius: 0 4px 4px 0;
 }
 .markdown-body code {
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12.5px;
+  font-family: Consolas, "Cascadia Code", "Courier New", monospace;
+  font-size: 14px; /* A-918++：13.5→14，代码块放大 */
+  font-weight: 600; /* A-918++：500→600，代码块加粗 */
   padding: 0.15em 0.4em;
   color: var(--accent-hover);
   background: var(--bg-hover);
@@ -1208,26 +1317,29 @@ body.slime-resizing {
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: auto;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 .markdown-body pre code {
   padding: 0;
   background: transparent;
   color: var(--text);
+  font-weight: 500;
 }
 .markdown-body table {
   border-collapse: collapse;
   margin: 0.8em 0;
   width: 100%;
-  font-size: 12.5px;
+  font-size: 14px; /* A-918++：12.5→14，表格内文字放大；黑体优先确保中文不细 */
+  font-weight: 500;
 }
 .markdown-body th,
 .markdown-body td {
   border: 1px solid var(--border);
-  padding: 6px 10px;
+  padding: 8px 12px; /* A-918++：6,10→8,12，单元格更舒展 */
   text-align: left;
+  font-weight: 500;
 }
-.markdown-body th { background: var(--bg-hover); font-weight: 600; color: var(--text); }
+.markdown-body th { background: var(--bg-hover); font-weight: 700; color: var(--text); }
 .markdown-body tr:nth-child(2n) td { background: rgba(255, 255, 255, 0.02); }
 .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
 .markdown-body img { max-width: 100%; border-radius: 6px; }
@@ -1296,23 +1408,34 @@ body.slime-resizing {
 .think-step {
   position: relative;
   margin: 2px 0 6px;
+  animation: fadeIn 0.18s ease; /* A-918+：思考段落淡入（离散新节点一次性淡入，不闪烁） */
 }
 .think-step-mark {
   position: absolute; left: -20px; top: 8px;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+  animation: breatheGlow 1.8s ease-in-out infinite; /* A-918+：时间线节点呼吸光晕（GPU 合成，带光晕不卡） */
+  will-change: opacity, filter; /* A-918++：will-change 提示 GPU 合成层 */
 }
 .think-step-text {
-  font-size: 12.5px; line-height: 1.7; color: var(--text-muted);
+  font-size: 14.5px; /* A-918++：12.5→14.5，思考文字和正文一样大——用户反馈"细、小、颗粒感" */
+  line-height: 1.75;
+  color: var(--text);
+  font-weight: 500; /* A-918++：加粗——避免细黑字颗粒感 */
   word-break: break-word;
   white-space: pre-line; /* A-174：配合 normalizeThinkingText 规范化后的文本，保留段落换行，合并多余空白 */
+  /* A-918++：黑体优先（避免 chromium fallback 宋体细字）+ antialiased 字形更平滑 */
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", "Source Han Sans CN", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 .think-step-text > *:first-child { margin-top: 0; }
 .think-step-text > *:last-child { margin-bottom: 0; }
 .think-tool-node {
   position: relative;
   margin: 2px 0 6px;
+  animation: fadeIn 0.18s ease; /* A-918+：工具节点淡入 */
 }
 .think-tool-mark {
   position: absolute; left: -20px; top: 9px;
@@ -1330,6 +1453,64 @@ body.slime-resizing {
   transition: background 0.15s;
 }
 .think-tool-btn:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+/* A-918++ 调整：成功/失败只 4px 左色条（不要整行满色，太"吵"）+ 标签字色保留 */
+.think-tool-btn[data-status="ok"] {
+  border-left: 4px solid var(--success);
+  padding-left: 7px; /* 4px 色条 + 原 8px 视觉对齐略减 */
+}
+.think-tool-btn[data-status="fail"] {
+  border-left: 4px solid var(--danger);
+  padding-left: 7px;
+}
+
+/* A-918++：VS Code 风格 diff 块（file_write 工具结果展开时显示 -/+ 整行背景 + 行首 +/-） */
+.think-diff-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.think-diff-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  font-size: 10.5px;
+  font-family: "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 600;
+}
+.think-diff-body {
+  max-height: 280px;
+  overflow: auto;
+  background: var(--bg);
+}
+.think-diff-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 0 8px;
+  white-space: pre;
+  color: var(--text);
+}
+.think-diff-row.diff-add { background: var(--diff-add-bg); }
+.think-diff-row.diff-del { background: var(--diff-del-bg); }
+.think-diff-row.diff-eq  { opacity: 0.55; }
+.think-diff-mark {
+  flex-shrink: 0;
+  width: 18px;
+  color: var(--text-dim);
+  user-select: none;
+  font-weight: 700;
+}
+.think-diff-row.diff-add .think-diff-mark { color: var(--diff-add); }
+.think-diff-row.diff-del .think-diff-mark { color: var(--diff-del); }
+.think-diff-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
 .think-tool-name {
   color: var(--accent-hover); font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

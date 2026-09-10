@@ -12,9 +12,12 @@ import { createPortal } from "react-dom";
 import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets } from "../../shared/ipc.js";
 import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
-import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FileMiniIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, type IconProps } from "../components/Icon.js";
+import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, type IconProps } from "../components/Icon.js";
+import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
+import SubAgentBar from "./SubAgentBar.js";
 import { confirmAsync, alertAsync } from "../dialog.js";
 import { useReasoningPreset, presetEffortsOf, presetLabelOf, useThinkingPreset, thinkingForcedOff } from "../reasoning.js";
+import { inferModelCapabilities } from "../../../../shared/gen/model-capabilities.js";
 
 /**
  * 推理强度等级 → 中文名（仅作展示标签）。等级以当前模型「上游返回」为准，
@@ -474,6 +477,8 @@ interface GhostSelectOption {
   title?: string;
   /** 选项前置图标（如审批档位图标） */
   icon?: React.ReactNode;
+  /** 不可选（如未启用的模型：灰显+点击不切换，仅展示） */
+  disabled?: boolean;
 }
 
 interface GhostSelectProps {
@@ -618,9 +623,14 @@ function GhostSelect({ value, options, onChange, title, style, maxWidth = 260, d
                   key={o.value}
                   type="button"
                   title={o.title ?? o.label}
-                  className={`ghost-dropdown-item${o.value === value ? " active" : ""}`}
-                  style={{ display: "block", width: "100%", textAlign: "left", boxSizing: "border-box" }}
-                  onClick={() => { onChange(o.value); setOpen(false); }}
+                  className={`ghost-dropdown-item${o.value === value ? " active" : ""}${o.disabled ? " disabled" : ""}`}
+                  style={{
+                    display: "block", width: "100%", textAlign: "left", boxSizing: "border-box",
+                    opacity: o.disabled ? 0.45 : 1,
+                    cursor: o.disabled ? "not-allowed" : "pointer",
+                  }}
+                  disabled={o.disabled}
+                  onClick={() => { if (o.disabled) { return; } onChange(o.value); setOpen(false); }}
                 >
                   {o.label}
                 </button>
@@ -772,6 +782,60 @@ function renderTextWithLinks(text: string): React.ReactNode[] {
   return out;
 }
 
+/** A-918++：简化行级 diff（LCS 动态规划），输出 (- 删除 / + 新增 / = 相同) 三态
+ *  用于 file_write 等工具结果展开时显示 VS Code 风格红绿行块；O(n·m) 适合 <2k 行的编辑 */
+function simpleDiffLines(a: string, b: string): Array<{ op: "=" | "+" | "-"; text: string }> {
+  const aLines = a.length ? a.split("\n") : [""];
+  const bLines = b.length ? b.split("\n") : [""];
+  const n = aLines.length, m = bLines.length;
+  // 极小文件直接全 + 全 -（避免 O(n·m) 内存爆炸）
+  if (n * m > 200000) {
+    return [
+      ...aLines.map((t) => ({ op: "-" as const, text: t })),
+      ...bLines.map((t) => ({ op: "+" as const, text: t })),
+    ];
+  }
+  const dp: Uint32Array[] = [];
+  for (let i = 0; i <= n; i++) { dp.push(new Uint32Array(m + 1)); }
+  for (let i = 1; i <= n; i++) {
+    const ai = aLines[i - 1];
+    const row = dp[i], prev = dp[i - 1];
+    for (let j = 1; j <= m; j++) { row[j] = ai === bLines[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], row[j - 1]); }
+  }
+  const out: Array<{ op: "=" | "+" | "-"; text: string }> = [];
+  let i = n, j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && aLines[i - 1] === bLines[j - 1]) { out.push({ op: "=", text: aLines[i - 1] }); i--; j--; }
+    else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { out.push({ op: "+", text: bLines[j - 1] }); j--; }
+    else { out.push({ op: "-", text: aLines[i - 1] }); i--; }
+  }
+  return out.reverse();
+}
+
+/** A-918++：diff 块渲染组件（VS Code 风格：行首 +/- 标识 + 整行红绿背景 + 等宽字体） */
+const DiffBlock = React.memo(function DiffBlock({ oldText, newText }: { oldText: string; newText: string }): JSX.Element {
+  const lines = React.useMemo(() => simpleDiffLines(oldText, newText), [oldText, newText]);
+  let adds = 0, dels = 0;
+  for (const l of lines) { if (l.op === "+") adds++; else if (l.op === "-") dels++; }
+  return (
+    <div className="think-diff-block" style={{ marginTop: 6 }}>
+      <div className="think-diff-header">
+        <span style={{ color: "var(--success)" }}>+{adds}</span>
+        <span style={{ color: "var(--danger)", marginLeft: 6 }}>−{dels}</span>
+        <span style={{ marginLeft: "auto", color: "var(--text-dim)" }}>vs 原内容</span>
+      </div>
+      <div className="think-diff-body">
+        {lines.map((l, i) => (
+          <div key={i} className={`think-diff-row diff-${l.op === "=" ? "eq" : l.op === "+" ? "add" : "del"}`}>
+            <span className="think-diff-mark">{l.op === "=" ? " " : l.op === "+" ? "+" : "−"}</span>
+            <span className="think-diff-text">{l.text || "\u00A0"}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
 /** 时间线节点组件（A-171：思考段落直接正文显示，工具调用为小型可折叠行；detail 可点击在右侧栏打开） */
 const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { step: TimelineStep; autoExpand?: boolean }): JSX.Element {
   // hooks 必须在每次渲染同序调用（React 规则，否则条件返回导致渲染崩溃/黑屏）：
@@ -794,7 +858,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
           }}
         >
           <span className="think-step-mark" style={{ flexShrink: 0 }} />
-          <ChevronIcon size={10} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)", transition: "transform 0.18s" }} />
+          <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)", transition: "transform 0.18s" }} />
           <span style={{
             fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5, overflow: "hidden",
             textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0,
@@ -821,7 +885,20 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   const toolCat = isCmd ? "执行命令" : isDelete ? "删除" : isWrite ? "写入" : isSearch ? "网页访问" : isRead ? "读取" : "";
   const statusColor = isCmd ? "#a78bfa" : isDelete ? "#f87171" : isWrite ? "#34d399" : isSearch ? "#60a5fa" : isRead ? "#fbbf24" : "var(--text-dim)";
   // A-172：结果状态判定——失败类前缀显红（沙箱拒绝/未找到/错误），其余视作成功
-  const r = (tool.result ?? "").trim();
+  // A-918++：先剥离 file_write 嵌入的 [__slime_diff__]old|new[/__slime_diff__] 标记
+  // （base64 隐藏在 result 文本里供 diff 渲染，剥离后不影响 isFail 判定与正常显示）
+  const rawResult = (tool.result ?? "");
+  let oldForDiff: string | null = null, newForDiff: string | null = null;
+  let displayResult = rawResult;
+  const diffMatch = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(rawResult);
+  if (diffMatch) {
+    try {
+      oldForDiff = Buffer.from(diffMatch[1], "base64").toString("utf-8");
+      newForDiff = Buffer.from(diffMatch[2], "base64").toString("utf-8");
+    } catch { /* base64 损坏则忽略 diff */ }
+    displayResult = rawResult.replace(diffMatch[0], "").trim();
+  }
+  const r = displayResult.trim();
   const isFail = r.length > 0 && /^(\[|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
   const hasBody = !!tool.detail || !!r;
   const statusLabel = !r ? (isWrite ? "已执行" : "调用中") : isFail ? "失败" : "成功";
@@ -844,7 +921,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   return (
     <div className="think-tool-node">
       <div className="think-tool-mark" style={{ background: isFail ? "#f87171" : statusColor }} />
-      <div className="think-tool-btn" style={{ display: "flex", flexWrap: "nowrap", alignItems: "center", gap: 5 }}>
+      <div className="think-tool-btn" data-status={isFail ? "fail" : "ok"} style={{ display: "flex", flexWrap: "nowrap", alignItems: "center", gap: 5 }}>
         <span style={{ display: "inline-flex", alignItems: "center", flexShrink: 0 }}>
           <Icon size={12} style={{ color: isFail ? "#f87171" : "var(--accent-hover)" }} />
         </span>
@@ -881,7 +958,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             title={expanded ? "收起详情" : "展开详情"}
             style={{ background: "transparent", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", flexShrink: 0 }}
           >
-            <ChevronIcon size={11} rotate={expanded ? 90 : 0} style={{ color: "var(--text-dim)", transition: "transform 0.2s" }} />
+            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ color: "var(--text-dim)", transition: "transform 0.2s" }} />
           </button>
         )}
       </div>
@@ -889,7 +966,9 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
         <div className="think-tool-detail-box">
           {tool.detail && (
             <div className="think-tool-detail-line">
-              <FileMiniIcon size={10} style={{ flexShrink: 0, opacity: 0.6 }} />
+              {isUrlDetail
+                ? <InternetIcon size={12} style={{ flexShrink: 0, opacity: 0.7 }} />
+                : <FileTypeIcon filename={tool.detail} size={13} style={{ flexShrink: 0, opacity: 0.92 }} />}
               {detailClickable ? (
                 <span className="think-clickable" onClick={onClickDetail} title={`点击在右侧栏${isUrlDetail ? "打开网页" : "打开文件"}`}>
                   {tool.detail.slice(0, 300)}{(tool.detail ?? "").length > 300 ? "…" : ""}
@@ -899,10 +978,16 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
               )}
             </div>
           )}
+          {/* A-918++：VS Code 风格 diff 块（- 删除 / + 新增 / = 相同），行首 +/- 标识 + 整行红绿背景 */}
+          {oldForDiff !== null && newForDiff !== null && (
+            <DiffBlock oldText={oldForDiff} newText={newForDiff} />
+          )}
           {r && (
-            <div style={{ marginTop: tool.detail ? 6 : 0, color: isFail ? "#f87171" : "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-              <span style={{ fontWeight: 600 }}>{isFail ? "✕ " : "✓ "}</span>
-              {renderTextWithLinks(normalizeBrokenLines(r).slice(0, 600))}{r.length > 600 ? "…" : ""}
+            <div style={{ marginTop: tool.detail ? 6 : 0, color: isFail ? "#f87171" : "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-word", display: "flex", alignItems: "flex-start", gap: 4 }}>
+              {isFail
+                ? <CloseIcon size={12} style={{ color: "#f87171", flexShrink: 0, marginTop: 2 }} />
+                : <CheckIcon size={12} style={{ color: "#34d399", flexShrink: 0, marginTop: 2 }} />}
+              <span style={{ flex: 1 }}>{renderTextWithLinks(normalizeBrokenLines(r).slice(0, 600))}{r.length > 600 ? "…" : ""}</span>
             </div>
           )}
         </div>
@@ -936,13 +1021,68 @@ function RefPanel({ files }: { files: Array<{ path: string | undefined; label: s
                 e.stopPropagation();
                 requestSidebarOpen({ kind: "file", rel: r.path, name: r.path.split(/[\\/]/).pop() });
               }}>
-              <CheckIcon size={11} style={{ color: "#34d399", flexShrink: 0 }} />
-              <FileMiniIcon size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
+              <CheckIcon size={12} style={{ color: "#34d399", flexShrink: 0 }} />
+              <FileTypeIcon filename={r.path ?? r.label} size={14} style={{ flexShrink: 0, opacity: 0.92 }} />
               <span className="t-file">{r.label}</span>
             </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** 网址面板（A-918+：网页访问/搜索的网址——此前收集到 stages.urls 却从未渲染，丢失来源展示） */
+/** 网址面板（A-918+：网页访问/搜索的网址——此前收集到 stages.urls 却从未渲染，丢失来源展示；
+ *  使用真实 https://{host}/favicon.ico 作为网址专属图标，失败回退 InternetIcon） */
+function UrlPanel({ urls }: { urls: Array<{ url: string; label: string }> }): JSX.Element {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="think-card" style={{ marginBottom: 4 }}>
+      <button className="think-card-title" onClick={() => setOpen(!open)}
+        style={{ width: "100%", background: "transparent", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+        <InternetIcon size={13} style={{ color: "var(--accent)", flexShrink: 0 }} />
+        <span>访问来源</span>
+        <span className="think-count">（{urls.length} 项）</span>
+        <span style={{ marginLeft: "auto", color: "var(--text-dim)", display: "inline-flex" }}>
+          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{ transition: "transform 0.2s" }} />
+        </span>
+      </button>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 1, marginTop: 6 }}>
+          {urls.map((u, i) => {
+            const host = ((): string => {
+              try { return new URL(/^https?:\/\//i.test(u.url) ? u.url : `https://${u.url}`).hostname; }
+              catch { return ""; }
+            })();
+            const clickable = /^https?:\/\//i.test(u.url);
+            return <UrlPanelRow key={`u${i}`} u={u} host={host} clickable={clickable} />;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 单行网址：真 favicon 加载失败时回退 InternetIcon */
+function UrlPanelRow({ u, host, clickable }: { u: { url: string; label: string }; host: string; clickable: boolean }): JSX.Element {
+  const [faviconFailed, setFaviconFailed] = React.useState(false);
+  return (
+    <div className="think-item" title={u.url}
+      style={{ cursor: clickable ? "pointer" : "default" }}
+      onClick={(e) => {
+        if (!clickable) { return; }
+        e.stopPropagation();
+        requestSidebarOpen({ kind: "url", url: u.url, name: host || u.label });
+      }}>
+      {host && !faviconFailed
+        ? // eslint-disable-next-line jsx-a11y/alt-text
+          <img src={`https://${host}/favicon.ico`} alt="" width={12} height={12}
+            style={{ flexShrink: 0, borderRadius: 2, background: "var(--bg)" }}
+            onError={() => setFaviconFailed(true)} />
+        : <InternetIcon size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />}
+      <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontWeight: 600 }}>{host || "查询"}</span>
+      <span className="t-file">{u.label || u.url}</span>
     </div>
   );
 }
@@ -1018,33 +1158,42 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
           {cap && <span style={{ fontWeight: 600 }}>{cap}</span>}
           {m.model && <span>· {m.model}</span>}
           <span>· {m.elapsedMs != null ? <>回复耗时 {fmtMs(m.elapsedMs)}</> : m.time}</span>
-          {showThinking && m.reasoning && (
+          {showThinking && (m.reasoning || (m.stages?.timeline && m.stages.timeline.length > 0) || (m.stages?.tools && m.stages.tools.length > 0)) && (
             <button onClick={() => onToggle(m.id)}
               title={collapsed ? "展开思考过程" : "收起思考过程"}
               style={{
-                background: "transparent", border: "none", cursor: "pointer", padding: 0,
+                background: collapsed ? "var(--bg-hover)" : "var(--accent-soft)",
+                border: "none", cursor: "pointer", padding: "2px 6px",
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
-                width: 18, height: 18, borderRadius: "50%", color: "var(--accent-hover)",
+                gap: 3, borderRadius: 10,
+                color: collapsed ? "var(--text-muted)" : "var(--accent-hover)",
+                fontSize: 11, fontWeight: 600,
               }}>
-              <ChevronIcon size={14} rotate={collapsed ? 0 : 90} />
+              <ChevronIcon size={12} rotate={collapsed ? 0 : 90} />
+              <span>思考</span>
             </button>
           )}
         </div>
         {/* A-174：思考过程展开区——参考内容 与 思考过程 是两个互相独立的折叠面板 */}
-        {showThinking && m.reasoning && !collapsed && (() => {
+        {showThinking && !collapsed && (() => {
           const localFiles = m.stages?.reads ?? [];
+          const localUrls = m.stages?.urls ?? [];
           const tools = m.stages?.tools ?? [];
           // 交错时间线：优先使用流式记录的真实顺序；历史消息（无 timeline）回退为「完整思考 + 工具列表」
-          const cleanReasoning = m.reasoning.replace(/\n?### 工具调用记录\n[\s\S]*$/g, "");
+          const cleanReasoning = (m.reasoning ?? "").replace(/\n?### 工具调用记录\n[\s\S]*$/g, "");
           const timeline: TimelineStep[] = m.stages?.timeline?.length
             ? m.stages.timeline
             : [
                 ...(cleanReasoning.trim() ? [{ kind: "think" as const, text: cleanReasoning }] : []),
                 ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label.replace(/^⟳\s*/, ""), detail: t.detail })),
               ];
-          if (timeline.length === 0 && localFiles.length === 0) return null;
+          if (timeline.length === 0 && localFiles.length === 0 && localUrls.length === 0) return null;
           return (
             <div style={{ margin: "8px 0 2px" }}>
+              {/* 面板零：访问来源（网页访问/搜索网址，A-918+ 补齐此前未渲染的 urls） */}
+              {localUrls.length > 0 && (
+                <UrlPanel urls={localUrls} />
+              )}
               {/* 面板一：参考内容（只含工作目录文件；独立折叠，与思考过程互不影响） */}
               {localFiles.length > 0 && (
                 <RefPanel files={localFiles} />
@@ -1085,7 +1234,7 @@ export default function ChatPanel({
   sessionId,
   sessionTitle,
   agentId,
-  agentName = "Agent",
+  agentName = "slime 助手",
   modelChoice = "inherit",
   mode = "build",
   reasoningEffort = "none",
@@ -1113,17 +1262,55 @@ export default function ChatPanel({
   const [loading, setLoading] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
   const [partial, setPartial] = React.useState("");
-  /** 流式正文渲染节流：数据实时累积到 ref，渲染按 50ms 批量，避免每 chunk 全量重解析 markdown 导致卡顿 */
+  // A-918++：输入框占位符动态激励语（每 6s 切换一句，激励/调侃/颜文字混搭；用户聚焦输入时暂停）
+  const PLACEHOLDER_PHRASES = [
+    "今天想折腾点什么？Σ(°△°|||)",
+    "问个问题，唤醒你的第二个大脑～ (●'◡'●)",
+    "把你想做的说出来，我帮你拆成可执行计划 ✨",
+    "代码读不懂？设计拿不准？丢过来我陪你过 🔍",
+    "工作累了？来调戏我两句 (ˉ▽ˉ) ﾉ",
+    "输入消息… Enter 发送，/ 展开指令，Shift+Enter 换行",
+    "想调研什么 / 写什么 / 改什么？说话就行 🚀",
+    "提示：可粘贴 / 拖拽图片识图，文件路径直接拖进来更省心",
+  ];
+  const [placeholderIndex, setPlaceholderIndex] = React.useState(0);
+  const [inputFocused, setInputFocused] = React.useState(false);
+  React.useEffect(() => {
+    // A-918++：加速 4s 切换 + 输入聚焦才暂停（loading/会话切不再锁死，让用户更快看到变化）
+    if (inputFocused) { return; }
+    const iv = window.setInterval(() => { setPlaceholderIndex((i) => (i + 1) % PLACEHOLDER_PHRASES.length); }, 4000);
+    return () => window.clearInterval(iv);
+  }, [inputFocused]);
+  /** 流式正文渲染节流：数据实时累积到 ref，渲染按 rAF 逐字推进（28ms/字），避免整块蹦出 + 每 chunk 全量重解析 markdown 卡顿 */
   const partialRef = React.useRef("");
-  const partialTimerRef = React.useRef<number | null>(null);
+  const partialRafRef = React.useRef<number | null>(null);
+  // A-918++：逐字限速缓冲——partialRef 累积模型完整文本，displayPartialRef 逐字推进（每 28ms 1 字），
+  // 正文"逐字渐入"（ChatGPT/Claude 式），不再"整个块蹦出"；onDone/reset 时清空
+  const displayPartialRef = React.useRef("");
+  const lastTypingAtRef = React.useRef(0);
   const schedulePartialRender = React.useCallback(() => {
-    if (partialTimerRef.current !== null) { return; }
-    partialTimerRef.current = window.setTimeout(() => {
-      partialTimerRef.current = null;
-      setPartial(partialRef.current);
-      // 随节流一并刷新 token 计数，避免每 chunk 独立 setState 触发重渲染
+    if (partialRafRef.current !== null) { return; }
+    partialRafRef.current = window.requestAnimationFrame(() => {
+      partialRafRef.current = null;
+      // 逐字推进：每 28ms 追加 1 字符（限速打字；模型快时 buffer 在 partialRef 堆积，完成后 onDone 补全）
+      const full = partialRef.current;
+      const shown = displayPartialRef.current;
+      if (shown.length < full.length) {
+        const now = Date.now();
+        if (now - lastTypingAtRef.current >= 28) {
+          displayPartialRef.current = full.slice(0, shown.length + 1);
+          lastTypingAtRef.current = now;
+        }
+      }
+      setPartial(displayPartialRef.current);
+      // 随 rAF 一并刷新 token 计数，避免每 chunk 独立 setState 触发重渲染
       setStreamTokens(streamTokensRef.current);
-      // 推理过程同样走 50ms 节流（A-129：去掉 reasoning 分支每 chunk 一次 setReasoningTmp）
+      // A-918++：实时 context tokens 估算（历史消息 + 当前 partial 总字符 / 4），rAF 驱动 → 流式输出/压缩都实时反映
+      let ctxChars = 0;
+      for (const mm of messagesRef.current) { ctxChars += mm.content?.length ?? 0; }
+      ctxChars += partialRef.current.length;
+      setContextTokens(Math.max(0, Math.round(ctxChars / 4)));
+      // 推理过程同样走 rAF（A-129：去掉 reasoning 分支每 chunk 一次 setReasoningTmp）
       setReasoningTmp(reasoningTmpRef.current);
       // A-xxx：交错时间线快照同步（增量 steps 数组——引用不可变，必须快照新数组触发渲染）
       setLiveTimeline(timelineStepsRef.current);
@@ -1136,14 +1323,21 @@ export default function ChatPanel({
           return prev.map((m) => (m.id === liveId ? { ...m, content: partialRef.current || "（恢复中…）" } : m));
         });
       }
-    }, 50);
+      // A-918++：自续——若 partialRef 还有未显示字符（buffer 堆积，模型快于打字），下一帧继续推进，直到追平
+      if (displayPartialRef.current.length < partialRef.current.length) {
+        partialRafRef.current = null;
+        schedulePartialRender();
+      }
+    });
   }, []);
   const resetPartial = React.useCallback(() => {
-    if (partialTimerRef.current !== null) {
-      clearTimeout(partialTimerRef.current);
-      partialTimerRef.current = null;
+    if (partialRafRef.current !== null) {
+      window.cancelAnimationFrame(partialRafRef.current);
+      partialRafRef.current = null;
     }
     partialRef.current = "";
+    displayPartialRef.current = ""; // A-918++：清空逐字缓冲
+    lastTypingAtRef.current = 0;
     setPartial("");
   }, []);
   /** f6：推理/思考过程内容（独立于正文字，输出中实时流式、完成后可主动展开查看） */
@@ -1152,6 +1346,10 @@ export default function ChatPanel({
   /** 推理过程读写走 ref，避免订阅 effect 因 chunk 高频重订阅 */
   const reasoningTmpRef = React.useRef("");
   const reasoningManuallyToggledRef = React.useRef(false);
+
+  // A-918++：可变思考提示语（loading 时 5 种轮播）+ 字体呼吸（CSS .thinking-hint-text 的 textBreathe）
+  // 让用户感受到 Agent 在"主动思考"而非"卡住"，对齐主流 Agent 平台的活跃指示体验。
+  // A-918++：用户要求删掉顶部"思考中"轮播，THINKING_HINTS/hintIndex 保留以备后续重新启用
   /** 渲染用延迟值（A-129）：流式 markdown 解析较重型，useDeferredValue 让 React
       在主线程繁忙（滚动 / 长文本解析）时自动降级刷新，滚动帧率与点击响应不被解析卡死；
       历史消息行已 memo，真正会受影响的只有正在流式输出的那一行 */
@@ -1183,9 +1381,14 @@ export default function ChatPanel({
   /* ── 流式实时监测：token 计数 + 耗时 + 吞吐速率 ── */
   const [streamElapsed, setStreamElapsed] = React.useState(0);
   const [streamTokens, setStreamTokens] = React.useState(0);
+  const [contextTokens, setContextTokens] = React.useState(0); // A-918++：当前会话完整上下文（历史消息 + 当前流式 partial）/ 4 估算
   const [streamModel, setStreamModel] = React.useState("");
   const streamStartRef = React.useRef(0);
   const streamCharCountRef = React.useRef(0);
+  /** A-918++：最近一次实时 chunk 时间戳（恢复"恢复中"后 6s 无动静 → 主动续接判定用） */
+  const lastChunkAtRef = React.useRef(0);
+  /** A-918++：恢复后超时主动续接定时器 */
+  const pendingResumeTimerRef = React.useRef<number | null>(null);
   /** token 计数走 ref 累积，随 50ms partial 节流批量刷进状态（A-129：去掉每 chunk 一次 setState） */
   const streamTokensRef = React.useRef(0);
   const streamElapsedTimerRef = React.useRef<number | null>(null);
@@ -1205,6 +1408,9 @@ export default function ChatPanel({
   const pendingTailErrorRef = React.useRef<{ content: string; reason: string } | null>(null);
   /** A-162：切回恢复的「进行中」消息 id（onDone 时替换为完整文本而非新增，防半截+完整重复） */
   const snapshotMsgIdRef = React.useRef<number | null>(null);
+  /** A-918++：messages 同步镜像（schedulePartialRender 闭包内读最新 messages，避免空依赖 useCallback 闭包陈旧） */
+  const messagesRef = React.useRef<Message[]>([]);
+  React.useEffect(() => { messagesRef.current = messages; }, [messages]);
   /** A-968：切回恢复的占位气泡 id（state 版）——供渲染层抑制底部独立 partial 区，避免"恢复中…"气泡 + partial 双份输出 */
   const [resumeMsgId, setResumeMsgId] = React.useState<number | null>(null);
   /** A-969：上下文自动压缩过渡动画（发送前触发；prep=整理 / summarize=生成摘要 / done=完成 / trunc=降级裁剪） */
@@ -1220,8 +1426,16 @@ export default function ChatPanel({
   /** 切换前上一会话 id（判定"本面板流是否属于切走的会话"） */
   const prevSessionIdRef = React.useRef<string | null>(null);
   /** A-162：per-session 流现场快照（切走保存/切回恢复 partial+reasoning+tools+活跃标记）。
-   *  切会话不取消旧流（后台跑完落库），恢复时从快照续接，杜绝「切回后内容消失」体验。 */
-  const perSessionStreamCache = React.useRef<Record<string, { partial: string; reasoning: string; toolEvents: ToolEvent[]; timeline: TimelineStep[]; hasActive: boolean; tailError?: { content: string; reason: string }; messages?: Message[] }>>({});
+   *  切会话不取消旧流（后台跑完落库），恢复时从快照续接，杜绝「切回后内容消失」体验。
+   *  A-918+：同时保存 input 草稿与 pendingAsk/pendingPerm 弹框状态（切回时一并恢复，
+   *  解决「终止提示消失」「用户输入消失」）。 */
+  const perSessionStreamCache = React.useRef<Record<string, {
+    partial: string; reasoning: string; toolEvents: ToolEvent[]; timeline: TimelineStep[]; hasActive: boolean;
+    tailError?: { content: string; reason: string }; messages?: Message[];
+    input?: string; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null;
+    /** A-918++：最近一次流式入参（恢复时还原 streamReqRef → 抖动可自动重连，修复"恢复中进度不动/中断"） */
+    req?: ChatStreamReq | null;
+  }>>({});
   const [reconnectInfo, setReconnectInfo] = React.useState<{ attempt: number; total: number } | null>(null);
   /** A-917：流失败/重连耗尽的就地错误横幅（不追加独立消息，避免"另发一条/切会话才见/切走即消失"） */
   const [streamErrorBanner, setStreamErrorBanner] = React.useState<string | null>(null);
@@ -1243,6 +1457,10 @@ export default function ChatPanel({
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
+    }
+    if (pendingResumeTimerRef.current !== null) { // A-918++：清理恢复超时续接定时器
+      window.clearTimeout(pendingResumeTimerRef.current);
+      pendingResumeTimerRef.current = null;
     }
     if (streamElapsedTimerRef.current !== null) {
       window.clearInterval(streamElapsedTimerRef.current);
@@ -1493,8 +1711,11 @@ export default function ChatPanel({
     // 正确语义（对齐 Claude Code/OpenClaw）：切走的流在后台自然跑完并落库；恢复时从快照续接。
     // 旧流事件已按 sessionId 标注入 renderer 过滤，不会串扰当前会话。
     // 把旧会话的流现场存进 per-session 快照（切回时恢复 partial/reasoning/tools）
-    if (prevSessionIdRef.current && prevSessionIdRef.current !== sessionId) {
-      const prevKey = prevSessionIdRef.current;
+    // A-918++：区分「会话切换」与「会话内切 Agent」——只有真正的 sessionId 变化才需要
+    // 保存/恢复 input 草稿与弹框；agentId 变化（sessionId 不变）不应覆盖用户正在输入的草稿。
+    const isSessionChange = prevSessionIdRef.current !== null && prevSessionIdRef.current !== sessionId;
+    if (isSessionChange) {
+      const prevKey = prevSessionIdRef.current!;
       if (streamActiveRef.current || partialRef.current || reasoningTmpRef.current || toolEventsRef.current.length > 0) {
         // A-968：快照必须【合并】既有条目而非整体替换——doSend 写入的乐观用户消息
         // （snap.messages）就在这里，整体覆盖会把它丢掉 → 切回后"用户文本直接消失"
@@ -1507,8 +1728,29 @@ export default function ChatPanel({
           timeline: timelineStepsRef.current,
           hasActive: streamActiveRef.current,
           tailError: pendingTailErrorRef.current ?? existing.tailError,
+          req: streamReqRef.current ?? null, // A-918++：保存入参，恢复时还原以便自动重连
         };
       }
+      // A-918+：input 草稿、pendingAsk/pendingPerm 弹框按会话隔离保存（切回恢复）
+      // 解决「终止提示框切换消失」「用户输入切换消失」——它们与流是否活跃无关，
+      // 即使旧会话没有进行中流也要保存（用户打了半截字再切走，回来应能续打）
+      const draftSnapshot = {
+        ...(perSessionStreamCache.current[prevKey] ?? {}),
+        input,
+        pendingAsk,
+        pendingPerm,
+      };
+      perSessionStreamCache.current[prevKey] = draftSnapshot;
+      // A-918++：额外持久化到 localStorage，防组件意外 unmount/remount 时 ref 快照丢失
+      // （如 React.StrictMode 双调用、父组件 key 变化等）；key 按 sessionId 隔离
+      try {
+        localStorage.setItem(`slime_session_draft_${prevKey}`, JSON.stringify({
+          input,
+          pendingAsk: pendingAsk ?? null,
+          pendingPerm: pendingPerm ?? null,
+          savedAt: Date.now(),
+        }));
+      } catch { /* localStorage 不可用时静默忽略（隐私模式/磁盘满） */ }
     }
     // 彻底复位流式 UI（loading/stopping/定时器/重连状态/节流缓存）：
     // 关键 —— 这保证切换后输入框立即可用，旧会话残留的 loading=true 不再延续到新会话
@@ -1527,8 +1769,38 @@ export default function ChatPanel({
     setPendingImages([]);
     prevSessionIdRef.current = sessionId;
     // A-918：切回本会话——以「已落库历史」为底，叠加「未落库乐观用户消息」与「进行中流现场」；
-    // 快照 hasActive 由后台流终态广播（streamEnded）校准，终态（停止/失败/完成）的会话切回不再显示"生成中"
+    // A-918+：input 草稿与 pendingAsk/pendingPerm 弹框按会话隔离恢复
+    // A-918++：优先用 ref 快照；ref 为空时回退 localStorage（防组件 remount 后快照丢失）
+    // A-918+++：仅真正的 sessionId 变化才恢复草稿；agentId 变化（isSessionChange=false）
+    // 不清空也不恢复——用户正在输入的草稿保持不变。且切到无缓存会话时显式置空 input，
+    // 避免上一会话草稿「漏」进新会话（真正的"输入丢失/串台"根因）。
     const cached = perSessionStreamCache.current[sessionId];
+    if (isSessionChange) {
+      let restoreInput = "";
+      let restoreAsk: AskUserRequestUI | null = null;
+      let restorePerm: PermissionRequestUI | null = null;
+      if (cached) {
+        restoreInput = cached.input ?? "";
+        restoreAsk = cached.pendingAsk ?? null;
+        restorePerm = cached.pendingPerm ?? null;
+      } else {
+        try {
+          const raw = localStorage.getItem(`slime_session_draft_${sessionId}`);
+          if (raw) {
+            const parsed = JSON.parse(raw) as { input?: string; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null; savedAt?: number };
+            // 仅 24h 内的草稿有效（避免加载陈旧历史会话的残留）
+            if (parsed.savedAt && Date.now() - parsed.savedAt < 24 * 3600 * 1000) {
+              restoreInput = parsed.input ?? "";
+              restoreAsk = parsed.pendingAsk ?? null;
+              restorePerm = parsed.pendingPerm ?? null;
+            }
+          }
+        } catch { /* 解析失败忽略 */ }
+      }
+      setInput(restoreInput);
+      setPendingAsk(restoreAsk);
+      setPendingPerm(restorePerm);
+    }
     pendingTailErrorRef.current = null;
     resetPartial();
     setReasoningTmp("");
@@ -1552,7 +1824,23 @@ export default function ChatPanel({
       }
       if (cached.hasActive) {
         streamActiveRef.current = true;
+        // A-918++：还原最近一次流入参 → 恢复期间若旧流抖动，onError 自动重连 payload 不为 null
+        // （此前只还原数据 ref 不还原 streamReqRef，恢复态重连 payload=null → failReconnect → "恢复中"冻结/中断）
+        if (cached.req) { streamReqRef.current = cached.req; }
         setLoading(true);
+        // A-918++ 深层兜底：旧流若在切换窗口内已静默结束/断连（未触发 done/error），恢复态会一直"恢复中"冻结。
+        // 启动 6s 超时检测：期间无实时 chunk 到达 → 用保存的 req 主动重发续接（真正"续上"，而非空等）。
+        lastChunkAtRef.current = Date.now();
+        if (pendingResumeTimerRef.current !== null) { window.clearTimeout(pendingResumeTimerRef.current); }
+        pendingResumeTimerRef.current = window.setTimeout(() => {
+          pendingResumeTimerRef.current = null;
+          const req = streamReqRef.current;
+          const noLive = Date.now() - lastChunkAtRef.current > 5500;
+          if (streamActiveRef.current && req && noLive) {
+            streamActiveRef.current = true;
+            void api.chat.stream({ ...req, resumeHint: buildResumeHint() });
+          }
+        }, 6000);
         // A-968：占位气泡内容绑定 partial——后续 chunk 到达时由 schedulePartialRender 实时续长，
         // 杜绝冻结的"（恢复中…）"+底部 partial 双份输出造成的"中断后重新输出一遍"观感
         liveMsg = makeMessage("assistant", partialRef.current || "（恢复中…）", {
@@ -1586,6 +1874,8 @@ export default function ChatPanel({
           .slice(-4);
       }
       delete perSessionStreamCache.current[sessionId];
+      // A-918++：localStorage 草稿也一并清理（成功恢复后无需保留）
+      try { localStorage.removeItem(`slime_session_draft_${sessionId}`); } catch { /* ignore */ }
     }
     setReasoningOpen(true);
     reasoningManuallyToggledRef.current = false;
@@ -1768,6 +2058,7 @@ export default function ChatPanel({
         partialRef.current += c.data?.content ?? "";
         // 实时监测：按字符增量估算 token（≈4 字符/token）
         const delta = (c.data?.content ?? "").length;
+        lastChunkAtRef.current = Date.now(); // A-918++：记录最近实时输出，供"恢复中"超时续接判定
         if (delta > 0) {
           streamCharCountRef.current += delta;
           streamTokensRef.current = Math.round(streamCharCountRef.current / 4);
@@ -1788,7 +2079,14 @@ export default function ChatPanel({
     const off2 = api.chat.onDone((m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => {
       // 事件过滤：切会话/切 Agent 后旧流的 done 一律丢弃，避免串扰到当前会话
       if (m.sessionId != null) {
-        if (m.sessionId !== sessionRef.current) { return; }
+        // A-918+：即便不是当前会话，也要先把快照 hasActive 置 false（流已真实结束），
+        // 否则切回时仍按"恢复中"建占位气泡 → 与随后 conversation.load 拉到的完整消息形成"两段"重复
+        if (m.sessionId !== sessionRef.current) {
+          const sid = m.sessionId;
+          const snap = perSessionStreamCache.current[sid];
+          if (snap) { snap.hasActive = false; }
+          return;
+        }
       } else if (streamSessionRef.current !== sessionRef.current) { return; }
       // 流已完成：清除重连状态（含可能遗留的重连定时器）
       streamActiveRef.current = false;
@@ -1807,7 +2105,15 @@ export default function ChatPanel({
       // 读 toolTraceRef（而非 toolEventsRef）：流中断触发自动重连会清空展示集合，但留痕保留（A-147）
       const doneTools = toolTraceRef.current;
       // A-170：reasoning 不再拼接 toolBlock，工具调用由独立卡片展示（避免重复）
-      const finalReasoning = reasoning ? sanitizeThinking(reasoning) : undefined;
+      let finalReasoning = reasoning ? sanitizeThinking(reasoning) : undefined;
+      // A-918++ 兜底2：流式没收到 reasoning chunk（上游不返回 reasoning_content），
+      // 但 reply 里混有 <thinking>...</thinking> 标签 → 提取到 reasoning（"某些模型只有调用记录没思考"的根因）
+      if (!finalReasoning && m.reply) {
+        const thinkMatch = m.reply.match(/<thinking>([\s\S]*?)<\/thinking>/i);
+        if (thinkMatch?.[1]) {
+          finalReasoning = sanitizeThinking(thinkMatch[1].trim());
+        }
+      }
       // A-163：组装阶段折叠卡结构化数据（参考内容=读过的文件/访问的网址；思考过程=思考+工具）
       const reads: Array<{ path: string | undefined; label: string }> = [];
       const urls: Array<{ url: string; label: string }> = [];
@@ -1816,13 +2122,22 @@ export default function ChatPanel({
         else if (t.name === "web_fetch" && t.detail) urls.push({ url: t.detail, label: t.detail });
         else if (t.name === "web_search" && t.detail) urls.push({ url: "", label: t.detail });
       }
+      // A-918++ 兜底：m.reasoning 有值但 timeline 没有 think 节点时手动追加一个（A-170 修复后时间线只来自
+      // 流式时 "reasoning" 事件，agnes/部分中转站把 reasoning_content 混在 chunk 里传上来，导致
+      // 流式阶段没追加 think 节点；onDone 时用 m.reasoning 补一个，让"思考过程"折叠里一定有节点）
+      let finalTimeline = timelineStepsRef.current;
+      if (finalReasoning && !finalTimeline.some((s) => s.kind === "think")) {
+        finalTimeline = [...finalTimeline, { kind: "think" as const, text: finalReasoning }];
+      }
       const stages = finalReasoning || doneTools.length > 0
-        ? { reads, urls, tools: doneTools, reasoning: finalReasoning, timeline: timelineStepsRef.current }
+        ? { reads, urls, tools: doneTools, reasoning: finalReasoning, timeline: finalTimeline }
         : undefined;
       // error chunk 已实时展示红字错误时，本 done 携带的是空正文（main 兜底收尾）→ 不再追加空白气泡
       const errorDisplayed = streamErrorSeenRef.current;
       streamErrorSeenRef.current = false;
-      const doneText = m.interrupted && !/\n\[已中断\]\s*$/.test(m.reply) ? `${m.reply}\n\n> ⏹ 已中断（停止生成）` : m.reply;
+      // A-918++：剥离 <thinking>...</thinking> 标签（标签内容已提取到 reasoning，正文不留残留）
+      const cleanReply = m.reply.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
+      const doneText = m.interrupted && !/\n\[已中断\]\s*$/.test(m.reply) ? `${cleanReply}\n\n> ⏹ 已中断（停止生成）` : cleanReply;
       // A-162：切回恢复的进行中消息 → 替换为完整文本（而非新增一条，防"半截+完整"重复）
       const snapshotId = snapshotMsgIdRef.current;
       snapshotMsgIdRef.current = null;
@@ -1923,7 +2238,16 @@ export default function ChatPanel({
     const off3 = api.chat.onError((e: { message: string; sessionId?: string }) => {
       // 事件过滤：旧会话/旧 Agent 的错误不处理（其流已被取消/作废）
       if (e.sessionId != null) {
-        if (e.sessionId !== sessionRef.current) { return; }
+        // A-918+：非当前会话也要先校准快照 hasActive=false 并记录 tailError，
+        // 否则切回时仍显示"恢复中"或丢失失败信息
+        if (e.sessionId !== sessionRef.current) {
+          const sid = e.sessionId;
+          const snap = perSessionStreamCache.current[sid] ?? { partial: "", reasoning: "", toolEvents: [], timeline: [], hasActive: true };
+          snap.hasActive = false;
+          if (e.message) { snap.tailError = { content: e.message, reason: "stream_error" }; }
+          perSessionStreamCache.current[sid] = snap;
+          return;
+        }
       } else if (streamSessionRef.current !== sessionRef.current) { return; }
       const msg = e.message ?? "";
       // 模型不支持图片输入 → 友好提示（上游返回 "this model does not support image input"），不重连
@@ -1986,22 +2310,24 @@ export default function ChatPanel({
       }
       failReconnect(msg, MAX_RETRY);
     });
+    // A-918：流终态广播订阅——后台流真实结束后把对应会话快照 hasActive 校准为 false，
+    // 根治「切走再切回仍显示生成中/仍重连」的假活跃状态；本会话的收尾仍由 onDone/onError 承担。
+    // 必须在 effect 内创建订阅：原实现写在组件函数体，每次重渲染都泄漏一个监听器（流式期间
+    // 每 50ms 一次 setState → 每分钟上千个订阅永不解绑，事件派发 O(n) 累积直至卡死）。
+    const off4 = (() => {
+      const w = window as unknown as { slimeAPI?: any };
+      const fn = w.slimeAPI?.chat?.onStreamEnded;
+      if (typeof fn !== "function") { return () => {}; }
+      return fn((ev: { sessionId?: string }) => {
+        const sid = ev?.sessionId;
+        if (!sid) { return; }
+        const snap = perSessionStreamCache.current[sid];
+        if (snap) { snap.hasActive = false; }
+      });
+    })();
     return () => { off1(); off2(); off3(); off4(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, makeMessage]);
-  // A-918：流终态广播订阅——后台流真实结束后把对应会话快照 hasActive 校准为 false，
-  // 根治「切走再切回仍显示生成中/仍重连」的假活跃状态；本会话的收尾仍由 onDone/onError 承担
-  const off4 = (() => {
-    const w = window as unknown as { slimeAPI?: any };
-    const fn = w.slimeAPI?.chat?.onStreamEnded;
-    if (typeof fn !== "function") { return () => {}; }
-    return fn((ev: { sessionId?: string }) => {
-      const sid = ev?.sessionId;
-      if (!sid) { return; }
-      const snap = perSessionStreamCache.current[sid];
-      if (snap) { snap.hasActive = false; }
-    });
-  })();
 
   /** 判断是否处于底部（阈值 48px 内视为底部）。
    *  A-129：rAF 合帧，避免每次 scroll 事件（≈60Hz）都触发 setState 整面板重渲染 */
@@ -2284,6 +2610,15 @@ export default function ChatPanel({
     // 允许「只发图片、不带文字」
     if (!api || (!text && imagesToSend.length === 0)) { return; }
     const sid = targetSessionId ?? sessionId;
+    // A-918++：自动委派启发式（保守）——消息明确要求"调研/研究/分析/审查/搜索对比/批量处理/汇总盘点"且足够长时，
+    // 后台自动派一个专家子代理并行处理（用户立即可见 SubAgentBar 活动，不必等模型自觉调工具）
+    const trimmedText = text.trim();
+    if (trimmedText.length >= 24 && !/^(什么|为什么|怎么|如何|哪个|多少|能否|可以|是不是|有没有)/.test(trimmedText)) {
+      const strong = /(?:联网|深度|全面)?(?:调研|研究|分析|审查|review)|(?:搜索|查询)[^。\n]{0,20}(?:对比|比对)|批量(?:处理|生成|检查)|(?:整理|汇总|盘点)[^。\n]{0,20}(?:数据|资料|信息)/i;
+      if (strong.test(trimmedText)) {
+        void api.resident?.subagentDelegate?.({ task: trimmedText.slice(0, 200) }).catch(() => { /* 派发失败不阻断主线 */ });
+      }
+    }
     setInput(""); // 受控清空输入框（textarea value={input}）；不直写 DOM，避免与 React 渲染竞态
     setAtOpen(false); // A-951：发送后收起 @ 选择器
     const modelLabel = !modelChoice || modelChoice === "inherit" ? "inherit" : (modelChoice.split(":").pop() || modelChoice);
@@ -2606,11 +2941,19 @@ export default function ChatPanel({
   const thinkingPreset = useThinkingPreset();
   const thinkingMetaKnown = isProviderModel && !!curProviderModel && typeof curProviderModel?.thinking === "boolean";
   const curThinkingExplicitlyUnsupported = thinkingForcedOff(thinkingPreset, thinkingMetaKnown, curProviderModel?.thinking);
-  // 当前模型已真实探测到的可用推理等级（上游返回或按 ID 推断）；为空 = 未知/未标注
-  const curEfforts: string[] = React.useMemo(
-    () => (curProviderModel?.thinking_efforts ?? []).filter((e): e is string => typeof e === "string" && e.length > 0),
-    [curProviderModel],
-  );
+  // 当前模型已真实探测到的可用推理等级（三层 fallback：上游 > 本地预制表 > 通用默认）
+  // A-918++ 修复「推理强度无法选择」：opencode-zen 等中转站模型上游不返回 thinking_efforts，
+  // 且 ID 推断表（MODEL_CAPABILITIES）覆盖不了这些中转站 ID → 此前 dropdown 空、无法选择。
+  // 最终兜底默认 low/medium/high，保证推理强度【总是可选】；local 模型（如 agnes）也按 ID 推断。
+  const curEfforts: string[] = React.useMemo(() => {
+    const upstream = (curProviderModel?.thinking_efforts ?? []).filter((e): e is string => typeof e === "string" && e.length > 0);
+    if (upstream.length > 0) { return upstream; }
+    const id = (parsedChoice.type === "api" || parsedChoice.type === "local") ? (parsedChoice.modelId ?? "") : "";
+    const inferred = inferModelCapabilities(id).efforts;
+    if (inferred && inferred.length > 0) { return inferred; }
+    return ["low", "medium", "high"];
+  },
+  [curProviderModel, parsedChoice]);
   const curSupportsEffortLevels = curEfforts.length > 0;
   // 设置里选择的推理等级模式（供应商弹窗 → 参数文件调试）：切换后本面板可选等级实时联动
   const reasonPreset = useReasoningPreset();
@@ -2806,89 +3149,70 @@ export default function ChatPanel({
               {agentName.charAt(0)}
             </div>
             <div style={{ minWidth: 0, flex: 1 }}>
-              {/* 状态行：Agent 名称 + 活动指示 */}
-              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                <span>{agentName}</span>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, color: "var(--text-dim)" }}>
-                  <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", animation: "pulse 1.5s ease-in-out infinite" }} />
-                  {toolEvents.length > 0 ? "调用工具中" : "思考中"}
-                </span>
+              {/* 状态行：A-918++：删掉原"思考中"轮播 + 圆点（用户要"最上方的'思考中'删去"），只保留 agentName */}
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6 }}>
+                {agentName}
               </div>
 
-              {/* 工具调用：流式时按类型分组显示，完成后折叠为摘要行 */}
-              {toolEvents.length > 0 && (() => {
-                const groups = computeToolGroups(toolEvents);
-                // 已完成回复时显示折叠摘要行
-                if (!loading) {
-                  return (
-                    <div style={{ marginBottom: 6 }}>
-                      <button
-                        onClick={() => setReasoningOpen((v) => !v)}
-                        style={{
-                          width: "100%", display: "flex", alignItems: "center", gap: 6,
-                          padding: "4px 0", background: "transparent", border: "none", cursor: "pointer",
-                          color: "var(--text-muted)", fontSize: 12, textAlign: "left",
-                        }}
-                        title={reasoningOpen ? "收起工具列表" : "展开工具列表"}
-                      >
-                        <BoltIcon size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                        <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>工具调用</span>
-                        {!reasoningOpen && (
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                            · {formatToolSummary(toolEvents)}
-                          </span>
-                        )}
-                        <ChevronIcon size={12} rotate={reasoningOpen ? 90 : 0} style={{ opacity: 0.7 }} />
-                      </button>
-                      {reasoningOpen && (
-                        <div style={{ padding: "4px 0 8px 16px", display: "flex", flexDirection: "column", gap: 3 }}>
-                          {groups.map((g) => (
-                            <div key={g.type} style={{
-                              fontSize: 12, color: "var(--text-muted)",
-                              display: "flex", alignItems: "center", gap: 6,
-                            }}>
-                              <g.Icon size={13} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-                              <span>{g.label}</span>
-                              <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: "auto" }}>×{g.count}</span>
-                            </div>
-                          ))}
-                        </div>
+              {/* 思考过程：流式时实时显示（与是否有工具调用无关——纯思考也要可见） */}
+              {loading && (
+                <div style={{ marginBottom: 6 }}>
+                  <button
+                    onClick={() => setReasoningOpen((v) => !v)}
+                    style={{
+                      width: "100%", display: "flex", alignItems: "center", gap: 6,
+                      padding: "4px 0", background: "transparent", border: "none", cursor: "pointer",
+                      color: "var(--text-muted)", fontSize: 12, textAlign: "left",
+                    }}
+                    title={reasoningOpen ? "收起思考过程" : "展开思考过程"}
+                  >
+                    <ThinkingIcon size={12} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
+                    <span className="text-scan-light" style={{ fontWeight: 600, letterSpacing: 0.3 }}>思考过程</span>
+                    {!reasoningOpen && (
+                      <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                        · {toolEvents.length > 0 ? formatToolSummary(toolEvents) : (reasoningTmp.slice(0, 60) + (reasoningTmp.length > 60 ? "…" : ""))}
+                      </span>
+                    )}
+                    <ChevronIcon size={12} rotate={reasoningOpen ? 90 : 0} style={{ opacity: 0.7 }} />
+                  </button>
+                  {reasoningOpen && (
+                    <div className="think-timeline" style={{ marginTop: 4 }}>
+                      {liveTimeline.map((step, i) => (
+                        <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
+                      ))}
+                      {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
+                        <span className="text-scan-light" style={{ fontSize: 11, color: "var(--text-dim)" }}>思考中…</span>
                       )}
                     </div>
-                  );
-                }
-                // 流式中：实时构建交错时间线——思考段落与工具调用按真实发生顺序穿插显示（A-174）
+                  )}
+                </div>
+              )}
+
+              {/* 工具调用摘要：流式时按类型分组显示（独立于思考过程，无论是否有思考都显示） */}
+              {loading && toolEvents.length > 0 && (() => {
+                const groups = computeToolGroups(toolEvents);
                 return (
                   <div style={{ marginBottom: 6 }}>
-                    <button
-                      onClick={() => setReasoningOpen((v) => !v)}
-                      style={{
-                        width: "100%", display: "flex", alignItems: "center", gap: 6,
-                        padding: "4px 0", background: "transparent", border: "none", cursor: "pointer",
-                        color: "var(--text-muted)", fontSize: 12, textAlign: "left",
-                      }}
-                      title={reasoningOpen ? "收起思考过程" : "展开思考过程"}
-                    >
-                      <ThinkingIcon size={12} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-                      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>思考过程</span>
-                      {!reasoningOpen && (
-                        <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                          · {toolEvents.length > 0 ? formatToolSummary(toolEvents) : (reasoningTmp.slice(0, 60) + (reasoningTmp.length > 60 ? "…" : ""))}
-                        </span>
-                      )}
-                      <ChevronIcon size={12} rotate={reasoningOpen ? 90 : 0} style={{ opacity: 0.7 }} />
-                    </button>
-                    {reasoningOpen && (
-                      <div className="think-timeline" style={{ marginTop: 4 }}>
-                        {/* 实时交错：基于当前 reasoning 已输出文本与已发生工具调用，用锚点切段 */}
-                        {liveTimeline.map((step, i) => (
-                          <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
-                        ))}
-                        {!reasoningTmp && toolEvents.length === 0 && (
-                          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>思考中…</span>
-                        )}
-                      </div>
-                    )}
+                    <div style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "4px 0", color: "var(--text-muted)", fontSize: 12,
+                    }}>
+                      <BoltIcon size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>工具调用</span>
+                      <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4 }}>· {formatToolSummary(toolEvents)}</span>
+                    </div>
+                    <div style={{ padding: "4px 0 8px 16px", display: "flex", flexDirection: "column", gap: 3 }}>
+                      {groups.map((g) => (
+                        <div key={g.type} style={{
+                          fontSize: 12, color: "var(--text-muted)",
+                          display: "flex", alignItems: "center", gap: 6,
+                        }}>
+                          <g.Icon size={13} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
+                          <span>{g.label}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: "auto" }}>×{g.count}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 );
               })()}
@@ -2897,14 +3221,19 @@ export default function ChatPanel({
               {/* 部分输出：流式 Markdown 渲染（补全未闭合语法，避免暴露原始符号）。
                   A-968：切回恢复的流由占位气泡内实时续长，此处抑制独立 partial 区（否则"恢复中…"气泡+底部输出双份） */}
               {resumeMsgId === null && (
-                <div className="stream-partial" style={{ lineHeight: 1.7, fontSize: 14, color: "var(--text)", wordBreak: "break-word" }}>
+                <div className="stream-partial" style={{ lineHeight: 1.7, fontSize: 14, wordBreak: "break-word" }}>
                   {deferredPartial ? <Markdown text={deferredPartial} streaming /> : partial ? (<Markdown text={partial} streaming />) : (
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 13 }}>
-                      <LoadingCircleIcon size={12} className="icon-spin" />
-                      生成中…
+                      <span className="text-scan-light">正在思考</span>
+                      <span className="stream-dot-row">
+                        <span className="stream-dot" />
+                        <span className="stream-dot" style={{ animationDelay: "0.2s" }} />
+                        <span className="stream-dot" style={{ animationDelay: "0.4s" }} />
+                      </span>
                     </span>
                   )}
-                  {partial && <span style={{ display: "inline-block", width: 8, height: 16, background: "var(--accent)", marginLeft: 2, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite" }} />}
+                  {/* A-918++：流式打字机末字光标（partial 末尾始终闪烁 8×16 矩形，1s step-start 步进；partial 增长时光标跟着走） */}
+                  <span className="stream-cursor" aria-hidden="true" style={{ display: "inline-block", width: 2, height: 16, background: "var(--accent)", marginLeft: 3, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite", willChange: "opacity" }} />
                 </div>
               )}
             </div>
@@ -2912,26 +3241,24 @@ export default function ChatPanel({
         )}
       </div>
 
-      {/* 回到最新按钮：不在最新处时固定显示在输入框上方居中（醒目，不随滚动移动） */}
+      {/* A-918++：回到最新——小巧胶囊内嵌于输入框正上方，随输入区自然排布、不遮挡消息内容 */}
       {!atBottom && (
-        <button onClick={jumpToLatest}
-          title="回到最新消息（恢复自动追踪）"
-          style={{
-            position: "absolute", left: "50%", transform: "translateX(-50%)",
-            bottom: 74, zIndex: 40,
-            display: "flex", alignItems: "center", gap: 8,
-            padding: "10px 20px", borderRadius: 24,
-            border: "1px solid var(--accent)",
-            background: "linear-gradient(135deg, var(--accent), #6366f1)",
-            color: "#fff", fontSize: 13.5, fontWeight: 800, cursor: "pointer",
-            boxShadow: "0 6px 22px rgba(56,189,248,0.45)",
-            transition: "transform 0.15s ease, box-shadow 0.15s ease",
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.transform = "translateX(-50%) scale(1.06)"; e.currentTarget.style.boxShadow = "0 8px 28px rgba(56,189,248,0.6)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.transform = "translateX(-50%)"; e.currentTarget.style.boxShadow = "0 6px 22px rgba(56,189,248,0.45)"; }}>
-          <ChevronIcon size={16} rotate={90} />
-          回到最新
-        </button>
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
+          <button onClick={jumpToLatest}
+            title="回到最新消息（恢复自动追踪）"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 11px", borderRadius: 999,
+              border: "1px solid var(--border-hover)", background: "var(--bg-secondary)",
+              color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+              transition: "background 0.12s, color 0.12s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-soft)"; e.currentTarget.style.color = "var(--accent-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-secondary)"; e.currentTarget.style.color = "var(--text-secondary)"; }}>
+            <img src={downIcon} alt="↓" width={11} height={11} style={{ filter: "brightness(0) invert(0.75)" }} draggable={false} />
+            最新
+          </button>
+        </div>
       )}
 
       {/* A-917：流失败/重连耗尽的就地错误横幅（红字，随当前会话立即显示，不追加到消息流） */}
@@ -2976,6 +3303,7 @@ export default function ChatPanel({
       )}
 
       {/* 输入区：圆角容器 + 自动增高 + 联想 + 指令面板 + 加号栏 */}
+      <SubAgentBar />
       <div style={{ padding: "10px 16px 12px", borderTop: "1px solid var(--border)", background: "var(--bg)", position: "relative", zIndex: 30 }}>
         {/* 输入联想（历史会话相似消息） */}
         {suggestions.length > 0 && !loading && (
@@ -3177,7 +3505,7 @@ export default function ChatPanel({
             <div style={{ padding: "14px 16px 12px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                 <span style={{ fontWeight: 700, fontSize: 13, color: "var(--accent-hover)" }}><BoltIcon size={13} /> Agent 提问</span>
-                <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--accent-hover)" }}>{pendingAsk.agentName || "Agent"}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--accent-hover)" }}>{pendingAsk.agentName || "slime 助手"}</span>
                 <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
                   需要你做出抉择{pendingAsk.header ? ` · ${pendingAsk.header}` : ""}
                 </span>
@@ -3427,9 +3755,12 @@ export default function ChatPanel({
               fontSize: 11, color: "var(--text-muted)",
               flexShrink: 0,
             }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: loading ? "var(--accent)" : "var(--success)", animation: loading ? "pulse 1.5s ease-in-out infinite" : "none" }} />
-                <span style={{ fontWeight: 600, color: "var(--text)" }}>{loading ? "生成中" : "已完成"}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: loading ? "var(--accent)" : "var(--success)", animation: loading ? "thinkGlow 1.4s ease-in-out infinite" : "none", flexShrink: 0 }} />
+                <span className="thinking-hint-text" style={{ fontWeight: 600, color: "var(--text)" }}>
+                  {/* A-918++：流式状态显示层级——loading + 工具调用 / loading + 思考中 / 空闲复用力输入区下方的动态激励语（4s 切换） */}
+                  {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
+                </span>
               </span>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
@@ -3447,6 +3778,13 @@ export default function ChatPanel({
                   {streamTokens > 0 && streamElapsed > 0 ? `${Math.round((streamTokens / streamElapsed) * 1000)}` : "—"}
                 </span>
                 <span style={{ color: "var(--text-dim)", marginLeft: 2 }}>tokens/s</span>
+              </span>
+              <span style={{ color: "var(--text-dim)" }}>|</span>
+              <span title="当前会话完整上下文（历史消息 + 流式输出）实时估算" style={{ display: "inline-flex", alignItems: "baseline", gap: 4 }}>
+                <span className="context-tokens-num" style={{ color: "var(--text)", fontWeight: 600, transition: "color 0.3s ease, transform 0.25s ease", display: "inline-block" }}>
+                  {contextTokens < 1000 ? contextTokens : contextTokens < 10000 ? `${(contextTokens / 1000).toFixed(1)}K` : `${Math.round(contextTokens / 1000)}K`}
+                </span>
+                <span style={{ color: "var(--text-dim)" }}>context</span>
               </span>
               {streamModel && (
                 <>
@@ -3484,7 +3822,7 @@ export default function ChatPanel({
               )}
               {compressUi.stage === "done" && (
                 <>
-                  <span style={{ color: "var(--success)", fontWeight: 700 }}>✓</span>
+                  <CheckIcon size={13} style={{ color: "var(--success)", flexShrink: 0 }} />
                   <span style={{ color: "var(--text)" }}>已压缩 {compressUi.dropped ?? 0} 轮对话，继续发送</span>
                   <span style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }} title={compressUi.summary}>
                     摘要：{(compressUi.summary ?? "").slice(0, 60)}{(compressUi.summary ?? "").length > 60 ? "…" : ""}
@@ -3493,7 +3831,7 @@ export default function ChatPanel({
               )}
               {compressUi.stage === "trunc" && (
                 <>
-                  <span style={{ color: "var(--warning)", fontWeight: 700 }}>⚠</span>
+                  <WarningIcon size={13} style={{ color: "var(--warning)", flexShrink: 0 }} />
                   <span style={{ color: "var(--text)" }}>摘要生成不可用，已保留最近 {compressUi.dropped ?? 0} 轮对话并继续发送</span>
                 </>
               )}
@@ -3526,7 +3864,15 @@ export default function ChatPanel({
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{pendingImages.length}/4 张 · 模型将识别图中内容</span>
             </div>
           )}
+          {/* A-918++：输入框上方动态激励/调侃语（独立行，输入为空且未聚焦时显示，输入即消失避免和文本冲突） */}
+          {!input && !inputFocused && (
+            <div style={{ fontSize: 12.5, color: "var(--text-secondary)", padding: "2px 6px 6px", lineHeight: 1.5, opacity: 0.85, transition: "opacity 0.18s", pointerEvents: "none" }}>
+              {PLACEHOLDER_PHRASES[placeholderIndex]}
+            </div>
+          )}
           <textarea ref={inputRef} value={input}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
             onPaste={handlePasteImages}
             onChange={(e) => {
               const next = e.target.value;
@@ -3656,6 +4002,7 @@ export default function ChatPanel({
                 { value: "silam", label: "silam", group: "默认", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" },
                 ...(providerModels ?? []).flatMap((p) => {
                   const enabled = (p.models ?? []).filter((m) => m.selected !== false);
+                  const disabled = (p.models ?? []).filter((m) => m.selected === false);
                   if (enabled.length === 0) {
                     return [{
                       value: `api:${p.key}`,
@@ -3683,6 +4030,17 @@ export default function ChatPanel({
                         title: `${p.key} :: ${m.id}`,
                       };
                     }),
+                    // A-918+：未启用模型灰显展示，提示去 Providers 面板开启，避免「探测到却用不了」误解
+                    ...disabled.map((m) => {
+                      const label = prettyModelLabel(m.id, p.key) || m.id || "（未命名）";
+                      return {
+                        value: `api:${p.key}:${m.id}`,
+                        label: `${label} · 未启用`,
+                        group: p.key,
+                        title: `「${m.id}」未启用——请到 Providers 面板打开后再选择`,
+                        disabled: true,
+                      };
+                    }),
                   ] as GhostSelectOption[];
                 }),
                 ...providerKeys
@@ -3697,28 +4055,30 @@ export default function ChatPanel({
               ]}
             />
             {/* 推理等级：无框下拉，点击直接弹出可选等级（输入区在底部 → 默认向上展开）。
-                平时以上游返回为准（「自动」不传 effort）；异常场景手动覆盖强度。
-                等级集随当前模型实时联动：上游默认模式 = 当前模型探明的等级；设置了预制
-                供应商模式 = 该模式等级集。切模型后打开下拉即可看到新模型的可用等级。 */}
+                等级集 = 当前模型上游实际返回的 effort 列表（如 Deepseek 返回 low/medium/high），
+                不再硬编码"自动（上游默认）"固定选项——请求不传 reasoning_effort 时即隐式走上游默认。
+                切模型后下拉自动刷新为新模型的可用等级。 */}
             <GhostSelect
               value={reasoningEffort}
               onChange={(v) => onReasoningChange?.(v)}
-              displayLabel={reasoningEffort === "none" ? "推理" : `推理: ${EFFORT_LABEL[reasoningEffort] ?? reasoningEffort}`}
+              displayLabel={reasoningEffort === "none" || !reasoningEffort ? "推理" : `推理: ${EFFORT_LABEL[reasoningEffort] ?? reasoningEffort}`}
               title={curSupportsEffortLevels
-                ? `推理强度当前：${reasoningEffort === "none" ? "自动/以上游为准" : (EFFORT_LABEL[reasoningEffort] ?? reasoningEffort)}；当前模型上游支持等级：${curEfforts.join(" / ")}；点击直接选择`
-                : `推理强度当前：${reasoningEffort === "none" ? "自动/以上游为准" : (EFFORT_LABEL[reasoningEffort] ?? reasoningEffort)}；等级集：${reasonPreset === "upstream" ? "以上游返回为准" : (presetLabelOf(reasonPreset) + "预设")}，平时默认采用上游返回的数据，异常场景可手动覆盖`}
+                ? `推理强度当前：${reasoningEffort === "none" || !reasoningEffort ? "以上游为准（不传 effort）" : (EFFORT_LABEL[reasoningEffort] ?? reasoningEffort)}；当前模型上游支持等级：${curEfforts.join(" / ")}；点击直接选择`
+                : `推理强度当前：${reasoningEffort === "none" || !reasoningEffort ? "以上游为准（不传 effort）" : (EFFORT_LABEL[reasoningEffort] ?? reasoningEffort)}；等级集：${reasonPreset === "upstream" ? "以上游返回为准" : (presetLabelOf(reasonPreset) + "预设")}，平时默认采用上游返回的数据，异常场景可手动覆盖`}
               style={{
                 padding: "3px 10px", borderRadius: 12, flexShrink: 0,
-                border: `1px solid ${reasoningEffort !== "none" ? "var(--accent)" : "var(--border)"}`,
-                background: reasoningEffort !== "none" ? "var(--accent-soft)" : "var(--bg-hover)",
-                color: reasoningEffort !== "none" ? "var(--accent-hover)" : "var(--text-muted)",
+                border: `1px solid ${reasoningEffort && reasoningEffort !== "none" ? "var(--accent)" : "var(--border)"}`,
+                background: reasoningEffort && reasoningEffort !== "none" ? "var(--accent-soft)" : "var(--bg-hover)",
+                color: reasoningEffort && reasoningEffort !== "none" ? "var(--accent-hover)" : "var(--text-muted)",
                 fontSize: 11.5, cursor: "pointer",
                 maxWidth: 130,
               }}
               maxWidth={260}
               options={[
-                { value: "none", label: "自动（上游默认）" },
-                ...manualEfforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] ?? e })),
+                // 仅显示上游实际返回的等级集（不再硬编码"自动"固定项）
+                ...curEfforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] ?? e })),
+                // 若上游未返回等级集但用户预设了预制模式，仍展示预制模式等级
+                ...(curEfforts.length === 0 && presetEfforts ? presetEfforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] ?? e, group: presetLabelOf(reasonPreset) })) : []),
               ]}
             />
             {/* 联网搜索开关：灰色（关）→ 绿色（开），点击切换；关闭时 web_search/web_fetch 被静默拒绝 */}

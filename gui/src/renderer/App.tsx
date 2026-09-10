@@ -320,6 +320,8 @@ export default function App(): JSX.Element {
   }, [selectedSessionId]);
   const [agents, setAgents] = React.useState<AgentBrief[]>([]);
   const [sessions, setSessions] = React.useState<SessionItem[]>([]);
+  /** A-918+：会话列表指纹（id/title/count/lastTime 序列化），用于 15s 轮询时跳过无变化的重渲 */
+  const sessionsKeyRef = React.useRef("");
   const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({});
   const [agentConfig, setAgentConfig] = React.useState<Record<string, { model_choice?: string; mode?: string; reasoning_effort?: string; show_thinking?: string }>>({});
   /** 每个 Agent 配置的写入代次：任何用户交互写入（updateAgentConfig）都会递增。
@@ -438,10 +440,14 @@ export default function App(): JSX.Element {
   const loadSessions = React.useCallback(async (): Promise<void> => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api) { return; }
-    const items = await api.conversations.list().catch((e: unknown) => {
+    const items: SessionItem[] = await api.conversations.list().catch((e: unknown) => {
       console.error("[app] sessions list failed:", e);
-      return [];
+      return [] as SessionItem[];
     });
+    // A-918+：无变化则跳过 setState，避免 15s 轮询整棵侧栏树无谓重渲（启动/事件驱动的关键调用不受影响）
+    const key = JSON.stringify(items.map((s) => [s.sessionId, s.title, s.count, s.lastTime]));
+    if (key === sessionsKeyRef.current) { return; }
+    sessionsKeyRef.current = key;
     setSessions(items);
     setUiReady(true); // A-966b：会话首拉完成 → 允许启动面板隐藏
   }, []);
@@ -450,8 +456,8 @@ export default function App(): JSX.Element {
   React.useEffect(() => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api) { return; }
-    void loadAgents().then(async () => {
-      await loadSessions();
+    // A-918+：loadAgents 与 loadSessions 并行拉取（此前串行，启动首屏等待翻倍）
+    void Promise.all([loadAgents(), loadSessions()]).then(async () => {
       const items = await api.conversations.list().catch(() => []);
       if (items.length > 0) {
         setSelectedSessionId(items[0].sessionId);
@@ -1227,12 +1233,13 @@ export default function App(): JSX.Element {
           <div className="card" style={{
             width: 480, maxWidth: "92vw", maxHeight: "76vh",
             display: "flex", flexDirection: "column",
-            // 面板本体：更高不透明度 + 微 blur，磨砂面板观感
-            background: "var(--bg-card, rgba(22, 30, 56, 0.9))",
-            backdropFilter: "blur(18px) saturate(1.15)",
-            WebkitBackdropFilter: "blur(18px) saturate(1.15)",
+            // A-918+：弹窗入场过渡（点击弹出衔接），fadeIn 已在 index.css 定义
+            animation: "fadeIn 0.18s ease",
+            // A-918+ 性能：面板本体去 backdrop-filter（滚动选文件夹列表时 GPU 持续重绘）；改纯实色底
+            background: "var(--bg-card, rgba(22, 30, 56, 0.96))",
           }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+              <PlusIcon size={16} style={{ color: "var(--accent)", marginRight: 8, flexShrink: 0 }} />
               <h3 style={{ margin: 0, flex: 1 }}>新建会话</h3>
               <button className="titlebar-btn" onClick={() => setNewProjectOpen(false)}></button>
             </div>
@@ -1602,14 +1609,21 @@ export default function App(): JSX.Element {
     const startX = e.clientX;
     const startWidth = rightWidthRef.current;
     let lastW = startWidth;
+    // A-918++ 修复「拖动卡死 + 宽度不更新」：此前 onMove → rAF → setRightWidth 每帧触发 App 整树
+    // 重渲染（ChatPanel/RightSidebar/设置面板全重渲）→ 主线程阻塞 → 鼠标卡死、宽度跟不上。
+    // 现在拖动期间直接改右栏 DOM 的 style.width（零 React 重渲染），松开才 setRightWidth 落 state。
+    const asideEl = document.querySelector<HTMLElement>(".right-sidebar");
     const onMove = (ev: MouseEvent): void => {
-      // 右栏：鼠标向左 → 变宽（范围 260–900；A-968 放宽上限以支撑 diff/图片/长文件完整观察）
+      // 右栏：鼠标向左 → 变宽（范围 260–900）
       lastW = Math.max(260, Math.min(900, startX - ev.clientX + startWidth));
-      setRightWidth(lastW);
+      if (asideEl) { asideEl.style.width = `${lastW}px`; }
     };
     const onUp = (): void => {
       document.body.classList.remove("slime-resizing");
+      document.body.style.cursor = "";
       localStorage.setItem('slime_rightbar_w', String(lastW));
+      // 松开才触发一次 React 重渲染，最终宽度落 state（供下次拖动起点 + 持久化一致）
+      setRightWidth(lastW);
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       window.removeEventListener('blur', onUp);

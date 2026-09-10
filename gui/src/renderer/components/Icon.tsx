@@ -689,3 +689,72 @@ export function MessageCircleIcon(props: IconProps): JSX.Element {
     </svg>
   );
 }
+
+/** Git 分支（源：git.svg；line 172 已有完整版本，此处跳过避免重复声明） */
+
+/** CSS 文件图标（源：gui/icon/icon_fpbc119q3rk/css.svg 简化为 # 形 + 开口 C 弧） */
+export function CssIcon(props: IconProps): JSX.Element {
+  return (
+    <Svg {...props}>
+      {/* # 号的两条横线 + 两条斜线（CSS # 形） */}
+      <line x1="220" y1="380" x2="800" y2="380" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
+      <line x1="180" y1="620" x2="780" y2="620" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
+      <line x1="320" y1="300" x2="240" y2="720" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
+      <line x1="700" y1="300" x2="640" y2="720" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+/* ── 文件类型图标（语言/文件后缀，VS Code 文件图标范式：彩色圆角块 + 缩写） ── */
+
+/** 文件类型 → 展示缩写 + 品牌色（按扩展名识别；未收录回退通用文件色） */
+export function resolveFileKind(filename: string): { abbr: string; color: string } {
+  const name = (filename ?? "").toLowerCase();
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : name;
+  const m: Record<string, { abbr: string; color: string }> = {
+    ts: { abbr: "TS", color: "#3178c6" },
+    tsx: { abbr: "TSX", color: "#3178c6" },
+    js: { abbr: "JS", color: "#f7df1e" },
+    jsx: { abbr: "JSX", color: "#f7df1e" },
+    mjs: { abbr: "JS", color: "#f7df1e" },
+    py: { abbr: "PY", color: "#3776ab" },
+    json: { abbr: "{}", color: "#5a8a3c" },
+    md: { abbr: "M↓", color: "#8b949e" },
+    html: { abbr: "</>", color: "#e34f26" },
+    htm: { abbr: "</>", color: "#e34f26" },
+    css: { abbr: "#", color: "#1572b6" },
+    sh: { abbr: ">_", color: "#34d399" },
+    bash: { abbr: ">_", color: "#34d399" },
+    go: { abbr: "GO", color: "#00add8" },
+    rs: { abbr: "RS", color: "#dea584" },
+    java: { abbr: "J", color: "#b07219" },
+    c: { abbr: "C", color: "#555" },
+    cpp: { abbr: "C++", color: "#659ad2" },
+    h: { abbr: "H", color: "#659ad2" },
+    yml: { abbr: "YML", color: "#8b949e" },
+    yaml: { abbr: "YML", color: "#8b949e" },
+    toml: { abbr: "TOML", color: "#8b949e" },
+    xml: { abbr: "XML", color: "#e34f26" },
+    sql: { abbr: "SQL", color: "#8b949e" },
+    txt: { abbr: "TXT", color: "#8b949e" },
+  };
+  const hit = m[ext];
+  if (hit) { return hit; }
+  const abbr = ext.length <= 3 ? ext.toUpperCase() : ext.slice(0, 3).toUpperCase();
+  return { abbr, color: "#8b949e" };
+}
+
+/** 文件类型彩色徽标（VS Code 文件图标范式：圆角块 + 缩写文字，非 emoji） */
+export function FileTypeIcon({ filename, size = 12, style }: { filename?: string; size?: number; style?: CSSProperties }): JSX.Element {
+  const { abbr, color } = resolveFileKind(filename ?? "");
+  return (
+    <svg viewBox="0 0 1024 1024" width={size} height={size} style={{ display: "inline-block", verticalAlign: "middle", flexShrink: 0, ...style }} xmlns="http://www.w3.org/2000/svg">
+      <rect x="128" y="128" width="768" height="768" rx="160" fill={color} />
+      <text x="512" y="512" textAnchor="middle" dominantBaseline="central"
+        fill="#0b1020" fontSize="400" fontWeight="700"
+        fontFamily="Segoe UI, system-ui, sans-serif" style={{ letterSpacing: -4 }}>
+        {abbr}
+      </text>
+    </svg>
+  );
+}
