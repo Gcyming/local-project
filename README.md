@@ -153,7 +153,7 @@ pilot project/
 
 ## 设计历程（阶段总览）
 
-> 详细里程碑见 [docs/PHASE\_LOG.md](docs/PHASE_LOG.md)；问题登记表与修复日志见 [docs/REVIEW\_AGENT.md](docs/REVIEW_AGENT.md)。
+> 详细里程碑见 [docs/阶段日志.md](docs/阶段日志.md)；问题登记表与修复日志见 [docs/REVIEW\_AGENT.md](docs/REVIEW_AGENT.md)。
 
 | 阶段            | 内容                                                                                                                                                 | 状态               |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
@@ -177,18 +177,16 @@ pilot project/
 
 | 文档                                                 | 作用                                     |
 | -------------------------------------------------- | -------------------------------------- |
+| [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) | 项目总览：改动日志（时间线）+ 功能/代码对照表 + 设计理念与演进方向 |
 | [docs/长存架构规划.md](docs/长存架构规划.md)                   | 架构总纲 v2.11：核心理念、双栈架构、数据契约、身份移民协议       |
-| [docs/PHASE\_LOG.md](docs/PHASE_LOG.md)            | 阶段级里程碑日志（含验收数据）                        |
+| [docs/阶段日志.md](docs/阶段日志.md)                   | 阶段级里程碑日志（双栈迁移 + GUI 迭代，含验收数据）             |
 | [docs/Intelligence.md](docs/Intelligence.md)       | L1/L2/L3 三层心智架构设计（1170 行白皮书）           |
 | [docs/soul-plan.md](docs/soul-plan.md)             | 三层心智 + 夺舍机制 + 四维人格模型（精简版）              |
 | [docs/身份移民协议规格.md](docs/身份移民协议规格.md)               | Agent 永存载体 `.slimeagent` 包格式 v1.2      |
 | [docs/CLI-GUI-MAPPING.md](docs/CLI-GUI-MAPPING.md) | CLI→GUI 命令映射表（MVP 定案）                  |
-| [docs/mcpfix.md](docs/mcpfix.md)                   | MCP 客户端优化方案（双帧 stdio / HTTP 长流）        |
 | [docs/sandbox\_design.md](docs/sandbox_design.md)  | 沙箱 L0-L5 架构设计方案 v1.0                   |
-| [docs/Evolution.md](docs/Evolution.md)             | 本地模型管理任务向导                             |
-| [docs/BUGS.md](docs/BUGS.md)                       | 已知 Bug 清单（BUG-001\~034 全部闭环 + S3 遗留）   |
-| [docs/阶段日志.md](docs/阶段日志.md)                       | 日常迭代快照（供回溯）                            |
 | [docs/search\_engine.md](docs/search_engine.md)    | 内置网络工具方案（web\_fetch/web\_search）       |
+| [docs/SILAM_INTEGRATION.md](docs/SILAM_INTEGRATION.md) | SILAM-Σ 原生生命模型集成（4C 集成 + 4D 持久化）      |
 | [linux/README.md](linux/README.md)                 | Linux 兼容子项目说明                          |
 | [AGENTS.md](AGENTS.md)                             | Agent Git 行为硬契约（提交粒度 / 身份铁律 / 回滚策略）    |
 | [CLAUDE.md](CLAUDE.md)                             | Claude Code 上下文工作指引                    |
