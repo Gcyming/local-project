@@ -9,6 +9,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Agent as HttpKeepAliveAgent } from "node:http";
 import { Agent as HttpsKeepAliveAgent } from "node:https";
+import { inferModelCapabilities, sortEfforts } from "../../../shared/gen/model-capabilities.js";
 
 /** API 端点格式：OpenAI Chat Completions / Anthropic Messages / 自动检测 */
 export type ApiFormat = "openai" | "anthropic" | "auto";
@@ -777,44 +778,12 @@ function inferPricingFromUrl(baseUrl: string, modelId: string): { price_in_usd?:
 /**
  * 基于模型 ID 推断是否支持 Thinking 模式。推理等级为【兜底推断】——真正的等级
  * 必须以上游 /models 返回的 reasoning.supported_efforts 为准（enrichModels 里优先取上游）。
- * 等级按行业共识预制（2026）：
- *  - OpenAI o1/o3/o4：low/medium/high；gpt-5 系列：low/medium/high/xhigh/max
- *  - Claude Opus/Sonnet 4.6+：low/medium/high/xhigh/max；旧 Claude：low/medium/high
- *  - DeepSeek-R/GLM5/step-L2/Agnes/Gemini-thinking：low/medium/high
+ * A-918+ 单源合并：能力预制表已收敛到 shared/model-capabilities.ts（MODEL_CAPABILITIES），
+ * 本函数与 renderer 端 REASONING_PRESETS 共用同一来源，杜绝双份数据漂移。
  */
-/** 推理强度行业共识顺序（2026，全网调研）：none ≤ minimal ≤ low ≤ medium ≤ high ≤ xhigh ≤ max */
-const EFFORT_RANK: Record<string, number> = {
-  none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 6, maximal: 7, adaptive: 8, auto: 9,
-};
-/** 按共识顺序稳定排序推理等级；未知等级排末尾，保证渲染稳定且以上游集合为准 */
-function sortEfforts(levels: string[]): string[] {
-  const known = levels.filter((l) => l in EFFORT_RANK).sort((a, b) => EFFORT_RANK[a] - EFFORT_RANK[b]);
-  const unknown = levels.filter((l) => !(l in EFFORT_RANK));
-  return [...known, ...unknown];
-}
-
 function inferThinkingSupport(modelId: string): { supported: boolean; efforts?: string[] } {
-  const id = modelId.toLowerCase();
-  // OpenAI reasoning（o1/o3/o4 固定仅 low/medium/high；gpt-5.x 支持 xhigh/max）
-  if (/(^|[^a-z0-9])(o1|o3|o4)([^a-z0-9]|$)/.test(id)) {
-    return { supported: true, efforts: ["low", "medium", "high"] };
-  }
-  if (/gpt[-_]?5\.(5|6)/.test(id) || /[-_]sol$|[-_]terra$|[-_]luna$/.test(id)) {
-    return { supported: true, efforts: ["low", "medium", "high", "xhigh", "max"] };
-  }
-  // Claude：Opus/Sonnet 4.6+ / 5 / Fable 支持 xhigh/max；其余 Claude 仅 low/medium/high
-  if (/claude[-_]/.test(id)) {
-    if (/claude[-_](opus|sonnet)/.test(id) && /(4\.[678]|5|fable)/.test(id)) {
-      return { supported: true, efforts: ["low", "medium", "high", "xhigh", "max"] };
-    }
-    return { supported: true, efforts: ["low", "medium", "high"] };
-  }
-  // DeepSeek / GLM / step / Agnes / Gemini thinking：开/关 + low/medium/high
-  if (/deepseek[-_](reasoner|r1)/.test(id) || /glm[-_](5|4\.5)/.test(id) || /step[-_]l2/.test(id)
-      || /agnes/.test(id) || /gemini[-_].*think/.test(id)) {
-    return { supported: true, efforts: ["low", "medium", "high"] };
-  }
-  return { supported: false };
+  const cap = inferModelCapabilities(modelId);
+  return { supported: cap.supported, efforts: cap.efforts };
 }
 
 export async function enrichModels(baseUrl: string, apiKey: string, format: ApiFormat = "auto"): Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }> {
