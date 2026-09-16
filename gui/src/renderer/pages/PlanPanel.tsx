@@ -52,6 +52,13 @@ export function PlanCard({ plan, sessionLabel }: { plan: PlanInfo; sessionLabel?
       {sessionLabel && (
         <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>会话：{sessionLabel}</div>
       )}
+      {/* A-980-R29：标出来源。`todo` 是「待办任务」清单的**只读镜像**（用于在设置里也能看进度），
+          真 Plan 才是可被 plan_update 推进的一等对象——不标的话用户会分不清这两个东西。 */}
+      {plan.source && (
+        <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, opacity: 0.85 }}>
+          {plan.source === "todo" ? "来源：待办清单（只读镜像）" : "来源：plan_create（结构化计划）"}
+        </div>
+      )}
       <div style={{ height: 6, background: "var(--border)", borderRadius: 3, marginTop: 6, overflow: "hidden" }}>
         <div style={{
           width: `${p.pct}%`, height: "100%",
@@ -108,9 +115,18 @@ export function usePlanStore(): PlanInfo[] {
     if (!w.slimeAPI?.plan?.onUpdate) { return; }
     const off = w.slimeAPI.plan.onUpdate((payload: { sessionId: string; plan: PlanInfo }) => {
       setPlans((prev) => {
-        const idx = prev.findIndex((pl) => pl.id === payload.plan.id);
-        const next = idx >= 0 ? prev.map((pl, i) => (i === idx ? payload.plan : pl)) : [...prev, payload.plan];
-        return next.slice(-8); // 最多保留 8 个近期 Plan，排序按更新时间降序
+        // A-980-R29：**按会话去重**，不再按 plan.id 入列。
+        // 一个会话可能同时/先后有两条来源的 Plan —— `plan_create` 的真 Plan（随机 id）与
+        // `todo_write` 派生的只读镜像（id = `todo-<sid尾8>`）；原来按 id 判重会让同一会话
+        // 在「任务进度」里冒出两张卡，数字还对不上。
+        const key = payload.plan.sessionId ?? payload.sessionId ?? "";
+        const at = key
+          ? prev.findIndex((pl) => (pl.sessionId ?? "") === key)
+          : prev.findIndex((pl) => pl.id === payload.plan.id);
+        // 真 Plan 不被派生镜像顶掉（主进程已拦一层；广播可能乱序，这里再兜一次）
+        if (at >= 0 && prev[at]!.source === "plan" && payload.plan.source === "todo") { return prev; }
+        const next = at >= 0 ? prev.map((pl, i) => (i === at ? payload.plan : pl)) : [...prev, payload.plan];
+        return next.slice(-8); // 最多保留 8 个近期 Plan（按更新时间降序展示）
       });
     });
     return off;

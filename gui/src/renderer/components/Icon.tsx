@@ -294,11 +294,13 @@ export function CloudDownloadIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 右箭头 */
+/** 右箭头（源：arrow-right.svg——此前只画了横线缺箭头，12px 下形似减号，用户实测"访问按钮是个减号"） */
 export function ArrowRightIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
       <path d="M810.624 473.6a38.4 38.4 0 1 1 0 76.8H213.312a38.4 38.4 0 1 1 0-76.8h597.312z" />
+      <path d="M783.552 484.864a38.336 38.336 0 1 1 54.272 54.272l-256 256a38.336 38.336 0 1 1-54.272-54.272l256-256z" />
+      <path d="M527.552 228.864a38.336 38.336 0 0 1 54.272 0l256 256a38.336 38.336 0 1 1-54.272 54.272l-256-256a38.336 38.336 0 0 1 0-54.272z" />
     </Svg>
   );
 }
@@ -362,12 +364,25 @@ export function CustomIcon(props: IconProps): JSX.Element {
 
 /* ── 旧图标别名（向后兼容） ── */
 // TreeIcon → now uses FoldersIcon
-// TaskIcon → now uses ListIcon
 // TermIcon → now uses CpuIcon
 // GlobeIcon → now uses SearchIcon
 
 export function TreeIcon(props: IconProps): JSX.Element { return <FoldersIcon {...props} />; }
-export function TaskIcon(props: IconProps): JSX.Element { return <ListIcon {...props} />; }
+/** 待办任务（勾选方框 + 对勾）
+ *  A-980-R24：替换旧的 `ListIcon` 别名——旧图标本质是「一条横杠」，放右侧栏「待办任务」
+ *  标签页上既不表意也不美观（用户反馈"标签图标不符合"）。
+ *  造型取自 `gui/icon/icon_fpbc119q3rk/Checkbox-filled.svg`（同图标库，1024 网格、单色填充风格一致）。
+ *  fillRule=evenodd：保证内部对勾稳定挖空（不依赖两条子路径的绕向，换个渲染器也不会变成实心方块）。 */
+export function TaskIcon(props: IconProps): JSX.Element {
+  return (
+    <Svg {...props}>
+      <path
+        fillRule="evenodd"
+        d="M768 128a128 128 0 0 1 128 128v512a128 128 0 0 1-128 128H256a128 128 0 0 1-128-128V256a128 128 0 0 1 128-128h512z m-36.864 228.864a38.336 38.336 0 0 0-54.272 0L448 585.728 347.136 484.864a38.336 38.336 0 1 0-54.272 54.272l128 128a38.336 38.336 0 0 0 54.272 0l256-256a38.336 38.336 0 0 0 0-54.272z"
+      />
+    </Svg>
+  );
+}
 export function TermIcon(props: IconProps): JSX.Element { return <CpuIcon {...props} />; }
 export function GlobeIcon(props: IconProps): JSX.Element { return <SearchIcon {...props} />; }
 

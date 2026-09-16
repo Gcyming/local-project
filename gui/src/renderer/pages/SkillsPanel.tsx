@@ -6,9 +6,12 @@ import React, { type JSX } from "react";
 import type { SkillInfo } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
 
-/** A-918++：内嵌 webview 标签（GitHub 授权页内嵌在面板内，非独立弹窗） */
-const WebviewTag = React.forwardRef<HTMLElement, { src: string; style: React.CSSProperties; partition?: string; allowpopups?: boolean }>(
-  (props, ref) => React.createElement("webview", { ...props, ref }),
+/** A-918++：内嵌 webview 标签（GitHub 授权页内嵌在面板内，非独立弹窗）
+ *  ⚠️ A-975-R6：`allowpopups` 必须转成**字符串** "true" —— React 对未知元素会丢弃值为 true 的
+ *  未知布尔属性（只留一条控制台警告），属性根本落不到 <webview> 上 → guest 的 window.open 被
+ *  Chromium 直接丢弃，宿主侧 setWindowOpenHandler 连机会都没有。 */
+const WebviewTag = React.forwardRef<HTMLElement, { src: string; style: React.CSSProperties; partition?: string; allowpopups?: boolean | string }>(
+  (props, ref) => React.createElement("webview", { ...props, allowpopups: props.allowpopups ? "true" : undefined, ref }),
 );
 WebviewTag.displayName = "WebviewTag";
 

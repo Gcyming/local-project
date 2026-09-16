@@ -9,6 +9,10 @@
   --bg-input: #0f172a;
   --bg-hover: #334155;
   --border: #334155;
+  /* A-975：卡片「抬高面」——此前产物卡用 --bg-input（#0f172a）= 与页面底色同色，
+     卡片和背景糊在一起分不出边界；这里给一个明确比 --bg 亮一档的面 + 更实的描边。 */
+  --card-surface: #1c2740;
+  --card-border: rgba(148, 163, 184, 0.30);
   --border-hover: #475569;
   --text: #e2e8f0;
   --text-primary: #e2e8f0;
@@ -23,6 +27,12 @@
   --warning: #f59e0b;
   --danger: #ef4444;
   --danger-soft: rgba(239, 68, 68, 0.14);
+
+  /* ── A-980-R32：「待办划掉」的动效节拍（全局共享）──────────────────────────
+     右栏待办面板（删除线 + 灰化层，两者共用同一变量才能「线到哪灰到哪」）
+     与思考历程里的推进播报行都读这两个值 —— 单点定义，两侧同节拍。 */
+  --todo-sweep: 0.36s;
+  --todo-sweep-ease: cubic-bezier(0.33, 0, 0.2, 1);
 
   /* ── 代码增删 diff 配色（VS Code diffEditor 范式：绿=新增、红=删除、蓝=修改） ── */
   --diff-add: #3fb950;
@@ -51,6 +61,10 @@
   --bg-input: rgba(10, 15, 30, 0.55);
   --bg-hover: rgba(56, 189, 248, 0.12);
   --border: rgba(140, 246, 251, 0.14);
+  /* A-975：卡片抬高面（Beta 主题底色 #05070e 极深，半透明 --bg-input 叠上去几乎不可见 →
+     产物卡与背景同色。这里用不透明度更高的蓝灰面 + 明显描边，保证一眼分得出卡片边界）。 */
+  --card-surface: rgba(30, 42, 70, 0.82);
+  --card-border: rgba(140, 246, 251, 0.26);
   --border-hover: rgba(56, 189, 248, 0.35);
   --text: #eef4ff;
   --text-primary: #eef4ff;
@@ -86,12 +100,20 @@
 }
 
 /* Beta 主题：结构件毛玻璃（A-918++：blur 12px→4px，12px 每帧重模糊是全屏常驻 3 区域
-   持续 GPU 重活的主因；4px 视觉仍毛玻璃但 GPU 负担降 60%+，卡顿/撕裂显著改善） */
+   持续 GPU 重活的主因；4px 视觉仍毛玻璃但 GPU 负担降 60%+，卡顿/撕裂显著改善）
+   ⚠️ A-975-R5：**右栏必须排除**。右栏里嵌着 <webview>（Chromium OOPIF），
+   带 backdrop-filter 的祖先会把 guest 放到独立合成层，导致**页面能渲染、鼠标命中测试失效** →
+   症状就是"能进网站，之后点什么都没反应"（用户实测；这也是 Electron 的已知雷区）。
+   右栏毛玻璃观感改由更实的底色提供（见下方 .right-sidebar 的 beta 覆盖），不依赖 blur。 */
 :root[data-theme="beta"] .sidebar,
-:root[data-theme="beta"] .titlebar,
-:root[data-theme="beta"] .right-sidebar {
+:root[data-theme="beta"] .titlebar {
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
+}
+
+/* 去掉 blur 后右栏底色补实一档，保持"黑里透蓝"的结构层次（无 blur，零合成风险） */
+:root[data-theme="beta"] .right-sidebar {
+  background: rgba(13, 19, 36, 0.92);
 }
 
 /* A-918++ Beta：卡片伪磨砂质感（顶部内高光模拟玻璃厚度 + 半透明底 + 细边框 + 天蓝微晕影）。
@@ -239,11 +261,20 @@ code,
   display: flex;
   flex-direction: column;
   width: var(--sidebar-w);
-  min-width: 280px; /* A-949：侧栏最小宽度扩大一倍（原 140）——保证会话项/按钮完整可读 */
+  /* A-980-R24：280 → 240。原 280 会顶掉「左栏占窗口 17.5%」的初始比例（1080p 下 17.5%×1498≈262
+     会被抬到 280 → 三栏占比与设计版式不一致）。240 仍保证会话项/按钮完整可读（原 140 才是不可读值）。
+     ⚠️ 与 App.tsx 的 SIDEBAR_MIN_W / SIDEBAR_MAX_W 必须保持一致。 */
+  min-width: 240px;
   max-width: 520px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
-  transition: width 0.18s ease;
+  /* A-980-R21：宽度过渡；opacity **不放 CSS**（由 App 的 runGeometrySyncFade 用 DOM style 逐帧写入，
+     取值 = smoothstep(实测宽/展开宽)，与宽度同拍——避免 className 切换时残留 opacity 过渡造成「收起后又闪一次渐变」）
+     A-980-R30：0.25s → 0.45s——放慢收起/展开速度，凸显几何同步的渐隐渐显
+     A-980-R34：0.45s → 0.6s——用户"展开跟收起的动画再长一点"
+     A-980-R35：0.6s → 0.5s（用户"又太长了，稍微缩短一点点"）；缓动 ease-in-out → **decelerate
+     cubic-bezier(0,0,0.2,1)**——展开/收起都是**由快到慢**的动态节奏（起步快、收尾缓） */
+  transition: width 0.5s cubic-bezier(0, 0, 0.2, 1);
   overflow: hidden;
   flex-shrink: 0;
   position: relative;
@@ -252,6 +283,12 @@ code,
   width: 0 !important;
   min-width: 0;
   border-right: none;
+}
+/* A-980-R34：展开动画期间临时解除 min-width——否则 240px 下限把展开过渡钳在下限之上，
+   实测宽度起跳即越出渐变带（[0.40,0.95]×full），窄栏展开看不到渐入。
+   类由 App 在 animateLeftSidebar(true) 挂上、几何 done 后移除。 */
+.sidebar-no-min {
+  min-width: 0 !important;
 }
 .sidebar-resizer {
   position: absolute;
@@ -377,13 +414,22 @@ code,
 /* ── 主内容区 ─ */
 .main {
   flex: 1 1 0%;
-  min-width: 0;
+  /* A-975-R4：聊天区**最小宽度保底**——此前 min-width:0 配合两侧栏 flex-shrink:0，
+     窗口一缩小两侧栏一分不让，聊天区被挤到 0（用户实测"聊天栏被挤没"）。
+     现在：聊天区保底 380px → 空间不足时 flex 会去收缩**可收缩的侧栏**（左 ≥280 / 右 ≥260），
+     再不够才由 .body 的横向滚动兜底。纯 CSS，无 JS 状态、无 resize 反馈环。 */
+  min-width: 380px;
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
   display: flex;
   flex-direction: column;
   position: relative;
+}
+/* A-975-R4：右栏处于「占满/浮层」模式（聊天已变悬浮窗）时，主区允许收成 0 宽 ——
+   否则 380 + 占满的右栏 会超出窗口 → 整页出现横向滚动条、右栏被推出可视区。 */
+.main.main-float {
+  min-width: 0;
 }
 
 /* ── 通用控件 ── */
@@ -473,7 +519,12 @@ code,
   padding: 4px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-hover);
-  background: var(--bg-card);
+  /* A-978-R：弹出层磨砂——近实色底（≈0.92，文本可读）+ blur 毛玻璃。
+   * 此前 var(--bg-card) 仅 0.5 不透明且无 blur → 底层文字/画面透出，几乎看不清（用户实测）。
+   * 对齐 A-911 责任版玻璃规范：文本置于近实底、blur 12-20px + saturate。瞬态层打开才渲染，无持续合成成本。 */
+  background: rgba(14, 20, 42, 0.92);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
@@ -509,7 +560,8 @@ code,
   letter-spacing: 0.5px;
   position: sticky;
   top: 0;
-  background: var(--bg-card);
+  /* 与下拉本体同源近实底（滚动时内容不透过分组头） */
+  background: rgba(14, 20, 42, 0.94);
   z-index: 2;
   user-select: none;
 }
@@ -564,6 +616,24 @@ code,
 }
 .input-field:focus { border-color: var(--accent); }
 
+/* A-978-R：右侧栏文件树右键菜单——磨砂（内联背景已改为近实底，此处补 blur + 微动画；间距沿用内联 marginRight，不加 gap 防双倍） */
+.ctx-menu {
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  backdrop-filter: blur(16px) saturate(140%);
+  animation: ghost-dropdown-in 0.12s ease;
+}
+.ctx-menu-item {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--accent-hover);
+}
+
 /* ── 卡片 ── */
 .card {
   background: var(--bg-card);
@@ -578,14 +648,15 @@ code,
   font-weight: 600;
 }
 
-/* ── 滚动条 ── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* ── 滚动条：A-980-R20 统一为「超薄细线 + 天蓝位置指示」样式（对齐前沿 Agent 产品位置指示条：
+   轨道透明、滑块是细色线、hover 加深；深灰滑块观感即用户反馈"样式不对"，已改为 accent 细线） ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-hover);
-  border-radius: 3px;
+  background: rgba(96, 165, 250, 0.4);
+  border-radius: 2.5px;
 }
-::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+::-webkit-scrollbar-thumb:hover { background: rgba(96, 165, 250, 0.85); }
 
 /* 流式光标闪烁 */
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0; } 100% { opacity: 1; } }
@@ -674,11 +745,17 @@ code,
   flex-direction: column;
   width: var(--right-sidebar-w, 320px);
   min-width: 260px;
-  /* A-968：放宽硬上限（600px 在高分屏/Git diff、图片预览场景偏窄），上限对齐拖拽实现与 localStorage */
-  max-width: 900px;
+  /* A-980-R14：解除 900px 硬上限——右栏可拖到占满窗口（上限对齐拖拽逻辑 innerWidth-48）
+     A-975-R4：再加 `100%`——外层 wrapper 允许被 flex 收缩（窗口变窄时优先让位给聊天区），
+     这里用 max-width:100% 跟随收缩后的 wrapper，避免固定宽度溢出 wrapper。 */
+  max-width: min(100%, calc(100vw - 48px));
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
-  transition: width 0.18s ease;
+  /* A-980-R20：宽度过渡；A-980-R24 起 opacity 与宽度**几何同步**（App 侧 rAF 逐帧写入，不放 CSS）
+     A-980-R30：0.25s → 0.45s——与左栏同速放慢，凸显渐隐渐显
+     A-980-R34：0.45s → 0.6s——用户"展开跟收起的动画再长一点"
+     A-980-R35：0.6s → 0.5s（用户"又太长了"）；缓动改 decelerate cubic-bezier(0,0,0.2,1)——由快到慢 */
+  transition: width 0.5s cubic-bezier(0, 0, 0.2, 1);
   overflow: hidden;
   flex: 0 0 auto;
   position: relative;
@@ -687,6 +764,12 @@ code,
   width: 0 !important;
   min-width: 0;
   border-left: none;
+}
+/* A-980-R34：展开动画期间临时解除内部 .right-sidebar 的 min-width（260px 下限会钳住展开过渡、
+   渐变带 [0.45,0.90]×full 进不去，窄栏展开看不到渐入）。类由 App 在 animateRightSidebar(true)
+   挂到外层 wrapper 上、几何 done 后移除。 */
+.right-wrapper-no-min .right-sidebar {
+  min-width: 0 !important;
 }
 .right-sidebar-resizer {
   position: absolute;
@@ -701,6 +784,51 @@ code,
 .right-sidebar-resizer:hover,
 .right-sidebar-resizer.active {
   background: var(--accent);
+}
+
+/* A-980-R17：悬浮窗整体 no-drag——拖到与程序标题栏（-webkit-app-region: drag）重叠时
+   仍能收到鼠标事件（否则按到的是整窗拖拽），标题栏内按钮的 no-drag 由 .titlebar-btn 自带 */
+.float-window {
+  -webkit-app-region: no-drag;
+}
+
+/* ── A-980-R18：全局超薄滚动条沿用既有全局细条（line 606：6px + var(--border-hover) 可见滑块）。
+   注意：曾用 *::-webkit-scrollbar-thumb 覆盖成 rgba(148,163,184,0.25) 极淡色，用户反馈"看不清/没落地"，
+   已回退到可见样式——统一超薄宽度 + 清晰滑块，hover 变 accent（既有全局规则） ── */
+
+/* 聊天消息区滚动条：天蓝 accent 细条（跟随主题，比全局稍醒目） */
+.chat-scroll {
+  scrollbar-color: rgba(96, 165, 250, 0.55) transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: rgba(96, 165, 250, 0.55);
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(96, 165, 250, 0.85);
+}
+
+/* A-980-R18：加载更早历史分段胶囊（对齐前沿 Agent 聊天「第 N 个问题（点击加载）」模式） */
+.load-earlier-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hover);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.load-earlier-pill:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+.load-earlier-pill:disabled {
+  opacity: 0.7;
+  cursor: default;
 }
 
 /* ── 侧栏拖拽调整尺寸：拖动期间禁用宽度过渡 + 禁用文本选中，保证跟手流畅 ── */
@@ -733,7 +861,7 @@ body.slime-resizing {
   background: transparent;
 }
 .right-tabbar::-webkit-scrollbar-thumb {
-  background: var(--border-hover);
+  background: rgba(96, 165, 250, 0.45);
   border-radius: 2px;
 }
 .right-tabbar-tab {
@@ -1349,13 +1477,15 @@ body.slime-resizing {
 .msg-row .msg-hover { opacity: 0; transition: opacity 0.12s; pointer-events: none; }
 .msg-row:hover .msg-hover { opacity: 1; pointer-events: auto; }
 
-/* ─ 思考过程展开区：TRAE 风格——分层卡片 + 可折叠工具行（A-170） ── */
+/* ─ 思考过程展开区：分层卡片 + 可折叠工具行（A-170） ──
+   注：容器不再画背景/边框——用户反馈"输出结束后都带一个文本框，更喜欢输出中那种没有气泡框的样式"。
+   内部的工具调用/访问行保留各自小卡片（"调用、访问时的那些倒无所谓"）。 */
 .think-card {
   border-radius: 10px;
-  padding: 8px 12px;
+  padding: 4px 0 2px;
   margin: 8px 0 2px;
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+  background: transparent;
+  border: none;
 }
 .think-card-title {
   display: flex; align-items: center; gap: 6px;
@@ -1415,14 +1545,33 @@ body.slime-resizing {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+/* 呼吸光晕只在「流式进行中」的时间线里跑；输出结束后必须停止闪烁
+   （用户反馈：输出完毕后蓝点还在一直闪）。.is-live 由流式渲染区加上。 */
+.think-timeline.is-live .think-step-mark {
   animation: breatheGlow 1.8s ease-in-out infinite; /* A-918+：时间线节点呼吸光晕（GPU 合成，带光晕不卡） */
   will-change: opacity, filter; /* A-918++：will-change 提示 GPU 合成层 */
 }
+/* 已完成时间线：静态蓝点（保留视觉重量，不呼吸、不占合成层） */
+.think-timeline:not(.is-live) .think-step-mark {
+  opacity: 0.8;
+}
+/* ── 思考正文：视觉降级（visual demotion）─────────────────────────────
+   业界规范（ChatGPT / Claude / Gemini / DeepSeek / Perplexity 已收敛）：
+   思考 ≠ 答案，必须一眼可辨——更小字号 + 更暗颜色 + 左侧竖线 + 独立滚动。
+   注意：内部 Markdown 渲染带 .markdown-body 类（显式 15px/正文色/字重 500），
+   会**覆盖**外层 font-size/color —— 必须用后代选择器压制，否则样式不生效。 */
 .think-step-text {
-  font-size: 14.5px; /* A-918++：12.5→14.5，思考文字和正文一样大——用户反馈"细、小、颗粒感" */
+  margin-top: 4px;
+  padding: 2px 4px 2px 12px;
+  border-left: 2px solid var(--border); /* 左侧竖线：标记"这是思考不是答案" */
+  max-height: 420px; /* 长思考独立滚动（Claude 做法），避免撑爆消息流 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 12.5px; /* 视觉降级：正文 15px → 思考 12.5px */
   line-height: 1.75;
-  color: var(--text);
-  font-weight: 500; /* A-918++：加粗——避免细黑字颗粒感 */
+  font-weight: 400;
+  color: var(--text-secondary); /* 浅灰（#94a3b8），与正文 --text 明确区分 */
   word-break: break-word;
   white-space: pre-line; /* A-174：配合 normalizeThinkingText 规范化后的文本，保留段落换行，合并多余空白 */
   /* A-918++：黑体优先（避免 chromium fallback 宋体细字）+ antialiased 字形更平滑 */
@@ -1430,8 +1579,154 @@ body.slime-resizing {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+.think-step-text .markdown-body {
+  font-size: 12.5px;
+  line-height: 1.75;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+.think-step-text .markdown-body strong,
+.think-step-text .markdown-body em {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.think-step-text .markdown-body h1,
+.think-step-text .markdown-body h2,
+.think-step-text .markdown-body h3,
+.think-step-text .markdown-body h4,
+.think-step-text .markdown-body h5,
+.think-step-text .markdown-body h6 {
+  margin: 0.6em 0 0.3em;
+  padding: 0;
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.think-step-text .markdown-body p { margin: 0.45em 0; }
+.think-step-text .markdown-body :is(ul, ol) { margin: 0.45em 0; padding-left: 1.5em; }
+.think-step-text .markdown-body li { margin: 0.2em 0; }
+.think-step-text .markdown-body code {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+.think-step-text .markdown-body pre {
+  margin: 0.5em 0;
+  padding: 0.5em 0.7em;
+  background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
+  border: 1px solid var(--border);
+}
+.think-step-text .markdown-body blockquote {
+  margin: 0.5em 0;
+  padding: 0 0 0 8px;
+  background: transparent;
+  border-left: 2px solid var(--border);
+  color: var(--text-secondary);
+}
 .think-step-text > *:first-child { margin-top: 0; }
 .think-step-text > *:last-child { margin-bottom: 0; }
+
+/* ── A-980-R32：思考历程里的「任务规划卡 + 推进播报行」 ─────────────────────
+   与右栏待办面板是**同一份规划的两个视角**：
+     · 这里 = 带时间序的推进日志（先有规划卡，之后每完成一项补一行），随消息持久化、可回看；
+     · 右栏 = 当前快照（做完就划掉，全部完成后自动清空）。
+   视觉沿用时间线的语言（小字号 + 降级色 + 节点圆点），但规划卡给一层极浅底，让它从思考正文里"立"出来。 */
+.think-step .plan-step-mark { background: var(--accent-hover); }
+.plan-card {
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 8px;
+  padding: 5px 8px 5px 7px;
+}
+.plan-card-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 0; text-align: left;
+  background: transparent; border: none; cursor: pointer;
+}
+.plan-card-title {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.plan-card-progress {
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  color: var(--accent-hover);
+  flex-shrink: 0;
+}
+.plan-card-progress[data-all-done="1"] { color: var(--success); }
+.plan-card-active {
+  font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1; min-width: 0;
+}
+.plan-card-list {
+  margin-top: 4px;
+  max-height: 240px; /* 长规划独立滚动，不把消息流撑爆（与思考正文同一策略） */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.plan-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 11.5px; line-height: 1.65;
+  padding: 1px 0;
+}
+.plan-item-mark {
+  flex-shrink: 0; width: 12px; text-align: center;
+  font-size: 10px; line-height: 1.75;
+  color: var(--text-dim);
+}
+.plan-item-text { flex: 1; min-width: 0; word-break: break-word; color: var(--text-muted); }
+.plan-item[data-status="in_progress"] .plan-item-text { color: var(--text-primary); font-weight: 500; }
+.plan-item[data-status="in_progress"] .plan-item-mark { color: var(--accent-hover); }
+.plan-item[data-status="completed"] .plan-item-text { color: var(--text-dim); text-decoration: line-through; }
+.plan-item[data-status="completed"] .plan-item-mark { color: var(--success); }
+
+/* 推进播报行：✓ 完成 / ▶ 开始 —— 与右栏划掉同一时刻出现，形成"两侧同步推进"的观感 */
+.think-step .todo-step-mark { background: var(--accent-hover); }
+.think-step .todo-step-mark.is-done { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 15%, transparent); }
+.todo-announce {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; line-height: 1.6;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.todo-announce-mark {
+  flex-shrink: 0; width: 13px; height: 13px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent-hover);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.todo-announce.is-done .todo-announce-mark {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+}
+/* 完成态的划掉：同样的"从左到右长出来"（0.36s），与右栏待办面板的划掉动画同参数同节奏 */
+.todo-announce-text { position: relative; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.todo-announce.is-done .todo-announce-text { color: var(--text-dim); }
+.todo-announce.is-done .todo-announce-text::after {
+  content: "";
+  position: absolute; left: 0; top: 50%;
+  height: 1px; width: 0;
+  background: currentColor;
+  animation: todoAnnounceStrike var(--todo-sweep, 0.36s) var(--todo-sweep-ease, ease-out) forwards;
+}
+@keyframes todoAnnounceStrike { from { width: 0; } to { width: 100%; } }
+.todo-announce-tag {
+  flex-shrink: 0;
+  font-size: 10px; padding: 0 5px; border-radius: 999px;
+  color: var(--accent-hover);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.todo-announce.is-done .todo-announce-tag {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .todo-announce.is-done .todo-announce-text::after { animation: none; width: 100%; }
+}
+
 .think-tool-node {
   position: relative;
   margin: 2px 0 6px;
@@ -1554,6 +1849,30 @@ body.slime-resizing {
   opacity: 0.55;
 }
 
+/* A-975：产物卡「抬高面」——此前 background:var(--bg-input) 与页面底色同色，卡片看不出边界。
+   现在用比背景亮一档的面 + 更实描边 + 轻投影，悬停再提亮一档。 */
+.prod-card {
+  background: var(--card-surface);
+  border: 1px solid var(--card-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
+}
+.prod-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.prod-card.is-open {
+  border-color: var(--accent);
+}
+.prod-card-title {
+  color: var(--text-primary);
+}
+/* A-975：产物卡展开的 diff 详情也用同一抬高面（此前 rgba(0,0,0,.18) 比背景更暗，像"凹坑"） */
+.prod-diff {
+  background: var(--card-surface);
+  border: 1px solid var(--card-border);
+}
+
 /* 性能优化（A-129）：长会话滚动时跳过视口外消息行的渲染/布局，
    滚动帧率显著提升；contain-intrinsic-size 提供行高估算避免滚动条跳动 */
 .msg-row {
@@ -1562,4 +1881,117 @@ body.slime-resizing {
 }
 @media (prefers-reduced-motion: reduce) {
   .msg-row .msg-hover { transition: none; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   待办任务：完成态标记（A-980-R27）
+   ─────────────────────────────────────────────────────────────────────────
+   设计依据：
+   - 「不靠颜色单独传意」——WCAG 1.4.1 / 澳大利亚 DTA 任务列表无障碍指引：
+     完成态必须同时有**形状**（实心对勾）与**纹理**（删除线）两种非颜色线索。
+   - 「已完成要降权」——vscode-acp / CopilotKit 的 Agent 计划卡：对勾 + 删除线 + 灰化，
+     用户的视线应被留给 still-running 的项。
+   - 「显示完成时刻」——进度步骤组件的通行做法（完成项带时间，便于事后复盘）。
+   - 「完成项沉底」——GOV.UK 任务列表的用户研究发现：完成几项之后用户很难再扫出未完成项，
+     故分组顺序固定为 进行中 → 待办 → 已完成（在 JSX 侧排序）。
+   ------------------------------------------------------------------------- */
+
+/* 整行：状态切换只做"降权"，不做位移（列表要稳，不能跳） */
+.todo-row {
+  /* A-980-R32：一次"划过"的总时长——删除线与灰化层**共用同一个变量**，
+     这是「线到哪灰到哪」能成立的前提（两处各写一个时长，改一处就会错位）。
+     变量定义提升到 :root（见文件头部），因为思考历程里的推进播报行也要用同一套节拍，
+     否则两侧划掉速度不一致，看着像两个不相干的动画。 */
+  transition: opacity 0.25s ease, background-color 0.25s ease;
+}
+.todo-row[data-status="completed"] { opacity: 0.55; }
+/* hover 回升——完成项仍可回读内容、可点掉重来，别做成"死"的 */
+.todo-row[data-status="completed"]:hover { opacity: 0.92; }
+
+/* 删除线 + 灰化：两根"扫帚"同节拍从 0 扫到 100%。
+   套 .todo-text-inner 是为了让划线/灰化只覆盖**文字实际宽度**（inline-block 收缩到内容），
+   否则 flex:1 撑开的整行宽度会让线跑到文字右侧空白里，与灰化脱节。 */
+.todo-text-inner {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+/* 删除线：text-decoration 不可动画，用一根随宽度生长的细线模拟"划过去" */
+.todo-text-inner::after {
+  content: "";
+  position: absolute;
+  left: 0; top: 55%;
+  height: 1px; width: 0;
+  background: currentColor;
+  opacity: 0.85;
+  transition: width var(--todo-sweep) var(--todo-sweep-ease);
+}
+.todo-row[data-status="completed"] .todo-text-inner::after { width: 100%; }
+
+/* A-980-R32：灰化层——正文的绝对定位副本，用 clip-path 从右往左揭开。
+   与删除线同时长同缓动 → 视觉上横线扫到哪，灰色就跟到哪（而不是整行"啪"地一起变灰，
+   那是旧实现：行级 opacity 一次性过渡，用户实测"没有划掉的过程感"）。
+   clip-path 而非 width：副本始终按原始宽度排版，省略号位置与正文严格一致。 */
+.todo-text-veil {
+  position: absolute;
+  inset: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path var(--todo-sweep) var(--todo-sweep-ease);
+  pointer-events: none;
+}
+.todo-row[data-status="completed"] .todo-text-veil { clip-path: inset(0 0 0 0); }
+
+/* 对勾"画入"：pathLength=100 让 dasharray 与路径长度解耦，任何图标尺寸都刚好画满 */
+.todo-check-path {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+}
+.todo-row[data-just-done="1"] .todo-check-path {
+  animation: todo-check-draw 0.3s cubic-bezier(0.65, 0, 0.35, 1) forwards;
+}
+@keyframes todo-check-draw {
+  from { stroke-dashoffset: 100; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* 完成瞬间：先把"划过"演完，整行再沉降（0.9s 后由 JS 摘掉 data-just-done）。
+   A-980-R32：关键帧在 40% 之前**锁 opacity:1**——若一上来就降到 0.55，
+   整行提前变暗会把"线到哪灰到哪"的前半程糊掉（灰与暗同时发生 → 看不出扫动）。
+   40% × 0.9s = 0.36s，正好等于 --todo-sweep。 */
+.todo-row[data-just-done="1"] { animation: todo-just-done 0.9s ease-out both; }
+@keyframes todo-just-done {
+  0%   { background-color: var(--success-soft); opacity: 1; }
+  40%  { background-color: var(--success-soft); opacity: 1; }
+  100% { background-color: transparent; opacity: 0.55; }
+}
+
+/* 待办项上的"开始"小三角：默认极弱，hover 才点亮，避免和复选框抢注意力 */
+.todo-play {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0.55;
+  transition: color 0.15s, opacity 0.15s;
+}
+.todo-row:hover .todo-play { color: var(--accent); opacity: 1; }
+
+/* 无障碍：尊重系统"减弱动态效果"；此时直接给终态，不做位移/生长动画 */
+@media (prefers-reduced-motion: reduce) {
+  .todo-row,
+  .todo-text-inner::after,
+  .todo-text-veil,
+  .todo-play { transition: none; }
+  .todo-row[data-just-done="1"],
+  .todo-row[data-just-done="1"] .todo-check-path { animation: none; }
+  .todo-check-path { stroke-dashoffset: 0; }
+  .todo-row[data-status="completed"] .todo-text-inner::after { width: 100%; }
+  .todo-row[data-status="completed"] .todo-text-veil { clip-path: inset(0 0 0 0); }
 }

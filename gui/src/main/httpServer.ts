@@ -5,16 +5,23 @@
  * 仅依赖 Node 内置模块（node:http / node:fs / node:path / node:os），零新依赖。
  *
  * 特性：
- *  - serve：默认 host 0.0.0.0（局域网可访问），port 留空则自动从 8080 起找空闲端口；
+ *  - serve：**默认 host 127.0.0.1（仅本机可访问）**，显式传 0.0.0.0 才对外暴露到局域网；
+ *    port 留空则自动从 8080 起找空闲端口；
  *  - 目录遍历防护（resolve 后必须仍在 dir 内，防 ../ 逃逸）；
  *  - 常见 MIME 类型（html/css/js/json/png/jpg/svg/woff2/...）；
  *  - index.html 默认页；可选 SPA fallback（未命中路径回 index.html，用于前端路由）；
  *  - 404/403 响应；每个 server 记访问计数；stop / stopAll / list 管理。
+ *
+ * 安全说明（A-918++ 加固）：早期实现默认监听 0.0.0.0，等于把本地目录直接暴露给同网段任何设备。
+ * 现在默认回环，只有用户/模型显式要求局域网分享时才监听全部网卡，且调用前会走权限审批。
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
-import { stat, createReadStream, type Stats } from "node:fs";
-import { extname, join, resolve, sep } from "node:path";
+import { stat, createReadStream, readFileSync, writeFileSync, mkdirSync, type Stats } from "node:fs";
+import { extname, join, resolve, sep, dirname } from "node:path";
 import { networkInterfaces } from "node:os";
+
+/** 默认监听地址：仅本机回环（局域网分享需显式传 host: "0.0.0.0"） */
+export const DEFAULT_HOST = "127.0.0.1";
 
 /** 启动静态服务的入参 */
 export interface HttpServeParams {
@@ -54,6 +61,8 @@ export interface HttpServeResult {
   host?: string;
   urls?: string[];
   error?: string;
+  /** A-975：是否复用了同目录既有服务（true 时未新开端口） */
+  reused?: boolean;
 }
 
 interface ServerEntry {
@@ -64,6 +73,8 @@ interface ServerEntry {
   server: Server;
   startedAt: number;
   requests: number;
+  /** A-977：SPA 回退开关（持久化时需一并记录） */
+  spa?: boolean;
 }
 
 /** 常见 MIME 类型映射（扩展名小写 → Content-Type） */
@@ -114,9 +125,15 @@ function lanIPv4(): string[] {
   return out;
 }
 
-/** 构造某端口的访问 URL 列表（本地回环 + 局域网） */
-function buildUrls(port: number): string[] {
+/** 构造某端口的访问 URL 列表：回环恒定给出；仅当显式监听非回环地址时才附局域网 IP */
+function buildUrls(port: number, host: string = DEFAULT_HOST): string[] {
   const urls = [`http://127.0.0.1:${port}`];
+  const loopbackOnly = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  if (loopbackOnly) { return urls; }
+  if (host && host !== "0.0.0.0" && host !== "::") {
+    urls.push(`http://${host}:${port}`);
+    return urls;
+  }
   for (const ip of lanIPv4()) {
     urls.push(`http://${ip}:${port}`);
   }
@@ -183,6 +200,59 @@ function sendIndexOr404(res: ServerResponse, dir: string): void {
 class HttpStaticServerManager {
   private entries = new Map<string, ServerEntry>();
   private seq = 0;
+  /**
+   * A-977：服务清单持久化路径（由装配层注入）。
+   * 此前服务表只在内存 Map 里、退出即 stopAll → 重启后旧链接全部失效（用户实测痛点）。
+   * 现在每次 serve/stop 落盘，启动时 restore() 按记录的端口重建服务。
+   */
+  private persistPath: string | null = null;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  setPersistPath(p: string | null): void {
+    this.persistPath = p;
+  }
+
+  /** 落盘（去抖 300ms，避免频繁写盘） */
+  private schedulePersist(): void {
+    if (!this.persistPath) { return; }
+    if (this.persistTimer) { clearTimeout(this.persistTimer); }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      try {
+        const list = [...this.entries.values()].map((e) => ({ dir: e.dir, host: e.host, port: e.port, spa: Boolean((e as { spa?: boolean }).spa) }));
+        mkdirSync(dirname(this.persistPath as string), { recursive: true });
+        writeFileSync(this.persistPath as string, JSON.stringify({ version: 1, entries: list }, null, 2), "utf8");
+      } catch { /* 落盘失败不影响服务运行 */ }
+    }, 300);
+  }
+
+  /**
+   * A-977：启动时按持久化清单重建静态服务。
+   * 先按记录端口尝试（链接尽量不变）；端口被占则自动改选空闲端口（并回写新端口）。
+   */
+  async restore(): Promise<{ restored: number; failed: number }> {
+    if (!this.persistPath) { return { restored: 0, failed: 0 }; }
+    let list: Array<{ dir?: string; host?: string; port?: number; spa?: boolean }> = [];
+    try {
+      const raw = readFileSync(this.persistPath, "utf8");
+      const parsed = JSON.parse(raw) as { entries?: typeof list };
+      list = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    } catch { return { restored: 0, failed: 0 }; }
+    let restored = 0; let failed = 0;
+    for (const e of list) {
+      const dir = (e.dir ?? "").trim();
+      if (!dir) { continue; }
+      const host = (e.host ?? DEFAULT_HOST).trim() || DEFAULT_HOST;
+      const port = Number.isFinite(e.port) ? Number(e.port) : 0;
+      let r = await this.serve({ dir, host, port, spa: Boolean(e.spa) });
+      if (!r.ok && port > 0) {
+        // 端口被占 → 改选空闲端口（链接会变，但服务可用）
+        r = await this.serve({ dir, host, port: 0, spa: Boolean(e.spa) });
+      }
+      if (r.ok) { restored++; this.schedulePersist(); } else { failed++; }
+    }
+    return { restored, failed };
+  }
 
   /** 启动一个静态文件服务 */
   async serve(params: HttpServeParams): Promise<HttpServeResult> {
@@ -200,8 +270,16 @@ class HttpStaticServerManager {
       return { ok: false, error: `不是目录：${dir}` };
     }
 
-    const host = params.host?.trim() || "0.0.0.0";
+    const host = params.host?.trim() || DEFAULT_HOST;
     const spa = Boolean(params.spa);
+
+    // A-975：**同目录复用**——同一目录已起过服务则直接返回既有地址，
+    // 避免"每次生成都新开端口"导致链接漂移、进程里堆一堆服务（也保证重启后链接尽量稳定）。
+    for (const e of this.entries.values()) {
+      if (resolve(e.dir) === dir && e.host === host) {
+        return { ok: true, id: e.id, port: e.port, host: e.host, urls: buildUrls(e.port, e.host), reused: true } as HttpServeResult;
+      }
+    }
 
     // 端口：指定则校验空闲，否则自动选
     let port = params.port && Number.isFinite(params.port) ? Number(params.port) : 0;
@@ -222,7 +300,7 @@ class HttpStaticServerManager {
     // 先建 entry（server 稍后回填），handler 通过闭包累加请求计数
     const id = `http_${Date.now().toString(36)}_${(this.seq++).toString(36)}`;
     const startedAt = Date.now();
-    const entry: ServerEntry = { id, dir, host, port, server: null as unknown as Server, startedAt, requests: 0 };
+    const entry: ServerEntry = { id, dir, host, port, server: null as unknown as Server, startedAt, requests: 0, spa };
 
     const handler = (req: IncomingMessage, res: ServerResponse): void => {
       // 计数：每进入一次请求 +1
@@ -277,7 +355,8 @@ class HttpStaticServerManager {
       server.once("error", onListenErr);
       server.listen(port, host, () => {
         server.removeListener("error", onListenErr);
-        resolvePromise({ ok: true, id, port, host, urls: buildUrls(port) });
+        this.schedulePersist(); // A-977：服务起来即落盘（供重启后恢复）
+        resolvePromise({ ok: true, id, port, host, urls: buildUrls(port, host) });
       });
     });
   }
@@ -290,6 +369,7 @@ class HttpStaticServerManager {
       entry.server.close();
     } catch { /* 忽略关闭异常 */ }
     this.entries.delete(id);
+    this.schedulePersist(); // A-977：显式停止要落盘（下次启动不再恢复它）
     return { ok: true };
   }
 
@@ -311,7 +391,7 @@ class HttpStaticServerManager {
       dir: e.dir,
       port: e.port,
       host: e.host,
-      urls: buildUrls(e.port),
+      urls: buildUrls(e.port, e.host),
       startedAt: e.startedAt,
       requests: e.requests,
     }));

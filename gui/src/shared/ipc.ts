@@ -30,6 +30,11 @@ export const IPC_CHANNELS = {
   // 状态
   stats_snapshot: "slime:stats:snapshot",
   stats_poll: "slime:stats:poll",
+  // 使用统计（Settings「使用统计」面板数据源）
+  usage_snapshot: "slime:usage:snapshot",
+  usage_clear: "slime:usage:clear",
+  /** 用当前生效价格重算历史成本（修正"写入时还没有价"的 0 成本记录） */
+  usage_recompute: "slime:usage:recompute",
   // Agent 管理
   agent_list: "slime:agents:list",
   agent_create: "slime:agents:create",
@@ -68,6 +73,15 @@ export const IPC_CHANNELS = {
   settings_autostart_get: "slime:settings:autostart:get",
   settings_autostart_set: "slime:settings:autostart:set",
   settings_uninstall: "slime:settings:uninstall",
+  // LLM 网关（设置 → LLM 网关）
+  llmgw_get: "slime:llmgw:get",
+  llmgw_set: "slime:llmgw:set",
+  llmgw_status: "slime:llmgw:status",
+  llmgw_restart: "slime:llmgw:restart",
+  llmgw_token_add: "slime:llmgw:token:add",
+  llmgw_token_update: "slime:llmgw:token:update",
+  llmgw_token_remove: "slime:llmgw:token:remove",
+  llmgw_token_toggle: "slime:llmgw:token:toggle",
   // 心智中枢（记忆/学习/进化/情绪整合）
   mind_config_get: "slime:mind:configGet",
   mind_config_set: "slime:mind:configSet",
@@ -83,8 +97,31 @@ export const IPC_CHANNELS = {
   // 文件资源管理器：系统对话框选浏览根 / 上级目录
   workspace_pick_browse_root: "slime:workspace:pickBrowseRoot",
   workspace_get_parent: "slime:workspace:getParent",
+  /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等右侧栏无力渲染的格式） */
+  shell_open_path: "slime:shell:openPath",
   term_exec: "slime:term:exec",
 } as const;
+
+/**
+ * A-980-R4：**浏览器类协议名单**——`bitbrowser://`、`chrome://`、`msedge://` 这类协议的目标是
+ * 「唤起另一款浏览器加载当前页面/云控指令」，对 slime 右侧栏浏览毫无价值。
+ * 若按「探测→已注册就 shell.openExternal」处理，用户装了 BitBrowser 时会被拉起，
+ * BitBrowser 自己加载不了 `bitbrowser://cc` 这类指令 → 它界面顶部弹黄色横幅报错（丑、按钮变形）。
+ * 因此浏览器类协议一律**不唤醒外部应用**，静默拦截 + 渲染层轻提示（治本而非屏蔽）。
+ * 其余真实应用协议（weixin:// / mailto: / qq:// / taobao:// 等）仍走「探测→已注册才打开」通道。
+ */
+export const BROWSER_SCHEMES = new Set([
+  "bitbrowser", "chrome", "msedge", "edge", "firefox", "opera", "opear", "vivaldi", "brave",
+  "qqbrowser", "sogou", "browser360", "360se", "360chrome", "maxthon", "baidubrowser",
+  "ucbrowser", "quark",
+]);
+
+/** URL 是否属于浏览器唤起类协议（应为 true → 拦截不唤起外部应用） */
+export function isBrowserSchemeUrl(url: string): boolean {
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec((url ?? "").trim());
+  if (!m) { return false; }
+  return BROWSER_SCHEMES.has(m[1].toLowerCase());
+}
 
 export interface StreamChunk {
   seq: number;
@@ -153,6 +190,17 @@ export interface PlanInfo {
   createdAt: number;
   updatedAt: number;
   status: PlanStatus;
+  /** A-980-R29：`"plan"`=plan_create 真 Plan；`"todo"`=由待办清单派生的只读镜像（优先级更低） */
+  source?: "plan" | "todo";
+}
+
+/** 待办任务项（右侧栏「待办任务」面板 / todo_write 工具落盘结构） */
+export interface TodoItemDTO {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  /** 完成时刻（ISO）——转入 completed 时由 todo_write 自动打戳，界面据此展示"何时完成" */
+  completedAt?: string;
 }
 
 export interface ChatInput {
@@ -186,6 +234,15 @@ export interface AgentInfo {
   lifecycle: string;
 }
 
+/** A-980-R22：Agent 工具面白名单（skill/MCP 差异化配置；与 core-ts agentTools.ToolProfile 同构） */
+export interface ToolProfileDTO {
+  mode: "default" | "custom";
+  /** 启用的技能名（extras.skillList 的 name） */
+  skills: string[];
+  /** 启用的 MCP 服务器名（extras.mcpList 的 name，运行时按 mcp_<server>_* 前缀匹配工具） */
+  mcp: string[];
+}
+
 /** 侧栏会话项（以目标工作文件夹为主分组；会话内指定调用 Agent，可随时切换） */
 export interface SessionItem {
   sessionId: string;
@@ -209,6 +266,8 @@ export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
   time: string;
+  /** A-980-R18：原始 ISO 时间戳（分页加载更早历史时作 beforeTs 定位锚；旧字段兼容缺省） */
+  ts?: string;
   /** 该条回复的推理/思考过程（assistant，Markdown；旧记录无此字段） */
   reasoning?: string;
   /** 该条回复的耗时（毫秒，assistant；旧记录无此字段） */
@@ -294,7 +353,10 @@ export interface GuiPermissions {
   approvalAllowPaths: string[];
   toolRead: boolean;
   toolWrite: boolean;
+  /** terminal 类：shell / 命令执行（含 ADB shell） */
   toolTerminal: boolean;
+  /** 图形控制总开关（screen_* 工具：桌面输入注入 + 安卓触摸控制） */
+  screenEnabled: boolean;
   mcpEnabled: boolean;
   skillsEnabled: boolean;
 }
@@ -331,6 +393,8 @@ export interface AgentDetail {
   max_context?: number;
   max_output?: number;
   lifecycle: string;
+  /** A-980-R22：工具面白名单（skill/MCP 差异化配置） */
+  tool_profile?: ToolProfileDTO;
 }
 
 export interface StatsSnapshot {
@@ -339,6 +403,101 @@ export interface StatsSnapshot {
   sessions: { totalRecords: number; recent: number };
   alarms: Array<{ seq: number; severity: string; source: string; message: string; timestamp: string }>;
   timestamp: string;
+}
+
+/** LLM 网关配置（设置 → LLM 网关） */
+/** LLM 网关令牌定义（B 档：每令牌独立速率/日配额/模型白名单） */
+export interface LlmGatewayTokenDTO {
+  key: string;
+  label?: string;
+  active?: boolean;
+  /** 每分钟请求数上限（0/undefined = 不限） */
+  ratePerMin?: number;
+  /** 每日请求数上限（UTC 自然日；0/undefined = 不限） */
+  dailyQuota?: number;
+  /** 模型白名单（空 = 全部可用） */
+  models?: string[];
+  note?: string;
+}
+/** LLM 网关配置（设置 → LLM 网关） */
+export interface LlmGatewayConfigDTO {
+  enabled: boolean;
+  port: number;
+  apiKey: string;
+  tokens: LlmGatewayTokenDTO[];
+}
+/** 新增令牌输入（key 由系统生成） */
+export interface LlmGatewayNewTokenDTO {
+  label?: string;
+  ratePerMin?: number;
+  dailyQuota?: number;
+  models?: string[];
+  note?: string;
+}
+/** 修改令牌输入（按 key 定位） */
+export interface LlmGatewayUpdateTokenDTO {
+  key: string;
+  label?: string;
+  active?: boolean;
+  ratePerMin?: number;
+  dailyQuota?: number;
+  models?: string[];
+  note?: string;
+}
+/** 令牌 CRUD 统一返回 */
+export interface LlmGatewayTokenOpResultDTO {
+  ok: boolean;
+  token?: LlmGatewayTokenDTO;
+  restarted?: boolean;
+  error?: string;
+  status?: LlmGatewayStatusDTO;
+  tokens?: LlmGatewayTokenDTO[];
+}
+/** LLM 网关运行状态 */
+export interface LlmGatewayStatusDTO {
+  ok: boolean;
+  running: boolean;
+  port: number;
+  enabled: boolean;
+  apiKeyConfigured: boolean;
+  error?: string;
+  /** 当前配置里的令牌数 */
+  tokenCount?: number;
+}
+
+/** 使用统计快照（Settings「使用统计」面板一次拉取） */
+export interface UsageRecordRow {
+  ts: string;
+  agent_id: string;
+  session_id: string;
+  model: string;
+  provider_key: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  elapsed_ms: number;
+  cost_usd: number;
+  success: boolean;
+  error?: string;
+}
+export interface UsageSnapshot {
+  records: UsageRecordRow[];
+  /** 本地时区偏移分钟数（东八区=+480）—— 由主进程从 process.env.TZ 或系统推断 */
+  tzOffsetMin: number;
+  totalRecords: number;
+}
+
+/** 历史成本回填结果（`slime:usage:recompute`） */
+export interface UsageRecomputeResult {
+  ok: boolean;
+  /** 被改写的记录数（只统计"0 → 有价"，具体数值见 usage.ts recomputeOne） */
+  updated: number;
+  /** 成功解析（未损坏）的记录总数 */
+  scanned: number;
+  /** 回填后全部记录的成本合计（USD） */
+  totalCostUsd: number;
 }
 
 export type SidecarStatus = {
@@ -381,6 +540,17 @@ export interface ModelSpec {
   selected?: boolean;
   price_in_usd?: number;
   price_out_usd?: number;
+  /** 缓存读取单价 USD / 1M tokens（cache 命中，通常远低于 prompt） */
+  price_cache_read_usd?: number;
+  /** 缓存写入/创建单价 USD / 1M tokens（通常高于 prompt） */
+  price_cache_write_usd?: number;
+  /**
+   * 定价来源 —— 与主进程 ModelSpec 保持同名字段（缺了它 UI 无法区分「未定价」和「免费」，
+   * 也无法在保存时把用户的「手填」标记回传，见 providers.ts mergeModelPrice）。
+   */
+  price_source?: "upstream" | "table" | "manual";
+  /** 端点格式覆盖（per-model）：聚合网关下不同模型可能走不同端点 */
+  api_format?: "openai" | "anthropic" | "responses" | "google" | "auto";
 }
 
 /** 渲染层可见的脱敏 Provider 摘要（绝不含明文 api_key） */
@@ -390,7 +560,7 @@ export interface ProviderSummary {
   has_key: boolean;
   key_hint: string;
   model: string | null;
-  api_format: "openai" | "anthropic" | "auto";
+  api_format: "openai" | "anthropic" | "responses" | "google" | "auto";
   models: ModelSpec[];
 }
 
@@ -533,7 +703,7 @@ export interface WorkspaceListResult {
 }
 
 /** 文件内容 MIME 类型映射 */
-export type FileMime = "text" | "image" | "binary";
+export type FileMime = "text" | "image" | "binary" | "pdf" | "office";
 
 /** 工作树文件读取结果（点击文件打开新标签页用） */
 export interface WorkspaceReadFileResult {
@@ -690,6 +860,24 @@ export interface GitDiffResult {
   error?: string;
 }
 
+/* ── 系统通知 + 可定制提示音（A-980-R26，设置 → 通用） ── */
+
+/**
+ * 通知配置（落盘 config/notifications.json）。
+ * 语义：`enabled` 是总开关；`soundEnabled` 仅在总开关打开时有意义。
+ * `soundFile` 为空 = 用系统默认提示音；非空 = 用户上传的音频（存于 config/notification-sounds/）。
+ */
+export interface NotifyConfigDTO {
+  /** 总开关：Agent 任务完成 / 需要选择 / 出错 / 意外终止时是否弹系统通知 */
+  enabled: boolean;
+  /** 弹通知时是否发出提示音 */
+  soundEnabled: boolean;
+  /** 自定义音频落盘文件名（null = 系统默认音） */
+  soundFile: string | null;
+  /** 自定义音频的原始文件名（仅界面展示） */
+  soundName: string | null;
+}
+
 /* ── 上下文自动压缩（A-969） ── */
 
 /** 上下文自动压缩结果（GUI 发送前调用；动画展示后继续原消息发送） */
@@ -728,11 +916,27 @@ export interface ResidentJobView {
 export interface SubAgentRunView {
   id: string;
   name: string;
-  status: "pending" | "running" | "done" | "fail";
+  /**
+   * A-980-R31：补齐 `timeout` / `cancelled`。
+   * 此前声明只有 4 态，但运行时本来就会下发超时/取消——类型在骗人，渲染层只好各自兜底，
+   * 于是「超时中断」在监测栏下拉里被显示成原始英文 `timeout`（STATUS_META 缺这一项）。
+   */
+  status: "pending" | "running" | "done" | "fail" | "timeout" | "cancelled";
+  /** A-980-R31：派发时的任务指令（详情弹窗据此回答"这次到底让它干什么"） */
+  task?: string;
+  /** A-980-R31：本次生效的墙钟预算（毫秒，undefined/0 = 不限时） */
+  timeoutMs?: number;
   startedAt?: number;
   finishedAt?: number;
+  /** 结果摘要（完整产出落盘 data/generated/subagent-*.md）；中断时保留**中断前已产出的部分** */
   result?: string;
   error?: string;
+  /** 实际路由到的模型（可核验"执行档"是否真的生效） */
+  model?: string;
+  /** 命中的声明式定义名（自动委派审计） */
+  definitionName?: string;
+  /** 结构化自评（outputSchema 契约） */
+  structured?: { status: string; summary: string; artifacts: string[]; confidence: number };
 }
 
 /** 后台常驻：整体快照 */

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>📚 免费小说聚合导航</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#171e2e; --card:#1c2536; --card2:#222d42;
+    --fg:#eaf0ff; --muted:#8b96ad; --accent:#5b8cff; --accent2:#ff6b8b;
+    --green:#39d98a; --border:#2a3550; --shadow:rgba(0,0,0,.4);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:radial-gradient(1200px 600px at 50% -10%,#1a2butter,#0f1420),var(--bg);
+    background-color:var(--bg);color:var(--fg);padding:28px 16px 60px;}
+  .wrap{max-width:1040px;margin:0 auto;}
+  header{text-align:center;margin-bottom:22px;}
+  header h1{margin:0;font-size:30px;letter-spacing:1px;}
+  header .sub{color:var(--muted);margin:8px 0 0;font-size:14px;}
+  .search{display:flex;gap:10px;margin:18px 0 6px;}
+  .search input{flex:1;padding:14px 16px;border:1px solid var(--border);border-radius:12px;
+    background:var(--panel);color:var(--fg);font-size:16px;outline:none;}
+  .search input:focus{border-color:var(--accent);}
+  .search button{padding:14px 24px;border:none;border-radius:12px;background:var(--accent);
+    color:#fff;font-size:16px;cursor:pointer;font-weight:600;}
+  .search button:active{transform:scale(.98);}
+  .tabs{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 14px;justify-content:center;}
+  .tab{padding:8px 16px;border:1px solid var(--border);border-radius:999px;background:var(--panel);
+    color:var(--muted);cursor:pointer;font-size:14px;user-select:none;}
+  .tab.on{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;
+    transition:transform .12s ease,border-color .12s;position:relative;overflow:hidden;}
+  .card:hover{transform:translateY(-3px);border-color:var(--accent);}
+  .card .name{font-size:17px;font-weight:700;margin-bottom:6px;}
+  .card .desc{color:var(--muted);font-size:13px;line-height:1.5;min-height:38px;}
+  .card .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:6px;
+    background:var(--card2);color:var(--accent);margin-bottom:10px;}
+  .card .btn{display:inline-block;margin-top:12px;padding:9px 16px;border-radius:10px;
+    background:var(--accent2);color:#fff;text-decoration:none;font-size:14px;font-weight:600;
+    text-align:center;}
+  .card .btn:active{transform:scale(.97);}
+  .card.hide{display:none;}
+  .hidden-cat{display:none;}
+  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:34px;line-height:1.8;}
+  .count{color:var(--muted);font-size:13px;margin:14px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📚 免费小说聚合导航</h1>
+    <p class="sub">一站式汇集各大免费小说站点 · 点击「进入」直达 · 支持多站聚合搜索</p>
+  </header>
+
+  <div class="search">
+    <input id="q" type="text" placeholder="输入书名/关键词，回车在选中站点中搜索…" />
+    <button onclick="doSearch()">🔍 聚合搜索</button>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div class="count" id="count"></div>
+  <div class="grid" id="grid"></div>
+
+  <div class="foot">
+    本页面为本地生成的导航工具，链接均为公开第三方站点，请自行判断内容合法性。<br/>
+    站点可能随时变更或失效，无法打开时可尝试该站点的其他镜像域名。
+  </div>
+</div>
+
+<script>
+// ===== 数据：站点列表 =====
+const sites = [
+  // 经典笔趣阁系（多镜像）
+  {name:"笔趣阁",cat:"经典",desc:"老牌免费网文，玄幻/都市/仙侠资源丰富",tag:"多镜像",urls:["https://www.biquge.com","https://www.biqu5200.net"]},
+  {name:"笔趣看",cat:"经典",desc:"免费小说，更新快、界面清爽",tag:"免费",urls:["https://www.biqukan.com"]},
+  {name:"看书吧",cat:"经典",desc:"多题材小说，TXT 下载友好",tag:"可下载",urls:["https://www.ksw8.com"]},
+  {name:"知轩藏书",cat:"经典",desc:"TXT 藏书，适合本地下载收藏",tag:"TXT",urls:["https://www.zxcs.info"]},
+
+  // 新笔趣阁 / 各镜像
+  {name:"新笔趣阁",cat:"镜像",desc:"笔趣阁新版镜像，内容更全",tag:"镜像",urls:["https://xibiquge.lol"]},
+  {name:"笔趣阁 m.bqg",cat:"镜像",desc:"移动端友好镜像，加载快",tag:"移动端",urls:["https://www.bqg88.com"]},
+  {name:"顶点小说网",cat:"镜像",desc:"玄幻/都市热门书多",tag:"玄幻",urls:["https://www.dingdianxin.cn"]},
+  {name:"69shuba",cat:"镜像",desc:"书海导航常见源，更新及时",tag:"热更",urls:["https://www.69shuba.com"]},
+
+  // 都市/言情
+  {name:"言情小说屋",cat:"言情",desc:"言情/甜宠/豪门，女性向丰富",tag:"言情",urls:["https://www.xswang.com"]},
+  {name:"晋江文学城",cat:"言情",desc:"正版女性向，部分免费",tag:"正版",urls:["https://www.jjwxc.net"]},
+  {name:"番茄免费小说",cat:"免费",desc:"字节系全免费，广告模式",tag:"全免费",urls:["https://fanqienovel.com"]},
+  {name:"七猫免费小说",cat:"免费",desc:"全免费正版授权",tag:"全免费",urls:["https://www.qimao.com"]},
+
+  // 玄幻/仙侠/武侠
+  {name:"起点中文",cat:"玄幻",desc:"网文大本营，部分作品免费",tag:"网文",urls:["https://www.qidian.com"]},
+  {name:"纵横中文网",cat:"玄幻",desc:"男频为主，热血玄幻多",tag:"男频",urls:["https://www.zongheng.com"]},
+  {name:"刺猬猫",cat:"二次元",desc:"同人/二次元/轻小说",tag:"同人",urls:["https://www.ciweimao.com"]},
+  {name:"轻之国度",cat:"二次元",desc:"轻小说/汉化本，动漫向",tag:"轻小说",urls:["https://qingzhi.org"]},
+
+  // 英文/外文
+  {name:"NovelRS",cat:"外文",desc:"英文小说聚合，科幻/奇幻",tag:"英文",urls:["https://www.novelrs.com"]},
+  {name:"Project Gutenberg",cat:"外文",desc:"英文经典公版书 6万+",tag:"公版",urls:["https://www.gutenberg.org"]},
+  {name:"WebNovel",cat:"外文",desc:"英文网文，中文出海作品多",tag:"英文网文",urls:["https://www.wnovel.com"]},
+  {name:"Royal Road",cat:"外文",desc:"英文同人/原创奇幻，免费连载",tag:"连载",urls:["https://www.royalroad.com"]},
+
+  // 古籍/公版中文
+  {name:"维基文库",cat:"公版",desc:"中文公版书/古籍/文献",tag:"公版",urls:["https://zh.wikisource.org"]},
+  {name:"古腾堡中文",cat:"公版",desc:"中文经典文学公版",tag:"公版",urls:["https://www.gutenberg.cn"]},
+  {name:"中国哲学书电子化",cat:"公版",desc:"古籍文言文，ctext",tag:"古籍",urls:["https://ctext.org/zh"]}
+];
+
+const cats = ["全部","经典","镜像","免费","言情","玄幻","二次元","外文","公版"];
+
+let activeCat = "全部";
+
+// 渲染分类标签
+const tabsEl = document.getElementById("tabs");
+cats.forEach(c=>{
+  const b=document.createElement("div");
+  b.className="tab"+(c===activeCat?" on":"");
+  b.textContent=c;
+  b.onclick=()=>setCat(c);
+  tabsEl.appendChild(b);
+});
+
+function setCat(c){
+  activeCat=c;
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.textContent===c));
+  render();
+}
+
+// 渲染卡片
+function render(filter=""){
+  const grid=document.getElementById("grid");
+  grid.innerHTML="";
+  let shown=0;
+  sites.forEach(s=>{
+    if(activeCat!=="全部" && s.cat!==activeCat) return;
+    if(filter){
+      const hay=(s.name+s.desc+s.cat+s.tag+s.urls.join(" ")).toLowerCase();
+      if(!hay.includes(filter.toLowerCase())) return;
+    }
+    shown++;
+    const card=document.createElement("div");
+    card.className="card";
+    const firstUrl=s.urls[0];
+    card.innerHTML=`
+      <div class="name">${s.name}</div>
+      <span class="tag">${s.tag} · ${s.cat}</span>
+      <div class="desc">${s.desc}</div>
+      <a class="btn" target="_blank" rel="noopener" href="${firstUrl}">进入站点</a>
+      ${s.urls.length>1?`<a class="btn" target="_blank" rel="noopener" style="background:var(--accent);margin-left:6px" href="${s.urls[1]}">备用镜像</a>`:""}
+    `;
+    grid.appendChild(card);
+  });
+  document.getElementById("count").textContent = shown ? `共 ${shown} 个站点` : "没有匹配的站点，换个关键词试试";
+}
+
+// 聚合搜索：在每个"经典/免费"站点里打开新标签搜该关键词
+function doSearch(){
+  const q=document.getElementById("q").value.trim();
+  if(!q){ render(""); return; }
+  render(q);
+}
+document.getElementById("q").addEventListener("keydown",e=>{
+  if(e.key==="Enter") doSearch();
+});
+document.getElementById("q").addEventListener("input",e=>render(e.target.value.trim()));
+
+render();
+</script>
+</body>
+</html>

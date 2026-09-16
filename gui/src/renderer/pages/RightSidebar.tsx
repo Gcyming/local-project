@@ -4,10 +4,11 @@ import remarkGfm from "remark-gfm";
 import type {
   DownloadProgressInfo, WorkspaceEntry, WorkspaceReadFileResult, CtxBuckets, GitDiffFile,
 } from "../../shared/ipc.js";
+import { isBrowserSchemeUrl } from "../../shared/ipc.js";
 import {
-  ChevronIcon, SidebarLeftIcon, TaskIcon, GlobeIcon,
-  GitIcon, PlusIcon, TodoListIcon, DashboardIcon,
-  CheckboxIcon, CheckboxCheckedIcon, CirclePlusIcon, LoadingCircleIcon,
+  ChevronIcon, TaskIcon, GlobeIcon,
+  GitIcon, PlusIcon, DashboardIcon,
+  CheckboxIcon, CirclePlusIcon, LoadingCircleIcon,
   TerminalIcon, FolderIcon, ArrowLeftIcon, ArrowRightIcon2,
   CloseIcon, RefreshIcon, CheckIcon, RepeatIcon, PaperclipIcon, EditIcon,
 } from "../components/Icon.js";
@@ -16,9 +17,10 @@ import { SIDEBAR_OPEN_EVENT, requestSidebarOpen, type SidebarOpenPayload } from 
 import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
 import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
 import BrainstormPanel from "./BrainstormPanel.js";
-import { onCtxUpdate } from "./ChatPanel.js";
+import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
+import { setBrowserHost, registerWebview, unregisterWebview, executeBrowserCommand, isWebNavUrl, normalizeBrowserUrl } from "./browserBridge.js";
 
-type TabType = "tasks" | "subagents" | "terminal" | "browser" | "git" | "file";
+type TabType = "tasks" | "terminal" | "browser" | "git" | "file";
 
 /** A-968：图片预览用真实 MIME（data:image/* 通配 MIME 在 Chromium 下不渲染，导致右栏看不了图） */
 const IMG_MIME: Record<string, string> = {
@@ -31,6 +33,17 @@ function imageDataUrl(name: string, base64: string): string {
   return `data:${mime};base64,${base64}`;
 }
 
+/** A-980-R8：PDF 预览 data URL（pdf 文件由主进程按 base64 读回） */
+function pdfDataUrl(base64: string): string {
+  return `data:application/pdf;base64,${base64}`;
+}
+
+/** A-980-R8：Office 扩展名 → 预览占位图标 */
+const OFFICE_ICONS: Record<string, string> = {
+  ".doc": "📘", ".docx": "📘", ".xls": "📗", ".xlsx": "📗",
+  ".ppt": "📙", ".pptx": "📙",
+};
+
 interface TabInstance {
   id: string;
   type: TabType;
@@ -40,8 +53,11 @@ interface TabInstance {
   /** A-173：绝对路径（聊天消息内打开的文件） */
   fileAbs?: string;
   fileContent?: string;
-  fileMime?: "text" | "image" | "binary";
+  fileMime?: "text" | "image" | "binary" | "pdf" | "office";
   fileError?: string;
+  /** A-975：该文件页当前的浏览根——用户在「打开文件夹」选的目录写回这里（可位于工作区之外），
+   *  使浏览位置在 tab 生命周期内持久（不被 workspace 变化/重挂载顶回工作目录）。 */
+  browseRoot?: string;
   /** A-918++：默认页标记——任务页（tasks）设为默认页不可删除（类似群聊专属页常驻），
       其他页（浏览器/文件/Git/终端等）可删到 0，无需"至少保留1个"限制 */
   isDefault?: boolean;
@@ -54,23 +70,12 @@ interface TabTypeMeta {
 }
 
 const TAB_TYPE_META: TabTypeMeta[] = [
-  { type: "tasks", label: "任务", icon: TaskIcon },
-  { type: "subagents", label: "子代理", icon: AgentIcon },
+  { type: "tasks", label: "待办任务", icon: TaskIcon },
   { type: "terminal", label: "终端", icon: TerminalIcon },
   { type: "browser", label: "浏览器", icon: GlobeIcon },
   { type: "git", label: "Git仓库", icon: GitIcon },
   { type: "file", label: "文件查看", icon: FileIcon },
 ];
-
-function AgentIcon(props: { size?: number; style?: React.CSSProperties }): JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" width={props.size ?? 14} height={props.size ?? 14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" style={props.style ?? { display: "inline-block", flexShrink: 0 }}>
-      <circle cx="12" cy="9" r="4" />
-      <path d="M4 20c1.6-3.2 4.4-4.8 8-4.8s6.4 1.6 8 4.8" />
-      <circle cx="18" cy="5" r="1.3" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
 
 function FileIcon(props: { size?: number }): JSX.Element {
   return (
@@ -105,8 +110,13 @@ interface TaskEvent {
 }
 
 /* ── webview 标签 ── */
-const WebviewTag = React.forwardRef<HTMLElement, { src: string; style: CSSProperties }>((props, ref) =>
-  React.createElement("webview", { ...props, ref }),
+/* ⚠️ A-975-R6：`allowpopups` 必须传**字符串** "true"，不能传 JSX 布尔 `allowpopups`。
+ * React 对未知元素（webview 非标准标签、无短横线不算 custom element）会**丢弃值为 true 的未知布尔属性**
+ * （只在控制台留一条 "Received `true` for a non-boolean attribute" 警告）→ 属性从没落到元素上 →
+ * 站点 window.open / target=_blank 被 Chromium 直接丢弃，主进程 setWindowOpenHandler 连机会都没有
+ * → "带跳转性质的按钮不会自动新建页"（用户实测）。这也正是历史上一度要注入脚本兜底的原因。 */
+const WebviewTag = React.forwardRef<HTMLElement, { src: string; style: CSSProperties; partition?: string; allowpopups?: boolean | string }>((props, ref) =>
+  React.createElement("webview", { ...props, allowpopups: props.allowpopups ? "true" : undefined, ref }),
 );
 WebviewTag.displayName = "WebviewTag";
 
@@ -154,7 +164,7 @@ export default function RightSidebar(props: {
   workspace: string;
   dl: Record<string, DownloadProgressInfo>;
   width?: number;
-  onResize?: (e: React.MouseEvent) => void;
+  onResize?: (e: React.PointerEvent) => void;
   /** A-949：群聊（brainstorm）默认不新建「任务」页——配套侧页另行设计；仍可手动新建文件/终端等页 */
   sessionType?: "normal" | "brainstorm";
   /** A-954：群聊成员 id 列表（含组长=agentId；BrainstormPanel 建群即预填成员卡） */
@@ -197,8 +207,150 @@ export default function RightSidebar(props: {
   }, [props.sessionId]);
   const [menuOpen, setMenuOpen] = React.useState(false);
   const menuRef = React.useRef<HTMLDivElement>(null);
+  /** A-980-R24：「新建标签页」菜单改为**锚定加号按钮**（此前是 position:absolute 无 top/left 的
+   *  孤立元素 → 永远贴在侧栏最左边，跟按钮脱节）。这里记录按钮触发时的实测坐标。 */
+  const [menuPos, setMenuPos] = React.useState<{ top: number; left: number } | null>(null);
+  const addBtnRef = React.useRef<HTMLButtonElement>(null);
+  /** 菜单的定位参照物 = <aside class="right-sidebar">（position:relative） */
+  const menuHostRef = React.useRef<HTMLElement>(null);
   const workspaceRef = React.useRef(props.workspace);
   workspaceRef.current = props.workspace;
+
+  /** A-980-R24：打开/收起「新建标签页」菜单——坐标按加号按钮实时测量，
+   *  并把右边界钳在侧栏内（窄侧栏也不会把菜单顶出可视区）。 */
+  const toggleAddMenu = React.useCallback((): void => {
+    setMenuOpen((open) => {
+      if (open) { return false; }
+      const btn = addBtnRef.current;
+      const host = menuHostRef.current;
+      if (btn && host) {
+        const b = btn.getBoundingClientRect();
+        const h = host.getBoundingClientRect();
+        // 绝对定位原点 = padding box（跳过 1px 左边框）
+        const MENU_W = 148;
+        const rawLeft = b.left - h.left - host.clientLeft;
+        setMenuPos({
+          top: b.bottom - h.top - host.clientTop + 4,
+          left: Math.max(2, Math.min(rawLeft, h.width - host.clientLeft * 2 - MENU_W - 2)),
+        });
+      }
+      return true;
+    });
+  }, []);
+
+  /** A-980-R24：菜单的**非按钮关闭路径**——此前只能再点一次加号才能关（用户反馈），
+   *  现在点菜单外任意处 / 按 Esc 都会关。 */
+  React.useEffect(() => {
+    if (!menuOpen) { return; }
+    const onDown = (e: MouseEvent): void => {
+      const t = e.target as Node | null;
+      if (t && menuRef.current?.contains(t)) { return; }
+      if (t && addBtnRef.current?.contains(t)) { return; } // 加号自身由 onClick 切换
+      setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent): void => { if (e.key === "Escape") { setMenuOpen(false); } };
+    // 捕获阶段：早于站点/组件自身的 stopPropagation
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  /** A-976：tabs / 活动页的 ref 镜像（供主进程浏览器指令读取最新值，避免闭包陈旧） */
+  const tabsRef = React.useRef(tabs);
+  tabsRef.current = tabs;
+  const activeIdRef = React.useRef(activeId);
+  activeIdRef.current = activeId;
+
+  /** A-976：注册「浏览器宿主」——把 tabs 的增删激活能力暴露给指令执行桥（browserBridge） */
+  React.useEffect(() => {
+    setBrowserHost({
+      listTabs: () => tabsRef.current
+        .filter((t) => t.type === "browser")
+        .map((t) => ({ id: t.id, title: t.title, url: t.url ?? "", active: t.id === activeIdRef.current })),
+      openTab: (url, activate = true) => {
+        // A-980：非 Web 协议不放进 tab 的 url（否则渲染 src=bitbrowser://… 触发系统弹窗，开空白页即可）
+        const safeUrl = url && isWebNavUrl(url) ? url : undefined;
+        const tab: TabInstance = { ...createTab("browser"), url: safeUrl, title: url ? url : "浏览器" };
+        setTabs((prev) => [...prev, tab]);
+        if (activate) { setActiveId(tab.id); }
+        return tab.id;
+      },
+      closeTab: (tabId) => {
+        const id = tabId ?? activeIdRef.current;
+        if (!id) { return false; }
+        const target = tabsRef.current.find((t) => t.id === id);
+        if (!target || target.isDefault) { return false; }
+        setTabs((prev) => prev.filter((t) => t.id !== id));
+        return true;
+      },
+      activateTab: (tabId) => {
+        const exists = tabsRef.current.some((t) => t.id === tabId);
+        if (exists) { setActiveId(tabId); }
+        return exists;
+      },
+      activeTabId: () => {
+        const browsers = tabsRef.current.filter((t) => t.type === "browser");
+        const act = browsers.find((t) => t.id === activeIdRef.current);
+        return (act ?? browsers[0])?.id ?? null;
+      },
+    });
+    return () => { setBrowserHost(null); };
+  }, []);
+
+  /** A-976：订阅主进程下发的浏览器控制指令（navigate/click/type/read/snapshot/screenshot…）并回传结果 */
+  React.useEffect(() => {
+    const w = window as unknown as {
+      slimeAPI?: {
+        browser?: {
+          onCommand?: (cb: (c: { id: string; kind: string } & Record<string, unknown>) => void) => () => void;
+          sendResult?: (p: { id: string; ok: boolean; data?: unknown; error?: string }) => void;
+        };
+      };
+    };
+    const api = w.slimeAPI?.browser;
+    if (!api?.onCommand) { return; }
+    const off = api.onCommand((cmd) => {
+      void executeBrowserCommand(cmd)
+        .then((res) => { try { api.sendResult?.({ id: cmd.id, ok: res.ok, data: res.data, error: res.error }); } catch { /* 忽略 */ } })
+        .catch((e: unknown) => { try { api.sendResult?.({ id: cmd.id, ok: false, error: e instanceof Error ? e.message : String(e) }); } catch { /* 忽略 */ } });
+    });
+    return () => { try { off(); } catch { /* 忽略 */ } };
+  }, []);
+
+  /* ── A-980-R：弹窗被拒横幅（window.open 一律拦截，不再弹登录窗卡死 Agent；URL 供显式导航） ── */
+  const [popupBanner, setPopupBanner] = React.useState<{ url: string; ts: number; kind?: string; scheme?: string; handler?: string } | null>(null);
+  /** A-975-R4：站点弹窗**时间戳队列**（弹窗风暴保护用；只记最近 3s，见 onOpen） */
+  const recentPopupRef = React.useRef<number[]>([]);
+  // 单一事件源：window 事件 slime-browser-popup-notice（detail: {url, kind, scheme?, handler?}）。
+  // 生产方：① 主进程 window.open 拒绝（kind="popup-denied"）② 本文件 onWillNav 深度链接真实打开
+  // （kind="opened" 已交给系统 / "need-install" 未注册需装客户端）。消费者：根横幅 + browserBridge（Agent 注入）。
+  React.useEffect(() => {
+    const w = window as unknown as {
+      slimeAPI?: { browser?: { onPopupNotice?: (cb: (p: { url: string; ts: number; kind?: string; scheme?: string }) => void) => () => void } }
+    };
+    const api = w.slimeAPI?.browser;
+    if (!api?.onPopupNotice) { return; }
+    return api.onPopupNotice((p) => {
+      try { window.dispatchEvent(new CustomEvent("slime-browser-popup-notice", { detail: { url: p.url, kind: p.kind ?? "popup-denied", scheme: p.scheme } })); } catch { /* 忽略 */ }
+    });
+  }, []);
+  React.useEffect(() => {
+    const onNotice = (e: Event): void => {
+      const d = (e as CustomEvent<{ url?: string; kind?: string; scheme?: string; handler?: string }>).detail ?? {};
+      if (d.url) { setPopupBanner({ url: d.url, ts: Date.now(), kind: d.kind, scheme: d.scheme, handler: d.handler }); }
+    };
+    window.addEventListener("slime-browser-popup-notice", onNotice);
+    return () => window.removeEventListener("slime-browser-popup-notice", onNotice);
+  }, []);
+  // 横幅 8s 自动消失（与 Agent 侧工具结果的 popupNotice 注入并存：一个给用户看，一个给模型看）
+  React.useEffect(() => {
+    if (!popupBanner) { return; }
+    const t = setTimeout(() => setPopupBanner(null), 8000);
+    return () => clearTimeout(t);
+  }, [popupBanner]);
 
   /* ── 拖拽重排状态 ── */
   const [dragId, setDragId] = React.useState<string | null>(null);
@@ -232,25 +384,74 @@ export default function RightSidebar(props: {
     setActiveId(tab.id);
   };
 
-  /** A-173：按绝对路径打开文件到新标签页（聊天消息内点击文件链接） */
+  /** A-173：按路径打开文件到新标签页（聊天消息内点击文件链接 / 产物卡 ↗）
+   *  A-975 修复：**支持相对路径**。产物卡的 rel 常写成"相对工作目录"的样子（如 `apps/index-v3.html`），
+   *  旧实现一律当绝对路径丢给 readFileAbs → existsSync 直接失败 → 用户体感"工作区外的文件打不开"。
+   *  A-980-R32 修复（用户实测"很多文件都报不存在，但自己找却能打开"）：只试「工作目录相对 + 绝对」
+   *  两种解析仍然不够——渲染层手里的 workspace 可能尚未加载完/压根没绑定，工具回传的也可能是
+   *  「相对项目根」「带项目名前缀」「带 :行:列 后缀」的形态。
+   *  现在第一步交给主进程 `openTarget`：它把**所有合理基准**列出来逐个试（会话工作目录 / 项目根 /
+   *  传入的 root / 去首段重试），命中即回真实绝对路径；并且**目录也是合法目标**——
+   *  点目录直接开一个浏览该目录的文件页，不再像以前那样被 readFile 判成"是目录"而失败。 */
   const openFileAbs = (abs: string, name?: string): void => {
     const clean = (abs ?? "").trim().replace(/^["']|["']$/g, "");
     if (!clean) { return; }
     const fname = (name ?? clean.split(/[\\/]/).pop() ?? clean).trim();
+    const isAbs = /^[a-zA-Z]:[\\/]/.test(clean) || clean.startsWith("\\\\") || clean.startsWith("/");
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     const tab: TabInstance = {
       id: uid(), type: "file", title: fname,
-      fileRel: clean, fileAbs: clean,
+      fileRel: clean, fileAbs: clean, // 先占位（让本页立即进入"文件预览"形态，而不是"打开文件夹"空态）
     };
-    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    void api?.workspace?.readFileAbs?.(clean).then((res: WorkspaceReadFileResult) => {
-      if (!res?.ok || !res.content) {
-        updateTab(tab.id, { fileError: res?.error ?? "读取失败" });
-        return;
+    void (async () => {
+      let lastErr = "";
+      const triedAll: string[] = [];
+      // ① 主进程多基准解析（唯一权威：它知道会话工作目录与项目根）
+      const resolved = await api?.workspace?.openTarget?.(clean, {
+        root: (props.workspace ?? "").trim(),
+        sessionId: props.sessionId ?? "",
+      }).catch(() => null) as { ok?: boolean; path?: string; isDir?: boolean; tried?: string[]; error?: string } | null | undefined;
+      if (resolved?.tried) { triedAll.push(...resolved.tried); }
+      if (resolved?.ok && resolved.path) {
+        if (resolved.isDir) {
+          // 目录：开一个以它为浏览根的文件页（文件页自带「上级/打开文件夹」导航）
+          updateTab(tab.id, { fileAbs: undefined, fileContent: undefined, browseRoot: resolved.path, title: fname });
+          return;
+        }
+        const res = await api?.workspace?.readFileAbs?.(resolved.path).catch(() => null) as WorkspaceReadFileResult | null | undefined;
+        if (res?.ok) {
+          updateTab(tab.id, { fileContent: res.content ?? "", fileMime: res.mime, fileAbs: res.path ?? resolved.path, fileError: undefined });
+          return;
+        }
+        lastErr = res?.error ?? "";
+        // 解析到的路径读不出来（权限/编码等）→ 再退回旧路径试一次，尽量不把可读的文件挡在外面
+      } else {
+        lastErr = resolved?.error ?? "";
       }
-      updateTab(tab.id, { fileContent: res.content, fileMime: res.mime });
-    }).catch((e: unknown) => {
-      updateTab(tab.id, { fileError: e instanceof Error ? e.message : String(e) });
-    });
+      // ② 旧兜底链：绝对路径直接读；相对路径先按工作目录读，再当绝对路径读
+      const tryRead = async (fn: (() => Promise<WorkspaceReadFileResult | null>) | undefined): Promise<boolean> => {
+        if (!fn) { return false; }
+        const res = await fn().catch(() => null);
+        if (res?.ok) {
+          updateTab(tab.id, { fileContent: res.content ?? "", fileMime: res.mime, fileAbs: res.path ?? clean, fileError: undefined });
+          return true;
+        }
+        lastErr = res?.error ?? lastErr;
+        return false;
+      };
+      if (isAbs) {
+        if (await tryRead(() => api?.workspace?.readFileAbs?.(clean))) { return; }
+      } else {
+        const root = (props.workspace ?? "").trim();
+        if (await tryRead(root ? () => api?.workspace?.readFile?.(root, clean) : undefined)) { return; }
+        if (await tryRead(() => api?.workspace?.readFileAbs?.(clean))) { return; }
+      }
+      // 失败时把"试过哪些路径"一并展示：这类问题多为解析基准不对，给出候选清单才能一眼定位
+      const hint = triedAll.length > 0
+        ? `\n已尝试解析为：\n${triedAll.slice(0, 6).map((t) => `· ${t}`).join("\n")}`
+        : "\n（已按工作目录 / 项目根 / 绝对路径逐一尝试）";
+      updateTab(tab.id, { fileError: (lastErr || `找不到该路径：${clean}`) + hint });
+    })();
     setTabs((prev) => [...prev, tab]);
     setActiveId(tab.id);
   };
@@ -260,17 +461,53 @@ export default function RightSidebar(props: {
     const onOpen = (e: Event): void => {
       const d = (e as CustomEvent<SidebarOpenPayload>).detail;
       if (!d) { return; }
+      /* A-975-R5：站点弹窗保护**只拦"风暴"，不拦正常点击**。
+       * ⚠️ 上一版（R4）写了个「浏览器页总数 ≥8 就一律拦」的硬上限，结果用户开了很多页签后
+       * **任何需要新页签的链接点击都被静默吞掉** → 表现成"能进网站，之后点什么都没反应"（用户实测）。
+       * 现在：只在 3s 内连爆 ≥5 个（广告风暴）时拦截；总量上限放宽到 16 且**只在爆发时**参与判断；
+       * 被拦时一定给横幅（横幅上「打开」可手动打开该链接），不静默丢。 */
+      if (d.from === "site" && d.kind === "url") {
+        const now = Date.now();
+        const recent = recentPopupRef.current.filter((t) => now - t < 3000);
+        const browserCount = tabs.filter((t) => t.type === "browser").length;
+        if (recent.length >= 5 || (recent.length >= 1 && browserCount >= 16)) {
+          recentPopupRef.current = recent;
+          setPopupBanner({ url: d.url ?? "", ts: now, kind: "popup-denied" });
+          return;
+        }
+        recentPopupRef.current = [...recent, now];
+      }
       if (d.kind === "file" && d.rel) {
         openFileAbs(d.rel, d.name);
       } else if (d.kind === "url" && d.url) {
-        // 在原浏览器标签直接改址；若还没有浏览器标签则新建一个
-        const existing = tabs.find((t) => t.type === "browser");
-        if (existing) {
-          updateTab(existing.id, { url: d.url, title: d.name ?? d.url });
-          setActiveId(existing.id);
+        // A-980-R6：统一归一 URL（裸地址补 http://）——链接路径不再把 `127.0.0.1:8081`
+        // 原样塞进 webview src（无 scheme 加载无效 → 白屏），与地址栏 go() 一致。
+        const url = normalizeBrowserUrl(d.url);
+        // A-980-R13：非 Web 协议（slime://、weixin:// 等）绝不进浏览器页导航——
+        // 否则 loadURL 该协议会触发系统「获取打开此链接的应用」弹窗
+        if (!isWebNavUrl(url)) { return; }
+        // A-980-R14：新建页标题用域名兜底（不再裸显示"浏览器"占位）
+        const domainTitle = (): string => {
+          try { return new URL(url).hostname.replace(/^www\./, "") || url; } catch { return url; }
+        };
+        // A-975-R2：name 可能是**空串**（主进程 slime:sidebar:open 就是 `name: ""`）——`??` 不会兜底，
+        // 结果新建的页签标题是空的（用户实测"跳转的页面没有标签页名字"）。改用「非空才用」。
+        const pageTitle = (): string => {
+          const n = (d.name ?? "").trim();
+          return n || domainTitle();
+        };
+        // A-976：支持"同时访问多个网站"——优先复用**同址**的浏览器页；
+        // 其次是**空白**浏览器页；都没有才新建。避免此前的"永远挤在唯一一个浏览器页"。
+        const browsers = tabs.filter((t) => t.type === "browser");
+        const sameUrl = browsers.find((t) => t.url === url);
+        const blank = browsers.find((t) => !t.url);
+        const target = sameUrl ?? blank;
+        if (target) {
+          if (!sameUrl) { updateTab(target.id, { url, title: pageTitle() }); }
+          setActiveId(target.id);
         } else {
           const tab = createTab("browser");
-          setTabs((prev) => [...prev, { ...tab, url: d.url, title: d.name ?? tab.title }]);
+          setTabs((prev) => [...prev, { ...tab, url, title: pageTitle() }]);
           setActiveId(tab.id);
         }
       }
@@ -286,7 +523,9 @@ export default function RightSidebar(props: {
     const w = window as unknown as { slimeAPI?: { onSidebarOpen?: (cb: (p: SidebarOpenPayload) => void) => () => void } };
     const off = w.slimeAPI?.onSidebarOpen?.((p) => {
       if (p && (p.kind === "url" || !p.kind) && p.url) {
-        requestSidebarOpen({ kind: "url", url: p.url, name: p.name });
+        // A-975-R4：来源透传——主进程 setWindowOpenHandler（站点弹窗）会带 from:"site"，
+        // 走弹窗风暴限流；Agent 的 http_create_app 不带（属于用户意图，不限流）。
+        requestSidebarOpen({ kind: "url", url: p.url, name: p.name, from: p.from === "site" ? "site" : "user" });
       }
     });
     return () => { off?.(); };
@@ -348,8 +587,11 @@ export default function RightSidebar(props: {
   };
 
   return (
-    <aside className={`right-sidebar${props.open ? "" : " collapsed"}`} style={{ width: props.width }}>
-      {props.open && <div className="sidebar-resizer right-sidebar-resizer" onMouseDown={props.onResize} />}
+    <aside ref={menuHostRef} className={`right-sidebar${props.open ? "" : " collapsed"}`} style={{ width: props.width }}>
+      {/* A-980-R27：只挂 right-sidebar-resizer（left:-3px）——此前同时挂了 sidebar-resizer
+          （right:-3px），同一元素左/右锚点都写死属于过约束，拖拽期宽度变化会跟着错位；
+          onMouseDown 改 onPointerDown 配合指针捕获，指针划过 <webview> 也不丢松手事件 */}
+      {props.open && <div className="right-sidebar-resizer" onPointerDown={props.onResize} />}
 
       {/* ── 标签栏（可滚动 + 拖拽重排） ─ */}
       <div className="right-tabbar" style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border)", padding: "0 4px", background: "var(--sidebar-bg, #1e1e2e)" }}>
@@ -391,14 +633,14 @@ export default function RightSidebar(props: {
                   borderTop: isDragOver ? "2px solid var(--accent)" : "2px solid transparent",
                 }}
                 onClick={() => setActiveId(tab.id)}
-                title={tab.fileRel || tab.title}
+                title={tab.isDefault ? `${tab.fileRel || tab.title}（默认页，常驻）` : (tab.fileRel || tab.title)}
               >
                 <Icon size={14} />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", flex: "1", minWidth: 0 }}>{tab.title}</span>
-                {/* A-918++：默认页（任务页）显示「固定」徽标不可删；其他页可删到 0 */}
-                {tab.isDefault ? (
-                  <span style={{ fontSize: 10, color: "var(--text-dim)", padding: "1px 6px", borderRadius: 5, background: "var(--bg-hover)", flexShrink: 0, fontWeight: 600 }}>固定</span>
-                ) : (
+                {/* A-980-R24：默认页（任务页）**不再显示「固定」徽标**。
+                 *  原徽标是"不可删除"的说明牌，但常驻标签页本身就是约定俗成（VS Code 钉子页同理），
+                 *  徽标挤在标题旁边既占宽又不美观（用户反馈）——语义改由 tooltip「默认页，常驻」承载。 */}
+                {!tab.isDefault && (
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                   title="关闭标签页"
@@ -419,9 +661,10 @@ export default function RightSidebar(props: {
             );
           })}
           <button
+            ref={addBtnRef}
             className="right-tab-add"
             title="新建标签页"
-            onClick={() => setMenuOpen((v) => !v)}
+            onClick={toggleAddMenu}
             style={{
               display: "flex", alignItems: "center", justifyContent: "center",
               width: 24, height: 24, marginLeft: 2, borderRadius: 4,
@@ -432,9 +675,9 @@ export default function RightSidebar(props: {
             <PlusIcon size={14} />
           </button>
         </div>
-        <button className="right-collapse" title="收起右侧栏" onClick={props.onToggle} style={{ flexShrink: 0 }}>
-          <SidebarLeftIcon size={15} />
-        </button>
+        {/* A-980-R24：此处原有的第二个「收起右侧栏」按钮**已删除**——顶部标题栏（App.tsx 的
+            .titlebar）已有一个同功能按钮，两个并存既重复又让人以为是两个不同操作（用户反馈）。
+            收起入口统一由标题栏那一个承担。 */}
       </div>
 
       {menuOpen && (
@@ -442,6 +685,9 @@ export default function RightSidebar(props: {
           ref={menuRef}
           style={{
             position: "absolute", zIndex: 9999,
+            // A-980-R24：跟随「新建」加号按钮定位（此前无 top/left → 永远贴在侧栏最左端）
+            top: menuPos?.top ?? 34,
+            left: menuPos?.left ?? 6,
             background: "var(--dropdown-bg, #252537)",
             border: "1px solid var(--border)", borderRadius: 6, padding: 4,
             minWidth: 140, boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
@@ -497,23 +743,95 @@ export default function RightSidebar(props: {
         <div style={{ display: activeTab?.type === "tasks" ? "flex" : "none", flexDirection: "column", height: "100%", minHeight: 0 }}>
           <TasksTab active={activeTab?.type === "tasks"} agentId={props.agentId ?? ""} sessionId={props.sessionId ?? ""} agentName={props.agentName} workspace={props.workspace} dl={props.dl} providerModels={props.providerModels} />
         </div>
-        {activeTab && activeTab.type === "subagents" && (
-          <SubAgentsTab />
-        )}
         {activeTab && activeTab.type === "terminal" && (
           <TerminalTab workspace={props.workspace} />
         )}
-        {activeTab && activeTab.type === "browser" && (
-          <BrowserTabInstance tabId={activeTab.id} url={activeTab.url ?? ""} onUrlChange={(url) => updateTab(activeTab.id, { url })} />
-        )}
+        {/* A-976：浏览器页**全部常驻挂载**（display 控制显隐）+ 每页独立 key。
+            此前只挂载当前激活的那一个、且没有 key：切换/新建浏览器页时 React 复用同一个组件实例与
+            同一个 <webview> DOM 节点，navUrl 内部 state 也被延续 → 新页继承旧页内容、「两页绑定」
+            （用户实测 bug："只能访问一个网站，新建的页延续第一个页的内容，改一个另一个也变"）。
+            常驻挂载同时保留了各页各自的浏览位置与历史（切回不重载）。 */}
+        {/* A-980-R3：弹窗/协议提示横幅（三态：need-install 琥珀 / opened 绿 / popup-denied 中性；
+            高 ≥34px、按钮 min-width + nowrap 防截断变形、URL 单行 ellipsis） */}
+        {activeTab?.type === "browser" && popupBanner && (() => {
+          const kind = popupBanner.kind ?? "popup-denied";
+          const needInstall = kind === "need-install";
+          const opened = kind === "opened";
+          // A-980-R4：浏览器唤起类协议（bitbrowser:// 等）——不再提示"未注册需装客户端"，
+          // 而是说明「已拦截、不唤醒外部浏览器」（BitBrowser 被拉起只会自己弹报错横幅）
+          const browserScheme = needInstall && isBrowserSchemeUrl(popupBanner.url);
+          const tone = needInstall
+            ? { bg: "rgba(240, 160, 48, 0.10)", border: "rgba(240, 160, 48, 0.32)", fg: "#e8c27a", icon: "⚠" }
+            : opened
+              ? { bg: "rgba(74, 222, 128, 0.10)", border: "rgba(74, 222, 128, 0.32)", fg: "#7fd9a0", icon: "✓" }
+              : { bg: "var(--bg-input, #161b22)", border: "var(--border, rgba(255,255,255,0.08))", fg: "var(--text-secondary)", icon: "⛔" };
+          const title = browserScheme
+            ? `已拦截浏览器唤起链接（${popupBanner.scheme ?? ""}://）——未唤起外部浏览器`
+            : needInstall
+              ? `无法打开 ${popupBanner.scheme ?? ""}:// 链接——系统未注册该协议`
+              : opened
+                ? `已交给系统打开${popupBanner.handler ? `（${popupBanner.handler}）` : ""}`
+                : "站点试图弹出新窗口，已自动拦截";
+          const btnStyle = { flexShrink: 0, minWidth: 54, padding: "4px 12px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)", color: tone.fg, fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" } as const;
+          return (
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, minHeight: 34, margin: "0 8px 6px", padding: "6px 12px", borderRadius: 8, background: tone.bg, border: `1px solid ${tone.border}`, fontSize: 11 }}>
+              <span style={{ flexShrink: 0, fontSize: 13, fontWeight: 600, color: tone.fg }}>{tone.icon}</span>
+              <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+                <span style={{ color: tone.fg, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</span>
+                <span style={{ color: "var(--text-muted, #8b949e)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", direction: "rtl", textAlign: "left" }} title={popupBanner.url}>{popupBanner.url}</span>
+              </div>
+              {!needInstall && (
+                <button style={btnStyle} onClick={() => {
+                  const u = popupBanner.url;
+                  setPopupBanner(null);
+                  if (!u || kind !== "popup-denied") { return; }
+                  // A-975-R5：在**浏览器页**里打开（复用同址 → 空白页 → 新建），
+                  // 不再把「当前页签」的地址改掉（若当前是任务页/文件页会把它们改坏）
+                  const browsers = tabs.filter((t) => t.type === "browser");
+                  const target = browsers.find((t) => t.url === u) ?? browsers.find((t) => !t.url);
+                  if (target) {
+                    updateTab(target.id, { url: u, title: u });
+                    setActiveId(target.id);
+                  } else {
+                    const tab = createTab("browser");
+                    setTabs((prev) => [...prev, { ...tab, url: u, title: u }]);
+                    setActiveId(tab.id);
+                  }
+                }}>打开</button>
+              )}
+              {needInstall && (
+                <button style={btnStyle} onClick={() => setPopupBanner(null)}>知道了</button>
+              )}
+            </div>
+          );
+        })()}
+        {tabs.filter((t) => t.type === "browser").map((t) => {
+          const isActive = t.id === activeTab?.id;
+          // A-979-R：**全部常驻**（display 控制显隐）——A-979 的 LRU 卸载导致非激活 tab 的 webview 被销毁、
+          // Agent 切回/操作时重挂载 about:blank 并中断原加载（抖音等反爬站点重载即白屏，用户实测"右侧白屏开不了"）。
+          // 资源占用改由「失活显式 setBackgroundThrottling(true)」控制（非激活页动画/定时器/合成降速），
+          // 状态不丢、不重载、不白屏；N 个重 tab 叠加的占用是 Chromium 固有成本。
+          return (
+            <div
+              key={t.id}
+              style={{ display: isActive ? "flex" : "none", flexDirection: "column", height: "100%", minHeight: 0 }}
+            >
+              <BrowserTabInstance tabId={t.id} url={t.url ?? ""} active={isActive}
+                onUrlChange={(url) => updateTab(t.id, { url })}
+                onTitleChange={(title) => updateTab(t.id, { title })} />
+            </div>
+          );
+        })}
         {activeTab && activeTab.type === "git" && (
           <GitTab workspace={props.workspace} onFileClick={openFileTab} />
         )}
         {activeTab && activeTab.type === "file" && (
-          <FileTab tab={activeTab} workspace={props.workspace} onBack={() => {
-            const gitIdx = tabs.findIndex((t) => t.type === "git");
-            if (gitIdx >= 0) { setActiveId(tabs[gitIdx].id); }
-          }} />
+          <FileTab tab={activeTab} workspace={props.workspace}
+            onBrowseRootChange={(root) => updateTab(activeTab.id, { browseRoot: root })}
+            onBack={() => {
+              const gitIdx = tabs.findIndex((t) => t.type === "git");
+              if (gitIdx >= 0) { setActiveId(tabs[gitIdx].id); }
+            }} />
         )}
       </div>
     </aside>
@@ -974,7 +1292,7 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
       {/* ─ 右键菜单 ── */}
       {ctxMenu && (
         <div className="ctx-menu" ref={ctxMenuRef}
-          style={{ position: "fixed", left: ctxMenu.x, top: ctxMenu.y, zIndex: 9999, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 4px 12px rgba(0,0,0,0.3)", minWidth: 160, padding: "4px 0" }}>
+          style={{ position: "fixed", left: ctxMenu.x, top: ctxMenu.y, zIndex: 9999, background: "rgba(14, 20, 42, 0.94)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 4px 12px rgba(0,0,0,0.3)", minWidth: 160, padding: "4px 0" }}>
           <div style={{ fontSize: 11, color: "var(--text-dim)", padding: "4px 12px 6px", borderBottom: "1px solid var(--border)", marginBottom: 4, wordBreak: "break-all" }}>{ctxMenu.name}</div>
           <div className="ctx-menu-item" onClick={() => { props.onFileClick?.(ctxMenu.rel, ctxMenu.name); setCtxMenu(null); }}>
             <span style={{ marginRight: 8 }}><FolderIcon size={13} /></span>在新标签打开
@@ -1371,16 +1689,32 @@ const ARCHIVE_NAMES = {
 interface FSActionState {
   rel: string;
   name: string;
-  mime: "text" | "image" | "binary";
+  mime: "text" | "image" | "binary" | "pdf" | "office";
   content: string;   // 文本原义；图片/二进制为 base64
   size: number;
   truncated?: boolean;
   error?: string;
 }
 
-function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => void }): JSX.Element {
+function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => void; onBrowseRootChange?: (root: string) => void }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
   const workspaceRoot = props.workspace?.trim() || "";
+
+  /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等右侧栏只读格式） */
+  const openInSystem = React.useCallback(async (f: FSActionState): Promise<void> => {
+    const abs = f.rel && !props.tab.fileAbs ? undefined : props.tab.fileAbs;
+    const api2 = (window as unknown as { slimeAPI?: { workspace?: { openPath?: (p: string) => Promise<{ ok?: boolean; error?: string }> } } }).slimeAPI;
+    if (!api2?.workspace?.openPath) { return; }
+    try {
+      // 有绝对路径直接用；否则按「当前浏览根（用户可能选的是工作区之外的目录）→ 回退工作目录」拼绝对路径
+      const base = (props.tab.browseRoot || workspaceRoot || "").trim();
+      const target = abs ?? (base ? `${base}/${f.rel}`.replace(/\\/g, "/") : f.rel);
+      const r = await api2.workspace.openPath(target);
+      if (r && r.ok === false && r.error) {
+        console.warn("[slime] 系统打开失败:", r.error);
+      }
+    } catch (e) { console.warn("[slime] 系统打开异常:", e); }
+  }, [props.tab.fileAbs, props.tab.browseRoot, workspaceRoot]);
 
   /** A-918++：行级 diff（LCS）——供 FileTab diff 模式渲染 VS Code 风格行 */
   const diffLinesFn = (a: string, b: string): Array<{ op: "=" | "+" | "-"; text: string }> => {
@@ -1457,7 +1791,9 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   };
 
   /* ── 文件浏览导航状态 ── */
-  const [browseRoot, setBrowseRoot] = React.useState<string>(workspaceRoot);
+  /** A-975：浏览根随 tab 持久化（`tab.browseRoot`）——用户在「打开文件夹」里选定的目录
+   *  （可以是**工作区之外**任意位置）不再因会话 workspace 变化/组件重挂载被顶回工作目录。 */
+  const [browseRoot, setBrowseRoot] = React.useState<string>(props.tab.browseRoot ?? workspaceRoot);
   /** 相对目录栈：[] 为根，["a"] 为 /a，逐级 push/pop */
   const [dirStack, setDirStack] = React.useState<string[]>([]);
   const [entries, setEntries] = React.useState<WorkspaceEntry[]>([]);
@@ -1521,19 +1857,38 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     }
   }, [api]);
 
-  /** workspace 变化时，把浏览根切换到工作目录并列出根 */
+  /** workspace 变化时，把浏览根切换到工作目录（只切根，列出目录交给下面统一的 effect）。
+   *  A-975：**用户手动选过目录的 tab 不覆盖**——否则选了个工作区外的文件夹，只要 workspace 一变
+   *  （或组件重挂载）就被顶回工作目录，表现成"工作区外的文件打不开"。 */
   React.useEffect(() => {
     if (!workspaceRoot) { return; }
+    if (props.tab.browseRoot) {
+      if (props.tab.browseRoot !== browseRoot) { setBrowseRoot(props.tab.browseRoot); }
+      return;
+    }
     setBrowseRoot(workspaceRoot);
     setDirStack([]);
-    void listDir(workspaceRoot, "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.workspace]);
+  }, [props.workspace, props.tab.browseRoot]);
+
+  /** A-980-R32：**浏览根一变就列目录**（统一唯一入口）。
+   *  此前只有「workspace 变化」那条分支会调 listDir，于是**由外部带着 browseRoot 直接打开的目录页**
+   *  （点击思考里出现的目录路径 → 主进程解析出 isDir → 建一个 browseRoot=该目录的文件页）
+   *  永远停在空列表，用户看到的是"打开了个空文件夹"。
+   *  这里只依赖 browseRoot（不依赖 curRel）：目录内导航由各导航 handler 自己 listDir，
+   *  否则一次点击会打两次 IPC 并可能因响应乱序闪烁。 */
+  React.useEffect(() => {
+    if (!browseRoot) { return; }
+    if (props.tab.fileAbs) { return; } // 文件预览页不抢列表
+    void listDir(browseRoot, "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [browseRoot, props.tab.fileAbs]);
 
   /** A-173：聊天消息内打开的文件（fileAbs/fileContent 异步预读完成）→ 内容回来即渲染预览 */
   React.useEffect(() => {
     if (!props.tab.fileAbs) { return; }
-    if (props.tab.fileContent) {
+    // A-975：内容为**空文件**时 fileContent === "" 也是有效结果（旧写法用真值判断会漏渲染）
+    if (props.tab.fileContent !== undefined) {
       setPreview({
         rel: props.tab.fileAbs, name: props.tab.title ?? props.tab.fileAbs.split(/[\\/]/).pop() ?? props.tab.fileAbs,
         mime: props.tab.fileMime ?? "text", content: props.tab.fileContent, size: 0, truncated: false,
@@ -1546,7 +1901,8 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tab.fileContent, props.tab.fileError]);
 
-  /** 打开系统文件夹选择对话框，选择后展示所选目录的内容列表（进入文件资源管理器模式） */
+  /** 打开系统文件夹选择对话框，选择后展示所选目录的内容列表（进入文件资源管理器模式）。
+   *  A-975：选定结果写回 tab（`browseRoot`）→ 该页的浏览位置持久化，可停留在**工作区之外**的目录。 */
   const handlePickFolder = React.useCallback(async (): Promise<void> => {
     if (!api?.workspace?.pickBrowseRoot) { return; }
     setPickingFolder(true);
@@ -1554,13 +1910,14 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
       const res = await api.workspace.pickBrowseRoot();
       if (res?.ok && res.path) {
         setBrowseRoot(res.path);
+        props.onBrowseRootChange?.(res.path);
         setDirStack([]);
         setPreview(null);
         void listDir(res.path, "");
       }
     } catch { /* 用户取消或失败，保持原状 */ }
     finally { setPickingFolder(false); }
-  }, [api, listDir]);
+  }, [api, listDir, props.tab.id, props.onBrowseRootChange]);
 
   const enterDir = (node: WorkspaceEntry): void => {
     setDirStack((prev) => [...prev, node.name]);
@@ -1652,6 +2009,37 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
       );
     }
     const lowExt = extOf(preview.name);
+    // A-980-R8：PDF——右侧栏内嵌 <embed> 预览（Chromium 原生 PDF viewer）
+    if (preview.mime === "pdf") {
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, flexShrink: 0 }}>
+            <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>📄 PDF 预览</span>
+            <span style={{ color: "var(--text-dim)" }}>{preview.name} · {fmtSize(preview.size)}</span>
+            <span style={{ flex: 1 }} />
+            <button className="btn" style={{ padding: "3px 12px", fontSize: 11 }} onClick={() => void openInSystem(preview)}>用系统应用打开</button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg)" }}>
+            <embed src={pdfDataUrl(preview.content)} type="application/pdf" style={{ width: "100%", height: "100%", border: "none", minHeight: 420 }} />
+          </div>
+        </div>
+      );
+    }
+    // A-980-R8：Office（word/excel/ppt）——右侧栏不内置解析，提供图标 + 系统应用打开
+    if (preview.mime === "office") {
+      const officeIcon = OFFICE_ICONS[lowExt];
+      return (
+        <div style={{ flex: 1, overflow: "auto", padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, textAlign: "center" }}>
+          <div style={{ fontSize: 40, lineHeight: 1 }}>{officeIcon ?? "🗎"}</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{preview.name}</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+            Office 文档不在右侧栏内预览（格式复杂）。<br />
+            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>大小：{fmtSize(preview.size)}</span>
+          </div>
+          <button className="btn" style={{ marginTop: 4, padding: "7px 18px", fontSize: 12, fontWeight: 600 }} onClick={() => void openInSystem(preview)}>用系统应用打开</button>
+        </div>
+      );
+    }
     // 压缩包 / 归档：友好提示，绝不尝试解析
     if (preview.mime === "binary") {
       const archName = ARCHIVE_NAMES[lowExt];
@@ -1665,6 +2053,8 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
               文件不可直接查看。请在系统资源管理器中解压后再浏览内容。<br />
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>大小：{fmtSize(preview.size)} · {preview.rel}</span>
             </div>
+            {/* A-975：此前只提示"自己去资源管理器"，没有出口 → 补「用系统应用打开」（可顺手定位/解压） */}
+            <button className="btn" style={{ marginTop: 4, padding: "7px 18px", fontSize: 12, fontWeight: 600 }} onClick={() => void openInSystem(preview)}>用系统应用打开</button>
           </div>
         );
       }
@@ -1673,6 +2063,7 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
         <div style={{ flex: 1, overflow: "auto", padding: "10px 14px" }}>
           <div style={{ fontSize: 11, color: "var(--warning)", padding: "4px 2px 8px" }}>{BINARY_EXT.has(lowExt) ? "不可直接预览（二进制）" : "二进制文件（十六进制预览）"} · 共 {view.byteLen} 字节{view.truncated ? `，仅显示前 ${512} 字节` : ""}：</div>
           <pre style={{ fontSize: 11, fontFamily: "Consolas, monospace", color: "var(--text-secondary)", padding: 10, background: "var(--bg-hover)", borderRadius: 6, overflow: "auto", whiteSpace: "pre", margin: 0, lineHeight: 1.5 }}>{view.hex || "（无法解析）"}</pre>
+          <button className="btn" style={{ marginTop: 8, padding: "6px 14px", fontSize: 12 }} onClick={() => void openInSystem(preview)}>用系统应用打开</button>
         </div>
       );
     }
@@ -1872,6 +2263,9 @@ function fmtSize(n: number): string {
   reasoningTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  /** A-974-R6：推理 token 含**估算成分**（上游 usage 从不回传 reasoning_tokens 时，用实际收到的
+   *  思考文本按 ≈4 字符/token 折算并明示为估算，避免该行永远显示 0 造成"侦测不到"的误解）。 */
+  reasoningEstimated?: boolean;
 }
 
 interface ModelPriceInfo {
@@ -1889,6 +2283,86 @@ export interface TodoItem {
   status: TaskStatus;
   blockedBy?: string[];
   blocks?: string[];
+  /** A-980-R27：完成时刻（ISO）。由 todo_write 落盘时打戳，这里只读用于展示"何时完成" */
+  completedAt?: string;
+}
+
+/**
+ * A-980-R27：完成标记的图形部分——实心绿底 + 可"画入"的对勾。
+ *
+ * 为什么不用现成图标组件：`CheckboxCheckedIcon` 是一条静态路径，没有可供动画的
+ * stroke-dasharray 钩子，做不出"划一下打勾"的完成反馈。这里自绘一个最小 SVG：
+ * - `pathLength={100}` 把路径长度归一化 → CSS 里 dasharray/dashoffset 恒为 100，
+ *   无论图标渲染成 13px 还是 15px、check 的 d 怎么调，动画都刚好一划到底（不会被截断）。
+ * - 颜色走 `var(--success)`，深浅主题共用一套。
+ * 无障碍：完成态本身还有删除线（纹理）+ 行降透明度，不靠颜色单独传意（WCAG 1.4.1）。
+ */
+function TodoCheck({ size = 15, animate }: { size?: number; animate?: boolean }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0, display: "block" }}>
+      <rect x="2.5" y="2.5" width="19" height="19" rx="5.5" fill="var(--success)" />
+      <path
+        className={animate ? "todo-check-path" : undefined}
+        d="M7 12.4l3.3 3.3L17 8.6"
+        stroke="#ffffff"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        pathLength={100}
+        style={animate ? undefined : { strokeDasharray: 100, strokeDashoffset: 0 }}
+      />
+    </svg>
+  );
+}
+
+/**
+ * 待办分组标题（进行中 / 待办 / 已完成）。
+ * 细线填满剩余宽度，让分组在窄侧栏里也能一眼分段，而不靠加粗或背景块。
+ */
+function TodoGroupLabel({ text, count, tone }: { text: string; count: number; tone: "accent" | "muted" | "success" }): JSX.Element {
+  const color = tone === "accent" ? "var(--accent)" : tone === "success" ? "var(--success)" : "var(--text-dim)";
+  // A-980-R28：上内边距 7px → 4px。分组标题只在多状态时出现，7px 的留白在窄侧栏里显得很空。
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 5px 0", fontSize: 9.5, fontWeight: 700, letterSpacing: 0.6, color }}>
+      <span>{text}</span>
+      <span style={{ opacity: 0.75, fontVariantNumeric: "tabular-nums" }}>{count}</span>
+      <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+    </div>
+  );
+}
+
+/**
+ * A-980-R28：待办数量徽标。
+ *
+ * 原来是一段内联样式（`fontSize:10 + padding:1px 6px + borderRadius:999`），
+ * 靠行盒自然撑高 → 数字在胶囊里**上下不居中**（用户："那个数字文本内容不在文本框的正中间"），
+ * 且 `1/3` 与 `10/12` 宽度不同会让胶囊忽宽忽窄。
+ * 现在用固定高度 + inline-flex 居中 + `tabular-nums` + `minWidth` 锁宽，
+ * 数字永远垂直居中、位数变化也不跳。
+ */
+function TodoCountChip({ text, tone }: { text: string; tone: "accent" | "success" }): JSX.Element {
+  const success = tone === "success";
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      height: 16, minWidth: 28, padding: "0 6px", borderRadius: 999,
+      background: success ? "var(--success-soft)" : "var(--accent-soft)",
+      color: success ? "var(--success)" : "var(--accent)",
+      fontSize: 10, fontWeight: 700, lineHeight: 1,
+      fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", flexShrink: 0,
+    }}>{text}</span>
+  );
+}
+
+/** 完成时刻的紧凑展示：今天只给 HH:MM，跨天补 MM-DD（侧栏空间紧张，不写年份） */
+function fmtDoneAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) { return ""; }
+  const p = (n: number): string => String(n).padStart(2, "0");
+  const now = new Date();
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? hm : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
 }
 
 /** 上下文上限：优先 Agent.max_context，其次 Provider 模型规格中的 context_window，最后运行时上游探测元数据。
@@ -1978,6 +2452,17 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     const off3 = api.chat?.onError?.(() => setIsStreaming(false));
     return () => { off1?.(); off2?.(); off3?.(); };
   }, [api]);
+  /** A-975：自动压缩触发占比——阈值刻度线与「距压缩」余量同源；设置面板保存后立即跟随（不再写死 80%） */
+  const [acRatio, setAcRatio] = React.useState<number>(() => readAutoCompressCfg().ratio);
+  React.useEffect(() => {
+    const sync = (): void => setAcRatio(readAutoCompressCfg().ratio);
+    window.addEventListener(AUTOCOMPRESS_CFG_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(AUTOCOMPRESS_CFG_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
   React.useEffect(() => {
     if (!active) { return; }
     let cancelled = false;
@@ -1996,6 +2481,11 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     const timer = setInterval(() => { void refreshModel(); }, 5_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [props.agentName, active]);
+  /** 模型定价刷新的外部抓手：每轮回复 done 后立即刷一次（新模型可能刚被用到）。
+   *  ⚠️ 不把轮询调紧的原因：主进程 listProviders → loadTable → decrypt 无缓存，
+   *  每次都要跑一遍 PBKDF2(600k) 且是**同步**的（阻塞主进程）——5s 轮询会让 GUI 周期性卡顿。
+   *  因此采用「事件驱动（done 即刷）+ 30s 兜底」而非高频轮询。 */
+  const pricesRefreshRef = React.useRef<(() => void) | null>(null);
   /** 定期刷新模型定价缓存；切模型时由 modelChoice 变化主动 refresh 一次（A-4b） */
   React.useEffect(() => {
     let cancelled = false;
@@ -2015,8 +2505,13 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       } catch { /* ignore */ }
     };
     void refresh();
+    pricesRefreshRef.current = () => { void refresh(); }; // 暴露给 onDone：回复完成即刷
     const timer = setInterval(() => { void refresh(); }, 30_000);
-    return () => { cancelled = true; clearInterval(timer); };
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      if (pricesRefreshRef.current) { pricesRefreshRef.current = null; }
+    };
   }, [modelChoice]);
   const [events, setEvents] = React.useState<TaskEvent[]>([]);
   const [running, setRunning] = React.useState(false);
@@ -2024,6 +2519,10 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
   /** 从 localStorage 持久化恢复：key 按「agentId + sessionId」聚合（会话级），
    *  会话切换时重新读取，避免多会话任务串联混淆（A-919） */
   const loadPersisted = React.useCallback(() => {
+    // A-980-R28：**会话就绪前一律不读**。此前无守卫，会把 key 拼成
+    // `slime_tasks_<agentId>_undefined`：既可能读到脏 key 里的缓存，
+    // 又会让后面的 flushPersist 把数据写进这个永远无人认领的桶里。
+    if (!props.agentId || !props.sessionId) { return null; }
     try {
       const raw = localStorage.getItem(`slime_tasks_${props.agentId}_${props.sessionId}`);
       if (raw) {
@@ -2040,29 +2539,107 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
    *  与 usage（四项累计，配 MetricsGrid 费用/消耗统计）语义分离，互不混用。 */
   const [liveUsed, setLiveUsed] = React.useState(0);
   const [liveCap, setLiveCap] = React.useState(0);
+  /** A-974-R6：本轮在途输出估算（正文/思考）——流式期间让「Token 明细」跟随刷新，done 时结算进累计 */
+  const [liveTurn, setLiveTurn] = React.useState<{ reply: number; reason: number }>({ reply: 0, reason: 0 });
+  const liveTurnRef = React.useRef<{ reply: number; reason: number }>({ reply: 0, reason: 0 });
+  /** A-975：本轮流式已耗时——并入「运行时间」让它在流式期也走字 */
+  const [liveElapsed, setLiveElapsed] = React.useState(0);
+  /** 清空在途输出估算（本轮结算进累计 / 切会话 / 异常收尾） */
+  const resetLiveTurn = React.useCallback((): void => {
+    liveTurnRef.current = { reply: 0, reason: 0 };
+    setLiveTurn({ reply: 0, reason: 0 });
+    // A-980-R31：**同时清掉挂起里的在途值**。
+    // 否则 done 路径「先 resetLiveTurn() 再 applyPendingCtx()」会把刚才清掉的旧在途值
+    // 又原样灌回来（applyPendingCtx 读的是 pendingCtxRef），在途估算被重复展示/重复计入。
+    pendingCtxRef.current.reply = 0;
+    pendingCtxRef.current.reason = 0;
+    pendingCtxRef.current.elapsedMs = 0;
+  }, []);
   // A-939：上下文分桶（随 done 事件/单一事件源传入；缺省 undefined 回退到 compose 的旧展示）
   const [liveBuckets, setLiveBuckets] = React.useState<CtxBuckets | undefined>(undefined);
   /** A-935：会话 ID 实时引用——订阅闭包读 ref 而非陈旧 props（根治切会话后 done/事件被旧值误过滤，
    *  导致右栏不更新/慢于圆环的根因）；组件随会话切换不重建本闭包也不受影响 */
   const sessionIdRef = React.useRef(props.sessionId);
   React.useEffect(() => { sessionIdRef.current = props.sessionId; }, [props.sessionId]);
-  /** A-935：订阅上下文占用单一事件源（发送估算 / done 真实校准）——与右上角环严格同源同时变更 */
+  /** A-975：右栏刷新节拍。
+   *
+   *  为什么是节拍而不是"来事件就 setState"：右栏是大组件，流式期 1s 心跳 + 高频派发会让它高频重渲染，
+   *  观感"又慢又抖"；所以事件只写 ref、由节拍统一应用。
+   *
+   *  ⚠️ A-980-R31 **根因修复**：节拍此前是**固定 10s**——等于右栏在整轮输出/思考过程中一动不动，
+   *  直到 done 才一次性跳变（用户："为什么思考中右边的所有实时监测报告的功能都不实时更新？"）。
+   *  现在改成**事件驱动的自适应节拍**：
+   *   - 有事件进来 → 最多 LIVE_APPLY_MS 后落地一次（尾沿合并，一窗多事件只渲染一次）；
+   *   - 空闲时 10s 兜底一拍（覆盖"无事件但显示值需要沉淀"的场景，如耗时兜底）。
+   *  主观上"跟着流走"，客观上渲染频率仍有上限（≤1 次/秒）。 */
+  const LIVE_APPLY_MS = 1000;
+  const pendingCtxRef = React.useRef<{
+    used?: number; cap?: number; buckets?: CtxBuckets; reply?: number; reason?: number; elapsedMs?: number;
+  }>({});
+  const appliedCtxOnceRef = React.useRef(false);
+  /** 挂起中的落地定时器（**只由卸载 effect 清理**；事件到达时若已挂起则复用 → 天然合并） */
+  const ctxApplyTimerRef = React.useRef<number | null>(null);
+  /** 把 ref 里的最新值一次性应用到状态（事件节拍 + 首次 + done 强制三处调用） */
+  const applyPendingCtx = React.useCallback((): void => {
+    const q = pendingCtxRef.current;
+    if (typeof q.used === "number" && q.used > 0) { setLiveUsed(q.used); }
+    if (typeof q.cap === "number" && q.cap > 0) { setLiveCap(q.cap); }
+    if (q.buckets) { setLiveBuckets(q.buckets); }
+    const turn = { reply: q.reply ?? 0, reason: q.reason ?? 0 };
+    liveTurnRef.current = turn;
+    setLiveTurn(turn);
+    setLiveElapsed(typeof q.elapsedMs === "number" && q.elapsedMs > 0 ? q.elapsedMs : 0);
+    appliedCtxOnceRef.current = true;
+  }, []);
+  /** 排一次落地（已在挂起则复用该窗口，实现"合并 + 有上限的实时性"） */
+  const scheduleApply = React.useCallback((): void => {
+    if (ctxApplyTimerRef.current !== null) { return; }
+    ctxApplyTimerRef.current = window.setTimeout(() => {
+      ctxApplyTimerRef.current = null;
+      applyPendingCtx();
+    }, LIVE_APPLY_MS);
+  }, [applyPendingCtx]);
+  /** 卸载清理挂起的落地定时器 */
+  React.useEffect(() => () => {
+    if (ctxApplyTimerRef.current !== null) {
+      window.clearTimeout(ctxApplyTimerRef.current);
+      ctxApplyTimerRef.current = null;
+    }
+  }, []);
+  /** A-935：订阅上下文占用单一事件源（发送估算 / 流式实时 / done 真实校准）——与右上角环严格同源 */
   React.useEffect(() => {
     const off = onCtxUpdate((p) => {
       if (p.sessionId !== sessionIdRef.current) { return; }
-      if (p.used > 0) { setLiveUsed(p.used); }
-      if (p.cap > 0) { setLiveCap(p.cap); }
-      // A-939：单事件源里带分桶数据，同步落状态
-      if (p.buckets) { setLiveBuckets(p.buckets); }
+      // 只写 ref（零重渲染）；实际落地交给节拍 / done
+      const q = pendingCtxRef.current;
+      if (p.used > 0) { q.used = p.used; }
+      if (p.cap > 0) { q.cap = p.cap; }
+      if (p.buckets) { q.buckets = p.buckets; }
+      q.reply = typeof p.liveReplyTokens === "number" ? p.liveReplyTokens : 0;
+      q.reason = typeof p.liveReasonTokens === "number" ? p.liveReasonTokens : 0;
+      q.elapsedMs = typeof p.liveElapsedMs === "number" ? p.liveElapsedMs : 0;
+      // 首次有值立即落地一次（否则新会话要等满一拍右栏才有数字，观感像"没数据"）；
+      // 之后走快速节拍 —— 这就是"思考中右栏全都不动"的修复点。
+      if (!appliedCtxOnceRef.current) { applyPendingCtx(); } else { scheduleApply(); }
     });
     return off;
-  }, []);
+  }, [applyPendingCtx, scheduleApply]);
+  /** 空闲兜底节拍：覆盖"无事件、但显示值仍需沉淀"的场景（耗时兜底等）；有事件时由快速节拍负责 */
+  React.useEffect(() => {
+    const iv = window.setInterval(() => { applyPendingCtx(); }, 10_000);
+    return () => window.clearInterval(iv);
+  }, [applyPendingCtx]);
   /** A-934：重启恢复——右栏窗口占用随会话元数据还原（与右上角环同源读取同一 key）；
    *  无持久化占用 → 显式置 0，防残留上一会话数值（切会话不同步的根因） */
   React.useEffect(() => {
     const meta = readSessionCtxMeta(props.agentId, props.sessionId);
     setLiveUsed(restoreUsed(meta));
     if (meta?.cap && meta.cap > 0) { setLiveCap(meta.cap); }
+    resetLiveTurn(); // A-974-R6：切会话清空在途输出估算，防上一会话残值混入
+    // A-975：切会话必须清掉挂起的 10s 快照，否则下一拍会把**上一个会话**的数值刷回来
+    pendingCtxRef.current = {};
+    appliedCtxOnceRef.current = false;
+    setLiveElapsed(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.agentId, props.sessionId]);
   const [detailOpen, setDetailOpen] = React.useState(false);
@@ -2079,6 +2656,9 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     // 变更时写回 localStorage（防抖：React state 更新周期内仅落盘一次）；key 会话级
     const persistTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const flushPersist = React.useCallback(() => {
+      // A-980-R28：会话未就绪不落盘——否则会写进 `slime_tasks_<agent>_undefined` 这个
+      // 永远无人认领的桶，下次启动若仍是未就绪态就会被当成本会话初值读回来
+      if (!props.agentId || !props.sessionId) { return; }
       if (persistTimerRef.current !== null) { clearTimeout(persistTimerRef.current); }
       persistTimerRef.current = setTimeout(() => {
         persistTimerRef.current = null;
@@ -2089,22 +2669,34 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     // A-919：会话切换联动——切到新会话立即重读该会话任务并主动向主进程拉取
     // （todo_write 落盘 data/todos_<sessionId>.json；广播 slime:tasks:todos 双保险）
     React.useEffect(() => {
+      // A-980-R28：**会话未就绪必须清空并停止拉取**。TasksTab 拿到的是 `props.sessionId ?? ""`，
+      // 空串会让主进程读到 `todos_` + "" + `.json` = `data/todos_.json` —— 修复前遗留的孤儿文件
+      // 恰好长这样，于是"会话加载途中就闪出上一次的旧待办"（用户实测）。
+      if (!props.agentId || !props.sessionId) {
+        setTodos([]);
+        setUsage(EMPTY_USAGE);
+        return;
+      }
       const p = loadPersisted();
       if (p) { setTodos(p.todos); setUsage(p.usage); } else { setTodos([]); setUsage(EMPTY_USAGE); }
       const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
       void api?.tasks?.loadTodos?.(props.sessionId).catch(() => {});
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [props.sessionId]);
+    }, [props.agentId, props.sessionId]);
     // 订阅主进程推送的任务列表（todo_write 工具写入后由主进程广播；按 sessionId 过滤）
     React.useEffect(() => {
       const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
       if (!api?.tasks?.onTodos) { return; }
-      const off = api.tasks.onTodos((data: { sessionId: string; todos: Array<{ id: string; content: string; status: string }> }) => {
-        if (props.sessionId && data.sessionId !== props.sessionId) { return; }
+      const off = api.tasks.onTodos((data: { sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }) => {
+        // A-980-R28：**两侧都必须严格匹配**。此前写的是
+        // `if (props.sessionId && data.sessionId !== props.sessionId) return;`
+        // —— props.sessionId 为空时整条守卫被跳过，任何会话（含空会话的孤儿文件）的推送都会被收下。
+        if (!props.sessionId || !data.sessionId || data.sessionId !== props.sessionId) { return; }
         const mapped: TodoItem[] = data.todos.map((t) => ({
           id: t.id ?? `auto-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           content: t.content,
           status: (t.status as TaskStatus) ?? "pending",
+          completedAt: t.completedAt,
         }));
         setTodos(mapped);
       });
@@ -2114,30 +2706,89 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
   const toggleTodoCollapse = React.useCallback(() => setCollapsedTodos((v) => !v), []);
 
   const addTodo = React.useCallback(() => {
+    // A-980-R28：会话未就绪时不接受手动添加——否则这条任务无处归属（既不会落盘到任何会话，
+    // 也会在切会话时被清掉，用户观感是"加了就没了"）
+    if (!props.agentId || !props.sessionId) { return; }
     const content = todoInput.trim();
     if (!content) { return; }
     const id = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     setTodos((prev) => [...prev, { id, content, status: "pending" }]);
     setTodoInput("");
-  }, [todoInput]);
+  }, [todoInput, props.agentId, props.sessionId]);
 
   const toggleTodo = React.useCallback((id: string) => {
     setTodos((prev) => prev.map((t) => {
       if (t.id !== id) { return t; }
-      return { ...t, status: t.status === "completed" ? "pending" : "completed" };
+      // 手动勾选同样要打/撤完成时间戳，语义与 todo_write 工具保持一致
+      if (t.status === "completed") { return { ...t, status: "pending", completedAt: undefined }; }
+      return { ...t, status: "completed", completedAt: t.completedAt ?? new Date().toISOString() };
     }));
   }, []);
 
   const advanceTodo = React.useCallback((id: string) => {
+    // 「单一进行中」是全局约束（与 todo_write 归一化同一规则），手动切换也不能破坏
     setTodos((prev) => prev.map((t) => {
-      if (t.id !== id || t.status === "completed") { return t; }
-      return { ...t, status: "in_progress" };
+      if (t.id === id) { return t.status === "completed" ? t : { ...t, status: "in_progress" }; }
+      return t.status === "in_progress" ? { ...t, status: "pending" } : t;
     }));
   }, []);
 
-  const deleteTodo = React.useCallback((id: string) => {
-    setTodos((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+  /**
+   * A-980-R32：**移除了两个手动清除入口**（行尾 ✕ 单删 / 标题栏「清完成」）。
+   *
+   * 为什么删：待办清单现在由 Agent 的任务规划驱动（`todo_write` 落盘 → 主进程广播），
+   * 完成态本身就是"滚动的进度账"，而两项手动删除的语义与它冲突：
+   * - 行尾 ✕ 删掉的是**证据**：用户事后复盘时看不到"这项做过/跳过了"；
+   * - 「清完成」是**双份控制**：全部完成时主进程会自动清空（见 scheduleTodoAutoClear），
+   *   再留一个手动按钮只会让人以为"不清就一直是脏的"。
+   * 需要真正丢弃整张计划时，模型调 `todo_write {action:"clear"}` 即可（有明确归属与留痕）。
+   */
+
+  /**
+   * A-980-R27：完成瞬间的「划过」动画。
+   *
+   * 行是稳定 key，状态变化不会重挂载，所以单靠 CSS 无法知道"这一帧刚好完成"。
+   * 这里 diff 出**刚刚**变成 completed 的 id，短暂放进 justDoneIds（900ms），
+   * 渲染时给这些行打 data-just-done，由 CSS 播放「对勾画入 + 删除线划入 + 沉降」。
+   *
+   * A-980-R28：基线**必须带上所属会话**。todo id 常是模型自己编的 "1"/"2"/"3"，
+   * 切换会话时新旧两批 id 会撞车 → 新会话里本来就是 completed 的项会被误判成"刚刚完成"而整片闪。
+   * 首次拉取（无基线 / 换了会话）一律不判定，只重建基线。
+   */
+  const [justDoneIds, setJustDoneIds] = React.useState<string[]>([]);
+  const prevStatusRef = React.useRef<{ sid: string; map: Map<string, TaskStatus> } | null>(null);
+  React.useEffect(() => {
+    const sid = props.sessionId ?? "";
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = { sid, map: new Map(todos.map((t) => [t.id, t.status])) };
+    if (!prev || prev.sid !== sid) { setJustDoneIds([]); return; }
+    const flipped = todos.filter((t) => t.status === "completed" && prev.map.get(t.id) && prev.map.get(t.id) !== "completed").map((t) => t.id);
+    if (flipped.length === 0) { return; }
+    setJustDoneIds(flipped);
+    const timer = window.setTimeout(() => setJustDoneIds([]), 900);
+    return () => window.clearTimeout(timer);
+  }, [todos, props.sessionId]);
+
+  /**
+   * 分组：进行中 → 待办 → 已完成。
+   * 已完成的沉到底部是有意的（GOV.UK 任务列表的用户研究发现：完成几项之后，用户很难再扫出"还没做的"）。
+   * 组内保持原顺序（计划本身的顺序有意义）。
+   */
+  const todoGroups = React.useMemo(() => {
+    const active = todos.filter((t) => t.status === "in_progress");
+    const pending = todos.filter((t) => t.status === "pending");
+    const done = todos.filter((t) => t.status === "completed");
+    return { active, pending, done };
+  }, [todos]);
+
+  /**
+   * A-980-R28：会话未就绪（sessionId 还是空串）时，待办区**不渲染任何数据**。
+   * 这是"pnpm dev 冷启动、会话加载途中冒出上一次的待办任务"的兜底门闸——
+   * 除了干净的空态，不给任何可能来自"空会话文件 / 上一会话缓存"的内容留显示窗口。
+   */
+  const sessionReady = Boolean(props.sessionId);
+  /** 分组标题只在**存在多个分组**时才显示：同状态一堆任务时，标题纯属占高（用户："该紧凑的不紧凑"）。 */
+  const multiGroup = [todoGroups.active, todoGroups.pending, todoGroups.done].filter((g) => g.length > 0).length > 1;
 
   const pushEvent = React.useCallback((kind: TaskEvent["kind"], label: string): void => {
     const now = new Date();
@@ -2151,7 +2802,20 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       const t = c?.type;
       if (t === "tool") {
         const name = c.data?.name ?? "";
-        pushEvent("tool", name.startsWith("delegate:") ? ` 传唤子 Agent「${name.slice(9)}」` : `⟳ 调用工具 ${name}`);
+        // A-973：tool 事件标签必须带上「具体抓手」（文件路径/网址/查询词）——
+        // 下方「会话文件」tab 靠正则从标签里抽扩展名文件，只存工具名的旧逻辑永远抽不到 → 恒空。
+        let detail = "";
+        try {
+          const args = typeof c.data?.args === "string" ? JSON.parse(c.data.args) : (c.data?.args ?? {});
+          if (args.path && typeof args.path === "string") { detail = args.path; }
+          else if (args.file && typeof args.file === "string") { detail = args.file; }
+          else if (args.url && typeof args.url === "string") { detail = args.url; }
+          else if (args.query && typeof args.query === "string") { detail = args.query; }
+        } catch { /* args 不可解析 → 无细节 */ }
+        const label = name.startsWith("delegate:")
+          ? ` 传唤子 Agent「${name.slice(9)}」`
+          : `⟳ 调用工具 ${name}${detail ? ` ${detail}` : ""}`;
+        pushEvent("tool", label);
       } else if (t === "reasoning") { setRunning(true); }
       else if (t === "progress") { pushEvent("progress", c.data?.progress ?? c.data?.content ?? "子任务进行中…"); }
       else if (t === "chunk") { setRunning(true); }
@@ -2161,12 +2825,20 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       if (m.sessionId != null && m.sessionId !== sessionIdRef.current) { return; }
       setRunning(false);
       pushEvent("done", m?.interrupted ? "⏹ 已中断" : "✓ 回复完成");
+      pricesRefreshRef.current?.(); // 本轮可能首次用到某模型 → 立即刷新定价（费用/命中率不留 30s 空窗）
       const t = m?.timings ?? {};
       const pt = typeof t.promptTokens === "number" ? t.promptTokens : 0;
       const ct = typeof t.completionTokens === "number" ? t.completionTokens : 0;
-      const rt = typeof t.reasoningTokens === "number" ? t.reasoningTokens : 0;
+      const rtReal = typeof t.reasoningTokens === "number" ? t.reasoningTokens : 0;
       const cr = typeof t.cacheReadTokens === "number" ? t.cacheReadTokens : 0;
       const em = typeof t.elapsedMs === "number" ? t.elapsedMs : 0;
+      // A-974-R6：推理 token 兜底——上游 usage 不回传 reasoning_tokens 时（本项目全量历史里它恒为 0，
+      // 见 config/usage.jsonl），用本轮**实收思考文本**按 ≈4 字符/token 折算，并置 reasoningEstimated
+      // 让明细行显式标注「估算」；上游一旦回传真实值则一律以真实值为准（估算不覆盖真值）。
+      const turnLive = liveTurnRef.current;
+      const reasonEst = Math.round(turnLive.reason);
+      const rt = rtReal > 0 ? rtReal : reasonEst;
+      const markingEstimated = rtReal <= 0 && reasonEst > 0;
       // 费用计算：从模型缓存读取定价；无定价时 cost=0
       const cost = computeModelCost(m?.model ?? "", pt, ct, modelPricesRef.current);
       setUsage((prev) => ({
@@ -2174,10 +2846,16 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
         promptTokens: prev.promptTokens + pt, completionTokens: prev.completionTokens + ct,
         reasoningTokens: prev.reasoningTokens + rt, cacheReadTokens: prev.cacheReadTokens + cr,
         costUsd: prev.costUsd + cost,
+        ...(prev.reasoningEstimated || markingEstimated ? { reasoningEstimated: true } : {}),
       }));
+      resetLiveTurn(); // 本轮已结算进累计（含估算），清空在途值
+      // A-975：done 是"最终值"落地时机 → 立刻应用一次挂起的 ctx 快照（不等 10s 节拍），
+      // 否则一轮结束后右栏可能还停在中途值上
+      applyPendingCtx();
     });
     const off3 = api.chat.onError((e: { message?: string }) => {
       setRunning(false);
+      resetLiveTurn(); // A-974-R6：异常收尾同样清空在途输出估算
       pushEvent("error", `✕ ${e?.message ?? "出错"}`);
     });
     let off4: (() => void) | undefined;
@@ -2215,6 +2893,57 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
   const todoDone = todos.filter((t) => t.status === "completed").length;
   const todoPct = todos.length > 0 ? Math.round((todoDone / todos.length) * 100) : 0;
 
+  /**
+   * A-980-R28：单行渲染抽成函数——三个分组各写一份会把「行内边距/图标尺寸/列宽」抄三遍，
+   * 改一处漏两处（此前 active/pending/done 三块的 padding 已经不一致）。
+   * 三态差异只在：复选框图形、状态图标列、文字色。
+   */
+  const renderTodoRow = (todo: TodoItem): JSX.Element => {
+    const done = todo.status === "completed";
+    const justDone = justDoneIds.includes(todo.id);
+    const label = done ? "已完成" : todo.status === "in_progress" ? "进行中" : "待办";
+    return (
+      <div
+        key={todo.id}
+        role="listitem"
+        className="todo-row"
+        data-status={todo.status}
+        data-just-done={justDone ? "1" : undefined}
+        aria-label={`${todo.content}（${label}${done && todo.completedAt ? `，完成于 ${fmtDoneAt(todo.completedAt)}` : ""}）`}
+        style={{
+          display: "flex", alignItems: "center", gap: 5, padding: "3px 5px", borderRadius: 5,
+          background: todo.status === "in_progress" ? "var(--accent-soft)" : "transparent",
+          borderLeft: `2px solid ${todoBadge(todo.status).dot}`,
+        }}
+      >
+        <button onClick={() => toggleTodo(todo.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", flexShrink: 0 }} title={done ? "标记为未完成" : "标记为已完成"}>
+          {done ? <TodoCheck size={14} animate={justDone} /> : <CheckboxIcon size={14} style={{ color: "var(--text-muted)" }} />}
+        </button>
+        {/* 状态图标列：固定 13px，三态对齐（进行中→转子，待办→可点的开始三角，已完成→占位） */}
+        {todo.status === "in_progress"
+          ? <LoadingCircleIcon size={12} className="icon-spin" style={{ color: "var(--accent)", flexShrink: 0 }} />
+          : todo.status === "pending"
+            ? <button onClick={() => advanceTodo(todo.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, width: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} title="标记为进行中"><span className="todo-play">▶</span></button>
+            : <span style={{ width: 13, flexShrink: 0 }} />}
+        {/* A-980-R32：正文 + **灰化层**。
+            灰化层是正文的一份绝对定位副本，用 clip-path 从右往左裁掉，
+            与 ::after 那根删除线**同一时长同一缓动** → 视觉上「线扫到哪，灰跟到哪」。
+            套一层 .todo-text-inner 是为了让划线/灰化只覆盖**文字实际宽度**，
+            而不是 flex:1 撑开的整行宽度（否则线会跑到文字右侧的空白里，与灰化脱节）。
+            注：p.todo.content 重复渲染两次是刻意的（层是同一段文字）。 */}
+        <span className="todo-text" style={{ flex: 1, minWidth: 0, overflow: "hidden", fontSize: 11.5, color: done ? "var(--text-muted)" : "var(--text-primary)" }}>
+          <span className="todo-text-inner">
+            {todo.content}
+            <span className="todo-text-veil" aria-hidden="true">{todo.content}</span>
+          </span>
+        </span>
+        {done && todo.completedAt && (
+          <span title={`完成于 ${new Date(todo.completedAt).toLocaleString()}`} style={{ flexShrink: 0, fontSize: 9.5, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{fmtDoneAt(todo.completedAt)}</span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="right-tab-pane" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <div className="right-pane-head">
@@ -2243,59 +2972,68 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       )}
 
       <div className="right-scroll" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        {/* A-918++：会话指标仅在流式输出时显示（用户要"输出监测时显示，不是平时显示"）；平时显示占位 */}
+        {/* A-975 修复：会话指标**常驻**。此前 `isStreaming ? <MetricsGrid/> : 占位文本` ——
+            空闲时整块数据表消失（只留一行灰字提示），用户两次反馈「右侧边栏会话指标/各项数据又没了」。
+            现在始终渲染累计指标；流式期间随本轮输出实时刷新（在途量已并入构成/明细）。 */}
         <div style={{ borderBottom: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: 6 }}>
             <span>会话指标</span>
             {isStreaming && <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", animation: "thinkGlow 1.4s ease-in-out infinite", flexShrink: 0 }} />}
           </div>
-          {isStreaming ? (
-            <MetricsGrid usage={usage} />
-          ) : (
-            <div style={{ fontSize: 11.5, color: "var(--text-dim)", padding: "6px 0", lineHeight: 1.6 }}>
-              空闲中 · 流式输出时实时显示 token / 命中 / 耗时等指标
-            </div>
-          )}
+          <MetricsGrid usage={usage} live={{ reply: liveTurn.reply, reason: liveTurn.reason, elapsedMs: liveElapsed }} />
+          <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.5, display: "flex", alignItems: "center", gap: 5 }}>
+            {isStreaming
+              ? "流式中 · 指标随本轮输出实时刷新"
+              : "累计值 · 发起对话后实时刷新；展开「明细」看四项构成"}
+          </div>
         </div>
 
-        <div style={{ borderBottom: "1px solid var(--border)", padding: "8px 10px", flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-            <button onClick={toggleTodoCollapse} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-              <ChevronIcon rotate={collapsedTodos ? 90 : 0} size={12} style={{ color: "var(--text-muted)" }} />
-              <TodoListIcon size={13} style={{ color: "var(--text-muted)" }} />
+        <div style={{ borderBottom: "1px solid var(--border)", padding: "6px 10px 7px", flexShrink: 0 }}>
+          {/* A-980-R28：整块收紧。此前「标题 6px + 进度条 6px + 分组标题 7px 上内边距」叠出
+             约 20px 死区，用户反馈"该紧凑的不紧凑，内容离标题有点远了"。 */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <button onClick={toggleTodoCollapse} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", padding: 0 }}
+              title={collapsedTodos ? "展开待办列表" : "收起待办列表"}>
+              {/* A-980-R28：ChevronIcon 基准方向是**右**（路径 d 从上→中→下，是个右尖括号）。
+                  所以展开态要转 90° 朝下 ▾，收起态回 0° 朝右 ▸。
+                  此前写成 `collapsedTodos ? 90 : 0` 恰好反了——用户实测"展开时箭头朝右、收起时朝下"。
+                  全仓其余 ChevronIcon 用法都是 `open ? 90 : 0`，这里对齐同一约定。 */}
+              <ChevronIcon rotate={collapsedTodos ? 0 : 90} size={12} style={{ color: "var(--text-muted)" }} />
+              <TaskIcon size={13} style={{ color: "var(--text-muted)" }} />
               <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>待办任务</span>
-              {todos.length > 0 && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 999, background: "var(--accent-soft)", color: "var(--accent)", fontWeight: 700 }}>{todoDone}/{todos.length}</span>}
+              {sessionReady && todos.length > 0 && (
+                todoPct === 100
+                  ? <TodoCountChip text="全部完成 ✓" tone="success" />
+                  : <TodoCountChip text={`${todoDone}/${todos.length}`} tone="accent" />
+              )}
             </button>
-            <button onClick={() => setTodos((prev) => prev.filter((t) => t.status !== "completed"))} style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 4px", fontSize: 10, color: "var(--text-muted)" }} title="清除已完成">清完成</button>
           </div>
-          {todos.length > 0 && (
-            <div style={{ height: 3, borderRadius: 999, background: "var(--input-bg)", overflow: "hidden", marginBottom: 6 }}>
-              <div style={{ width: `${todoPct}%`, height: "100%", background: "var(--success)", borderRadius: 999, transition: "width .3s ease" }} />
+          {sessionReady && todos.length > 0 && (
+            <div style={{ height: 3, borderRadius: 999, background: "var(--input-bg)", overflow: "hidden", marginBottom: 4 }}>
+              <div style={{ width: `${todoPct}%`, height: "100%", background: todoPct === 100 ? "var(--success)" : "var(--accent)", borderRadius: 999, transition: "width .3s ease, background-color .3s ease" }} />
             </div>
           )}
           {!collapsedTodos && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 200, overflowY: "auto", marginBottom: 6 }}>
-              {todos.length === 0 && <div className="tree-hint" style={{ padding: "12px 0", fontSize: 11.5 }}>暂无任务 — Agent 规划后会自动显示，也可手动添加</div>}
-              {todos.map((todo) => {
-                const b = todoBadge(todo.status);
-                return (
-                  <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 6px", borderRadius: 5, background: todo.status === "in_progress" ? "var(--accent-soft)" : "transparent", borderLeft: `2px solid ${b.dot}` }}>
-                    <button onClick={() => toggleTodo(todo.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center" }} title={todo.status === "completed" ? "标记为未完成" : "标记为完成"}>
-                      {todo.status === "completed" ? <CheckboxCheckedIcon size={15} style={{ color: "var(--success)" }} /> : <CheckboxIcon size={15} style={{ color: "var(--text-muted)" }} />}
-                    </button>
-                    <button onClick={() => advanceTodo(todo.id)} style={{ background: "none", border: "none", cursor: todo.status === "pending" ? "pointer" : "default", padding: 0, display: "flex", alignItems: "center", opacity: todo.status === "pending" ? 0.5 : 1 }} title="标记为进行中">
-                      {todo.status === "in_progress" ? <LoadingCircleIcon size={13} className="icon-spin" style={{ color: "var(--accent)" }} /> : <span style={{ width: 13, height: 13, display: "inline-block" }} />}
-                    </button>
-                    <span style={{ flex: 1, fontSize: 11.5, color: todo.status === "completed" ? "var(--text-muted)" : "var(--text-primary)", textDecoration: todo.status === "completed" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{todo.content}</span>
-                    <button onClick={() => deleteTodo(todo.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 3px", fontSize: 10, color: "var(--text-muted)", lineHeight: 1 }} title="删除"><CloseIcon size={10} /></button>
-                  </div>
-                );
-              })}
+            <div role="list" style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 220, overflowY: "auto", marginBottom: 5 }}>
+              {/* A-980-R28：会话未就绪只给一句中性提示，不渲染任何数据 */}
+              {!sessionReady && <div className="tree-hint" style={{ padding: "4px 0", fontSize: 11.5 }}>正在加载会话…</div>}
+              {sessionReady && todos.length === 0 && <div className="tree-hint" style={{ padding: "4px 0", fontSize: 11.5 }}>暂无任务 — Agent 规划后会自动显示，也可手动添加</div>}
+              {/* 分组顺序固定：进行中 → 待办 → 已完成（完成项沉底，见 index.css 注释里的 GOV.UK 研究发现）。
+                  分组标题**只在出现两种以上状态时**才显示：同状态一堆任务时标题纯属占高。 */}
+              {sessionReady && multiGroup && todoGroups.active.length > 0 && <TodoGroupLabel text="进行中" count={todoGroups.active.length} tone="accent" />}
+              {sessionReady && todoGroups.active.map(renderTodoRow)}
+              {sessionReady && multiGroup && todoGroups.pending.length > 0 && <TodoGroupLabel text="待办" count={todoGroups.pending.length} tone="muted" />}
+              {sessionReady && todoGroups.pending.map(renderTodoRow)}
+              {sessionReady && multiGroup && todoGroups.done.length > 0 && <TodoGroupLabel text="已完成" count={todoGroups.done.length} tone="success" />}
+              {sessionReady && todoGroups.done.map(renderTodoRow)}
             </div>
           )}
           <div style={{ display: "flex", gap: 4 }}>
-            <input value={todoInput} onChange={(e) => setTodoInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addTodo(); }} placeholder="添加任务…" style={{ flex: 1, background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 8px", fontSize: 11.5, color: "var(--text-primary)", outline: "none" }} />
-            <button onClick={addTodo} style={{ background: "var(--accent-soft)", border: "none", borderRadius: 4, cursor: "pointer", display: "flex", alignItems: "center", padding: "4px 6px" }} title="添加任务">
+            <input value={todoInput} disabled={!sessionReady} onChange={(e) => setTodoInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { addTodo(); } }}
+              placeholder={sessionReady ? "添加任务…" : "会话加载中…"}
+              style={{ flex: 1, minWidth: 0, background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 8px", fontSize: 11.5, color: "var(--text-primary)", outline: "none", opacity: sessionReady ? 1 : 0.5 }} />
+            <button onClick={addTodo} disabled={!sessionReady} style={{ background: "var(--accent-soft)", border: "none", borderRadius: 4, cursor: sessionReady ? "pointer" : "default", display: "flex", alignItems: "center", padding: "3px 6px", opacity: sessionReady ? 1 : 0.5 }} title="添加任务">
               <CirclePlusIcon size={13} style={{ color: "var(--accent)" }} />
             </button>
           </div>
@@ -2306,18 +3044,34 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
           <ContextWindowBar
             used={liveUsed}
             cap={liveCap > 0 ? liveCap : maxCtx}
-            compressCount={0}
-            compose={{ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, reasoningTokens: usage.reasoningTokens, cacheReadTokens: usage.cacheReadTokens }}
+            // A-974：距压缩余量 = 触发阈值(cap×ratio) - 当前占用（真实同源；旧值为硬编码 0 → 恒显"距压缩 0"，误导）
+            compressCount={(() => {
+              const capNow = liveCap > 0 ? liveCap : maxCtx;
+              if (capNow <= 0 || liveUsed <= 0) { return 0; }
+              const thr = capNow * acRatio;
+              return Math.max(0, Math.round(thr - liveUsed));
+            })()}
+            // A-975：阈值刻度线与设置里的触发占比同源（改设置立即跟随）
+            thresholdPct={Math.round(acRatio * 100)}
+            compose={{
+              promptTokens: usage.promptTokens,
+              // A-974-R6：把本轮在途输出估算并入构成条 —— 流式期间构成微条/明细同步增长
+              completionTokens: usage.completionTokens + liveTurn.reply,
+              reasoningTokens: usage.reasoningTokens + liveTurn.reason,
+              cacheReadTokens: usage.cacheReadTokens,
+            }}
             buckets={liveBuckets}
             detailOpen={detailOpen}
             onToggleDetail={() => setDetailOpen((v) => !v)}
           />
-          {detailOpen && <UsageBreakdown usage={usage} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />}
+          {detailOpen && <UsageBreakdown usage={usage} live={liveTurn} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />}
         </div>
 
-        {/* A-937：分隔线 + 活动记录 / 会话文件 并列 tab（横向收纳） */}
-        <div style={{ borderTop: "1px solid var(--border)" }}>
-          <div style={{ display: "flex", gap: 2, padding: "6px 10px 0" }}>
+        {/* A-937：分隔线 + 活动记录 / 会话文件 并列 tab（横向收纳）
+            A-980-R14：活动记录区**独立滚动**（flex:1 + 内容容器 overflow-y:auto），
+            不再把滚动绑定到整个右侧栏 */}
+        <div style={{ borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+          <div style={{ display: "flex", gap: 2, padding: "6px 10px 0", flexShrink: 0 }}>
             {(["activity", "files"] as const).map((t) => (
               <button key={t} onClick={() => setLogTab(t)} style={{ padding: "5px 12px", fontSize: 11.5, borderRadius: "6px 6px 0 0", border: "none", cursor: "pointer", background: "none", color: logTab === t ? "var(--accent)" : "var(--text-muted)", borderBottom: logTab === t ? "2px solid var(--accent)" : "2px solid transparent", fontWeight: logTab === t ? 700 : 500 }}>
                 {t === "activity" ? "活动记录" : "会话文件"}
@@ -2325,7 +3079,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
               </button>
             ))}
           </div>
-          <div style={{ padding: "8px 10px 16px" }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 10px 16px" }}>
             {logTab === "activity" ? (
               <>
                 {events.length === 0 && <div className="tree-hint">暂无活动 — Agent 开始工作后，工具调用 / 思考 / 进度会实时显示在这里</div>}
@@ -2361,124 +3115,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
   );
 }
 
-/** A-937：子代理工作台——并行派发的 subagent 目标/状态/摘要（对标 Claude Code Agent View，
- *  4s 轻轮询 slime:resident:state；每个 subagent 独立上下文，主会话只见摘要）。 */
-function SubAgentsTab(): JSX.Element {
-  const [runs, setRuns] = React.useState<Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>>([]);
-  const [delegateInput, setDelegateInput] = React.useState("");
-  const [delegating, setDelegating] = React.useState(false);
-  const refreshRef = React.useRef<() => void>(() => {});
-  if (!refreshRef.current) {
-    refreshRef.current = (): void => {
-      const w = window as unknown as { slimeAPI?: any };
-      void w.slimeAPI?.resident?.state?.().then((s: { subagents?: Array<Record<string, unknown>> }) => {
-        if (Array.isArray(s?.subagents)) { setRuns(s.subagents as Array<{ id?: string; name?: string; task?: string; status?: string; result?: string }>); }
-      }).catch(() => {});
-    };
-  }
-  React.useEffect(() => {
-    refreshRef.current();
-    // A-918++：订阅后台实时推送（subagent start/complete 立即触发，4s 轮询作兜底）
-    const w = window as unknown as { slimeAPI?: any };
-    const off = w.slimeAPI?.resident?.onUpdate?.(() => { refreshRef.current(); });
-    const iv = window.setInterval(() => refreshRef.current(), 4000);
-    return () => { off?.(); window.clearInterval(iv); };
-  }, []);
-
-  /** 取消运行中/排队中的子代理（A-938 preload 转发 slime:resident:subagent:cancel） */
-  const handleCancel = (id: string | undefined): void => {
-    if (!id) { return; }
-    const w = window as unknown as { slimeAPI?: any };
-    void w.slimeAPI?.resident?.subagentCancel?.(id).then(() => refreshRef.current()).catch(() => {});
-  };
-  /** 手动按 description 自动委派（命中 代码审查/调研/数据分析 专家） */
-  const handleDelegate = (): void => {
-    const task = delegateInput.trim();
-    if (!task || delegating) { return; }
-    setDelegating(true);
-    const w = window as unknown as { slimeAPI?: any };
-    void w.slimeAPI?.resident?.subagentDelegate?.({ task })
-      .then(() => { setDelegateInput(""); refreshRef.current(); })
-      .catch(() => {})
-      .finally(() => setDelegating(false));
-  };
-
-  const stMeta: Record<string, { txt: string; c: string; bg: string }> = {
-    pending: { txt: "排队中", c: "var(--text-muted)", bg: "rgba(139,148,158,0.14)" },
-    running: { txt: "执行中", c: "#d29922", bg: "rgba(210,153,34,0.15)" },
-    done: { txt: "已完成", c: "#2ea043", bg: "rgba(46,160,67,0.15)" },
-    fail: { txt: "失败", c: "#f85149", bg: "rgba(248,81,73,0.16)" },
-    timeout: { txt: "超时", c: "#d29922", bg: "rgba(210,153,34,0.15)" },
-    cancelled: { txt: "已取消", c: "var(--text-muted)", bg: "rgba(139,148,158,0.14)" },
-  };
-
-  const active = (s: string | undefined): boolean => s === "pending" || s === "running";
-
-  return (
-    <div className="right-tab-pane" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      <div className="right-pane-head">
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <AgentIcon size={13} style={{ color: "var(--text-muted)" }} />
-          <span className="right-pane-title">子代理工作台</span>
-        </span>
-      </div>
-      <div className="right-scroll" style={{ flex: 1, minHeight: 0 }}>
-        <div style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, borderBottom: "1px solid var(--border)" }}>
-          主 Agent 派发的子代理在此**并行执行**，每个子代理拥有独立上下文窗口——原始产出只以摘要回到主会话，主上下文不被污染。
-        </div>
-        {/* 手动按 description 自动委派（命中 代码审查/调研/数据分析 专家，A-938 preload 已转发 delegate IPC） */}
-        <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)", display: "flex", gap: 4 }}>
-          <input
-            value={delegateInput}
-            onChange={(e) => setDelegateInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") { handleDelegate(); } }}
-            placeholder="委派任务描述…（自动匹配专家）"
-            style={{ flex: 1, background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 8px", fontSize: 11.5, color: "var(--text-primary)", outline: "none" }}
-          />
-          <button
-            onClick={handleDelegate}
-            disabled={!delegateInput.trim() || delegating}
-            style={{ background: "var(--accent-soft)", border: "none", borderRadius: 4, cursor: delegateInput.trim() && !delegating ? "pointer" : "default", padding: "4px 10px", fontSize: 11.5, fontWeight: 700, color: delegateInput.trim() && !delegating ? "var(--accent-hover)" : "var(--text-muted)", whiteSpace: "nowrap" }}
-            title="按描述自动匹配专家子代理并后台执行"
-          >
-            {delegating ? "委派中…" : "委派"}
-          </button>
-        </div>
-        {runs.length === 0 && (
-          <div className="tree-hint" style={{ padding: "16px 12px", lineHeight: 1.6 }}>
-            暂无子代理任务。<br />可到 [设置 → 后台任务] 手动/定时派发；对话中让 Agent 调用子代理工具时也会在此展示进度与目标。
-          </div>
-        )}
-        {runs.map((r, i) => {
-          const st = stMeta[r.status ?? ""] ?? stMeta.pending;
-          return (
-            <div key={r.id ?? i} style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", maxWidth: "50%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name || "子代理"}</span>
-                <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 999, color: st.c, background: st.bg, fontWeight: 700 }}>{st.txt}</span>
-                {r.status === "running" && <span className="icon-spin" style={{ fontSize: 11, color: "var(--accent)" }}>●</span>}
-                {active(r.status) && (
-                  <button
-                    onClick={() => handleCancel(r.id)}
-                    style={{ marginLeft: "auto", background: "none", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer", padding: "1px 7px", fontSize: 10, color: "var(--text-muted)" }}
-                    title="取消该子代理（运行中中断 / 排队中直接取消）"
-                  >
-                    取消
-                  </button>
-                )}
-              </div>
-              {r.task && <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.task}</div>}
-              {r.status === "done" && r.result && (
-                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 6, borderLeft: "2px solid var(--border)", paddingLeft: 8, maxHeight: 96, overflowY: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{r.result}</div>
-              )}
-              {r.status === "fail" && <div style={{ fontSize: 11, color: "#f85149", marginTop: 6 }}>任务失败，详见摘要/日志</div>}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
+// SubAgentsTab 已移除（A-978：子代理入口统一走监测栏按钮）
 
 /* ── 任务页辅助组件 ── */
 
@@ -2511,13 +3148,16 @@ function bucketComps(b: CtxBuckets): Array<{ label: string; pct: number; color: 
   });
 }
 
-function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOpen, onToggleDetail }: {
+function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOpen, onToggleDetail, thresholdPct = 80 }: {
   used: number; cap: number; compressCount: number;
   /** A-937：token 构成（四项累计）→ 进度条下方 4 色构成微条 + 图例，让"已用"不再是黑盒 */
   compose?: { promptTokens: number; completionTokens: number; reasoningTokens: number; cacheReadTokens: number };
   /** A-939：上下文分桶（按注入来源切分，对齐 Cursor Context Buckets 理念） */
   buckets?: CtxBuckets;
   detailOpen?: boolean; onToggleDetail?: () => void;
+  /** A-975：自动压缩触发占比（0-100）——进度条上的阈值刻度线必须**跟随设置**。
+   *  此前写死 left:80% + 标签"80%"，用户在设置里改 60%/70% 后刻度线纹丝不动（用户实测 bug）。 */
+  thresholdPct?: number;
 }): JSX.Element {
   const pct = contextRatio(used, cap);
   const pctLabel = contextPct(pct);
@@ -2545,9 +3185,10 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
         <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{fmtK(used)}/{cap > 0 ? fmtK(cap) : "-"}</span>
       </div>
       <div style={{ position: "relative", margin: "2px 0 10px", height: 8, borderRadius: 999, background: "var(--input-bg, #161b22)", border: "1px solid var(--border)", overflow: "hidden" }}>
-        <div aria-hidden style={{ position: "absolute", left: "80%", top: 0, bottom: 0, width: 1, background: "rgba(139,148,158,0.55)" }} />
+        {/* A-975：压缩触发阈值刻度线——位置与标签都跟随设置的 ratio（不再写死 80%） */}
+        <div aria-hidden style={{ position: "absolute", left: `${Math.max(0, Math.min(100, thresholdPct))}%`, top: 0, bottom: 0, width: 1, background: "rgba(139,148,158,0.75)" }} />
         <div style={{ position: "absolute", left: 2, top: -18, fontSize: 10.5, color: color, fontWeight: 700 }}>{pctLabel}%</div>
-        <div style={{ position: "absolute", right: 4, top: -18, fontSize: 10.5, color: "var(--text-muted)", fontWeight: 600 }}>80%</div>
+        <div style={{ position: "absolute", right: 4, top: -18, fontSize: 10.5, color: "var(--text-muted)", fontWeight: 600 }} title="自动压缩触发阈值（设置 → 通用 → 上下文自动压缩）">{thresholdPct}% 压缩</div>
         {pct > 0 && <div style={{ width: `${pct * 100}%`, height: "100%", background: color, borderRadius: 999, transition: "width .25s ease" }} />}
       </div>
       {/* A-937：token 构成微条（四项占比）——"已用"不再是黑盒 */}
@@ -2587,23 +3228,32 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
           <span style={{ fontSize: 8, transform: detailOpen ? "rotate(90deg)" : "none", transition: "transform .2s", color: "var(--text-muted)" }}>▶</span>
           明细 {detailOpen ? "收起" : "展开"}
         </button>
-        <span>距压缩 {compressCount}</span>
+        <span>{compressCount > 0 ? `距压缩 ${fmtK(compressCount)}` : "距压缩 已达阈值"}</span>
       </div>
     </div>
   );
 }
 
-function MetricsGrid({ usage }: { usage: AccumUsage }): JSX.Element {
+function MetricsGrid({ usage, live }: {
+  usage: AccumUsage;
+  /** A-975：本轮在途量（正文/思考 token + 已耗时）——流式期间「运行时间 / 累计 tokens」也随之走字，
+   *  不再整轮只在 done 跳一次（用户反馈"各项数值刷新慢"）。 */
+  live?: { reply: number; reason: number; elapsedMs: number };
+}): JSX.Element {
+  const liveReply = live?.reply ?? 0;
+  const liveReason = live?.reason ?? 0;
+  const liveElapsed = live?.elapsedMs ?? 0;
+  const inFlight = liveReply > 0 || liveReason > 0 || liveElapsed > 0;
   // 分母用 promptTokens 本身：Anthropic/OpenAI 的 input_tokens 已包含 cache_read 部分，
   // 避免「promptTokens + cacheReadTokens」重复计入导致命中率低估。
   const cacheHit = usage.promptTokens > 0 ? (usage.cacheReadTokens / usage.promptTokens) * 100 : 0;
   const items: Array<[string, string, boolean?]> = [
-    ["平均命中", usage.requests === 0 ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
-    ["运行时间", fmtMsSmart(usage.elapsedMs)],
-    ["累计 tokens", fmtK(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens)],
+    ["平均命中", usage.requests === 0 && !inFlight ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
+    ["运行时间", fmtMsSmart(usage.elapsedMs + liveElapsed)],
+    ["累计 tokens", fmtK(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens + liveReply + liveReason)],
     ["会话费用", usage.requests === 0 ? "—（未配置单价）" : usage.costUsd === 0 ? "—" : `¥${(usage.costUsd * 7.25).toFixed(4)}`],
     ["请求数", String(usage.requests)],
-    ["", "—"],
+    ["", inFlight ? "含本轮在途" : "—"],
   ];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1 }}>
@@ -2617,10 +3267,17 @@ function MetricsGrid({ usage }: { usage: AccumUsage }): JSX.Element {
   );
 }
 
-function UsageBreakdown({ usage, detailOpen, onToggleDetail }: { usage: AccumUsage; detailOpen: boolean; onToggleDetail: () => void }): JSX.Element {
+function UsageBreakdown({ usage, live, detailOpen, onToggleDetail }: {
+  usage: AccumUsage;
+  /** A-974-R6：本轮在途输出估算（正文/回复 + 思考），并入明细让数值随流式刷新 */
+  live?: { reply: number; reason: number };
+  detailOpen: boolean; onToggleDetail: () => void;
+}): JSX.Element {
+  const liveReply = live?.reply ?? 0;
+  const liveReason = live?.reason ?? 0;
   const prompt = usage.promptTokens;
-  const reply = usage.completionTokens;
-  const reasoning = usage.reasoningTokens;
+  const reply = usage.completionTokens + liveReply;
+  const reasoning = usage.reasoningTokens + liveReason;
   const cache = usage.cacheReadTokens;
   const total = prompt + reply + reasoning + cache;
 
@@ -2662,8 +3319,14 @@ function UsageBreakdown({ usage, detailOpen, onToggleDetail }: { usage: AccumUsa
       {detailOpen && (
         <div style={{ marginTop: 6, borderRadius: 4, background: "rgba(139,148,158,0.06)", border: "1px solid var(--border)", padding: "8px 10px", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.65 }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}><span>提示词 Tokens（输入）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{prompt.toLocaleString()}</span></div>
-          <div style={{ display: "flex", justifyContent: "space-between" }}><span>回复 Tokens（输出）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reply.toLocaleString()}</span></div>
-          <div style={{ display: "flex", justifyContent: "space-between" }}><span>推理 Tokens（思考）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reasoning.toLocaleString()}</span></div>
+          <div title={liveReply > 0 ? `累计 ${usage.completionTokens.toLocaleString()} + 本轮在途 ≈${liveReply.toLocaleString()}` : undefined} style={{ display: "flex", justifyContent: "space-between" }}><span>回复 Tokens（输出）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reply.toLocaleString()}</span></div>
+          <div
+            title={[liveReason > 0 ? `累计 ${usage.reasoningTokens.toLocaleString()} + 本轮在途 ≈${liveReason.toLocaleString()}` : "",
+              usage.reasoningEstimated ? "上游 usage 未回传 reasoning_tokens，其中含按实收思考文本 ≈4 字符/token 折算的估算值（上游一旦回传真实值即以其为准）" : ""].filter(Boolean).join("；") || undefined}
+            style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>推理 Tokens（思考）{usage.reasoningEstimated && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · 估算</span>}</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reasoning.toLocaleString()}</span>
+          </div>
           <div style={{ display: "flex", justifyContent: "space-between" }}><span>缓存读 Tokens（命中）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{cache.toLocaleString()}</span></div>
           <div style={{ height: 1, background: "var(--border)", margin: "6px 0" }} />
           <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontWeight: 700, color: "var(--text-primary)" }}>合计</span><span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "var(--text-primary)" }}>{total.toLocaleString()}</span></div>
@@ -2772,42 +3435,307 @@ function TerminalTab(props: { workspace: string }): JSX.Element {
 
 /* ═══════════════ 浏览器（独立实例） ═══════════════ */
 
-function BrowserTabInstance(props: { tabId: string; url: string; onUrlChange: (url: string) => void }): JSX.Element {
+/** 加载失败错误码 → 可读文案（webview did-fail-load，避免"白屏无提示"） */
+function failTitle(code: number): string {
+  switch (code) {
+    case -102: return "连接被拒绝（服务未启动或端口未监听）";
+    case -105: return "域名无法解析";
+    case -106: return "连接被中断";
+    case -109: return "无法访问网络";
+    case -130: return "证书错误";
+    case -137: return "服务器无响应（超时）";
+    case -201: return "连接被重置";
+    case -7: return "超时";
+    default: return `失败（错误码 ${code}）`;
+  }
+}
+
+/* ── 站点"新建页跳转"（A-975-R3：**已撤掉注入脚本，回归纯原生**）────────────────────────────
+ * 历史：这里曾注入一段脚本，把 `window.open` 整个覆盖成"永远 return null"，并在捕获阶段
+ * `stopPropagation` 拦截 `a[target=_blank]` 点击（用 location.href=slime:// 桥接宿主新建页）。
+ * 后果（用户实测）：
+ *   ① 覆盖 window.open 会打断站点自身逻辑（登录/阅读器/播放器都靠 `window.open` 的返回值做后续处理）
+ *      → "网页里很多地方点不动"；
+ *   ② 捕获阶段吞掉点击 → 站点的 SPA 路由/埋点一起失效；
+ *   ③ 任何一处抛错都发生在**站点的事件处理栈里** → 整页交互看起来"死了"。
+ * 结论：**不再向页面注入任何东西、不改站点全局、不拦站点事件**。
+ * 新窗口/新标签页统一由主进程 `setWindowOpenHandler`（app.on("web-contents-created") 覆盖所有 guest）
+ * 接住并派发 `slime:sidebar:open` → 右栏新建浏览器页。这是 Electron 的官方机制，且完全在宿主侧，
+ * 站点与我们互不干扰；webview 的 `new-window` 监听只用于**非 Web 协议**的确认/诊断。 */
+
+function BrowserTabInstance(props: { tabId: string; url: string; active?: boolean; onUrlChange: (url: string) => void; onTitleChange?: (title: string) => void }): JSX.Element {
   const webviewRef = React.useRef<HTMLElement | null>(null);
+  /** A-975-R5：guest 崩溃是否已自动救过一次（防止"崩溃→重载→再崩溃"死循环） */
+  const goneHandledRef = React.useRef(false);
+  /** A-975-R6：最近一次已上报的页面标题（去重，避免重复 setState） */
+  const titleRef = React.useRef("");
   const [inputUrl, setInputUrl] = React.useState(props.url ?? "");
   const [navUrl, setNavUrl] = React.useState("");
   const [canBack, setCanBack] = React.useState(false);
   const [canFwd, setCanFwd] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [active, setActive] = React.useState(false);
+  /** A-980-R3：加载失败提示（did-fail-load）——不再白屏无反馈（如 http://127.0.0.1:8081 连不上） */
+  const [failInfo, setFailInfo] = React.useState<{ url: string; code: number } | null>(null);
 
-  // A-173：外部（聊天消息链接点击）修改 url 后，自动导航到新地址
+  // A-979：非激活浏览器页显式开启后台节流（display:none 时 Chromium 的动画/定时器/合成降速，
+  // 避免后台页持续全速吃 GPU/CPU；卸载时随 webview 销毁自动清理）
   React.useEffect(() => {
-    if (props.url && props.url !== navUrl) {
-      setInputUrl(props.url);
-      setNavUrl(props.url);
-    }
+    const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
+    if (!wv) { return; }
+    // setBackgroundThrottling 不在 WebviewTag 类型上（Electron 类型滞后），运行时守卫后调用
+    const throttle = (wv as unknown as { setBackgroundThrottling?: (v: boolean) => void }).setBackgroundThrottling;
+    if (typeof throttle !== "function") { return; }
+    try { throttle.call(wv, props.active !== true); } catch { /* 忽略 */ }
+  }, [props.active]);
+
+  // A-173 / A-976：外部（聊天链接、自动打开、多页切换）修改 url 后自动导航。
+  // 以前只在 props.url 为真值时同步 → 新建的空浏览器页会残留上一页的 navUrl（"两页绑定"的另一半原因）。
+  // 现在按"设置 or 清空"双向同步；且每个浏览器页是独立组件实例（渲染处已加 key），互不干扰。
+  React.useEffect(() => {
+    // A-980-R6：统一归一 URL（裸地址补 http://）——与 go()/onOpen 一致，杜绝无 scheme 进 src
+    const next = normalizeBrowserUrl(props.url ?? "");
+    // A-979-R2：忽略空值与 about:blank 占位——webview 初始 src=about:blank 的 did-navigate
+    // 会把 tabs 里的 url 污染成 about:blank（再经本 effect 把 navUrl 拉回 → 真实导航被顶掉 → 白屏）
+    if (!next || next === "about:blank") { return; }
+    // A-980：非 Web 协议（bitbrowser:// 等）不进 navUrl（直接进 src 会触发系统弹窗）
+    if (!isWebNavUrl(next)) { return; }
+    if (next === navUrl) { return; }
+    setInputUrl(next);
+    setNavUrl(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.url]);
+
+  /* A-980-R7：**命令式导航**（不再受控 src）——Electron 官方文档明确 webview 基于 Chromium OOPIF、
+   * 渲染与导航存在已知不稳定问题，`src` 属性写入才触发导航；而 React 受控 src 在「新建页首次挂载
+   * frame 内立刻改 src」的时序下存在竞态（webview 内部尚未 attach，src 更新不触发 loadURL → 白屏；
+   * 手动输入 go() 时 webview 已就绪所以正常——这正是用户实测"点链接新建页白屏、手输能进"的机制）。
+   * 业界的稳妥做法是**不依赖受控 src**，改为 webview 就绪后显式调 `loadURL`，并以 `did-attach`
+   * 兜底（attach 表示 guest 进程已就绪，此时 loadURL 必生效）。webview 的 src 恒为 about:blank 占位，
+   * 所有导航（链接点击 / 地址栏 go() / props.url 同步）统一由 navUrl → forceNav() 落地。 */
+  const navUrlRef = React.useRef("");
+  React.useEffect(() => { navUrlRef.current = navUrl; }, [navUrl]);
+  const forceNav = React.useCallback((): void => {
+    const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
+    const next = navUrlRef.current;
+    if (!wv || !next) { return; }
+    try {
+      // 已是目标地址则跳过（防与 did-navigate 写回互相循环触发）
+      const cur = typeof wv.getURL === "function" ? wv.getURL() : "";
+      if (cur === next) { return; }
+      wv.loadURL(next);
+    } catch { /* loadURL 在 attach 前调用会被拒，did-attach 兜底重试 */ }
+  }, []);
+  // navUrl 变化（链接点击 / go() / props.url 同步）→ 命令式导航
+  React.useEffect(() => { forceNav(); }, [forceNav, navUrl]);
+
+  /* A-980-R9：把 `did-attach` 兜底监听**提前到 ref callback 注册**——修 A-980-R7 引入的回归。
+   * 根因：R7 把 webview 的 src 固定为 about:blank、一切导航依赖命令式 loadURL 后，唯一兜底是
+   * `did-attach`；但该监听原来注册在 useEffect（React 在浏览器 **paint 之后**才执行），而 webview
+   * guest 进程的 attach 是异步 IPC——attach 极快时会**先于 useEffect 触发** did-attach → 兜底监听
+   * 永久丢失，且 attach 前的 loadURL 抛 "must be attached to the DOM" 被静默吞掉 → 新建页/点链接
+   * 卡死在 about:blank（用户实测"点不了了"，手动输入 go() 时 webview 已就绪所以正常）。
+   * ref callback 在 React commit 阶段**同步**执行（DOM 元素插入即调用），必然早于 guest attach 的
+   * 异步完成 → did-attach 必不丢失；同时元素入 DOM 后立即尝试一次 forceNav（未 attach 被拒则由
+   * did-attach / 安全网兜底）。 */
+  const setWvRef = React.useCallback((el: HTMLElement | null) => {
+    const prev = webviewRef.current;
+    if (prev && prev !== el) {
+      try { (prev as unknown as Electron.WebviewTag).removeEventListener?.("did-attach", forceNav); } catch { /* 忽略 */ }
+    }
+    webviewRef.current = el;
+    if (!el) { return; }
+    // A-975-R6：`allowpopups` 兜一层显式 setAttribute（必须在 guest attach 前生效；ref 回调在 commit 阶段执行）
+    try { el.setAttribute("allowpopups", "true"); } catch { /* 忽略 */ }
+    try { (el as unknown as Electron.WebviewTag).addEventListener?.("did-attach", forceNav); } catch { /* 忽略 */ }
+    forceNav();
+  }, [forceNav]);
+
+  // A-980-R9：导航安全网——webview 常驻挂载下，任何单一事件（did-attach / navUrl effect）都可能因
+  // Electron OOPIF 的异步时序错过；300ms 周期的轻量检查兜底：只要 webview 仍处于初始 about:blank
+  //（首帧竞态窗口，顶层导航尚未打通）且存在期望地址，就命令式 loadURL，直到 attach 后成功。
+  // ★ 一旦 getURL 离开 about:blank（顶层导航已落地）立即停止干预——否则 SPA 页内 pushState 改址后
+  // cur≠navUrl 会被误判"未落地"而每 300ms 强制 loadURL 回初始页，把正在浏览的页内状态弹回（新引入
+  // bug）。之后的导航（二次 go() / SPA 内跳转）由 forceNav 与 did-navigate 写回负责，均同步生效。
+  React.useEffect(() => {
+    const timer = window.setInterval(() => {
+      const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
+      const next = navUrlRef.current;
+      if (!wv || !next) { return; }
+      try {
+        const cur = typeof wv.getURL === "function" ? wv.getURL() : "";
+        if (cur && cur !== "about:blank") { return; }
+        wv.loadURL(next);
+      } catch { /* 未 attach → 下一轮再试 */ }
+    }, 300);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  React.useEffect(() => {
+    const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
+    // A-976 修复：**不再要求 navUrl 非空**——webview 已改为常驻挂载（空白页 src=about:blank），
+    // 否则"新建的空白浏览器页"没有 webview → Agent 无法在其上做任何操作（只能导航）。
+    if (!wv) { return; }
+    registerWebview(props.tabId, wv);
+    return () => { unregisterWebview(props.tabId); };
+  }, [props.tabId]);
 
   React.useEffect(() => {
     const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
     if (!wv) { return; }
-    const onNav = (e: Electron.DidNavigateEvent): void => { setInputUrl(e.url); setActive(true); props.onUrlChange(e.url); };
-    const onInPage = (e: Electron.DidNavigateInPageEvent): void => { setInputUrl(e.url); };
-    const onStart = (): void => setLoading(true);
-    const onStop = (): void => { setLoading(false); setCanBack(wv.canGoBack()); setCanFwd(wv.canGoForward()); };
+    // A-979-R2：过滤 about:blank 的 did-navigate——webview 初始 src=about:blank 的加载完成事件
+    // 若被同步到地址栏/tabs，会把真实导航（如 douyin.com）顶成 about:blank → 白屏 + 网址栏错乱。
+    const onNav = (e: Electron.DidNavigateEvent): void => {
+      if (!e.url || e.url === "about:blank") { return; }
+      setInputUrl(e.url); setActive(true); props.onUrlChange(e.url);
+    };
+    // A-980-R7：guest 进程 attach 完成（webview 就绪）→ 若此时已有期望地址（新建页链接），
+    // 命令式 loadURL 兜底（受控 src 的首次挂载竞态用 did-attach 保证必导航）
+    const onAttach = (): void => { forceNav(); };
+    const onInPage = (e: Electron.DidNavigateInPageEvent): void => {
+      if (!e.url || e.url === "about:blank") { return; }
+      setInputUrl(e.url);
+    };
+    const onStart = (): void => { setLoading(true); setFailInfo(null); };
+    /* A-975-R6：**页签名跟随页面标题**（此前完全没有监听 → 站内跳转/SPA 换题后页签名永不更新，
+     * 新建页也只有域名）。用 ref 比对去重，避免同一标题反复 setState 触发无谓重渲染。 */
+    const onTitle = (e: { title?: string }): void => {
+      const t = (e?.title ?? "").trim();
+      if (!t || t === titleRef.current) { return; }
+      titleRef.current = t;
+      props.onTitleChange?.(t.length > 28 ? `${t.slice(0, 28)}…` : t);
+    };
+    /* A-975-R4/R5：**guest 进程崩溃/OOM 自动恢复**（每个页签只自动救一次）。
+     * 页面渲染进程挂掉时画面停在最后一帧、点什么都没反应。
+     * ⚠️ 必须一次性：若站点自身稳定崩溃，反复 reload 会变成"永远在重载 → 看起来还是点不动"的循环。 */
+    const onGone = (): void => {
+      const cur = navUrlRef.current;
+      setLoading(false);
+      if (!cur || goneHandledRef.current) { return; }
+      goneHandledRef.current = true;
+      try {
+        window.setTimeout(() => { try { (webviewRef.current as unknown as Electron.WebviewTag | null)?.reload(); } catch { /* 忽略 */ } }, 400);
+      } catch { /* 忽略 */ }
+    };
+    const onStop = (): void => {
+      setLoading(false); setCanBack(wv.canGoBack()); setCanFwd(wv.canGoForward());
+      // A-975-R3：**不再注入任何脚本**（见文件上方 NEWTAB_HOOK 撤除说明）——
+      // 新窗口/新标签页改由主进程 setWindowOpenHandler 统一接住派发，站点侧零侵入。
+    };
+    // A-980-R3：加载失败可见化（ERR_CONNECTION_REFUSED 等）——过滤 about:blank/-3(ABORTED 重定向)误报
+    const onFail = (e: { url?: string; errorCode?: number }): void => {
+      if (!e || !e.url || e.url === "about:blank" || e.errorCode === -3) { return; }
+      setFailInfo({ url: e.url, code: e.errorCode ?? 0 });
+      setLoading(false);
+    };
+    // A-980-R2：自定义协议链接（bitbrowser://、weixin://、mailto: 等）**不再静默拦截**——
+    // preventDefault 阻止 Chromium 自己处理（防系统弹「获取打开此链接的应用」），然后探测系统
+    // 是否注册了该协议处理器：**已注册 → 交给系统应用真实打开链接**（装了对应客户端即真正生效）；
+    // 未注册 → 明确提示「需要安装 xxx 客户端」。「解决报错」而非「屏蔽报错」。
+    const onWillNav = (e: Electron.WillNavigateEvent | { url: string; preventDefault: () => void }): void => {
+      try {
+        const url = (e as { url?: string }).url ?? "";
+        if (!url) { return; }
+        const scheme = url.split(":")[0].toLowerCase();
+        if (scheme === "http" || scheme === "https" || scheme === "about" || scheme === "file" || scheme === "data" || scheme === "blob" || url === "about:blank") { return; }
+        e.preventDefault();
+        // A-980-R12：注入钩子触发的"新建页跳转"桥（slime://open?u=https%3A%2F%2F…）→ 右栏新建浏览器页
+        if (scheme === "slime") {
+          try {
+            const u = new URL(url).searchParams.get("u");
+            if (u && /^https?:\/\//i.test(u)) {
+              requestSidebarOpen({ kind: "url", url: u, name: "" });
+              return;
+            }
+          } catch { /* 非标准 slime URL */ }
+          // 其余 slime:// 内部跳转保持原行为（交给 onUrlChange 导航）
+          props.onUrlChange(url);
+          return;
+        }
+        // 其余非 Web 协议 → **先征求用户同意**（允许/拒绝跳转，A-980-R10）：同意才探测系统处理器并真实打开
+        //（已注册→ShellExecute，未注册→诊断缺应用）；拒绝则拦截并轻提示。
+        void (async () => {
+          try {
+            const agree = await confirmAsync(
+              `是否允许打开外部应用（${scheme}://）？`,
+              `链接：${url}\n\n该链接需要系统已注册的「${scheme}」应用才能打开。\n「允许」→ 交给对应应用打开；「拒绝」→ 本次不打开。`,
+            );
+            if (!agree) {
+              window.dispatchEvent(new CustomEvent("slime-browser-popup-notice", { detail: { url, kind: "popup-denied", scheme } }));
+              return;
+            }
+            const api = (window as unknown as {
+              slimeAPI?: { protocol?: { open?: (u: string) => Promise<{ ok?: boolean; scheme?: string; handler?: string; reason?: string }> } }
+            }).slimeAPI?.protocol;
+            const r = await api?.open?.(url);
+            if (r?.ok) {
+              window.dispatchEvent(new CustomEvent("slime-browser-popup-notice", { detail: { url, kind: "opened", scheme, handler: r.handler } }));
+            } else {
+              window.dispatchEvent(new CustomEvent("slime-browser-popup-notice", { detail: { url, kind: "need-install", scheme: r?.scheme ?? scheme } }));
+            }
+          } catch { /* 忽略 */ }
+        })();
+      } catch { /* 忽略 */ }
+    };
+    // webview 的 will-navigate / will-redirect / new-window 事件：named 引用便于卸载；都是"导航尝试"统一走协议守卫。
+    // will-redirect 覆盖**服务端 302/301 跳转**——will-navigate 不会为重定向目标触发，
+    // 不少站点（如视频站"打开 App"跳板）就是靠服务端跳转抛 bitbrowser:// 这类未知协议。
+    const onWillNavEvent = (e: unknown): void => onWillNav(e as Electron.WillNavigateEvent);
+    const onWillRedirect = (e: unknown): void => onWillNav(e as Electron.WillNavigateEvent);
+    // A-980-R11：webview new-window 事件签名为 (event, url, ...)——url 在**第二参数**
+    //（event 上无 url）。allowpopups 后 guest 的 window.open/target=_blank 会触发本事件。
+    // A-975-R3：**Web URL 也在这里兜底开页**（此前只处理非 Web 协议、把 web 全交给主进程
+    // setWindowOpenHandler）。两条路传入的是**同一个 url**，渲染层的复用逻辑按「同址优先」命中
+    // → 只会有一个页签，不会开两份；主进程那条路若因版本差异没触发，这条也能开出来。
+    const onNewWindow = (e: unknown, url?: string): void => {
+      try {
+        if (typeof url === "string" && /^https?:\/\//i.test(url)) {
+          requestSidebarOpen({ kind: "url", url, name: "", from: "site" });
+          return;
+        }
+        if (typeof url === "string" && url) {
+          onWillNav({ url, preventDefault: () => { try { (e as { preventDefault?: () => void }).preventDefault?.(); } catch { /* 忽略 */ } } } as Electron.WillNavigateEvent);
+        } else {
+          onWillNav(e as Electron.WillNavigateEvent);
+        }
+      } catch { /* 忽略 */ }
+    };
+    try { (wv as any).addEventListener?.("will-navigate", onWillNavEvent); } catch { /* 忽略 */ }
+    try { (wv as any).addEventListener?.("will-redirect", onWillRedirect); } catch { /* 忽略 */ }
+    try { (wv as any).addEventListener?.("new-window", onNewWindow); } catch { /* 忽略 */ }
+    try { (wv as any).addEventListener?.("did-attach", onAttach); } catch { /* 忽略 */ }
     wv.addEventListener("did-navigate", onNav);
     wv.addEventListener("did-navigate-in-page", onInPage);
     wv.addEventListener("did-start-loading", onStart);
     wv.addEventListener("did-stop-loading", onStop);
-    return () => { wv.removeEventListener("did-navigate", onNav); wv.removeEventListener("did-navigate-in-page", onInPage); wv.removeEventListener("did-start-loading", onStart); wv.removeEventListener("did-stop-loading", onStop); };
+    wv.addEventListener("did-fail-load", onFail);
+    try { (wv as any).addEventListener?.("page-title-updated", onTitle); } catch { /* 忽略 */ }
+    // A-975-R4：guest 崩溃/OOM 自愈（新老两个事件名都挂，版本差异兜底）
+    try { (wv as any).addEventListener?.("render-process-gone", onGone); } catch { /* 忽略 */ }
+    try { (wv as any).addEventListener?.("crashed", onGone); } catch { /* 忽略 */ }
+    return () => {
+      try { (wv as any).removeEventListener?.("will-navigate", onWillNavEvent); } catch { /* 忽略 */ }
+      try { (wv as any).removeEventListener?.("will-redirect", onWillRedirect); } catch { /* 忽略 */ }
+      try { (wv as any).removeEventListener?.("new-window", onNewWindow); } catch { /* 忽略 */ }
+      try { (wv as any).removeEventListener?.("did-attach", onAttach); } catch { /* 忽略 */ }
+      try { (wv as any).removeEventListener?.("page-title-updated", onTitle); } catch { /* 忽略 */ }
+      try { (wv as any).removeEventListener?.("render-process-gone", onGone); } catch { /* 忽略 */ }
+      try { (wv as any).removeEventListener?.("crashed", onGone); } catch { /* 忽略 */ }
+      wv.removeEventListener("did-navigate", onNav); wv.removeEventListener("did-navigate-in-page", onInPage); wv.removeEventListener("did-start-loading", onStart); wv.removeEventListener("did-stop-loading", onStop); wv.removeEventListener("did-fail-load", onFail);
+    };
   }, []);
 
   const go = (): void => {
-    let target = inputUrl.trim();
-    if (!target) { return; }
-    if (!/^https?:\/\//i.test(target)) { target = `https://${target}`; }
+    const targetRaw = inputUrl.trim();
+    if (!targetRaw) { return; }
+    // A-980：未知协议（bitbrowser:// 等）不让它进 webview src（否则系统弹"获取打开此链接的应用"）
+    if (!isWebNavUrl(targetRaw)) {
+      setInputUrl("");
+      return;
+    }
+    // A-980-R6：统一归一（裸地址补 http://）——此前补 https:// 会把 `127.0.0.1:8081` 这种
+    // 本地 IP:端口 错拼成 https（TLS 握手失败白屏），与链接点击路径同规后行为一致。
+    let target = normalizeBrowserUrl(targetRaw);
     setNavUrl(target);
   };
 
@@ -2824,13 +3752,31 @@ function BrowserTabInstance(props: { tabId: string; url: string; onUrlChange: (u
       </div>
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {!active && !navUrl && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "var(--text-muted, #8b949e)", gap: 12 }}>
+          // A-976：空态提示层必须 pointerEvents:none，否则会吃掉 Agent 的点击事件
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "var(--text-muted, #8b949e)", gap: 12, pointerEvents: "none", zIndex: 5 }}>
             <GlobeIcon size={36} />
             <div style={{ fontSize: 14, opacity: 0.7 }}>在上方输入网址开始浏览</div>
           </div>
         )}
         {loading && active && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--accent, #58a6ff)", zIndex: 10 }} />}
-        {navUrl && <WebviewTag ref={webviewRef} src={navUrl} style={{ flex: 1, width: "100%", height: "100%", border: "none", background: "#fff" }} />}
+        {/* A-980-R3：加载失败可见条（不白屏无反馈；重试=刷新当前页） */}
+        {failInfo && (
+          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, margin: "0 8px 6px", padding: "5px 10px", fontSize: 11, color: "var(--danger, #f85149)", background: "rgba(248,81,73,0.08)", border: "1px solid rgba(248,81,73,0.28)", borderRadius: 6 }}>
+            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={failInfo.url}>无法连接 {failInfo.url} —— {failTitle(failInfo.code)}</span>
+            <button style={{ flexShrink: 0, minWidth: 44, padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(248,81,73,0.35)", background: "transparent", color: "var(--danger, #f85149)", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => { setFailInfo(null); try { (webviewRef.current as unknown as Electron.WebviewTag | null)?.reload(); } catch { /* 忽略 */ } }}>重试</button>
+          </div>
+        )}
+        {/* A-976：webview **常驻挂载**（空白页用 about:blank）——保证任何浏览器页都可被 Agent 操作，
+            且导航不必等 React 重挂载新元素（此前 navUrl 由空变非空才渲染，导致"只能导航不能操作"）。
+            A-980-R7：src 固定 about:blank 占位（不再受控），一切导航由 navUrl → forceNav() 命令式 loadURL，
+            did-attach 兜底——规避 React 首帧改 src 与 webview attach 的竞态（新建页白屏根因）。 */}
+        <WebviewTag
+          ref={setWvRef}
+          src="about:blank"
+          partition="persist:slime-browser"
+          allowpopups
+          style={{ flex: 1, width: "100%", height: "100%", border: "none", background: "#fff" }}
+        />
       </div>
     </div>
   );

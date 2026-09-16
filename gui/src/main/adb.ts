@@ -373,6 +373,35 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_NORMAL });
   }
 
+  /**
+   * A-975：导出当前 UI 层级（uiautomator dump）——元素级定位的数据源。
+   * 兼容策略（覆盖 MIUI/部分机型 dump 往 stderr 打警告、但文件仍生成；以及 exec-out 直出两条路）：
+   *   ① dump 到 /sdcard → cat 读回（最稳，不受 tty 混输出影响）；
+   *   ② 回退 exec-out uiautomator dump /dev/tty，从输出里截取 <hierarchy> 段。
+   */
+  async uiDump(serial: string): Promise<{ ok: boolean; xml?: string; error?: string }> {
+    const s = (serial ?? "").trim();
+    const remote = "/sdcard/slime_ui_dump.xml";
+    const withS = (rest: string[]): string[] => (s ? ["-s", s, ...rest] : rest);
+    // ① dump + cat
+    const dumped = await this.run(withS(["shell", `uiautomator dump ${remote}`]), { timeout: TIMEOUT_NORMAL });
+    const read = await this.run(withS(["shell", `cat ${remote}`]), { timeout: TIMEOUT_NORMAL });
+    const xml1 = read.stdout ?? "";
+    if (xml1.includes("<hierarchy")) { return { ok: true, xml: xml1 }; }
+    // ② exec-out 回退
+    const tty = await this.run(withS(["exec-out", "uiautomator dump /dev/tty"]), { timeout: TIMEOUT_NORMAL });
+    const out2 = tty.stdout ?? "";
+    const hIdx = out2.indexOf("<hierarchy");
+    if (hIdx >= 0) {
+      const xmlIdx = out2.lastIndexOf("<?xml", hIdx);
+      return { ok: true, xml: out2.slice(xmlIdx >= 0 ? xmlIdx : hIdx) };
+    }
+    return {
+      ok: false,
+      error: (dumped.error ?? read.error ?? tty.error ?? "uiautomator dump 失败（界面可能为全屏画布/仍在加载）").slice(0, 200),
+    };
+  }
+
   /** 安装 APK（serial + 本地 apk 路径） */
   async install(serial: string, apkPath: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
@@ -421,10 +450,12 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_LONG, maxBuffer: 64 * 1024 * 1024 });
   }
 
-  /** 重启设备 */
-  async reboot(serial: string): Promise<AdbCmdResult> {
+  /** 重启设备（A-978：支持可选 mode，如 recovery / bootloader / sideload / fastboot） */
+  async reboot(serial: string, mode?: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
-    const args = s ? ["-s", s, "reboot"] : ["reboot"];
+    const m = (mode ?? "").trim();
+    const base = s ? ["-s", s, "reboot"] : ["reboot"];
+    const args = m ? [...base, m] : base;
     return this.run(args, { timeout: TIMEOUT_NORMAL });
   }
 

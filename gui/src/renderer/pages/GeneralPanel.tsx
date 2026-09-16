@@ -2,15 +2,60 @@
  * gui/src/renderer/pages/GeneralPanel.tsx — 设置「通用」专栏。
  * - 主题选择：Alpha（既有 slate 深色）/ Beta（毛玻璃黑里透蓝，史莱姆品牌配色）
  * - 开机自启开关：与安装器 HKCU Run 项语义一致（app.setLoginItemSettings）
+ * - A-980-R26：系统通知开关（任务完成/需要选择/出错/意外终止）+ 可定制提示音（可上传音频）
  * - 卸载 Slime：启动 NSIS 卸载器（找不到时提示去控制面板/安装目录）
  */
 import React, { type JSX } from "react";
 import type { ThemeName } from "../theme.js";
+import type { NotifyConfigDTO } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
+// A-980-R26：试听走渲染层播放器（主进程无音频能力），换音频后要让它失效缓存
+import { playCustomNotifySound, invalidateNotifySoundCache } from "../notifySound.js";
+// A-975：自动压缩配置变更广播（右栏阈值刻度线据此即时跟随）
+import { AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
 
 interface Props {
   theme?: ThemeName;
   onThemeChange?: (t: ThemeName) => void;
+}
+
+/** 小药丸开关：与既有「已开启/已关闭」按钮同款样式，供通知/提示音两个开关复用 */
+function Pill(props: { on: boolean; disabled?: boolean; title?: string; onClick: () => void }): JSX.Element {
+  return (
+    <button
+      onClick={props.onClick}
+      disabled={props.disabled}
+      title={props.title}
+      style={{
+        height: 26, padding: "0 14px", borderRadius: 13, cursor: props.disabled ? "default" : "pointer",
+        border: `1px solid ${props.on ? "var(--accent)" : "var(--border)"}`,
+        background: props.on ? "var(--accent-soft)" : "transparent",
+        color: props.on ? "var(--accent-hover)" : "var(--text-muted)",
+        fontSize: 12, fontWeight: 700, opacity: props.disabled ? 0.6 : 1,
+      }}
+    >
+      {props.on ? "已开启" : "已关闭"}
+    </button>
+  );
+}
+
+/** 次级小按钮（上传 / 试听 / 恢复默认 / 发送测试） */
+function MiniBtn(props: { children: React.ReactNode; disabled?: boolean; danger?: boolean; onClick: () => void }): JSX.Element {
+  return (
+    <button
+      onClick={props.onClick}
+      disabled={props.disabled}
+      style={{
+        height: 26, padding: "0 12px", borderRadius: 8, cursor: props.disabled ? "default" : "pointer",
+        fontSize: 12, fontWeight: 600, opacity: props.disabled ? 0.6 : 1,
+        border: `1px solid ${props.danger ? "var(--danger)" : "var(--border)"}`,
+        background: props.danger ? "var(--danger-soft)" : "var(--bg-hover)",
+        color: props.danger ? "#f87171" : "var(--accent-hover)",
+      }}
+    >
+      {props.children}
+    </button>
+  );
 }
 
 const THEMES: Array<{ id: ThemeName; name: string; desc: string; swatch: string[] }> = [
@@ -48,6 +93,10 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
     } catch { /* ignore */ }
     return { enabled: true, ratio: 0.85, mode: "animated" };
   });
+  // A-980-R26：系统通知 + 可定制提示音
+  const [nCfg, setNCfg] = React.useState<NotifyConfigDTO>({ enabled: false, soundEnabled: true, soundFile: null, soundName: null });
+  const [nBusy, setNBusy] = React.useState(false);
+  const [soundBusy, setSoundBusy] = React.useState(false);
   const api = React.useRef<any>(null);
 
   const showNotice = (ok: boolean, text: string): void => {
@@ -61,6 +110,8 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
       const merged = { ...prev, ...next };
       try {
         localStorage.setItem("slime_auto_compress", JSON.stringify(merged));
+        // A-975：广播变更——右栏阈值刻度线/距压缩余量据此立即跟随（此前要刷新界面才变）
+        window.dispatchEvent(new CustomEvent(AUTOCOMPRESS_CFG_EVENT, { detail: merged }));
       } catch { /* ignore */ }
       return merged;
     });
@@ -86,7 +137,87 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
         });
       }).catch(() => {});
     }
+    // A-980-R26：通知配置（文件在 config/notifications.json，主进程读）
+    if (api.current?.notify?.get) {
+      void api.current.notify.get().then((r: { ok: boolean; config: NotifyConfigDTO }) => {
+        if (r?.config) { setNCfg(r.config); }
+      }).catch(() => {});
+    }
   }, []);
+
+  /** A-980-R26：改通知配置（局部合并；主进程写盘后回传最新全量） */
+  async function patchNotify(patch: Partial<Pick<NotifyConfigDTO, "enabled" | "soundEnabled">>, okText: string): Promise<void> {
+    if (!api.current?.notify?.set || nBusy) { return; }
+    setNBusy(true);
+    try {
+      const r = await api.current.notify.set(patch);
+      if (r?.config) { setNCfg(r.config); }
+      showNotice(Boolean(r?.ok), r?.ok ? okText : (r?.error ?? "保存失败"));
+    } catch (e) {
+      showNotice(false, `保存失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setNBusy(false);
+    }
+  }
+
+  /** 上传自定义提示音（主进程弹文件框 → 拷贝进配置目录 → 回传新配置） */
+  async function pickSound(): Promise<void> {
+    if (!api.current?.notify?.pickSound || soundBusy) { return; }
+    setSoundBusy(true);
+    try {
+      const r = await api.current.notify.pickSound();
+      if (r?.canceled) { return; }
+      if (r?.config) { setNCfg(r.config); }
+      if (r?.ok) {
+        // 换了音频 → 让渲染层丢掉旧的 data URL 缓存，否则试听/通知还是旧声音
+        invalidateNotifySoundCache();
+        showNotice(true, `已上传提示音：${r.name ?? "自定义音频"}`);
+      } else {
+        showNotice(false, r?.error ?? "上传失败");
+      }
+    } catch (e) {
+      showNotice(false, `上传失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSoundBusy(false);
+    }
+  }
+
+  /** 恢复系统默认提示音 */
+  async function removeSound(): Promise<void> {
+    if (!api.current?.notify?.clearSound || soundBusy) { return; }
+    setSoundBusy(true);
+    try {
+      const r = await api.current.notify.clearSound();
+      if (r?.config) { setNCfg(r.config); }
+      invalidateNotifySoundCache();
+      showNotice(Boolean(r?.ok), r?.ok ? "已恢复系统默认提示音" : (r?.error ?? "操作失败"));
+    } catch (e) {
+      showNotice(false, `操作失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSoundBusy(false);
+    }
+  }
+
+  /** 试听（只在渲染层播，不弹通知） */
+  async function previewSound(): Promise<void> {
+    const ok = await playCustomNotifySound();
+    if (!ok) { showNotice(false, "试听失败：音频无法播放（格式不被支持或文件已丢失）"); }
+  }
+
+  /** 发送测试通知（无视总开关，用来确认系统通知/提示音是否真的生效） */
+  async function sendTest(): Promise<void> {
+    if (!api.current?.notify?.test || nBusy) { return; }
+    setNBusy(true);
+    try {
+      const r = await api.current.notify.test();
+      if (r?.config) { setNCfg(r.config); }
+      showNotice(Boolean(r?.ok), r?.ok ? "已发送测试通知（留意系统通知中心）" : "测试通知发送失败");
+    } catch (e) {
+      showNotice(false, `测试失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setNBusy(false);
+    }
+  }
 
   async function saveRequests(): Promise<void> {
     if (!api.current?.requests?.set || reqBusy) { return; }
@@ -140,7 +271,7 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
     <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>通用设置</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
-        应用级行为：界面主题、开机自启与卸载。主题切换即时生效并持久化保存。
+        应用级行为：界面主题、请求频率、上下文自动压缩、系统通知与提示音、开机自启与卸载。大部分设置即时生效并持久化保存。
       </div>
 
       {notice && (
@@ -350,6 +481,83 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
             {m === "quit" ? "直接退出" : "最小化到后台保留（托盘常驻）"}
           </button>
         ))}
+      </div>
+
+      {/* A-980-R26：系统通知 + 可定制提示音 */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>系统通知</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Agent 任务完成、需要你做选择、出错或意外终止时，弹出操作系统通知。应用被最小化到托盘、或在后台跑长任务时最有用。
+            </div>
+          </div>
+          <Pill
+            on={nCfg.enabled}
+            disabled={nBusy}
+            title={nCfg.enabled ? "点击关闭系统通知" : "点击开启系统通知"}
+            onClick={() => void patchNotify({ enabled: !nCfg.enabled }, nCfg.enabled ? "已关闭系统通知" : "已开启系统通知（任务完成/需选择/出错/意外终止时提示）")}
+          />
+        </div>
+
+        {nCfg.enabled && (
+          <>
+            <div style={{ height: 1, background: "var(--card-border, var(--border))", margin: "14px 0 12px" }} />
+
+            {/* 提示音总开关 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600 }}>通知提示音</div>
+                <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2, lineHeight: 1.5 }}>
+                  关闭则通知静默；开启后可用系统默认提示音，或上传你自己的音频。
+                </div>
+              </div>
+              <Pill
+                on={nCfg.soundEnabled}
+                disabled={nBusy}
+                title={nCfg.soundEnabled ? "点击静音" : "点击开启提示音"}
+                onClick={() => void patchNotify({ soundEnabled: !nCfg.soundEnabled }, nCfg.soundEnabled ? "已关闭提示音（通知静默）" : "已开启提示音")}
+              />
+            </div>
+
+            {nCfg.soundEnabled && (
+              <div style={{
+                marginTop: 10, padding: "10px 12px", borderRadius: 10,
+                border: "1px solid var(--card-border, var(--border))",
+                background: "var(--card-surface, var(--bg-input))",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 160, fontSize: 12.5, lineHeight: 1.5 }}>
+                    {nCfg.soundFile
+                      ? <>当前：<span style={{ color: "var(--accent-hover)", fontWeight: 600 }}>{nCfg.soundName ?? nCfg.soundFile}</span></>
+                      : <span style={{ color: "var(--text-muted)" }}>当前：系统默认提示音</span>}
+                  </div>
+                  <MiniBtn disabled={soundBusy} onClick={() => void pickSound()}>
+                    {soundBusy ? "处理中…" : (nCfg.soundFile ? "更换音频…" : "上传音频…")}
+                  </MiniBtn>
+                  {nCfg.soundFile && (
+                    <MiniBtn disabled={soundBusy} onClick={() => void previewSound()}>试听</MiniBtn>
+                  )}
+                  {nCfg.soundFile && (
+                    <MiniBtn danger disabled={soundBusy} onClick={() => void removeSound()}>恢复默认</MiniBtn>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.5 }}>
+                  支持 mp3 / wav / ogg / m4a / aac / flac / webm / opus，单个文件不超过 8MB。音频会复制到应用配置目录，原文件可自由移动或删除。
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: 12 }}>
+              <MiniBtn disabled={nBusy} onClick={() => void sendTest()}>
+                {nBusy ? "发送中…" : "发送测试通知"}
+              </MiniBtn>
+              <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 10 }}>
+                用来确认系统通知与提示音是否真的生效。
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
       {/* 卸载 */}

@@ -12,6 +12,8 @@
  */
 import "./boot.js"; // 数据根引导：必须最先执行（在 core-ts 模块级常量求值前设置 SLIME_ROOT）
 import { INSTALL_ROOT } from "./boot.js";
+// A-980-R31：子代理运行记录落盘（内存态 + 历史合并、终态快照持久化）
+import { clearSubagentRuns, mergedSubagentRuns, syncSubagentRuns } from "./subagentStore.js";
 
 // A-937：退出行为（模块级，IPC handlers 与窗口 close 拦截共用）
 let exitModeStore: "quit" | "background" = "quit";
@@ -19,9 +21,17 @@ let tray: Electron.Tray | null = null;
 let appIsQuitting = false;
 const exitModePath = () => join(app.getPath("userData"), "exit-mode.json");
 
-/** B：审批前置分类——把 sandbox 权限请求映射为 classifier 输入做调用前复核。
- *  action 名启发分型：terminal/shell/exec/run → 命令；write/save/append → 写路径；
- *  fetch/search/http/web → 网络；其余归类 read。返回是否含拦截项 + 是否全自动 + 原因清单。 */
+/** B：审批前置分类——把 sandbox 权限请求映射为分类器输入做调用前复核。
+ *
+ * 【设计原则】分类器不再靠「工具名子串」猜风险，而是**服从工具自述 + slime 自身审批策略**：
+ *   1. 从注册表取工具，读它声明的 `riskKind`（缺省由 permissions 推导）；
+ *   2. 未注册工具 → **fail-closed**（需确认），绝不默认放行；
+ *   3. read 类 → 直接放行；
+ *   4. write/terminal/network 类 → 先跑硬规则（`..` 越权、敏感文件、受保护源码目录、
+ *      rm -rf / curl|sh 等 block 特征始终生效），再按工具是否声明 `autoApprovable` 决定：
+ *        声明了 → 允许 auto；未声明 → 一律收敛为「需用户确认」。
+ *   这样可以杜绝 adb_install / adb_connect / http_create_app 这类新工具因名字不匹配
+ *   三档正则而被静默放行，也让「设置 → 权限」成为唯一权威。 */
 function classifyPermissions(actions: Array<{ action: string; target: string }>): {
   hasBlocked: boolean;
   allAuto: boolean;
@@ -30,24 +40,44 @@ function classifyPermissions(actions: Array<{ action: string; target: string }>)
   let hasBlocked = false;
   let allAuto = true;
   const reasons: string[] = [];
+  const registry = getRegistry();
   for (const a of actions) {
     const name = (a.action ?? "").toLowerCase();
     const target = (a.target ?? "").trim();
-    let r;
-    if (/terminal|shell|exec|run_cmd|run_command|command/.test(name)) {
+    const tool = registry.get(name);
+
+    // ① 未注册工具：不猜、不放行，交给用户审批
+    if (!tool) {
+      allAuto = false;
+      reasons.push(`${name}: 未注册工具，需用户确认（fail-closed）`);
+      continue;
+    }
+
+    const kind = tool.effectiveRiskKind();
+    let r: { level: "auto" | "confirm" | "block"; reason: string; matched: string };
+
+    if (kind === "read") {
+      r = { level: "auto", reason: `只读工具 ${name}`, matched: "read" };
+    } else if (kind === "terminal") {
       const { command, commandArgs } = splitCommand(target);
       r = assessAction({ kind: "terminal", command, commandArgs });
-    } else if (/write|save|append|create|patch|modify/.test(name)) {
+    } else if (kind === "write") {
       r = assessAction({ kind: "write", path: target });
       // 引擎源码/契约/宿主目录写入一律 block（防 Agent 自我改写护栏），仅锚定 PROJECT_ROOT 内不误伤用户工作区
       if (r.level !== "block" && isProtectedSourcePath(target, PROJECT_ROOT)) {
         r = { level: "block", reason: `受保护源码目录禁止写入：${target.slice(0, 60)}`, matched: "protected-dir" };
       }
-    } else if (/fetch|search|http|web|request/.test(name)) {
-      r = assessAction({ kind: "network", url: target });
     } else {
-      r = { level: "auto", reason: `只读动作 ${name}`, matched: "read" };
+      r = assessAction({ kind: "network", url: target });
     }
+
+    // ② 非只读工具未声明 autoApprovable 时，分类器的 auto 一律降级为「需确认」——
+    //    免审批权只有工具自己显式声明才能拿到（web_search / file_write 等无副作用动作）。
+    //    只读类（kind === "read"）不参与降级：纯读取无副作用，不需要每次审批。
+    if (kind !== "read" && r.level === "auto" && !tool.autoApprovable) {
+      r = { level: "confirm", reason: `${name}（${kind} 类）未声明可自动放行，需用户确认`, matched: "policy-confirm" };
+    }
+
     if (r.level !== "auto") { allAuto = false; }
     if (r.level === "block") { hasBlocked = true; }
     reasons.push(`${name}: ${r.reason}`);
@@ -108,8 +138,8 @@ const ensureTray = (): void => {
     tray.on("click", () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
   } catch { tray = null; }
 };
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell, Tray, Menu, nativeImage } from "electron";
-import { join, resolve, sep, dirname } from "node:path";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, screen, session, shell, Tray, Menu, nativeImage } from "electron";
+import { join, resolve, sep, dirname, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { spawn, exec, execFile, type ChildProcess } from "node:child_process";
@@ -119,35 +149,53 @@ import { getModelServer, ModelServerManager, setModelServer } from "../../../cor
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setSidebarOpener } from "../../../core-ts/src/tools/builtin.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setSidebarOpener, setScreenController } from "../../../core-ts/src/tools/builtin.js";
+import { setBrowserAdapter } from "../../../core-ts/src/tools/browser.js";
+import { BrowserBridge } from "./browserBridge.js";
+import { StreamChunkBatcher } from "./streamBatch.js";
 import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
 import { adbService, type AdbDetect, type AdbDevice, type AdbCmdResult, type AdbScreencapResult, type AdbDownloadProgress } from "./adb.js";
+import { annotateBitmap } from "../shared/imageAnnotate.js";
 import { httpServer } from "./httpServer.js";
 import { createServer } from "node:http";
 import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
+// A-980-R29：待办存储唯一真源（工具与主进程共用；别再各自手搓路径/解析）
+import { readTodos, removeTodos, todosToPlanStatus } from "../../../core-ts/src/services/todoStore.js";
+import { loadUsage, clearUsage, rewriteUsageCosts } from "../../../core-ts/src/services/usage.js";
+import { getLlmGatewayManager, readLlmGatewayConfig, type LlmGatewayConfig } from "./llmGateway.js";
 import { AgentRegistry, type AgentState } from "../../../core-ts/src/services/agents.js";
 import { createEngine, buildSilamTraitSignals } from "../../../core-ts/src/services/engine.js";
 import { ChatClient, AnthropicClient } from "../../../core-ts/src/llm/client.js";
 import { inferApiFormat, type RouteEntry } from "../../../core-ts/src/router.js";
 import { chromiumFetch } from "./providers.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
-import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult } from "../shared/ipc.js";
+import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult } from "../shared/ipc.js";
+import { isBrowserSchemeUrl } from "../shared/ipc.js";
 import { parseUnifiedDiff } from "./git_diff.js";
 import { initUpdater, registerUpdaterHandlers, setStatusSink } from "./updater.js";
 import {
   listProviders, enrichModels, saveProvider, removeProvider, clearAllProviders, refreshProviderModels,
   listLocalModels, saveLocalModel, removeLocalModel, scanLocalModels,
+  buildPriceResolver,
   type ProviderSummary, type LocalModelSpec,
 } from "./providers.js";
 import { overview as configOverview, readConfigFile, writeConfigFile, setMcpEnabled, setSkillEnabled, deleteSkill, deleteMcp, skillDirPath } from "./config_files.js";
+// A-980-R26：系统通知 + 可定制提示音（设置 → 通用）
+import { initNotify, notifyUser, readNotifyConfig, writeNotifyConfig, importSound, clearSound, readSoundData, customSoundPath } from "./notify.js";
 import { getPermissions, setPermissions } from "./permissions.js";
 import { SlimeEngine } from "../../../core-ts/src/services/engine.js";
 import { SilamBrainClient, readSilamConfig, type SilamBrain, type SilamAffectState } from "../../../core-ts/src/services/silam_brain.js";
 import { decryptRaw } from "../../../core-ts/src/encryption.js";
 import { removeAgentHistory, loadHistory, appendHistory, attachTimelineToRecord, type HistoryRecord } from "../../../core-ts/src/services/history.js";
 import { SkillRegistry } from "../../../core-ts/src/skills.js";
-import { getRegistry } from "../../../core-ts/src/tools/registry.js";
+import { getRegistry, setToolCategoryGate } from "../../../core-ts/src/tools/registry.js";
+import {
+  getScreenController,
+  DesktopScreenBackend,
+  AndroidScreenBackend,
+  setImageOptimizer,
+} from "../../../core-ts/src/screen/index.js";
 import { MemoryStore } from "../../../core-ts/src/memory/store.js";
 import { createTrace, beginSpan, endSpan, emitEvent, attachEval, type Trace, type TraceEventKind } from "../../../core-ts/src/observability/trace.js";
 import { parsePlan, type Plan, type PlanStageStatus } from "../../../core-ts/src/planning/plan.js";
@@ -161,7 +209,35 @@ process.on("unhandledRejection", (reason) => {
 
 // ── D：全链路可观测（引擎 stream 真实事件点 → trace spans → 渲染层 TraceViewer） ──
 // sessionId → 最近一次请求的 Trace 快照（内存驻留；流结束经 slime:trace:update 广播）
+//
+// A-980-R24：**加上限**。此前是纯 `Map` 且全仓无 `delete`——每开一个新会话就永久多留一份 Trace
+// （含 40 个 span + 字符串快照），长时间使用（尤其群聊/子 Agent 会不断产生新 sessionId）主进程
+// 内存只增不减，是"用久了越来越卡、最后崩"的慢性根因之一。
+// 现在用「Map 保序 = 插入序」做 LRU：超上限时删最早插入的键，并设 TTL 拒绝过期快照。
 const traceStore = new Map<string, Trace>();
+const TRACE_STORE_MAX = 60;
+const TRACE_STORE_TTL_MS = 30 * 60 * 1000;
+function traceStoreSet(key: string, trace: Trace): void {
+  // 重新插入以刷新 LRU 位置（Map 的 set 对已存在键不改顺序，故先删再插）
+  traceStore.delete(key);
+  traceStore.set(key, trace);
+  while (traceStore.size > TRACE_STORE_MAX) {
+    const oldest = traceStore.keys().next();
+    if (oldest.done) { break; }
+    traceStore.delete(oldest.value);
+  }
+}
+/** 读取前的过期清理（TraceViewer 拉取旧会话时用；过期直接当没有） */
+function traceStoreGet(key: string): Trace | undefined {
+  const t = traceStore.get(key);
+  if (!t) { return undefined; }
+  const at = t.endedAt ?? t.startedAt;
+  if (Number.isFinite(at) && Date.now() - at > TRACE_STORE_TTL_MS) {
+    traceStore.delete(key);
+    return undefined;
+  }
+  return t;
+}
 /** chunk/reasoning 逐 token 级事件采样上限，防止 spans 爆炸 */
 const TRACE_SAMPLE_CAP = 40;
 function capStr(s: string, n: number): string {
@@ -212,7 +288,7 @@ class TraceRecorder {
 function registerTraceHandlers(): void {
   ipcMain.handle("slime:trace:get", (_e, sessionId: string) => {
     if (!sessionId || typeof sessionId !== "string") { return null; }
-    const t = traceStore.get(sessionId);
+    const t = traceStoreGet(sessionId);
     return t ? { sessionId, ...t } : null;
   });
 }
@@ -220,53 +296,183 @@ function registerTraceHandlers(): void {
 // ── E：Plan 一等对象（plan_create/plan_update/todo_write 工具返回 → 会话级 planStore → PlanPanel） ──
 // sessionId → 当前 Plan（内存驻留；工具结果流经 slime:plan:update 广播；重启后可由工具输出重建）
 const planStore = new Map<string, Plan>();
+/** planStore 上限：只用于展示的派生数据，没必要无限驻留（超限按 updatedAt 淘汰最旧） */
+const PLAN_STORE_MAX = 64;
 const PLAN_TOOLS = new Set(["plan_create", "plan_update", "todo_write"]);
 
-/** 解析工具返回：plan_create/plan_update 从结果 JSON 还原；todo_write 从 todos_<session> 落盘文件还原。 */
+/**
+ * A-980-R30：子代理管理器引用（供 fixedSegments 注入「可用子代理」清单）。
+ *
+ * 为什么需要这个引用：此前可用子代理只活在管理器内部，**模型完全不知道能问谁** ——
+ * 工具描述里硬编码三个方向，用户勾选的自建 Agent 名字从不进提示词，于是"配好了也派不到"。
+ * Claude Code 的做法是把 name + description 清单写进上下文，模型才能按描述自动选人或显式点名。
+ */
+let subagentsRef: SubAgentManager | null = null;
+
+/** 把子代理目录渲染成系统提示段（无任何子代理时返回空数组，不占上下文） */
+function subagentCatalogSegment(): string[] {
+  const cat = subagentsRef?.catalog?.() ?? [];
+  if (cat.length === 0) { return []; }
+  const user = cat.filter((c) => c.source === "user");
+  const builtin = cat.filter((c) => c.source !== "user");
+  const lines = [
+    "## 可用子代理（delegate_subagent）",
+    "你可以把**独立、自包含**的子任务交给下列子代理并行执行（各自独立上下文与工具面，产出会作为工具结果交回给你验收）：",
+  ];
+  if (user.length > 0) {
+    lines.push("用户选定的子代理（优先用）：");
+    for (const c of user) { lines.push(`- ${c.name}：${c.description}`); }
+  }
+  if (builtin.length > 0) {
+    lines.push("内置专家子代理：");
+    for (const c of builtin) { lines.push(`- ${c.name}：${c.description}`); }
+  }
+  lines.push('用法：`delegate_subagent({ agent: "<上面的名字>", task: "目标 + 期望输出格式 + 边界" })`；不点名则由系统按任务语义自动选。');
+  lines.push("派发后**必须验收**产出：对照目标核对是否真的完成、产物是否落地；存疑就点名同一子代理追问，或自己补齐——不要把子代理的结论不加核对地当事实转述给用户。");
+  return [lines.join("\n")];
+}
+
+
+/** 会话被删除时清掉其 Plan 与待办文件（此前两者都只增不减：内存常驻 + data/ 堆垃圾） */
+function purgeSessionPlanning(sessionId: string): void {
+  if (!sessionId) { return; }
+  planStore.delete(sessionId);
+  removeTodos(sessionId);
+}
+
+/**
+ * 解析工具返回：plan_create/plan_update 从结果 JSON 还原；todo_write 从 `todos_<session>` 落盘文件还原。
+ *
+ * ⚠️ 这是一条**有损的单向派生**（真源仍是待办文件本身）：`todo_write` 没有自己的 Plan 对象，
+ * PlanPanel 要显示就得在这里把清单映射成「阶段」。因此必须：
+ * ① 用 `todoStore.readTodos` 读同一份文件（别再手搓路径/解析）；
+ * ② 打上 `source: "todo"` —— 真 Plan（plan_create）优先级更高，不允许被派生数据顶掉（见 interceptPlanTool）；
+ * ③ `status` 由进度推导，**不能恒定 "planning"**（否则全做完了还显示"规划中"）。
+ */
 function planFromToolResult(name: string, result: string, sessionId: string): Plan | null {
   if (name === "plan_create" || name === "plan_update") {
     const idx = result.indexOf("\n"); // 工具返回形如 "[Plan 已创建] id（…）\n{json}"
     const json = idx >= 0 ? result.slice(idx + 1) : result;
-    return parsePlan(json);
+    const p = parsePlan(json);
+    return p ? { ...p, source: "plan" } : null;
   }
   if (name === "todo_write" && sessionId) {
-    try {
-      const todoJson = join(PROJECT_ROOT, "data", `todos_${sessionId}.json`);
-      if (!existsSync(todoJson)) { return null; }
-      const raw = JSON.parse(readFileSync(todoJson, "utf8")) as { updated_at?: string; items?: Array<{ id?: string; content?: string; status?: string }> };
-      const items = Array.isArray(raw.items) ? raw.items.filter((x) => x && typeof x.content === "string") : [];
-      if (items.length === 0) { return null; }
-      const statusMap: Record<string, PlanStageStatus> = { pending: "pending", in_progress: "in_progress", completed: "done", done: "done" };
-      return {
-        id: `todo-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(-8) || "s"}`,
-        sessionId,
-        description: items[0]!.content!.slice(0, 60),
-        stages: items.map((it, i) => ({
-          id: String(it.id ?? i + 1),
-          label: String(it.content ?? "").slice(0, 120),
-          status: statusMap[String(it.status ?? "pending")] ?? "pending",
-        })),
-        createdAt: Date.parse(raw.updated_at ?? "") || Date.now(),
-        updatedAt: Date.now(),
-        status: "planning" as const,
-      };
-    } catch { return null; }
+    const items = readTodos(sessionId); // 空 sessionId / 文件缺失 / 损坏 → []（store 内已兜底）
+    if (items.length === 0) { return null; }
+    const statusMap: Record<string, PlanStageStatus> = { pending: "pending", in_progress: "in_progress", completed: "done", done: "done" };
+    return {
+      id: `todo-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(-8) || "s"}`,
+      sessionId,
+      description: items[0]!.content.slice(0, 60),
+      stages: items.map((it, i) => ({
+        id: it.id || String(i + 1),
+        label: it.content.slice(0, 120),
+        status: statusMap[it.status] ?? "pending",
+      })),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: todosToPlanStatus(items),
+      source: "todo",
+    };
   }
   return null;
 }
 
-/** 工具轮拦截：Plan 类工具结果 → planStore 更新 + 广播渲染层。 */
+/** planStore 落盘 + 淘汰超限项（只保留最近的 N 个会话） */
+function putPlan(sessionId: string, plan: Plan): void {
+  planStore.set(sessionId, plan);
+  if (planStore.size <= PLAN_STORE_MAX) { return; }
+  const sorted = [...planStore.entries()].sort((a, b) => (a[1].updatedAt ?? 0) - (b[1].updatedAt ?? 0));
+  for (const [sid] of sorted.slice(0, planStore.size - PLAN_STORE_MAX)) { planStore.delete(sid); }
+}
+
+/**
+ * A-980-R27：todo_write 落盘后**立刻**把列表推给渲染层。
+ *
+ * 此前全仓库只有「切会话」时经 `slime:sessions:loadTodos` 主动拉一次，
+ * Agent 在会话中途写待办没有任何广播 → 右侧栏停在旧快照上，
+ * 用户体感就是"待办面板不动/像摆设"。这里在工具拦截点补上推送。
+ *
+ * A-980-R29：读取改用 `todoStore.readTodos`（与工具同一份实现），
+ * 并**总是**广播（含空列表）—— 否则模型 `clear` 掉待办后界面会一直留着旧项。
+ */
+function broadcastTodos(sessionId: string): void {
+  if (!sessionId) { return; }
+  const todos = readTodos(sessionId).map((t) => ({
+    id: t.id,
+    content: t.content,
+    status: t.status,
+    // completedAt 必须带上：界面完成标记的时间戳来源（缺了会退化成"没有时间"的旧样式）
+    ...(t.completedAt ? { completedAt: t.completedAt } : {}),
+  }));
+  mainWindow?.webContents.send("slime:tasks:todos", { sessionId, todos });
+  // A-980-R32：推送之后再判"是否已全部完成" → 排一次自动清空（见该函数注释）
+  scheduleTodoAutoClear(sessionId, todos);
+}
+
+/**
+ * A-980-R32：全部完成 → **自动清空**待办（用户明确要求，同时移除了手动的 ✕ 与「清完成」）。
+ *
+ * 为什么清空必须落在主进程，而不是渲染层"看不见就算了"：
+ * 待办的唯一真源是 `data/todos_<sid>.json`。渲染层 setTodos([]) 只是清掉内存镜像，
+ * 文件还在 → 下次 `slime:sessions:loadTodos`（切会话、重启、重挂载）原样读回来，
+ * 症状就是"界面明明清空了，重启后旧清单又复活"。
+ *
+ * 为什么要延迟而不是立即清：留给「划过」动画（--todo-sweep 0.36s + 沉降 0.9s）播完的时间，
+ * 否则最后一项刚变勾就被删掉，用户根本看不到完成反馈。
+ * 1.5s 内若又有新的 `todo_write`（模型连续写两次很常见），计时器**重置**并重新判定，
+ * 避免"第一次的定时器把第二次刚写的、还没做完的清单清掉"。
+ */
+const TODO_AUTO_CLEAR_MS = 1500;
+const todoAutoClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** 全部完成判定：**必须有项**（空列表不算"全部完成"，否则会与 clear 语义打架） */
+function allTodosCompleted(todos: Array<{ status?: string }>): boolean {
+  return todos.length > 0 && todos.every((t) => t.status === "completed");
+}
+
+function scheduleTodoAutoClear(sessionId: string, todos: Array<{ status?: string }>): void {
+  const pending = todoAutoClearTimers.get(sessionId);
+  if (!allTodosCompleted(todos)) {
+    // 不再是"全完成"（模型又加了一项 / 用户手动取消勾选）→ 撤销已排队的清空
+    if (pending) { clearTimeout(pending); todoAutoClearTimers.delete(sessionId); }
+    return;
+  }
+  if (pending) { clearTimeout(pending); }
+  const timer = setTimeout(() => {
+    todoAutoClearTimers.delete(sessionId);
+    removeTodos(sessionId);
+    // 清空后必须再广播一次（空列表）——渲染层据此把面板收干净，并重置它的"刚刚完成"基线
+    broadcastTodos(sessionId);
+  }, TODO_AUTO_CLEAR_MS);
+  todoAutoClearTimers.set(sessionId, timer);
+}
+
+/**
+ * 工具轮拦截：Plan 类工具结果 → planStore 更新 + 广播渲染层。
+ *
+ * A-980-R29：两条规划链路（`plan_create` 真 Plan / `todo_write` 派生 Plan）共用同一个 sessionId key，
+ * 原先后到的会**顶掉**先到的 → 模型只要顺手调一次 todo_write，就能把用户正在看的真 Plan 冲掉。
+ * 现在按 `source` 定优先级：真 Plan 不被派生 Plan 覆盖（派生 Plan 可以被真 Plan 覆盖）。
+ */
 function interceptPlanTool(ev: { type: string; data?: unknown }, sessionId: string): void {
   if (ev.type !== "tool" || !sessionId) { return; }
   const d = (ev.data ?? {}) as Record<string, unknown>;
   const name = String(d.name ?? "");
   if (!PLAN_TOOLS.has(name)) { return; }
+  // 待办列表走独立通道（右侧栏「待办任务」面板订阅 slime:tasks:todos），
+  // 与 PlanPanel 的 slime:plan:update 并行推，两个面板各自即时刷新
+  if (name === "todo_write") { broadcastTodos(sessionId); }
   const result = String(d.result ?? "");
   const plan = planFromToolResult(name, result, sessionId);
-  if (plan) {
-    planStore.set(sessionId, plan);
-    mainWindow?.webContents.send("slime:plan:update", { sessionId, plan });
+  if (!plan) { return; }
+  const prev = planStore.get(sessionId);
+  if (plan.source === "todo" && prev?.source === "plan") {
+    // 会话已有真 Plan：派生数据只做兜底，不顶掉真 Plan
+    return;
   }
+  putPlan(sessionId, plan);
+  mainWindow?.webContents.send("slime:plan:update", { sessionId, plan });
 }
 
 /** E IPC：读取某会话的当前 Plan；渲染层 PlanPanel/StatusPanel 用 */
@@ -505,9 +711,11 @@ import {
   setSessionAgent, setSessionWorkspace, setSessionSummary, touchSessionWithMessage, SESSIONS_PATH,
   memberIdsOf, memberModelsOf, type MemberEntry,
 } from "../../../core-ts/src/services/sessions.js";
-import { loadHistoryForSession, clearSessionHistory } from "../../../core-ts/src/services/history.js";
+import { loadHistoryForSession, loadHistoryForSessionBefore, clearSessionHistory } from "../../../core-ts/src/services/history.js";
 import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO } from "../../../core-ts/src/services/context_compress.js";
 import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
+// A-980-R32：点击路径的多基准候选解析（纯逻辑，vitest 直测）
+import { buildTargetCandidates, normalizeTargetPath } from "./targetPath.js";
 
 let mainWindow: BrowserWindow | null = null;
 let chatService: ChatService | null = null;
@@ -524,6 +732,15 @@ const agentStreamSessionMap = new Map<string, string>();
 let sandbox: SandboxManager | null = null;
 /** 权限请求 → 渲染层等待用户抉择的挂起解析器（requestId → resolver） */
 const pendingPerms = new Map<string, (decision: PermissionDecision) => void>();
+/**
+ * 后台子代理的会话 ID 前缀（配合 core-ts 子代理流）。
+ * A-980-R31：**这里也是一个关键的静默失败源**——子代理会话与用户当前会话永远不相等，
+ * 渲染层的会话过滤会把这些交互请求静默丢弃，于是它们既不展示、也不立即失败，
+ * 而是挂满 5 分钟超时（PERM_TIMEOUT_MS / ASK_TIMEOUT_MS）才被拒/跳过。
+ * 实测后果：子代理在等一个永远不会出现的用户点击，直到自己的执行预算耗尽 → 被记为"超时中断"。
+ * 所以这两类请求必须在**主进程**就按"后台无人可交互"处理掉。
+ */
+const SUBAGENT_SESSION_PREFIX = "__subagent__:";
 /** 权限请求超时（渲染层无响应时自动拒绝，避免工具调用卡死） */
 const PERM_TIMEOUT_MS = 300_000;
 /** ask_user 提问 → 渲染层等待用户回答的挂起解析器（requestId → resolver） */
@@ -643,6 +860,27 @@ async function ensureServices(): Promise<void> {
         resolve({ requestId: req.requestId, approved: false, approvedActions: [], deniedActions: [req.actions[0].action], reason: "无窗口", autoApproved: false });
         return;
       }
+      // A-980-R31：后台子代理的授权请求 → **立即拒绝并说清原因**，不要推给渲染层。
+      // 理由：① 子代理跑在 `__subagent__:*` 会话，渲染层会话过滤必然丢弃它（无人可见）；
+      //      ② 于是它会挂满 PERM_TIMEOUT_MS（5 分钟）才被拒 —— 这段时间子代理什么都没做，
+      //         最后往往被自己的执行预算判成"超时中断"（用户看到的"子代理超时率 100%"有它一份）；
+      //      ③ 后台任务本来就不该静默替用户点"允许"，fail-closed 才是正确姿势。
+      // 立即拒绝 + 可操作原因，能让子代理**当场换一条不需要授权的路**把任务做完。
+      const reqSid = req.sessionId ?? agentStreamSessionMap.get(req.agentId);
+      if (typeof reqSid === "string" && reqSid.startsWith(SUBAGENT_SESSION_PREFIX)) {
+        resolve({
+          requestId: req.requestId,
+          approved: false,
+          approvedActions: [],
+          deniedActions: req.actions.map((a) => a.action),
+          reason:
+            "该操作需要用户授权，但这是后台子代理（无人可交互确认）→ 已直接拒绝。"
+            + "请改用不需要授权的做法完成任务（例如只读分析、基于已有信息给结论），"
+            + "并在最终产出里如实说明哪一步因权限被跳过。",
+          autoApproved: false,
+        });
+        return;
+      }
       const ui: PermissionRequestUI = {
         requestId: req.requestId,
         agentId: req.agentId,
@@ -728,15 +966,22 @@ async function ensureServices(): Promise<void> {
     },
     hooks: {
       fixedSegments: (agent) => {
+        const segs: string[] = [];
         try {
           const a = agentRegistry!.loadedAgents.find((x) => x.name === agent.name);
           const emotion = new EmotionalState((a?.emotion as Record<string, unknown>) ?? undefined);
           const behavior = BehaviorStore.fromDict(a?.behavior ?? {});
-          return buildMindSegments(emotion, behavior);
+          segs.push(...buildMindSegments(emotion, behavior));
         } catch (e) {
           console.warn(`[gui:mind] 心智固定段注入失败: ${e}`);
-          return [];
         }
+        // A-980-R30：可用子代理清单（模型据此决定委派给谁 / 点名谁）
+        try {
+          segs.push(...subagentCatalogSegment());
+        } catch (e) {
+          console.warn(`[gui:subagent] 子代理清单注入失败: ${e}`);
+        }
+        return segs;
       },
       retrieveSegments: async (agentId: string, query: string) => {
         try {
@@ -764,6 +1009,13 @@ async function ensureServices(): Promise<void> {
           resolve({ answer: "", skipped: true });
           return;
         }
+        // A-980-R31：后台子代理不能向用户提问（同权限请求的道理：渲染层会按会话丢弃 → 白挂 5 分钟）。
+        // 按「跳过」立即返回，子代理据此基于合理默认继续，并在产出里写明这个假设。
+        const askSid = req.sessionId ?? agentStreamSessionMap.get(req.agentId);
+        if (typeof askSid === "string" && askSid.startsWith(SUBAGENT_SESSION_PREFIX)) {
+          resolve({ answer: "", skipped: true });
+          return;
+        }
         const ui: AskUserRequestUI = {
           requestId: randomUUID(),
           agentId: req.agentId,
@@ -782,6 +1034,13 @@ async function ensureServices(): Promise<void> {
           }
         }, ASK_TIMEOUT_MS);
         pendingAsks.set(ui.requestId, resolve);
+        // A-980-R26：「需要用户做选择」→ 系统通知（模型在等回答，用户可能没盯着这个窗口；
+        // 弹通知不出现在渲染层，故不受渲染层切会话过滤影响）
+        notifyUser({
+          kind: "choice",
+          title: `${ui.agentName || "Agent"} 需要你选择`,
+          body: (ui.question || ui.header || "有一个待确认的选择").slice(0, 160),
+        });
         try {
           win.webContents.send("slime:ask:request", ui);
         } catch {
@@ -859,30 +1118,78 @@ async function ensureServices(): Promise<void> {
         if (!target) { throw new Error(`子代理「${def.name}」找不到可执行 Agent`); }
         if (!engine) { throw new Error("引擎未就绪"); }
         const system = def.systemPrompt ?? (await engine.buildSystem(target, undefined, undefined));
+        // A-978：子代理流必须带专属 sessionId（`__subagent__:<runId>`），否则 chunk 的 sessionId 为 undefined，
+        // 渲染器过滤逻辑（cSid == null 时回退 streamSessionRef 判定）会把子代理 chunk 误判为主 Agent 流，
+        // 导致主 Agent 监测栏（tokens/耗时/tokens/s）被子代理数据污染（用户实测"指定 subagent 模型后主 Agent 动作也被认定"）。
+        const subagentSessionId = `${SUBAGENT_SESSION_PREFIX}${def.id ?? def.name}`;
+        // A-980-R30 **深度守卫**：子代理不再获得派发/收取子代理的能力。
+        // 理由：本管理器没有深度计数（不像 Claude Code 有 MAX_SUBAGENT_SPAWN_DEPTH），
+        // 子代理若能再 delegate，每层 3 并发 → 指数级套娃；Anthropic 也明确多智能体的
+        // 协调成本可能超过收益。需要多级时走「链式」：主 Agent 依次派发并把上下文转交下一个。
+        const dispatchTools = new Set(["delegate_subagent", "subagent_result"]);
+        const allToolNames = engine.listTools?.().map((t) => t?.function?.name).filter((n): n is string => !!n) ?? [];
+        const subToolsOnly = def.toolsOnly
+          ?? (allToolNames.length > 0 ? allToolNames.filter((n) => !dispatchTools.has(n)) : undefined);
+        // A-980-R31 **超时率 100% 的根因**：此前这里没有把 `ctx.signal` 交给 engine.stream，
+        // 于是 SubAgentManager.execute() 里那句 `setTimeout(() => controller.abort(), timeoutMs)`
+        // 只是让一个**没人监听**的信号变成 aborted——模型流照旧跑到自然结束
+        // （实测：120s 预算实跑 332.3s），最后收尾时再按 signal.aborted 把它**归因**为"超时中断"。
+        // 即：不是模型慢，是中断从来没生效过。现在把 signal 透传进去（引擎 abort → 底层请求中断 → 携部分正文收尾）。
+        // networkEnabled 有意不传：引擎侧缺省即 true（tool_loop `networkEnabled ?? true`），
+        // 子代理的联网工具本就可用，不必在这里重复下发（传了反而容易和用户开关打架）。
         let reply = "";
-        for await (const ev of engine.stream({ agent: target, message: def.task, history: [], systemPrompt: system })) {
+        const acc: string[] = [];
+        for await (const ev of engine.stream({
+          agent: target,
+          message: def.task,
+          history: [],
+          systemPrompt: system,
+          sessionId: subagentSessionId,
+          signal: ctx?.signal,
+          ...(subToolsOnly ? { toolsOnly: subToolsOnly } : {}),
+        })) {
+          // 注意顺序：先消费事件、再判中断。引擎在 abort 之后会 yield 一个**携带部分正文**的 done，
+          // 旧写法在读取前就 `break`，这份部分产出被直接丢掉 → 落盘 0 字节、
+          // 主 Agent 只拿到一句"超时中断"（用户："失败了，但怎么一个记录都没有"）。
+          if (ev.type === "chunk" && typeof ev.content === "string") {
+            acc.push(ev.content);
+          } else if (ev.type === "done" && typeof ev.reply === "string") {
+            reply = ev.reply;
+          }
           if (ctx?.signal.aborted) { break; }
-          if (ev.type === "done") { reply = ev.reply ?? ""; }
         }
+        // done 未到达（异常/提前跳出）时用累积增量兜底；引擎的中断占位文案不算产出
+        const aborted = ctx?.signal.aborted === true;
+        if (!reply || reply.trim() === "（生成已被中断）") { reply = acc.join(""); }
         const dir = join(INSTALL_ROOT, "data", "generated");
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        writeFileSync(join(dir, `subagent-${def.name}-${stamp}.md`), reply, "utf8");
+        // 中断也落盘（带归因头），不再写 0 字节空文件——"没有记录"本身就是最坏的结果
+        const body = reply.trim()
+          ? `${aborted ? "> ⚠️ 本次执行被中断，以下为中断前已产出的部分内容。\n\n" : ""}${reply}`
+          : `> 本次执行${aborted ? "被中断" : "结束"}，子代理未产出任何正文。\n`;
+        writeFileSync(join(dir, `subagent-${def.name}-${stamp}.md`), body, "utf8");
         return reply;
       }, {
         concurrency: 3,
         hooks: {
+          // A-980-R31：每次广播运行态时顺手把**新到达终态**的记录落盘。
+          // 为什么放在广播点而不是只放 onComplete/onError：取消「排队中」的任务是在
+          // SubAgentManager.cancel() 里直接改状态、**不触发任何钩子**，只挂钩子会漏掉这一类记录。
           onStart: (run) => {
             console.log(`[subagent] 开始 ${run.name} (${run.id})`);
+            syncSubagentRuns(subagents.list());
             // A-918+：派发即推送，让右侧栏「子代理」区立即看到（不等 4s 轮询）
             mainWindow?.webContents.send("slime:resident:update", null);
           },
           onComplete: (run) => {
             console.log(`[subagent] 完成 ${run.name}${run.structured ? "（含结构化结果）" : ""}`);
+            syncSubagentRuns(subagents.list());
             mainWindow?.webContents.send("slime:resident:update", null);
           },
           onError: (run) => {
             console.warn(`[subagent] ${run.status} ${run.name}: ${run.error ?? ""}`);
+            syncSubagentRuns(subagents.list());
             mainWindow?.webContents.send("slime:resident:update", null);
           },
         },
@@ -894,7 +1201,8 @@ async function ensureServices(): Promise<void> {
         description: "审查代码质量、发现潜在 bug、静态分析、给出改进建议",
         systemPrompt: "你是资深代码审查专家，输出问题清单与修复建议。",
         model: "inherit",
-        timeoutMs: 120_000,
+        // A-980-R31：执行预算 120s→300s（原值配上"abort 不生效"= 必然超时；预算应防挂死，不该是常态失败源）
+        timeoutMs: 300_000,
         outputSchema: true,
       });
       subagents.register({
@@ -902,7 +1210,7 @@ async function ensureServices(): Promise<void> {
         description: "联网搜索资料、汇总信息、多来源调研与引用整理",
         systemPrompt: "你是多来源调研专家，输出带引用的结构化调研摘要。",
         model: "inherit",
-        timeoutMs: 180_000,
+        timeoutMs: 300_000,
         outputSchema: true,
       });
       subagents.register({
@@ -910,7 +1218,7 @@ async function ensureServices(): Promise<void> {
         description: "数据清洗、统计、表格/指标计算与分析",
         systemPrompt: "你是数据分析专家，输出可核验的统计与结论。",
         model: "inherit",
-        timeoutMs: 120_000,
+        timeoutMs: 300_000,
         outputSchema: true,
       });
 
@@ -928,7 +1236,7 @@ async function ensureServices(): Promise<void> {
             systemPrompt: ag.identity_prompt?.trim() || `你是「${ag.name}」，负责：${ag.role}。`,
             agentId: ag.id,
             model: "inherit",
-            timeoutMs: 180_000,
+            timeoutMs: 300_000,
             outputSchema: true,
           });
         }
@@ -941,6 +1249,8 @@ async function ensureServices(): Promise<void> {
 
       // 自动委派注入：把管理器挂到 delegate_subagent 工具（模型对话中可自行委派）
       setSubagentManager(subagents);
+      // A-980-R30：同时挂到 fixedSegments 的清单注入（让模型知道"能问谁"）
+      subagentsRef = subagents;
       // 全局子代理默认模型：恢复上次设置（无显式 def/委派模型时生效；继承优先级最低）
       if (subagentDefaultModel) {
         subagents.setDefaultModel(subagentDefaultModel);
@@ -971,7 +1281,8 @@ async function ensureServices(): Promise<void> {
       // A-910：设置页「后台任务」IPC —— 定时任务增删/暂停恢复/立即触发、子代理派发、整体快照
       ipcMain.handle("slime:resident:state", () => ({
         scheduler: scheduler.list(),
-        subagents: subagents.list(),
+        // A-980-R31：内存运行态 + 落盘历史合并（重启后不再是空白面板 / 消失的下拉按钮）
+        subagents: mergedSubagentRuns(subagents.list()),
         defaultModel: subagents.getDefaultModel(),
       }));
       ipcMain.handle("slime:resident:scheduler:add", (_e, p: { name?: string; cron?: string; prompt?: string; agentId?: string }) => {
@@ -1013,11 +1324,26 @@ async function ensureServices(): Promise<void> {
       ipcMain.handle("slime:resident:subagent:cancel", (_e, p: { id?: string }) => ({
         ok: !!p?.id && subagents.cancel(p.id!),
       }));
-      // v2 自动委派：依任务与已注册定义的 description 语义匹配，自动选人派发；无匹配返回 ok:false
-      ipcMain.handle("slime:resident:subagent:delegate", (_e, p: { task?: string; agentId?: string }) => {
+      // A-980-R31：清空**历史记录**（落盘 + 内存中已终态的痕迹）。
+      // 运行中/排队中的**保留**——用户要清的是"跑完的痕迹"，不能顺手把在途任务也干掉。
+      // 必须同时 `forgetTerminal()`：只清文件的话，下一次广播的 `syncSubagentRuns(list())`
+      // 会发现内存里那些终态记录"不在文件里"，又把它们写回去（清空变僵尸）。
+      ipcMain.handle("slime:resident:subagent:clear", () => {
+        const cleared = clearSubagentRuns();
+        const dropped = subagents.forgetTerminal();
+        mainWindow?.webContents.send("slime:resident:update", null);
+        return { ok: true, cleared, dropped };
+      });
+      // v2 自动委派：依任务与已注册定义的 description 语义匹配，自动选人派发；无匹配时 delegate 会
+      // 自动合成通用子代理兜底（故这里几乎不会失败）。A-980-R30：支持 agent 点名（设置页/外部调用）。
+      ipcMain.handle("slime:resident:subagent:delegate", (_e, p: { task?: string; agentId?: string; agent?: string; model?: string }) => {
         if (!p?.task) { return { ok: false, error: "task 必填" }; }
-        const run = subagents.delegate(p.task, p.agentId ? { agentId: p.agentId } : {});
-        if (!run) { return { ok: false, error: "无匹配的子代理定义（请先 register 定义）" }; }
+        const overrides: { agentId?: string; agent?: string; model?: string } = {};
+        if (p.agentId) { overrides.agentId = p.agentId; }
+        if (p.agent) { overrides.agent = p.agent; }
+        if (p.model) { overrides.model = p.model; }
+        const run = subagents.delegate(p.task, overrides);
+        if (!run) { return { ok: false, error: p.agent ? `没有名为「${p.agent}」的子代理` : "无可派发的子代理定义" }; }
         return { ok: true, run };
       });
       // A-942：全局子代理默认模型（贵模型统筹、廉价模型执行档位；持久化 + 即时生效）
@@ -1282,7 +1608,12 @@ function buildPermOptions(req: {
   ];
 }
 
-function buildAgentState(name: string, role: string, parentId: string | null = null): AgentState {
+function buildAgentState(
+  name: string,
+  role: string,
+  parentId: string | null = null,
+  toolProfile?: { mode: "default" | "custom"; skills: string[]; mcp: string[] },
+): AgentState {
   return {
     id: randomUUID().replace(/-/g, "").slice(0, 12),
     name,
@@ -1296,6 +1627,8 @@ function buildAgentState(name: string, role: string, parentId: string | null = n
     children: [],
     created_at: new Date().toISOString(),
     lifecycle: "growth",
+    // A-980-R22：工具面白名单（缺省 → 运行时回退内置推荐集）
+    ...(toolProfile ? { tool_profile: toolProfile } : {}),
   } as AgentState;
 }
 
@@ -1306,10 +1639,14 @@ function assertAgentNameRole(name: unknown, role: unknown): asserts name is stri
   }
 }
 
-async function createAgent(name: string, role: string): Promise<AgentState> {
+async function createAgent(
+  name: string,
+  role: string,
+  toolProfile?: { mode: "default" | "custom"; skills: string[]; mcp: string[] },
+): Promise<AgentState> {
   assertAgentNameRole(name, role);
   const agents = agentRegistry!.loadedAgents;
-  const a = buildAgentState(name.trim(), role.trim(), null);
+  const a = buildAgentState(name.trim(), role.trim(), null, toolProfile);
   agents.push(a);
   await agentRegistry!.save();
   return a;
@@ -1320,7 +1657,7 @@ async function forkAgent(parent: AgentState, name: string, role: string): Promis
   if ((parent.fork_depth ?? 0) + 1 > 2) {
     throw new Error("分裂深度已达上限（MAX_FORK_DEPTH=2）");
   }
-  const child = buildAgentState(name.trim(), role.trim(), parent.id);
+  const child = buildAgentState(name.trim(), role.trim(), parent.id, parent.tool_profile as { mode: "default" | "custom"; skills: string[]; mcp: string[] } | undefined);
   child.model_choice = parent.model_choice;
   child.fork_depth = (parent.fork_depth ?? 0) + 1;
   parent.children.push(child.id);
@@ -1382,6 +1719,37 @@ async function resolveSessionWindowCap(agentId: string, modelId: string): Promis
   return undefined;
 }
 
+/** A-980-R26：通知标题用的 Agent 显示名（查不到就回落到 Agent id / 通用文案，绝不抛） */
+function agentNameForNotify(agentId: string | undefined): string {
+  try {
+    if (agentId && agentRegistry) {
+      const a = agentRegistry.loadedAgents.find((x) => x.id === agentId || x.name === agentId);
+      if (a?.name) { return a.name; }
+    }
+  } catch { /* ignore */ }
+  return agentId || "Agent";
+}
+
+/** A-980-R24：为一条流创建「chunk 发送合批器」。
+ *
+ *  上游每吐一个 token 就回调一次 → 此前主进程**逐条** `webContents.send("slime:chat:chunk")`，
+ *  高速率模型下变成每秒数百条 IPC。Electron 的 send 没有背压，渲染进程（同时还在跑 Markdown
+ *  全量重解析）一旦跟不上，消息队列只增不减 → 渲染进程 OOM（`data/logs/renderer-crash.log`
+ *  已记录过 `oom`，用户侧表现就是"用着用着 slime 直接崩了、任务中断"）。
+ *
+ *  这里把「同一条流 + 同类型」的纯文本增量按 40ms 窗口合并成一条再发（≈25 帧/秒，观感无损），
+ *  IPC 消息数下降 1~2 个数量级。**只动发送侧**：`session.pushChunk()` 仍按原始 chunk 记录，
+ *  断线重放与轨迹数据不受影响。详见 `gui/src/main/streamBatch.ts`。
+ *
+ *  ⚠️ `done` / `error` 之前必须 `flush()`，否则最后一段正文会晚于 done 到达（尾部丢字）。 */
+function createChunkSender(): StreamChunkBatcher {
+  return new StreamChunkBatcher((chunk) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send("slime:chat:chunk", chunk);
+    }
+  });
+}
+
 /** 引擎事件 → IPC StreamChunk：统一 snake_case→camelCase 字段映射（elapsed_ms→elapsedMs 等）
  *
  *  关键兼容：后端 `done` 事件会把 `prompt_tokens` / `completion_tokens` 放在 chunk **最外层**，
@@ -1431,6 +1799,22 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
       mergedTimings.reasoningTokens = 0;
     }
   }
+  // A-974-R7：窗口占用口径（「最近一轮」输入侧 token；仅工具循环路径下发）——
+  // 工具循环每轮全量重发历史，外层 prompt_tokens 是跨轮累计（计费口径）；
+  // 直接拿它当窗口占用会 N 轮叠加 → GUI 上下文环/右栏爆表（用户实测正文输出后爆到 1.1M）。
+  {
+    const wpt = (d as any).window_prompt_tokens ?? (d as any).windowPromptTokens;
+    const wcr = (d as any).window_cache_read_tokens ?? (d as any).windowCacheReadTokens;
+    if (typeof wpt === "number") { mergedTimings.windowPromptTokens = wpt; }
+    if (typeof wcr === "number") { mergedTimings.windowCacheReadTokens = wcr; }
+  }
+  // A-974-R8：协议语义标记（OpenAI 兼容=true=prompt 已含缓存命中 / Anthropic=false）——
+  // 渲染层窗口占用公式据此决定是否 +cacheRead，避免 OpenAI 兼容系重复计缓存导致窗口虚高。
+  // timings 为 number 表，布尔编码为 1/0，渲染层按 `=== 1` 判定。
+  {
+    const cri = (d as any).cache_read_in_prompt ?? (d as any).cacheReadInPrompt;
+    if (typeof cri === "boolean") { mergedTimings.cacheReadInPrompt = cri ? 1 : 0; }
+  }
   return {
     seq: ev.seq,
     type: ev.type as StreamChunk["type"],
@@ -1463,9 +1847,74 @@ function isLocalModelReady(agent: AgentState): boolean {
   return mgr.isChatReady(spec?.path ?? "");
 }
 
+/** A-980-R24：窗口启动尺寸**固定按屏幕工作区比例**（不再沿用上次退出尺寸）。
+ *
+ *  用户实测诉状：每次重启都恢复上次拖过的大小 → 同一程序在不同时候"长相不一"，且拖小过之后
+ *  再启动就是个小窗。现在：每次启动都用主屏工作区比例算出尺寸并**居中**，只有位置可选记忆。
+ *  比例取自用户给定的目标版式截图实测：窗口占工作区宽 77.8%、高 89.9%。
+ *  （另一个附带好处：窗口渲染尺寸稳定 → 首帧布局/动画节拍也稳定，不再随上次窗口大小漂移。） */
+interface WindowState { width: number; height: number; x?: number; y?: number; }
+const WIN_STATE_PATH = resolveExtra("../config/winstate.json");
+const WIN_MIN = { width: 800, height: 560 };
+/** 默认尺寸比例（× 主屏工作区宽/高，用户指定版式） */
+const WIN_DEFAULT_RATIO = { width: 0.78, height: 0.90 };
+/** 默认尺寸下限（首启/超小屏时保证可用工作面的最小逻辑窗口） */
+const WIN_DEFAULT_FLOOR = { width: 1040, height: 700 };
+
+function defaultWindowState(): WindowState {
+  const wa = screen.getPrimaryDisplay().workArea;
+  const wantW = Math.round(wa.width * WIN_DEFAULT_RATIO.width);
+  const wantH = Math.round(wa.height * WIN_DEFAULT_RATIO.height);
+  // 下限保证小屏不缩得过小，上限受工作区与全局极值双重约束，杜绝越界
+  const w = Math.max(WIN_MIN.width, Math.min(Math.max(wantW, WIN_DEFAULT_FLOOR.width), wa.width, 2560));
+  const h = Math.max(WIN_MIN.height, Math.min(Math.max(wantH, WIN_DEFAULT_FLOOR.height), wa.height, 1600));
+  return { width: w, height: h };
+}
+
+/** A-980-R24：只读回**位置**（尺寸一律由上方的 defaultWindowState 按比例重算），
+ *  并按新尺寸重新钳制进工作区——否则"旧坐标 + 新尺寸"会让窗口探出屏幕外。 */
+function loadWindowPos(size: { width: number; height: number }): { x?: number; y?: number } {
+  try {
+    const s = JSON.parse(readFileSync(WIN_STATE_PATH, "utf8")) as Partial<WindowState>;
+    if (typeof s.x !== "number" || typeof s.y !== "number") { return {}; }
+    const wa = screen.getPrimaryDisplay().workArea;
+    const x = Math.round(s.x), y = Math.round(s.y);
+    if (x + 200 > wa.x + wa.width || y + 120 > wa.y + wa.height || x < wa.x - 400 || y < wa.y - 400) {
+      return {}; // 位置越界（换显示器/分辨率变了）→ 不给坐标，走默认居中
+    }
+    return {
+      x: Math.max(wa.x, Math.min(x, wa.x + wa.width - size.width)),
+      y: Math.max(wa.y, Math.min(y, wa.y + wa.height - size.height)),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function persistWindowState(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.isMinimized() || win.isMaximized() || win.isFullScreen()) { return; }
+  try {
+    // A-980-R24：只存位置（尺寸下次启动一律按比例重算，不存也不读）
+    const [x, y] = win.getPosition();
+    writeFileSync(WIN_STATE_PATH, JSON.stringify({ x, y }), "utf8");
+  } catch { /* 首次无目录时忽略（下次写） */ }
+}
+let winStateTimer: NodeJS.Timeout | null = null;
+function schedulePersistWindowState(): void {
+  if (winStateTimer) { clearTimeout(winStateTimer); }
+  winStateTimer = setTimeout(() => { winStateTimer = null; persistWindowState(); }, 400);
+}
+
 function createWindow(): void {
+  // A-980-R26：通知模块注入主窗口获取器 + 设置 Windows AppUserModelID（通知归属，须早于任何弹窗）
+  initNotify({ getWindow: () => mainWindow });
+  // A-980-R24：每次启动都按屏幕比例定尺寸 + 居中（位置可选记忆，见 loadWindowPos）
+  const st = defaultWindowState();
+  const pos = loadWindowPos(st);
   mainWindow = new BrowserWindow({
-    width: 1100, height: 720, minWidth: 800, minHeight: 560, show: false,
+    width: st.width, height: st.height, x: pos.x, y: pos.y,
+    minWidth: WIN_MIN.width, minHeight: WIN_MIN.height, show: false,
     icon: join(INSTALL_ROOT, "build", "icon.png"),
     // Campanula 式自绘标题栏：隐藏系统标题栏，Windows overlay 渲染窗口按钮
     titleBarStyle: "hidden",
@@ -1481,8 +1930,44 @@ function createWindow(): void {
     },
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
+  // A-980-R23：拖动/缩放/关闭时持久化窗口状态（下一启动恢复同尺寸同位置）
+  mainWindow.on("resize", () => schedulePersistWindowState());
+  mainWindow.on("move", () => schedulePersistWindowState());
+  mainWindow.on("close", () => persistWindowState());
   // GPU 崩溃保护：ready-to-show 未触发时（如 GPU exit_code=-1），兜底主动 show
   setTimeout(() => { if (mainWindow && !mainWindow.isVisible()) mainWindow.show(); }, 3000);
+  // A-975：渲染进程崩溃自愈（DeepSeek 长时间生成实测白屏 + 终端无限 error 的根因一半在此）——
+  // 渲染进程一旦崩溃（OOM/长任务/未知），主进程仍在持续 send → 每条对已销毁 webContents 报错 → "无限 error"；
+  // 窗口则停在纯白。此处：崩溃原因落盘 + 自动 reload 恢复（在途流现场由 per-session 快照/后台镜像兜底）。
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    try {
+      const dir = resolveExtra("../data/logs");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "renderer-crash.log"), `${new Date().toISOString()}\t${details.reason} (exit=${details.exitCode})\n`, { flag: "a" });
+      console.error("[gui:main] 渲染进程已崩溃，原因:", details.reason, "(将自动重载恢复)");
+    } catch { /* ignore */ }
+    // A-980-R26：意外终止 → 系统通知（用户可能正在别的窗口，页面白屏他看不到）
+    notifyUser({
+      kind: "aborted",
+      title: "slime 意外终止",
+      body: `界面进程异常退出（${details.reason}），已自动重载恢复；进行中的生成可能已中断。`,
+    });
+    try { mainWindow?.webContents.reload(); } catch { /* ignore */ }
+  });
+  // 渲染进程无响应（主线程死循环/巨大长任务）→ 记录后尝试重载恢复
+  mainWindow.webContents.on("unresponsive", () => {
+    try {
+      const dir = resolveExtra("../data/logs");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "renderer-unresponsive.log"), `${new Date().toISOString()}\n`, { flag: "a" });
+    } catch { /* ignore */ }
+    // A-980-R26：界面卡死（主线程死循环/巨长任务）也属"意外终止"体验——通知提醒用户
+    notifyUser({
+      kind: "aborted",
+      title: "slime 界面无响应",
+      body: "界面进程长时间未响应，可能正在执行超长任务；若无恢复请重启应用。",
+    });
+  });
   // A-937：退出行为——后台模式拦截 close → 隐藏窗口 + 托盘常驻（真正退出走托盘菜单或 app.quit）
   mainWindow.on("close", (e) => {
     if (exitModeStore === "background" && !appIsQuitting) {
@@ -1629,6 +2114,8 @@ function registerIpcHandlers(): void {
       resumeHint: (input as { resumeHint?: string }).resumeHint,
     };
     const session = createStreamSession();
+    // A-980-R24：chunk 下发合批（见 createChunkSender 注释）
+    const chunkSender = createChunkSender();
     // 干净正文：优先取 chatService done 事件里全量 extractThinkingFromReply 清洗后的 reply
     // （流式逐 chunk 剥离对细粒度 chunk 可能漏掉裸思考，累积的 fullReply 不代表最终正文）
     let cleanReply: string | undefined;
@@ -1683,28 +2170,54 @@ function registerIpcHandlers(): void {
           }
           const chunk = toStreamChunk(ev, cancelKey);
           session.pushChunk(chunk);
-          mainWindow?.webContents.send("slime:chat:chunk", chunk);
+          // A-980-R24：原始 chunk 已逐条进 session 缓冲（重放/轨迹完整），IPC 侧走合批
+          chunkSender.push(chunk);
         }
         if (input.sessionId) {
           await touchSessionWithMessage(input.sessionId, input.message).catch(() => undefined);
         }
-        mainWindow?.webContents.send("slime:chat:done", {
-          reply: cleanReply ?? session.fullReply, model: session.model,
-          elapsedMs: session.elapsedMs, timings: session.timings,
-          interrupted: controller.signal.aborted,
-          sessionId: cancelKey,
-          ctxBuckets,
-        });
-        // A-918：流终态广播——渲染层据此把 per-session 快照 hasActive 校准为 false，
-        // 根治「切走再切回仍显示生成中/仍重连」的假活跃状态
-        mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: cancelKey });
+        try {
+          // A-980-R24：**done 之前必须 flush**，否则尾部正文会晚于 done 到达（末尾丢字）
+          chunkSender.flush();
+          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+            mainWindow.webContents.send("slime:chat:done", {
+              reply: cleanReply ?? session.fullReply, model: session.model,
+              elapsedMs: session.elapsedMs, timings: session.timings,
+              interrupted: controller.signal.aborted,
+              sessionId: cancelKey,
+              // A-933：权威窗口上限（Agent.max_context 或本次模型 context_window）——右栏进度条/圆环/
+              // 压缩阈值三者同源。⚠️ 此前**只**在 retry 路径下发，正常发送的 done 里没有 →
+              // 渲染层只能退回本地预设（曾把 512K 模型显示成 128K），且压缩阈值判定跟着错。
+              windowCap: await resolveSessionWindowCap(agentId, session.model).catch(() => undefined),
+              ctxBuckets,
+            });
+            // A-918：流终态广播——渲染层据此把 per-session 快照 hasActive 校准为 false，
+            // 根治「切走再切回仍显示生成中/仍重连」的假活跃状态
+            mainWindow.webContents.send("slime:chat:streamEnded", { sessionId: cancelKey });
+            // A-980-R26：任务完成 → 系统通知。**用户主动中断（aborted）不通知**——
+            // 那是用户自己按的停止，再弹一条"完成"只会打扰。
+            if (!controller.signal.aborted) {
+              notifyUser({
+                kind: "done",
+                title: `${agentNameForNotify(agentId)} 已完成`,
+                body: (cleanReply ?? session.fullReply ?? "").replace(/\s+/g, " ").trim().slice(0, 160) || "任务已结束",
+              });
+            }
+          }
+        } catch { /* ignore */ }
         // D：收敛 trace 并广播（成功）
         const traced = recorder.finish(true);
-        traceStore.set(cancelKey, traced);
-        mainWindow?.webContents.send("slime:trace:update", { sessionId: cancelKey, trace: traced });
+        traceStoreSet(cancelKey, traced);
+        try {
+          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+            mainWindow.webContents.send("slime:trace:update", { sessionId: cancelKey, trace: traced });
+          }
+        } catch { /* ignore */ }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("[gui:main] chat stream error:", msg);
+        // A-980-R24：错误前把已生成的待发文本放出去（用户应看到中断前已产出的内容）
+        chunkSender.flush();
         // A-918++：中断类错误落盘（data/logs/chat-errors.log），便于事后归因"刚要开始就中断"
         try {
           const logDir = resolveExtra("../data/logs");
@@ -1713,11 +2226,19 @@ function registerIpcHandlers(): void {
         } catch { /* 落盘失败不影响主流程 */ }
         mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: cancelKey });
         mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: cancelKey });
+        // A-980-R26：出错 → 系统通知（用户常在生成中切走做别的事，回来才发现整轮标红）
+        notifyUser({
+          kind: "error",
+          title: `${agentNameForNotify(input.agentId)} 出错`,
+          body: msg.replace(/\s+/g, " ").trim().slice(0, 160) || "生成过程中发生错误",
+        });
         // D：失败轨迹也收敛广播（TraceViewer 见失败归因 eval=false + 错误摘要）
         const failedTrace = recorder.finish(false, msg);
-        traceStore.set(cancelKey, failedTrace);
+        traceStoreSet(cancelKey, failedTrace);
         mainWindow?.webContents.send("slime:trace:update", { sessionId: cancelKey, trace: failedTrace });
       } finally {
+        // A-980-R24：合批器收尾（flush 幂等；此后新帧一律丢弃，避免流结束后仍向渲染层发僵尸帧）
+        chunkSender.dispose();
         activeChats.delete(cancelKey);
         // 会话标签竞态防护（A-151）：仅当映射中的值仍是本流注册的 cancelKey 时才删除——
         // 同 Agent 多会话并发时，本流 finally 可能晚于「新会话流已 set」执行，
@@ -1739,6 +2260,12 @@ function registerIpcHandlers(): void {
       console.error("[gui:main] chat stream setup error:", msg);
       mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: input.sessionId });
       mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: input.sessionId });
+      // A-980-R26：发送阶段就失败（服务未就绪 / Agent 解析失败）同样通知
+      notifyUser({
+        kind: "error",
+        title: "请求未能开始",
+        body: msg.replace(/\s+/g, " ").trim().slice(0, 160) || "发送阶段发生错误",
+      });
       return { ok: false, error: msg };
     }
   });
@@ -1753,9 +2280,27 @@ function registerIpcHandlers(): void {
     return { ok: true, active: activeChats.size };
   });
 
+  /** A-973：查询指定会话是否仍有进行中的流（渲染层恢复会话时判定"进行中/已结算"的唯一真相源）。
+   *  activeChats 的 key 与流归属同口径（sessionId ?? agentId）：先按传入 key 精确查，未命中再
+   *  遍历值匹配 agentStreamSessionMap 兜底——主进程 activeChats 才有资格回答"这条流死没死"，
+   *  杜绝渲染层靠 6s 超时猜测导致"恢复中"冻结/误判整条重发。 */
+  handleTrusted<{ key?: string }>("slime:chat:isActive", async (_event, payload): Promise<{ active: boolean }> => {
+    const key = payload.key ?? "";
+    // 流归属口径：activeChats 的 cancelKey = sessionId ?? agentId。渲染层恢复时传的 key 可能是
+    // 当前 sessionId 或 agentId，故遍历比对（精确匹配或经 agentStreamSessionMap 反查）。
+    if (activeChats.has(key)) { return { active: true }; }
+    for (const mapKey of activeChats.keys()) {
+      if (mapKey === key) { return { active: true }; }
+    }
+    for (const [, boundKey] of agentStreamSessionMap) {
+      if (boundKey === key) { return { active: true }; }
+    }
+    return { active: false };
+  });
+
   /** A-969 上下文自动压缩：把指定会话历史压缩为摘要并写回会话 meta（后续 loadSessionHistory 自动注入摘要头 +
    *  最近 K 轮，不再全量重发）。摘要轮失败/无模型时降级硬裁剪——绝不阻塞对话。GUI 发送前触发并展示过渡动画。 */
-  handleTrusted<{ sessionId?: string; ratio?: number }>("slime:chat:compress", async (_event, p): Promise<CompressResult> => {
+  handleTrusted<{ sessionId?: string; ratio?: number; used?: number }>("slime:chat:compress", async (_event, p): Promise<CompressResult> => {
     try {
       const sessionId = (p?.sessionId ?? "").trim();
       if (!sessionId) { return { ok: false, error: "缺少会话 ID" }; }
@@ -1766,7 +2311,21 @@ function registerIpcHandlers(): void {
       const cap = capRaw ?? (agent?.max_context ?? 0);
       const history = await loadSessionHistory(sessionId);
       if (history.length < 6) { return { ok: true, skipped: true, used: 0, cap }; }
-      const used = estimateHistoryTokens(history);
+      // A-974-R3：占用口径取「历史轮次估算」与「渲染层实测输入侧占用」的**较大值**。
+      // 实测值 = 上游 prompt_tokens + cache_read（含系统提示/记忆/技能/工具定义/工作区注入），
+      // 比只看可见轮次的估算更贴近真实窗口压力；此前只用估算 → 实测已超阈值却判 skipped，
+      // 压缩永不执行（用户实测"逼近硬阈值却毫无动作/压缩失效"的根因）。
+      const histUsed = estimateHistoryTokens(history);
+      const hint = typeof p?.used === "number" && Number.isFinite(p.used) && p.used > 0 ? Math.round(p.used) : 0;
+      const used = Math.max(histUsed, hint);
+      // A-974-R3 护栏：由「实测占用（hint）抬高」触发的场景，必须确有**多余轮次可裁**才动手——
+      // 压缩后 loadSessionHistory 只剩「摘要头 + 最近 K 轮」（长度回落到 ~K+2），若固定开销
+      // （系统提示/记忆/技能/工具定义/工作区注入）本身就逼近上限，裁历史降不下来 →
+      // 每轮都会空跑一次摘要模型调用并刷一条「已压缩上下文」。此处显式拦掉这种空转。
+      // 注意：histUsed 自身超阈值的既有路径不受影响（保持原语义，无回归）。
+      if (used > histUsed && history.length <= DEFAULT_TAIL_KEEP + 2) {
+        return { ok: true, skipped: true, used, cap };
+      }
       const ratio = typeof p?.ratio === "number" && p.ratio > 0 ? p.ratio : DEFAULT_COMPRESS_RATIO;
       if (!needsCompress(used, cap, ratio, history.length)) {
         return { ok: true, skipped: true, used, cap };
@@ -1837,6 +2396,8 @@ function registerIpcHandlers(): void {
       sessionId: payload.sessionId,
     };
     const session = createStreamSession();
+    // A-980-R24：重试流同样走 chunk 合批（此前与正常发送路径一样是每 token 一条 IPC）
+    const chunkSender = createChunkSender();
     // 授权/提问请求按当前流打会话标签（retry 流的会话 = payload.sessionId）
     const retryCancelKey = payload.sessionId ?? agentId;
     agentStreamSessionMap.set(agentId, retryCancelKey);
@@ -1858,8 +2419,11 @@ function registerIpcHandlers(): void {
             }
             const chunk = toStreamChunk(ev, payload.sessionId);
             session.pushChunk(chunk);
-            mainWindow?.webContents.send("slime:chat:chunk", chunk);
+            // A-980-R24：合批下发（原始 chunk 仍逐条进 session 缓冲）
+            chunkSender.push(chunk);
           }
+          // A-980-R24：done 之前必须 flush（否则尾部正文晚于 done 到达）
+          chunkSender.flush();
           mainWindow?.webContents.send("slime:chat:done", {
             reply: cleanReply ?? session.fullReply, model: session.model,
             elapsedMs: session.elapsedMs, timings: session.timings,
@@ -1870,20 +2434,34 @@ function registerIpcHandlers(): void {
             ctxBuckets,
           });
           mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: payload.sessionId }); // A-918
+          // A-980-R26：重新生成完成 → 系统通知
+          notifyUser({
+            kind: "done",
+            title: `${agentNameForNotify(agentId)} 已完成`,
+            body: (cleanReply ?? session.fullReply ?? "").replace(/\s+/g, " ").trim().slice(0, 160) || "任务已结束",
+          });
           const traced = recorder.finish(true);
-          traceStore.set(retryCancelKey, traced);
+          traceStoreSet(retryCancelKey, traced);
           mainWindow?.webContents.send("slime:trace:update", { sessionId: retryCancelKey, trace: traced });
           resolve({ ok: true });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           console.error("[gui:main] chat retry error:", msg);
+          chunkSender.flush(); // A-980-R24：中断前已产出的内容照常放出去
           mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: payload.sessionId });
           mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: payload.sessionId }); // A-918
+          // A-980-R26：重新生成出错同样通知
+          notifyUser({
+            kind: "error",
+            title: `${agentNameForNotify(agentId)} 出错`,
+            body: msg.replace(/\s+/g, " ").trim().slice(0, 160) || "重新生成时发生错误",
+          });
           const failedTrace = recorder.finish(false, msg);
-          traceStore.set(retryCancelKey, failedTrace);
+          traceStoreSet(retryCancelKey, failedTrace);
           mainWindow?.webContents.send("slime:trace:update", { sessionId: retryCancelKey, trace: failedTrace });
           resolve({ ok: false, error: msg });
         } finally {
+          chunkSender.dispose(); // A-980-R24：合批器收尾（flush 幂等）
           // 值匹配才删（A-151 竞态防护，同 slime:chat:stream）
           if (agentStreamSessionMap.get(agentId) === retryCancelKey) {
             agentStreamSessionMap.delete(agentId);
@@ -2030,6 +2608,9 @@ function registerIpcHandlers(): void {
     if (meta) {
       await clearSessionHistory(meta.agentId, meta.id);
     }
+    // A-980-R29：会话删了，它的 Plan（内存 Map）与待办文件（data/todos_<sid>.json）也要一起走。
+    // 此前两条都只增不减 → 内存常驻 + data/ 目录无限堆积。
+    purgeSessionPlanning(payload.sessionId);
     console.info(`[gui:main] 会话已删除: session=${payload.sessionId}`);
     return { ok: removed };
   });
@@ -2044,16 +2625,17 @@ function registerIpcHandlers(): void {
     // 旧记录（无 session_id）归入创建最早的会话
     const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
     const records = await loadHistoryForSession(meta.agentId, meta.id, 500, firstSession);
-    const messages: Array<{ role: "user" | "assistant"; content: string; time: string; reasoning?: string; elapsedMs?: number; timeline?: unknown[] }> = [];
+    const messages: Array<{ role: "user" | "assistant"; content: string; time: string; ts?: string; reasoning?: string; elapsedMs?: number; timeline?: unknown[] }> = [];
     for (const r of records) {
       if (r.user) {
-        messages.push({ role: "user", content: r.user, time: r.timestamp });
+        messages.push({ role: "user", content: r.user, time: r.timestamp, ts: r.timestamp });
       }
       if (r.ai) {
         messages.push({
           role: "assistant",
           content: r.ai,
           time: r.timestamp,
+          ts: r.timestamp,
           reasoning: r.reasoning,
           elapsedMs: r.elapsed_ms,
           // A-966：历史附带交错时间线（重启后思考历程保持时间线展示）
@@ -2062,6 +2644,33 @@ function registerIpcHandlers(): void {
       }
     }
     return messages;
+  });
+
+  /** A-980-R18：分页加载更早历史（聊天顶部「加载更早的消息」分段胶囊点击再载；首屏只载最近 500 条） */
+  handleTrusted<{ sessionId: string; beforeTs: string; limit?: number }>("slime:sessions:loadEarlier", async (_event, payload) => {
+    await ensureServices();
+    const meta = await getSession(payload.sessionId);
+    if (!meta) { return { messages: [], hasMore: false }; }
+    const metas = await listSessions();
+    const agentSessions = metas.filter((m) => m.agentId === meta.agentId);
+    // 旧记录（无 session_id）归入创建最早的会话
+    const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
+    const { records, hasMore } = await loadHistoryForSessionBefore(
+      meta.agentId, meta.id, payload.limit ?? 200, firstSession, payload.beforeTs,
+    );
+    const messages: Array<{ role: "user" | "assistant"; content: string; time: string; ts?: string; reasoning?: string; elapsedMs?: number; timeline?: unknown[] }> = [];
+    for (const r of records) {
+      if (r.user) {
+        messages.push({ role: "user", content: r.user, time: r.timestamp, ts: r.timestamp });
+      }
+      if (r.ai) {
+        messages.push({
+          role: "assistant", content: r.ai, time: r.timestamp, ts: r.timestamp,
+          reasoning: r.reasoning, elapsedMs: r.elapsed_ms, timeline: r.timeline as unknown[] | undefined,
+        });
+      }
+    }
+    return { messages, hasMore };
   });
 
   /** A-966：渲染层 done 后把该条回复的交错时间线回填到 history.jsonl（重启恢复时间线，不依赖 localStorage） */
@@ -2191,20 +2800,26 @@ function registerIpcHandlers(): void {
 
   /** 加载会话级待办任务（由 todo_write 工具写入 data/todos_<sessionId>.json） */
   handleTrusted<{ sessionId: string }>("slime:sessions:loadTodos", async (_event, payload) => {
-    const fs = require("node:fs") as typeof import("node:fs");
-    const path = require("node:path") as typeof import("node:path");
-    const { PROJECT_ROOT } = await import("../../../core-ts/src/paths.js");
-    const p = path.join(PROJECT_ROOT, "data", `todos_${payload.sessionId}.json`);
-    let todos: Array<{ id: string; content: string; status: string }> = [];
-    try {
-      const raw = fs.readFileSync(p, "utf8");
-      const parsed = JSON.parse(raw) as { items: typeof todos };
-      todos = parsed.items;
-    } catch { /* 无历史文件视为空 */ }
+    // A-980-R28：**空 sessionId 直接拒绝**。渲染层在会话未就绪时传的是 `?? ""`，
+    // 而 `todos_` + "" + `.json` = `data/todos_.json` —— 那正好是修复前遗留孤儿文件的文件名，
+    // 于是"会话加载途中就把上一次的旧待办显示出来了"（用户实测）。
+    // 这类兜底必须放在主进程：渲染层任何一处忘了守卫都不该能把孤儿文件读出来。
+    // （A-980-R29：`todoStore.todoPath` 对空 sessionId 返回 null，双重保险。）
+    const sid = typeof payload?.sessionId === "string" ? payload.sessionId.trim() : "";
+    if (!sid) {
+      console.warn("[gui:main] loadTodos 收到空 sessionId，已拒绝（避免读到 todos_.json 这类孤儿文件）");
+      return { ok: true, todos: [] };
+    }
+    // 读取统一走 todoStore（容错 + 归一化口径与工具一致）
+    const todos = readTodos(sid);
     // 广播到所有渲染进程（支持多窗口场景）
     for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send("slime:tasks:todos", { sessionId: payload.sessionId, todos });
+      win.webContents.send("slime:tasks:todos", { sessionId: sid, todos });
     }
+    // A-980-R32：冷启动/切会话读到的若是一张**已全部完成**的清单，同样要自动收干净——
+    // 这条路径不经过 broadcastTodos，漏掉它就会出现"自动清空只在当前会话生效，
+    // 切走再切回旧清单复活"（正是本次要消灭的手动清除遗留态）。
+    scheduleTodoAutoClear(sid, todos);
     return { ok: true, todos };
   });
 
@@ -2225,9 +2840,13 @@ function registerIpcHandlers(): void {
   handleTrusted<{ agentId: string }>("slime:sessions:removeAgent", async (_event, payload) => {
     await ensureServices();
     const agentId = payload.agentId;
+    // A-980-R29：**先记住**该 Agent 的会话 id —— `removeSessionsForAgent` 只返回数量，
+    // 删完就再也查不到这些 sessionId，待办文件（data/todos_<sid>.json）会永远留在磁盘上。
+    const doomed = (await listSessions()).filter((s) => s.agentId === agentId).map((s) => s.id);
     await removeSessionsForAgent(agentId);
     await removeAgentHistory(agentId);
-    console.info(`[gui:main] 项目已删除（会话+历史清理）: agent=${agentId}`);
+    for (const sid of doomed) { purgeSessionPlanning(sid); }
+    console.info(`[gui:main] 项目已删除（会话+历史+待办清理）: agent=${agentId} sessions=${doomed.length}`);
     return { ok: true };
   });
 
@@ -2238,6 +2857,8 @@ function registerIpcHandlers(): void {
     const removed = await removeSessionsForWorkspace(workspace);
     for (const s of removed) {
       try { await clearSessionHistory(s.agentId, s.sessionId); } catch { /* 忽略单条历史清理失败 */ }
+      // A-980-R29：待办文件与 Plan 一并清理（与上面两个删除入口口径一致）
+      purgeSessionPlanning(s.sessionId);
     }
     console.info(`[gui:main] 工作文件夹会话已删除: workspace=${workspace} count=${removed.length}`);
     return { ok: true, count: removed.length };
@@ -2631,10 +3252,91 @@ function registerIpcHandlers(): void {
   /* ═══════════════ HTTP 静态服务搭建（A-918++） ═══════════════ */
   /** 注入 HttpStaticServer 给 core-ts 工具层（对齐 setAdbService 注入模式） */
   setHttpServer(httpServer);
+  /** A-977：静态服务清单持久化——记到 userData，启动时按记录端口重建（重启后旧链接仍可用）。 */
+  try {
+    const persistPath = join(app.getPath("userData"), "http_servers.json");
+    httpServer.setPersistPath(persistPath);
+    void httpServer.restore().then((r) => {
+      if (r.restored > 0 || r.failed > 0) {
+        console.log(`[slime] HTTP 静态服务恢复：成功 ${r.restored}，失败 ${r.failed}`);
+      }
+    }).catch(() => { /* 恢复失败不影响启动 */ });
+  } catch { /* userData 不可用时退化为不持久化 */ }
 
   /** A-918++：生成网页应用后，由 core-ts 工具层回调 → 主进程通知渲染层在右侧栏浏览器自动打开 */
   setSidebarOpener((url: string, name?: string): void => {
     mainWindow?.webContents.send("slime:sidebar:open", { kind: "url", url, name });
+  });
+
+  /* ═══════════════ 图形控制能力（screen_*）：slime 全程序级 ═══════════════ */
+  /** ① 截图瘦身钩子：electron.nativeImage 缩放 + PNG→JPEG（防原图吃掉巨量 token），
+   *     并叠加**刻度网格 + 元素编号框**标注（A-975：让模型有刻度可读、有编号可点）。 */
+  setImageOptimizer((pngBase64: string, maxWidth: number, quality: number, annotate?: { grid?: boolean; marks?: Array<{ index: number; label?: string; x1: number; y1: number; x2: number; y2: number }>; marksSpace?: { width: number; height: number } }) => {
+    try {
+      const img = nativeImage.createFromBuffer(Buffer.from(pngBase64, "base64"));
+      if (img.isEmpty()) { return null; }
+      const size = img.getSize();
+      const out = maxWidth > 0 && size.width > maxWidth
+        ? img.resize({ width: maxWidth, quality: "good" })
+        : img;
+      let finalImg = out;
+      // A-975：在缩放后的位图上叠加标注（BGRA 逐像素绘制，零新依赖）
+      if (annotate && (annotate.grid || (annotate.marks && annotate.marks.length > 0))) {
+        try {
+          const fs = out.getSize();
+          const bmp = out.toBitmap();
+          annotateBitmap(
+            { buf: bmp, width: fs.width, height: fs.height },
+            { grid: annotate.grid, marks: annotate.marks, marksSpace: annotate.marksSpace },
+          );
+          finalImg = nativeImage.createFromBitmap(bmp, { width: fs.width, height: fs.height });
+        } catch { /* 标注失败 → 用无标注图（不阻断截图） */ }
+      }
+      const jpg = finalImg.toJPEG(quality);
+      if (!jpg || jpg.length === 0) { return null; }
+      const finalSize = finalImg.getSize();
+      return {
+        dataUrl: `data:image/jpeg;base64,${jpg.toString("base64")}`,
+        width: finalSize.width,
+        height: finalSize.height,
+        bytes: jpg.length,
+      };
+    } catch {
+      return null; // 优化失败 → 上层回退原 PNG
+    }
+  });
+
+  /** ② 注册图形控制后端：桌面（Windows PowerShell+user32.dll 常驻宿主）与 Android（adb shell input）。
+   *     两后端共用同一套动作语义与归一化坐标 → 这就是「属于 slime 整个程序的图形控制能力」，不限 ADB。 */
+  const screenCtl = getScreenController();
+  screenCtl.register(new DesktopScreenBackend());
+  screenCtl.register(new AndroidScreenBackend(adbService));
+  setScreenController(screenCtl);
+
+  /** A-976：右侧栏浏览器控制桥 —— Agent 的 browser_* 工具经它把指令下发到 renderer 的 <webview> 执行。
+   *  与 screen_* 并列的"第三块操控面"：ADB/桌面是屏幕级，这里是应用内嵌浏览器级。 */
+  setBrowserAdapter(new BrowserBridge(() => mainWindow));
+
+  /** ③ 工具类别闸门：让「设置 → 权限」的开关真正生效（此前只有 UI、无执行点）。
+   *      每次调用实时读取配置 → 改设置后无需重启引擎。 */
+  setToolCategoryGate((tool) => {
+    const perms = getPermissions();
+    // 图形控制总开关（高危能力，默认关闭）
+    if (!perms.screenEnabled && tool.name.startsWith("screen_")) {
+      return { allowed: false, reason: "图形控制已在「设置 → 权限」中关闭" };
+    }
+    const has = (p: string): boolean => tool.permissions.includes(p as never);
+    // 只读工具：仅当「读」类别被关闭时才拦（避免误伤纯检索）
+    if (!has("write") && !has("terminal") && !has("network")) {
+      return perms.toolRead ? { allowed: true } : { allowed: false, reason: "「读」类别已关闭" };
+    }
+    if (!perms.toolWrite && has("write")) {
+      return { allowed: false, reason: "「写」类别已关闭" };
+    }
+    if (!perms.toolTerminal && has("terminal")) {
+      return { allowed: false, reason: "「终端」类别已关闭（ADB shell / 命令执行需开启此项）" };
+    }
+    return { allowed: true };
   });
 
   /** A-918++：HTTP —— 把本地目录作为静态服务启动（默认 0.0.0.0，端口自动选） */
@@ -2657,13 +3359,62 @@ function registerIpcHandlers(): void {
     return httpServer.list();
   });
 
-  /** A-918++：HTTP —— 用系统默认浏览器打开某个访问地址 */
+  /* ═══════════════ 图形控制能力（screen_*）：GUI 面板与紧急停止 ═══════════════ */
+
+  /** 列出可用图形控制后端与目标（渲染层「图形控制」卡片展示） */
+  handleTrusted<void>("slime:screen:info", async (): Promise<{
+    enabled: boolean;
+    halted: boolean;
+    backends: string[];
+    targets: Array<{ backend: string; target: string; width: number; height: number; label: string }>;
+  }> => {
+    const enabled = getPermissions().screenEnabled;
+    const ctl = getScreenController();
+    const backends = ctl.listBackends();
+    let targets: Array<{ backend: string; target: string; width: number; height: number; label: string }> = [];
+    try {
+      targets = await ctl.listTargets();
+    } catch { /* 无可用目标不抛错 */ }
+    return { enabled, halted: ctl.isHalted(), backends, targets };
+  });
+
+  /** 紧急停止：中断后续所有图形动作（用户在 GUI 上一键刹车） */
+  handleTrusted<void>("slime:screen:halt", async (): Promise<{ ok: boolean }> => {
+    getScreenController().halt();
+    return { ok: true };
+  });
+
+  /** 恢复图形控制（新一轮任务开始） */
+  handleTrusted<void>("slime:screen:resume", async (): Promise<{ ok: boolean }> => {
+    getScreenController().resume();
+    return { ok: true };
+  });
+
+  /** 截图（GUI 手动预览用；工具侧走 screen_capture 工具） */
+  handleTrusted<{ backend?: string; target?: string }>("slime:screen:capture", async (_event, p): Promise<{ ok: boolean; dataUrl?: string; width?: number; height?: number; error?: string }> => {
+    const backend = p?.backend === "android" ? "android" : "desktop";
+    const r = await getScreenController().capture(backend, p?.target || undefined);
+    return { ok: r.ok, dataUrl: r.dataUrl, width: r.width, height: r.height, error: r.error };
+  });
+
+  /** A-918++：HTTP —— 用系统默认浏览器打开某个访问地址。
+   *  A-980-R3：加协议安全门——web 链接直接开；非 web（bitbrowser:// 等）走 openExternalSafe
+   *  （探测处理器，已注册才开；未注册返回诊断，**绝不**直接 openExternal 触发系统报错框）。 */
   handleTrusted<{ url: string }>("slime:http:open", async (_event, p): Promise<{ ok: boolean; error?: string }> => {
     const url = (p?.url ?? "").trim();
     if (!url) { return { ok: false, error: "url 不能为空" }; }
     try {
-      await shell.openExternal(url);
-      return { ok: true };
+      if (isWebSafeUrl(url)) {
+        await shell.openExternal(url);
+        return { ok: true };
+      }
+      const r = await openExternalSafe(url);
+      if (r.ok) { return { ok: true }; }
+      // A-980-R4：浏览器唤起类协议 → 明确告知已拦截（不要求装客户端）
+      if (r.reason === "browser-scheme") {
+        return { ok: false, error: `已拦截浏览器唤起链接 ${(url.split(":")[0] || "").toLowerCase()}:// ——不唤醒外部浏览器` };
+      }
+      return { ok: false, error: `链接 ${(url.split(":")[0] || "").toLowerCase()}:// 需要安装对应客户端才能打开（系统未注册该协议）` };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -2842,6 +3593,36 @@ function registerIpcHandlers(): void {
   handleTrusted<void>("slime:stats:snapshot", async () => {
     await ensureServices();
     return (await statsService!.snapshot()) as unknown as StatsSnapshot;
+  });
+
+  // ── 使用统计（Settings「使用统计」面板） ────────────────
+  handleTrusted<{ sinceIso?: string; untilIso?: string; limit?: number }>("slime:usage:snapshot", async (_e, payload) => {
+    // 本地时区偏移（分钟；东八区=+480）—— 仅 Date.getTimezoneOffset 的反向
+    const tzOffsetMin = -new Date().getTimezoneOffset();
+    const records = await loadUsage({
+      sinceIso: payload?.sinceIso,
+      untilIso: payload?.untilIso,
+      limit: payload?.limit ?? 5000,
+    });
+    return {
+      records,
+      tzOffsetMin,
+      totalRecords: records.length,
+    } as unknown as UsageSnapshot;
+  });
+
+  handleTrusted<void>("slime:usage:clear", async () => {
+    await clearUsage();
+    return { ok: true };
+  });
+
+  // 用**当前生效价格**重算历史成本：usage.jsonl 的 cost_usd 是写入时固化的，
+  // 之前价格表全线失守导致 1606 条记录 100% 为 0；价格表修正后需要一次性回填。
+  // 只把"0 → 有价"的记录改写（只增不减），免费模型（价目表显式 0）保持 0 不产生 diff。
+  handleTrusted<void>("slime:usage:recompute", async () => {
+    await ensureServices();
+    const res = await rewriteUsageCosts(buildPriceResolver());
+    return { ok: true, ...res } as UsageRecomputeResult;
   });
 
   // ── D/E：可观测 trace + Plan 一等对象 IPC ────────────────
@@ -3055,9 +3836,9 @@ function registerIpcHandlers(): void {
     }));
   });
 
-  handleTrusted<{ name: string; role: string }>("slime:agents:create", async (_event, params) => {
+  handleTrusted<{ name: string; role: string; toolProfile?: { mode: "default" | "custom"; skills: string[]; mcp: string[] } }>("slime:agents:create", async (_event, params) => {
     await ensureServices();
-    const a = await createAgent(params.name, params.role);
+    const a = await createAgent(params.name, params.role, params.toolProfile);
     selectedAgentId = a.id;
     a2aBus?.register(a.name);
     mainWindow?.webContents.send("slime:agents:selected", a.id);
@@ -3128,6 +3909,7 @@ function registerIpcHandlers(): void {
       max_context: a.max_context ?? undefined,
       max_output: a.max_output ?? undefined,
       lifecycle: a.lifecycle ?? "unknown",
+      tool_profile: a.tool_profile as { mode: "default" | "custom"; skills: string[]; mcp: string[] } | undefined,
     };
   });
 
@@ -3224,10 +4006,11 @@ function registerIpcHandlers(): void {
   /** Provider 管理（加密存储；渲染层只接触脱敏摘要，明文 key 不出主进程） */
   handleTrusted<void>("slime:providers:list", async (): Promise<ProviderSummary[]> => listProviders());
 
-  handleTrusted<{ baseUrl: string; apiKey: string }>("slime:providers:fetchModels", async (_event, p) =>
+  handleTrusted<{ baseUrl: string; apiKey: string; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto" }>("slime:providers:fetchModels", async (_event, p) =>
     // A-918+：探测即 enrich 填充元数据（context_window/max_output/vision/think/pricing），
-    // 让「探测成功」一步到位，渲染层拿到完整 model spec 而非仅 ID
-    enrichModels(p.baseUrl, p.apiKey),
+    // 让「探测成功」一步到位，渲染层拿到完整 model spec 而非仅 ID。
+    // api_format 穿透：用户显式指定 anthropic 时用 x-api-key 探测，auto 时双鉴权兜底。
+    enrichModels(p.baseUrl, p.apiKey, p.api_format ?? "auto"),
   );
 
   handleTrusted<{ key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }>(
@@ -3413,6 +4196,49 @@ function registerIpcHandlers(): void {
     }
   });
 
+  /** A-980-R32：把「聊天/产物里点到的路径」解析成真实存在的绝对路径。
+   *
+   *  背景（用户实测）：思考历程与产物卡里点的**很多**文件都报「文件不存在」，但自己按同样路径去
+   *  右侧栏翻却能打开。根因不是文件不在，而是**解析基准不对**：点击来源五花八门——
+   *  工具回传的 path 可能是「相对会话工作目录」「相对项目根」「带项目名前缀」「带 `:行:列` 后缀」，
+   *  甚至是设备内路径（adb 的 /sdcard/...）；而渲染层手里那个 workspace 可能还没加载完或压根没绑定。
+   *  旧实现只试两种（workspace 相对 + 当绝对），于是大量明明存在的文件被判"不存在"。
+   *
+   *  这里把所有**合理候选**按优先级列出来逐个试，并且把试过的路径原样回给界面：
+   *  找不到时用户/开发者看到的是"我按这些路径找过"，而不是一句黑箱错误。
+   *  额外返回值 `isDir`：目录也是合法的点击目标（渲染层据此打开一个浏览该目录的文件页），
+   *  而不是沿用 readFile 那套"是目录 → 报错"（这正是用户说的"文件夹也点不开"）。
+   */
+  handleTrusted<{ rel: string; root?: string; sessionId?: string }>(
+    "slime:workspace:openTarget",
+    async (_event, p): Promise<{ ok: boolean; path?: string; isDir?: boolean; tried?: string[]; error?: string }> => {
+      const sessionWorkspace = p.sessionId
+        ? (await getSession(p.sessionId).catch(() => null))?.workspace
+        : null;
+      // 候选生成是纯逻辑（可单测）：见 ./targetPath.ts
+      const { candidates } = buildTargetCandidates(
+        typeof p?.rel === "string" ? p.rel : "",
+        { root: p.root, sessionWorkspace, projectRoot: PROJECT_ROOT },
+        resolve, basename, dirname,
+      );
+      if (candidates.length === 0) {
+        return { ok: false, error: `缺少文件路径（原始值："${typeof p?.rel === "string" ? p.rel : ""}"）`, tried: [] };
+      }
+      for (const c of candidates) {
+        try {
+          if (existsSync(c)) {
+            return { ok: true, path: c, isDir: statSync(c).isDirectory(), tried: candidates };
+          }
+        } catch { /* 权限等异常跳到下一个候选 */ }
+      }
+      return {
+        ok: false,
+        error: `文件不存在：${normalizeTargetPath(typeof p?.rel === "string" ? p.rel : "")}`,
+        tried: candidates,
+      };
+    },
+  );
+
   /** 右侧栏「工作树」：读取文件内容（文本/图片/二进制，主进程校验锚定） */
   handleTrusted<{ root: string; rel: string }>("slime:workspace:readFile", (_event, p): WorkspaceReadFileResult => {
     try {
@@ -3439,6 +4265,18 @@ function registerIpcHandlers(): void {
       if (IMG_EXT.has(ext)) {
         const buf = readFileSync(filePath);
         return { ok: true, path: filePath, name: rel, mime: "image", content: buf.toString("base64") };
+      }
+      // A-980-R8：PDF / Office（word/excel/ppt）专用 mime——pdf 由右侧栏内嵌预览，
+      // office 右侧栏只读二进制（复杂格式不外挂解析库），交给系统默认应用打开。
+      // 注意要在 ARCHIVE_BINARY_EXT 判定**之前**（.pdf 原在该集合里判 binary）。
+      const OFFICE_EXT = new Set([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
+      if (ext === ".pdf") {
+        const buf = readFileSync(filePath);
+        return { ok: true, path: filePath, name: rel, mime: "pdf", content: buf.toString("base64") };
+      }
+      if (OFFICE_EXT.has(ext)) {
+        const buf = readFileSync(filePath);
+        return { ok: true, path: filePath, name: rel, mime: "office", content: buf.toString("base64") };
       }
       // 先读原始字节，再判定二进制：readFileSync(path, "utf-8") 在二进制上不会抛错（会静默按替换符解码），
       // 若直接当文本返回会得到乱码/超长字符串，渲染时拖垮乃至崩溃整个应用。
@@ -3480,6 +4318,16 @@ function registerIpcHandlers(): void {
         const buf = readFileSync(abs);
         return { ok: true, path: abs, name, mime: "image", content: buf.toString("base64") };
       }
+      // A-980-R8：PDF / Office 专用 mime（与 readFile 同规，先于 ARCHIVE 判定）
+      const OFFICE_EXT = new Set([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
+      if (ext === ".pdf") {
+        const buf = readFileSync(abs);
+        return { ok: true, path: abs, name, mime: "pdf", content: buf.toString("base64") };
+      }
+      if (OFFICE_EXT.has(ext)) {
+        const buf = readFileSync(abs);
+        return { ok: true, path: abs, name, mime: "office", content: buf.toString("base64") };
+      }
       const buf = readFileSync(abs);
       const hasNul = binarySniff(buf);
       const ARCHIVE_BINARY_EXT = new Set([
@@ -3499,6 +4347,15 @@ function registerIpcHandlers(): void {
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  });
+
+  /** A-980-R8：用系统默认应用（关联程序）打开文件——word/pdf/ppt/excel 等右侧栏只读的格式 */
+  handleTrusted<{ path: string }>("slime:shell:openPath", async (_event, p): Promise<{ ok: boolean; error?: string }> => {
+    const abs = (typeof p?.path === "string" ? p.path : "").trim().replace(/^["']|["']$/g, "");
+    if (!abs) { return { ok: false, error: "缺少文件路径" }; }
+    if (!existsSync(abs)) { return { ok: false, error: `文件不存在：${abs}` }; }
+    const err = await shell.openPath(abs);
+    return err ? { ok: false, error: err } : { ok: true };
   });
 
   /** 工作树右键菜单：在主进程构建菜单模板，渲染层触发 popup */
@@ -3887,6 +4744,144 @@ function registerIpcHandlers(): void {
     }
   });
 
+  /* ── A-980-R26：系统通知 + 可定制提示音（设置 → 通用） ── */
+
+  /** 读取通知配置（含自定义音频是否存在——文件被用户删掉时界面要能提示） */
+  handleTrusted<void>("slime:notify:get", async () => {
+    const cfg = readNotifyConfig();
+    const soundOk = cfg.soundFile ? Boolean(customSoundPath()) : false;
+    return { ok: true, config: cfg, soundReady: soundOk };
+  });
+
+  /** 保存通知配置（局部合并：界面只传改动的字段） */
+  handleTrusted<Partial<{ enabled: boolean; soundEnabled: boolean }>>("slime:notify:set", async (_event, patch) => {
+    try {
+      const cfg = writeNotifyConfig({
+        ...(typeof patch?.enabled === "boolean" ? { enabled: patch.enabled } : {}),
+        ...(typeof patch?.soundEnabled === "boolean" ? { soundEnabled: patch.soundEnabled } : {}),
+      });
+      return { ok: true, config: cfg, soundReady: cfg.soundFile ? Boolean(customSoundPath()) : false };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  /** 选择并导入自定义提示音（拷进应用配置目录；原文件之后删掉也不影响） */
+  handleTrusted<void>("slime:notify:sound:pick", async () => {
+    try {
+      const soundOpts = {
+        title: "选择提示音音频",
+        properties: ["openFile"] as Array<"openFile">,
+        filters: [{ name: "音频文件", extensions: ["mp3", "wav", "ogg", "m4a", "aac", "flac", "webm", "opus"] }],
+      };
+      const r = mainWindow && !mainWindow.isDestroyed()
+        ? await dialog.showOpenDialog(mainWindow, soundOpts)
+        : await dialog.showOpenDialog(soundOpts);
+      if (r.canceled || !r.filePaths?.[0]) { return { ok: false, canceled: true }; }
+      const res = importSound(r.filePaths[0]);
+      return res.ok ? { ...res, config: readNotifyConfig() } : res;
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  /** 移除自定义提示音（回落系统默认音） */
+  handleTrusted<void>("slime:notify:sound:clear", async () => {
+    const res = clearSound();
+    return res.ok ? { ...res, config: readNotifyConfig() } : res;
+  });
+
+  /** 读出自定义音频（data URL）——渲染层 new Audio() 播放/试听用 */
+  handleTrusted<void>("slime:notify:sound:data", async () => readSoundData());
+
+  /** 发送一条测试通知（无视总开关，便于用户确认系统层通不通） */
+  handleTrusted<void>("slime:notify:test", async () => {
+    notifyUser({
+      kind: "test",
+      title: "slime 通知测试",
+      body: "若你看到这条通知，说明系统通知已打通；提示音按你的设置播放。",
+    });
+    return { ok: true, config: readNotifyConfig() };
+  });
+
+  // ── LLM 网关（设置 → LLM 网关） ────────────────
+  handleTrusted<void>("slime:llmgw:get", async () => {
+    const cfg = readLlmGatewayConfig();
+    const mgr = getLlmGatewayManager();
+    const st = mgr.status();
+    return { ok: true, config: cfg, status: st };
+  });
+
+  handleTrusted<LlmGatewayConfig>("slime:llmgw:set", async (_event, cfg) => {
+    try {
+      const mgr = getLlmGatewayManager();
+      const r = await mgr.apply({
+        enabled: Boolean(cfg?.enabled),
+        port: typeof cfg?.port === "number" && cfg.port > 0 && cfg.port < 65536 ? Math.floor(cfg.port) : 19110,
+        apiKey: typeof cfg?.apiKey === "string" ? cfg.apiKey : "",
+        tokens: cfg?.tokens ?? mgr.listTokens(),
+      });
+      return { ...r, status: mgr.status() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), status: getLlmGatewayManager().status() };
+    }
+  });
+
+  handleTrusted<void>("slime:llmgw:status", async () => {
+    return getLlmGatewayManager().status();
+  });
+
+  handleTrusted<void>("slime:llmgw:restart", async () => {
+    try {
+      const mgr = getLlmGatewayManager();
+      const r = await mgr.start();
+      return { ...r, status: mgr.status() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), status: getLlmGatewayManager().status() };
+    }
+  });
+
+  // ── 令牌 CRUD（B 档：每令牌独立速率/日配额/模型白名单）────
+  handleTrusted<import("./llmGateway.js").NewTokenInput>("slime:llmgw:token:add", async (_event, input) => {
+    try {
+      const mgr = getLlmGatewayManager();
+      const r = await mgr.addToken(input ?? {});
+      return { ...r, status: mgr.status(), tokens: mgr.listTokens() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), status: getLlmGatewayManager().status() };
+    }
+  });
+
+  handleTrusted<import("./llmGateway.js").UpdateTokenInput>("slime:llmgw:token:update", async (_event, input) => {
+    try {
+      const mgr = getLlmGatewayManager();
+      const r = await mgr.updateToken(input ?? { key: "" });
+      return { ...r, status: mgr.status(), tokens: mgr.listTokens() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), status: getLlmGatewayManager().status() };
+    }
+  });
+
+  handleTrusted<{ key: string }>("slime:llmgw:token:remove", async (_event, input) => {
+    try {
+      const mgr = getLlmGatewayManager();
+      const r = await mgr.removeToken(input?.key ?? "");
+      return { ...r, status: mgr.status(), tokens: mgr.listTokens() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), status: getLlmGatewayManager().status() };
+    }
+  });
+
+  handleTrusted<{ key: string; active: boolean }>("slime:llmgw:token:toggle", async (_event, input) => {
+    try {
+      const mgr = getLlmGatewayManager();
+      const r = await mgr.toggleToken(input?.key ?? "", input?.active ?? false);
+      return { ...r, status: mgr.status(), tokens: mgr.listTokens() };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), status: getLlmGatewayManager().status() };
+    }
+  });
+
   /** 重置本地数据：清空 Provider / Agent / 会话与历史（记忆文件保留）。渲染层需先确认 */
   handleTrusted<void>("slime:data:reset", async (): Promise<{ ok: boolean; error?: string }> => {
     try {
@@ -3948,6 +4943,43 @@ function registerSchemePrivileges(): void {
   ]);
 }
 
+/** A-980：主进程协议安全白名单——非 Web 协议（bitbrowser://、mailto:…）一律拦截，
+ *  防止 Chromium 把未知 scheme 交给系统协议分发触发 Windows「获取打开此链接的应用」弹窗。
+ *  slime:// 仅主窗口使用，单独放行。 */
+function isWebSafeUrl(url: string): boolean {
+  try {
+    if (!url) { return true; }
+    if (url === "about:blank" || url.startsWith("slime://")) { return true; }
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url);
+    if (!m) { return true; } // 无 scheme（相对地址等）
+    return ["http", "https", "about", "file", "data", "blob", "chrome"].includes(m[1].toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** A-980-R3：**唯一的**打开外部链接通道——先探测系统是否注册了该协议处理器：
+ *  已注册（装了对应客户端）→ `shell.openExternal` 交给系统应用**真正打开**；
+ *  未注册 → 返回诊断（绝不 openExternal，避免 Windows「获取打开此链接的应用」系统框）。
+ *  A-980-R4：浏览器类协议（bitbrowser:// 等）**永远返回失败**——即使系统注册了对应浏览器也
+ *  不唤起：这类链接的目的是把另一款浏览器拉起来加载页面/云控指令，BitBrowser 收到
+ *  `bitbrowser://cc` 这类指令自己打不开，会在界面顶部弹黄色横幅报错（用户痛批的丑弹窗）。
+ *  所有外部打开（webview 深链转发 / slime:http:open IPC / iframe 深链）都必须走这里。 */
+async function openExternalSafe(url: string): Promise<{ ok: boolean; handler?: string; reason?: string }> {
+  if (isBrowserSchemeUrl(url)) {
+    return { ok: false, reason: "browser-scheme" };
+  }
+  try {
+    const info = await app.getApplicationInfoForProtocol(url);
+    const handler = info && typeof info === "object" ? (info as { name?: string }).name : undefined;
+    if (handler) {
+      await shell.openExternal(url);
+      return { ok: true, handler };
+    }
+  } catch { /* 探测失败按未注册处理 */ }
+  return { ok: false, reason: "未注册" };
+}
+
 function registerProtocolHandler(): void {
   const rendererDir = resolve(__dirname, "../renderer");
   protocol.handle("slime", (request) => {
@@ -3960,7 +4992,19 @@ function registerProtocolHandler(): void {
   });
 
   app.on("web-contents-created", (_event, webContents) => {
+    // A-980：任意 webContents（含 <webview> 客页、授权子窗口）导航/重定向到**非 Web 协议**
+    // （bitbrowser://、mailto: 等）一律 preventDefault——这是 renderer 层 will-navigate 守卫
+    // 的**硬兜底**：renderer 脚本一旦漏拦，Chromium 会把未知 scheme 交给系统协议分发 → 
+    // Windows 弹「获取打开此'xxx'链接的应用」。主进程兜底保证弹窗绝不可能出现。
     webContents.on("will-navigate", (e, url) => {
+      // A-980-R12：slime://open?u=… 是渲染层"新建页跳转"桥（站点按钮 window.open/target=_blank 经
+      // 注入钩子转入），**必须放行**给 renderer 的 will-navigate 守卫拦截并新建右栏页；此处 preventDefault
+      // 会连 renderer 事件一起取消 → 新建页跳转再次失效（用户实测"还是无法新建浏览器页跳转"的根因之一）。
+      if (url.startsWith("slime://open?u=")) { return; }
+      if (!isWebSafeUrl(url)) {
+        e.preventDefault();
+        return;
+      }
       // A-918++ 修复「GitHub 登录输入密码后无响应」：此前对所有 webContents 无条件 preventDefault，
       // 把 GitHub 授权窗口/内嵌 webview 的登录成功重定向也拦死了（停在原地看似无响应）。
       // 现在仅阻止【主窗口】导航到非 slime:// 的外部地址；webview / 授权子窗口放行。
@@ -3968,13 +5012,73 @@ function registerProtocolHandler(): void {
         e.preventDefault();
       }
     });
-    webContents.setWindowOpenHandler(() => {
-      // 仅主窗口禁止 window.open（安全）；授权窗口/webview 放行（GitHub 登录可能触发弹窗）
-      if (webContents === mainWindow?.webContents) {
-        return { action: "deny" };
+    // 服务端 302/301 跳转到未知协议同样拦截（will-navigate 不覆盖重定向目标）
+    webContents.on("will-redirect", (e, url) => {
+      if (!isWebSafeUrl(url)) {
+        e.preventDefault();
       }
-      return { action: "allow", overrideBrowserWindowOptions: { webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } } };
     });
+    // A-980-R3：**frame 级**深链拦截——will-navigate/will-redirect 只覆盖顶层导航，站点的
+    // "打开客户端"逻辑常放在 iframe 或脚本动态创建的链接内（子 frame 导航到外部协议不会触发
+    // will-navigate → Chromium 直接交系统分发 → 未注册就弹系统框）。will-frame-navigate 覆盖
+    // 任意 frame：非 Web 协议 preventDefault 后经 openExternalSafe 真实打开（确认是否装了客户端）。
+    webContents.on("will-frame-navigate", (details) => {
+      const url = details?.url ?? "";
+      if (isWebSafeUrl(url)) { return; }
+      try { details.preventDefault(); } catch { /* 忽略 */ }
+      void openExternalSafe(url).then((r) => {
+        if (!r.ok) {
+          try {
+            // 未注册 → 通知渲染层「需安装对应客户端」（banner），绝不让系统框出现
+            mainWindow?.webContents.send("slime:browser:popup-notice", { url, ts: Date.now(), kind: "need-install", scheme: (url.split(":")[0] || "").toLowerCase() });
+          } catch { /* 忽略 */ }
+        }
+      });
+    });
+    webContents.setWindowOpenHandler(({ url }) => {
+      // A-980-R11：站点"新建页跳转"（window.open / target=_blank）不再静默失败——
+      // webview 已加 allowpopups，guest 的开窗请求会到达本 handler。web URL 一律在
+      // slime 右栏**新浏览器页**打开（send slime:sidebar:open → renderer 新建/复用 tab）；
+      // 非 Web 协议保持拒绝 + 通知（renderer 协议确认框 / 缺应用诊断）。窗口本身**绝不
+      // 真实创建**（return deny）——防站点弹系统新窗抢焦点、阻断 Agent 工具循环
+      // （A-980-R 用户实测「中途弹出的登录弹窗，不关就得卡死」）。
+      try {
+        if (url.startsWith("slime://open?u=")) {
+          // 旧注入钩子（slime://open 桥）的兼容分支：解析出真实网址再开页。
+          // A-975-R3 起钩子已整体撤除，这里只作历史兜底保留。
+          try {
+            const u = new URL(url).searchParams.get("u");
+            if (u && /^https?:\/\//i.test(u)) {
+              mainWindow?.webContents.send("slime:sidebar:open", { kind: "url", url: u, name: "", from: "site" });
+            }
+          } catch { /* 忽略 */ }
+          return { action: "deny" };
+        }
+        if (isWebSafeUrl(url)) {
+          // ⚠️ A-975-R4：站点弹窗必须带 from:"site" —— 渲染层据此做**弹窗风暴限流**。
+          // 站点广告会在计时器里连续 window.open，而右栏浏览器页是常驻挂载（webview 不卸载），
+          // 每弹一个就多一个常驻重页面 → 内存暴涨、渲染进程卡死（用户实测"浏览器什么都点不动"）。
+          mainWindow?.webContents.send("slime:sidebar:open", { kind: "url", url, name: "", from: "site" });
+        } else {
+          mainWindow?.webContents.send("slime:browser:popup-notice", { url, ts: Date.now(), kind: "need-install", scheme: (url.split(":")[0] || "").toLowerCase() });
+        }
+      } catch { /* 忽略 */ }
+      return { action: "deny" };
+    });
+  });
+
+  // A-980-R2：深度链接「真实打开」——拦截到 bitbrowser:// 等非 Web 协议时，**不再屏蔽**，
+  // 而是先探测系统是否注册了该协议处理器：已注册（用户安装 BitBrowser 等客户端后自动注册）→
+  // 调系统协议分发**真正打开链接**（弹窗报错消失、链接意图达成）；未注册 → 返回明确诊断
+  // 「需要安装 xxx 客户端」，由渲染层提示用户，绝不弹系统对话框、绝不静默卡住。
+  ipcMain.handle("slime:protocol:open", async (_ev, raw: unknown) => {
+    const url = typeof raw === "string" ? raw.trim() : "";
+    if (!url) { return { ok: false, reason: "空链接" }; }
+    const scheme = (url.split(":")[0] || "").toLowerCase();
+    // Web 链接不走系统协议分发（应由浏览器页导航），防止被滥用为外部打开
+    if (isWebSafeUrl(url)) { return { ok: false, reason: "web" }; }
+    const r = await openExternalSafe(url); // A-980-R3：统一走「探测→已注册才打开」通道
+    return r.ok ? { ok: true, url, scheme, handler: r.handler } : { ok: false, url, scheme, reason: r.reason ?? "未注册" };
   });
 }
 
@@ -3992,9 +5096,31 @@ function main(): void {
   // 跳过重复启动时的重新编译，明显缩短二次启动时间
   app.commandLine.appendSwitch("v8-cache-options", "code");
 
-  // 禁用 GPU 加速：部分机器 GPU 进程崩溃导致窗口无法渲染（exit_code=-1）
-  app.commandLine.appendSwitch("disable-gpu");
-  app.commandLine.appendSwitch("disable-gpu-sandbox");
+  // A-980-R：禁用 Chromium 的 ExternalProtocolDialog 特性——**系统级绝杀**：
+  // 即便未来某条导航绕过全部 will-navigate/will-redirect 守卫抵达系统协议分发，
+  // 未知协议（bitbrowser:// 等）也**不会再弹** Windows「获取打开此链接的应用」对话框
+  // （无注册应用则静默失败不打扰）。与既有守卫构成双脚架：守卫在"导航到达 OS 层之前"
+  // 拦掉，该开关保证"即使漏网到 OS 层也绝不弹窗"。
+  app.commandLine.appendSwitch("disable-features", "ExternalProtocolDialog");
+
+  // A-980-R4（修正 R3 反语义）：**不再显式设置 proxy-bypass-list 的 <-loopback>**。
+  // 实测核验（Microsoft Docs + Chromium net/docs/proxy.md + 多源复证）：Chromium 自 Chrome 72 起
+  // 对 loopback（127.0.0.1/8、localhost、[::1]、169.254/16）有**隐式绕过代理直连**规则，
+  // 且该隐式规则无法被系统代理/PAC 覆盖；而 `<-loopback>` 的语义恰恰是**禁用这个隐式绕过、
+  // 强制 loopback 走代理**（Dev Proxy 等工具用它来劫持 localhost）。上一版把它当"强制直连"是
+  // 方向写反了——用户一旦开 Clash 全局代理，此行会把 127.0.0.1:8081 的请求强行丢进代理 → 白屏。
+  // 正确做法 = 什么都不做（默认即直连）。若未来需显式兜底，应写普通条目 127.0.0.1;localhost，不要用尖括号语法。
+
+  // A-980-R5（GPU 白屏根治）：**默认不再禁用 GPU**。实弹对照验证（同机 Electron 35 webview 加载
+  // 127.0.0.1:8081）：disable-gpu + disable-gpu-sandbox 下 capturePage 返回 **0 字节、整窗无像素**
+  // （webview 网络导航全部成功但内容完全不绘制 → 白屏无错误）；克 GPU 时页面正常绘制。
+  // 此前"部分机器 GPU 崩溃 exit_code=-1"的规避本身在部分环境制造了持续白屏（含 Agent 打开
+  // 本地 HTTP 服务"其他浏览器能开、slime 白屏"的经典症状）。改为默认启用 GPU，保留逃生门：
+  // 环境变量 SLIME_DISABLE_GPU=1 时仍回退软渲染（仅个别崩溃机器需要）。
+  if (process.env.SLIME_DISABLE_GPU === "1") {
+    app.commandLine.appendSwitch("disable-gpu");
+    app.commandLine.appendSwitch("disable-gpu-sandbox");
+  }
 
   // 统一应用名：安装器写 HKCU Run 值名 "Slime"，而 setLoginItemSettings 用 app.getName()
   // 作值名（默认取 package.json name = "slime-gui"）——不同名会导致设置开关与安装勾选不同步。
@@ -4030,6 +5156,13 @@ function main(): void {
     .then(async () => {
       // 先建窗口立即出首屏，后端 sidecar 并行启动（渲染层启动加载面板展示进度）
       registerProtocolHandler();
+      // A-980-R13：给 webview 独立 session（persist:slime-browser）注册 slime:// 处理器——
+      // app 级 protocol.handle 对独立 partition **不生效**，用户实测 webview 导航 slime:// 仍弹
+      // Windows「获取打开此'slime'链接的应用」。会话级注册后该导航由 Electron 接管（204 空响应），
+      // 不再落到系统协议分发 → 系统弹窗根除；正常路径仍被 renderer will-navigate 拦截新建右栏页。
+      try {
+        session.fromPartition("persist:slime-browser").protocol.handle("slime", () => new Response(null, { status: 204 }));
+      } catch { /* 忽略 */ }
       createWindow();
       // 本地模型生命周期管理器（llama-server：BGE 嵌入 / 对话 GGUF），解析自 slime.toml [model_server]
       initModelServerManager();
@@ -4041,6 +5174,18 @@ function main(): void {
       // 启动状态推送到渲染进程（启动加载面板 slime:boot:event）
       setBootSink((s) => mainWindow?.webContents.send("slime:boot:event", s));
       void startPythonBackend(); // 并行启动，不阻塞窗口
+      // LLM 网关自动启动：配置 enabled 时随应用启动（auth token 未就绪则 fallback，网关端点用独立 key）
+      void (async () => {
+        try {
+          const cfg = readLlmGatewayConfig();
+          if (cfg.enabled) {
+            const r = await getLlmGatewayManager().start();
+            if (!r.ok) { console.warn("[gui:main] LLM 网关启动失败:", r.error); }
+          }
+        } catch (e) {
+          console.warn("[gui:main] LLM 网关自动启动异常:", e);
+        }
+      })();
       // dev 模式优先走 electron-vite dev server（渲染层热更新实时生效）；
       // 无 dev server 时（生产/直接 electron .）回退 slime:// 协议读磁盘产物
       const devUrl = process.env.ELECTRON_RENDERER_URL;
@@ -4058,6 +5203,20 @@ function main(): void {
     })
        .catch((e) => { console.error("[gui:main] 启动失败:", e); process.exit(1); });
 
+  // A-975：主进程兜底——渲染进程崩溃/主进程未知异常全部落盘（不退出、静默容错），
+  // 便于用户把 data/logs/main-errors.log 里第一条 error 贴出来精确定位（DeepSeek 白屏调查闭环）。
+  const logMainError = (tag: string, err: unknown): void => {
+    try {
+      const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
+      const dir = resolveExtra("../data/logs");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "main-errors.log"), `${new Date().toISOString()}\t[${tag}]\t${msg}\n`, { flag: "a" });
+      console.error(`[gui:main] ${tag}:`, msg);
+    } catch { /* 兜底失败的兜底 */ }
+  };
+  process.on("uncaughtException", (err) => { logMainError("uncaughtException", err); });
+  process.on("unhandledRejection", (reason) => { logMainError("unhandledRejection", reason); });
+
   app.on("window-all-closed", () => {
     terminatePythonBackend();
     silamBrain?.close();
@@ -4072,6 +5231,7 @@ function main(): void {
     silamBrain?.close();
     silamBrain = null;
     void terminateModelServer();
+    void getLlmGatewayManager().stop(); // 停止 LLM 网关，释放端口
     // A-918++：退出前清理所有 HTTP 静态服务，释放端口
     try { httpServer.stopAll(); } catch { /* 忽略清理异常 */ }
   });

@@ -7,14 +7,27 @@
  *    retry（popLast 替换同 turn）后序数不变，仍对齐。
  */
 
+/** 规划项（结构对齐 ChatPanel.TodoPanoramaItem） */
+export interface PlanItemLite {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
 /** 时间线节点（结构对齐 ChatPanel.TimelineStep，独立类型避免跨组件耦合） */
 export interface TimelineStepLite {
-  kind: "think" | "tool";
+  kind: "think" | "tool" | "plan" | "todo";
   text?: string;
   name?: string;
   label?: string;
   detail?: string;
   result?: string;
+  /** A-980-R32：kind=plan —— 任务规划全景快照。
+   *  必须一起持久化，否则重启后「思考历程里有规划与进度」这条承诺只在当次会话成立：
+   *  用户回看历史消息时会发现规划卡凭空消失、只剩一堆工具调用行。 */
+  items?: PlanItemLite[];
+  /** kind=todo：该项是「开始做」还是「做完了」 */
+  state?: "start" | "done";
 }
 
 export interface SessionCtxMeta {

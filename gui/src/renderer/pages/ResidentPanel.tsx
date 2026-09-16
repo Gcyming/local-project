@@ -6,42 +6,52 @@
  * - 布局：卡片分区 + 按钮恒横排 + 内容可滚动（A-911/A-912 保留）。
  * 数据经主进程（core-ts SchedulerService / SubAgentManager），4s 轻轮询刷新。
  */
-import React, { type JSX } from "react";
+import React from "react";
+/** A-980-R31：子代理头像抽成公共组件（三处面板共用"图标=身份"的口径） */
+import SubagentAvatar from "../components/SubagentAvatar.js";
 
 type ResJob = { id: string; name: string; cron: string; prompt: string; agentId?: string; nextRun?: number; lastRun?: number; lastResult?: string; paused?: boolean; running?: boolean };
-type SubRun = { id: string; name: string; status: string; result?: string; error?: string; startedAt?: number; finishedAt?: number };
+type SubRun = {
+  id: string;
+  name: string;
+  status: string;
+  /** A-980-R31：派发时的任务指令（详情可查"这次让它干什么"） */
+  task?: string;
+  /** A-980-R31：本次生效的墙钟预算（毫秒） */
+  timeoutMs?: number;
+  result?: string;
+  error?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  /** A-980-R30：路由到的模型（可核验用户设的"执行档"是否真的生效） */
+  model?: string;
+  /** A-980-R30：结构化自评（子代理按 outputSchema 契约输出）；面板据此做轻量验收 */
+  structured?: { status: string; summary: string; artifacts: string[]; confidence: number };
+};
 type AgentBrief = { id: string; name: string; role?: string };
 
 const fmtTime = (ts?: number): string => (ts ? new Date(ts).toLocaleString() : "—");
 
-/** A-918++：子代理字母头像（名字 hash → 颜色 + 首字母；用户准备好的 D:\pilot project\gui\icon\icon_1cdszr8as42
- *  系列 SVG 下一轮集成到 SubagentAvatar 形成"有自定义用自定义，无则字母兜底"的分级渲染） */
-const AVATAR_COLORS = ["#f87171", "#fb923c", "#fbbf24", "#a3e635", "#34d399", "#22d3ee", "#60a5fa", "#a78bfa", "#f472b6", "#94a3b8", "#fb7185", "#facc15", "#4ade80", "#38bdf8", "#818cf8", "#c084fc", "#e879f9", "#fda4af", "#fcd34d", "#86efac"];
-const AVATAR_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"]; // 21 个，对应 icon_1cdszr8as42 的 A-T 系列
-function SubagentAvatar({ name, size = 24, running = false }: { name: string; size?: number; running?: boolean }): JSX.Element {
-  const sum = [...name].reduce((a, c) => a + c.charCodeAt(0), 0);
-  const color = AVATAR_COLORS[Math.abs(sum) % AVATAR_COLORS.length];
-  const initial = AVATAR_LETTERS[Math.abs(sum) % AVATAR_LETTERS.length] || (name[0] ?? "?").toUpperCase();
-  return (
-    <div style={{ position: "relative", flexShrink: 0 }}>
-      <div style={{
-        width: size, height: size, borderRadius: Math.max(4, size * 0.22),
-        background: color, color: "#fff",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: size * 0.42, fontWeight: 800, lineHeight: 1,
-        boxShadow: running ? `0 0 0 2px rgba(34,197,94,0.4), 0 0 10px ${color}80` : "none",
-        transition: "box-shadow 0.4s",
-      }}>{initial}</div>
-      {running && (
-        <span style={{
-          position: "absolute", right: -2, bottom: -2, width: 10, height: 10, borderRadius: "50%",
-          background: "#22c55e", border: "2px solid var(--bg)",
-          animation: "liveDot 1.2s ease-in-out infinite", willChange: "opacity, box-shadow, transform" as const,
-        }} />
-      )}
-    </div>
-  );
-}
+/**
+ * A-980-R30：子代理状态 → 徽标样式。
+ *
+ * 此前只有 running/done/fail 三态分支，`timeout` 与 `cancelled` 会掉进 else 显示成**「排队」**
+ * ——超时中断的子代理看起来像还在排队，用户据此判断"没跑"，直接误导。
+ */
+const SUBS_STATUS_UI: Record<string, { text: string; bg: string; fg: string }> = {
+  pending: { text: "排队", bg: "var(--bg-hover)", fg: "var(--text-muted)" },
+  running: { text: "● 执行中", bg: "rgba(34,197,94,.15)", fg: "#22c55e" },
+  done: { text: "✓ 完成", bg: "rgba(0,200,120,.15)", fg: "#22c55e" },
+  fail: { text: "✗ 失败", bg: "rgba(255,80,80,.15)", fg: "#f87171" },
+  timeout: { text: "⏱ 超时中断", bg: "rgba(251,191,36,.15)", fg: "#fbbf24" },
+  cancelled: { text: "⃠ 已取消", bg: "var(--bg-hover)", fg: "var(--text-muted)" },
+};
+
+/**
+ * A-980-R31：子代理头像已抽成 `components/SubagentAvatar.tsx`
+ * （图标库 gui/icon/icon_1cdszr8as42，按名字首字符选图标；监测栏下拉/详情弹窗共用同一实现，
+ * 于是"同一个人在哪个面板里都长一样"）。此处不再保留"哈希出一个字母"的旧实现。
+ */
 
 /** 子代理预设模板（点选填充表单，仍可修改） */
 const SUBAGENT_PRESETS = [
@@ -209,8 +219,25 @@ export default function ResidentPanel(): React.JSX.Element {
   };
   const spawnSub = async (): Promise<void> => {
     if (!saName.trim() || !saTask.trim()) { setNotice("子代理名称 / 任务指令 必填"); return; }
-    await act(() => api.resident?.subagentSpawn({ name: saName.trim(), task: saTask.trim(), systemPrompt: saSystem.trim() || undefined, agentId: saAgentId || undefined }), "子代理已派发（后台执行）");
+    // A-980-R30：带上 outputSchema —— 要求子代理按 {status,summary,artifacts,confidence} 自评，
+    // 面板才能显示"部分完成/置信度/产物数"这类可核验信息（与内置专家定义口径一致）。
+    await act(() => api.resident?.subagentSpawn({ name: saName.trim(), task: saTask.trim(), systemPrompt: saSystem.trim() || undefined, agentId: saAgentId || undefined, outputSchema: true }), "子代理已派发（后台执行）");
     setSaName(""); setSaTask(""); setSaSystem("");
+  };
+
+  /**
+   * A-980-R31：清空子代理历史记录。
+   * 记录现在会落盘（data/subagent-runs.json），所以需要一个显式的"清空"入口，
+   * 否则历史只增不减。在途（运行中/排队中）的任务**不受影响**——清的是跑完的痕迹。
+   */
+  const clearRuns = async (): Promise<void> => {
+    const r: any = await api.resident?.subagentClear?.();
+    if (r?.ok) {
+      setNotice(`已清空 ${r.cleared ?? 0} 条历史记录（在途任务保留）`);
+      refresh();
+    } else {
+      setNotice(`清空失败：${r?.error ?? "未知"}`);
+    }
   };
 
   // 首次加载后默认选中第一个 Agent
@@ -292,9 +319,18 @@ export default function ResidentPanel(): React.JSX.Element {
 
       {/* ── 子代理 ── */}
       <section style={card}>
-        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
-          子代理
-          <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（最多 3 个并发），结果落盘 data/generated/subagent-*.md</span>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>
+            子代理
+            <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（最多 3 个并发）· 这里手动派发的产出落盘 data/generated/subagent-*.md；<b>对话里由 Agent 委派的，产出会作为工具结果交回主对话并由主 Agent 验收</b></span>
+          </div>
+          {/* A-980-R31：运行记录现在持久化（data/subagent-runs.json），给一个显式清空入口 */}
+          {runs.length > 0 && (
+            <button style={{ ...miniBtn, flexShrink: 0, color: "var(--text-dim)" }} onClick={() => void clearRuns()}
+              title="清空子代理历史记录（落盘文件 + 已结束的内存记录；运行中/排队中的任务不受影响）">
+              清空历史
+            </button>
+          )}
         </div>
 
         {/* A-942：全局子代理默认模型档位（贵模型统筹、廉价/免费模型执行） */}
@@ -390,29 +426,61 @@ export default function ResidentPanel(): React.JSX.Element {
         </div>
 
         {runs.length === 0 ? (
-          <div style={{ color: "var(--text-dim)", fontSize: 12.5, marginTop: 10, padding: "12px", background: "var(--bg)", borderRadius: 8 }}>暂无子代理运行记录。选一个预设（或自己填）直接派发。</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 12.5, marginTop: 10, padding: "12px", background: "var(--bg)", borderRadius: 8 }}>暂无子代理运行记录。选一个预设（或自己填）直接派发；运行记录会落盘到 data/subagent-runs.json，重启后依然可查。</div>
         ) : (
           <div style={{ marginTop: 10, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", maxHeight: 240, overflowY: "auto", background: "var(--bg)" }}>
             {[...runs].reverse().map((r) => {
+              const ui = SUBS_STATUS_UI[r.status] ?? { text: r.status, bg: "var(--bg-hover)", fg: "var(--text-muted)" };
               const isRunning = r.status === "running";
-              const isDone = r.status === "done";
-              const isFail = r.status === "fail";
+              const isOk = r.status === "done";
+              const elapsed = r.startedAt && r.finishedAt ? `${((r.finishedAt - r.startedAt) / 1000).toFixed(1)}s` : null;
+              // 轻量验收信息：耗时 / 路由模型 / 自评置信度 / 产物数（让"设置里的执行档到底生效没"可核验）
+              const meta = [
+                elapsed ? `耗时 ${elapsed}` : null,
+                // A-980-R31：把生效的执行预算显式写出来——用户看到"超时中断"时能立刻判断
+                // 是"任务本就超过预算"还是"中断根本没生效"，不必再去猜
+                r.timeoutMs ? `限时 ${(r.timeoutMs / 1000).toFixed(0)}s` : null,
+                r.model ? `模型 ${r.model}` : null,
+                r.structured ? `置信度 ${r.structured.confidence.toFixed(2)}` : null,
+                r.structured?.artifacts?.length ? `产物 ${r.structured.artifacts.length} 项` : null,
+              ].filter(Boolean).join(" · ");
+              const partial = isOk && r.structured?.status === "partial";
+              // A-980-R31：中断的 run 现在也会带部分产出，面板必须把它显示出来（否则"记录还在但内容是空的"）
+              const interruptedPartial = !isOk && !isRunning && (r.result ?? "").trim();
               return (
                 <div key={r.id} style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)", background: isRunning ? "rgba(34,197,94,0.04)" : "transparent" }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <SubagentAvatar name={r.name} size={26} running={isRunning} />
                     <span style={{ fontWeight: 600, fontSize: 12.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                    {partial && (
+                      <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 8, flexShrink: 0, background: "rgba(251,191,36,.15)", color: "#fbbf24", fontWeight: 700 }} title="子代理自评：只完成了一部分">部分</span>
+                    )}
                     <span style={{ fontSize: 11.5, padding: "2px 9px", borderRadius: 8, flexShrink: 0,
-                      background: isDone ? "rgba(0,200,120,.15)" : isFail ? "rgba(255,80,80,.15)" : isRunning ? "rgba(34,197,94,.15)" : "var(--bg-hover)",
-                      color: isDone ? "#22c55e" : isFail ? "#f87171" : isRunning ? "#22c55e" : "var(--text-muted)",
-                      fontWeight: isRunning ? 700 : 500 }}>
-                      {isDone ? "✓ 完成" : isFail ? "✗ 失败" : isRunning ? "● 执行中" : "排队"}
+                      background: ui.bg, color: ui.fg, fontWeight: isRunning ? 700 : 500 }}>
+                      {ui.text}
                     </span>
                     <span style={{ color: "var(--text-dim)", fontSize: 11, flexShrink: 0 }}>{fmtTime(r.startedAt)}</span>
                   </div>
+                  {meta && (
+                    <div style={{ color: "var(--text-dim)", fontSize: 10.5, marginTop: 3, paddingLeft: 34 }}>{meta}</div>
+                  )}
+                  {r.task && (
+                    <div style={{ color: "var(--text-dim)", fontSize: 10.5, marginTop: 2, paddingLeft: 34, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.task}>
+                      任务：{r.task}
+                    </div>
+                  )}
                   <div style={{ color: "var(--text-muted)", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word", marginTop: 3, paddingLeft: 34 }}>
-                    {isFail ? `✗ ${r.error ?? ""}` : isRunning ? "（运行中…）" : (r.result?.slice(0, 300) || "—")}
+                    {r.status === "fail" || r.status === "timeout" || r.status === "cancelled"
+                      ? `${ui.text} ${r.error ?? ""}`
+                      : isRunning ? "（运行中…）" : (r.structured?.summary?.slice(0, 300) || r.result?.slice(0, 300) || "—")}
                   </div>
+                  {interruptedPartial && (
+                    <div style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 4, paddingLeft: 34, maxHeight: 60, overflow: "hidden" }}>
+                      <span style={{ color: "#fbbf24" }}>中断前已产出（{r.result!.trim().length} 字）：</span>
+                      {r.result!.trim().slice(0, 200)}
+                      {r.result!.trim().length > 200 ? "…" : ""}
+                    </div>
+                  )}
                 </div>
               );
             })}

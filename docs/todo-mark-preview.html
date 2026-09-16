@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>待办任务 · 面板与完成态标记样式（A-980-R28）</title>
+<style>
+  /* ── 主题变量（取自 slime 的 Alpha 主题，与 gui/src/renderer/index.css 同值） ── */
+  :root {
+    --bg-secondary: #1e293b;
+    --border: rgba(148, 163, 184, 0.18);
+    --text-primary: #e2e8f0;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.15);
+    --success: #34d399;
+    --success-soft: rgba(52, 211, 153, 0.15);
+    --input-bg: rgba(15, 23, 42, 0.6);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 56px;
+    background: #060a14; color: var(--text-primary);
+    font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .layout { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: var(--text-dim); margin-bottom: 18px; }
+
+  .panel { width: 320px; flex-shrink: 0; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px 7px; }
+  .notes { flex: 1; min-width: 300px; }
+  .notes h2 { font-size: 13px; margin: 0 0 8px; }
+  .notes ul { margin: 0 0 16px; padding-left: 18px; }
+  .notes li { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  .notes code { background: rgba(148,163,184,.14); padding: 1px 5px; border-radius: 4px; font-size: 11px; color: #bae6fd; }
+
+  /* ── 标题行：chevron + 图标 + 标题 + 徽标，5px 紧贴 ── */
+  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .head-btn { display: flex; align-items: center; gap: 5px; background: none; border: none; cursor: pointer; padding: 0; color: inherit; font: inherit; }
+  .head-title { font-size: 12px; font-weight: 600; }
+  /* 折叠箭头：基准朝右 ▸；展开态转 90° 朝下 ▾（全仓约定 open ? 90 : 0） */
+  .chev { display: inline-flex; color: var(--text-muted); transform: rotate(90deg); transition: transform .15s ease; }
+  .chev.collapsed { transform: rotate(0deg); }
+
+  /* ── 数量徽标：固定高度 + inline-flex 居中 + tabular-nums，数字不再上下错位 ── */
+  .chip {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 16px; min-width: 28px; padding: 0 6px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent);
+    font-size: 10px; font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0;
+  }
+  .chip.done { background: var(--success-soft); color: var(--success); }
+  .clear { background: none; border: none; cursor: pointer; font-size: 10px; color: var(--text-muted); padding: 1px 3px; }
+  .bar { height: 3px; border-radius: 999px; background: var(--input-bg); overflow: hidden; margin-bottom: 4px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width .3s ease, background-color .3s ease; }
+
+  .list { display: flex; flex-direction: column; gap: 1px; margin-bottom: 5px; }
+  /* 分组标题只在**出现两种以上状态**时渲染（同状态一堆任务时标题纯占高） */
+  .group { display: flex; align-items: center; gap: 5px; padding: 4px 5px 0; font-size: 9.5px; font-weight: 700; letter-spacing: .6px; }
+  .group .n { opacity: .75; font-variant-numeric: tabular-nums; }
+  .group .rule { flex: 1; height: 1px; background: var(--border); }
+  .g-active { color: var(--accent); } .g-pending { color: var(--text-dim); } .g-done { color: var(--success); }
+  .hint { padding: 4px 0; font-size: 11.5px; color: var(--text-dim); }
+
+  .add { display: flex; gap: 4px; }
+  .add input { flex: 1; min-width: 0; background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-size: 11.5px; color: var(--text-primary); outline: none; }
+  .add input:disabled { opacity: .5; }
+  .add button { background: var(--accent-soft); border: none; border-radius: 4px; color: var(--accent); padding: 3px 6px; cursor: pointer; font-size: 12px; }
+  .add button:disabled { opacity: .5; cursor: default; }
+
+  /* ══════════════════════════════════════════════════════════════
+     下面这段与 gui/src/renderer/index.css 的 .todo-* 规则逐字一致
+     ══════════════════════════════════════════════════════════════ */
+  .todo-row { display: flex; align-items: center; gap: 5px; padding: 3px 5px; border-radius: 5px; background: transparent; transition: opacity .25s ease, background-color .25s ease; }
+  .todo-row[data-status="in_progress"] { background: var(--accent-soft); border-left: 2px solid var(--accent); }
+  .todo-row[data-status="pending"] { border-left: 2px solid var(--text-muted); }
+  .todo-row[data-status="completed"] { border-left: 2px solid var(--success); opacity: .55; }
+  .todo-row[data-status="completed"]:hover { opacity: .92; }
+
+  .todo-text { flex: 1; min-width: 0; font-size: 11.5px; position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .todo-row[data-status="completed"] .todo-text { color: var(--text-muted); }
+  .todo-text::after {
+    content: ""; position: absolute; left: 0; top: 55%; height: 1px; width: 0;
+    background: currentColor; opacity: .8;
+    transition: width .26s cubic-bezier(.4,0,.2,1);
+  }
+  .todo-row[data-status="completed"] .todo-text::after { width: 100%; }
+
+  .todo-check-path { stroke-dasharray: 100; stroke-dashoffset: 100; }
+  .todo-row[data-just-done="1"] .todo-check-path { animation: todo-check-draw .3s cubic-bezier(.65,0,.35,1) forwards; }
+  @keyframes todo-check-draw { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+
+  .todo-row[data-just-done="1"] { animation: todo-just-done .9s ease-out both; }
+  @keyframes todo-just-done {
+    0%   { background-color: var(--success-soft); opacity: 1; }
+    40%  { background-color: var(--success-soft); opacity: 1; }
+    100% { background-color: transparent; opacity: .55; }
+  }
+
+  .todo-play { font-size: 9px; line-height: 1; color: var(--text-dim); opacity: .55; transition: color .15s, opacity .15s; }
+  .todo-row:hover .todo-play { color: var(--accent); opacity: 1; }
+  .icon-btn { background: none; border: none; cursor: pointer; padding: 0; display: flex; align-items: center; flex-shrink: 0; }
+  .del { background: none; border: none; cursor: pointer; padding: 0 2px; color: var(--text-muted); line-height: 1; flex-shrink: 0; }
+  .when { flex-shrink: 0; font-size: 9.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .col13 { width: 13px; flex-shrink: 0; }
+  .spin { width: 12px; height: 12px; border-radius: 999px; border: 1.6px solid var(--accent-soft); border-top-color: var(--accent); animation: sp .8s linear infinite; flex-shrink: 0; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .todo-row, .todo-text::after, .todo-play { transition: none; }
+    .todo-row[data-just-done="1"], .todo-row[data-just-done="1"] .todo-check-path { animation: none; }
+    .todo-check-path { stroke-dashoffset: 0; }
+  }
+  /* ══════════ 逐字一致段落结束 ══════════ */
+
+  .actions { display: flex; gap: 8px; margin: 0 0 18px; flex-wrap: wrap; }
+  .actions button { background: var(--accent-soft); border: 1px solid var(--border); color: var(--accent); border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; font-weight: 600; }
+  .actions button.ghost { background: transparent; color: var(--text-muted); }
+  .spec { border-left: 2px solid var(--border); padding-left: 12px; margin-bottom: 14px; }
+  .spec b { color: var(--text-primary); font-size: 12px; }
+  .spec p { margin: 3px 0 0; font-size: 11.5px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div>
+    <h1>待办任务 · 面板与完成态标记</h1>
+    <div class="sub">A-980-R28 · 320px 侧栏真实尺寸 · 可交互</div>
+
+    <div class="actions">
+      <button id="btn-next">完成当前进行中的任务</button>
+      <button id="btn-collapse" class="ghost">收起 / 展开列表</button>
+      <button id="btn-ready" class="ghost">切换「会话未就绪」</button>
+      <button id="btn-reset" class="ghost">重置</button>
+    </div>
+
+    <div class="panel">
+      <div class="head">
+        <button class="head-btn" id="head-btn" title="收起待办列表">
+          <span class="chev" id="chev">
+            <svg width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor">
+              <path d="M420.864 283.136a38.336 38.336 0 1 1 54.272-54.272l256 256a38.336 38.336 0 0 1 0 54.272l-256 256a38.336 38.336 0 1 1-54.272-54.272L649.728 512 420.864 283.136z"/>
+            </svg>
+          </span>
+          <svg width="13" height="13" viewBox="0 0 1024 1024" fill="var(--text-muted)"><path d="M128 192h768v128H128V192zm0 256h768v128H128V448zm0 256h768v128H128V704z"/></svg>
+          <span class="head-title">待办任务</span>
+          <span id="chip-slot"></span>
+        </button>
+        <button class="clear" id="btn-clear">清完成</button>
+      </div>
+      <div class="bar" id="bar-wrap" style="display:none"><i id="bar" style="width:0%"></i></div>
+      <div class="list" id="list"></div>
+      <div class="add">
+        <input id="add-input" placeholder="添加任务…" readonly>
+        <button>＋</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <h2>本轮修的五件事</h2>
+    <ul>
+      <li><b>箭头方向</b>：<code>ChevronIcon</code> 基准朝右 ▸，全仓约定 <code>open ? 90 : 0</code>。原来写成 <code>collapsed ? 90 : 0</code>，于是展开时朝右、收起时朝下，正好反了。现展开朝下 ▾、收起朝右 ▸。</li>
+      <li><b>数量徽标居中</b>：原来靠行盒自然撑高（<code>fontSize:10 + padding:1px 6px</code>），数字在胶囊里上下不居中。现改为固定 <code>height:16</code> + <code>inline-flex</code> 居中 + <code>tabular-nums</code> + <code>minWidth:28</code>，数字永远居中、位数变化也不跳宽。</li>
+      <li><b>整块收紧</b>：标题 6→4px、进度条 6→4px、分组标题上内边距 7→4px、行内边距 5→3px、行间距 2→1px。原来这几层留白叠出约 20px 死区。</li>
+      <li><b>分组标题按需出现</b>：只在<b>出现两种以上状态</b>时才打「进行中 / 待办 / 已完成」——一堆同状态任务时标题纯占高。</li>
+      <li><b>会话未就绪门闸</b>：<code>sessionId</code> 还没就绪时不渲染任何数据，只给「正在加载会话…」，输入框置灰。</li>
+    </ul>
+
+    <h2>「加载途中冒出旧待办」的真因</h2>
+    <div class="spec">
+      <p><code>TasksTab</code> 拿到的是 <code>props.sessionId ?? ""</code>。会话未就绪时是空串，于是主进程去读
+      <code>todos_</code> + <code>""</code> + <code>.json</code> = <code>data/todos_.json</code> ——
+      那正好是修复前遗留的孤儿文件的文件名，所以冷启动途中会把上一次的旧计划显示出来。</p>
+      <p style="margin-top:6px">三层防御：①渲染层 <code>sessionReady</code> 门闸（<code>loadPersisted</code>/<code>flushPersist</code>/拉取三处都有守卫）；②订阅过滤两侧严格匹配（原来 <code>props.sessionId</code> 为空时整条守卫被跳过）；③主进程对空 <code>sessionId</code> 直接拒绝。</p>
+      <p style="margin-top:6px">另外「刚完成」动画的 diff 基线也带上会话标识了 —— todo id 常是模型自己编的 <code>"1"/"2"/"3"</code>，切会话时新旧 id 撞车会把新会话里本来就完成的项误判成「刚刚完成」而整片闪。</p>
+    </div>
+
+    <h2>完成瞬间三个动作（未改，保留）</h2>
+    <div class="spec">
+      <b>① 对勾「画入」</b>
+      <p><code>pathLength=100</code> 归一化路径长度，CSS 里 <code>stroke-dasharray/offset</code> 恒为 100 —— 任何图标尺寸都刚好一划到底。0.3s。</p>
+    </div>
+    <div class="spec">
+      <b>② 删除线「划过去」</b>
+      <p><code>text-decoration</code> 不可动画，改用随宽度 0→100% 生长的细线（<code>::after</code> + <code>currentColor</code>）。0.26s。</p>
+    </div>
+    <div class="spec">
+      <b>③ 整行先亮再沉降</b>
+      <p>背景先落 <code>--success-soft</code> 保持 40%，再用 0.9s 落回透明、透明度过到 0.55。</p>
+    </div>
+
+    <div class="sub" style="margin-top:18px">
+      本页样式段与 <code>gui/src/renderer/index.css</code> / <code>RightSidebar.tsx</code> 保持一致，改样式时两边要同步。
+    </div>
+  </div>
+</div>
+
+<script>
+const seed = [
+  { id: "1", content: "调研各家 Agent 的任务规划机制", status: "completed", completedAt: "13:31" },
+  { id: "2", content: "修复 todo_write 未注入 sessionId", status: "completed", completedAt: "13:38" },
+  { id: "3", content: "补上工具写入后的即时广播", status: "in_progress" },
+  { id: "4", content: "设计完成态标记样式", status: "pending" },
+  { id: "5", content: "修箭头方向与徽标居中", status: "pending" },
+  { id: "6", content: "收紧面板排布并加会话门闸", status: "pending" },
+];
+let todos = structuredClone(seed);
+let collapsed = false;
+let sessionReady = true;
+let justDone = [];
+
+function checkSVG(animate) {
+  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="flex-shrink:0;display:block">
+    <rect x="2.5" y="2.5" width="19" height="19" rx="5.5" fill="var(--success)"/>
+    <path class="todo-check-path" d="M7 12.4l3.3 3.3L17 8.6" stroke="#fff" stroke-width="2.6"
+      stroke-linecap="round" stroke-linejoin="round" pathLength="100"
+      ${animate ? "" : 'style="stroke-dasharray:100;stroke-dashoffset:0"'} /></svg>`;
+}
+const emptyBoxSVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="flex-shrink:0;display:block">
+  <rect x="3" y="3" width="18" height="18" rx="5" stroke="var(--text-muted)" stroke-width="1.8"/></svg>`;
+
+function row(t, just) {
+  const done = t.status === "completed";
+  const label = done ? "已完成" : t.status === "in_progress" ? "进行中" : "待办";
+  return `<div class="todo-row" data-status="${t.status}" ${just ? 'data-just-done="1"' : ""} aria-label="${t.content}（${label}）">
+    <button class="icon-btn">${done ? checkSVG(just) : emptyBoxSVG}</button>
+    ${t.status === "in_progress" ? '<span class="spin"></span>'
+      : t.status === "pending" ? '<button class="icon-btn" style="width:13px;justify-content:center"><span class="todo-play">▶</span></button>'
+      : '<span class="col13"></span>'}
+    <span class="todo-text">${t.content}</span>
+    ${done && t.completedAt ? `<span class="when">${t.completedAt}</span>` : ""}
+    <button class="del">✕</button>
+  </div>`;
+}
+const groupLabel = (text, cls, n) => `<div class="group ${cls}"><span>${text}</span><span class="n">${n}</span><span class="rule"></span></div>`;
+
+function render() {
+  const active = todos.filter(t => t.status === "in_progress");
+  const pending = todos.filter(t => t.status === "pending");
+  const done = todos.filter(t => t.status === "completed");
+  const multi = [active, pending, done].filter(g => g.length > 0).length > 1;
+
+  let html = "";
+  if (!sessionReady) {
+    html = '<div class="hint">正在加载会话…</div>';
+  } else if (todos.length === 0) {
+    html = '<div class="hint">暂无任务 — Agent 规划后会自动显示，也可手动添加</div>';
+  } else if (!collapsed) {
+    if (multi && active.length) html += groupLabel("进行中", "g-active", active.length);
+    html += active.map(t => row(t, false)).join("");
+    if (multi && pending.length) html += groupLabel("待办", "g-pending", pending.length);
+    html += pending.map(t => row(t, false)).join("");
+    if (multi && done.length) html += groupLabel("已完成", "g-done", done.length);
+    html += done.map(t => row(t, justDone.includes(t.id))).join("");
+  }
+  document.getElementById("list").innerHTML = html;
+
+  const pct = todos.length ? Math.round(done.length / todos.length * 100) : 0;
+  document.getElementById("chip-slot").innerHTML = (sessionReady && todos.length)
+    ? (pct === 100 ? '<span class="chip done">全部完成 ✓</span>' : `<span class="chip">${done.length}/${todos.length}</span>`)
+    : "";
+  document.getElementById("btn-clear").style.display = done.length > 0 ? "" : "none";
+
+  const wrap = document.getElementById("bar-wrap");
+  wrap.style.display = (sessionReady && todos.length && !collapsed) ? "" : "none";
+  const bar = document.getElementById("bar");
+  bar.style.width = pct + "%";
+  bar.style.background = pct === 100 ? "var(--success)" : "var(--accent)";
+
+  // 折叠箭头：展开 ▾(90°) / 收起 ▸(0°)；标题 tooltip 同步
+  document.getElementById("chev").className = "chev" + (collapsed ? " collapsed" : "");
+  document.getElementById("head-btn").title = collapsed ? "展开待办列表" : "收起待办列表";
+
+  const inp = document.getElementById("add-input");
+  inp.disabled = !sessionReady;
+  inp.placeholder = sessionReady ? "添加任务…" : "会话加载中…";
+}
+
+document.getElementById("btn-next").onclick = () => {
+  const i = todos.findIndex(t => t.status === "in_progress");
+  if (i < 0) return;
+  const now = new Date();
+  todos[i].status = "completed";
+  todos[i].completedAt = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const nxt = todos.find(t => t.status === "pending");
+  if (nxt) nxt.status = "in_progress";
+  justDone = [todos[i].id];
+  render();
+  setTimeout(() => { justDone = []; render(); }, 900);
+};
+document.getElementById("head-btn").onclick = () => { collapsed = !collapsed; render(); };
+document.getElementById("btn-collapse").onclick = () => { collapsed = !collapsed; render(); };
+document.getElementById("btn-ready").onclick = () => { sessionReady = !sessionReady; render(); };
+document.getElementById("btn-clear").onclick = () => { todos = todos.filter(t => t.status !== "completed"); render(); };
+document.getElementById("btn-reset").onclick = () => { todos = structuredClone(seed); collapsed = false; sessionReady = true; justDone = []; render(); };
+
+render();
+</script>
+</body>
+</html>

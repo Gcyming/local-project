@@ -21,7 +21,10 @@ export interface GuiPermissions {
   /** 工具权限类别（对应 Tool.permissions ∈ {read,write,terminal}；network 开关见 networkEnabled） */
   toolRead: boolean;
   toolWrite: boolean;
+  /** terminal 类：shell / 命令执行 —— 含 ADB shell（需先开启才能操作设备命令行） */
   toolTerminal: boolean;
+  /** 图形控制总开关（screen_* 工具：桌面鼠标键盘注入 + 安卓触摸控制）——高危，默认关闭 */
+  screenEnabled: boolean;
   /** 全局功能开关 */
   mcpEnabled: boolean;
   skillsEnabled: boolean;
@@ -33,6 +36,7 @@ const DEFAULTS: GuiPermissions = {
   toolRead: true,
   toolWrite: true,
   toolTerminal: false,
+  screenEnabled: false,
   mcpEnabled: true,
   skillsEnabled: true,
 };
@@ -85,6 +89,7 @@ export function getPermissions(): GuiPermissions {
       toolRead: typeof o.toolRead === "boolean" ? o.toolRead : DEFAULTS.toolRead,
       toolWrite: typeof o.toolWrite === "boolean" ? o.toolWrite : DEFAULTS.toolWrite,
       toolTerminal: typeof o.toolTerminal === "boolean" ? o.toolTerminal : DEFAULTS.toolTerminal,
+      screenEnabled: typeof o.screenEnabled === "boolean" ? o.screenEnabled : DEFAULTS.screenEnabled,
       mcpEnabled: typeof o.mcpEnabled === "boolean" ? o.mcpEnabled : DEFAULTS.mcpEnabled,
       skillsEnabled: typeof o.skillsEnabled === "boolean" ? o.skillsEnabled : DEFAULTS.skillsEnabled,
     };
@@ -108,7 +113,7 @@ export function setPermissions(patch: Partial<GuiPermissions>): { ok: boolean; p
     }
     next.approvalAllowPaths = patch.approvalAllowPaths.filter((x) => typeof x === "string");
   }
-  for (const k of ["toolRead", "toolWrite", "toolTerminal", "mcpEnabled", "skillsEnabled"] as const) {
+  for (const k of ["toolRead", "toolWrite", "toolTerminal", "screenEnabled", "mcpEnabled", "skillsEnabled"] as const) {
     if (patch[k] !== undefined) {
       next[k] = Boolean(patch[k]);
     }

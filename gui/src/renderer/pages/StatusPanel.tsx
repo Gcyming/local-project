@@ -156,7 +156,6 @@ export default function StatusPanel(): JSX.Element {
   const servers = stats?.servers ?? [];
   const agents = stats?.agents ?? { total: 0, roots: 0, leaves: 0, byLifecycle: {}, maxDepth: 0 };
   const sessions = stats?.sessions ?? { totalRecords: 0, recent: 0 };
-  const alarms = stats?.alarms ?? [];
 
   // 更新状态兜底：渲染层未收到主进程推送时，默认"未启用"（避免只有一个按钮显异常感）
   const updateStatusSafe = updateStatus ?? { status: "disabled" };
@@ -176,7 +175,6 @@ export default function StatusPanel(): JSX.Element {
     { label: "会话记录", value: sessions.totalRecords, color: "#a78bfa" },
     { label: "24h 活跃", value: sessions.recent, color: WARN },
     { label: "模型实例", value: servers.length },
-    { label: "告警", value: alarms.length, color: alarms.length > 0 ? DANGER : undefined },
   ];
 
   return (
@@ -322,7 +320,9 @@ export default function StatusPanel(): JSX.Element {
         )}
       </section>
 
-      {/* E: 任务进度（Plan 一等对象）+ D: 链路视图（trace 可观测） */}
+      {/* E: 任务进度（Plan 一等对象）+ D: 链路视图（trace 可观测）
+          A-980-R30：保留——数据源真实（plan:update / trace:update 广播），仅在有任务/对话时才有内容；
+          空态由子组件给出引导文案，不算"死面板"。告警表已删除（主进程从不产出 alarms，永远为空）。 */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14, alignItems: "start" }}>
         <section className="card">
           <PlanPanel />
@@ -331,46 +331,6 @@ export default function StatusPanel(): JSX.Element {
           <TraceViewer />
         </section>
       </div>
-
-      {/* 告警表 */}
-      <section className="card" style={{ marginBottom: 14, borderColor: alarms.length > 0 ? "var(--danger-soft)" : undefined }}>
-        <h3 style={{ marginTop: 0, fontSize: 14, color: alarms.length > 0 ? DANGER : undefined }}>
-          告警（{alarms.length}）
-        </h3>
-        {alarms.length === 0 ? (
-          <p style={{ color: "var(--text-dim)", fontSize: 12 }}>暂无告警</p>
-        ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead>
-              <tr style={{ color: "var(--text-muted)", textAlign: "left" }}>
-                <th style={{ padding: "4px 8px" }}>级别</th>
-                <th style={{ padding: "4px 8px" }}>来源</th>
-                <th style={{ padding: "4px 8px" }}>消息</th>
-                <th style={{ padding: "4px 8px" }}>时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {alarms.slice(-12).reverse().map((a) => (
-                <tr key={a.seq} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "6px 8px" }}>
-                    <span style={{
-                      color: a.severity === "critical" ? DANGER : a.severity === "warning" ? WARN : "var(--text-muted)",
-                      fontWeight: 700,
-                    }}>
-                      {a.severity}
-                    </span>
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>{a.source}</td>
-                  <td style={{ padding: "6px 8px", color: "var(--text)" }}>{a.message}</td>
-                  <td style={{ padding: "6px 8px", color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                    {new Date(a.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
 
       {/* 自动更新 */}
       <section className="card" style={{ marginBottom: 14 }}>
@@ -394,7 +354,7 @@ export default function StatusPanel(): JSX.Element {
           )}
           {updateStatusSafe.status === "disabled" && !updateStatusSafe.error && (
             <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              自动更新未启用（可在 slime.toml [update] 段配置 feed_url 后开启）
+              自动检查未开启（可点「手动检查」随时对比 GitHub Release；如需启动时自动检查，在 slime.toml [update] 段配置 enabled = true）
             </span>
           )}
           {updateStatusSafe.status === "up-to-date" && (

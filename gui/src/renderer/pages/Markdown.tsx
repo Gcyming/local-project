@@ -12,6 +12,9 @@ export interface SidebarOpenPayload {
   /** 文件相对工作目录路径（或绝对路径） */
   rel?: string;
   name?: string;
+  /** A-975-R4：请求来源——"site" = 站点弹窗/新窗口（会被弹窗风暴保护限流）；
+   *  缺省 = 用户或 Agent 主动打开（不限流）。 */
+  from?: "site" | "user";
 }
 export function requestSidebarOpen(payload: SidebarOpenPayload): void {
   window.dispatchEvent(new CustomEvent<SidebarOpenPayload>(SIDEBAR_OPEN_EVENT, { detail: payload }));
@@ -103,12 +106,41 @@ function renderItalic(text: string, key: string): JSX.Element {
   let last = 0; let k = 0; let m: RegExpExecArray | null;
   italic.lastIndex = 0;
   while ((m = italic.exec(text)) !== null) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(<em key={`${key}i${k++}`}>{m[1]}</em>);
+    if (m.index > last) out.push(<React.Fragment key={`${key}t${k}`}>{autoLink(text.slice(last, m.index), `${key}${k++}`)}</React.Fragment>);
+    out.push(<em key={`${key}i${k++}`}>{autoLink(m[1], `${key}${k}`)}</em>);
     last = m.index + m[0].length;
   }
-  if (last < text.length) out.push(text.slice(last));
+  if (last < text.length) out.push(<React.Fragment key={`${key}t${k}`}>{autoLink(text.slice(last), `${key}${k}`)}</React.Fragment>);
   return <>{out}</>;
+}
+
+/** A-975：裸 URL 自动链接——Agent 生成的成品链接（如 http://127.0.0.1:8080）此前是纯文本不可点，
+ *  用户必须自己开浏览器。现在自动链接化，点击即在**右侧边栏**打开（不跳系统浏览器）。 */
+const BARE_URL_RE = /https?:\/\/[^\s<>()[\]"'，。；：、）】]+/g;
+function autoLink(text: string, key: string): React.ReactNode {
+  if (!/https?:\/\//i.test(text)) { return text; }
+  const parts: React.ReactNode[] = [];
+  let last = 0; let k = 0; let m: RegExpExecArray | null;
+  BARE_URL_RE.lastIndex = 0;
+  while ((m = BARE_URL_RE.exec(text)) !== null) {
+    if (m.index > last) { parts.push(text.slice(last, m.index)); }
+    const url = m[0];
+    parts.push(
+      <a
+        key={`${key}u${k++}`}
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => { e.preventDefault(); requestSidebarOpen({ kind: "url", url, name: url }); }}
+        style={{ color: "var(--accent-hover)", textDecoration: "underline" }}
+      >
+        {url}
+      </a>,
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) { parts.push(text.slice(last)); }
+  return <>{parts}</>;
 }
 
 /**
@@ -450,15 +482,63 @@ export function normalizeMarkdownBlocks(text: string): string {
   return out.join("\n");
 }
 
+/** 代码块右上角「复制」按钮。
+ *  业界惯例（GitHub / ChatGPT / Claude / Cursor 一致）：复制按钮放在代码块的**标题行右端**
+ *  （不是浮动在代码上，避免遮挡首行），悬停显形、点击后短暂显示"已复制"。
+ *  剪贴板不可用（非安全上下文 / 无权限）时静默降级——不弹错、不误导。 */
+function CopyCodeButton({ text }: { text: string }): JSX.Element {
+  const [copied, setCopied] = React.useState(false);
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => () => { if (timerRef.current) { clearTimeout(timerRef.current); } }, []);
+  const onCopy = React.useCallback((): void => {
+    const done = (): void => {
+      setCopied(true);
+      if (timerRef.current) { clearTimeout(timerRef.current); }
+      timerRef.current = setTimeout(() => setCopied(false), 1400);
+    };
+    try {
+      const p = navigator.clipboard?.writeText(text);
+      if (p && typeof p.then === "function") { p.then(done).catch(() => { /* 无权限 → 无反馈 */ }); }
+    } catch { /* ignore */ }
+  }, [text]);
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? "已复制" : "复制代码"}
+      style={{
+        background: "transparent",
+        border: "1px solid var(--border)",
+        borderRadius: 6,
+        color: copied ? "var(--success)" : "var(--text-muted)",
+        fontSize: 11, lineHeight: 1, padding: "3px 8px",
+        cursor: "pointer", flexShrink: 0,
+        transition: "color 0.15s, border-color 0.15s",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = "var(--border-hover)";
+        e.currentTarget.style.color = copied ? "var(--success)" : "var(--text)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = "var(--border)";
+        e.currentTarget.style.color = copied ? "var(--success)" : "var(--text-muted)";
+      }}
+    >
+      {copied ? "已复制" : "复制"}
+    </button>
+  );
+}
+
 function renderBlock(b: Block, key: string): JSX.Element {
   switch (b.t) {
     case "code":
       return (
         <div key={key} style={codeBlockWrapStyle}>
-          <div style={codeBlockHeaderStyle}>
+          <div style={{ ...codeBlockHeaderStyle, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", letterSpacing: 0.3 }}>
               {b.lang ? b.lang.toUpperCase() : "CODE"}
             </span>
+            <CopyCodeButton text={b.text} />
           </div>
           <pre style={codeBlockStyle}>
             <code>{b.text}</code>
@@ -559,15 +639,47 @@ export function tightenCjkSpacing(text: string): string {
     .replace(/([\u4e00-\u9fff])[ \t\u3000]+([\u4e00-\u9fff])/g, "$1$2");
 }
 
+/**
+ * A-980-R24：长文本流式期的**解析步进缓存**（只在 ≥LARGE_TEXT 时生效）。
+ *
+ * 问题：`Markdown` 是 `memo(text)`，但流式期每帧 text 都在变（新增几个字符）→ 每帧都要对**整段**
+ * 重跑「正则净化链 + parseBlocks + renderBlock」。一段两万字的回答，每帧全量解析是几十毫秒级，
+ * 渲染进程会被钉在 60fps 做同一件重活；它与流式 buffer 堆积叠加，是渲染进程卡死/OOM 的放大器。
+ *
+ * 做法：长文本流式时**按增长比例步进**——距上次解析不足 step 个字符就**复用上次的解析文本**
+ * （只是显示落后一点点，内容永远是正确文本的前缀，不会错乱）。
+ * 短/中文本完全不受影响（保持逐字平滑）；长文本本来就不可能逐字丝滑，用「少解析」换「不卡死」。
+ *
+ * 单槽缓存：多个 Markdown 实例同时复用时最多退化为「缓存不命中」，结果始终是各自文本的前缀，安全。
+ */
+const longStreamParseCache = { src: "", out: "" };
+function throttleLongStreamParse(src: string, streaming: boolean): string {
+  if (!streaming || src.length < LARGE_TEXT) {
+    longStreamParseCache.src = src;
+    longStreamParseCache.out = src;
+    return src;
+  }
+  const step = Math.max(160, Math.floor(src.length / 120));
+  const prev = longStreamParseCache.src;
+  if (prev && src !== prev && src.startsWith(prev) && src.length - prev.length < step) {
+    return longStreamParseCache.out;
+  }
+  longStreamParseCache.src = src;
+  longStreamParseCache.out = src;
+  return src;
+}
+
 const Markdown = React.memo(function Markdown({ text, streaming }: { text: string; streaming?: boolean }): JSX.Element {
   const raw = text ?? "";
   const pre = streaming ? repairStreamingMarkdown(raw) : raw;
   // A-929：统一净化管道（标本式）——块级规整（补空行）→ 碎片换行折叠 → 单行内联表格规整 → 中文标点/CJK 紧贴
   const src = tightenCjkSpacing(normalizeInlineTables(normalizeBrokenLines(normalizeMarkdownBlocks(pre))));
-  if (src.length >= LARGE_TEXT) {
-    return renderLargeText(src);
+  // A-980-R24：长文本流式解析节流（见 throttleLongStreamParse 注释）
+  const parsed = throttleLongStreamParse(src, !!streaming);
+  if (parsed.length >= LARGE_TEXT) {
+    return renderLargeText(parsed);
   }
-  const blocks = parseBlocks(src);
+  const blocks = parseBlocks(parsed);
   return <>{blocks.map((b, i) => renderBlock(b, `md${i}`))}</>;
 });
 

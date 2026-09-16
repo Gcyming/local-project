@@ -2,15 +2,18 @@
  * gui/src/renderer/pages/PermissionsPanel.tsx — 设置「权限」专栏（全局权限控制台）。
  * - 全局默认审批模式（手动/自动/无需/自定义）：作为会话未单独配置时的兜底
  * - 自定义审批白名单（custom 档生效）：预设目录/仓库命中免审批
- * - 工具权限类别开关 / MCP / 技能 全局开关：统一持久化到 gui_permissions.json
+ * - 工具权限类别开关 / 图形控制 / MCP / 技能 全局开关：统一持久化到 gui_permissions.json
+ *
+ * 【生效说明】工具类别开关由主进程注入的 ToolCategoryGate 在每次工具调用时实时读取，
+ * 关闭的类别会被直接拒绝并把原因回传模型（模型无法绕过）。改动即时生效，无需重启。
  */
 import React, { type JSX } from "react";
 import type { GuiPermissions, ApprovalMode } from "../../shared/ipc.js";
 
 const TOOL_ROWS: Array<{ key: "toolRead" | "toolWrite" | "toolTerminal"; label: string; desc: string; warn: boolean }> = [
-  { key: "toolRead", label: "读（read）", desc: "检索本地文件 / 内存 / 知识库", warn: false },
-  { key: "toolWrite", label: "写（write）", desc: "创建 / 修改本地文件与配置", warn: false },
-  { key: "toolTerminal", label: "终端（terminal）", desc: "执行 shell / 命令，风险较高", warn: true },
+  { key: "toolRead", label: "读（read）", desc: "检索本地文件 / 内存 / 知识库 / 截屏预览", warn: false },
+  { key: "toolWrite", label: "写（write）", desc: "创建 / 修改本地文件与配置；图形控制（鼠标·键盘·触摸注入）", warn: true },
+  { key: "toolTerminal", label: "终端（terminal）", desc: "执行 shell / 命令，含 **ADB shell**（操作安卓设备命令行）", warn: true },
 ];
 
 export default function PermissionsPanel(): JSX.Element {
@@ -149,7 +152,10 @@ export default function PermissionsPanel(): JSX.Element {
 
           {/* 工具权限类别 */}
           <div className="card" style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>工具权限类别</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>工具权限类别</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 6 }}>
+              关闭的类别会被直接拒绝并把原因回传模型（模型无法绕过）。改动即时生效。
+            </div>
             {TOOL_ROWS.map((r) => (
               <label key={r.key} style={{
                 display: "flex", alignItems: "center", gap: 10, padding: "9px 2px",
@@ -167,6 +173,29 @@ export default function PermissionsPanel(): JSX.Element {
                 <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{r.desc}</span>
               </label>
             ))}
+          </div>
+
+          {/* 图形控制能力（桌面 + 安卓） */}
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>图形控制能力</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8 }}>
+              slime 全程序级能力：Agent 可截图查看画面并注入鼠标 / 键盘 / 触摸事件。
+              桌面（Windows）与安卓设备（ADB）共用同一套动作语义。**高危能力，默认关闭。**
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", cursor: "pointer" }}>
+              <input type="checkbox" checked={perms.screenEnabled}
+                onChange={(e) => void save({ screenEnabled: e.target.checked })}
+                style={{ accentColor: "var(--accent)" }} />
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--warning)" }}>启用图形控制（screen_*）</span>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                允许 Agent 截屏并操作本机桌面或已连接的安卓设备
+              </span>
+            </label>
+            {perms.screenEnabled ? (
+              <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6, paddingLeft: 26 }}>
+                提示：每次图形动作仍会走上方审批档位；面板中的「紧急停止」可随时中断。
+              </div>
+            ) : null}
           </div>
 
           {/* 全局功能开关 */}

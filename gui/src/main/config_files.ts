@@ -271,12 +271,35 @@ function isTableStart(line: string): boolean {
   return /^\[/.test(t);
 }
 
-/** 从 [[mcp_servers]] 表头收集该 server 块（遇下一个表头或 EOF 结束） */
+/** 判断某行是否为「键 = 值」行（同样忽略行首单层 # 注释前缀）。
+ *  A-980-R28：用于界定 server 块的**结尾**——块内允许空行与注释掉的键，
+ *  但「空行之后不再是键值行」（散文注释 / 新段落 / EOF）就说明块已经结束。 */
+function isKeyValueLine(line: string): boolean {
+  const t = line.trimStart().replace(/^#/, "").trimStart();
+  return /^[A-Za-z_][A-Za-z0-9_.-]*\s*=/.test(t);
+}
+
+/** 从 [[mcp_servers]] 表头收集该 server 块。
+ *  结束条件：下一个表头（含被 # 注释的表头）/ EOF / **空行之后已不是块内容**。
+ *
+ *  A-980-R28（真事故根因）：此前只认「下一个表头」——于是**文件里最后一个 server 块**
+ *  会把其后所有内容（散文注释、下一个配置段的横幅注释…）一并吞进块内。再叠加下面
+ *  rebuildBlock 启用侧"逐行剥一层 #"的行为，用户一在 GUI 里点「启用」，这些注释就被剥成裸文本：
+ *      `# 已删除（A-092-R）：headroom…`  →  ` 已删除（A-092-R）：headroom…`
+ *  → 整个 slime.toml 解析失败（实测 `Invalid statement (at line 191, column 2)`），
+ *  于是 [media]/[silam]/[sandbox] 等**全文件配置一起失效**；同时被误剥的 server 块
+ *  （agent_browser）也从「注释禁用」悄悄变成真启用。 */
 function collectTomlBlock(lines: string[], header: number): BlockRef {
   let end = header + 1;
   while (end < lines.length) {
     const candidate = lines[end];
     if (isTableStart(candidate)) { break; }
+    if (candidate.trim() === "") {
+      // 空行可能是块内分隔，也可能是块已结束：看空行之后第一个非空行还像不像块内容
+      let probe = end + 1;
+      while (probe < lines.length && lines[probe].trim() === "") { probe++; }
+      if (probe >= lines.length || !isKeyValueLine(lines[probe])) { break; }
+    }
     end++;
   }
   return { start: header, end };
@@ -292,7 +315,13 @@ function parseBlockName(body: string[]): string {
   return "";
 }
 
-/** 重建一个 MCP server 块（enabled=false 时逐行加 #；true 时剥去单层 #） */
+/** 重建一个 MCP server 块（enabled=false 时逐行加 #；true 时剥去单层 # 与其后的一个空格）。
+ *
+ *  A-980-R28：启用侧此前是 `/^((\s*)#)/` → 只剥 `#`、把 `# ` 里那个空格留在原地，
+ *  `# name = "x"` 变成 ` name = "x"`（带前导空格但仍是合法 TOML）：功能上等于已启用，
+ *  可外观仍是缩进的、像没启用；被误吞进块的散文注释同样被剥成裸文本 → 文件解析失败。
+ *  现在两侧严格互逆（加/减 `#` + 至多一个空格，保留原有缩进），且禁用侧用 `/^\s*#/`
+ *  判断"已注释"，缩进过的注释行不会被重复加 `#`。 */
 function rebuildBlock(lines: string[], block: BlockRef, enabled: boolean): string[] {
   const out: string[] = [];
   for (let i = block.start; i < block.end; i++) {
@@ -302,9 +331,9 @@ function rebuildBlock(lines: string[], block: BlockRef, enabled: boolean): strin
       continue;
     }
     if (enabled) {
-      out.push(raw.replace(/^((\s*)#)/, "$2"));
+      out.push(raw.replace(/^(\s*)#[ \t]?/, "$1"));
     } else {
-      out.push(raw.startsWith("#") ? raw : `#${raw}`);
+      out.push(/^\s*#/.test(raw) ? raw : raw.replace(/^(\s*)/, "$1# "));
     }
   }
   return out;

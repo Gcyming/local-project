@@ -181,14 +181,17 @@ export function readModelServerConfig(): ModelServerToml {
 
 export type TomlKey = "llama_bin" | "model_path" | "models_dir";
 
-/** 自动更新配置（slime.toml [update] 段；默认关闭避免无发布源时反复报"检查失败"） */
+/** 自动更新配置（slime.toml [update] 段；默认**开启**——GitHub Release 发布源已就绪，见 updater.ts。
+ *  不想自动检查时显式配 enabled = false；feed_url 可覆盖为自定义源）。 */
 export interface UpdateConfig {
   enabled: boolean;
   feedUrl: string;
 }
 
 export function readUpdateConfig(): UpdateConfig {
-  let enabled = false;
+  // A-980-R30：默认 true（此前默认 false 是因为"无发布源时反复报检查失败"——现已接入 GitHub release，
+  // 见 updater.ts configureFeed）；读不到 enabled 键或值非法时保持默认。
+  let enabled = true;
   let feedUrl = "";
   try {
     const tomlPath = resolve(PROJECT_ROOT, "slime.toml");

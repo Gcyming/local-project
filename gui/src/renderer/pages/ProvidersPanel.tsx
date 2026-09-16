@@ -18,7 +18,7 @@ interface DraftModel extends ModelSpec { selected: boolean; }
 /** A-158：常用供应商预设库（对齐 LobeChat/Cherry Studio——选中即自动填充 base URL 与
  *  端点格式，根治「加不上」= Base URL 手填错误/格式选错的高频诱因）。
  *  模型列表仍按需「获取模型列表」/手动补充（各平台模型随版本变动，不宜硬编码）。 */
-const PRESET_PROVIDERS: Array<{ name: string; label: string; api_base: string; api_format: "openai" | "anthropic" | "auto"; hint?: string; models?: string[] }> = [
+const PRESET_PROVIDERS: Array<{ name: string; label: string; api_base: string; api_format: "openai" | "anthropic" | "responses" | "google" | "auto"; hint?: string; models?: string[] }> = [
   { name: "deepseek", label: "DeepSeek（深度求索）", api_base: "https://api.deepseek.com", api_format: "auto", hint: "deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp", models: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"] },
   { name: "openai", label: "OpenAI", api_base: "https://api.openai.com/v1", api_format: "auto", hint: "gpt-4o / gpt-4o-mini", models: ["gpt-4o", "gpt-4o-mini"] },
   { name: "openrouter", label: "OpenRouter（聚合 300+）", api_base: "https://openrouter.ai/api/v1", api_format: "auto", hint: "免费模型池含大厂开源模型", models: ["deepseek/deepseek-chat", "meta-llama/llama-3.3-70b-instruct"] },
@@ -44,7 +44,7 @@ interface EditState {
   name: string;
   api_base: string;
   api_key: string;
-  api_format: "openai" | "anthropic" | "auto";
+  api_format: "openai" | "anthropic" | "responses" | "google" | "auto";
   models: DraftModel[];
   proto: Proto;
   manualIds: string;
@@ -207,7 +207,7 @@ export default function ProvidersPanel(): JSX.Element {
     setModalError(null);
     setFetching(true);
     try {
-      const res = await api.current.providers.fetchModels(edit.api_base.trim(), edit.api_key.trim());
+      const res = await api.current.providers.fetchModels(edit.api_base.trim(), edit.api_key.trim(), edit.api_format);
       if (res.ok && res.models) {
         // A-918+：探测即 enrich（IPC 层已用 enrichModels）+ 默认 selected:true（自动选用），
         // 满足「添加即用」的 UX 期望；用户仍可在拨片列关掉不想用的模型
@@ -266,6 +266,31 @@ export default function ProvidersPanel(): JSX.Element {
       ...edit,
       models: edit.models.map((m, i) => (i === index ? { ...m, ...patch } : m)),
     });
+  }
+
+  /**
+   * 手填单价（USD / 1M tokens）。
+   * 一旦写入就标记 `price_source: "manual"` —— 自动探测（一键刷新 / 上游 /api/pricing）永不覆盖；
+   * 两个输入框都清空则撤销 manual，交还给自动取值链路（上游 → 内置价目表）。
+   * ⚠️ `0` 是**有意义的**（官方限时免费），必须原样存下去，不能当"空"处理。
+   */
+  function updateDraftPrice(index: number, field: "price_in_usd" | "price_out_usd", raw: string): void {
+    const cur = edit?.models[index];
+    if (!cur) { return; }
+    const trimmed = raw.trim();
+    let v: number | undefined;
+    if (trimmed !== "") {
+      const n = Number(trimmed);
+      if (!Number.isFinite(n) || n < 0) { return; } // 非法输入直接忽略，不写脏值
+      v = n;
+    }
+    const nextIn = field === "price_in_usd" ? v : cur.price_in_usd;
+    const nextOut = field === "price_out_usd" ? v : cur.price_out_usd;
+    const stillManual = typeof nextIn === "number" || typeof nextOut === "number";
+    updateDraftModel(index, {
+      [field]: v,
+      price_source: stillManual ? "manual" : undefined,
+    } as Partial<DraftModel>);
   }
 
   async function handlePickLocal(): Promise<void> {
@@ -331,8 +356,14 @@ export default function ProvidersPanel(): JSX.Element {
         max_output: m.max_output || undefined,
         vision: m.vision === true,
         selected: m.selected === true,
-        price_in_usd: m.price_in_usd || undefined,
-        price_out_usd: m.price_out_usd || undefined,
+        // ⚠️ 用 `?? undefined` 而不是 `|| undefined`：`0` 表示"官方限时免费"，是有效价，
+        //    用 `||` 会把 0 吞成 undefined → 免费模型被记成"未定价"（0/undefined 语义不可合并）。
+        price_in_usd: m.price_in_usd ?? undefined,
+        price_out_usd: m.price_out_usd ?? undefined,
+        price_cache_read_usd: m.price_cache_read_usd ?? undefined,
+        price_cache_write_usd: m.price_cache_write_usd ?? undefined,
+        // 手填标记必须一起回传，否则一键刷新会用自动探测价覆盖掉用户填的议价
+        price_source: m.price_source,
       }));
       const res = await api.current.providers.save({
         key: edit.name.trim(),
@@ -527,7 +558,7 @@ export default function ProvidersPanel(): JSX.Element {
                 <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 80 }}>端点格式</span>
                   <select className="tool-select" value={edit.api_format}
-                    onChange={(e) => setEdit({ ...edit, api_format: e.target.value as "openai" | "anthropic" | "auto" })}
+                    onChange={(e) => setEdit({ ...edit, api_format: e.target.value as "openai" | "anthropic" | "responses" | "google" | "auto" })}
                     style={{ flex: 1, maxWidth: 320 }}>
                     <option value="auto">自动检测（推荐）</option>
                     <option value="openai">OpenAI — /v1/chat/completions + /v1/models</option>
@@ -575,7 +606,7 @@ export default function ProvidersPanel(): JSX.Element {
                       未获取模型列表 — 填写 Base URL 与 API Key 后点击"获取模型列表"，自动探测并预选默认选项
                     </div>
                   ) : (
-                    <div style={{ flex: 1, minHeight: 0, maxHeight: 260, overflowY: "auto", marginBottom: 10 }}>
+                    <div style={{ flex: 1, minHeight: 0, maxHeight: 260, overflow: "auto", marginBottom: 10 }}>
                       {/* 顶部全选：一键启用/取消全部模型（探测后默认一个都不选，按需用拨片开启） */}
                       <div style={{
                         display: "flex", alignItems: "center", gap: 8,
@@ -595,7 +626,7 @@ export default function ProvidersPanel(): JSX.Element {
                         <span style={{ flex: 1 }} />
                         <span style={{ fontSize: 11.5, color: "var(--text-dim)", overflowWrap: "break-word" }}>共 {edit.models.length} 个 · 聊天界面只显示已启用</span>
                       </div>
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <table style={{ width: "100%", minWidth: 880, borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
                         <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
                           <th style={{ padding: "4px 8px", width: 44, whiteSpace: "nowrap" }}>启用</th>
@@ -603,7 +634,8 @@ export default function ProvidersPanel(): JSX.Element {
                           <th style={{ padding: "4px 8px", width: 80, whiteSpace: "nowrap" }}>上下文(K)</th>
                           <th style={{ padding: "4px 8px", width: 80, whiteSpace: "nowrap" }}>最大输出(K)</th>
                           <th style={{ padding: "4px 8px", width: 44, whiteSpace: "nowrap" }}>图片</th>
-                          <th style={{ padding: "4px 8px", width: 70, whiteSpace: "nowrap" }}>定价来源</th>
+                          <th style={{ padding: "4px 8px", width: 72, whiteSpace: "nowrap" }}>定价来源</th>
+                          <th style={{ padding: "4px 8px", width: 146, whiteSpace: "nowrap" }} title="单价 USD / 1M tokens。手填即视为「手填价」，一键刷新不会覆盖；两个都留空则恢复自动取值。">单价 $/M（输/出）</th>
                         </tr>
                       </thead>
                         <tbody>
@@ -640,11 +672,21 @@ export default function ProvidersPanel(): JSX.Element {
                                   onChange={(e) => updateDraftModel(i, { vision: e.target.checked })} />
                               </td>
                               <td style={{ padding: "4px 8px" }}>
-                                {m.price_in_usd !== undefined && m.price_in_usd > 0
-                                  ? <span style={{ fontSize: 10, color: "var(--success)", background: "var(--success-soft)", padding: "1px 5px", borderRadius: 3 }}>自动</span>
-                                  : m.context_window !== undefined
-                                    ? <span style={{ fontSize: 10, color: "var(--warning)", background: "rgba(210,153,34,0.12)", padding: "1px 5px", borderRadius: 3 }}>推断</span>
-                                    : <span style={{ fontSize: 10, color: "var(--text-dim)", overflowWrap: "break-word" }}>—</span>}
+                                <PriceSourceBadge m={m} />
+                              </td>
+                              <td style={{ padding: "4px 8px" }}>
+                                <div style={{ display: "flex", gap: 4 }}>
+                                  <input type="number" min={0} step="0.01" placeholder="输入"
+                                    title="输入单价 USD / 1M tokens。填写即标记为手填（一键刷新不覆盖）；清空两个框恢复自动取值。"
+                                    value={typeof m.price_in_usd === "number" ? String(m.price_in_usd) : ""}
+                                    onChange={(e) => updateDraftPrice(i, "price_in_usd", e.target.value)}
+                                    style={{ ...cellInputStyle(), width: 64 }} />
+                                  <input type="number" min={0} step="0.01" placeholder="输出"
+                                    title="输出单价 USD / 1M tokens（含思考 token）。填写即标记为手填。"
+                                    value={typeof m.price_out_usd === "number" ? String(m.price_out_usd) : ""}
+                                    onChange={(e) => updateDraftPrice(i, "price_out_usd", e.target.value)}
+                                    style={{ ...cellInputStyle(), width: 64 }} />
+                                </div>
                               </td>
                             </tr>
                           ))}
@@ -963,6 +1005,50 @@ function chipStyle(bg: string, color: string): React.CSSProperties {
     display: "inline-block", padding: "1px 8px", borderRadius: 8,
     background: bg, color, fontSize: 11, marginRight: 4,
   };
+}
+
+/**
+ * 定价来源徽标。
+ *
+ * 旧实现只看 `price_in_usd > 0` 就标「自动」、否则标「推断」—— 两个标签都不对应真实来源，
+ * 而且把「未定价」和「免费（=0）」混为一谈，用户根本看不出哪个模型需要手填。
+ * 现在按 `price_source` + 实际值细分成五态，`未定价` 会明确提示"去右边填单价"。
+ */
+function PriceSourceBadge({ m }: { m: DraftModel }): JSX.Element {
+  const src = m.price_source;
+  const hasIn = typeof m.price_in_usd === "number";
+  const hasOut = typeof m.price_out_usd === "number";
+  const isFree = hasIn && hasOut && m.price_in_usd === 0 && m.price_out_usd === 0;
+
+  let text: string;
+  let color: string;
+  let bg: string;
+  let hint: string;
+  if (src === "manual") {
+    text = "手填"; color = "var(--accent, #8b7bf7)"; bg = "rgba(139,123,247,0.14)";
+    hint = "用户手填单价 —— 自动探测/一键刷新不会覆盖。清空右侧两个单价框即可恢复自动取值。";
+  } else if (src === "upstream") {
+    text = "上游"; color = "var(--success)"; bg = "var(--success-soft)";
+    hint = "来自上游 /models 或网关 /api/pricing 的真实结算价（最权威）。";
+  } else if (isFree) {
+    text = "免费"; color = "var(--success)"; bg = "var(--success-soft)";
+    hint = "官方现价就是 0（限时免费 / 本地推理端）—— 成本恒为 0 是正确结果，不需要手填。";
+  } else if (src === "table") {
+    text = "内置表"; color = "var(--text-secondary)"; bg = "rgba(127,127,127,0.14)";
+    hint = "来自 slime 内置家族价目表（已核实刊例价）。上游探测不到价时的离线兜底，可能滞后于官方调价。";
+  } else if (hasIn) {
+    text = "已存"; color = "var(--text-dim)"; bg = "rgba(127,127,127,0.10)";
+    hint = "历史遗留值，没有来源标记。下次「一键刷新」会尝试用上游价 / 内置表价取代它。";
+  } else {
+    text = "未定价"; color = "var(--warning)"; bg = "rgba(210,153,34,0.12)";
+    hint = "既没探测到上游价、也不在内置表中 —— 该模型的消耗会记成 $0。请在右侧手填单价（USD / 1M tokens）。";
+  }
+  return (
+    <span title={hint} style={{
+      fontSize: 10, color, background: bg, padding: "1px 5px", borderRadius: 3,
+      whiteSpace: "nowrap", cursor: "help",
+    }}>{text}</span>
+  );
 }
 
 function cellInputStyle(): React.CSSProperties {

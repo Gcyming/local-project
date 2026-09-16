@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>免费小说导航</title>
+<style>
+  :root { --bg:#f5f6fa; --fg:#1f2330; --card:#ffffff; --accent:#5b6cff; --muted:#7a8194; --border:#e6e8f0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1117; --fg:#e8eaf0; --card:#181b24; --accent:#7c8bff; --muted:#9aa3b8; --border:#262a36; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--fg); display:flex; min-height:100vh; align-items:center; justify-content:center; padding:24px; }
+  .wrap { width:100%; max-width:560px; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:28px; box-shadow:0 10px 40px rgba(0,0,0,.08); }
+  .center { text-align:center; } .hero { text-align:center; }
+  h1 { margin:0 0 16px; font-size:24px; }
+  .sub { color:var(--muted); margin:0 0 18px; }
+  .row { display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+  input, textarea, select { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--bg); color:var(--fg); font-size:15px; }
+  button { padding:10px 16px; border:none; border-radius:10px; background:var(--accent); color:#fff; font-size:15px; cursor:pointer; transition:transform .06s ease, opacity .2s; }
+  button:active { transform:scale(.97); }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--border); }
+  ul { list-style:none; padding:0; margin:14px 0; }
+  li { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:10px; margin-bottom:8px; }
+  li span { flex:1; } li.done span { text-decoration:line-through; color:var(--muted); }
+  .meta { color:var(--muted); font-size:13px; margin-top:8px; }
+  .badge { display:inline-block; padding:4px 12px; border-radius:999px; background:var(--accent); color:#fff; font-size:12px; margin-bottom:12px; }
+  .feats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-top:22px; }
+  .feat { background:var(--bg); border:1px solid var(--border); border-radius:12px; padding:14px; text-align:left; }
+  .feat h3 { margin:0 0 6px; font-size:15px; } .feat p { margin:0; color:var(--muted); font-size:13px; }
+  .calc { max-width:320px; } .calc .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:14px; }
+  .calc button { padding:14px 0; font-size:18px; } .calc .op { background:var(--border); color:var(--fg); }
+  #disp { text-align:right; font-size:26px; margin-bottom:8px; }
+  .tabs { display:flex; gap:8px; justify-content:center; margin-bottom:14px; }
+  .tab { background:var(--bg); color:var(--fg); border:1px solid var(--border); }
+  .tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .big { font-size:46px; font-weight:600; margin:10px 0 18px; font-variant-numeric:tabular-nums; }
+  .ok { margin-top:14px; color:#27ae60; font-weight:600; }
+  label { display:block; margin-bottom:12px; color:var(--muted); font-size:13px; } label input, label textarea { margin-top:6px; }
+</style>
+</head>
+<body>
+
+<div class="wrap center">
+  <h1>免费小说导航</h1>
+  <p class="sub">这是一个由 slime 自动生成的通用页面。你可以在下方实时编辑内容：</p>
+  <textarea id="note" rows="6" placeholder="在这里写点什么…"></textarea>
+  <div class="meta">已自动保存到本地</div>
+</div>
+<script>
+var n=document.getElementById('note');try{n.value=localStorage.getItem('slime_note')||''}catch(e){}
+n.oninput=function(){try{localStorage.setItem('slime_note',n.value)}catch(e){}};
+</script>
+</body>
+</html>

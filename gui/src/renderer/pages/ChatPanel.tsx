@@ -11,10 +11,29 @@ import React, { type CSSProperties, type JSX } from "react";
 import { createPortal } from "react-dom";
 import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets } from "../../shared/ipc.js";
 import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
+import { sanitizeThinking, normalizeThinkingText, stripMarkdown } from "./thinkingText.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
 import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, type IconProps } from "../components/Icon.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
-import SubAgentBar from "./SubAgentBar.js";
+/** A-980-R19/R21：悬浮窗唤出按钮图标（用户指定目录 message-circle.svg——聊天悬浮窗=对话气泡） */
+import floatToggleIcon from "../../../icon/icon_fpbc119q3rk/message-circle.svg";
+// A-1007：产物卡文件类型图标（拷贝自 gui/icon/icon_fpbc119q3rk，vite 静态资源按 URL 字符串导入）
+import wordIcon from "../assets/icons/word.svg";
+import excelIcon from "../assets/icons/Excel.svg";
+import pdfIcon from "../assets/icons/pdf.svg";
+import pptIcon from "../assets/icons/ppt.svg";
+import pythonIcon from "../assets/icons/python.svg";
+import cssIcon from "../assets/icons/css.svg";
+import tsIcon from "../assets/icons/ts.svg";
+import gitIcon from "../assets/icons/git.svg";
+import llamaIcon from "../assets/icons/llama.svg";
+import fileTextIcon from "../assets/icons/file-text.svg";
+import codeIcon from "../assets/icons/code.svg";
+import fileZipIcon from "../assets/icons/file-zip.svg";
+import imageIcon from "../assets/icons/image.svg";
+import terminalIcon from "../assets/icons/terminal.svg";
+import fileInfoIcon from "../assets/icons/file-info.svg";
+// SubAgentBar 已移除（A-978：监测栏按钮是唯一子代理入口）
 import { confirmAsync, alertAsync } from "../dialog.js";
 import { useReasoningPreset, presetEffortsOf, presetLabelOf, useThinkingPreset, thinkingForcedOff } from "../reasoning.js";
 import { inferModelCapabilities } from "../../../../shared/gen/model-capabilities.js";
@@ -54,9 +73,13 @@ function parseModelChoice(choice: string): { type: "inherit" | "api" | "local"; 
   return { type: "inherit" };
 }
 
-/** A-969 上下文自动压缩：GUI 发送前触发的配置（localStorage 持久化；GeneralPanel 可调） */
-interface AutoCompressCfg { enabled: boolean; ratio: number; mode: "animated" | "silent"; }
-function readAutoCompressCfg(): AutoCompressCfg {
+/** A-969 上下文自动压缩：GUI 发送前触发的配置（localStorage 持久化；GeneralPanel 可调）
+ *  A-974：导出给右栏复用——ContextWindowBar 的「距压缩」余量必须与真实触发阈值同源。 */
+export interface AutoCompressCfg { enabled: boolean; ratio: number; mode: "animated" | "silent"; }
+/** A-975：自动压缩配置变更广播事件——GeneralPanel 保存后派发，右栏阈值刻度线/余量、聊天面板
+ *  下一次体检立即读到新值（此前只在每次调用时读 localStorage，界面上的刻度线永远停在旧值）。 */
+export const AUTOCOMPRESS_CFG_EVENT = "slime:autocompress:changed";
+export function readAutoCompressCfg(): AutoCompressCfg {
   try {
     const raw = localStorage.getItem("slime_auto_compress");
     if (raw) {
@@ -76,13 +99,50 @@ const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentType<Ico
   file_list: { label: "列出文件", Icon: FolderIcon },
   file_write: { label: "写入文件", Icon: EditIcon },
   code_check: { label: "语法检查", Icon: CheckIcon },
-  delegate: { label: "传唤子 Agent", Icon: SitemapIcon },
+  // A-980-R30：键名必须是**真实工具名**。此前写的是 `delegate`（并不存在这个工具），
+  // 而真正的工具叫 `delegate_subagent` → 命不中映射，工具卡只能退化成裸名字显示。
+  delegate_subagent: { label: "委派子代理", Icon: SitemapIcon },
+  subagent_result: { label: "收取子代理结果", Icon: SitemapIcon },
   ask_user: { label: "询问用户", Icon: MessageCircleIcon },
   todo_write: { label: "记录待办", Icon: TodoListIcon },
   agnes_prompt_build: { label: "构建生成提示词", Icon: BrainThinkingIcon },
   agnes_generate_image: { label: "生成图片", Icon: StarIcon },
   agnes_generate_video: { label: "生成视频", Icon: PlayIcon },
   agnes_video_status: { label: "视频任务状态", Icon: ClockIcon },
+  // A-975：HTTP 应用生成 & 本地服务
+  http_create_app: { label: "生成网页应用", Icon: StarIcon },
+  http_serve: { label: "启动本地服务", Icon: InternetIcon },
+  http_stop: { label: "停止本地服务", Icon: InternetIcon },
+  http_list: { label: "本地服务列表", Icon: InternetIcon },
+  // A-975：图形控制（桌面 / 安卓）
+  screen_info: { label: "屏幕信息", Icon: InternetIcon },
+  screen_capture: { label: "屏幕截图", Icon: StarIcon },
+  screen_ui_dump: { label: "导出界面元素", Icon: TodoListIcon },
+  screen_action: { label: "图形操作", Icon: EditIcon },
+  screen_windows: { label: "桌面窗口列表", Icon: InternetIcon },
+  screen_focus: { label: "聚焦窗口", Icon: StarIcon },
+  // A-975：ADB
+  adb_devices: { label: "ADB 设备列表", Icon: InternetIcon },
+  adb_shell: { label: "ADB 命令", Icon: BoltIcon },
+  adb_screencap: { label: "ADB 截图", Icon: StarIcon },
+  adb_install: { label: "安装 APK", Icon: EditIcon },
+  adb_connect: { label: "ADB 连接", Icon: InternetIcon },
+  adb_setup: { label: "ADB 环境准备", Icon: InternetIcon },
+  adb_uninstall: { label: "卸载 APK", Icon: CloseIcon },
+  adb_reboot: { label: "重启设备", Icon: RotateIcon },
+  // A-976：右侧栏浏览器控制
+  browser_tabs: { label: "浏览器页列表", Icon: InternetIcon },
+  browser_open_tab: { label: "新开浏览器页", Icon: PlusIcon },
+  browser_close_tab: { label: "关闭浏览器页", Icon: CloseIcon },
+  browser_navigate: { label: "打开网页", Icon: InternetIcon },
+  browser_snapshot: { label: "页面元素清单", Icon: TodoListIcon },
+  browser_read: { label: "读取网页", Icon: RefFileIcon },
+  browser_click: { label: "点击网页元素", Icon: EditIcon },
+  browser_type: { label: "网页填表", Icon: EditIcon },
+  browser_press: { label: "网页按键", Icon: BoltIcon },
+  browser_scroll: { label: "网页滚动", Icon: ChevronIcon },
+  browser_screenshot: { label: "网页截图", Icon: StarIcon },
+  browser_wait: { label: "等待页面", Icon: ClockIcon },
 };
 
 function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
@@ -91,6 +151,42 @@ function resolveToolLabel(name: string): { label: string; Icon: React.ComponentT
   // 未知工具：去掉 delegate: 等前缀后显示
   const clean = name.startsWith("delegate:") ? name.slice(9) : name;
   return { label: clean, Icon: BoltIcon };
+}
+
+/**
+ * A-975：工具行「具体抓手」统一提炼——网址 / 文件路径 / 命令 / 元素定位 / 生成的链接。
+ * 折叠态直接可见（对齐 Claude Code 阶段卡"访问了哪个网址、改了哪个文件、点了哪个元素"的语义）；
+ * 结果里没有显式参数时，兜底从返回值中抠第一个 http(s) URL（如 http_create_app 生成的成品链接）。
+ */
+function extractToolDetail(argsRaw: unknown, result?: string): string {
+  let args: Record<string, unknown> = {};
+  try {
+    args = (typeof argsRaw === "string" ? JSON.parse(argsRaw) : argsRaw) as Record<string, unknown> ?? {};
+  } catch { args = {}; }
+  const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  if (s(args.url)) { return s(args.url); }
+  if (s(args.query)) { return `查询: ${s(args.query)}`; }
+  if (s(args.path)) { return s(args.path); }
+  if (s(args.file)) { return s(args.file); }
+  if (s(args.remote)) { return s(args.remote); }
+  if (s(args.local)) { return s(args.local); }
+  if (s(args.command)) { return s(args.command); }
+  if (s(args.host)) { return s(args.host); }
+  // screen_action：把动作类型 + 元素定位/坐标显示出来，便于核对"点的是哪个"
+  if (s(args.kind)) {
+    const sel = (args.selector && typeof args.selector === "object") ? args.selector as Record<string, unknown> : null;
+    const selTxt = sel ? (s(sel.text) || s(sel.id) || (typeof sel.index === "number" ? `#${sel.index}` : "")) : "";
+    const coord = (typeof args.x === "number" && typeof args.y === "number") ? `(${args.x},${args.y})` : "";
+    return [s(args.kind), selTxt, coord].filter(Boolean).join(" ");
+  }
+  if (s(args.title)) { return s(args.title); }
+  if (s(args.description)) { return s(args.description).slice(0, 30); }
+  // 兜底：从结果里抠第一个 URL（成品链接）
+  if (result) {
+    const m = result.match(/https?:\/\/[^\s<>()[\]"'，。；：、）】]+/);
+    if (m) { return m[0]; }
+  }
+  return "";
 }
 
 /** 消息结构（用户/助手消息） */
@@ -129,36 +225,104 @@ interface Message {
     reasoning?: string;
     /** A-171：交错时间线（思考段落 ↔ 工具调用按真实发生顺序穿插） */
     timeline?: TimelineStep[];
+    /** A-1007：本轮回复的真实产物文件（file_write/file_read 提炼，去重后按写→读排序；随 stages 持久化重载可回显） */
+    products?: ProductItem[];
     /** 完成阶段（todo_write 相关）由 reasoning 中 ### 工具调用记录 解析，保留 Markdown */
   };
+  /** A-975：本轮发生的「上下文自动压缩」报告行——以分隔线形式渲染在正文之前。
+   *  此前只写进思考时间线（思考卡一折叠就完全看不见），用户反馈"压缩完成后文中报告压缩完成的分隔线也看不到"。 */
+  compressNote?: string;
 }
 
-/** A-171：时间线节点（思考段落 / 工具调用，按执行顺序交错） */
-interface TimelineStep {
-  kind: "think" | "tool";
-  /** kind=think：该阶段思考内容（Markdown） */
-  text?: string;
-  /** kind=tool：工具名 */
-  name?: string;
-  /** kind=tool：展示标签 */
-  label?: string;
-  /** kind=tool：具体抓手（网址/文件路径/查询词） */
-  detail?: string;
-  /** kind=tool：执行结果（成功=内容 / 失败=失败原因） */
-  result?: string;
-}
+/** A-171：时间线节点（思考段落 / 工具调用 / 任务规划 / 推进播报，按执行顺序交错）
+ *  A-980-R32：定义与全部解析/折叠纯函数已抽到 `./todoPanorama.js`（独立模块，vitest 可直测）。 */
+import {
+  appendTimelineStep,
+  parseTodoPanorama,
+  foldTodoWriteIntoSteps,
+  lastPlanItems,
+  type TimelineStep,
+} from "./todoPanorama.js";
 
 /** A-934：会话级「思考时间线 + 窗口占用」持久化纯函数（独立模块，无 React 依赖、vitest 可直测）——
  *  历史落库只存 reasoning 文本（无交错顺序/无 token 统计），重启后思考历程退化为文本平铺、上下文清零；
  *  此处把 timelineSteps（按 assistant 消息序数）与最近一次窗口占用快照随会话存下来，
  *  加载会话时按序数回填交错时间线、恢复环与右栏占用值。 */
 import { readSessionCtxMeta, clearSessionCtxMeta, updateSessionCtxMeta, attachTimelineToHistory, restoreUsed, type TimelineStepLite } from "./sessionCtxMeta.js";
+import { normalizeForCompare, decideRestoreKeep } from "./restoreDedup.js";
+import { createMonitor, bumpMonitor, monitorElapsed, type StreamMonitor } from "./streamMonitor.js";
 import { contextRatio, contextPct, ringLevel } from "./contextMath.js";
+import SubAgentExpandButton from "./SubAgentExpandButton.js";
+import { selfHealState } from "../ErrorBoundary.js";
 
 /** A-935：上下文占用**单一事件源**——发送时估算 / done 收到真实 usage 校准都经此广播，
  *  右上角 ContextRing 与右侧栏 ContextWindowBar 订阅同一事件按 sessionId 过滤 →
  *  两端数值严格同源同时变更（根治"右栏慢于圆环/不同步"）。 */
-export interface CtxUpdatePayload { sessionId: string; used: number; cap: number; buckets?: CtxBuckets }
+export interface CtxUpdatePayload {
+  sessionId: string; used: number; cap: number; buckets?: CtxBuckets;
+  /** A-974-R6：本轮**在途**输出 token 估算（≈4 字符/token）——右栏「Token 明细」据此在流式期间
+   *  跟随刷新（此前明细只在 done 时跳一次，用户实测"无法跟随上下文的刷新进行跟进"）。 */
+  liveReplyTokens?: number;
+  liveReasonTokens?: number;
+  /** A-975：本轮流式已耗时（ms）——右栏「会话指标 · 运行时间」在流式期间也能跟着走，
+   *  不再整轮只在 done 时跳一次。 */
+  liveElapsedMs?: number;
+}
+
+/**
+ * 会话级「在途流式现场」单一 store —— **模块级，跨组件卸载/重挂载存活**。
+ *
+ * 为什么必须放在组件外：此前它是组件内的 `useRef`，组件一卸载（切会话/切界面）整份状态就没了，
+ * 于是被迫长出一整套「切走时快照 + 切回时还原 + hasActive 标记 + 超时续接」的补丁逻辑，
+ * 而这些补丁只要有一处路径漏同步就会冒出「幽灵气泡（恢复中…）/ 思考跑到正文 / 要切界面才刷新」——
+ * 全都是**同一个结构缺陷的症状**，不是各自的 bug。
+ *
+ * 现在：状态只有一处（本模块），按 sessionId 分槽 → **多个会话可并行流式、互不干扰**（不是"只能单会话"）。
+ * UI 只是订阅者；切会话重挂载不会丢任何在途状态。
+ * 保留 `.current` 形状是为了让既有使用点零改动（后续可平滑收敛为显式 get/set API）。
+ */
+const perSessionStreamCache: { current: Record<string, {
+  partial: string; reasoning: string; toolEvents: ToolEvent[]; timeline: TimelineStep[]; hasActive: boolean;
+  tailError?: { content: string; reason: string }; messages?: Message[];
+  input?: string; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null;
+  /** A-918++：最近一次流式入参（恢复时还原 streamReqRef → 抖动可自动重连，修复"恢复中进度不动/中断"） */
+  req?: ChatStreamReq | null;
+  /**
+   * A-974-R9：监测栏计数器快照——切走时随流内容一起存，切回时还原。
+   * 此前只快照 partial/reasoning/tools，计数器被 resetStreamUI 清零后无人还原
+   * → 用户实测"切换会话再切回，当前轮输出记录直接清零重新计算"。
+   * 语义与折算规则见 `./streamMonitor.ts`（纯函数，vitest 直测）。
+   */
+  monitor?: StreamMonitor;
+}> } = { current: {} };
+
+/** 清空某会话的在途快照（会话删除/新建时用；不清其它会话 → 并行流不受影响） */
+export function clearSessionStream(sid: string): void {
+  delete perSessionStreamCache.current[sid];
+}
+
+/**
+ * A-980-R24：快照表的**容量回收**。
+ *
+ * 每个会话一个槽，槽里装着 partial 正文 / reasoning / toolEvents / timeline（可能还有整份 messages）。
+ * 此前只有「会话删除 / 新建 / 流终态且切换」这些显式路径才 delete —— 用的时间越久、开过的会话越多，
+ * 这个**模块级**对象只增不减，长会话（大正文 + 长 timeline）尤其占内存。
+ * 它是渲染进程 OOM 的一个慢性来源（配合流式期的大字符串一起发作）。
+ *
+ * 这里在超过上限时回收**已结束**的槽（`hasActive === false`），
+ * **正在流式的槽一律保留** —— 多会话并行流式是设计目标，绝不能为了省内存把别人的在途状态删掉。
+ */
+const STREAM_CACHE_MAX_SLOTS = 12;
+export function pruneStreamCache(keep?: string): void {
+  const store = perSessionStreamCache.current;
+  const keys = Object.keys(store);
+  if (keys.length <= STREAM_CACHE_MAX_SLOTS) { return; }
+  const idle = keys.filter((k) => k !== keep && !store[k]?.hasActive);
+  for (const k of idle) {
+    if (Object.keys(store).length <= STREAM_CACHE_MAX_SLOTS) { break; }
+    delete store[k];
+  }
+}
 export function dispatchCtxUpdate(payload: CtxUpdatePayload): void {
   window.dispatchEvent(new CustomEvent<CtxUpdatePayload>("slime:ctx:update", { detail: payload }));
 }
@@ -280,12 +444,187 @@ interface ToolEvent {
   result?: string;
 }
 
+/** A-1007：产物卡条目。kind 为写/读（暂无删除类工具，删除体现为 diff 的红色 - 行）。 */
+export type ProductKind = "write" | "read";
+export interface ProductItem {
+  rel: string;
+  name: string;
+  kind: ProductKind;
+  ext: string;
+  /** 变更统计（+n -m）——由 file_write result 内嵌 [__slime_diff__] 标记解析 */
+  diff?: { add: number; del: number };
+  /** 变更全文（old/new 原文）——产物卡点击展开 diff 详情用；超过大小上限省略 */
+  diffFull?: { old: string; new: string };
+}
+
 /** 分组统计：按工具类型聚合 */
 interface ToolGroup {
   type: string;
   label: string;
   Icon: React.ComponentType<IconProps>;
   count: number;
+}
+
+/** A-1007：产物卡工具集——扩展名→品牌 SVG 图标映射、diff 变更统计解析、产物提炼（vitest 可直测的纯函数）。
+ *  解析 file_write result 内嵌的 [__slime_diff__]base64(old)|base64(new)[/__slime_diff__] 变更统计
+ *  （A-172 同款标记）：行级近似（new 相对 old 净增/净删行数）；无标记/base64 损坏 → null（不显示 +n -m）。 */
+export function parseDiffStat(result: string | undefined): { add: number; del: number } | null {
+  if (!result) { return null; }
+  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
+  if (!m) { return null; }
+  try {
+    const oldTxt = Buffer.from(m[1], "base64").toString("utf-8");
+    const newTxt = Buffer.from(m[2], "base64").toString("utf-8");
+    if (!oldTxt && !newTxt) { return null; }
+    const oldLines = new Set(oldTxt.split("\n"));
+    const newLines = new Set(newTxt.split("\n"));
+    let add = 0, del = 0;
+    for (const l of newLines) { if (l && !oldLines.has(l)) { add += 1; } }
+    for (const l of oldLines) { if (l && !newLines.has(l)) { del += 1; } }
+    return add > 0 || del > 0 ? { add, del } : null;
+  } catch { return null; }
+}
+
+/** 解析 file_write result 内嵌 diff 标记的**全文**（old/new 原文，产物卡点击展开 diff 详情用）。
+ *  与 parseDiffStat 同规：无标记/base64 损坏/空串 → null；old+new 合计超过 maxChars → null
+ *  （大文件仅显示计数，不撑爆 localStorage 与渲染）。 */
+export function parseDiffFull(result: string | undefined, maxChars = 20000): { old: string; new: string } | null {
+  if (!result) { return null; }
+  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
+  if (!m) { return null; }
+  try {
+    const oldTxt = Buffer.from(m[1], "base64").toString("utf-8");
+    const newTxt = Buffer.from(m[2], "base64").toString("utf-8");
+    if (!oldTxt && !newTxt) { return null; }
+    if (oldTxt.length + newTxt.length > maxChars) { return null; }
+    return { old: oldTxt, new: newTxt };
+  } catch { return null; }
+}
+
+/** 行级 diff（LCS 回溯，保序）：old/new 逐行标 eq/add/del——产物卡展开后的红绿 diff 详情。
+ *  纯函数，vitest 可直测。行数受 parseDiffFull 20k 字符上限约束，DP 表规模可控。 */
+export function diffLines(oldTxt: string, newTxt: string): Array<{ type: "eq" | "add" | "del"; text: string }> {
+  const a = oldTxt ? oldTxt.split("\n") : [];
+  const b = newTxt ? newTxt.split("\n") : [];
+  const n = a.length, m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out: Array<{ type: "eq" | "add" | "del"; text: string }> = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ type: "eq", text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
+    else { out.push({ type: "add", text: b[j] }); j++; }
+  }
+  while (i < n) { out.push({ type: "del", text: a[i] }); i++; }
+  while (j < m) { out.push({ type: "add", text: b[j] }); j++; }
+  return out;
+}
+
+/** 扩展名 → 产物卡图标 URL（按文件类型品牌色；未匹配回退通用 file-text） */
+export function productIconUrl(ext: string | undefined): string {
+  switch ((ext ?? "").toLowerCase()) {
+    case "doc": case "docx":
+      return wordIcon;
+    case "xls": case "xlsx": case "csv":
+      return excelIcon;
+    case "pdf":
+      return pdfIcon;
+    case "ppt": case "pptx":
+      return pptIcon;
+    case "py": case "ipynb":
+      return pythonIcon;
+    case "css":
+      return cssIcon;
+    case "ts": case "tsx": case "mdx":
+      return tsIcon;
+    case "js": case "jsx": case "mjs": case "cjs":
+      return codeIcon;
+    case "gitignore":
+      return gitIcon;
+    case "gguf":
+      return llamaIcon;
+    case "png": case "jpg": case "jpeg": case "gif": case "webp": case "svg":
+      return imageIcon;
+    case "zip": case "tar": case "gz":
+      return fileZipIcon;
+    case "sh": case "bash":
+      return terminalIcon;
+    case "env": case "log": case "license":
+      return fileTextIcon;
+    case "html": case "htm": case "json": case "md": case "go": case "rs":
+    case "toml": case "yml": case "yaml": case "xml": case "sql": case "txt":
+    default:
+      return fileInfoIcon;
+  }
+}
+
+/** A-1007：从工具留痕提炼本轮真实产物文件（vitest 可直测的纯函数）——
+ *  优先 file_write（写/改），file_read 作补充；去重、过滤 URL/空串/非文件；写入者排前。
+ *  file_write 的 result 若带 [__slime_diff__] 标记 → 附 diff 变更统计 + diffFull 全文（点击产物卡展开详情）。
+ *  返回 { ext, ... } 均带扩展名以备图标映射。 */
+export function extractProducts(events: ToolEvent[]): ProductItem[] {
+  const out: ProductItem[] = [];
+  const wrote = new Set<string>();
+  const reads: Array<{ rel: string; name: string; ext: string }> = [];
+  const base = (rel: string): string => (rel.split(/[\\/]/).pop() ?? rel);
+  const extOf = (name: string): string => (name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "");
+  for (const t of events) {
+    if (t.name !== "file_write" && t.name !== "file_read") { continue; }
+    const rel = (t.detail ?? "").trim();
+    if (!rel || /^https?:\/\//i.test(rel)) { continue; }
+    const name = base(rel);
+    const ext = extOf(name);
+    if (t.name === "file_write") {
+      if (wrote.has(rel)) { continue; }
+      wrote.add(rel);
+      const diff = parseDiffStat(t.result);
+      const diffFull = parseDiffFull(t.result);
+      out.push(diff
+        ? diffFull
+          ? { rel, name, kind: "write", ext, diff, diffFull }
+          : { rel, name, kind: "write", ext, diff }
+        : { rel, name, kind: "write", ext });
+    } else {
+      reads.push({ rel, name, ext });
+    }
+  }
+  for (const r of reads) {
+    if (wrote.has(r.rel)) { continue; } // 已作为写产物展示，不再重复
+    wrote.add(r.rel);
+    out.push({ ...r, kind: "read" });
+  }
+  return out;
+}
+
+/** A-1007：产物持久化（localStorage 会话级，按 assistant 序数；对齐 A-163 时间线用 sessionCtxMeta 的会话级持久化思路）。
+ *  历史消息体（ConversationMessage）只落 reasoning/timeline，不含 stages——产物若不另存，
+ *  重启/重载后产物卡将丢失；此处按序数独立存 localStorage，加载历史时按序数回填 stages.products。 */
+const PRODUCTS_STORAGE_PREFIX = "slime_products_";
+type ProductLite = ProductItem;
+
+export function readSessionProducts(agentId: string, sessionId: string): Record<string, ProductLite[]> {
+  try {
+    const raw = localStorage.getItem(`${PRODUCTS_STORAGE_PREFIX}${agentId}_${sessionId}`);
+    if (!raw) { return {}; }
+    const p = JSON.parse(raw) as Record<string, ProductLite[]>;
+    return p && typeof p === "object" ? p : {};
+  } catch { return {}; }
+}
+export function writeSessionProducts(agentId: string, sessionId: string, ordinal: number, products: ProductLite[]): void {
+  if (!products || products.length === 0) { return; }
+  try {
+    const prev = readSessionProducts(agentId, sessionId);
+    prev[String(ordinal)] = products;
+    localStorage.setItem(`${PRODUCTS_STORAGE_PREFIX}${agentId}_${sessionId}`, JSON.stringify(prev));
+  } catch { /* ignore */ }
+}
+export function clearSessionProducts(agentId: string, sessionId: string): void {
+  try { localStorage.removeItem(`${PRODUCTS_STORAGE_PREFIX}${agentId}_${sessionId}`); } catch { /* ignore */ }
 }
 
 /** 计算工具分组统计 */
@@ -312,25 +651,6 @@ function formatToolSummary(events: ToolEvent[]): string {
   return groups.map((g) => `${g.label}×${g.count}`).join("，");
 }
 
-/** A-xxx（业界标准，对齐 LangChain/AI SDK parts 数组）：流式中按事件到达顺序增量构建交错时间线。
- * think 内容追加到当前 think 段；tool 事件追加独立 tool 段——工具与思考按真实顺序自然穿插，
- * 无需依赖「工具发生时 reasoning 长度」字符锚点回溯切分（锚点对中文/换行偏移脆弱，易错位粘连）。 */
-function appendTimelineStep(
-  steps: TimelineStep[],
-  ev: { kind: "think"; text: string } | { kind: "tool"; name?: string; label?: string; detail?: string; result?: string },
-): TimelineStep[] {
-  if (ev.kind === "think") {
-    if (!ev.text) { return steps; }
-    const last = steps[steps.length - 1];
-    // 末尾已是 think 段 → 追加；否则新开 think 段
-    if (last && last.kind === "think") {
-      return [...steps.slice(0, -1), { kind: "think", text: (last.text ?? "") + ev.text }];
-    }
-    return [...steps, { kind: "think", text: ev.text }];
-  }
-  return [...steps, { kind: "tool", name: ev.name, label: ev.label, detail: ev.detail, result: ev.result }];
-}
-
 interface ChatPanelProps {
   sessionId: string;
   sessionTitle: string;
@@ -351,12 +671,18 @@ interface ChatPanelProps {
   onThinkingChange?: (val: boolean) => void;
   /** 会话列表变更通知（新对话/发送后刷新侧栏） */
   onConversationsChanged?: () => void;
+  /** A-975：会话工作目录变更通知——App 需刷新会话列表 + 右栏工作树根
+   *  （此前改完目录只有本面板知道，右栏/侧栏要切会话才跟上；重启后会话记录里的旧 workspace
+   *   又会把界面"还原"回初始文件夹）。 */
+  onWorkspaceChanged?: () => void;
   /** 会话重命名（工具栏 ✎） */
   onSessionRenamed?: (title: string) => void;
   /** 项目内新建会话请求（App 创建并切换） */
   onNewSessionRequested?: () => void;
   /** 跳转设置页子页（命令面板用） */
   onNavigateSettings?: (tab: "agents" | "providers" | "status") => void;
+  /** A-980-R19/R21：悬浮窗手动唤出/收起（ContextRing 右侧按钮）——右栏占满不再自动出现，需手动唤出 */
+  onToggleFloat?: () => void;
   /** 会话级工作目录（"以文件夹为主"：新建会话绑定的目标文件夹，Agent 读写锚定在此目录） */
   workspace?: string;
   /** 可切换 Agent 候选（会话内切换调用 Agent：同文件夹多 Agent 协作，避免同一 Agent 并发阻塞） */
@@ -708,42 +1034,6 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
   );
 });
 
-/** 规范化思考文本：单换行合并为空格（模型逐 token 输出带单换行），双换行保留为段落分隔。
- *  避免 white-space: pre-wrap 把逐词换行全部保留导致"每个字独占一行"。 */
-/** 摘要用：把 markdown 符号剥离成纯文本（时间线思考步的折叠标题，避免暴露 * # | 等底层符号） */
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/`{1,4}/g, "")
-    .replace(/[#*_>|~]{1,3}/g, " ")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeThinkingText(text: string): string {
-  // 先按 \n\n 分段 → 段内单 \n 合并为空格 → 段间保留 \n\n
-  return text
-    .split(/\n\s*\n/)
-    .map(seg => seg.replace(/[ \t]*\n[ \t]*/g, " ").replace(/\s{2,}/g, " ").trim())
-    .filter(seg => seg.length > 0)
-    .join("\n\n");
-}
-
-/** A-923：思考过程整体净化——① 剥离 XML 风格工具调用残留（<parameter>/<function>/<tool_call>/<result> 等
- *  半成品标签，模型把预训练 XML 工具格式泄进 reasoning，样例：</parameter name="test_file.txt"> 直接露出）；
- *  ② 归一空白（逐词断行/多余空格合并）。输出为可读纯文本，供思考卡与最终 reasoning 折叠卡。 */
-function sanitizeThinking(text: string): string {
-  const stripped = (text ?? "")
-    .replace(/<\/?(?:parameter|function|tool_call|result|safety|safety_check|ban_message|reasoning|system)\b[^>]*>/gi, "");
-  return normalizeThinkingText(stripped)
-    // A-924：收敛词间空格观感——中文标点前不得留空格、开括号后不得留空格（上游 token 级空格常见 `好 的 ， 我`）
-    .replace(/\s+([，。；：！？、）》】）])/g, "$1")
-    .replace(/([（《【])\s+/g, "$1")
-    // A-928：思考区英文 token 分词收敛（`B ing`/`S tudio`/`n a n o b ot` → 拼合）——思考为私有展示，体验优先
-    .replace(/([A-Za-z0-9])\s+([A-Za-z0-9])/g, "$1$2");
-}
-
 /** 把文本内的 http(s) url 渲染为可点击链接（点击 → 右侧栏新建浏览器页）。
  *  用于思考/结果等纯文本展示，避免换行被 Markdown 段落合并压掉（A-174）。 */
 function renderTextWithLinks(text: string): React.ReactNode[] {
@@ -874,6 +1164,63 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
       </div>
     );
   }
+  // A-980-R32：任务规划卡——模型一发出规划就出现在思考历程里；之后每次 todo_write 都**就地刷新**这张卡，
+  // 所以用户看到的永远是"现在整体到哪"，而不是"规划那一刻的样子 + 后面一串完成播报"（后者见下面的 todo 行）
+  if (step.kind === "plan") {
+    const items = step.items ?? [];
+    const done = items.filter((it) => it.status === "completed").length;
+    const active = items.find((it) => it.status === "in_progress");
+    return (
+      <div className="think-step">
+        <span className="think-step-mark plan-step-mark" />
+        <div className="plan-card">
+          <button
+            className="plan-card-head"
+            onClick={() => setExpanded((v) => !v)}
+            title={expanded ? "收起任务规划" : "展开任务规划（全部条目与状态）"}
+          >
+            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)", transition: "transform 0.18s" }} />
+            <TodoListIcon size={12} style={{ flexShrink: 0, color: "var(--accent-hover)" }} />
+            <span className="plan-card-title">任务规划</span>
+            <span className="plan-card-progress" data-all-done={done === items.length && items.length > 0 ? "1" : "0"}>
+              {done}/{items.length}
+            </span>
+            {!expanded && active && (
+              <span className="plan-card-active" title={active.content}>· {active.content}</span>
+            )}
+          </button>
+          {expanded && (
+            <div className="plan-card-list">
+              {items.map((it, i) => (
+                <div key={`${i}\u0001${it.content}`} className="plan-item" data-status={it.status}>
+                  <span className="plan-item-mark" aria-hidden="true">
+                    {it.status === "completed" ? "✓" : it.status === "in_progress" ? "▶" : "○"}
+                  </span>
+                  <span className="plan-item-text">{it.content}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+  // A-980-R32：推进播报行——每完成/开始一项各插一行，构成带时间序的推进日志（与右栏待办的划掉同步出现）
+  if (step.kind === "todo") {
+    const isDone = step.state === "done";
+    return (
+      <div className="think-step">
+        <span className={`think-step-mark todo-step-mark${isDone ? " is-done" : ""}`} />
+        <div className={`todo-announce${isDone ? " is-done" : ""}`}>
+          <span className="todo-announce-mark" aria-hidden="true">
+            {isDone ? <CheckIcon size={10} /> : <PlayIcon size={10} />}
+          </span>
+          <span className="todo-announce-text" title={step.text}>{step.text}</span>
+          <span className="todo-announce-tag">{isDone ? "已完成" : "开始"}</span>
+        </div>
+      </div>
+    );
+  }
   // 工具调用：小型行 + 折叠详情（含结果：成功显示访问/编辑内容，失败显示失败原因）
   const tool = step as TimelineStep & { kind: "tool" };
   const { Icon } = resolveToolLabel(tool.name ?? "");
@@ -899,7 +1246,9 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
     displayResult = rawResult.replace(diffMatch[0], "").trim();
   }
   const r = displayResult.trim();
-  const isFail = r.length > 0 && /^(\[|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
+  // A-976：子代理委派 / 提示类前缀是成功/中性消息，绝不判失败
+  const isSuccessPrefix = /^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存)\]/i.test(r);
+  const isFail = !isSuccessPrefix && r.length > 0 && /^(\[错误\]|\[失败\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
   const hasBody = !!tool.detail || !!r;
   const statusLabel = !r ? (isWrite ? "已执行" : "调用中") : isFail ? "失败" : "成功";
   const statusTitle = isFail ? "执行失败" : "执行成功";
@@ -907,7 +1256,21 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   // 查询词（web_search 的“查询: xxx”）不是文件也不是网址，仅作展示不可点击
   const isQueryDetail = /^查询[:：]/.test(tool.detail ?? "");
   const isUrlDetail = /^https?:\/\//i.test(tool.detail ?? "");
-  const detailClickable = !!tool.detail && !isQueryDetail;
+  /**
+   * A-980-R32：detail 能不能当"文件路径"点开——**按工具判定**，不再"凡非网址皆文件"。
+   *
+   * 此前 `detailClickable = detail && !查询`：凡是抽出来的抓手串都被当成文件路径，
+   * 于是 bash 的**命令串**、screen_action 的**动作描述**、adb 的**设备内路径**（/sdcard/x.apk）、
+   * web 的 host、git 的参数……全变成了可点文件链接，点一次报一次「文件不存在」——
+   * 这就是用户体感的"很多文件都打不开"（其中相当一部分压根不是本地文件）。
+   *
+   * 现在只有**确实产出本地路径的工具**（file_read / file_list / file_write / code_check）
+   * 的 detail 才可点；其余一律降级为纯文本：内容照旧完整显示，只是不再是个骗人的链接。
+   * `extractToolDetail` 的 URL 兜底不在此列（网址已由 isUrlDetail 单独放行）。
+   */
+  const isFileTool = /^(file_(read|list|write)|code_check)$/i.test(tool.name ?? "");
+  const detailIsFile = isFileTool && !!tool.detail && !isQueryDetail && !isUrlDetail;
+  const detailClickable = isUrlDetail || detailIsFile;
   const onClickDetail = (e: React.MouseEvent): void => {
     e.preventDefault();
     e.stopPropagation();
@@ -968,7 +1331,10 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             <div className="think-tool-detail-line">
               {isUrlDetail
                 ? <InternetIcon size={12} style={{ flexShrink: 0, opacity: 0.7 }} />
-                : <FileTypeIcon filename={tool.detail} size={13} style={{ flexShrink: 0, opacity: 0.92 }} />}
+                : detailIsFile
+                  ? <FileTypeIcon filename={tool.detail} size={13} style={{ flexShrink: 0, opacity: 0.92 }} />
+                  /* A-980-R32：非本地文件（命令/界面动作/设备路径）用闪电图标，不再伪装成文件类型图标 */
+                  : <BoltIcon size={12} style={{ flexShrink: 0, opacity: 0.7 }} />}
               {detailClickable ? (
                 <span className="think-clickable" onClick={onClickDetail} title={`点击在右侧栏${isUrlDetail ? "打开网页" : "打开文件"}`}>
                   {tool.detail.slice(0, 300)}{(tool.detail ?? "").length > 300 ? "…" : ""}
@@ -1111,8 +1477,102 @@ const ThinkingPanel = React.memo(function ThinkingPanel({ timeline }: { timeline
   );
 });
 
+/** A-1007：产物卡片区（对齐 Cursor/Claude 消息产物区）——横向可换行的卡片网格。
+ *  每张卡：文件类型图标 + 可点击文件名（右侧栏打开文件）+ 次级信息（写入/读取）+ ↗ 打开箭头；
+ *  2+ 产物时底部小字「共 N 个产物」。空产物渲染 null（零回归）。 */
+const ProductPanel = React.memo(function ProductPanel({ products }: { products: ProductItem[] }): JSX.Element | null {
+  const [expanded, setExpanded] = React.useState<number | null>(null);
+  if (!products || products.length === 0) { return null; }
+  return (
+    <div style={{ margin: "10px 0 2px" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 5 }}>
+        <img src={fileInfoIcon} alt="" width={13} height={13} style={{ flexShrink: 0 }} draggable={false} />
+        <span>产物</span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+        {products.map((p, i) => (
+          <div key={`p${i}`} style={{ display: "flex", flexDirection: "column", maxWidth: "100%" }}>
+            <div
+              title={p.diffFull ? `点击展开变更详情（${p.diffFull.old.split("\n").length} → ${p.diffFull.new.split("\n").length} 行）` : p.rel}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (p.diffFull) { setExpanded(expanded === i ? null : i); }
+                else { requestSidebarOpen({ kind: "file", rel: p.rel, name: p.name }); }
+              }}
+              className={`prod-card${expanded === i ? " is-open" : ""}`}
+              style={{
+                display: "flex", alignItems: "center", gap: 9, cursor: "pointer",
+                maxWidth: "100%",
+                padding: "9px 12px", borderRadius: 8,
+              }}>
+              <img src={productIconUrl(p.ext || (p.name.includes(".") ? p.name.slice(p.name.lastIndexOf(".") + 1) : ""))} alt=""
+                width={20} height={20} style={{ flexShrink: 0, borderRadius: 3 }} draggable={false} />
+              <span style={{ minWidth: 0 }}>
+                <span className="prod-card-title" style={{ display: "block", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>{p.name}</span>
+                <span style={{ display: "block", fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>{p.kind === "write" ? "写入" : "读取"}</span>
+              </span>
+              <span style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, flexShrink: 0 }}>
+                {p.diff && (
+                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.3, whiteSpace: "nowrap" }}>
+                    <span style={{ color: "#34d399" }}>+{p.diff.add}</span>
+                    <span style={{ color: "#f87171" }}> -{p.diff.del}</span>
+                  </span>
+                )}
+                <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  {p.diffFull && <span style={{ fontSize: 10, color: "var(--accent, #58a6ff)" }}>{expanded === i ? "收起 ▲" : "变更详情 ▼"}</span>}
+                  <span
+                    role="button" title="在右侧栏打开文件"
+                    onClick={(e) => { e.stopPropagation(); requestSidebarOpen({ kind: "file", rel: p.rel, name: p.name }); }}
+                    style={{ color: "var(--text-dim)", fontSize: 13, cursor: "pointer", padding: "0 2px" }}>↗</span>
+                </span>
+              </span>
+            </div>
+            {expanded === i && p.diffFull && (
+              <div className="prod-diff" style={{ marginTop: 6, borderRadius: 8, overflow: "hidden", maxHeight: 340, overflowY: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.65 }}>
+                {diffLines(p.diffFull.old, p.diffFull.new).map((l, k) => (
+                  <div key={k} style={{
+                    whiteSpace: "pre-wrap", wordBreak: "break-all", padding: "0 8px",
+                    background: l.type === "add" ? "rgba(52,211,153,0.10)" : l.type === "del" ? "rgba(248,113,113,0.12)" : "transparent",
+                    color: l.type === "add" ? "#34d399" : l.type === "del" ? "#f87171" : "var(--text-muted)",
+                  }}>
+                    <span style={{ userSelect: "none", opacity: 0.65, marginRight: 6, display: "inline-block", width: 10 }}>{l.type === "add" ? "+" : l.type === "del" ? "−" : " "}</span>
+                    {l.text || " "}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {products.length > 1 && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>共 {products.length} 个产物</div>
+      )}
+    </div>
+  );
+});
+
 /** Agent 消息（memo：流式输出时历史消息不重渲染；折叠态变化时按需重渲染）
  *  isMember=true 表示该条为团队会话成员发言（群聊气泡，与组长整合回复并列展示） */
+/** A-975：上下文自动压缩报告分隔线（正文之上、不受思考卡折叠影响）。
+ *  用户明确要求"压缩完成后文中要有一条报告压缩完成的分隔线"——对齐主流 Agent 的上下文压缩提示惯例。 */
+const CompressNoteLine = React.memo(function CompressNoteLine({ note, live }: { note: string; live?: boolean }): JSX.Element {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 6px" }} title={note}>
+      <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 5, padding: "2px 10px", borderRadius: 999,
+        fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", maxWidth: "78%",
+        background: "var(--accent-soft)", color: "var(--accent-hover)",
+        border: "1px solid var(--border)",
+      }}>
+        <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--accent)", flexShrink: 0, animation: live ? "thinkGlow 1.4s ease-in-out infinite" : undefined }} />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{note}</span>
+      </span>
+      <span style={{ flex: 1, height: 1, background: "var(--border)" }} />
+    </div>
+  );
+});
+
 const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, showThinking, collapsed, onToggle, isMember }: {
   m: Message; agentName: string; showThinking: boolean; collapsed: boolean; onToggle: (id: number) => void; isMember?: boolean;
 }): JSX.Element {
@@ -1205,6 +1665,8 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             </div>
           );
         })()}
+        {/* A-975：压缩报告分隔线（在正文之前，思考卡折叠也可见） */}
+        {m.compressNote && <CompressNoteLine note={m.compressNote} />}
         <div className="msg-body-divider" />
         {m.error ? (
           <div style={{
@@ -1225,6 +1687,8 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             })() : null}
           </div>
         )}
+        {/* A-1007：产物卡片区——消息正文之后、独立于「思考过程」折叠卡；无产物时零渲染 */}
+        {m.stages?.products && m.stages.products.length > 0 && <ProductPanel products={m.stages.products} />}
       </div>
     </div>
   );
@@ -1247,9 +1711,11 @@ export default function ChatPanel({
   onReasoningChange,
   onThinkingChange,
   onConversationsChanged,
+  onWorkspaceChanged,
   onSessionRenamed,
   onNewSessionRequested,
   onNavigateSettings,
+  onToggleFloat,
   workspace,
   agents = [],
   onAgentSwitch,
@@ -1259,6 +1725,10 @@ export default function ChatPanel({
 }: ChatPanelProps): JSX.Element {
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [input, setInput] = React.useState("");
+  /** A-971：input 值实时镜像——卸载清理（unmount flush）需读到「切走那一刻」的最新草稿，
+   *  卸载闭包里只能靠 ref 拿最新值（state 会被 eslint-disable 的旧 deps 卡住） */
+  const inputValueRef = React.useRef("");
+  React.useEffect(() => { inputValueRef.current = input; }, [input]);
   const [loading, setLoading] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
   const [partial, setPartial] = React.useState("");
@@ -1288,16 +1758,34 @@ export default function ChatPanel({
   // 正文"逐字渐入"（ChatGPT/Claude 式），不再"整个块蹦出"；onDone/reset 时清空
   const displayPartialRef = React.useRef("");
   const lastTypingAtRef = React.useRef(0);
-  const schedulePartialRender = React.useCallback(() => {
+
+  /** A-980-R24：打字机限速的「追平阈值」（字符）。
+   *  显示落后超过这个量就切换到按比例追赶——否则高速率模型下 buffer 会无限堆积，
+   *  而每帧都要对全文重跑 Markdown 解析 → 渲染进程 OOM（详见 schedulePartialRender 注释）。 */
+  const TYPING_CATCHUP_CHARS = 240;  const schedulePartialRender = React.useCallback(() => {
     if (partialRafRef.current !== null) { return; }
     partialRafRef.current = window.requestAnimationFrame(() => {
       partialRafRef.current = null;
-      // 逐字推进：每 28ms 追加 1 字符（限速打字；模型快时 buffer 在 partialRef 堆积，完成后 onDone 补全）
+      // 逐字推进：正常速率走打字机（28ms/字）；**高速率模型改为「追平优先」**（A-980-R24）。
+      //
+      //  为什么必须改：模型可以吐 700+ 字符/秒，而 28ms/字的固定限速只有约 36 字符/秒 ——
+      //  `partialRef` 会以十几倍速度堆积，而每帧都要对**越来越长的全文**跑一次 Markdown 重解析。
+      //  于是渲染进程被钉在 60fps 处理一个只增不减的大字符串，内存与 CPU 双爆
+      //  （`data/logs/renderer-crash.log` 里就有渲染进程 `oom` 的记录；用户侧表现是
+      //  "用着用着 slime 直接崩了、任务中断"）。
+      //  现在：积压小 → 保留逐字渐入的观感；积压大 → 按比例追赶（几何收敛，几十帧内追平），
+      //  显示位置与真实输出的差距被**有界地**压在 TYPING_CATCHUP_CHARS 附近，不再无限滞后。
       const full = partialRef.current;
       const shown = displayPartialRef.current;
       if (shown.length < full.length) {
+        const backlog = full.length - shown.length;
         const now = Date.now();
-        if (now - lastTypingAtRef.current >= 28) {
+        if (backlog > TYPING_CATCHUP_CHARS) {
+          // 追平模式：每次推进积压的 ~1/12，且不受 28ms 门限限制（每帧都能推进）
+          const step = Math.max(4, Math.ceil(backlog / 12));
+          displayPartialRef.current = full.slice(0, shown.length + step);
+          lastTypingAtRef.current = now;
+        } else if (now - lastTypingAtRef.current >= 28) {
           displayPartialRef.current = full.slice(0, shown.length + 1);
           lastTypingAtRef.current = now;
         }
@@ -1310,6 +1798,24 @@ export default function ChatPanel({
       for (const mm of messagesRef.current) { ctxChars += mm.content?.length ?? 0; }
       ctxChars += partialRef.current.length;
       setContextTokens(Math.max(0, Math.round(ctxChars / 4)));
+      // 上下文环 + 右栏进度条：**流式期间实时推进**（输入基线 + 已产出正文/思考，≈4 字符/token）。
+      // 此前只在「发送时估算」和「done 时校准」两处更新 → 圆环/进度条全程不动、结束后才跳变（用户反馈的根因）。
+      // setCtxUsed 每帧跟随（同值 setState 不触发渲染），跨组件的 dispatchCtxUpdate 压到 500ms 一次。
+      // A-974-R6：streamTokensRef 语义已升级为「总输出（正文+思考）」，此处不再额外加 reasoning/4（避免重复计）
+      const liveUsed = ctxBaseRef.current + streamTokensRef.current;
+      if (liveUsed > 0) {
+        // A-974-R2：直接跟随（不再 Math.max 单调锁死）。基线 ctxBaseRef 已锚定真值且 ≥ 真值锚，
+        // 故本帧 liveUsed 天然 ≥ 上一帧、不会无故回落；而压缩/done/恢复能真正把数值降下来
+        // （此前 Math.max 使圆环停在历史峰值 629K/100% 永不回落）。
+        setCtxUsed(liveUsed);
+        const nowMs = Date.now();
+        if (nowMs - lastCtxDispatchRef.current >= 500) {
+          lastCtxDispatchRef.current = nowMs;
+          // ⑤ 阈值实时压缩：一旦越过 cfg.ratio **立即**触发（不再等"下次发送前"）。
+          // 每轮只压一次（didCompressTurnRef），压缩成功后 ctxBaseRef 回落，避免抖动。
+          void maybeAutoCompress(streamSessionRef.current ?? "", liveUsed);
+        }
+      }
       // 推理过程同样走 rAF（A-129：去掉 reasoning 分支每 chunk 一次 setReasoningTmp）
       setReasoningTmp(reasoningTmpRef.current);
       // A-xxx：交错时间线快照同步（增量 steps 数组——引用不可变，必须快照新数组触发渲染）
@@ -1318,9 +1824,22 @@ export default function ChatPanel({
       // "中断 + 底部重新输出一遍"的观感；此处把占位气泡内容绑定实际流内容
       const liveId = snapshotMsgIdRef.current;
       if (liveId !== null) {
+        // A-974-R5：恢复态隐藏独立流式块后，占位气泡是**唯一**渲染源 —— 思考段落/工具现场
+        // 也必须随流续长（此前只同步 content，思路卡片停在恢复瞬间的快照上）。
+        const tlNow = timelineStepsRef.current;
+        const toolsNow = toolEventsRef.current;
+        const reasonNow = reasoningTmpRef.current;
         setMessages((prev) => {
           if (!prev.some((m) => m.id === liveId)) { return prev; }
-          return prev.map((m) => (m.id === liveId ? { ...m, content: partialRef.current || "（恢复中…）" } : m));
+          return prev.map((m) => (m.id === liveId ? {
+            ...m,
+            content: partialRef.current || "（恢复中…）",
+            reasoning: reasonNow || m.reasoning,
+            stages: {
+              reads: m.stages?.reads ?? [], urls: m.stages?.urls ?? [],
+              tools: toolsNow, reasoning: reasonNow || undefined, timeline: tlNow,
+            },
+          } : m));
         });
       }
       // A-918++：自续——若 partialRef 还有未显示字符（buffer 堆积，模型快于打字），下一帧继续推进，直到追平
@@ -1385,12 +1904,26 @@ export default function ChatPanel({
   const [streamModel, setStreamModel] = React.useState("");
   const streamStartRef = React.useRef(0);
   const streamCharCountRef = React.useRef(0);
-  /** A-918++：最近一次实时 chunk 时间戳（恢复"恢复中"后 6s 无动静 → 主动续接判定用） */
-  const lastChunkAtRef = React.useRef(0);
-  /** A-918++：恢复后超时主动续接定时器 */
-  const pendingResumeTimerRef = React.useRef<number | null>(null);
-  /** token 计数走 ref 累积，随 50ms partial 节流批量刷进状态（A-129：去掉每 chunk 一次 setState） */
+  /**
+   * A-974-R6：**思考（reasoning）输出字符数独立累计**。
+   * 此前只有正文 chunk 计入 streamCharCountRef → 长思考阶段监测栏「tokens」不涨、tokens/s 恒 0、
+   * 耗时也不启动（用户实测：思考期间完全侦测不到输出）。现在两者相加计入总输出 token 与吞吐。
+   */
+  const streamReasonCharCountRef = React.useRef(0);
+  /** token 计数走 ref 累积，随 50ms partial 节流批量刷进状态（A-129：去掉每 chunk 一次 setState）。
+   *  A-974-R6：语义 = 本轮**总输出**（正文 + 思考）token 估算，供监测栏 tokens/tokens·s⁻¹ 与上下文推进共用。 */
   const streamTokensRef = React.useRef(0);
+  /** A-974-R9：streamModel 的 ref 镜像——快照保存发生在 effect 闭包内，读 state 会拿到陈旧值 */
+  const streamModelRef = React.useRef("");
+  React.useEffect(() => { streamModelRef.current = streamModel; }, [streamModel]);
+  /** 本轮请求的「输入侧」上下文估算基线（发送时写入）——流式期间据此 + 实时产出量持续推进上下文环/进度条，
+   *  不再等 done 才刷新（用户反馈：圆环与侧栏进度条只有输出结束才跟进）。 */
+  const ctxBaseRef = React.useRef(0);
+  /** 上下文更新事件的派发节流（rAF 每帧都跑，但跨组件事件压到 500ms 一次） */
+  const lastCtxDispatchRef = React.useRef(0);
+  /** A-974：流式期 1s 心跳——rAF 派发随 partial 节流驱动，长时间思考/无正文 chunk 时会静默；
+   *  心跳把当前实时占用强制推给右栏（上限取 ref 防陈旧），满足"实时监测，3s/5s 刷新也可以"。 */
+  const ctxPulseTimerRef = React.useRef<number | null>(null);
   const streamElapsedTimerRef = React.useRef<number | null>(null);
   /* ── 模型调用失败自动重连：流式断联时自动重试（上限 9 次），进度流式输出 ── */
   const streamActiveRef = React.useRef(false);      // 本面板活跃流标记（避免其它面板/旧流的错误误触发重连）
@@ -1415,6 +1948,15 @@ export default function ChatPanel({
   const [resumeMsgId, setResumeMsgId] = React.useState<number | null>(null);
   /** A-969：上下文自动压缩过渡动画（发送前触发；prep=整理 / summarize=生成摘要 / done=完成 / trunc=降级裁剪） */
   const [compressUi, setCompressUi] = React.useState<null | { stage: "prep" | "summarize" | "done" | "trunc"; dropped?: number; summary?: string }>(null);
+  /** A-975：本轮「已压缩上下文」报告行——渲染为正文之上的分隔线（思考卡折叠也可见），
+   *  并在 done 时随消息落库，历史回看仍能看到"这轮发生过压缩"。 */
+  const [compressNote, setCompressNote] = React.useState<string | null>(null);
+  const compressNoteRef = React.useRef<string | null>(null);
+  /** A-975：流式/压缩进行中 → 暂停 ErrorBoundary 的整页自愈 reload（避免抹掉在途监测现场与压缩分隔线） */
+  React.useEffect(() => {
+    selfHealState.paused = loading || compressUi !== null;
+    return () => { selfHealState.paused = false; };
+  }, [loading, compressUi]);
   const compressBusyRef = React.useRef(false);
   /** 每轮只压一次（发送前触发压缩后，本轮发送结束前不再重复触发；onDone 复位允许下一轮再体检） */
   const didCompressTurnRef = React.useRef(false);
@@ -1428,14 +1970,9 @@ export default function ChatPanel({
   /** A-162：per-session 流现场快照（切走保存/切回恢复 partial+reasoning+tools+活跃标记）。
    *  切会话不取消旧流（后台跑完落库），恢复时从快照续接，杜绝「切回后内容消失」体验。
    *  A-918+：同时保存 input 草稿与 pendingAsk/pendingPerm 弹框状态（切回时一并恢复，
-   *  解决「终止提示消失」「用户输入消失」）。 */
-  const perSessionStreamCache = React.useRef<Record<string, {
-    partial: string; reasoning: string; toolEvents: ToolEvent[]; timeline: TimelineStep[]; hasActive: boolean;
-    tailError?: { content: string; reason: string }; messages?: Message[];
-    input?: string; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null;
-    /** A-918++：最近一次流式入参（恢复时还原 streamReqRef → 抖动可自动重连，修复"恢复中进度不动/中断"） */
-    req?: ChatStreamReq | null;
-  }>>({});
+   *  解决「终止提示消失」「用户输入消失」）。
+   *  ⚠️ 2026-09-12：改指向**模块级** store（见文件上方 `perSessionStreamCache` 定义）——
+   *  组件重挂载不再丢在途状态，这才能安全地给 ChatPanel 加 `key={sessionId}`。 */
   const [reconnectInfo, setReconnectInfo] = React.useState<{ attempt: number; total: number } | null>(null);
   /** A-917：流失败/重连耗尽的就地错误横幅（不追加独立消息，避免"另发一条/切会话才见/切走即消失"） */
   const [streamErrorBanner, setStreamErrorBanner] = React.useState<string | null>(null);
@@ -1454,17 +1991,20 @@ export default function ChatPanel({
     setResumeMsgId(null); // A-968：复位（切走/停止/失败）时清占位气泡标记，保证下一次恢复重建
     setCompressUi(null); // A-969：复位时收起压缩过渡浮层（残留浮层会挡住 input）
     compressBusyRef.current = false;
+    // A-975：本轮压缩报告行随之复位（消息落库时已带走一份，历史回看不依赖这里）
+    compressNoteRef.current = null;
+    setCompressNote(null);
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-    if (pendingResumeTimerRef.current !== null) { // A-918++：清理恢复超时续接定时器
-      window.clearTimeout(pendingResumeTimerRef.current);
-      pendingResumeTimerRef.current = null;
-    }
     if (streamElapsedTimerRef.current !== null) {
       window.clearInterval(streamElapsedTimerRef.current);
       streamElapsedTimerRef.current = null;
+    }
+    if (ctxPulseTimerRef.current !== null) { // A-974：复位一并停心跳
+      window.clearInterval(ctxPulseTimerRef.current);
+      ctxPulseTimerRef.current = null;
     }
     streamActiveRef.current = false;
     streamReqRef.current = null;
@@ -1474,6 +2014,72 @@ export default function ChatPanel({
   /** 上下文消耗圆环：已用（done 的 promptTokens）/ 上限（Agent max_context） */
   const [ctxUsed, setCtxUsed] = React.useState(0);
   const [ctxCap, setCtxCap] = React.useState(0);
+  /** ctxCap 的 ref 镜像：rAF 回调 / useCallback 里的闭包会capture 首帧值（陈旧），
+   *  压缩阈值判定必须读 ref 才准（⑦"状态要切界面才刷新"的同类根因）。 */
+  const ctxCapRef = React.useRef(0);
+  React.useEffect(() => { ctxCapRef.current = ctxCap; }, [ctxCap]);
+  /**
+   * A-974-R2：**真值锚**——最近一次「已确认的真实输入侧占用」（done 的 prompt+cacheRead、
+   * 压缩后的回落值、会话恢复的持久化值）。它只被"真实来源"改写，**永不**被发送时的可见消息字符估算拉低。
+   *
+   * 为什么必须有它（用户实测"两处进度在 30K 与 629K 之间闪烁、圆环被钉在 629K"的根因）：
+   *   真实输入侧占用（含系统提示/记忆/技能/工具定义）≈629K，而按「可见消息字符 ÷3」的估算只有 ≈30K。
+   *   此前发送时直接用 30K 覆盖流式基线 ctxBaseRef，于是心跳派发 30K、done 派发 629K，两路数值
+   *   在同一通道里打架 → 右栏进度条来回跳；圆环侧因 `Math.max` 单调锁死停在历史峰值 629K（100%）永不回落。
+   *   现在：估算只取 `max(锚, 估算)` 作乐观反馈（窗口单调不缩），真实值由 done/压缩/恢复校准，
+   *   且取消 Math.max 锁死 → 压缩后能真实回落。
+   */
+  const ctxAnchorRef = React.useRef(0);
+  /** A-974：启动流式期 1s 心跳（发送/恢复活跃流时调用，done/error/reset 清理）。
+   *  心跳把「基线 + 产出 token + 思考字符」的实时占用写进**唯一状态源** ctxUsed——
+   *  跨组件广播统一由 ctxUsed/ctxCap 的 debounce effect 承担（单一派发路径，
+   *  根治"心跳直派 + effect 派发"两路数值打架导致的 30K↔629K 闪烁）。 */
+  const ensureCtxPulse = React.useCallback(() => {
+    if (ctxPulseTimerRef.current !== null) { return; }
+    ctxPulseTimerRef.current = window.setInterval(() => {
+      if (!streamActiveRef.current || stoppingRef.current) { return; }
+      if (!(streamSessionRef.current ?? sessionRef.current ?? "")) { return; }
+      const liveUsed = ctxBaseRef.current + streamTokensRef.current;
+      if (liveUsed <= 0) { return; }
+      setCtxUsed(liveUsed);
+    }, 1000);
+  }, []);
+  /**
+   * A-974-R9：**无守卫**启动耗时定时器——恢复会话时专用（streamStartRef 已被设成"历史起点"，
+   * 不能走 ensureStreamTimer 的 `===0` 判定，否则恢复后耗时纹丝不动）。
+   */
+  const startElapsedTimer = React.useCallback(() => {
+    if (streamElapsedTimerRef.current !== null) { window.clearInterval(streamElapsedTimerRef.current); }
+    streamElapsedTimerRef.current = window.setInterval(() => {
+      setStreamElapsed(Date.now() - streamStartRef.current);
+    }, 500);
+  }, []);
+  /**
+   * A-974-R6：**首次产出即启动耗时计时器**——正文与思考任一先到都算"开始输出"。
+   * 此前只在正文 chunk 分支启动 → 长思考阶段「耗时」纹丝不动（用户实测"思考期间全部侦测不到"）。
+   */
+  const ensureStreamTimer = React.useCallback(() => {
+    if (streamStartRef.current !== 0) { return; }
+    streamStartRef.current = Date.now();
+    startElapsedTimer();
+  }, [startElapsedTimer]);
+  /** A-974-R6：本轮总输出（正文 + 思考）token 估算唯一入口（≈4 字符/token），监测栏与上下文推进共用 */
+  const recomputeStreamTokens = React.useCallback(() => {
+    streamTokensRef.current = Math.round((streamCharCountRef.current + streamReasonCharCountRef.current) / 4);
+  }, []);
+  /** A-974-R9：把当前监测 refs 打包成可落槽的快照（切走保存 / 卸载 flush 共用，语义单点） */
+  const snapshotMonitor = React.useCallback((): StreamMonitor => {
+    const m = createMonitor(streamStartRef.current, streamModelRef.current);
+    m.tokens = streamTokensRef.current;
+    m.replyChars = streamCharCountRef.current;
+    m.reasonChars = streamReasonCharCountRef.current;
+    return m;
+  }, []);
+  /** 强制从存储重载当前会话消息的开关（+1 触发）。
+   *  用途：流式错误/中断后，渲染层内存态可能与落库态不一致 —— 典型症状就是用户反馈的
+   *  「思考文本被当成正文多出一条气泡 / 错误消息不消失 / 思考历程错乱」，此前必须**手动切会话或切界面**
+   *  才恢复正常（因为切走会重跑 load effect 从存储重建）。现在错误收尾自动 +1 → 立刻对齐，等同手动切换。 */
+  const [reloadTick, setReloadTick] = React.useState(0);
   const [sessionConfig, setSessionConfig] = React.useState<SessionConfig>({ approval: "auto", workspace: "" });
   const [renaming, setRenaming] = React.useState(false);
   const [renameDraft, setRenameDraft] = React.useState("");
@@ -1509,6 +2115,11 @@ export default function ChatPanel({
   }, [networkEnabled]);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = React.useState(true);
+  /** A-980-R18：是否位于顶部（<8px）——顶部渐变遮罩显隐 */
+  const [atTop, setAtTop] = React.useState(true);
+  /** A-980-R18：更早历史分段加载状态（首屏 500 条封顶且有更早 → 顶部胶囊点击再载） */
+  const [olderInfo, setOlderInfo] = React.useState<{ beforeTs: string; hasMore: boolean } | null>(null);
+  const [loadingOlder, setLoadingOlder] = React.useState(false);
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
   const eventIdRef = React.useRef(0);
   /** 消息自增 id（稳定键 + 折叠态索引） */
@@ -1516,11 +2127,9 @@ export default function ChatPanel({
   /** 已完成消息的推理块折叠态：true=折叠（默认） */
   const [collapsedReasoning, setCollapsedReasoning] = React.useState<Record<number, boolean>>({});
 
-  /* ── 识图：待发送图片（预览行显示，可删除）＋ 会话内图片记忆（多轮识图）── */
+  /* ── 识图：待发送图片（预览行显示，可删除；仅随当前轮消息发送一次）── */
   const [pendingImages, setPendingImages] = React.useState<Array<{ id: string; name: string; dataUrl: string }>>([]);
   const imagesSeqRef = React.useRef(0);
-  /** 会话内已发送图片（后续轮次自动携带最近 ≤4 张，让模型多轮都能看到图；不写入服务端历史） */
-  const sessionImagesRef = React.useRef<Array<{ name: string; dataUrl: string }>>([]);
 
   /** ── 输入框内嵌权限请求（替代系统弹窗）：请求到达时输入框切换为选择题 UI ── */
   const [pendingPerm, setPendingPerm] = React.useState<PermissionRequestUI | null>(null);
@@ -1699,6 +2308,14 @@ export default function ChatPanel({
     timelineStepsRef.current = [];
     setLiveTimeline([]);
     resetStreamUI();
+    // A-974-R9：**清零监测计数器**——防切到无活跃流的会话时残留上一会话的 tokens/耗时；
+    // 若本会话有活跃流，下方 `cached.monitor` 还原块会把真实值重新写回。
+    streamStartRef.current = 0;
+    streamCharCountRef.current = 0;
+    streamReasonCharCountRef.current = 0;
+    streamTokensRef.current = 0;
+    setStreamTokens(0);
+    setStreamElapsed(0);
   }, [makeMessage, resetStreamUI]);
 
   /** 切换会话：加载历史 + 会话配置 + 已有 Agent 列表（A2A 传唤候选） */
@@ -1714,11 +2331,21 @@ export default function ChatPanel({
     // A-918++：区分「会话切换」与「会话内切 Agent」——只有真正的 sessionId 变化才需要
     // 保存/恢复 input 草稿与弹框；agentId 变化（sessionId 不变）不应覆盖用户正在输入的草稿。
     const isSessionChange = prevSessionIdRef.current !== null && prevSessionIdRef.current !== sessionId;
+    // A-971：key 化后每个新实例首挂时 prevSessionIdRef=null → isSessionChange 恒 false，
+    // 草稿/弹框恢复块成死代码（"切回输入没了"的同族回归）。首挂即「remount 切回」，
+    // 按 isFreshMount 放行；全新会话（无 cache 无 localStorage 草稿）走到这里也只是置空，无害。
+    // 同实例内 agentId 变化（切 Agent 不切会话）两者皆 false → 不清不恢复，语义不变。
+    const isFreshMount = prevSessionIdRef.current === null;
+    // 保存只发生在「同实例内真切走」(isSessionChange)。首挂(isFreshMount)时本实例 prevSessionIdRef=null、
+    // 自身流状态为空，无东西可存——上一个实例的状态已由它的卸载 flush(A-971) 写进 cache，这里只读不写。
+    // 若 isFreshMount 也走保存，prevKey=null 会写出 cache["null"] 脏槽。
     if (isSessionChange) {
       const prevKey = prevSessionIdRef.current!;
       if (streamActiveRef.current || partialRef.current || reasoningTmpRef.current || toolEventsRef.current.length > 0) {
         // A-968：快照必须【合并】既有条目而非整体替换——doSend 写入的乐观用户消息
         // （snap.messages）就在这里，整体覆盖会把它丢掉 → 切回后"用户文本直接消失"
+        // A-970：hasActive 保留镜像值——后台流镜像（onChunk/onDone 写回本槽）才是权威；
+        // 无既有条目时回退本流 streamActiveRef（本流此刻被卸载，值可靠）
         const existing = perSessionStreamCache.current[prevKey] ?? {};
         perSessionStreamCache.current[prevKey] = {
           ...existing,
@@ -1726,9 +2353,11 @@ export default function ChatPanel({
           reasoning: reasoningTmpRef.current,
           toolEvents: toolEventsRef.current,
           timeline: timelineStepsRef.current,
-          hasActive: streamActiveRef.current,
+          hasActive: existing.hasActive ?? streamActiveRef.current,
           tailError: pendingTailErrorRef.current ?? existing.tailError,
           req: streamReqRef.current ?? null, // A-918++：保存入参，恢复时还原以便自动重连
+          // A-974-R9：监测栏计数器一并快照——否则切回时 resetStreamUI 清零后无人还原（实测"记录清零重算"）
+          monitor: snapshotMonitor(),
         };
       }
       // A-918+：input 草稿、pendingAsk/pendingPerm 弹框按会话隔离保存（切回恢复）
@@ -1755,6 +2384,14 @@ export default function ChatPanel({
     // 彻底复位流式 UI（loading/stopping/定时器/重连状态/节流缓存）：
     // 关键 —— 这保证切换后输入框立即可用，旧会话残留的 loading=true 不再延续到新会话
     resetStreamUI();
+    // A-974-R9：清零监测计数器（防上一会话残值串台）；本会话若有活跃流，
+    // 下方 `cached.monitor` 还原块会把 tokens/耗时/吞吐/model 真实值重新写回。
+    streamStartRef.current = 0;
+    streamCharCountRef.current = 0;
+    streamReasonCharCountRef.current = 0;
+    streamTokensRef.current = 0;
+    setStreamTokens(0);
+    setStreamElapsed(0);
     // 收起旧会话残留的内嵌权限/提问选择题（main 有 300s 超时兜底：未回答按拒绝/跳过放行，不会挂死工具调用）
     setPendingPerm(null);
     setPendingAsk(null);
@@ -1763,9 +2400,7 @@ export default function ChatPanel({
     // 作废旧流绑定：旧会话残留流事件（main 已按流打 sessionId 标签）一律被过滤；
     // sendMessage 发起新流时会重新绑定
     streamSessionRef.current = null;
-    // 识图现场隔离：切换会话清空「会话内图片记忆」与「待发图片」，
-    // 防 A 会话的图被带到 B 会话（跨会话图片串扰/上下文污染）
-    sessionImagesRef.current = [];
+    // 识图现场隔离：切换会话清空「待发图片」，防 A 会话的图被带到 B 会话（跨会话图片串扰）
     setPendingImages([]);
     prevSessionIdRef.current = sessionId;
     // A-918：切回本会话——以「已落库历史」为底，叠加「未落库乐观用户消息」与「进行中流现场」；
@@ -1775,7 +2410,10 @@ export default function ChatPanel({
     // 不清空也不恢复——用户正在输入的草稿保持不变。且切到无缓存会话时显式置空 input，
     // 避免上一会话草稿「漏」进新会话（真正的"输入丢失/串台"根因）。
     const cached = perSessionStreamCache.current[sessionId];
-    if (isSessionChange) {
+    // A-971：首挂(isFreshMount)也恢复——remount 即"切到本会话"，本就该按 cache/localStorage
+    // 还原文本草稿与弹框（此前 isSessionChange 恒 false → 切回输入框草稿丢失的同族回归）。
+    // 全新空会话无 cache 无 localStorage → 恢复出空串，无害。
+    if (isSessionChange || isFreshMount) {
       let restoreInput = "";
       let restoreAsk: AskUserRequestUI | null = null;
       let restorePerm: PermissionRequestUI | null = null;
@@ -1810,6 +2448,12 @@ export default function ChatPanel({
     toolTraceRef.current = [];
     const optimisticMsgs: Message[] = cached?.messages ?? [];
     let liveMsg: Message | null = null;
+    /** A-974-R4：主进程确认「本会话流已死」——历史加载回调据此丢弃 stale 占位气泡（见下） */
+    let streamConfirmedDead = false;
+    // A-970：结算气泡——后台 done 已把完整 reply 镜像进 cache（hasActive=false），但 main 侧历史落盘
+    // 在 finally（done 之后）才完成。此「done 已派发 / 历史未落盘」竞态窗口内切回，若只信历史
+    // 就会丢这条回复（"输出没了，要再切一次才看到"的另一根因）。保留结算气泡，load 回调里与历史去重。
+    let settledMsg: Message | null = null;
     if (cached) {
       partialRef.current = cached.partial ?? "";
       reasoningTmpRef.current = cached.reasoning ?? "";
@@ -1824,23 +2468,37 @@ export default function ChatPanel({
       }
       if (cached.hasActive) {
         streamActiveRef.current = true;
+        // A-973：恢复会话时必须重绑 streamSessionRef——切走时被置 null（见上方 resetStreamUI 块），
+        // 若不重绑，压缩路径 maybeAutoCompress(streamSessionRef.current ?? "") 拿到空 sessionId：
+        // ① api.chat.compress("") 压缩错会话 ② 压缩后 dispatchCtxUpdate({sessionId:""}) 被右栏
+        // 「p.sessionId !== sessionIdRef.current」判为异会话丢弃 → 切回后上下文条/压缩动画全程冻结，
+        // 只有 done 手动派发（sessionRef 兜底）才动一次（用户实测"只有输出结束后才刷新"根因）。
+        streamSessionRef.current = sessionId;
         // A-918++：还原最近一次流入参 → 恢复期间若旧流抖动，onError 自动重连 payload 不为 null
         // （此前只还原数据 ref 不还原 streamReqRef，恢复态重连 payload=null → failReconnect → "恢复中"冻结/中断）
         if (cached.req) { streamReqRef.current = cached.req; }
+        // A-974-R9：**还原监测栏计数器**——切走时 resetStreamUI 已把它们清零，此前无人还原
+        // → 用户实测"切换会话再切回，当前轮 Agent 输出记录直接清零重新计算"。
+        // 用绝对起点 startedAt 还原耗时（含切走时段：流在后台一直在跑，语义正确），并重启计时器。
+        const mon = cached.monitor;
+        if (mon) {
+          streamCharCountRef.current = mon.replyChars ?? 0;
+          streamReasonCharCountRef.current = mon.reasonChars ?? 0;
+          streamTokensRef.current = mon.tokens ?? 0;
+          setStreamTokens(streamTokensRef.current);
+          streamStartRef.current = mon.startedAt > 0 ? mon.startedAt : Date.now();
+          setStreamElapsed(monitorElapsed({ startedAt: streamStartRef.current }, Date.now()));
+          startElapsedTimer();
+          setStreamModel(mon.model ?? "");
+        }
         setLoading(true);
-        // A-918++ 深层兜底：旧流若在切换窗口内已静默结束/断连（未触发 done/error），恢复态会一直"恢复中"冻结。
-        // 启动 6s 超时检测：期间无实时 chunk 到达 → 用保存的 req 主动重发续接（真正"续上"，而非空等）。
-        lastChunkAtRef.current = Date.now();
-        if (pendingResumeTimerRef.current !== null) { window.clearTimeout(pendingResumeTimerRef.current); }
-        pendingResumeTimerRef.current = window.setTimeout(() => {
-          pendingResumeTimerRef.current = null;
-          const req = streamReqRef.current;
-          const noLive = Date.now() - lastChunkAtRef.current > 5500;
-          if (streamActiveRef.current && req && noLive) {
-            streamActiveRef.current = true;
-            void api.chat.stream({ ...req, resumeHint: buildResumeHint() });
-          }
-        }, 6000);
+        // A-974：恢复活跃流即启心跳——切回后继续 1s 强制派发实时占用（右栏进度条/环不冻结）
+        ensureCtxPulse();
+        // A-972：删除「6s 无字 → 整条重发」定时器（连同 lastChunkAtRef/pendingResumeTimerRef）。
+        // 它是旧架构（状态在组件内、切走即丢）时代打的补丁：流在长思考阶段 5.5s 不吐字就被误判"死了"
+        // → 用 req 整条重发 → "重新输出一遍"。现在真正的安全网 = core-ts 300s 空闲看门狗 +
+        // 后台镜像（chunk 持续写回本会话 cache 槽，切回即最新现场）。占位气泡仍由 hasActive 重建，
+        // 后续 chunk 到达经 schedulePartialRender 实时续长，无需重发兜底。
         // A-968：占位气泡内容绑定 partial——后续 chunk 到达时由 schedulePartialRender 实时续长，
         // 杜绝冻结的"（恢复中…）"+底部 partial 双份输出造成的"中断后重新输出一遍"观感
         liveMsg = makeMessage("assistant", partialRef.current || "（恢复中…）", {
@@ -1854,26 +2512,70 @@ export default function ChatPanel({
         });
         snapshotMsgIdRef.current = liveMsg.id;
         setResumeMsgId(liveMsg.id);
+        // A-973：真相源校准——主进程 activeChats 才是"这条流死没死"的唯一权威（A-972 删掉本地
+        // 6s 猜测定时器后失去的判断依据）。恢复时乐观建了占位气泡，但若流其实已静默结束
+        // （done 在切走期间已派发、面板不在场未收尾），占位会永久冻结成"（恢复中…）"幽灵
+        // （用户实测回归）。查 isActive：流已死 → 立即把占位气泡转结算气泡（有正文）或移除
+        // （纯思考后断流、无正文），并清 loading/活跃标记；流还活着（查询不可用也保守保持）→ 占位等 chunk 续长。
+        void (async () => {
+          const r = await api.chat?.isActive?.(sessionId).catch(() => null);
+          if (!r || r.active) { return; }
+          streamConfirmedDead = true; // A-974-R4：供下方历史加载回调丢弃 stale 占位气泡
+          if (streamActiveRef.current && !stoppingRef.current) {
+            streamActiveRef.current = false;
+            setLoading(false);
+          }
+          const settled = cached.partial?.trim() ?? "";
+          if (settled && !cached.tailError) {
+            const sm = makeMessage("assistant", settled, {
+              reasoning: cached.reasoning?.trim() || undefined,
+              stages: (cached.toolEvents?.length ?? 0) > 0
+                ? { reads: [], urls: [], tools: cached.toolEvents ?? [], reasoning: cached.reasoning?.trim() || undefined, timeline: cached.timeline ?? [], products: extractProducts(cached.toolEvents ?? []) }
+                : undefined,
+            });
+            // A-974-R5：同时登记为结算气泡候选 —— 历史加载回调（可能晚于本判定返回）会用同一套
+            // 去重规则决定是否保留，避免"本判定刚装上回复、却被随后的历史 setMessages 整体覆盖"的
+            // 竞态（历史落盘在 main 的 finally，done 之后才完成，存在真空窗口）。
+            settledMsg = sm;
+            setMessages((prev) => prev.map((mm) => (mm.id === snapshotMsgIdRef.current ? sm : mm)));
+          } else {
+            setMessages((prev) => prev.filter((mm) => mm.id !== snapshotMsgIdRef.current));
+          }
+          snapshotMsgIdRef.current = null;
+          setResumeMsgId(null);
+        })();
       } else {
         // 流已真实终态（停止/失败/完成）→ 切回不带"生成中"，避免假活跃
         streamActiveRef.current = false;
         setLoading(false);
-      }
-      // A-968：多模态连续识图——从快照消息重建会话内图片记忆（此前切走即清空，
-      // 回来"记不住上一张图"；此处恢复最近 ≤4 张）
-      const restoredImages: Array<{ name: string; dataUrl: string }> = [];
-      for (const m of cached.messages ?? []) {
-        for (const u of (m as { images?: string[] }).images ?? []) {
-          if (u) { restoredImages.push({ name: "", dataUrl: u }); }
+        // A-970：结算镜像保留——后台 done 已把完整 reply 写进 cache.partial（hasActive=false）。
+        // 历史落盘在 main 的 finally（done 之后）才完成；若此刻切回且历史尚无此条，
+        // 不建 liveMsg 就会"结算回复消失"。建一条结算气泡，load 回调按文本去重（历史已有则丢弃）。
+        // 错误/截断收尾（tailError）不建结算气泡：main 侧落库文本会追加 "\n[截断]" 等后缀，
+        // 与 cache.partial 文本不等价 → 会与历史 error/截断记录双份显示；错误已有红字横幅兜底。
+        const settledContent = cached.tailError ? "" : cached.partial?.trim() ?? "";
+        if (settledContent) {
+          settledMsg = makeMessage("assistant", settledContent, {
+            reasoning: cached.reasoning?.trim() || undefined,
+            stages: cached.toolEvents && cached.toolEvents.length > 0
+              ? {
+                reads: [], urls: [],
+                tools: cached.toolEvents,
+                reasoning: cached.reasoning?.trim() || undefined,
+                timeline: cached.timeline ?? [],
+                products: extractProducts(cached.toolEvents ?? []),
+              }
+              : undefined,
+          });
         }
       }
-      if (restoredImages.length > 0) {
-        const seenSet = new Set<string>();
-        sessionImagesRef.current = restoredImages
-          .filter((i) => (seenSet.has(i.dataUrl) ? false : (seenSet.add(i.dataUrl), true)))
-          .slice(-4);
+      // A-974：流仍活跃 → **保留槽**。此前无条件 delete，二次切走时卸载 flush 以空槽重建，
+      // `messages`（doSend 写入的乐观用户消息）随之丢失 → 切回后历史（流未落库）与乐观消息都没有
+      // → 用户消息/思考现场消失，直到流 done 落库（用户实测"输出期间切换，消息没了"根因）。
+      // 仅流已真实终态（cached.hasActive=false）才删除：此时历史已落库，删除无副作用。
+      if (!cached?.hasActive) {
+        delete perSessionStreamCache.current[sessionId];
       }
-      delete perSessionStreamCache.current[sessionId];
       // A-918++：localStorage 草稿也一并清理（成功恢复后无需保留）
       try { localStorage.removeItem(`slime_session_draft_${sessionId}`); } catch { /* ignore */ }
     }
@@ -1886,38 +2588,70 @@ export default function ChatPanel({
     // A-934/A-935：会话级窗口占用恢复——done 事件持久化的「最近一次输入侧占用 + 权威上限」；
     // 无持久化占用 → **显式置 0**（否则残留上一会话的环数值——切会话不同步的根因）
     const ctxMeta = readSessionCtxMeta(agentId, sessionId);
-    setCtxUsed(restoreUsed(ctxMeta));
+    const usedMeta = restoreUsed(ctxMeta);
+    setCtxUsed(usedMeta);
+    // A-974：流式基线同步到持久化占用（恢复活跃流后，心跳/实时推进从真实占用起步而非 0）
+    ctxBaseRef.current = usedMeta;
+    // A-974-R2：真值锚同步——恢复后发送估算不得把已恢复的真实占用拉低
+    ctxAnchorRef.current = usedMeta;
     if (ctxMeta?.cap && ctxMeta.cap > 0) { setCtxCap(ctxMeta.cap); }
     void api.conversations.load(sessionId).then((msgs: ConversationMessage[]) => {
       // A-934：按 assistant 序数回填持久化的交错时间线（历史落库只有 reasoning 文本，
       // 无工具↔思考穿插顺序——重启后思考历程重归「交错时间线」设计而非整段平铺）
       const attaches = attachTimelineToHistory(msgs, ctxMeta);
+      // A-1007：按 assistant 序数回填持久化的产物文件（重载/重启后产物卡仍可渲染）
+      const productsByOrd = readSessionProducts(agentId, sessionId);
       let aiOrd = 0;
       const hist = msgs.map((m, i) => {
         const a = attaches[i] ?? {};
-        const extra: Partial<Message> = { time: fmtTime(m.time), reasoning: m.reasoning, elapsedMs: m.elapsedMs, agentName: m.agentName, agentId: m.agentId };
+        // A-980-R18：ts 带上原始历史时间戳（分页加载更早历史的定位锚 + 消息真实时刻）
+        const extra: Partial<Message> = { time: fmtTime(m.time), ts: m.ts, reasoning: m.reasoning, elapsedMs: m.elapsedMs, agentName: m.agentName, agentId: m.agentId };
         if (a.assistantOrdinal) {
           aiOrd = a.assistantOrdinal;
-          if (a.timeline || m.reasoning) {
+          const productFiles = productsByOrd[String(a.assistantOrdinal)] ?? [];
+          if (a.timeline || m.reasoning || productFiles.length > 0) {
             const toolSteps = (a.timeline ?? []).filter((s): s is TimelineStepLite & { kind: "tool" } => s.kind === "tool");
             const tools: ToolEvent[] = toolSteps.map((t, tIdx) => ({
               id: a.assistantOrdinal! * 1000 + tIdx, name: t.name ?? "", label: t.label ?? t.name ?? "",
               detail: t.detail, result: t.result,
             }));
-            extra.stages = { reads: [], urls: [], tools, reasoning: m.reasoning, timeline: a.timeline };
+            extra.stages = {
+              reads: [], urls: [], tools, reasoning: m.reasoning, timeline: a.timeline,
+              ...(productFiles.length > 0 ? { products: productFiles } : {}),
+            };
           }
         }
         return makeMessage(m.role, m.content, extra);
       });
       assistantOrdinalRef.current = aiOrd;
       // 底 = 历史（已落库）；叠加未落库乐观用户消息；再叠进行中现场消息（onDone 到达时替换为完整文本）
-      // A-968：乐观用户消息去重——流在后台跑完已落库（切回时历史含该 user 记录）时，
-      // 只保留历史里还没有的乐观消息，避免"用户文本重复出现"（曾有切走→done→切回双份的复现）
-      const histSeen = new Set(hist.map((h) => `${h.role}|${h.content}`));
-      const optimisticMsgs2 = optimisticMsgs.filter((m) => m.role !== "user" || !histSeen.has(`user|${m.content}`));
-      setMessages([...hist, ...optimisticMsgs2, ...(liveMsg ? [liveMsg] : [])]);
+      // A-974-R4：去重统一改为**归一化（去空白）+ 双向包含**判定，而非精确相等——
+      // 场景：切走期间流在后台跑完并落库，切回时历史已含完整回复，而占位气泡仍持有较短的
+      // cached.partial（或"（恢复中…）"占位）→ 二者同时渲染成"一条完整 + 一条截断"的双份输出
+      // （用户实测"切换会话后像被截断了又重新输出一遍"的根因；旧代码只给 settledMsg 做了去重，
+      //  而对 liveMsg（进行中占位气泡）**完全没有去重**，任何文本差异都会漏成双份）。
+      // 乐观用户消息去重（归一化比较，与下方 assistant 去重同一套规范化口径）
+      const histUserSeen = new Set(hist.filter((h) => h.role === "user").map((h) => normalizeForCompare(h.content)));
+      const optimisticMsgs2 = optimisticMsgs.filter((m) => m.role !== "user" || !histUserSeen.has(normalizeForCompare(m.content)));
+      // 占位气泡/结算气泡的保留判定统一走纯函数（归一化 + 双向包含 + isActive 兜底；vitest 直测）
+      const { keepLive, keepSettled } = decideRestoreKeep({
+        liveContent: liveMsg?.content,
+        settledContent: settledMsg?.content,
+        historyAssistantTexts: hist.filter((h) => h.role === "assistant").map((h) => h.content ?? ""),
+        streamConfirmedDead,
+      });
+      setMessages([...hist, ...optimisticMsgs2, ...(keepLive ? [liveMsg!] : []), ...(keepSettled ? [settledMsg!] : [])]);
+      // A-980-R18：首屏封顶 500 条且有更早 → 顶部胶囊「加载更早的消息」；
+      // 滚动到底需等布局稳定（图片/markdown 异步增高），否则落在随机历史时刻
+      if (hist.length >= 500 && hist[0]?.ts) {
+        setOlderInfo({ beforeTs: hist[0].ts, hasMore: true });
+      } else {
+        setOlderInfo(null);
+      }
+      settleScrollToBottom();
     }).catch(() => {
-      setMessages([...optimisticMsgs, ...(liveMsg ? [liveMsg] : [])]);
+      // 历史加载失败 → 全凭 cache 镜像：结算气泡此时是"唯一真相源"，必须保留
+      setMessages([...optimisticMsgs, ...(!streamConfirmedDead && liveMsg ? [liveMsg] : []), ...(settledMsg ? [settledMsg] : [])]);
     });
     // 会话级配置（"以文件夹为主"：按 sessionId 取 workspace；无则回退 Agent 级旧配置）
     void api.conversations.configGet({ agentId, sessionId }).then(setSessionConfig).catch(() => undefined);
@@ -1926,7 +2660,52 @@ export default function ChatPanel({
       void api.tasks.loadTodos(sessionId).catch(console.error);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, agentId, makeMessage]);
+  }, [sessionId, agentId, makeMessage, reloadTick]);
+
+  /** A-971：卸载 flush——key 化（key={sessionId}）后，"切走时保存快照"只能靠卸载钩子：
+   *  上方 A-162 保存分支挂在「同实例 sessionId 变化」上，而 key 化后每个实例的 sessionId 永远不变
+   *  （切会话 = 旧实例卸载 + 新实例挂载），该分支成为**死代码** → 切走瞬间 refs 里的在途现场
+   *  （partial/reasoning/tools）随实例死亡，cache 槽停在 doSend 时刻的空壳 → 切回输出直接消失
+   *  （用户实测"还不如以前"的回归根因，2026-09-12）。
+   *  现改为：任何实例卸载前把 refs 现场写回模块级 cache（合并保留既有条目：乐观用户消息/
+   *  后台镜像值不被覆盖）。切走后后台 chunk/done 由新面板订阅继续镜像（A-970）→ 槽位始终是最新现场。
+   *  注意：不 dump 完整 messages 列表（restore 后其中含已落库历史 → 下次恢复会与历史重复）；
+   *  流式现场全部走 refs（partialRef/reasoningTmpRef/toolEventsRef/timelineStepsRef）。 */
+  React.useEffect(() => {
+    return () => {
+      const sid = sessionRef.current;
+      if (!sid) { return; }
+      const hasStream = streamActiveRef.current || !!partialRef.current || !!reasoningTmpRef.current || toolEventsRef.current.length > 0;
+      const draft = inputValueRef.current;
+      const ask = pendingAskRef.current;
+      const perm = pendingPermRef.current;
+      if (!hasStream && !draft && !ask && !perm) { return; } // 无东西可存 → 不留空槽
+      const existing = perSessionStreamCache.current[sid] ?? {};
+      perSessionStreamCache.current[sid] = {
+        ...existing, // 保留既有 messages（doSend 乐观用户消息）等未列出的字段
+        partial: hasStream ? partialRef.current : (existing.partial ?? ""),
+        reasoning: hasStream ? reasoningTmpRef.current : (existing.reasoning ?? ""),
+        toolEvents: hasStream ? toolEventsRef.current : (existing.toolEvents ?? []),
+        timeline: hasStream ? timelineStepsRef.current : (existing.timeline ?? []),
+        // A-970：镜像值（后台 chunk 置 true / 后台 done 置 false）是权威；无镜像时回退本实例流状态
+        hasActive: existing.hasActive ?? streamActiveRef.current,
+        tailError: pendingTailErrorRef.current ?? existing.tailError,
+        req: existing.req ?? streamReqRef.current ?? null,
+        input: draft,
+        pendingAsk: ask ?? null,
+        pendingPerm: perm ?? null,
+        // A-974-R9：监测栏计数器随流现场一起落槽（有流才覆盖，避免无流时把既有值清空）
+        ...(hasStream ? { monitor: snapshotMonitor() } : {}),
+      };
+      // localStorage 草稿备份（与 restore 的 24h 回退读取同键；进程重启后 cache 槽丢失时可用）
+      try {
+        localStorage.setItem(`slime_session_draft_${sid}`, JSON.stringify({
+          input: draft, pendingAsk: ask ?? null, pendingPerm: perm ?? null, savedAt: Date.now(),
+        }));
+      } catch { /* localStorage 不可用时静默忽略 */ }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** 上下文圆环上限：优先 Agent 配置的 max_context；未配置（0）时回退当前模型上游 context_window
    *  （A-1xx：上游 context_window 元数据此前只显示不生效 → 环 cap=0 永远 0%） */
@@ -1955,9 +2734,53 @@ export default function ChatPanel({
       // 事件过滤：仅采纳当前展示会话的流（切会话/切 Agent 后旧流事件一律丢弃）。
       // main 已按流打 sessionId 标签，优先按标签与会话比对；无标签的兼容事件回退 streamSessionRef 判定
       const cSid = c.data?.sessionId;
-      if (cSid != null) {
-        if (cSid !== sessionRef.current) { return; }
-      } else if (streamSessionRef.current !== sessionRef.current) {
+      // A-970：后台流镜像——非当前会话的流事件不再「直接丢弃」，而是把现场写回它自己的 cache 槽。
+      // 此前：切走期间旧流的 chunk/reasoning/tool 全被丢弃 → 该会话快照停在 doSend 时的空壳
+      // （partial:""）→ 切回时占位气泡空白、要「切出去再切回」拿到新快照才看得到输出（用户实测症状）。
+      const otherSid: string | null = cSid != null && cSid !== sessionRef.current ? cSid : null;
+      if (otherSid != null) {
+        const snap = perSessionStreamCache.current[otherSid];
+        if (snap) {
+          // A-974-R9：该会话正被后台镜像——监测计数器也要跟着涨，否则切回时数值停在切走那一刻
+          // （用户实测"记录清零/少算"的另一半：切走期间产出的 token 与耗时都没记）。
+          // 累计/回算语义统一走 streamMonitor 纯函数（vitest 直测）。
+          if (!snap.monitor) { snap.monitor = createMonitor(Date.now()); }
+          if (c.type === "chunk") {
+            const content = c.data?.content ?? "";
+            snap.partial += content;
+            snap.hasActive = true;
+            bumpMonitor(snap.monitor, content.length, 0, c.data?.model);
+          } else if (c.type === "reasoning") {
+            const content = c.data?.content ?? "";
+            snap.reasoning += content;
+            if (content) {
+              snap.timeline = appendTimelineStep(snap.timeline, { kind: "think", text: content });
+              bumpMonitor(snap.monitor, 0, content.length, c.data?.model);
+            }
+          } else if (c.type === "tool" && c.data?.name) {
+            const rawName = c.data.name;
+            const { label } = resolveToolLabel(rawName);
+            const detail = extractToolDetail(c.data.args, typeof c.data.result === "string" ? c.data.result : undefined);
+            const ev: ToolEvent = {
+              id: ++eventIdRef.current, name: rawName,
+              label: rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`,
+              detail, result: typeof c.data.result === "string" ? c.data.result : undefined,
+            };
+            snap.toolEvents = [...snap.toolEvents, ev];
+            snap.timeline = appendTimelineStep(snap.timeline, { kind: "tool", name: rawName, label, detail, result: ev.result });
+            // A-980-R32：后台镜像的会话也要把任务规划折进它自己的时间线，否则切回去看那段
+            // 思考历程时规划卡与完成播报是缺的（只在当前会话可见 = 切走一次就丢）。
+            if (rawName === "todo_write") {
+              snap.timeline = foldTodoWriteIntoSteps(snap.timeline, parseTodoPanorama(ev.result ?? "")?.items ?? [], lastPlanItems(snap.timeline)).steps;
+            }
+          } else if (c.type === "error") {
+            snap.hasActive = false;
+            snap.tailError = { content: c.data?.message ?? "未知错误", reason: "stream_error" };
+          }
+        }
+        return;
+      }
+      if (cSid == null && streamSessionRef.current !== sessionRef.current) {
         return;
       }
       // 错误事件（core-ts 流内 `yield { type:"error" }`，如响应超限/流式生成异常）：
@@ -1989,6 +2812,16 @@ export default function ChatPanel({
         setLiveTimeline([]);
         resetStreamUI();
         onConversationsChanged?.();
+        // 清本会话快照的 hasActive：done 分支本来会清（见下方 delete/校准），但错误分支此前**没清** →
+        // 切回该会话时 restore 逻辑按 hasActive=true 建"（恢复中…）"占位气泡，永远冻在那里（用户实测幽灵气泡）。
+        {
+          const sidForSnap = cSid ?? sessionRef.current;
+          const snap = sidForSnap ? perSessionStreamCache.current[sidForSnap] : undefined;
+          if (snap) { snap.hasActive = false; }
+        }
+        // 与存储对齐：清掉渲染层可能残留的错乱气泡（思考文本被当正文/重复回复），
+        // 效果等同用户手动切会话再切回 —— 但不需要用户操作。
+        setReloadTick((t) => t + 1);
         return;
       }
       // 团队会话：成员发言（type="member"）→ 台内流式累积（同一 Agent 期间的 chunk 追加到同一条消息），
@@ -2022,14 +2855,8 @@ export default function ChatPanel({
           : `⟳ ${label}`;
         // A-162：从工具参数提取「具体抓手」——网址（web_fetch/web_search）或文件路径
         // （file_*/code_check），工具行直接可见，符合 Claude Code 阶段卡中"访问了哪个网址/改了哪个文件"的语义。
-        let detail = "";
-        try {
-          const args = typeof c.data.args === "string" ? JSON.parse(c.data.args) : (c.data.args ?? {});
-          if (args.url && typeof args.url === "string") { detail = args.url; }
-          else if (args.query && typeof args.query === "string") { detail = `查询: ${args.query}`; }
-          else if (args.path && typeof args.path === "string") { detail = String(args.path); }
-          else if (args.file && typeof args.file === "string") { detail = String(args.file); }
-        } catch { /* 参数不可解析 → 无细节行 */ }
+        // A-975：统一走 extractToolDetail（含 selector/命令/结果里的成品链接兜底）。
+        const detail = extractToolDetail(c.data.args, typeof c.data.result === "string" ? c.data.result : undefined);
         // 注意：refs 必须在 setState 的 updater 之外同步累积——
         // React 的 updater 是延迟到 render 阶段执行的。
         // 事件回调内同步累积，保证留痕与 reasoning 实际输出进度一一对应。
@@ -2041,14 +2868,32 @@ export default function ChatPanel({
         timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, {
           kind: "tool", name: rawName, label: displayLabel.replace(/^⟳\s*/, ""), detail, result: ev.result,
         });
+        // A-980-R32：`todo_write` 额外把待办全景折进思考历程——
+        // ① 首份规划 → 时间线里出现一张「任务规划」卡（列出全部条目，未完成项标注状态）；
+        // ② 同一份计划的后续写回 → 原地刷新那张卡（显示当前进度），并把**新完成/新开始**的项
+        //    各追加一行「✓ 完成：…」「▶ 开始：…」，读起来就是一份带时间序的推进日志。
+        // 基线取自时间线自身的最后一张计划卡（见 lastPlanItems），无需额外 ref。
+        if (rawName === "todo_write") {
+          const steps = foldTodoWriteIntoSteps(
+            timelineStepsRef.current,
+            parseTodoPanorama(ev.result ?? "")?.items ?? [],
+            lastPlanItems(timelineStepsRef.current),
+          ).steps;
+          timelineStepsRef.current = steps;
+          setLiveTimeline(steps);
+        }
         setToolEvents(next);
         return;
       }
       if (c.type === "reasoning") {
-        reasoningTmpRef.current += c.data?.content ?? "";
-        // A-xxx：增量 append 到交错时间线（勿改动纯文本累积——头部摘要行仍读 reasoningTmp）
         const content = c.data?.content ?? "";
+        reasoningTmpRef.current += content;
+        // A-xxx：增量 append 到交错时间线（勿改动纯文本累积——头部摘要行仍读 reasoningTmp）
         if (content) {
+          // A-974-R6：思考输出计入监测（此前只统计正文 → 长思考期 tokens / tokens·s⁻¹ 恒 0、耗时也不启动）
+          streamReasonCharCountRef.current += content.length;
+          recomputeStreamTokens();
+          ensureStreamTimer();
           timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, { kind: "think", text: content });
         }
         schedulePartialRender();
@@ -2056,19 +2901,17 @@ export default function ChatPanel({
       }
       if (c.type === "chunk") {
         partialRef.current += c.data?.content ?? "";
-        // 实时监测：按字符增量估算 token（≈4 字符/token）
+        // 实时监测：按字符增量估算 token（≈4 字符/token；正文 + 思考合计）
         const delta = (c.data?.content ?? "").length;
-        lastChunkAtRef.current = Date.now(); // A-918++：记录最近实时输出，供"恢复中"超时续接判定
         if (delta > 0) {
           streamCharCountRef.current += delta;
-          streamTokensRef.current = Math.round(streamCharCountRef.current / 4);
-          if (streamStartRef.current === 0) {
-            streamStartRef.current = Date.now();
-            // A-129：耗时刷新 200ms->500ms，降低流式期间定时器唤醒频率（减少主线程打断）
-            streamElapsedTimerRef.current = window.setInterval(() => {
-              setStreamElapsed(Date.now() - streamStartRef.current);
-            }, 500);
-          }
+          recomputeStreamTokens();
+          ensureStreamTimer();
+        }
+        // A-974-R9：用首个 chunk 携带的 model 提前点亮监测栏模型标签（此前只在 done 才设置 →
+        // 流式全程模型栏空白，且 R9 快照的 model 也一直是空串）
+        if (!streamModelRef.current && typeof c.data?.model === "string" && c.data.model) {
+          setStreamModel(c.data.model);
         }
         schedulePartialRender();
         return;
@@ -2077,14 +2920,21 @@ export default function ChatPanel({
       schedulePartialRender();
     });
     const off2 = api.chat.onDone((m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => {
+      // A-980-R24：每条流结束都是一次天然的回收时机——此时刚有槽变成 hasActive=false，
+      // 顺手把超额的历史结算快照清掉（不会碰其它会话正在流式的槽）。见 pruneStreamCache 注释。
+      pruneStreamCache(m.sessionId ?? undefined);
       // 事件过滤：切会话/切 Agent 后旧流的 done 一律丢弃，避免串扰到当前会话
       if (m.sessionId != null) {
         // A-918+：即便不是当前会话，也要先把快照 hasActive 置 false（流已真实结束），
         // 否则切回时仍按"恢复中"建占位气泡 → 与随后 conversation.load 拉到的完整消息形成"两段"重复
         if (m.sessionId !== sessionRef.current) {
           const sid = m.sessionId;
+          // A-970：后台流 done 镜像——把完整正文写回该会话快照（此前只清 hasActive 不写正文 →
+          // done 与切回之间的竞态窗口内，快照仍是空壳 → 切回占位气泡空白）。
+          // reasoning 不动：思考文本只由上面 onChunk 的 reasoning 镜像累积，done 里无思考原文，
+          // 用 reply 冒充会把正文写进思考区（污染折叠卡「思考过程」）。
           const snap = perSessionStreamCache.current[sid];
-          if (snap) { snap.hasActive = false; }
+          if (snap) { snap.hasActive = false; snap.partial = m.reply; }
           return;
         }
       } else if (streamSessionRef.current !== sessionRef.current) { return; }
@@ -2129,8 +2979,10 @@ export default function ChatPanel({
       if (finalReasoning && !finalTimeline.some((s) => s.kind === "think")) {
         finalTimeline = [...finalTimeline, { kind: "think" as const, text: finalReasoning }];
       }
+      // A-1007：本轮真实产物文件（file_write 主产物 + file_read 补充；随 stages 组装）
+      const products = extractProducts(doneTools);
       const stages = finalReasoning || doneTools.length > 0
-        ? { reads, urls, tools: doneTools, reasoning: finalReasoning, timeline: finalTimeline }
+        ? { reads, urls, tools: doneTools, reasoning: finalReasoning, timeline: finalTimeline, products }
         : undefined;
       // error chunk 已实时展示红字错误时，本 done 携带的是空正文（main 兜底收尾）→ 不再追加空白气泡
       const errorDisplayed = streamErrorSeenRef.current;
@@ -2145,7 +2997,7 @@ export default function ChatPanel({
       if (snapshotId !== null && !(errorDisplayed && !m.reply)) {
         setMessages((prev) => prev.map((mm) =>
           mm.id === snapshotId
-            ? { ...makeMessage("assistant", doneText, { reasoning: finalReasoning || undefined, elapsedMs: m.elapsedMs, model: m.model || undefined, mode, stages }), id: mm.id }
+            ? { ...makeMessage("assistant", doneText, { reasoning: finalReasoning || undefined, elapsedMs: m.elapsedMs, model: m.model || undefined, mode, stages, compressNote: compressNoteRef.current ?? undefined }), id: mm.id }
             : mm,
         ));
       } else if (!(errorDisplayed && !m.reply) && (snapshotId !== null || (m.reply && m.reply.trim()))) {
@@ -2154,7 +3006,7 @@ export default function ChatPanel({
           makeMessage(
             "assistant",
             doneText,
-            { reasoning: finalReasoning || undefined, elapsedMs: m.elapsedMs, model: m.model || undefined, mode, stages },
+            { reasoning: finalReasoning || undefined, elapsedMs: m.elapsedMs, model: m.model || undefined, mode, stages, compressNote: compressNoteRef.current ?? undefined },
           ),
         ]);
       }
@@ -2187,6 +3039,10 @@ export default function ChatPanel({
         window.clearInterval(streamElapsedTimerRef.current);
         streamElapsedTimerRef.current = null;
       }
+      if (ctxPulseTimerRef.current !== null) { // A-974：done 收尾停心跳
+        window.clearInterval(ctxPulseTimerRef.current);
+        ctxPulseTimerRef.current = null;
+      }
       setStreamModel(m.model ?? "");
       // A-933：上下文占用口径对齐厂商（Claude Code statusline 生态共识）——
       // 窗口占用 = **输入侧** tokens（prompt + cache read），completion/reasoning 是输出、
@@ -2197,8 +3053,25 @@ export default function ChatPanel({
       const t = m.timings ?? {};
       const pt = typeof t.promptTokens === "number" ? t.promptTokens : 0;
       const cr = typeof t.cacheReadTokens === "number" ? t.cacheReadTokens : 0;
-      const inputSide = pt + cr;
-      if (inputSide > 0) { setCtxUsed(inputSide); }
+      // A-974-R7：窗口占用必须取「最近一轮」输入侧 —— 工具循环每轮全量重发历史，累计 prompt 会把
+      // N 轮叠加（用户实测：正文输出后环/右栏直接爆到 1.1M，实际窗口仅约 600K）。
+      // 引擎在工具循环路径额外下发 windowPromptTokens/windowCacheReadTokens；未下发（单请求路径，
+      // 无叠加问题）则回退累计值。累计值仍用于「累计 tokens/费用」等计费口径统计，两者互不混用。
+      const wpt = typeof t.windowPromptTokens === "number" ? t.windowPromptTokens : pt;
+      const wcr = typeof t.windowCacheReadTokens === "number" ? t.windowCacheReadTokens : cr;
+      // A-974-R8（AGNES 探针铁证）：OpenAI 兼容系的 prompt_tokens 是总量、**已含**缓存命中
+      // （实测 45547 = 非缓存 41451 + cached 4096）；Anthropic 的 input_tokens 不含 cache。
+      // 窗口占用 = prompt + (cacheReadInPrompt===true ? 0 : cacheRead)——按协议标记决定，避免重复计缓存。
+      const cacheIncluded = t.cacheReadInPrompt === 1; // timings 表内布尔编码为 1/0
+      const inputSide = wpt + (cacheIncluded ? 0 : wcr);
+      if (inputSide > 0) {
+        setCtxUsed(inputSide);
+        // A-974：done 校准输入侧真实值 → 流式估算/心跳基线同步对齐真实占用，
+        // 下一轮发送的心跳与 rAF 从真实值起步（避免恢复/续聊时环又被旧基线推高后突然回落）
+        ctxBaseRef.current = inputSide;
+        // A-974-R2：真值锚也一起校准——后续发送估算只允许 ≥ 它，不得把真实占用拉低
+        ctxAnchorRef.current = inputSide;
+      }
       if (typeof m.windowCap === "number" && m.windowCap > 0) { setCtxCap(m.windowCap); }
       // A-935：单一事件源广播——right 栏与环同一次 done 触发、同值变更
       // A-939：上下文分桶随事件透传（渲染层 ContextWindowBar / ContextRing 可消费 buckets）
@@ -2219,6 +3092,8 @@ export default function ChatPanel({
           cap: wc > 0 ? wc : (ctxCap > 0 ? ctxCap : undefined),
           timeline: stages?.timeline ?? undefined,
         });
+        // A-1007：产物随会话持久化（localStorage 按 assistant 序数）——重载/重启后按序数回填产物卡
+        writeSessionProducts(agentId, sessionRef.current, assistantOrdinalRef.current, products);
         // A-966：同时把时间线回填 history.jsonl（重启恢复时间线不依赖 localStorage 存活）
         if (stages?.timeline?.length) {
           const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
@@ -2339,6 +3214,7 @@ export default function ChatPanel({
       const el = scrollRef.current;
       if (!el) { return; }
       setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 48);
+      setAtTop(el.scrollTop < 8); // A-980-R18：顶部渐变遮罩显隐
     });
   }
 
@@ -2347,6 +3223,71 @@ export default function ChatPanel({
     const el = scrollRef.current;
     if (el) { el.scrollTop = el.scrollHeight; }
     setAtBottom(true);
+    setAtTop(el ? el.scrollTop > 8 : false);
+  }
+
+  /** A-980-R18：布局稳定滚动到底——历史渲染后图片/markdown 异步增高会使单次
+   *  scrollTop=scrollHeight 落在"随机历史时刻"（用户实测重启后位置随机）；
+   *  重复滚动直到 scrollHeight 稳定（上限 maxMs），确保落在最新消息。 */
+  function settleScrollToBottom(maxMs = 1200): void {
+    const el = scrollRef.current;
+    if (!el) { return; }
+    let lastH = -1;
+    const t0 = Date.now();
+    const step = (): void => {
+      const e = scrollRef.current;
+      if (!e) { return; }
+      e.scrollTop = e.scrollHeight;
+      const h = e.scrollHeight;
+      if (h !== lastH && Date.now() - t0 < maxMs) {
+        lastH = h;
+        requestAnimationFrame(step);
+      } else {
+        setAtTop(e.scrollTop > 8);
+      }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(step));
+  }
+
+  /** A-980-R18：加载更早的历史（顶部「加载更早的消息」胶囊）——前插消息并保持视口位置 */
+  async function loadOlder(): Promise<void> {
+    if (!olderInfo || loadingOlder) { return; }
+    setLoadingOlder(true);
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    const el = scrollRef.current;
+    const prevH = el?.scrollHeight ?? 0;
+    const prevT = el?.scrollTop ?? 0;
+    try {
+      const res = await api.conversations.loadEarlier({ sessionId, beforeTs: olderInfo.beforeTs, limit: 200 });
+      const older: Message[] = (res.messages as ConversationMessage[]).map((m) =>
+        makeMessage(m.role, m.content, {
+          time: fmtTime(m.time), ts: m.ts, reasoning: m.reasoning, elapsedMs: m.elapsedMs,
+          agentName: m.agentName, agentId: m.agentId,
+        }));
+      if (older.length > 0) {
+        const newOldest = older[0]?.ts;
+        setMessages((prev) => [...older, ...prev]);
+        if (newOldest && res.hasMore) {
+          setOlderInfo({ beforeTs: newOldest, hasMore: true });
+        } else {
+          setOlderInfo(null);
+        }
+        // 内容前插后把视口拉回原位置（等一帧布局完成）
+        requestAnimationFrame(() => {
+          const e = scrollRef.current;
+          if (!e) { return; }
+          const delta = e.scrollHeight - prevH;
+          e.scrollTop = prevT + delta;
+          setAtTop(e.scrollTop < 8);
+        });
+      } else {
+        setOlderInfo(null);
+      }
+    } catch {
+      // 加载失败保持胶囊可重试
+    } finally {
+      setLoadingOlder(false);
+    }
   }
 
   /** 自动追踪：仅在用户位于底部时跟随最新输出（上滑即暂停，回底自动恢复）。
@@ -2471,10 +3412,10 @@ export default function ChatPanel({
     await api.conversations.clear(sessionId).catch(console.error);
     // A-934：清空会话 = 历史 records 全部删除，持久化的时间线/窗口占用按序数已无对应消息 → 一并清除
     clearSessionCtxMeta(agentId, sessionId);
+    clearSessionProducts(agentId, sessionId);
     setMessages([]);
     resetPartial();
-    // 清空会话 = 重新开始：会话内图片记忆与待发图一并清空，防旧图在清空后仍被自动携带
-    sessionImagesRef.current = [];
+    // 清空会话 = 重新开始：待发图一并清空
     setPendingImages([]);
     setReasoningTmp("");
     reasoningTmpRef.current = "";
@@ -2543,17 +3484,84 @@ export default function ChatPanel({
     doSend(text);
   }
 
-  /** A-969：发送前上下文压缩体检（maybeAutoCompress 由 doSend 开头 await）。
-   *  - 仅发送侧（非打断插入）触发：ctxUsed/cap 超过阈值且本轮未压过；
-   *  - 动画版：prep（整理）→ summarize（生成摘要）→ done/trunc 过渡浮层，遇失败短暂展示后一律继续发送（绝不卡用户）；
-   *  - 静默版：同流程无动画，await 完成直接发送；
-   *  - 压缩由主进程执行（engine.summarizeContext 摘要轮），失败自动降级硬裁剪并写回会话 meta。 */
-  async function maybeAutoCompress(sid: string): Promise<void> {
-    if (compressBusyRef.current || didCompressTurnRef.current || loading || stopping) { return; }
-    if (ctxUsed <= 0 || ctxCap <= 0) { return; }
+  /** 上下文广播的节流窗口（毫秒）。流式期间 rAF 每帧都改 `ctxUsed`，这里限流到 ≤8 次/秒。 */
+  const CTX_DISPATCH_MS = 120;
+  /** 最近一次真正 broadcast 的时间戳 */
+  const ctxDispatchAtRef = React.useRef(0);
+  /** 处于节流窗口内时挂起的尾沿定时器（**由专门的卸载 effect 清理，不放下面 effect 的 cleanup**） */
+  const ctxDispatchTimerRef = React.useRef<number | null>(null);
+  /** 待广播的最新载荷（尾沿触发时读它，保证发的永远是**最新值**而不是排程那一刻的旧值） */
+  const ctxPayloadRef = React.useRef<CtxUpdatePayload | null>(null);
+
+  /** 组装右栏/圆环共用的载荷（会话、占用、上限、本轮在途正文/思考/耗时） */
+  const buildCtxPayload = React.useCallback((used: number, cap: number): CtxUpdatePayload => ({
+    sessionId: streamSessionRef.current ?? sessionRef.current ?? "",
+    used,
+    cap,
+    // A-974-R6：附带本轮在途输出估算（正文/思考分开），右栏 Token 明细据此流式跟随刷新
+    liveReplyTokens: Math.round(streamCharCountRef.current / 4),
+    liveReasonTokens: Math.round(streamReasonCharCountRef.current / 4),
+    // A-975：本轮已耗时（流式中才有意义）——右栏「运行时间」随之推进
+    liveElapsedMs: streamActiveRef.current && streamStartRef.current > 0 ? Date.now() - streamStartRef.current : undefined,
+  }), []);
+
+  /** 单一事件源（补强）：`ctxUsed/ctxCap` 的任何变化都广播给右栏。
+   *  此前只在「发送估算 / done 校准 / 流式节流」三处**手动**派发 —— 任何一处遗漏就让圆环与右栏进度条打架
+   *  （用户实测：环 65% vs 栏 23K/524K）。现在把「上下文环」定为唯一权威，右栏只是镜像。
+   *
+   *  ⚠️ A-980-R31 **根因修复**：这里原来是 120ms **尾沿 debounce**（`clearTimeout` 写在 effect cleanup 里）。
+   *  而流式期间 rAF 每帧都 `setCtxUsed` → effect 每帧重跑 → 定时器**每帧被清掉重建** → 只要还在输出，
+   *  它**永远不会触发**：右栏所有实时监测（tokens/耗时/tokens/s/进度条）在思考与输出过程中全部冻结，
+   *  直到 done 那一刻才一次性跳变（用户："为什么思考中右边的所有实时监测…都不实时更新？只有结束了才会更新"）。
+   *  现在改成**前导 + 尾沿节流**：窗口外立即发（首帧就有数据）、窗口内挂一个尾沿定时器、
+   *  且 cleanup **不再清定时器**（清了就等于退回 debounce）。 */
+  React.useEffect(() => {
+    // A-974：只要有占用值就广播（不再额外要求 ctxCap > 0）——上限未配置（cap=0）时右栏仍会
+    // 按自己的 maxCtx 兜底显示，此前该分支直接 return 会让流式期间右栏完全不动。
+    if (ctxUsed <= 0) { return; }
+    ctxPayloadRef.current = buildCtxPayload(ctxUsed, ctxCap);
+    const flush = (): void => {
+      ctxDispatchTimerRef.current = null;
+      ctxDispatchAtRef.current = Date.now();
+      const payload = ctxPayloadRef.current;
+      if (payload) { dispatchCtxUpdate(payload); }
+    };
+    const since = Date.now() - ctxDispatchAtRef.current;
+    if (since >= CTX_DISPATCH_MS) {
+      flush(); // 前导：不在窗口内 → 立即发，思考刚开始右栏就动
+      return;
+    }
+    if (ctxDispatchTimerRef.current === null) {
+      ctxDispatchTimerRef.current = window.setTimeout(flush, CTX_DISPATCH_MS - since);
+    }
+  }, [ctxUsed, ctxCap, buildCtxPayload]);
+
+  /** 卸载时才清挂起的尾沿定时器（与上面的 effect 分开：合在一起就退化成 debounce） */
+  React.useEffect(() => () => {
+    if (ctxDispatchTimerRef.current !== null) {
+      window.clearTimeout(ctxDispatchTimerRef.current);
+      ctxDispatchTimerRef.current = null;
+    }
+  }, []);
+
+  /** A-969：上下文压缩体检（两处调用：① 发送前 await ② **流式期间实时** —— 见 rAF 循环里的 watchCtxCompress）。
+   *  - 触发条件：占用/上限 ≥ cfg.ratio 且本轮未压过；
+   *  - 动画版：prep（整理）→ summarize（生成摘要）→ done/trunc 过渡浮层，遇失败短暂展示后一律继续（绝不卡用户）；
+   *  - 静默版：同流程无动画；
+   *  - 压缩由主进程执行（engine.summarizeContext 摘要轮），失败自动降级硬裁剪并写回会话 meta。
+   *
+   *  ⚠️ 2026-09-12 修复：此前首行 `if (… || loading || stopping) return` —— **正在输出时明确跳过**，
+   *  导致「只有发送前才体检」：一轮长输出把上下文顶过阈值时完全无反应，用户以为"达到阈值不压缩"。
+   *  现改为：`liveUsed` 可显式传入（流式实时值，避免读 state 陈旧），且不再因 loading 跳过。
+   *  `didCompressTurnRef` 仍保证每轮只压一次，防压缩→回落→再涨→再压的抖动。 */
+  async function maybeAutoCompress(sid: string, liveUsed?: number): Promise<void> {
+    if (compressBusyRef.current || didCompressTurnRef.current || stopping) { return; }
+    const used = typeof liveUsed === "number" ? liveUsed : ctxUsed;
+    const cap = ctxCapRef.current > 0 ? ctxCapRef.current : ctxCap; // 读 ref 防陈旧闭包
+    if (used <= 0 || cap <= 0) { return; }
     const cfg = readAutoCompressCfg();
     if (!cfg.enabled) { return; }
-    if (ctxUsed < ctxCap * cfg.ratio) { return; } // 未达触发占比，不压缩
+    if (used < cap * cfg.ratio) { return; } // 未达触发占比，不压缩
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api?.chat?.compress) { return; }
     const animated = cfg.mode !== "silent";
@@ -2565,7 +3573,11 @@ export default function ChatPanel({
         await new Promise((r) => setTimeout(r, 420));
         setCompressUi({ stage: "summarize" });
       }
-      const res = await api.chat.compress(sid, cfg.ratio);
+      // A-974-R3：把 GUI 的实时占用（= 上游真实输入侧 prompt+cacheRead，含系统提示/记忆/技能/工具定义）
+      // 透传给主进程做阈值判定。此前主进程只用 estimateHistoryTokens(history)（仅可见轮次 ≈30K）
+      // 自行复核 → 与 GUI 的判据（≈629K）不一致 → 永远返回 skipped → 用户看到「逼近硬阈值」却毫无动作
+      // （"压缩失效"的根因）。传 hint 后主进程取两者较大值判定，压缩才会真正执行。
+      const res = await api.chat.compress(sid, cfg.ratio, used);
       if (animated && res) {
         if (res.skipped) {
           setCompressUi(null);
@@ -2582,10 +3594,26 @@ export default function ChatPanel({
         }
       }
       // 压缩生效 → 本地占用镜像回落（真实值由本轮 done 的 promptTokens 校准；此处仅即时反馈）
+      // ⚠️ 同时派发 ctx 更新 → 圆环与右栏进度条在压缩动画结束时**立刻**回落（不再等 done）
       if (res?.ok && (res.summary || res.truncated) && res.cap && res.cap > 0) {
         const next = Math.max(1, Math.round(res.cap * 0.5));
+        ctxBaseRef.current = next; // 压缩后输入基线同步回落，避免流式 watcher 拿旧基线又触发一次
+        // A-974-R2：真值锚同步回落到压缩后的估算（这是唯一允许"下调锚"的真实来源之一）
+        ctxAnchorRef.current = next;
         setCtxUsed(next);
-        dispatchCtxUpdate({ sessionId: sid, used: next, cap: ctxCap > 0 ? ctxCap : res.cap });
+        dispatchCtxUpdate({ sessionId: sid, used: next, cap: cap > 0 ? cap : res.cap });
+        // A-974：压缩事件写入思考时间线——展开「思考过程」即可看到「— 已压缩上下文 —」标记
+        // （对齐市面主流 Agent 的输出惯例）；流式中途压缩时 thinking 卡实时可见，done 后随
+        // stages.timeline 持久化（重启恢复时间线仍可见）。timeline 与 compressUi 动画解耦，
+        // 即使动画被收起（silent 模式）也保留记录。
+        const compressNote = `— 已压缩上下文（${res.truncated
+          ? `摘要不可用，保留最近 ${res.dropped ?? 0} 轮对话`
+          : `压缩 ${res.dropped ?? 0} 轮对话`}）${res.summary ? `摘要：${String(res.summary).slice(0, 90)}` : ""} —`;
+        timelineStepsRef.current = [...timelineStepsRef.current, { kind: "think", text: compressNote }];
+        setLiveTimeline(timelineStepsRef.current);
+        // A-975：同时挂到「正文之上的分隔线」——思考卡默认折叠，只写时间线等于看不见
+        compressNoteRef.current = compressNote;
+        setCompressNote(compressNote);
       }
     } catch {
       setCompressUi(null); // 压缩失败不阻塞发送
@@ -2602,23 +3630,21 @@ export default function ChatPanel({
     // 输入侧占用 ≥ cap×ratio 且本轮未压过 → 先跑摘要轮并展示过渡动画，再继续正常发送
     await maybeAutoCompress(targetSessionId ?? sessionId);
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    // 识图：本轮待发图片 + 会话内已发送图片（多轮识图），合并取最近 ≤4 张
-    const imagesToSend = [
-      ...pendingImages.map((i) => i.dataUrl),
-      ...sessionImagesRef.current.map((i) => i.dataUrl),
-    ].slice(-4);
+    // 识图：仅发送本轮用户主动选择的图片（上传一次只对当前轮生效——
+    // 不自动携带会话历史图，否则上传一张后后续所有指令都会被强制附带旧图）
+    const imagesToSend = pendingImages.map((i) => i.dataUrl);
     // 允许「只发图片、不带文字」
     if (!api || (!text && imagesToSend.length === 0)) { return; }
     const sid = targetSessionId ?? sessionId;
-    // A-918++：自动委派启发式（保守）——消息明确要求"调研/研究/分析/审查/搜索对比/批量处理/汇总盘点"且足够长时，
-    // 后台自动派一个专家子代理并行处理（用户立即可见 SubAgentBar 活动，不必等模型自觉调工具）
-    const trimmedText = text.trim();
-    if (trimmedText.length >= 24 && !/^(什么|为什么|怎么|如何|哪个|多少|能否|可以|是不是|有没有)/.test(trimmedText)) {
-      const strong = /(?:联网|深度|全面)?(?:调研|研究|分析|审查|review)|(?:搜索|查询)[^。\n]{0,20}(?:对比|比对)|批量(?:处理|生成|检查)|(?:整理|汇总|盘点)[^。\n]{0,20}(?:数据|资料|信息)/i;
-      if (strong.test(trimmedText)) {
-        void api.resident?.subagentDelegate?.({ task: trimmedText.slice(0, 200) }).catch(() => { /* 派发失败不阻断主线 */ });
-      }
-    }
+    // A-980-R30：**移除"发送前无脑自动派发子代理"启发式**（A-975 曾在此按正则猜测意图，把用户原话
+    // 前 200 字直接丢给子代理）。理由有三，任何一条都足以撤掉：
+    // ① 它抢在模型前面派发，等于**替模型做了委派决策**，与模型自己的规划冲突，最坏情况是同一个子任务
+    //    被子代理和主 Agent 各做一遍（Anthropic 实测的首要失败模式就是重复劳动）；
+    // ② 它只传 `trimmedText.slice(0, 200)` —— 没有目标、没有输出格式、没有边界，正是 Anthropic
+    //    明确点名会导致子代理跑偏的"简短指令"；
+    // ③ 它派发的结果**从不回到主对话**（fire-and-forget），用户只看到右栏多了一条运行记录，
+    //    既不知道子代理做了什么、也没人验收 —— 这就是"派发/验收像摆设"的观感来源。
+    // 现在改由模型显式调用 delegate_subagent：产出发回主对话、由主 Agent 验收，链路完整可见。
     setInput(""); // 受控清空输入框（textarea value={input}）；不直写 DOM，避免与 React 渲染竞态
     setAtOpen(false); // A-951：发送后收起 @ 选择器
     const modelLabel = !modelChoice || modelChoice === "inherit" ? "inherit" : (modelChoice.split(":").pop() || modelChoice);
@@ -2630,18 +3656,20 @@ export default function ChatPanel({
     {
       const snap = perSessionStreamCache.current[sid] ?? { partial: "", reasoning: "", toolEvents: [], timeline: [], hasActive: true };
       snap.hasActive = true;
+      // A-974-R9：初始化监测起点（发送即计时）——否则"发完立刻切走"时，切回后耗时会从切回那刻重算
+      snap.monitor = createMonitor(Date.now());
       snap.messages = [...(snap.messages ?? []), makeMessage("user", text, {
         model: modelLabel, mode,
         images: imagesToSend.length > 0 ? imagesToSend : undefined,
       })];
       perSessionStreamCache.current[sid] = snap;
     }
-    // 发送后：图片并入会话记忆（留作下一轮识图上下文），清空待发区
-    if (imagesToSend.length > 0) {
-      sessionImagesRef.current = imagesToSend.slice(-4).map((u) => ({ name: "", dataUrl: u }));
-    }
+    // 发送后清空待发区（图片只对当前轮生效，不写入会话记忆供后续轮次自动携带）
     setPendingImages([]);
     resetPartial();
+    // A-975：新一轮开始 → 清上一轮的压缩报告行（若有）
+    compressNoteRef.current = null;
+    setCompressNote(null);
     setReasoningTmp("");
     reasoningTmpRef.current = "";
     setReasoningOpen(true);
@@ -2655,8 +3683,10 @@ export default function ChatPanel({
     setLoading(true);
     setStopping(false);
     // A-935：发送即更新（单一事件源）——会话输入按字符估算（中英混合 ÷3），环与右栏立即响应；
-    // 数值与既有占用取大（窗口单调不缩），真实 usage 在该轮 done 时校准覆盖。
-    // 估算只作"发送后即时反馈"，不为精确（厂商 Claude Code 状态栏同为估算 + usage 校准式）。
+    // 真实 usage 在该轮 done 时校准覆盖。估算只作"发送后即时反馈"，不为精确。
+    // A-974-R2：估算**不得拉低**已确认的真实输入侧占用——此前直接 `ctxBaseRef = estimate`，
+    // 把真值（含系统提示/记忆/技能/工具定义 ≈629K）覆盖成仅可见消息的 ≈30K，导致两处进度在
+    // 30K 与 629K 之间来回闪烁、且压缩阈值判定失真。现取 max(真值锚, 估算)：窗口单调不缩（对齐厂商语义）。
     {
       // A-968：上下文估算排除图片 dataURL 原始字符——base64 字符串会把估算 token 数打到
       // 几个 M（环直接爆满/红）；图片按 ~2000 token 计（对齐 Claude Code 图片占用口径）
@@ -2666,11 +3696,13 @@ export default function ChatPanel({
         return s + textLen + imgs * 2000;
       }, 0) + (text?.length ?? 0) + 2500; // ≈系统提示/工具定义近似
       const estimate = Math.round(estChars / 3);
+      const base = Math.max(ctxAnchorRef.current, estimate);
+      ctxBaseRef.current = base; // 流式期间上下文基线（输入侧）——rAF/心跳据此实时推进
       const capNow = ctxCap > 0 ? ctxCap : (curProviderModel?.context_window ?? 0);
       if (capNow > 0) { setCtxCap(capNow); }
-      if (estimate > 0) {
-        setCtxUsed((prev) => Math.max(prev, estimate));
-        dispatchCtxUpdate({ sessionId: sid, used: Math.max(ctxUsed, estimate), cap: capNow });
+      if (base > 0) {
+        setCtxUsed(base);
+        dispatchCtxUpdate({ sessionId: sid, used: base, cap: capNow });
       }
     }
     // 上游 max_output 元数据 → max_tokens：限制单次输出上限（有值才传，未标注不限制）
@@ -2688,9 +3720,10 @@ export default function ChatPanel({
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-    // 重置流式监测
+    // 重置流式监测（A-974-R6：思考字符累计一并归零，否则上一轮思考会持续抬高本轮 tokens）
     streamStartRef.current = 0;
     streamCharCountRef.current = 0;
+    streamReasonCharCountRef.current = 0;
     streamTokensRef.current = 0;
     setStreamElapsed(0);
     setStreamTokens(0);
@@ -2703,6 +3736,8 @@ export default function ChatPanel({
       inputRef.current.style.height = "auto";
       inputRef.current.focus();
     }
+    // A-974：发流即启心跳（实测占用的 1s 强制派发；done/error/reset 时清理）
+    ensureCtxPulse();
     void api.chat.stream({ agentId, message: text, sessionId: sid, networkEnabled, maxTokens, images: imagesToSend.length > 0 ? imagesToSend : undefined });
   }
 
@@ -2723,45 +3758,21 @@ export default function ChatPanel({
     }
   }
 
-  async function handleRetry(): Promise<void> {
-    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api || messages.length === 0) { return; }
-    let lastAiIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant") { lastAiIdx = i; break; }
-    }
-    if (lastAiIdx < 0) { return; }
-    const before = messages.slice(0, lastAiIdx);
-    setMessages(before);
-    resetPartial();
-    setReasoningTmp("");
-    reasoningTmpRef.current = "";
-    setReasoningOpen(true);
-    reasoningManuallyToggledRef.current = false;
-    setToolEvents([]);
-    toolEventsRef.current = [];
-    toolTraceRef.current = [];
-    // 重试发起新流前清空留痕（防御：旧残留不污染新流）
-    timelineStepsRef.current = [];
-    setLiveTimeline([]);
-    setLoading(true);
-    const result = await api.chat.retryLast(agentId, sessionId);
-    if (result.error) {
-      console.error("[chat] retry failed:", result.error);
-      setLoading(false);
-    }
-  }
-
-  /** 会话级配置：工作目录 / 审批模式（项目 = Agent 级设定） */
+  /** 会话级配置：工作目录 / 审批模式（项目 = Agent 级设定）
+   *  ⚠️ A-975 修复：必须带 `sessionId`。此前只传 agentId → 主进程走到「无 sessionId」的旧兼容分支，
+   *  把工作目录写进 **Agent 级 sandbox_override**，而会话记录里的 workspace 从未更新：
+   *  ① 重启后按会话记录显示 → "还原成初始工作文件夹"；② 同 Agent 的其它会话被串味。 */
   async function setSessionConfigField(patch: { approval?: ApprovalMode; workspace?: string | null }): Promise<void> {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api) { return; }
-    const res = await api.conversations.config({ agentId, ...patch }).catch((e: unknown) => {
+    const res = await api.conversations.config({ agentId, sessionId, ...patch }).catch((e: unknown) => {
       console.error("[chat] session config failed:", e);
       return null;
     });
     if (res?.ok) {
       setSessionConfig({ approval: res.approval, workspace: res.workspace });
+      // 工作目录变更 → 通知 App：刷新会话列表（侧栏分组/标题）+ 右栏工作树根立即跟上
+      if (patch.workspace !== undefined) { onWorkspaceChanged?.(); }
     }
   }
 
@@ -2899,8 +3910,6 @@ export default function ChatPanel({
     }
   }, [appendImageFiles]);
 
-  const canRetry = messages.length > 0 && !loading;
-
   /** 回滚：撤销某条用户消息及其之后的全部对话，内容放回输入框。
    *  useCallback(messages)：流式期间 messages 不变 → 引用稳定 → UserMessage(memo) 不因
    *  onRollback 引用变化而重渲染；仅在真正换消息时重建。 */
@@ -3034,9 +4043,10 @@ export default function ChatPanel({
             <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               / {sessionTitle}
             </span>
-            {!!workspace && (
+            {/* A-975：优先显示会话配置里的实时值（改完目录当场更新，不等会话列表回刷） */}
+            {!!(sessionConfig.workspace || workspace) && (
               <span
-                title={`工作文件夹：${workspace}`}
+                title={`工作文件夹：${sessionConfig.workspace || workspace}`}
                 style={{
                   fontSize: 11.5, color: "var(--accent-hover)",
                   background: "var(--bg-input)", border: "1px solid var(--border)",
@@ -3044,7 +4054,7 @@ export default function ChatPanel({
                   whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180,
                 }}
               >
-                <span aria-hidden>⌂ </span>{pathBaseLocal(workspace)}
+                <span aria-hidden>⌂ </span>{pathBaseLocal(sessionConfig.workspace || workspace || "")}
               </span>
             )}
             <button className="titlebar-btn" style={{ fontSize: 11, opacity: 0.7 }}
@@ -3057,10 +4067,6 @@ export default function ChatPanel({
         <button onClick={() => onNewSessionRequested?.()} disabled={loading}
           className="btn" title="项目内新建会话">
           新会话
-        </button>
-        <button onClick={handleRetry} disabled={!canRetry}
-          className="btn primary" title="重试上一条（重发最后一条用户消息）">
-          重试
         </button>
         <button onClick={() => {
           const nextThinking = !showThinking;
@@ -3081,9 +4087,11 @@ export default function ChatPanel({
             : "思考显示：开启时请求并展示 Agent 的思考过程（未开启推理时自动设为中等，输出时展开、完成后自动折叠，可手动展开/折叠）"}
           style={{
             height: 26, padding: "0 10px", borderRadius: 13,
-            border: curThinkingExplicitlyUnsupported ? "1px dashed var(--border)" : `1px solid ${showThinking ? "var(--accent)" : "var(--border)"}`,
-            background: curThinkingExplicitlyUnsupported ? "transparent" : (showThinking ? "var(--accent-soft)" : "transparent"),
-            color: curThinkingExplicitlyUnsupported ? "var(--text-dim)" : (showThinking ? "var(--accent-hover)" : "var(--text-muted)"),
+            // A-980-R19：思考「开」恒为 accent 高亮（不再因上游标注不支持而整块灰掉——灰色观感即用户反馈）；
+            // 不支持仅在「关」时用虚线边框提示（title 里已说明）
+            border: curThinkingExplicitlyUnsupported && !showThinking ? "1px dashed var(--border)" : `1px solid ${showThinking ? "var(--accent)" : "var(--border)"}`,
+            background: showThinking ? "var(--accent-soft)" : "transparent",
+            color: showThinking ? "var(--accent-hover)" : "var(--text-muted)",
             fontSize: 12, fontWeight: 700, cursor: "pointer",
             display: "inline-flex", alignItems: "center", gap: 5,
             transition: "background 0.12s, border-color 0.12s, color 0.12s, transform 0.08s",
@@ -3108,12 +4116,35 @@ export default function ChatPanel({
           </span>
         )}
         <ContextRing used={ctxUsed} cap={ctxCap} loading={loading} />
+        {/* A-980-R19/R21：最右侧「唤出/收起聊天悬浮窗」按钮——不挨前面的按钮组（marginLeft 拉开）；
+            右栏占满不再自动出现悬浮窗，需手动点按唤出（右栏展开到最宽 + 聊天浮于其上），再点收起 */}
+        <button onClick={() => onToggleFloat?.()}
+          title="唤起聊天悬浮窗（展开右栏到最宽，聊天以悬浮窗浮于其上；再点收起）"
+          style={{
+            marginLeft: 10, width: 26, height: 26, borderRadius: 13, flexShrink: 0,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            border: "1px solid var(--border-hover)", background: "var(--bg-secondary)",
+            cursor: "pointer", transition: "background 0.12s, border-color 0.12s",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-soft)"; e.currentTarget.style.borderColor = "var(--accent)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-secondary)"; e.currentTarget.style.borderColor = "var(--border-hover)"; }}>
+          <img src={floatToggleIcon} alt="唤起悬浮窗" width={14} height={14}
+            style={{ filter: "brightness(0) invert(0.8)" }} draggable={false} />
+        </button>
       </div>
 
-      {/* 消息区域：卡片化 + 事件行 */}
-      <div ref={scrollRef} onScroll={handleScroll}
-        style={{ flex: 1, overflowY: "auto", padding: "14px 16px 0", position: "relative", overflowAnchor: "none" }}>
-        {messages.length === 0 && !loading && (
+      {/* 消息区域：卡片化 + 事件行 + A-980-R18 顶部/底部渐变遮罩 + 更早历史分段胶囊 */}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <div ref={scrollRef} onScroll={handleScroll} className="chat-scroll"
+          style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "14px 16px 0", overflowAnchor: "none" }}>
+          {olderInfo && (
+            <div style={{ display: "flex", justifyContent: "center", margin: "2px 0 12px" }}>
+              <button className="load-earlier-pill" onClick={() => void loadOlder()} disabled={loadingOlder}>
+                {loadingOlder ? "正在加载更早的消息…" : "加载更早的消息（点击加载）"}
+              </button>
+            </div>
+          )}
+          {messages.length === 0 && !loading && (
           <div style={{ color: "var(--text-dim)", textAlign: "center", marginTop: 48, fontSize: 13 }}>
             与 {agentName} 的会话「{sessionTitle}」
             {sessionConfig.workspace && (
@@ -3133,12 +4164,17 @@ export default function ChatPanel({
                 agentName={m.agentName || agentName}
                 isMember={!!m.agentId && m.agentId !== agentId}
                 showThinking={showThinking}
-                collapsed={collapsedReasoning[m.id] ?? true}
+                // A-974-R5：恢复中的占位气泡强制展开思考面板（与正常流式观感一致）；
+                // 该轮结束后 resumeMsgId 归空，自动回落到常规折叠默认值。
+                collapsed={resumeMsgId === m.id ? false : (collapsedReasoning[m.id] ?? true)}
                 onToggle={toggleReasoning}
               />
             )
         )}
-        {loading && (
+        {/* 流式现场块。A-974-R5：恢复活跃流时（resumeMsgId 非空）**整块让位**给 messages 里的
+            占位气泡——此前只抑制了下面的正文区，思考过程卡片与工具摘要仍在渲染，
+            于是同一轮被拆成"正文一块 + 思考/工具一块"（用户实测"先出现截断字样，再在底下接着输出"）。 */}
+        {loading && resumeMsgId === null && (
           <div style={{ display: "flex", gap: 10, marginBottom: 14, opacity: 0.95 }}>
             <div style={{
               width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
@@ -3176,12 +4212,12 @@ export default function ChatPanel({
                     <ChevronIcon size={12} rotate={reasoningOpen ? 90 : 0} style={{ opacity: 0.7 }} />
                   </button>
                   {reasoningOpen && (
-                    <div className="think-timeline" style={{ marginTop: 4 }}>
+                    <div className="think-timeline is-live" style={{ marginTop: 4 }}>
                       {liveTimeline.map((step, i) => (
                         <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
                       ))}
                       {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
-                        <span className="text-scan-light" style={{ fontSize: 11, color: "var(--text-dim)" }}>思考中…</span>
+                        <span className="text-scan-light" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
                       )}
                     </div>
                   )}
@@ -3217,13 +4253,15 @@ export default function ChatPanel({
                 );
               })()}
 
+              {/* A-975：本轮压缩报告分隔线（流式期即时可见，不依赖思考卡展开） */}
+              {compressNote && <CompressNoteLine note={compressNote} live />}
               <div className="msg-body-divider" style={{ margin: "8px 0 10px" }} />
               {/* 部分输出：流式 Markdown 渲染（补全未闭合语法，避免暴露原始符号）。
                   A-968：切回恢复的流由占位气泡内实时续长，此处抑制独立 partial 区（否则"恢复中…"气泡+底部输出双份） */}
               {resumeMsgId === null && (
                 <div className="stream-partial" style={{ lineHeight: 1.7, fontSize: 14, wordBreak: "break-word" }}>
                   {deferredPartial ? <Markdown text={deferredPartial} streaming /> : partial ? (<Markdown text={partial} streaming />) : (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 13 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 14, fontWeight: 500 }}>
                       <span className="text-scan-light">正在思考</span>
                       <span className="stream-dot-row">
                         <span className="stream-dot" />
@@ -3239,6 +4277,18 @@ export default function ChatPanel({
             </div>
           </div>
         )}
+        </div>
+        {/* A-980-R18：顶部/底部边缘渐变遮罩（pointer-events none，仅滚动未到边界时显示提示更多内容） */}
+        <div className="scroll-fade-mask" aria-hidden="true" style={{
+          position: "absolute", top: 0, left: 0, right: 0, height: 44,
+          pointerEvents: "none", opacity: atTop ? 0 : 1, transition: "opacity 0.2s ease",
+          background: "linear-gradient(to bottom, var(--bg), transparent)",
+        }} />
+        <div className="scroll-fade-mask" aria-hidden="true" style={{
+          position: "absolute", bottom: 0, left: 0, right: 0, height: 56,
+          pointerEvents: "none", opacity: atBottom ? 0 : 1, transition: "opacity 0.2s ease",
+          background: "linear-gradient(to top, var(--bg), transparent)",
+        }} />
       </div>
 
       {/* A-918++：回到最新——小巧胶囊内嵌于输入框正上方，随输入区自然排布、不遮挡消息内容 */}
@@ -3303,7 +4353,6 @@ export default function ChatPanel({
       )}
 
       {/* 输入区：圆角容器 + 自动增高 + 联想 + 指令面板 + 加号栏 */}
-      <SubAgentBar />
       <div style={{ padding: "10px 16px 12px", borderTop: "1px solid var(--border)", background: "var(--bg)", position: "relative", zIndex: 30 }}>
         {/* 输入联想（历史会话相似消息） */}
         {suggestions.length > 0 && !loading && (
@@ -3793,6 +4842,8 @@ export default function ChatPanel({
                   </span>
                 </>
               )}
+              {/* A-976：子代理展开按钮 */}
+              <SubAgentExpandButton />
             </>)}
           </div>
           {/* A-969：上下文自动压缩过渡动画（发送前触发；prep→summarize→done/trunc，完成后自动收起并继续发送） */}

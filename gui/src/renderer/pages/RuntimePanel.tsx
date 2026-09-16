@@ -132,6 +132,53 @@ export default function RuntimePanel(): JSX.Element {
     }
   }
 
+  /* ── 图形控制能力（screen_*）：后端/目标一览 + 紧急停止 + 截图预览 ── */
+  interface ScreenInfo {
+    enabled: boolean;
+    halted: boolean;
+    backends: string[];
+    targets: Array<{ backend: string; target: string; width: number; height: number; label: string }>;
+  }
+  const [screen, setScreen] = React.useState<ScreenInfo | null>(null);
+  const [shot, setShot] = React.useState<{ dataUrl: string; width?: number; height?: number } | null>(null);
+  const [shotBusy, setShotBusy] = React.useState(false);
+
+  const loadScreen = React.useCallback(async (): Promise<void> => {
+    if (!api?.screen?.info) { return; }
+    try {
+      const res = await api.screen.info() as ScreenInfo;
+      setScreen(res);
+    } catch { /* 未就绪时静默 */ }
+  }, [api]);
+
+  React.useEffect(() => {
+    void loadScreen();
+  }, [loadScreen]);
+
+  async function takeShot(backend: string, target?: string): Promise<void> {
+    if (!api?.screen?.capture) { return; }
+    setShotBusy(true);
+    try {
+      const r = await api.screen.capture({ backend, target });
+      if (r?.ok && r.dataUrl) { setShot({ dataUrl: r.dataUrl, width: r.width, height: r.height }); }
+      else { showNotice(false, r?.error ?? "截图失败"); }
+    } finally {
+      setShotBusy(false);
+    }
+  }
+
+  async function haltScreen(): Promise<void> {
+    await api?.screen?.halt?.();
+    showNotice(true, "已紧急停止图形控制，后续动作将被拒绝");
+    await loadScreen();
+  }
+
+  async function resumeScreen(): Promise<void> {
+    await api?.screen?.resume?.();
+    showNotice(true, "图形控制已恢复");
+    await loadScreen();
+  }
+
   const renderAction = (it: RuntimeItem): JSX.Element | null => {
     // A-918++：不再限"未就绪"——ADB 就绪时也要显示「启动 ADB 服务」按钮
     if (!it.action) { return null; }
@@ -222,6 +269,87 @@ export default function RuntimePanel(): JSX.Element {
           })}
         </div>
       )}
+
+      {/* ── 图形控制能力（桌面 + 安卓统一）：可用目标一览 / 截图预览 / 紧急停止 ── */}
+      <div style={{ marginTop: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+          <h2 style={{ fontSize: 15, margin: 0, flex: 1 }}>图形控制能力</h2>
+          <button className="btn" style={{ padding: "4px 10px", fontSize: 12, marginRight: 6 }} onClick={() => void loadScreen()}>
+            刷新
+          </button>
+          {screen?.halted ? (
+            <button className="btn" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => void resumeScreen()}>
+              恢复
+            </button>
+          ) : (
+            <button className="btn" style={{ padding: "4px 10px", fontSize: 12, color: "#f87171" }} onClick={() => void haltScreen()}>
+              紧急停止
+            </button>
+          )}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 10 }}>
+          Agent 可截图查看画面并注入鼠标 / 键盘 / 触摸事件，桌面与安卓设备共用同一套动作语义。
+          总开关在「设置 → 权限 → 图形控制能力」。
+        </div>
+
+        <div className="card" style={{ padding: "12px 14px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 700 }}>状态</span>
+            <span style={{
+              fontSize: 11, padding: "1px 8px", borderRadius: 7, fontWeight: 600,
+              background: screen?.enabled ? "rgba(0,200,120,.15)" : "var(--danger-soft)",
+              color: screen?.enabled ? "#22c55e" : "#f87171",
+            }}>
+              {screen ? (screen.enabled ? "已启用" : "未启用（设置 → 权限）") : "查询中…"}
+            </span>
+            {screen?.halted ? (
+              <span style={{ fontSize: 11, padding: "1px 8px", borderRadius: 7, background: "var(--danger-soft)", color: "#f87171", fontWeight: 600 }}>
+                已紧急停止
+              </span>
+            ) : null}
+          </div>
+
+          {screen && screen.targets.length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {screen.targets.map((t) => (
+                <div key={`${t.backend}:${t.target}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                  <span style={{
+                    fontSize: 10.5, padding: "1px 7px", borderRadius: 6, fontWeight: 600,
+                    background: t.backend === "desktop" ? "rgba(56,189,248,.16)" : "rgba(0,200,120,.15)",
+                    color: t.backend === "desktop" ? "#38bdf8" : "#22c55e",
+                  }}>
+                    {t.backend === "desktop" ? "桌面" : "安卓"}
+                  </span>
+                  <span style={{ color: "var(--text)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {t.label}
+                  </span>
+                  <button className="btn" style={{ padding: "3px 10px", fontSize: 11, flexShrink: 0 }}
+                    disabled={shotBusy || !screen.enabled}
+                    onClick={() => void takeShot(t.backend, t.backend === "android" ? t.target : undefined)}>
+                    截图
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+              {screen?.backends?.length
+                ? "暂无可用目标：桌面后端需在 Windows 上运行；安卓后端请先用 ADB 连接模拟器/设备。"
+                : "图形控制后端未装载。"}
+            </div>
+          )}
+
+          {shot ? (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
+                截图预览{shot.width && shot.height ? `（${shot.width}×${shot.height}）` : ""}
+              </div>
+              <img src={shot.dataUrl} alt="screen preview"
+                style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid var(--border)" }} />
+            </div>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }
