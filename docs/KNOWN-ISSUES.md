@@ -85,10 +85,10 @@ slime 项目运行/开发中已确认但**未修复**的问题归档。每个问
 
 | 操作 | 是否受影响 |
 |------|-----------|
-| `git commit` 写当前分支 loose ref | ❌ 受影响（实验已证实）|
-| `git push` | ✅ 不受影响（走 packed-refs fallback）|
+| `git commit` 写当前分支 loose ref | ❌ **受影响（2026-09-16 实证，不只是"理论受影响"）**——commit 对象与 reflog 都写成功，但**分支 ref 不前进**，`git log` / `git rev-parse HEAD` 仍显示旧提交、`git status` 里改动仍是 staged。**每次在带斜杠分支上 commit 后都必须按 §10 修正 packed-refs** |
+| `git push` | ✅ 不受影响（走 packed-refs fallback）；⚠️ 但若忘了 §10 修正，推上去的是**旧的** ref，你自己的 commit 不会上远端 |
 | `git pull` / `git fetch` | ✅ 不受影响（写 remotes/，不是 heads/）|
-| 已有 `slime/{x}/{y}` 分支 | ✅ 不受影响（packed-refs 兜底）|
+| 已有 `slime/{x}/{y}` 分支 | ✅ 可被解析（packed-refs 兜底），⚠️ 但**不会随 commit 前进**（见第 1 行）|
 | 新建 `slime/{x}/{y}` 分支 | ❌ 失败（git 静默拒绝）|
 | 切换分支 (`git checkout`) | ✅ 不受影响（HEAD loose 或 packed 都行）|
 | `git merge` / `git rebase` | ✅ 不受影响 |
@@ -98,10 +98,15 @@ slime 项目运行/开发中已确认但**未修复**的问题归档。每个问
 
 **维持现状（方案 A）**——理由：
 1. 已有 5 个带斜杠分支（`codex/immigration-protocol-v12`, `codex/immigration-v12`, `codex/immigration-v12-b`, `main`, `slime/final-qa-optimize`）全部**在 packed-refs 里正常工作**
-2. 当前分支 `slime/final-qa-optimize` HEAD 解析正确（`18240d1`），commit 链路完整
+2. ~~当前分支 `slime/final-qa-optimize` HEAD 解析正确（`18240d1`），commit 链路完整~~
+   **⚠️ 2026-09-16 更正**：这句是**错的**。"能解析到 18240d1" 只说明 packed-refs 里恰好存着这个值，
+   不代表 commit 链路完整——**每次 commit 后 ref 都不会前进**（见 §10 实证）。原结论把影响面低估成
+   "唯一的限制是新建分支会失败"，实际是"**在这个分支上 commit 之后必须手工修 packed-refs，否则
+   提交等于没发生**"。
 3. `git push` 验证通过（`5812513..18240d1` 已上远端）
-4. **唯一的限制**是**新建**带斜杠分支会失败——可通过"绕行方案"或"升/降 Git for Windows"解决
+4. ~~**唯一的限制**是**新建**带斜杠分支会失败~~ → 更正为：**新建分支会失败 + 已存在分支的 commit 不前进**
 5. 不去改 AGENTS.md 的 `slime/{agent_id}/{slug}` 命名规范（避免工程性大改）
+6. **维持现状仍可接受的前提**：每次在该分支 commit 后执行 §10 的"修正 + 三处校验"。
 
 ### 7. 绕行方案（仅在"必须新建带斜杠分支"时使用）
 
@@ -109,34 +114,56 @@ slime 项目运行/开发中已确认但**未修复**的问题归档。每个问
 
 ```powershell
 # PowerShell
-$branchPath = '.git\refs\heads\slime\my-agent\feature-x'
+$branchName = 'slime/my-agent/feature-x'
+$refFile = ".git\refs\heads\$branchName"   # 这是 ref 文件本身
+$refDir  = Split-Path $refFile -Parent     # 这是它的父目录
 $hash = '18240d1494ddbb59ae2da73947d36bc24d70f4ed'
-New-Item -ItemType Directory -Path $branchPath -Force | Out-Null
-Set-Content -Path "$branchPath\master" -Value $hash -NoNewline -Encoding ascii
-# 验证
-git for-each-ref | Select-String "slime/my-agent"
+
+# 先清残（含之前 git branch 失败留下的空目录）
+if (Test-Path $refDir)  { Remove-Item -Path $refDir  -Recurse -Force }
+if (Test-Path $refFile) { Remove-Item -Path $refFile -Recurse -Force }
+
+New-Item -ItemType Directory -Path $refDir -Force | Out-Null
+Set-Content -Path $refFile -Value $hash -NoNewline -Encoding ascii
+
+# 验证：三个命令必须一致
+git rev-parse HEAD
+git rev-parse $branchName
+git show-ref | Select-String "my-agent"
 ```
 
 **注意**：
 - 如果 `slime/my-agent/` 已存在但**有其他内容**（包括手动建的文件），运行 `git branch` 时整个目录会被清空——所以**必须先单独建好目录再写**（实验 6 警告）
 - 如果之前 `git branch` 已经失败过，**必须先 `rm -rf` 残留的空目录**再重新建
+- ❌ **别把 hash 写进 `"$refFile\master"`**（把分支名当目录、再套一层文件名）——那会创建出
+  `refs/heads/slime/my-agent/feature-x/master` 这个**另一个分支**，`git for-each-ref` 看着"有了"，
+  而你要的分支根本不存在。（本文件旧版 D1 与配套 skill 都犯过这个错，2026-09-16 更正）
 
-#### 方案 D2：直接编辑 packed-refs
+#### 方案 D2：直接编辑 packed-refs（**已有分支 commit 后修正 ref 的首选**）
 
 ```bash
 # 1. 查 packed-refs 现有 ref
 cat .git/packed-refs
 
-# 2. 追加新 ref（注意尾部加换行）
+# 2A. 新建：追加一行（注意尾部换行）
 echo "<hash> refs/heads/slime/my-agent/feature-x" >> .git/packed-refs
 
-# 3. 验证
-git for-each-ref | grep "slime/my-agent"
+# 2B. 更新已有分支（commit 后修正）：把该分支那一行的**旧 hash 替换成新 hash**
+#     例：18240d1... refs/heads/slime/final-qa-optimize
+#      → 66b224d... refs/heads/slime/final-qa-optimize
+#     （别追加！同一分支出现两行会以最后一行为准，旧行残留会让人误判）
+
+# 3. 验证：三者必须一致
+git rev-parse HEAD
+git rev-parse slime/my-agent/feature-x
+git show-ref | grep "slime/my-agent"
 ```
 
 **注意**：
 - 改 packed-refs 后**不要立即跑 `git gc` 或 `git pack-refs`**（会重写 packed-refs）
 - 改 packed-refs 后**不要立即跑 `git branch <同名>`**（git 会创建 loose 然后又失败）
+- 用 `node -e` + `fs` 做替换比 `sed` 稳（Windows 上 sed 对 `.git/` 路径与编码易出问题），
+  且要**先断言目标行存在**再写，避免静默改错文件
 
 #### 方案 D3：升级/降级 Git for Windows
 
@@ -169,6 +196,58 @@ git branch slime-my-agent-feature-x <hash>
 5. **PowerShell vs Git Bash 双视角**：msys2 路径转换在某些 .git/ 路径下行为不同，debug 时两种工具都试
 
 详见 `.workbuddy/memory/2026-09-10.md` 21:25 段。
+
+---
+
+### 10. 2026-09-16 实证：在带斜杠分支上 `git commit` 后 ref 不前进（Symptom B）
+
+**现场**：在 `slime/final-qa-optimize` 上提交 87 个文件（14426 insertions / 1803 deletions）。
+
+**观察到的现象（全部"看起来成功"）**：
+- `git commit` exit 0，并正常打印 `create mode 100644 ...` 一系列新文件
+- `.git/logs/HEAD` 新增一行：`18240d1... 66b224d... WorkBuddy <...> commit: feat(gui): ...`
+- `.git/logs/refs/heads/slime/final-qa-optimize` 同步新增同一行
+
+**实际状态（关键）**：
+- `.git/refs/heads/slime/final-qa-optimize` **不存在**（松散 ref 没写）
+- `.git/packed-refs` 里该分支**仍是旧的 `18240d1`**
+- 因此 `git rev-parse HEAD` / `git rev-parse slime/final-qa-optimize` / `git show-ref` 全部返回 `18240d1`
+- `git log --oneline -1` 显示旧提交；`git status` 里那 87 个文件**仍是 staged**
+
+> **极易误判为"提交被某个钩子/治理层回退了"**（本仓库有 `tools/git.py`「Git 工具层」，
+> 且 AGENTS.md 提到会拒绝不合规提交，第一反应就是它）。
+> **验证方法**：`git cat-file -t <reflog 里的新 hash>` —— 若返回 `commit`，说明**提交是真实存在的**，
+> 只是分支 ref 没跟上。**此时绝不要重新 commit**，否则会叠出重复提交、diff 翻倍。
+
+**修正步骤（3 步 + 3 项校验）**：
+
+```bash
+# 1) 从 reflog 拿到真实的新提交 hash（HEAD@{0}）
+git reflog -3
+
+# 2) 用 node+fs 把 packed-refs 里该分支的旧 hash 替换为新 hash
+node -e "
+const fs=require('fs');
+const p='.git/packed-refs';
+const s=fs.readFileSync(p,'utf8');
+const old='<old-hash> refs/heads/slime/final-qa-optimize';
+const neu='<new-hash> refs/heads/slime/final-qa-optimize';
+if(!s.includes(old)){ console.log('target line not found'); process.exit(1); }
+fs.writeFileSync(p, s.replace(old,neu), 'utf8');
+"
+
+# 3) 三处校验必须全部返回新 hash
+git rev-parse HEAD
+git rev-parse slime/final-qa-optimize
+git show-ref | grep final-qa-optimize
+git log --oneline -2
+```
+
+**结果**：修正后 `HEAD` = `66b224d`（本次提交），`git log` 顶部即新提交，工作区只剩两个未跟踪临时文件。
+
+**固化**：`py qa.py` 那类门禁都不会发现这个问题（门禁看的是工作区/索引，不看 ref）。
+**这个分支上每次 commit 后都要跑一遍上面的第 3 步校验**；不平仓就会"提交静静地丢掉"。
+配套绕行细节见用户级 skill `git-create-slash-ref-windows-workaround`。
 
 ---
 
