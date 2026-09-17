@@ -14,6 +14,10 @@ import "./boot.js"; // 数据根引导：必须最先执行（在 core-ts 模块
 import { INSTALL_ROOT } from "./boot.js";
 // A-980-R31：子代理运行记录落盘（内存态 + 历史合并、终态快照持久化）
 import { clearSubagentRuns, mergedSubagentRuns, syncSubagentRuns } from "./subagentStore.js";
+// A-984：主进程事件循环卡死看门狗（埋点 + 掉拍检测 → data/watchdog.log）
+import { startMainWatchdog, markMainActivity } from "./watchdog.js";
+// A-986：意外退出保底（脏标记判定异常退出 + 清障 + 留证 → data/crash-report.log）
+import { sweepAfterCrash, markRunning, markCleanExit } from "./crashGuard.js";
 
 // A-937：退出行为（模块级，IPC handlers 与窗口 close 拦截共用）
 let exitModeStore: "quit" | "background" = "quit";
@@ -161,7 +165,7 @@ import { createServer } from "node:http";
 import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
 // A-980-R29：待办存储唯一真源（工具与主进程共用；别再各自手搓路径/解析）
-import { readTodos, removeTodos, todosToPlanStatus } from "../../../core-ts/src/services/todoStore.js";
+import { readTodos, removeTodos, writeTodos, todosToPlanStatus, demoteStaleInProgress } from "../../../core-ts/src/services/todoStore.js";
 import { loadUsage, clearUsage, rewriteUsageCosts } from "../../../core-ts/src/services/usage.js";
 import { getLlmGatewayManager, readLlmGatewayConfig, type LlmGatewayConfig } from "./llmGateway.js";
 import { AgentRegistry, type AgentState } from "../../../core-ts/src/services/agents.js";
@@ -425,6 +429,14 @@ function broadcastTodos(sessionId: string): void {
  */
 const TODO_AUTO_CLEAR_MS = 1500;
 const todoAutoClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * A-985：**本进程已做过"僵尸 in_progress 收敛"的会话**。
+ *
+ * 只在**首次**读某会话的待办时收敛一次（进程刚起时一定没有活跃流，所以这一次是安全的）。
+ * 之后不再重复：若每读一次都降级，会把用户/模型刚标记的"进行中"立刻打回待办 —— 那才是真 bug。
+ */
+const staleChecked = new Set<string>();
 
 /** 全部完成判定：**必须有项**（空列表不算"全部完成"，否则会与 clear 语义打架） */
 function allTodosCompleted(todos: Array<{ status?: string }>): boolean {
@@ -2161,6 +2173,11 @@ function registerIpcHandlers(): void {
           : chatService!.stream(agentId, req, input.resumeSeq ?? 0, controller.signal);
         for await (const ev of evSource) {
           recorder.push(ev);
+          // A-984：给看门狗留现场 —— 卡顿时能直接看出"当时在跑哪个工具"
+          if (ev.type === "tool") {
+            const t = (ev.data ?? {}) as Record<string, unknown>;
+            markMainActivity(`tool ${String(t.name ?? "?")}`);
+          }
           if (planSessionId) { interceptPlanTool(ev, planSessionId); }
           if (ev.type === "done") {
             const d = (ev.data ?? {}) as Record<string, unknown>;
@@ -2277,6 +2294,12 @@ function registerIpcHandlers(): void {
       return { ok: false, error: "无进行中的对话可取消", active: activeChats.size };
     }
     active.abort();
+    // A-985：用户主动中断 = 没人在干活了 → 把该会话停在"进行中"的项降级为待办。
+    // 否则中断后那一项会一直转圈高亮，看起来像"任务还在跑"（与强杀重启后的僵尸态同一个坑）。
+    try {
+      const key = payload.key ?? "";
+      if (key && demoteStaleInProgress(key) > 0) { broadcastTodos(key); }
+    } catch { /* 收敛失败不影响中断本身 */ }
     return { ok: true, active: activeChats.size };
   });
 
@@ -2810,17 +2833,81 @@ function registerIpcHandlers(): void {
       console.warn("[gui:main] loadTodos 收到空 sessionId，已拒绝（避免读到 todos_.json 这类孤儿文件）");
       return { ok: true, todos: [] };
     }
+    // A-985：**首次**读某会话的待办时收敛"僵尸 in_progress" ——
+    // App 卡死被强杀 / 进程重启后，落盘的 in_progress 项会永远显示成"进行中"（转圈 + 高亮），
+    // 但根本没有流在跑（用户实测："我并未输入任何命令，列表却显示一个任务在进行中"）。
+    // 判定依据用 `activeChats`（主进程唯一有资格回答"这条流死没死"的地方，key = sessionId ?? agentId）：
+    // 只有确证没有活跃流才降级，绝不会误伤正在跑的任务。
+    if (!staleChecked.has(sid)) {
+      staleChecked.add(sid);
+      if (!activeChats.has(sid)) {
+        const n = demoteStaleInProgress(sid);
+        if (n > 0) {
+          console.warn(`[gui:main] 待办收敛：会话 ${sid} 有 ${n} 项停在"进行中"但没有活跃流，已降级为待办（A-985）`);
+        }
+      }
+    }
     // 读取统一走 todoStore（容错 + 归一化口径与工具一致）
     const todos = readTodos(sid);
+    // A-985：读盘路径读到一张**已全部完成**的清单 → **立即**清干净，不再走 1.5s 延迟。
+    // 那个延迟的唯一目的是"让刚完成时的划过动画播完"；而读盘路径没有任何动画要播，
+    // 延迟只会让用户看到"打开会话后列表自己消失一下" —— 用户实测把它当成了显示异常
+    // （原话："我怀疑是列表判断为任务全部完成后全部自动清除"）。
+    // 顺带解决一个更糟的边界：若在这 1.5s 内 App 被强杀，清空永远不会发生 → 那张全完成清单
+    // 会一直躺在盘上，每次打开会话都重新排一次清空（反复"自己消失"）。
+    if (allTodosCompleted(todos)) {
+      removeTodos(sid);
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send("slime:tasks:todos", { sessionId: sid, todos: [] });
+      }
+      return { ok: true, todos: [] };
+    }
     // 广播到所有渲染进程（支持多窗口场景）
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("slime:tasks:todos", { sessionId: sid, todos });
     }
-    // A-980-R32：冷启动/切会话读到的若是一张**已全部完成**的清单，同样要自动收干净——
-    // 这条路径不经过 broadcastTodos，漏掉它就会出现"自动清空只在当前会话生效，
-    // 切走再切回旧清单复活"（正是本次要消灭的手动清除遗留态）。
-    scheduleTodoAutoClear(sid, todos);
     return { ok: true, todos };
+  });
+
+  /**
+   * A-986：渲染层手改待办 → **落盘**。
+   *
+   * 事故：此前**根本没有这条通道**（只有 load + 订阅），渲染层的 `toggleTodo/advanceTodo/addTodo`
+   * 只调 `setTodos()` 改内存。而待办的真源是 `data/todos_<sid>.json` ——
+   * 下一次任何来源的 `slime:tasks:todos` 广播（模型 todo_write / 切会话 / 重启读盘）
+   * 都用盘上的旧内容把它覆盖回去。后果有两个，用户都撞上了：
+   *   ① 手动勾选"没反应"（勾完过一会儿又变回未完成）；
+   *   ② 主进程的「全部完成 → 自动清空」挂在 `broadcastTodos` 上 —— 手改不落盘就永不广播，
+   *      于是把全部任务勾完也**不会**触发自动清空。
+   * 现在手改同样走"写盘 → 广播"（与模型写 todo_write 完全同一条链路），语义才一致。
+   */
+  handleTrusted<{ sessionId?: string; todos?: unknown[] }>("slime:tasks:saveTodos", async (_event, payload) => {
+    const sid = typeof payload?.sessionId === "string" ? payload.sessionId.trim() : "";
+    if (!sid) { return { ok: false, error: "会话未就绪，无法保存待办" }; }
+    if (!Array.isArray(payload?.todos)) { return { ok: false, error: "todos 必须是数组" }; }
+    // 归一化 + 落盘统一走 todoStore（与工具同一份实现，规则只有一处）
+    const saved = writeTodos(sid, payload.todos as Parameters<typeof writeTodos>[1]);
+    if (!saved) { return { ok: false, error: "写入失败（路径不可写或会话无效）" }; }
+    // 写盘后立刻广播：界面与磁盘对齐，并顺带触发"全部完成 → 自动清空"判定
+    broadcastTodos(sid);
+    return { ok: true, todos: saved };
+  });
+
+  /**
+   * A-986：整张清空（删文件 + 广播空列表）。
+   *
+   * A-980-R32 曾以"自动清空已覆盖"为由删掉手动清空入口。实践证伪：自动清空只覆盖
+   * **全部 completed** 这一种终态；清单里混进"莫须有的任务"（模型写歪、旧会话串味、
+   * 手滑加错）时，用户既删不掉（行尾 ✕ 也被删了）也清不了 —— 只能看着它一直挂在那儿。
+   * 用户的诉求很直接："你给我彻底优化这个待办任务的清除逻辑"。故恢复该入口。
+   */
+  handleTrusted<{ sessionId?: string }>("slime:tasks:clearTodos", async (_event, payload) => {
+    const sid = typeof payload?.sessionId === "string" ? payload.sessionId.trim() : "";
+    if (!sid) { return { ok: false }; }
+    removeTodos(sid);
+    staleChecked.add(sid); // 刚清空 → 没有可收敛的东西，避免下一次读盘又走一遍收敛
+    broadcastTodos(sid);
+    return { ok: true };
   });
 
   /** 选择工作目录（项目文件夹） */
@@ -5164,6 +5251,20 @@ function main(): void {
         session.fromPartition("persist:slime-browser").protocol.handle("slime", () => new Response(null, { status: 204 }));
       } catch { /* 忽略 */ }
       createWindow();
+      // A-984：主进程卡死看门狗（用户实测过一次"界面点按钮没反应"，当时只能从
+      // audit.jsonl 停止写入反推主进程被独占 —— 没有日志就无法归因，故补这个探针）
+      startMainWatchdog();
+      markMainActivity("app ready");
+      // A-986：意外退出保底 —— 判定上次是否异常退出（run.lock 残留）+ 清掉残留临时文件 + 留证，
+      // 然后写下本次的运行标记（强杀时它不会被删，下次启动即可据此判定）
+      {
+        const sweep = sweepAfterCrash();
+        if (sweep.abnormalExit) {
+          console.warn(`[gui:main] 检测到上次异常退出（清障：临时文件 ${sweep.removedTmp} 个）；详见 data/crash-report.log`);
+        }
+        markRunning(app.getVersion());
+      }
+      app.on("will-quit", () => { markCleanExit(); });
       // 本地模型生命周期管理器（llama-server：BGE 嵌入 / 对话 GGUF），解析自 slime.toml [model_server]
       initModelServerManager();
       registerIpcHandlers();

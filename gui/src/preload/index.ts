@@ -144,6 +144,19 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:sessions:loadTodos", { sessionId }) as Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>,
     onTodos: (cb: (data: { sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }) => void) =>
       onMessage<{ sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>("slime:tasks:todos", cb),
+    /**
+     * A-986：把渲染层手改后的整张清单**落盘**。
+     *
+     * ⚠️ 这条通道此前**完全不存在**（只有 load + 订阅），于是"手动勾选"是个纯内存操作：
+     * 下一次 `slime:tasks:todos` 广播（工具写入 / 切会话 / 重启读盘）就用盘上的旧内容覆盖回来，
+     * 用户勾了半天等于没勾；主进程的「全部完成 → 自动清空」也永远不会被触发
+     * （它挂在 broadcastTodos 上）。用户实测："我直接手动全部勾选了还是没反应"。
+     */
+    saveTodos: (sessionId: string, todos: Array<{ id: string; content: string; status: string; completedAt?: string }>) =>
+      ipcRenderer.invoke("slime:tasks:saveTodos", { sessionId, todos }) as Promise<{ ok: boolean; todos?: Array<{ id: string; content: string; status: string; completedAt?: string }>; error?: string }>,
+    /** A-986：整张清空（删文件 + 广播空列表）。恢复这个手动入口 —— 见 RightSidebar 里的说明。 */
+    clearTodos: (sessionId: string) =>
+      ipcRenderer.invoke("slime:tasks:clearTodos", { sessionId }) as Promise<{ ok: boolean }>,
   },
   extras: {
     list: () => ipcRenderer.invoke("slime:extras:list") as Promise<ExtrasList>,
@@ -730,6 +743,8 @@ declare global {
       tasks: {
         loadTodos: (sessionId: string) => Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>;
         onTodos: (cb: (data: { sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }) => void) => () => void;
+        saveTodos: (sessionId: string, todos: Array<{ id: string; content: string; status: string; completedAt?: string }>) => Promise<{ ok: boolean; todos?: Array<{ id: string; content: string; status: string; completedAt?: string }>; error?: string }>;
+        clearTodos: (sessionId: string) => Promise<{ ok: boolean }>;
       };
       askUser: {
         onRequest: (cb: (req: AskUserRequestUI) => void) => () => void;

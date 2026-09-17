@@ -17,7 +17,7 @@ import { SIDEBAR_OPEN_EVENT, requestSidebarOpen, type SidebarOpenPayload } from 
 import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
 import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
 import BrainstormPanel from "./BrainstormPanel.js";
-import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
+import { onCtxUpdate, readLiveMonitor, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
 import { setBrowserHost, registerWebview, unregisterWebview, executeBrowserCommand, isWebNavUrl, normalizeBrowserUrl } from "./browserBridge.js";
 
 type TabType = "tasks" | "terminal" | "browser" | "git" | "file";
@@ -2629,6 +2629,31 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     const iv = window.setInterval(() => { applyPendingCtx(); }, 10_000);
     return () => window.clearInterval(iv);
   }, [applyPendingCtx]);
+
+  /**
+   * A-982：**主动取样**在途监测快照（每 250ms），这是"右栏实时"的主通道。
+   *
+   * 为什么必须有这条：事件推送链上任何一处守卫失效都会让数值静默冻死 —— 且不报错、测试也测不出
+   * （事件本身没错，只是没到）。这条拉取路径只依赖"ChatPanel 还在写快照"，与订阅时机、
+   * 节流窗口、组件重挂全部解耦，因此"输出途中右栏不动、只在 done 跳变"这个反复出现三次的
+   * 问题从架构上不再可能复现（done 后再停写快照，取样自然停止，也顺带避免了残值）。
+   *
+   * 取值全部走"不变则原样返回"的更新方式，避免每拍都重渲染。
+   */
+  const LIVE_POLL_MS = 250;
+  React.useEffect(() => {
+    const iv = window.setInterval(() => {
+      const s = readLiveMonitor(props.sessionId ?? "");
+      if (!s) { return; }
+      if (s.used > 0) { setLiveUsed(s.used); }
+      if (s.cap > 0) { setLiveCap(s.cap); }
+      const turn = { reply: s.replyTokens, reason: s.reasonTokens };
+      liveTurnRef.current = turn;
+      setLiveTurn((prev) => (prev.reply === turn.reply && prev.reason === turn.reason ? prev : turn));
+      setLiveElapsed((prev) => (prev === s.elapsedMs ? prev : s.elapsedMs));
+    }, LIVE_POLL_MS);
+    return () => window.clearInterval(iv);
+  }, [props.sessionId]);
   /** A-934：重启恢复——右栏窗口占用随会话元数据还原（与右上角环同源读取同一 key）；
    *  无持久化占用 → 显式置 0，防残留上一会话数值（切会话不同步的根因） */
   React.useEffect(() => {
@@ -2703,6 +2728,39 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       return () => { off(); };
     }, [props.sessionId]);
 
+  /**
+   * A-986：手改待办 = 乐观更新 + **落盘**。
+   *
+   * ⚠️ 这是本次修的根因：此前 `toggleTodo/advanceTodo/addTodo` 只调 `setTodos()` 改内存，
+   * 而待办的真源是 `data/todos_<sid>.json`。于是任何一次 `slime:tasks:todos` 广播
+   * （模型 `todo_write` / 切会话 / 重启读盘）都用盘上的旧内容把用户的手改**覆盖回去** ——
+   * 用户实测"手动全部勾选了还是没反应"。主进程的「全部完成 → 自动清空」挂在 `broadcastTodos` 上，
+   * 手改不落盘就永不广播 → 勾完也不会清。
+   * 现在与模型写待办走**同一条链路**（落盘 → 广播），语义才一致、行为才可预期。
+   *
+   * 顺序刻意是"先改本地再发 IPC"：勾选反馈必须是立即的；即使 IPC 失败，下一次广播会把
+   * 磁盘真值刷回来（自愈），不会长期显示假状态。
+   */
+  const persistTodos = React.useCallback((next: TodoItem[]): void => {
+    setTodos(next);
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!props.sessionId) { return; }
+    void api?.tasks?.saveTodos?.(props.sessionId, next).catch(() => { /* 交给下一次广播纠正 */ });
+  }, [props.sessionId]);
+
+  /** A-986：整张清空（用户明确要求恢复的手动入口 —— 见下方长注释） */
+  const clearAllTodos = React.useCallback(async (): Promise<void> => {
+    if (!props.sessionId || todos.length === 0) { return; }
+    const ok = await confirmAsync(
+      `清空待办清单？将删除本会话的全部 ${todos.length} 项（含已完成记录）并删除落盘文件。`,
+      "此操作不可撤销。若非本会话的任务，请先确认当前会话是否正确。",
+    );
+    if (!ok) { return; }
+    setTodos([]);
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    void api?.tasks?.clearTodos?.(props.sessionId).catch(() => { /* 下一次读盘会纠正 */ });
+  }, [props.sessionId, todos.length]);
+
   const toggleTodoCollapse = React.useCallback(() => setCollapsedTodos((v) => !v), []);
 
   const addTodo = React.useCallback(() => {
@@ -2712,26 +2770,28 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     const content = todoInput.trim();
     if (!content) { return; }
     const id = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    setTodos((prev) => [...prev, { id, content, status: "pending" }]);
+    persistTodos([...todos, { id, content, status: "pending" }]);
     setTodoInput("");
-  }, [todoInput, props.agentId, props.sessionId]);
+  }, [todoInput, todos, props.agentId, props.sessionId, persistTodos]);
 
   const toggleTodo = React.useCallback((id: string) => {
-    setTodos((prev) => prev.map((t) => {
+    if (!props.sessionId) { return; }
+    persistTodos(todos.map((t) => {
       if (t.id !== id) { return t; }
       // 手动勾选同样要打/撤完成时间戳，语义与 todo_write 工具保持一致
       if (t.status === "completed") { return { ...t, status: "pending", completedAt: undefined }; }
       return { ...t, status: "completed", completedAt: t.completedAt ?? new Date().toISOString() };
     }));
-  }, []);
+  }, [todos, props.sessionId, persistTodos]);
 
   const advanceTodo = React.useCallback((id: string) => {
+    if (!props.sessionId) { return; }
     // 「单一进行中」是全局约束（与 todo_write 归一化同一规则），手动切换也不能破坏
-    setTodos((prev) => prev.map((t) => {
+    persistTodos(todos.map((t) => {
       if (t.id === id) { return t.status === "completed" ? t : { ...t, status: "in_progress" }; }
       return t.status === "in_progress" ? { ...t, status: "pending" } : t;
     }));
-  }, []);
+  }, [todos, props.sessionId, persistTodos]);
 
   /**
    * A-980-R32：**移除了两个手动清除入口**（行尾 ✕ 单删 / 标题栏「清完成」）。
@@ -3007,6 +3067,21 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
                   : <TodoCountChip text={`${todoDone}/${todos.length}`} tone="accent" />
               )}
             </button>
+            {/* A-986：恢复「清空」入口。
+                A-980-R32 曾以"自动清空已覆盖"为由删掉它 —— 实践证伪：自动清空只覆盖
+                **全部 completed** 这一种终态；清单里混进"莫须有的任务"（模型写歪 / 旧会话串味 /
+                手滑加错）时，用户既删不掉（行尾 ✕ 也删了）也清不了，只能看着它一直挂着。
+                用户诉求："你给我彻底优化这个待办任务的清除逻辑"。 */}
+            {sessionReady && todos.length > 0 && (
+              <button
+                onClick={() => { void clearAllTodos(); }}
+                title="清空本会话的整张待办清单（删除落盘文件，需确认）"
+                style={{
+                  marginLeft: "auto", background: "transparent", border: "1px solid var(--border)",
+                  cursor: "pointer", borderRadius: 6, padding: "1px 7px",
+                  fontSize: 10.5, color: "var(--text-dim)", flexShrink: 0,
+                }}>清空</button>
+            )}
           </div>
           {sessionReady && todos.length > 0 && (
             <div style={{ height: 3, borderRadius: 999, background: "var(--input-bg)", overflow: "hidden", marginBottom: 4 }}>
