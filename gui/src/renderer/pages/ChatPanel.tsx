@@ -335,6 +335,50 @@ export function onCtxUpdate(cb: (p: CtxUpdatePayload) => void): () => void {
   return () => window.removeEventListener("slime:ctx:update", h);
 }
 
+/**
+ * 流式在途监测快照（A-982）。
+ *
+ * 架构：ChatPanel 每帧把在途数值写进这个**模块级对象**，右侧栏**自己按拍子取样**。
+ *
+ * 为什么不再只靠 CustomEvent 推送（这是"右栏不实时"反复出现三次的根因）：
+ * 事件链上任何一处守卫失效都会让数值**静默冻结、且一行报错都没有** ——
+ *   ① `p.sessionId !== sessionIdRef.current` 就把事件丢掉（空串/跨会话切换/恢复态很容易不匹配）；
+ *   ② 发送前后 120ms 节流窗口 + 右栏 1s 合并窗口叠加；
+ *   ③ 右栏被卸载重挂（收起/展开、切换会话）时订阅重建，重建瞬间的事件全部落空。
+ * 这类"事件没到"的故障无法被测试发现（事件本身没错），只能靠**改变架构**根治：
+ * 右栏改成"拉"（poll）而不是"推"（push）——只要 ChatPanel 还在写快照，右栏就一定看得到。
+ * 事件通道保留（history/校准等一次性通知仍走它），但实时性**不再依赖**它。
+ *
+ * 对齐业界做法：Cline 的 token 进度条由 `TaskHeader` 从**单一 webview 状态通道**（gRPC
+ * `subscribeToState`）读取 `lastApiReqTotalTokens` 渲染，而不是靠逐值事件推送 ——
+ * 单一数据源 + 组件自取，天然没有"某个事件没到就冻住"的状态。
+ */
+export interface LiveMonitorSnapshot {
+  sessionId: string;
+  used: number;
+  cap: number;
+  replyTokens: number;
+  reasonTokens: number;
+  elapsedMs: number;
+  streaming: boolean;
+  /** 写入时刻（ms）——取样方可据此判断快照是否已过期（陈旧快照不覆盖校准值） */
+  updatedAt: number;
+}
+const liveMonitor = { current: null as LiveMonitorSnapshot | null };
+
+/** ChatPanel 每帧写入（纯内存赋值，不触发任何 React 渲染） */
+export function publishLiveMonitor(snap: Omit<LiveMonitorSnapshot, "updatedAt">): void {
+  liveMonitor.current = { ...snap, updatedAt: Date.now() };
+}
+/** 右栏按拍子取样。sessionId 不匹配 → null（跨会话隔离）；快照过旧（>3s 无更新）→ null */
+export function readLiveMonitor(sessionId: string, maxAgeMs = 3000): LiveMonitorSnapshot | null {
+  const s = liveMonitor.current;
+  if (!s) { return null; }
+  if (sessionId && s.sessionId && s.sessionId !== sessionId) { return null; }
+  if (Date.now() - s.updatedAt > maxAgeMs) { return null; }
+  return s;
+}
+
 /** 流式入参（自动重连时按原样重发；字段与 preload ChatInput 对齐） */
 type ChatStreamReq = {
   agentId: string;
@@ -465,6 +509,45 @@ interface ToolGroup {
   count: number;
 }
 
+/**
+ * base64 → UTF-8 文本。**渲染进程绝对不能用 `Buffer`**。
+ *
+ * ⚠️ 这是一个"测试全绿、线上全废"的经典环境差事故（A-979）：
+ * 主进程 BrowserWindow 是 `contextIsolation: true, sandbox: true, nodeIntegration: false`，
+ * 渲染层**没有 `Buffer` 全局**，`Buffer.from(...)` 抛 `ReferenceError`；
+ * 而 `parseDiffStat/parseDiffFull` 里的 `try/catch` 会把它吞成 `null` ——
+ * 于是"产物卡的 +n/-m"与"工具行的红绿 diff 块"**全部静默失效**，一行报错都没有。
+ * 更隐蔽的是 `gui-products.spec.ts` 在 **Node 里**跑（那里有 Buffer）→ 测试 100% 通过。
+ * 结论：渲染层一律用 `atob` + `TextDecoder`，并且**加源码守卫禁止 `Buffer.` 出现在 renderer**。
+ */
+function b64ToText(b64: string): string {
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) { bytes[i] = bin.charCodeAt(i); }
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch { return ""; }
+}
+
+/**
+ * 从工具结果文本里**彻底剥离** `[__slime_diff__]old|new[/__slime_diff__]` 机器标记。
+ *
+ * 为什么要"彻底"而不是"配对就删"：这个标记是给**程序**读的（base64 全文，动辄几十 KB），
+ * 一旦原样漏进界面就是截图里那几行乱码。而它可能因为任何一环截断/中断而**不闭合**
+ * （工具结果有 1200/24000 字符两道截断、流式可被打断、历史记录可能来自旧版本）。
+ * 只处理"配对成功"的情况 = 只要有一处不配对，用户就会看到一整屏 base64。
+ * 故分三步：① 删配对标记；② 删未闭合的起始标记**及其后全部内容**；③ 删孤立结束标记。
+ */
+export function stripDiffTag(raw: string | undefined): string {
+  if (!raw || !raw.includes("__slime_diff__")) { return raw ?? ""; }
+  return raw
+    .replace(/\[__slime_diff__\][\s\S]*?\[\/__slime_diff__\]/g, "")
+    .replace(/\[__slime_diff__\][\s\S]*$/g, "")
+    .replace(/\[\/__slime_diff__\]/g, "")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
+}
+
 /** A-1007：产物卡工具集——扩展名→品牌 SVG 图标映射、diff 变更统计解析、产物提炼（vitest 可直测的纯函数）。
  *  解析 file_write result 内嵌的 [__slime_diff__]base64(old)|base64(new)[/__slime_diff__] 变更统计
  *  （A-172 同款标记）：行级近似（new 相对 old 净增/净删行数）；无标记/base64 损坏 → null（不显示 +n -m）。 */
@@ -472,17 +555,15 @@ export function parseDiffStat(result: string | undefined): { add: number; del: n
   if (!result) { return null; }
   const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
   if (!m) { return null; }
-  try {
-    const oldTxt = Buffer.from(m[1], "base64").toString("utf-8");
-    const newTxt = Buffer.from(m[2], "base64").toString("utf-8");
-    if (!oldTxt && !newTxt) { return null; }
-    const oldLines = new Set(oldTxt.split("\n"));
-    const newLines = new Set(newTxt.split("\n"));
-    let add = 0, del = 0;
-    for (const l of newLines) { if (l && !oldLines.has(l)) { add += 1; } }
-    for (const l of oldLines) { if (l && !newLines.has(l)) { del += 1; } }
-    return add > 0 || del > 0 ? { add, del } : null;
-  } catch { return null; }
+  const oldTxt = b64ToText(m[1]);
+  const newTxt = b64ToText(m[2]);
+  if (!oldTxt && !newTxt) { return null; }
+  const oldLines = new Set(oldTxt.split("\n"));
+  const newLines = new Set(newTxt.split("\n"));
+  let add = 0, del = 0;
+  for (const l of newLines) { if (l && !oldLines.has(l)) { add += 1; } }
+  for (const l of oldLines) { if (l && !newLines.has(l)) { del += 1; } }
+  return add > 0 || del > 0 ? { add, del } : null;
 }
 
 /** 解析 file_write result 内嵌 diff 标记的**全文**（old/new 原文，产物卡点击展开 diff 详情用）。
@@ -492,13 +573,11 @@ export function parseDiffFull(result: string | undefined, maxChars = 20000): { o
   if (!result) { return null; }
   const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
   if (!m) { return null; }
-  try {
-    const oldTxt = Buffer.from(m[1], "base64").toString("utf-8");
-    const newTxt = Buffer.from(m[2], "base64").toString("utf-8");
-    if (!oldTxt && !newTxt) { return null; }
-    if (oldTxt.length + newTxt.length > maxChars) { return null; }
-    return { old: oldTxt, new: newTxt };
-  } catch { return null; }
+  const oldTxt = b64ToText(m[1]);
+  const newTxt = b64ToText(m[2]);
+  if (!oldTxt && !newTxt) { return null; }
+  if (oldTxt.length + newTxt.length > maxChars) { return null; }
+  return { old: oldTxt, new: newTxt };
 }
 
 /** 行级 diff（LCS 回溯，保序）：old/new 逐行标 eq/add/del——产物卡展开后的红绿 diff 详情。
@@ -1111,13 +1190,13 @@ const DiffBlock = React.memo(function DiffBlock({ oldText, newText }: { oldText:
     <div className="think-diff-block" style={{ marginTop: 6 }}>
       <div className="think-diff-header">
         <span style={{ color: "var(--success)" }}>+{adds}</span>
-        <span style={{ color: "var(--danger)", marginLeft: 6 }}>−{dels}</span>
+        <span style={{ color: "var(--danger)", marginLeft: 6 }}>-{dels}</span>
         <span style={{ marginLeft: "auto", color: "var(--text-dim)" }}>vs 原内容</span>
       </div>
       <div className="think-diff-body">
         {lines.map((l, i) => (
           <div key={i} className={`think-diff-row diff-${l.op === "=" ? "eq" : l.op === "+" ? "add" : "del"}`}>
-            <span className="think-diff-mark">{l.op === "=" ? " " : l.op === "+" ? "+" : "−"}</span>
+            <span className="think-diff-mark">{l.op === "=" ? " " : l.op === "+" ? "+" : "-"}</span>
             <span className="think-diff-text">{l.text || "\u00A0"}</span>
           </div>
         ))}
@@ -1232,19 +1311,15 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   const toolCat = isCmd ? "执行命令" : isDelete ? "删除" : isWrite ? "写入" : isSearch ? "网页访问" : isRead ? "读取" : "";
   const statusColor = isCmd ? "#a78bfa" : isDelete ? "#f87171" : isWrite ? "#34d399" : isSearch ? "#60a5fa" : isRead ? "#fbbf24" : "var(--text-dim)";
   // A-172：结果状态判定——失败类前缀显红（沙箱拒绝/未找到/错误），其余视作成功
-  // A-918++：先剥离 file_write 嵌入的 [__slime_diff__]old|new[/__slime_diff__] 标记
-  // （base64 隐藏在 result 文本里供 diff 渲染，剥离后不影响 isFail 判定与正常显示）
+  // A-918++/A-979：剥离 file_write 嵌入的 [__slime_diff__]old|new[/__slime_diff__] 标记
+  // （base64 全文藏在 result 文本里供 diff 渲染；剥离后不影响 isFail 判定与正常显示）。
+  // ⚠️ 必须用 stripDiffTag（含"未闭合标记"兜底）——旧写法只删"配对成功"的那一处，
+  //    一旦标记被任何一环截断/打断，整段 base64 就会原样糊在界面上（用户截图所见）。
   const rawResult = (tool.result ?? "");
-  let oldForDiff: string | null = null, newForDiff: string | null = null;
-  let displayResult = rawResult;
-  const diffMatch = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(rawResult);
-  if (diffMatch) {
-    try {
-      oldForDiff = Buffer.from(diffMatch[1], "base64").toString("utf-8");
-      newForDiff = Buffer.from(diffMatch[2], "base64").toString("utf-8");
-    } catch { /* base64 损坏则忽略 diff */ }
-    displayResult = rawResult.replace(diffMatch[0], "").trim();
-  }
+  const parsedDiff = parseDiffFull(rawResult);
+  const oldForDiff = parsedDiff?.old ?? null;
+  const newForDiff = parsedDiff?.new ?? null;
+  const displayResult = stripDiffTag(rawResult);
   const r = displayResult.trim();
   // A-976：子代理委派 / 提示类前缀是成功/中性消息，绝不判失败
   const isSuccessPrefix = /^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存)\]/i.test(r);
@@ -1479,18 +1554,49 @@ const ThinkingPanel = React.memo(function ThinkingPanel({ timeline }: { timeline
 
 /** A-1007：产物卡片区（对齐 Cursor/Claude 消息产物区）——横向可换行的卡片网格。
  *  每张卡：文件类型图标 + 可点击文件名（右侧栏打开文件）+ 次级信息（写入/读取）+ ↗ 打开箭头；
- *  2+ 产物时底部小字「共 N 个产物」。空产物渲染 null（零回归）。 */
+ *  2+ 产物时底部小字「共 N 个产物」。空产物渲染 null（零回归）。
+ *
+ *  A-981 收纳：大任务一轮能产出几十个产物（实测 25 个），全铺开会把聊天记录冲得看不见，
+ *  用户明确要求"安排一个折叠按钮，只显示核心的一两个，其余自动折叠"。
+ *  默认**只显示 2 个核心产物**（判据：有变更的写入 > 其他写入 > 读取），其余折进「还有 N 个」。 */
+const PRODUCT_CORE_LIMIT = 2;
+
 const ProductPanel = React.memo(function ProductPanel({ products }: { products: ProductItem[] }): JSX.Element | null {
   const [expanded, setExpanded] = React.useState<number | null>(null);
+  const [open, setOpen] = React.useState(false);
   if (!products || products.length === 0) { return null; }
+  // 「核心」判据：**有变更的写入**最该被看见（用户要的就是"改了什么"），其次普通写入，最后读取。
+  // 用稳定排序（原始序做次序键）→ 同一批产物每次渲染顺序一致，不会跳。
+  const ranked = products
+    .map((p, i) => ({ p, i, rank: p.diff ? 0 : p.kind === "write" ? 1 : 2 }))
+    .sort((a, b) => (a.rank - b.rank) || (a.i - b.i));
+  const visible = open ? ranked : ranked.slice(0, PRODUCT_CORE_LIMIT);
+  const hidden = products.length - visible.length;
   return (
     <div style={{ margin: "10px 0 2px" }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 5 }}>
         <img src={fileInfoIcon} alt="" width={13} height={13} style={{ flexShrink: 0 }} draggable={false} />
         <span>产物</span>
+        <span style={{ fontWeight: 400, color: "var(--text-dim)" }}>共 {products.length} 个</span>
+        {products.length > PRODUCT_CORE_LIMIT && (
+          <button
+            onClick={() => { setOpen((v) => !v); if (open) { setExpanded(null); } }}
+            title={open ? "收起，只看核心产物" : `展开全部 ${products.length} 个产物`}
+            style={{
+              marginLeft: "auto", background: open ? "var(--accent-soft)" : "var(--bg-hover)",
+              border: "1px solid var(--border)", cursor: "pointer", padding: "2px 8px",
+              display: "inline-flex", alignItems: "center", gap: 3, borderRadius: 10,
+              color: open ? "var(--accent-hover)" : "var(--text-muted)", fontSize: 11, fontWeight: 600,
+            }}>
+            <ChevronIcon size={11} rotate={open ? 90 : 0} />
+            <span>{open ? "收起" : `展开全部 ${products.length}`}</span>
+          </button>
+        )}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-        {products.map((p, i) => (
+        {visible.map(({ p }) => {
+          const i = products.indexOf(p);
+          return (
           <div key={`p${i}`} style={{ display: "flex", flexDirection: "column", maxWidth: "100%" }}>
             <div
               title={p.diffFull ? `点击展开变更详情（${p.diffFull.old.split("\n").length} → ${p.diffFull.new.split("\n").length} 行）` : p.rel}
@@ -1535,17 +1641,29 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
                     background: l.type === "add" ? "rgba(52,211,153,0.10)" : l.type === "del" ? "rgba(248,113,113,0.12)" : "transparent",
                     color: l.type === "add" ? "#34d399" : l.type === "del" ? "#f87171" : "var(--text-muted)",
                   }}>
-                    <span style={{ userSelect: "none", opacity: 0.65, marginRight: 6, display: "inline-block", width: 10 }}>{l.type === "add" ? "+" : l.type === "del" ? "−" : " "}</span>
+                    <span style={{ userSelect: "none", opacity: 0.65, marginRight: 6, display: "inline-block", width: 10 }}>{l.type === "add" ? "+" : l.type === "del" ? "-" : " "}</span>
                     {l.text || " "}
                   </div>
                 ))}
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
-      {products.length > 1 && (
-        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>共 {products.length} 个产物</div>
+      {hidden > 0 && (
+        <button
+          onClick={() => setOpen(true)}
+          title={`展开其余 ${hidden} 个产物`}
+          style={{
+            marginTop: 8, background: "var(--bg-hover)", border: "1px dashed var(--border)",
+            cursor: "pointer", padding: "5px 12px", borderRadius: 8,
+            color: "var(--text-dim)", fontSize: 11.5, fontWeight: 600,
+            display: "inline-flex", alignItems: "center", gap: 4,
+          }}>
+          <ChevronIcon size={11} rotate={0} />
+          <span>还有 {hidden} 个产物（点击展开）</span>
+        </button>
       )}
     </div>
   );
@@ -1808,6 +1926,17 @@ export default function ChatPanel({
         // 故本帧 liveUsed 天然 ≥ 上一帧、不会无故回落；而压缩/done/恢复能真正把数值降下来
         // （此前 Math.max 使圆环停在历史峰值 629K/100% 永不回落）。
         setCtxUsed(liveUsed);
+        // A-982：把在途数值写进模块级快照 —— 右栏每 250ms 取一次，**实时性不依赖事件送达**
+        // （事件链上的 sessionId 守卫/节流窗口/组件重挂都会让数值静默冻死，且不报错）
+        publishLiveMonitor({
+          sessionId: streamSessionRef.current ?? sessionRef.current ?? "",
+          used: liveUsed,
+          cap: ctxCapRef.current,
+          replyTokens: Math.round(streamCharCountRef.current / 4),
+          reasonTokens: Math.round(streamReasonCharCountRef.current / 4),
+          elapsedMs: streamStartRef.current > 0 ? Date.now() - streamStartRef.current : 0,
+          streaming: true,
+        });
         const nowMs = Date.now();
         if (nowMs - lastCtxDispatchRef.current >= 500) {
           lastCtxDispatchRef.current = nowMs;
@@ -2937,7 +3066,16 @@ export default function ChatPanel({
           if (snap) { snap.hasActive = false; snap.partial = m.reply; }
           return;
         }
-      } else if (streamSessionRef.current !== sessionRef.current) { return; }
+      } else if (streamSessionRef.current !== sessionRef.current) {
+        // A-982：**切走会话时结束的流也必须清掉"每轮一次"的压缩闸门**。
+        // 旧写法这里直接 return，而 `didCompressTurnRef` 只在下面（流已完成分支）重置 ——
+        // 于是一次"流式期间切走会话"之后该 ref **永久为 true**，之后所有轮次的**中途压缩**
+        // 都被静默跳过（用户："Agent 输出途中根本都没看见过压缩时的分隔显示"）。
+        // 这两个闸门是**流级**状态、不属于会话视图，所以必须放在会话守卫之前重置。
+        didCompressTurnRef.current = false;
+        compressBusyRef.current = false;
+        return;
+      }
       // 流已完成：清除重连状态（含可能遗留的重连定时器）
       streamActiveRef.current = false;
       retryCountRef.current = 0;
@@ -3626,16 +3764,21 @@ export default function ChatPanel({
    *  注意：本函数总是清空输入框（调用方只管把内容传进来）——此前重构遗漏 setInput("")，
    *  导致「消息发出后文本仍留在输入框」的用户实测回归（A-164）。 */
   async function doSend(text: string, targetSessionId?: string): Promise<void> {
+    // A-982：**空串必须当"没传"处理**。`targetSessionId ?? sessionId` 只在 null/undefined 时回落，
+    // 而空串是"有值"——调用方（如中断续发队列）传 "" 时会得到 `sid = ""`，于是
+    // ① streamSessionRef 变成空串 → 右栏 sessionId 守卫把所有实时事件丢掉（这就是"右栏不实时"
+    //    的一条真实触发路径）；② maybeAutoCompress("") 会去压缩一个不存在的会话。
+    const targetSid = typeof targetSessionId === "string" && targetSessionId.trim() ? targetSessionId : undefined;
     // A-969：发送前上下文压缩体检（对齐 Claude Code「每次 query 前 context 检查」）——
     // 输入侧占用 ≥ cap×ratio 且本轮未压过 → 先跑摘要轮并展示过渡动画，再继续正常发送
-    await maybeAutoCompress(targetSessionId ?? sessionId);
+    await maybeAutoCompress(targetSid ?? sessionId);
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     // 识图：仅发送本轮用户主动选择的图片（上传一次只对当前轮生效——
     // 不自动携带会话历史图，否则上传一张后后续所有指令都会被强制附带旧图）
     const imagesToSend = pendingImages.map((i) => i.dataUrl);
     // 允许「只发图片、不带文字」
     if (!api || (!text && imagesToSend.length === 0)) { return; }
-    const sid = targetSessionId ?? sessionId;
+    const sid = targetSid ?? sessionId;
     // A-980-R30：**移除"发送前无脑自动派发子代理"启发式**（A-975 曾在此按正则猜测意图，把用户原话
     // 前 200 字直接丢给子代理）。理由有三，任何一条都足以撤掉：
     // ① 它抢在模型前面派发，等于**替模型做了委派决策**，与模型自己的规划冲突，最坏情况是同一个子任务
@@ -4804,7 +4947,12 @@ export default function ChatPanel({
             flexShrink: 0,
           }}>
             <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: loading ? "var(--accent)" : "var(--success)", animation: loading ? "thinkGlow 1.4s ease-in-out infinite" : "none", flexShrink: 0 }} />
+              {/* A-977：流式期间**不显示圆点**（用户明确要求删掉那个蓝色呼吸点）——
+                  它与右侧「💭 思考中…」文案 + 实时递增的 tokens/tokens·s⁻¹ 三重表达同一件事，
+                  属于噪音。空闲态保留绿色点（"在线/就绪"信号，用户要求保留）。 */}
+              {!loading && (
+                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "var(--success)", flexShrink: 0 }} />
+              )}
               <span className="thinking-hint-text" style={{ fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
               </span>

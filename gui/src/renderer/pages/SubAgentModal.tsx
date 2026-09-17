@@ -6,6 +6,8 @@
 import React, { type JSX, useEffect, useState } from "react";
 import { CloseIcon } from "../components/Icon.js";
 import SubagentAvatar from "../components/SubagentAvatar.js";
+// A-986：子代理产出与聊天正文用**同一个 Markdown 渲染器**（此前是 pre-wrap 贴原文 → 星号/井号/表格全裸）
+import Markdown from "./Markdown.js";
 
 interface SubAgentRun {
   id: string;
@@ -130,9 +132,11 @@ export default function SubAgentModal({ runId, onClose }: Props): JSX.Element {
                   <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6, fontWeight: 600 }}>任务</div>
                   <div style={{
                     padding: 12, background: "var(--bg-hover, #334155)", borderRadius: 8,
-                    fontSize: 13, color: "var(--text)", lineHeight: 1.6, whiteSpace: "pre-wrap",
+                    fontSize: 13, color: "var(--text)", lineHeight: 1.6,
                   }}>
-                    {run.task}
+                    {/* A-986：任务文本同样是 Markdown（派发指令里常带 **强调**、`反引号路径`、列表），
+                        与聊天正文统一渲染口径，避免"同一段文字在两处长得不一样"。 */}
+                    <Markdown text={run.task} />
                   </div>
                 </div>
               )}
@@ -159,10 +163,14 @@ export default function SubAgentModal({ runId, onClose }: Props): JSX.Element {
                   </div>
                   <div style={{
                     padding: 12, background: "var(--bg-hover, #334155)", borderRadius: 8,
-                    fontSize: 13, color: "var(--text)", lineHeight: 1.6, whiteSpace: "pre-wrap",
+                    fontSize: 13, color: "var(--text)", lineHeight: 1.6,
                     maxHeight: 300, overflow: "auto",
                   }}>
-                    {run.result}
+                    {/* A-986：与聊天正文**同一个渲染器**。此前这里用 `whiteSpace: pre-wrap` 直接贴原文，
+                        于是子代理写的 Markdown 全部原样暴露：`**结论**` 显示成星号、`## 小标题` 显示成井号、
+                        `|---|` 表格变成一堆竖线（用户实测截图）。子代理产出本就是 Markdown，
+                        与主对话一视同仁即可（同一个组件 = 同一套排版/代码块/表格/链接规则）。 */}
+                    <Markdown text={run.result} />
                   </div>
                 </div>
               )}
