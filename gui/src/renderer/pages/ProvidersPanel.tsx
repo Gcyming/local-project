@@ -12,6 +12,7 @@ import type { ProviderSummary, ModelSpec, ConfigOverview, ConfigFileInfo, SkillI
 import { ChevronIcon, PlusIcon, CheckIcon, CloseIcon, RefreshIcon } from "../components/Icon.js";
 import { confirmAsync } from "../dialog.js";
 import { REASONING_PRESETS, useReasoningPreset, saveReasoningPreset, EFFORT_LABEL, THINKING_PRESETS, useThinkingPreset, saveThinkingPreset } from "../reasoning.js";
+import { describePriceTiers, resolveEffectivePricing, resolveModelPriceTier, type PriceOrigin } from "../../../../shared/gen/model-capabilities.js";
 
 interface DraftModel extends ModelSpec { selected: boolean; }
 
@@ -626,16 +627,25 @@ export default function ProvidersPanel(): JSX.Element {
                         <span style={{ flex: 1 }} />
                         <span style={{ fontSize: 11.5, color: "var(--text-dim)", overflowWrap: "break-word" }}>共 {edit.models.length} 个 · 聊天界面只显示已启用</span>
                       </div>
-                      <table style={{ width: "100%", minWidth: 880, borderCollapse: "collapse", fontSize: 13 }}>
+                      {/*
+                        ⚠️ 这里**故意不设 minWidth**。弹窗卡片固定 width:680（内容区约 640 CSS px），
+                        此前写 `minWidth: 880`（后又加到 920）→ 表格比容器宽 280px，被裁得只剩中间一段：
+                        左边模型 ID 只剩 "sh"/"-pro" 尾巴、右边「单价」列整列看不见，底部还多一条横向滚动条。
+                        让表格 = 容器宽度才是对的；真窄到放不下时浏览器的 min-content 会自然给出滚动，
+                        不需要（也不应该）用一个拍脑袋的 minWidth 去替它决定。
+                        同理，列头文字长度**直接决定列的最小宽度**（th 有 nowrap），所以列头必须短：
+                        "上下文(K)"→"上下文K"、"最大输出(K)"→"输出K"、"单价 $/M（输/出）"→"单价 $/M"（单位/双框语义移进 title）。
+                      */}
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
                         <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
-                          <th style={{ padding: "4px 8px", width: 44, whiteSpace: "nowrap" }}>启用</th>
+                          <th style={{ padding: "4px 8px", width: 56, whiteSpace: "nowrap" }}>启用</th>
                           <th style={{ padding: "4px 8px" }}>模型 ID</th>
-                          <th style={{ padding: "4px 8px", width: 80, whiteSpace: "nowrap" }}>上下文(K)</th>
-                          <th style={{ padding: "4px 8px", width: 80, whiteSpace: "nowrap" }}>最大输出(K)</th>
-                          <th style={{ padding: "4px 8px", width: 44, whiteSpace: "nowrap" }}>图片</th>
-                          <th style={{ padding: "4px 8px", width: 72, whiteSpace: "nowrap" }}>定价来源</th>
-                          <th style={{ padding: "4px 8px", width: 146, whiteSpace: "nowrap" }} title="单价 USD / 1M tokens。手填即视为「手填价」，一键刷新不会覆盖；两个都留空则恢复自动取值。">单价 $/M（输/出）</th>
+                          <th style={{ padding: "4px 8px", width: 60, whiteSpace: "nowrap" }} title="上下文窗口，单位 K token（输入 1024 = 1048576 token）">上下文K</th>
+                          <th style={{ padding: "4px 8px", width: 48, whiteSpace: "nowrap" }} title="最大输出，单位 K token（输入 64 = 65536 token）">输出K</th>
+                          <th style={{ padding: "4px 8px", width: 40, whiteSpace: "nowrap" }} title="支持图片输入">图片</th>
+                          <th style={{ padding: "4px 8px", width: 122, whiteSpace: "nowrap" }} title="这是「引擎实际计费」所用的价格来源（不是配置里存了什么）。优先级：手填/上游结算价 > 本地端点免费 > 峰谷分时档 > 内置价目表 > 残留存值 > 未定价。">定价来源</th>
+                          <th style={{ padding: "4px 8px", width: 124, whiteSpace: "nowrap" }} title="两个框依次是 **输入 / 输出** 单价（USD / 1M tokens）。手填即视为「手填价」，一键刷新不会覆盖；两个都留空则恢复自动取值（含峰谷分时）。">单价 $/M</th>
                         </tr>
                       </thead>
                         <tbody>
@@ -648,7 +658,18 @@ export default function ProvidersPanel(): JSX.Element {
                                   title={`${m.selected ? "停用" : "启用"} ${m.id}`}
                                 />
                               </td>
-                              <td style={{ padding: "4px 8px", overflowWrap: "break-word", wordBreak: "break-all" }}>{m.id}</td>
+                              {/*
+                                模型 ID 用「单行 + 省略号」而不是 `break-all` 换行：
+                                换行会让长 ID（deepseek-v4-flash-vision-exp）把行高从 31px 顶到 53px ——
+                                用户报过"间隔怎么这么长"，根因就是行内出现第二行文字。这里的 min/max
+                                宽度让列可以随窗口收放、但永远只占一行，完整 ID 走 title 悬停可见。
+                              */}
+                              <td style={{ padding: "4px 8px" }}>
+                                <span title={m.id} style={{
+                                  display: "block", minWidth: 120, maxWidth: 320,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                }}>{m.id}</span>
+                              </td>
                               <td style={{ padding: "4px 8px" }}>
                                 <input type="number" min={0} placeholder="auto" title="上下文窗口 (K token，输入 32 = 32768 token)"
                                   value={m.context_window ? String(Math.round(m.context_window / 1024)) : ""}
@@ -671,21 +692,23 @@ export default function ProvidersPanel(): JSX.Element {
                                 <input type="checkbox" checked={m.vision === true} title="支持图片输入"
                                   onChange={(e) => updateDraftModel(i, { vision: e.target.checked })} />
                               </td>
-                              <td style={{ padding: "4px 8px" }}>
-                                <PriceSourceBadge m={m} />
+                              <td style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>
+                                <PriceOriginBadges m={m} baseUrl={edit.api_base} />
                               </td>
                               <td style={{ padding: "4px 8px" }}>
                                 <div style={{ display: "flex", gap: 4 }}>
-                                  <input type="number" min={0} step="0.01" placeholder="输入"
-                                    title="输入单价 USD / 1M tokens。填写即标记为手填（一键刷新不覆盖）；清空两个框恢复自动取值。"
+                                  <input type="number" min={0} step="0.01"
+                                    placeholder={pricePlaceholder(m, edit.api_base, "in")}
+                                    title={priceInputHint(m, edit.api_base, "in")}
                                     value={typeof m.price_in_usd === "number" ? String(m.price_in_usd) : ""}
                                     onChange={(e) => updateDraftPrice(i, "price_in_usd", e.target.value)}
-                                    style={{ ...cellInputStyle(), width: 64 }} />
-                                  <input type="number" min={0} step="0.01" placeholder="输出"
-                                    title="输出单价 USD / 1M tokens（含思考 token）。填写即标记为手填。"
+                                    style={priceInputStyle(m, edit.api_base, "in")} />
+                                  <input type="number" min={0} step="0.01"
+                                    placeholder={pricePlaceholder(m, edit.api_base, "out")}
+                                    title={priceInputHint(m, edit.api_base, "out")}
                                     value={typeof m.price_out_usd === "number" ? String(m.price_out_usd) : ""}
                                     onChange={(e) => updateDraftPrice(i, "price_out_usd", e.target.value)}
-                                    style={{ ...cellInputStyle(), width: 64 }} />
+                                    style={priceInputStyle(m, edit.api_base, "out")} />
                                 </div>
                               </td>
                             </tr>
@@ -1008,46 +1031,93 @@ function chipStyle(bg: string, color: string): React.CSSProperties {
 }
 
 /**
- * 定价来源徽标。
- *
- * 旧实现只看 `price_in_usd > 0` 就标「自动」、否则标「推断」—— 两个标签都不对应真实来源，
- * 而且把「未定价」和「免费（=0）」混为一谈，用户根本看不出哪个模型需要手填。
- * 现在按 `price_source` + 实际值细分成五态，`未定价` 会明确提示"去右边填单价"。
+ * 生效价（USD / 1M tokens）→ 简短文本。去掉浮点尾巴（0.30000000000000004 → 0.3），
+ * 保留足够精度（DeepSeek 缓存命中价 0.006 这类三位小数不能被截成 0）。
  */
-function PriceSourceBadge({ m }: { m: DraftModel }): JSX.Element {
-  const src = m.price_source;
-  const hasIn = typeof m.price_in_usd === "number";
-  const hasOut = typeof m.price_out_usd === "number";
-  const isFree = hasIn && hasOut && m.price_in_usd === 0 && m.price_out_usd === 0;
+function fmtPrice(n: number | undefined): string {
+  if (typeof n !== "number" || !Number.isFinite(n)) { return ""; }
+  return String(Number(n.toFixed(6)));
+}
 
-  let text: string;
-  let color: string;
-  let bg: string;
-  let hint: string;
-  if (src === "manual") {
-    text = "手填"; color = "var(--accent, #8b7bf7)"; bg = "rgba(139,123,247,0.14)";
-    hint = "用户手填单价 —— 自动探测/一键刷新不会覆盖。清空右侧两个单价框即可恢复自动取值。";
-  } else if (src === "upstream") {
-    text = "上游"; color = "var(--success)"; bg = "var(--success-soft)";
-    hint = "来自上游 /models 或网关 /api/pricing 的真实结算价（最权威）。";
-  } else if (isFree) {
-    text = "免费"; color = "var(--success)"; bg = "var(--success-soft)";
-    hint = "官方现价就是 0（限时免费 / 本地推理端）—— 成本恒为 0 是正确结果，不需要手填。";
-  } else if (src === "table") {
-    text = "内置表"; color = "var(--text-secondary)"; bg = "rgba(127,127,127,0.14)";
-    hint = "来自 slime 内置家族价目表（已核实刊例价）。上游探测不到价时的离线兜底，可能滞后于官方调价。";
-  } else if (hasIn) {
-    text = "已存"; color = "var(--text-dim)"; bg = "rgba(127,127,127,0.10)";
-    hint = "历史遗留值，没有来源标记。下次「一键刷新」会尝试用上游价 / 内置表价取代它。";
+/** 生效价来源徽标的文案与配色（`origin` 由共享的 resolveEffectivePricing 给出，不在这里重新判断） */
+const ORIGIN_META: Record<PriceOrigin, { text: string; color: string; bg: string }> = {
+  manual: { text: "手填", color: "var(--accent, #8b7bf7)", bg: "rgba(139,123,247,0.14)" },
+  upstream: { text: "上游", color: "var(--success)", bg: "var(--success-soft)" },
+  local: { text: "本地免费", color: "var(--success)", bg: "var(--success-soft)" },
+  tier: { text: "分时价", color: "var(--accent, #8b7bf7)", bg: "rgba(139,123,247,0.12)" },
+  table: { text: "内置表", color: "var(--text-secondary)", bg: "rgba(127,127,127,0.14)" },
+  stored: { text: "残留值", color: "var(--text-dim)", bg: "rgba(127,127,127,0.10)" },
+  none: { text: "未定价", color: "var(--warning)", bg: "rgba(210,153,34,0.12)" },
+};
+
+const ORIGIN_HINT: Record<PriceOrigin, string> = {
+  manual: "用户手填单价 —— 自动探测/一键刷新不会覆盖。清空右侧两个单价框即可恢复自动取值。",
+  upstream: "来自上游 /models 或网关 /api/pricing 的真实结算价（最权威）。",
+  local: "本地 / 内网端点：没有按 token 计费的账单，成本恒为 0。若这里其实是要计费的托管端点，请在右侧手填单价（手填即覆盖）。",
+  tier: "内置价目表的分时档 —— 按每条记录**自己的时刻**取档，本行显示的是该时刻的档位价。",
+  table: "来自 slime 内置家族价目表（已核实刊例价）。上游探测不到价时的离线兜底，可能滞后于官方调价。",
+  stored: "历史遗留值，没有来源标记。下次「一键刷新」会尝试用上游价 / 内置表价取代它。",
+  none: "既没探测到上游价、也不在内置表中 —— 该模型的消耗会记成 $0。请在右侧手填单价（USD / 1M tokens）。",
+};
+
+/**
+ * 定价徽标（定价来源列）。
+ *
+ * **为什么必须单源**：本列显示的是「引擎实际按什么价记账」，而不是「配置里存了什么」。
+ * 旧实现只看存值（`price_source` + `price_in_usd`），于是出现两种用户可见的分裂：
+ *   ① 存值缺价但内置表有价 → 面板显示「未定价」，引擎却按 0.3 计费（投诉"flash 怎么还是没定价"）；
+ *   ② 本地端点（127.0.0.1）存值缺价 → 面板显示「未定价」，引擎却套官方刊例价（凭空产生账单）。
+ * 现在改由共享的 `resolveEffectivePricing` 统一判定 —— 与引擎**逐条同序**，不可能再分裂。
+ *
+ * 分时徽标（峰谷分时）单独一枚，与来源徽标**并排一行**（不要拆成两行：那会把行高翻倍，
+ * 看起来像"行间距异常"，实测每行从 31px 涨到 53px）。
+ */
+function PriceOriginBadges({ m, baseUrl }: { m: DraftModel; baseUrl: string }): JSX.Element {
+  const eff = resolveEffectivePricing(m.id, baseUrl, m);
+  const tierDesc = describePriceTiers(m.id);
+  const meta = ORIGIN_META[eff.origin];
+  // 分时徽标只在**分时价真的参与计价**时出现。模型带分时规格 ≠ 这行在用分时价：
+  // 本地端点 / 手填价 / 上游结算价都会压过分时价，此时挂个「峰谷分时」会让人以为时段在生效
+  // （实测 127.0.0.1 上的 deepseek-chat 就命中了 deepseek 家族的分时规格）。
+  const tierActive = !!tierDesc && (eff.origin === "table" || eff.origin === "tier");
+
+  const lines = [`【${meta.text}】${ORIGIN_HINT[eff.origin]}`];
+  if (eff.origin === "none") {
+    lines.push("计费单价：未知（按 $0 记账）");
   } else {
-    text = "未定价"; color = "var(--warning)"; bg = "rgba(210,153,34,0.12)";
-    hint = "既没探测到上游价、也不在内置表中 —— 该模型的消耗会记成 $0。请在右侧手填单价（USD / 1M tokens）。";
+    lines.push(`计费单价：输入 ${fmtPrice(eff.priceIn)} / 输出 ${fmtPrice(eff.priceOut)} USD per 1M tokens`);
   }
+  if (eff.superseded) {
+    lines.push(`⚠️ 配置里存着 ${fmtPrice(eff.superseded.priceIn)}，但引擎**不采用**它（级别低于 ${meta.text}）。清空右侧单价框可清掉这条残留。`);
+  }
+  if (tierDesc) {
+    lines.push(`该模型的官方规格是峰谷分时：${tierDesc}`);
+    if (!tierActive) {
+      lines.push(`本行当前**不走分时价**（${meta.text} 压过分时）。想让时段生效 → 清空右侧两个单价框。`);
+    } else {
+      // 尽力而为的"此刻"提示：面板没有请求时刻，这里只是让用户知道离高峰价有多远
+      const now = resolveModelPriceTier(m.id, new Date());
+      if (now.tiered) {
+        lines.push(`当前时刻命中：${now.label ?? now.tierId} — 输入 ${fmtPrice(now.pricing.priceIn)} / 输出 ${fmtPrice(now.pricing.priceOut)}`);
+      }
+      lines.push("⚠️ 一旦手填单价就会覆盖分时价（手填视为议价/合同价）。想继续按时段计费，请把两个框留空。");
+    }
+  }
+
   return (
-    <span title={hint} style={{
-      fontSize: 10, color, background: bg, padding: "1px 5px", borderRadius: 3,
-      whiteSpace: "nowrap", cursor: "help",
-    }}>{text}</span>
+    <span title={lines.join("\n")} style={{
+      display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", cursor: "help",
+    }}>
+      <span style={{
+        fontSize: 10, color: meta.color, background: meta.bg, padding: "1px 5px", borderRadius: 3,
+      }}>{meta.text}</span>
+      {tierActive && (
+        <span style={{
+          fontSize: 10, color: "var(--accent, #8b7bf7)", background: "rgba(139,123,247,0.12)",
+          padding: "1px 5px", borderRadius: 3,
+        }}>峰谷分时</span>
+      )}
+    </span>
   );
 }
 
@@ -1059,6 +1129,44 @@ function cellInputStyle(): React.CSSProperties {
   };
 }
 
+/**
+ * 单价输入框的占位文本。
+ *
+ * **关键：没存价时占位显示的是「引擎实际会用的价」，而不是中性的"输入"**。
+ * 旧写法一律显示"输入"，于是 deepseek-flash 这种"存值缺价、内置表有价"的行看起来像没定价 ——
+ * 用户实际投诉的就是这个（表里明明有 0.3，界面却只写"未定价"）。数字摆在框里，一眼可见。
+ */
+function pricePlaceholder(m: DraftModel, baseUrl: string, which: "in" | "out"): string {
+  const stored = which === "in" ? m.price_in_usd : m.price_out_usd;
+  if (typeof stored === "number") { return which === "in" ? "输入" : "输出"; }
+  const eff = resolveEffectivePricing(m.id, baseUrl, m);
+  if (eff.origin === "none") { return which === "in" ? "输入" : "输出"; }
+  const v = which === "in" ? eff.priceIn : eff.priceOut;
+  return fmtPrice(v) || (which === "in" ? "输入" : "输出");
+}
+
+/** 单价输入框的悬停说明（把"存值 vs 生效价"的分歧讲清楚，避免用户以为存值在计费） */
+function priceInputHint(m: DraftModel, baseUrl: string, which: "in" | "out"): string {
+  const label = which === "in" ? "输入" : "输出";
+  const base = `${label}单价 USD / 1M tokens。填写即标记为手填（一键刷新不覆盖）；清空两个框恢复自动取值。`;
+  const eff = resolveEffectivePricing(m.id, baseUrl, m);
+  if (eff.origin === "none") { return `${base}\n当前**未定价**：表里没有已核实的价，该模型消耗会记成 $0。`; }
+  const now = `${label}：${fmtPrice(which === "in" ? eff.priceIn : eff.priceOut)}（来源：${ORIGIN_META[eff.origin].text}）`;
+  if (eff.superseded) {
+    return `${base}\n⚠️ 这里存的 ${fmtPrice(eff.superseded.priceIn)} 引擎**不采用**；实际计费按 ${now}。`;
+  }
+  return `${base}\n当前实际计费 → ${now}`;
+}
+
+/** 单价输入框样式：存值被更高优先级来源取代时加删除线 + 变暗（一眼看出"这行数字不算数"） */
+function priceInputStyle(m: DraftModel, baseUrl: string, which: "in" | "out"): React.CSSProperties {
+  const stored = which === "in" ? m.price_in_usd : m.price_out_usd;
+  const stale = typeof stored === "number" && resolveEffectivePricing(m.id, baseUrl, m).superseded !== undefined;
+  return {
+    ...cellInputStyle(), width: 52,
+    ...(stale ? { textDecoration: "line-through", opacity: 0.45 } : {}),
+  };
+}
 /** 拨片开关（启用/停用）：悬停发光 + 点击缩放反馈，主题跟随 */
 function ToggleSwitch({ checked, onChange, title }: {
   checked: boolean;

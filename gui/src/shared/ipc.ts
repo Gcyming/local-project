@@ -498,6 +498,24 @@ export interface UsageRecomputeResult {
   scanned: number;
   /** 回填后全部记录的成本合计（USD） */
   totalCostUsd: number;
+  /**
+   * A-971：有 token 但**查不到任何价**的记录数。用于区分两种"updated=0"：
+   * 真·没有可回填项（unpriced=0） vs 价格解析全线失守（unpriced≈全库）。
+   * 没有这个数字时，后者会被界面上的"无可回填项"伪装成成功。
+   */
+  unpriced: number;
+  /**
+   * 未定价的模型 ID（按记录数降序，最多 5 个）。
+   * 只给条数不够用：`m1`/`free-a` 这类自建模型本就不在价目表里，条数会长期很大，
+   * 一律报"解析失守"就成了狼来了；列出模型名，用户才能判断是"该手填单价"还是"该查链路"。
+   */
+  unpricedModels: string[];
+  /**
+   * 回填的记录中**有多少条是按峰谷分时取档**（`price_tier` 非空）。
+   * 分时定价是"看不见的计算逻辑"，只报"回填 N 条"无法区分「一律按均价算」与「逐条按时刻分档」——
+   * 这个数字就是"分时功能对我的历史账目真的生效了"的证据。
+   */
+  tiered: number;
 }
 
 export type SidecarStatus = {

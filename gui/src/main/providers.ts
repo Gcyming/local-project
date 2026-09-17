@@ -9,7 +9,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Agent as HttpKeepAliveAgent } from "node:http";
 import { Agent as HttpsKeepAliveAgent } from "node:https";
-import { inferModelCapabilities, inferModelPricing, isAggregatorGateway, sortEfforts } from "../../../shared/gen/model-capabilities.js";
+import { inferModelCapabilities, resolveModelPriceTier, isAggregatorGateway, isLocalEndpoint, sortEfforts } from "../../../shared/gen/model-capabilities.js";
 import { probe, type ProbeObservation, type ProbeResult } from "../../../core-ts/src/probe.js";
 // 仅类型导入（编译期擦除，不产生运行时循环依赖）：历史成本回填的解析器签名
 import type { PriceResolver, UsagePrice } from "../../../core-ts/src/services/usage.js";
@@ -1103,31 +1103,41 @@ export function mergeModelPrice(
  *   2. **覆盖窄 + 漏匹配**：只认十几个域名，任意自建网关/中转站/新厂商一律 `return {}` → 无价；
  *      模型正则也漏（deepseek 只匹配 chat|reasoner|v4，`deepseek-flash` 完全不命中 → 直接无价）。
  *
- * 现在改为：**价格统一由家族能力表（inferModelPricing）提供**，本函数只保留一件
- * "必须知道 baseUrl 才能判断"的事 —— 本地推理端点（跑在自己机器上，没有 API 账单）。
+ * 现在改为：**价格统一由家族能力表（resolveModelPriceTier / inferModelPricing）提供**，
+ * 本函数只保留一件"必须知道 baseUrl 才能判断"的事 —— 本地推理端点（跑在自己机器上，没有 API 账单）。
  *
  * 返回值三态语义（**必须区分，不能合并**）：
  *   - `0`         → 免费（官方限时免费 / 本地推理）→ 成本恒为 0 是**正确结果**
  *   - `> 0`       → 有价
  *   - `undefined` → **未定价**：表里没有已核实的价 → 上层存 undefined → UI 显示"未定价 · 可填写"
  *                   （宁可留空让用户填，也不编造 —— 错的低价比没有价格危害大得多）
+ *
+ * 第三参 `at`（分时定价）：给了时刻就返回**该时刻的档位价**（DeepSeek 等峰谷计费），
+ * 并通过 `tier_id` 回传命中的档位。不回传档位语义会造成一个很隐蔽的坑：
+ * 同一个模型在高峰/空闲下算出两个不同的价，而调用方只看到"价变了"，无法判断是调价还是换档。
+ * 不传 `at`（面板展示 / enrichModels 预填）→ 返回平铺价（高峰标准价），结果**确定不随时间跳动**。
  */
-export function inferPricingFromUrl(baseUrl: string, modelId: string): {
+export function inferPricingFromUrl(baseUrl: string, modelId: string, at?: Date | string | number): {
   price_in_usd?: number;
   price_out_usd?: number;
   price_cache_read_usd?: number;
+  /** 分时定价命中的档位 id（如 "peak"/"offpeak"）；无分时规格时 undefined */
+  tier_id?: string;
 } {
   const base = (baseUrl ?? "").toLowerCase();
   // 本地 / 内网推理端点：跑在自己的机器上，没有按 token 计费的账单 → 显式 0（"免费"而非"未定价"）
-  if (/^(https?:\/\/)?(\[[0-9a-f:]+\]|localhost|127\.0\.0\.1|0\.0\.0\.0|host\.docker\.internal)/.test(base)
-    || /^https?:\/\/(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(base)) {
+  // 判定统一走共享的 isLocalEndpoint（engine.recordUsage 用同一个函数决定"要不要套官方价"，
+  // 两处必须给同一个答案，否则会出现"面板说免费、引擎按官方价记账"的分裂）
+  if (isLocalEndpoint(base)) {
     return { price_in_usd: 0, price_out_usd: 0, price_cache_read_usd: 0 };
   }
-  const p = inferModelPricing(modelId);
+  // 分时规格优先：有规格且给了时刻时，pricing 就是该时刻的档位价（否则等同平铺价）
+  const r = resolveModelPriceTier(modelId, at);
   return {
-    price_in_usd: p.priceIn,
-    price_out_usd: p.priceOut,
-    price_cache_read_usd: p.priceCacheRead,
+    price_in_usd: r.pricing.priceIn,
+    price_out_usd: r.pricing.priceOut,
+    price_cache_read_usd: r.pricing.priceCacheRead,
+    tier_id: r.tiered ? r.tierId : undefined,
   };
 }
 
@@ -1173,6 +1183,9 @@ export function resolvePrice(
  *      这一步正是本函数存在的理由：旧配置里躺着 deepseek-v4-pro 的 `0.0193`（美元刊例价
  *      又被按人民币除了一次 7.25）、以及大量 `undefined`（`deepseek-flash` 正则漏匹配）。
  *      若沿用"已存值优先"，这些错值会被原样拿去算钱 → 错值自杀锁。表里查不到才退回存的值。
+ *      分时定价（DeepSeek 峰谷）：③ 会传**该记录自己的 `ts`**，按当时档位取价。历史记录因此
+ *      能精确到"那一条落在高峰还是空闲"，而不是按今天此刻的档位一刀切。
+ *      ① ② 走的是单一数值（手填/上游只给了一个价），**不参与分时** —— 用户与网关说了算。
  *   ④ 供应商已从表里删除 → 仍按模型 ID 走价目表，保住历史账目的可读性。
  */
 export function makePriceResolver(table: ProvidersTable): PriceResolver {
@@ -1191,23 +1204,25 @@ export function makePriceResolver(table: ProvidersTable): PriceResolver {
     priceCacheWrite: m.price_cache_write_usd,
   });
 
-  return (providerKey: string, model: string): UsagePrice | undefined => {
+  return (providerKey: string, model: string, ts?: string): UsagePrice | undefined => {
     const rec = index.get(providerKey);
     const specs = Array.isArray(rec?.models) ? rec.models : [];
     const hit = specs.find((m) => m.id === model);
-    // ①② 手填 / 上游价：用户或网关说了算
+    // ①② 手填 / 上游价：用户或网关说了算（单一价，不分时）
     if (hit && (hit.price_source === "manual" || hit.price_source === "upstream")
       && typeof hit.price_in_usd === "number") {
       return fromSpec(hit);
     }
     // ③ 内置价目表（本地/内网端点命中"显式 0 = 免费"分支，回填保持 0，正确）
-    const t = inferPricingFromUrl(String(rec?.api_base ?? ""), model);
+    //    `ts` 传入 → 分时模型按该时刻取档；同时把档位 id 带回给 recomputeOne 落盘
+    const t = inferPricingFromUrl(String(rec?.api_base ?? ""), model, ts);
     if (t.price_in_usd !== undefined) {
       return {
         priceIn: t.price_in_usd,
         priceOut: t.price_out_usd ?? t.price_in_usd,
         priceCacheRead: t.price_cache_read_usd,
         priceCacheWrite: undefined,
+        tierId: t.tier_id,
       };
     }
     // ④ 表里也没价 → 退回存的值（可能是用户环境的自定义价）
@@ -1646,7 +1661,12 @@ export async function refreshProviderModels(key: string): Promise<RefreshProvide
   const seen = new Set<string>();
   const nextModels = enriched.models.map((m) => {
     seen.add(m.id);
-    return { ...m, selected: prevSelected.has(m.id) };
+    const prev = prevModels.find((p) => p.id === m.id);
+    // ⚠️ 必须过 mergeModelPrice：本函数此前直接 `{ ...m, selected }` 覆盖整条记录，
+    //    于是「一键刷新」会**静默抹掉用户手填的单价**（而 mergeModelPrice 的注释一直声称
+    //    saveProvider / refreshProviderModels 两处都用了它 —— 后者其实没有，是真的漏了）。
+    //    影响面：议价/合同价被官方刊例价替换，且不报错、不可察觉。
+    return { ...m, selected: prevSelected.has(m.id), ...(prev ? mergeModelPrice(prev, m) : {}) };
   });
   const added = nextModels.filter((m) => !prevModels.some((p) => p.id === m.id)).length;
   const removed = prevModels.filter((p) => !seen.has(p.id)).length;

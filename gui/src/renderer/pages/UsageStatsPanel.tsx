@@ -630,7 +630,7 @@ export default function UsageStatsPanel(): JSX.Element {
   // 用当前生效价格重算历史成本（修正"写入时还没有价"的 0 成本记录）
   const runRecompute = React.useCallback(async () => {
     const api = (window as unknown as {
-      slimeAPI?: { usage?: { recompute?: () => Promise<{ ok: boolean; updated: number; scanned: number; totalCostUsd: number }> } };
+      slimeAPI?: { usage?: { recompute?: () => Promise<{ ok: boolean; updated: number; scanned: number; totalCostUsd: number; unpriced?: number; unpricedModels?: string[]; tiered?: number }> } };
     }).slimeAPI;
     if (typeof api?.usage?.recompute !== "function") {
       setRecomputeMsg("slimeAPI.usage.recompute 不可用（请确认 preload 已暴露）");
@@ -641,9 +641,25 @@ export default function UsageStatsPanel(): JSX.Element {
     try {
       const r = await api.usage.recompute();
       await fetchAndAggregate();
+      const unpriced = r.unpriced ?? 0;
+      const models = r.unpricedModels ?? [];
+      const tiered = r.tiered ?? 0;
+      // A-971：把两种 "updated=0" 区分开——真·无可回填 vs 一条价都没解析出来（后者是故障）。
+      // 并且列出具体模型名：自建模型（m1 之类）本就不在价目表里，不能一律报警。
+      const hint = r.updated > 0
+        ? ""
+        : unpriced > 0
+          ? "（这些模型未定价——可在供应商面板手填「单价 $/M」）"
+          : "（无可回填项——价格表已是最新，或这些记录本就在免费模型上）";
       setRecomputeMsg(
         `重算完成：扫描 ${r.scanned} 条，回填 ${r.updated} 条，累计成本 $${r.totalCostUsd.toFixed(4)}`
-        + (r.updated === 0 ? "（无可回填项——价格表已是最新，或这些记录本就在免费模型上）" : ""),
+        // 分时定价是看不见的逻辑：明确告诉用户有多少条是**按各自时刻分档**算的，
+        // 否则"按均价一律算"与"逐条分档"在界面上长得一模一样。
+        + (tiered > 0 ? `，其中 ${tiered} 条按峰谷分时取档` : "")
+        + (unpriced > 0
+          ? `，未定价 ${unpriced} 条${models.length > 0 ? `（${models.join("、")}${unpriced > 0 && models.length >= 5 ? " 等" : ""}）` : ""}`
+          : "")
+        + hint,
       );
     } catch (e) {
       setRecomputeMsg(`重算失败：${e instanceof Error ? e.message : String(e)}`);
