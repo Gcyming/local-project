@@ -41,6 +41,17 @@ function checkAny(group, files, needles, label) {
   console.log(`${hit ? "OK  " : "MISS"} [${group}] ${label}`);
 }
 
+/**
+ * 反向断言：某段文案**必须不在**产物里。
+ * 用于锁"旧行为已被彻底移除"（如 file_read 的"文件过大 → 拒绝读取"死路分支）——
+ * 只断言新代码存在，无法阻止旧分支残留在某个没跑到的 if 里。
+ */
+function checkAbsent(group, files, needle, label) {
+  const hit = files.some((pair) => pair[1].includes(needle));
+  if (hit) { fail++; }
+  console.log(`${hit ? "MISS" : "OK  "} [${group}] ${label}`);
+}
+
 console.log("=== main ===");
 for (const ch of ["slime:notify:get", "slime:notify:set", "slime:notify:sound:pick", "slime:notify:sound:clear", "slime:notify:sound:data", "slime:notify:test", "slime:notify:playsound"]) {
   check("main", main, ch, ch);
@@ -131,7 +142,7 @@ check("main", main, "/api/ratio_config", "阶段 2：new-api 倍率端点");
 check("main", main, "probeUpstreamTwoPhase", "两阶段探测（互不短路）");
 // ② 内置价目表覆盖 DeepSeek（此前 regex 漏 deepseek-flash + 美元价被除了一次 7.25）
 check("main", main, "deepseek.*pro", "价目表：deepseek pro 档");
-check("main", main, "0.0045", "价目表：deepseek flash 缓存命中价（不再除以汇率）");
+check("main", main, "0.006", "价目表：deepseek flash 高峰缓存命中价（不再除以汇率）");
 // ③ 手填价保护：price_source=manual 必须进产物，否则一键刷新会静默抹掉用户手填价
 check("main", main, "mergeModelPrice", "手填价保护（合并点）");
 check("main", main, "price_source", "定价来源标记");
@@ -143,7 +154,99 @@ check("main", main, "buildPriceResolver", "回填取价器");
 check("renderer", renderer, "重算历史成本", "设置页回填入口");
 // ⑤ UI 可行动性：「未定价」必须与「免费」区分，且提供手填单价输入列
 check("renderer", renderer, "未定价", "定价来源徽标区分「未定价」");
-check("renderer", renderer, "单价 $/M（输/出）", "手填单价输入列");
+check("renderer", renderer, "单价 $/M", "手填单价输入列");
+
+console.log("=== 定价虚高（A-971）：子集字段不再被当成并列项重复计费 ===");
+// 事故：computeRecordCost 把 cache_read_tokens 与 reasoning_tokens 两个**子集字段**
+// 按并列项相加（prompt 已含命中却又收一遍缓存价；completion 已含推理却又收一遍输出价），
+// 实测整体虚高 5.02×、单条最坏 10.81×。修复是纯计算逻辑，tsc/产物都看不出来，
+// 故既在源码守卫测试里锁公式，也在产物里确认新链路真的进了包：
+check("main", main, "defaultCacheReadInPrompt", "按上游语义判定 prompt 是否已含缓存命中");
+check("main", main, "unpricedModels", "回填结果带未定价模型清单");
+check("renderer", renderer, "可在供应商面板手填", "未定价的可操作指引（不再只报条数）");
+
+console.log("=== 分时（峰谷）定价：按请求时刻取档，不再用「峰谷均值」 ===");
+// 旧做法把 DeepSeek 的峰谷价取均值（0.225/0.9）—— 那个数在**任何真实时段都不存在**，
+// 单条记录最多偏 ±33%。新实现按每条记录自己的 ts 命中档位。纯逻辑改动，tsc 看不出来，
+// 故在产物里确认整条链路（数据 → 解析 → 写入 → 回填 → UI）真的进了包：
+check("main", main, "resolveModelPriceTier", "分时档位解析（engine/providers 共用入口）");
+check("main", main, "Asia/Shanghai", "计费时区按供应商的钟（不是 UTC）");
+check("main", main, "offpeak", "空闲档位进产物（deepseek 峰谷表）");
+check("main", main, "price_tier", "命中的档位落盘（usage 记录可对账）");
+check("main", main, "isLocalEndpoint", "本地端点闸门（本地跑 deepseek-flash 不得被按官方分时价记账）");
+check("renderer", renderer, "峰谷分时", "供应商面板分时徽标（提示手填会覆盖分时价）");
+check("renderer", renderer, "其余时段", "时段文案由数据生成（describePriceTiers）");
+check("renderer", renderer, "按峰谷分时取档", "回填结果里可见分时条数（功能不是隐形的）");
+
+console.log("=== 生效价单源：面板显示 = 引擎计费（旧面板只看存值 → 显示「未定价」却按 0.3 记账）===");
+// 事故：面板按**配置里存了什么**显示，引擎按**表**计费，两者分裂出用户可见的矛盾 ——
+// deepseek-flash 存值缺价（enrich 从未跑过）时面板显示「未定价」，但引擎实际按 0.3 计费；
+// 本地端点(127.0.0.1)存值缺价时引擎还会套官方刊例价，跑本地模型凭空产生账单。
+// 修复 = 抽出一个共享的生效价函数，panel/engine/回填三处共用（纯逻辑，tsc 看不出来，故锁产物）：
+check("main", main, "resolveEffectivePricing", "生效价单源入口（engine 与面板共用）");
+check("renderer", renderer, "resolveEffectivePricing", "面板定价列走同一入口");
+check("renderer", renderer, "本地免费", "本地端点标「本地免费」而不是「未定价」");
+check("renderer", renderer, "残留值", "无来源的机器臭值标「残留值」（引擎不采用）");
+check("renderer", renderer, "引擎**不采用**", "存值被取代时明确告知（不让用户以为存值在计费）");
+// 表格必须适配弹窗（width:680 → 内容区约 640 CSS px）：曾写 minWidth:880/920 把表格顶出容器，
+// 表现为"左边只剩 sh/-pro、右边单价列不见 + 横向滚动条"。minWidth 与长列头是这次的根因，两条一起锁。
+check("renderer", renderer, "上下文K", "紧凑列头（列头长度 = 列最小宽度，长列头会把表格撑宽）");
+check("renderer", renderer, "单价 $/M", "紧凑单价列头（单位语义移进 title）");
+
+console.log("=== A-978/979/981/982：文件读取分页 · diff 板块 · 产物收纳 · 右栏实时取样 ===");
+// ① file_read 不再"文件过大 → 拒绝读取"（死路），改为按行分页 + 可复用的续读参数
+// 目标精确到"工具读取"的那条文案：`MB），拒绝读取` 只可能来自旧的 file_read 硬拒分支
+// （`config_files.ts` 的 512KB 上限是参数文件编辑器，文案是 `字节 > N`，不在本次范围）
+checkAbsent("main", main, "MB），拒绝读取", "旧「文件过大 → 拒绝读取」死路分支已彻底移除");
+check("main", main, "继续读取请传 offset=", "续读指引（模型能直接抄回去用）");
+check("main", main, "本行超长已截断", "单行超长截断（防一行吃光预算）");
+check("main", main, "DEFAULT_READ_LINES", "默认 2000 行（对齐 Claude Code）");
+// ② diff：渲染层不许用 Buffer（渲染进程没有它）→ 改走 atob；机器人标记必须彻底剥离
+check("renderer", renderer, "stripDiffTag", "机器标记剥离（未闭合标记也要吃掉，否则 base64 糊屏）");
+check("renderer", renderer, "think-diff-row", "工具行红绿 diff 行（- 删 / + 增）");
+// ③ 产物收纳：大任务几十个产物默认只显示核心 2 个
+check("renderer", renderer, "个产物（点击展开）", "产物折叠入口");
+check("renderer", renderer, "PRODUCT_CORE_LIMIT", "核心产物数量常量");
+// ④ 右栏实时监测：拉取式取样（不再依赖事件送达）
+check("renderer", renderer, "readLiveMonitor", "右栏主动取样在途快照");
+check("renderer", renderer, "publishLiveMonitor", "ChatPanel 每帧写快照");
+
+console.log("=== A-983：子代理预算（派发不再「必然超时」）===");
+// 实录：审计日志里一次真实派发已做到 4/4 步，却被 300s 预算掐掉 → 用户体感"全部超时"
+checkAbsent("main", main, "SUBAGENT_WAIT_DEFAULT = 33e4", "旧的 330s 等待字面量已移除（改为由预算推导）");
+check("main", main, "SUBAGENT_WAIT_DEFAULT = DEFAULT_EXEC_BUDGET_MS", "等待上限由预算常量单源推导");
+check("main", main, "预算 ", "超时文案带实跑时长（可区分「卡死」与「差一步」）");
+check("main", main, "已保住中断前产出", "超时也保住中断前产出（不丢工作）");
+
+console.log("=== A-984：读取卡死 / 主进程看门狗 ===");
+// 用户实测"界面点按钮没反应"：流式读取对无换行符文件会按 O(n²) 撑爆缓冲 → 主进程被独占。
+// 锁死"硬上限 + 无条件扫描闸 + 空结果也要有说明"，以及看门狗真的进了产物。
+check("main", main, "watchdog.log", "主进程卡死看门狗落盘（下次卡顿可归因）");
+check("main", main, "MAX_SCAN_BYTES", "扫描预算硬闸（单行文件不再一路读到底）");
+check("main", main, "本行超长已截断", "超长单行按字符截断（常数内存）");
+check("main", main, "已超出文件末尾", "offset 越界给说明而不是空串");
+
+console.log("=== A-985：待办列表不再出现「没人在跑却显示进行中」===");
+// 用户实测：强杀重启后那一项永远停在「进行中」（转圈+高亮），但并没有输入任何命令。
+// 根因：in_progress 落盘后没有任何机制在"干活的进程没了"时收回来。
+check("main", main, "待办收敛", "僵尸 in_progress 收敛日志（可事后核对发生过什么）");
+check("main", main, "demoteStaleInProgress", "收敛入口（首次读盘 + 用户中断两处）");
+check("main", main, "staleChecked", "每会话只收敛一次（不会把模型刚标记的进行中打回待办）");
+
+console.log("=== A-986：手改待办必须落盘 + 意外退出保底 ===");
+// 用户实测："我直接手动全部勾选了还是没反应" —— 根因是渲染层手改只改内存、从不落盘，
+// 下一次广播就用磁盘旧值覆盖回去，且主进程的"全部完成→自动清空"（挂在 broadcastTodos 上）永不触发。
+check("main", main, "slime:tasks:saveTodos", "手改待办落盘通道");
+check("main", main, "slime:tasks:clearTodos", "整张清空通道（恢复手动入口）");
+check("preload", preload, "slime:tasks:saveTodos", "落盘通道在 preload 有真实现（不是只有类型声明）");
+check("preload", preload, "slime:tasks:clearTodos", "清空通道在 preload 有真实现");
+check("renderer", renderer, "persistTodos", "渲染层手改走落盘（不再是纯内存操作）");
+check("renderer", renderer, "clearAllTodos", "清空按钮接上落盘通道");
+// 意外退出保底：脏标记判定 + 原子写 + 清障留证
+check("main", main, "run.lock", "异常退出脏标记");
+check("main", main, "crash-report.log", "崩溃报告落盘（下次启动可查）");
+check("main", main, "markCleanExit", "正常退出时删标记（强杀下唯一成立的判据）");
+check("main", main, "fsyncSync", "原子写（临时文件 + fsync + rename，不留半截 JSON）");
 
 console.log(fail === 0 ? "\nALL ASSERTIONS PASSED" : `\n${fail} ASSERTION(S) FAILED`);
 process.exit(fail === 0 ? 0 : 1);
