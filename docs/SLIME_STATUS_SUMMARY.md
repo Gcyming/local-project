@@ -56,7 +56,7 @@
 
 ## 已知风险
 
-1. core-ts/ 被 .gitignore 忽略，C/D/E 引擎改动不在 git 追踪范围（私有 IP 策略）
+1. ~~core-ts/ 被 .gitignore 忽略~~（已于 2026-09-17 解决：引擎源码现已入库，仅密钥与隐私数据不入库）
 2. trace/planStore 为内存驻留（重启清空，plan 可由工具输出重建）
 3. chunk/reasoning trace 为 40 采样封顶（防 spans 膨胀，非全量）
 
