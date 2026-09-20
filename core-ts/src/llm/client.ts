@@ -5,6 +5,9 @@
  */
 
 import { ChatCompletionChunk, ChatRequest, ChatResponse, ChatToolCallDelta } from "shared/schemas";
+// 上游错误正文特征表的唯一实现已移到 upstreamErrorScope.ts（A-157 收敛：三处同源实现合并到这里，
+// client.ts / probe-live.ts 的 modelScope / isModelDeadError / nextAuthOnFailure 都改调它，避免再漂移）。
+import { modelScopeFromUpstreamText } from "../upstreamErrorScope.js";
 
 export const RETRY_429_BACKOFF = [5.0, 15.0, 30.0, 60.0];
 
@@ -42,6 +45,50 @@ export const DEFAULT_LLM_TIMEOUT_MS = (() => {
   }
   return 300_000;
 })();
+
+/**
+ * A-1008：base URL 的尾部 API 版本段。
+ *
+ * 为什么必须是通配而非只认 `/v1`：厂商官方 base 常自带自己的版本号，
+ * 智谱的 base 就是 `https://open.bigmodel.cn/api/paas/v4`（chat 端点 = `{base}/chat/completions`）。
+ * 旧逻辑只硬化了 `/v1`，于是拼出 `/api/paas/v4/v1/chat/completions` → 上游 404，
+ * 表现为「某个群成员每一轮发言都失败」（用户实测 t2 绑 `glm-4.5-air:free`，报错原文
+ * `"path":"/v4/v1/chat/completions"`）。
+ *
+ * 也覆盖 `/v1beta`（Gemini 风格）：字母后缀一并吃掉，避免只切到数字。
+ */
+const VERSION_TAIL_RE = /\/v\d+[a-z]*$/i;
+
+/** `path` 里的版本段前缀（`/v1`、`/v1beta`…）——用于在 base 已带版本时把它摘掉。 */
+const LEADING_VERSION_RE = /^\/v\d+[a-z]*/i;
+
+/**
+ * A-1008：**API 端点拼接的唯一实现**（ChatClient / AnthropicClient / ResponsesClient /
+ * GeminiClient / thread_worker 宿主侧全部走这里）。
+ *
+ * 为什么不各写一份：这条规则已经出过一次线上事故 —— `ChatClient.endpoint` 只硬化了
+ * `endsWith("/v1")`，而智谱官方 base 是 `…/api/paas/v4`，于是拼出
+ * `/api/paas/v4/v1/chat/completions` → 上游 404，表现为「群里某个成员每一轮发言都失败」。
+ * 四处客户端各有一份等价逻辑 = 改一处漏三处（本项目对"同一规则两处实现"已有多次事故记录）。
+ *
+ * 规则（按顺序）：
+ *   1. base 已含完整 path → 原样返回（幂等，可重复调用）；
+ *   2. base 已含 path 的功能段（无版本）→ 原样返回（极端自定义网关）；
+ *   3. base 尾部是任意 API 版本段 → 只补版本段之后的功能路径；
+ *   4. 否则 → base + path（补上 `/v1`）。
+ *
+ * @param baseUrl 厂商/网关 base（尾斜杠可有可无）
+ * @param path    完整端点路径，必须带版本段（如 `/v1/chat/completions`）
+ */
+export function joinApiEndpoint(baseUrl: string, path: string): string {
+  const base = (baseUrl ?? "").replace(/\/+$/, "");
+  if (!base) { return path; }
+  if (base.endsWith(path)) { return base; }
+  const fnPath = path.replace(LEADING_VERSION_RE, "");
+  if (fnPath && base.endsWith(fnPath)) { return base; }
+  if (VERSION_TAIL_RE.test(base)) { return `${base}${fnPath}`; }
+  return `${base}${path}`;
+}
 
 /** A-157：把一次读取与「空闲超时」竞速——timer 触发时 reject 一个 timeout UpstreamError
  * （复用 jsonWithTimeout 同型思路，但基准是「距上次数据」而非「请求开始」）。 */
@@ -490,22 +537,6 @@ export class UpstreamError extends Error {
   }
 }
 
-/**
- * A-157：从上游错误正文识别「模型级错误」（换模型可恢复）。
- * 免费池/网关常见形态：RegionError（区域限制）、Model is unavailable（模型下线/维护）、
- * model_not_found（模型名不存在）、FreeUsageLimitError（免费池限流）。命中任一 → "model"。
- */
-function modelScopeFromUpstreamText(text: string, status: number): "model" | "provider" | undefined {
-  if (!text) { return undefined; }
-  if (status === 401) { return "provider"; }
-  if (
-    /regionerror|not available in your (country|region)|model (is |not )?unavailable|model_not_found|model not found|freeusagelimit|endpoint is unavailable|invalid model/i.test(text)
-  ) {
-    return "model";
-  }
-  if (status === 403) { return "provider"; }
-  return undefined;
-}
 
 export interface ChatClientOptions {
   baseUrl: string;
@@ -538,22 +569,12 @@ export class ChatClient {
   }
 
   /**
-   * 端点容错：上游网关 base URL 形态各异（无 /v1 / 含 /v1 / 已含完整路径 / 尾斜杠）。
-   * 避免双拼 /v1/chat/completions（否则部分网关 404/401）。
+   * 端点容错：上游网关 base URL 形态各异（无 /v1 / 含 /v1 / 含 /v4… / 已含完整路径 / 尾斜杠）。
+   * 规则与实现统一在 `joinApiEndpoint`（见其注释：智谱 `…/api/paas/v4` 曾被拼成
+   * `/v4/v1/chat/completions` → 上游 404）。
    */
   private endpoint(kind: "chat" | "embeddings"): string {
-    const path = kind === "chat" ? "/v1/chat/completions" : "/v1/embeddings";
-    const base = this.baseUrl.replace(/\/+$/, ""); // 先剥尾斜杠，避免双拼
-    if (base.endsWith(path)) {
-      return base;
-    }
-    if (base.endsWith("/chat/completions") || base.endsWith("/embeddings")) {
-      return base; // 已含功能路径（极端自定义网关）
-    }
-    if (base.endsWith("/v1")) {
-      return `${base}${path.slice("/v1".length)}`; // 已含 /v1，只补余下路径
-    }
-    return `${base}${path}`;
+    return joinApiEndpoint(this.baseUrl, kind === "chat" ? "/v1/chat/completions" : "/v1/embeddings");
   }
 
   private async requestWithRetry(
@@ -931,11 +952,8 @@ export class AnthropicClient {
   }
 
   private endpoint(): string {
-    const base = this.baseUrl.replace(/\/+$/, "");
-    if (base.endsWith("/v1/messages")) return base;
-    if (base.endsWith("/v1")) return `${base}/messages`;
-    if (base.endsWith("/messages")) return base;
-    return `${base}/v1/messages`;
+    // A-1008：统一走 joinApiEndpoint（版本段不止 /v1，见其注释）
+    return joinApiEndpoint(this.baseUrl, "/v1/messages");
   }
 
   private headers(): Record<string, string> {
@@ -1331,10 +1349,8 @@ export class ResponsesClient {
   }
 
   private endpoint(): string {
-    const base = this.baseUrl.replace(/\/+$/, "");
-    if (base.endsWith("/v1/responses") || base.endsWith("/responses")) { return base; }
-    if (base.endsWith("/v1")) { return `${base}/responses`; }
-    return `${base}/v1/responses`;
+    // A-1008：统一走 joinApiEndpoint（版本段不止 /v1，见其注释）
+    return joinApiEndpoint(this.baseUrl, "/v1/responses");
   }
 
   /** ChatRequest → Responses payload */
@@ -1549,10 +1565,10 @@ export class GoogleClient {
   }
 
   private endpoint(model: string): string {
-    const base = this.baseUrl.replace(/\/+$/, "");
-    if (base.endsWith(":generateContent")) { return base; }
-    if (base.endsWith("/v1beta") || base.endsWith("/v1")) { return `${base}/models/${encodeURIComponent(model)}:generateContent`; }
-    return `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    // base 已含某个 :generateContent 端点 → 原样使用（旧行为：允许直接把完整端点填进配置）
+    if (this.baseUrl.replace(/\/+$/, "").endsWith(":generateContent")) { return this.baseUrl.replace(/\/+$/, ""); }
+    // A-1008：其余统一走 joinApiEndpoint（版本段不止 /v1，见其注释）
+    return joinApiEndpoint(this.baseUrl, `/v1beta/models/${encodeURIComponent(model)}:generateContent`);
   }
 
   /** reasoning_effort → Gemini thinkingLevel（Gemini 3）/ thinkingBudget（Gemini 2.5） */
@@ -1676,8 +1692,10 @@ export class GoogleClient {
     const base = this.baseUrl.replace(/\/+$/, "");
     if (base.endsWith(":streamGenerateContent")) { return base; }
     const suffix = `models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
-    if (base.endsWith("/v1beta") || base.endsWith("/v1")) { return `${base}/${suffix}`; }
-    return `${base}/v1beta/${suffix}`;
+    // A-1008：统一走 joinApiEndpoint。此处原为**第二份**版本段实现
+    // （`base.endsWith("/v1beta") || base.endsWith("/v1")`），与 ChatClient.endpoint 的
+    // `/v1` 硬化同病：只认枚举到的版本号。交给唯一实现后，`/v4`、`/v1beta2` 等一并正确。
+    return joinApiEndpoint(base, `/v1beta/${suffix}`);
   }
 
   async chatStream(

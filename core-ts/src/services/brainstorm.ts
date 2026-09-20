@@ -68,6 +68,13 @@ export interface BrainstormOptions {
 export interface TranscriptLine {
   speaker: string;
   content: string;
+  /** A-1008：该条实为**发言失败**的占位文本（不是这位成员真的说了这话）。
+   *
+   *  为什么必须显式标注而不是靠文本判断：引擎在成员发言抛错时把失败原因写进正文，
+   *  于是它会被当成"该成员的发言"① 渲染成正常气泡、② 落库进历史、③ 喂给其他成员当语境。
+   *  三者都是污染。标注后：构建 prompt 时跳过它（只把内容带出来，不冒充观点），
+   *  UI 侧降级为错误样式，历史里也能区分"没说话"和"说过这句话"。 */
+  failed?: boolean;
 }
 
 const DEFAULT_ROUNDS = 2;

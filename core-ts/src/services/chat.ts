@@ -1620,6 +1620,7 @@ export class ChatService {
       "   b. 元素列表里没有目标 → 先 screen_action 下滑/swipe 后再 screen_ui_dump；若是全屏画布/游戏（无元素树）→ 用 screen_capture 截图，按图上**刻度网格**读像素坐标，再 screen_action 传 x,y（默认就是**所见图像的像素坐标**，直接量，不要换算）。\n" +
       "   c. **每次 screen_action 后都会回传操作后的画面——务必看一眼确认是否真的点中/生效**；没生效就重新截图重新定位，**不要用同一坐标盲目重试**。\n" +
       "   d. 桌面（本机电脑）：**先 screen_windows 看有哪些窗口 → screen_focus 或 screen_capture({window:\"记事本\"}) 把目标窗口带到前台再截图**（按窗口截图会自动裁到该窗口、坐标带窗口偏移，比截整屏准得多）→ screen_action 按刻度读像素坐标操作。桌面无元素树，「先聚焦、再看图、按刻度定位」这三步是精度的关键；type 输入中文在安卓上不受支持（需设备装 ADBKeyboard），失败时如实说明别硬试。\n" +
+      "   e. **桌面的硬边界（必须如实告知用户，不要含糊承诺）**：Windows 的鼠标/键盘注入（SetCursorPos + mouse_event/SendInput）**只作用于当前前台窗口**，注入点击本身也会把窗口带到前台——所以**桌面做不到「目标窗口留在下层、不抢焦点地干活」**。另外 Windows 会拒绝后台进程抢前台（screen_focus 返回「未获得前台」时就是被拒了）：此时**不要**继续盲点，先如实告知用户「需要先把目标窗口切到前台」；若用了 screen_capture({window:...}) 且回传里带 ⚠️ 警告，说明那张图可能被其它窗口遮挡，看图时要把它当不确定信息。想要真正不抢焦点的后台操作，只有安卓（adb 在设备侧执行，与 PC 焦点无关）和右侧栏浏览器（操作发生在应用内，不经 OS 前台）这两条路。\n" +
       "5) **右侧栏浏览器操作（browser_* 工具）**——用户要求「打开某网站 / 在网页里点某按钮 / 填表 / 查网页内容」时用它，**不要**改用命令行或让他自己开浏览器：\n" +
       "   a. 流程：browser_navigate 打开网址 → **browser_snapshot** 拿元素清单（编号/文本/CSS 选择器）→ browser_click({index:N} 或 {text:\"登录\"}) 点击、browser_type({text, selector}) 填表 → browser_snapshot/browser_screenshot 核对是否生效。\n" +
       "   b. **元素定位优先于坐标**（与安卓同思路）；确实要按坐标点时浏览器坐标是**页面像素**（可用 browser_screenshot 的元素编号辅助）。\n" +
@@ -1744,6 +1745,8 @@ export class ChatService {
       systemPrompt: systemBegin,
       maxTokens: req.maxTokens,
       workspace,
+      // 断链 A 修复：联网开关原样透传到引擎 → 工具循环（非流式路径同样漏传，导致开关在普通对话里是死的）。
+      networkEnabled: req.networkEnabled,
       // A-980-R22：工具面白名单（内置+skill 入口保留，mcp_* 按 Agent 勾选过滤）
       toolsOnly: this.agentToolsFor(agent),
     });
@@ -1772,6 +1775,11 @@ export class ChatService {
             history: [],
             systemPrompt: child.identity_prompt || `你是 ${child.name}，你的角色是：${child.role}`,
             workspace,
+            // A-1014-C2：非流式路径**内部**的两处 engine.chat 同样必须透传联网开关。
+            // 这里是「文本委托」子路径（回复里写 @名字 触发的老机制，与新工具 delegate_subagent
+            // 是两套）—— 漏传的后果：用户关了联网搜索，父 Agent 不联网，但被委托的子 Agent
+            // 照旧联网（缺省即开），开关表现为"有时管用"。
+            networkEnabled: req.networkEnabled,
           });
           const childReply = childResult.reply ?? "";
           delegationResults.push({ name: d.name, task: d.task, result: childReply });
@@ -1800,6 +1808,8 @@ export class ChatService {
           systemPrompt: systemBegin,
           maxTokens: req.maxTokens,
           workspace,
+          // A-1014-C2：汇总轮同样是「父 Agent 在跑」，用户关了联网时它也不能联网。
+          networkEnabled: req.networkEnabled,
         });
         reply = stripDelegationTags(followupResult.reply ?? "");
         result = followupResult;
@@ -1890,6 +1900,8 @@ export class ChatService {
           history: [],
           systemPrompt: target.identity_prompt || `你是 ${target.name}，你的角色是：${target.role}`,
           workspace,
+          // A-1014-C2：「传唤」子路径 —— 关联网时被传唤的 Agent 也不能联网。
+          networkEnabled: req.networkEnabled,
         });
         const childReply = childResult.reply ?? "";
         directDelegationInject +=
@@ -1938,6 +1950,9 @@ export class ChatService {
         workspace,
         sessionId: req.sessionId,
         images: req.images,
+        // 断链 A 修复：联网开关必须原样透传到引擎 → 工具循环（此前漏传 → tool_loop 缺省 true → 闸门永死）。
+        // ChatRequest.networkEnabled 已声明，这里只是接线；不传时保持 undefined（保住 A-918+「缺省即开」语义）。
+        networkEnabled: req.networkEnabled,
         // A-980-R22：工具面白名单（内置+skill 入口保留，mcp_* 按 Agent 勾选过滤）
         toolsOnly: this.agentToolsFor(agent),
         // A-980-R24：接线工具循环的预算护栏（此前从未传 → tool_loop 里的三道护栏是死代码）。
@@ -2067,6 +2082,8 @@ export class ChatService {
                     history: [],
                     systemPrompt: child.identity_prompt || `你是 ${child.name}，你的角色是：${child.role}`,
                     workspace,
+                    // A-1014-C2：流式路径的并发委派 —— 关联网时子 Agent 一并关（与 delegate_subagent 工具口径一致）。
+                    networkEnabled: req.networkEnabled,
                   });
                   const childReply = childResult.reply ?? "";
                   delegationResults[idx] = { name: d.name, task: d.task, result: childReply };
@@ -2150,6 +2167,8 @@ export class ChatService {
             signal,
             workspace,
             sessionId: req.sessionId,
+            // A-1014-C2：流式汇总轮 —— 与主路径同一口径（关联网时整条链都不联网）。
+            networkEnabled: req.networkEnabled,
           })) {
             if (fchunk.type === "chunk") {
               const clean = followupStripper.push(fchunk.content ?? "");

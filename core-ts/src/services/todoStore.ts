@@ -8,14 +8,17 @@
  * 后果：格式一变就要改四处、漏一处也不报错（R27 的"两条链路读的不是同一个文件"就是这么来的）。
  * 现在路径、容错读取、归一化（单一 in_progress / completedAt 打戳）、渲染全在这一个文件里。
  *
- * ⚠️ 两条铁律（都踩过坑）：
+ * ⚠️ 三条铁律（都踩过坑）：
  * ① **sessionId 为空必须拒绝**。`todos_` + `""` + `.json` 会拼出一个看似正常的文件名
  *    `data/todos_.json`，那正是 R27 遗留孤儿文件的名字——空值当路径片段＝静默读到别人的数据。
  * ② 状态归一化（最多一个 in_progress、completedAt 自动打/撤戳）**只能在这里做一次**，
  *    否则工具写的和主进程读的口径会漂移。
+ * ③ **sessionId 绝不能直接当路径片段用**（A-987）。子代理 id `__subagent__:<runId>` 含冒号，
+ *    在 NTFS 上会被解析成备用数据流 → `data/` 里冒出 0 字节幽灵文件、不同 runId 共用同一个
+ *    基名文件、打包备份丢流。必须经 `encodeSessionId()` 转成单段合法文件名（`%XX` 转义）。
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, openSync, writeSync, closeSync, fsyncSync, renameSync, copyFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, readdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, copyFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { PROJECT_ROOT } from "../paths.js";
 
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -43,6 +46,34 @@ function dataDir(): string {
 }
 
 /**
+ * 会话 id → **单段合法文件名**（A-987）。
+ *
+ * ⚠️ 千万别把 `todos_${sid}.json` 直接拼回去。子代理的会话 id 形如
+ * `__subagent__:<runId>`（见 gui/src/main/index.ts 的 `SUBAGENT_SESSION_PREFIX`），**含冒号**；
+ * 而 NTFS 上 `a:b` 的 `:` 表示**备用数据流（ADS）**。实测复现（本机 node，2026-09-17）：
+ *
+ * ```
+ * fs.writeFileSync("data/ads_probe___subagent__:RUNID123.json", "…")   // 不报错
+ * → 目录里冒出 ads_probe___subagent__（size=0）
+ * → fs.readFileSync("…:RUNID123.json") 却能把内容读回来
+ * ```
+ *
+ * 也就是说本地"看起来是对的"，直到三个后果陆续兑现：
+ *   ① `data/` 里堆出一个 **0 字节幽灵文件** —— 这正是用户截图上看到的"不存在的任务"残留物
+ *      （现场遗留物：`data/todos___subagent__`，0 字节，而任何代码路径都读不到它）；
+ *   ② **所有子代理共用同一个基名文件**，不同 runId 只是同一文件上的不同数据流 ——
+ *      `removeTodos` 删基名会把别人正在跑的流一起抹掉；
+ *   ③ 备份/打包/同步（zip、git、rsync、拷到别的盘）只带走基名文件，**数据流全部丢失且不报错**。
+ *
+ * 做法：把 `[A-Za-z0-9._-]` 之外的一切按 `%XX` 转义。结果仍是**单段**文件名（不含 `/\`，
+ * 也不含转义歧义，因为 `%` 自身也会被编码成 `%25`）。普通会话 id（`s_9ca48dbc9acc` 这类）
+ * 编码前后一字不变 → **既有文件不需要迁移**。
+ */
+function encodeSessionId(sid: string): string {
+  return sid.replace(/[^A-Za-z0-9._-]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
+/**
  * 待办文件路径。`sessionId` 为空时返回 `null`（**不抛**，让调用方走"无待办"分支）。
  *
  * 返回 null 而不是拼出 `todos_.json`：空值当路径片段是最隐蔽的一类越权/脏读，
@@ -52,7 +83,7 @@ export function todoPath(sessionId: string): string | null {
   const sid = typeof sessionId === "string" ? sessionId.trim() : "";
   if (!sid) { return null; }
   try { mkdirSync(dataDir(), { recursive: true }); } catch { /* 目录创建失败交给后续读写如实报错 */ }
-  return join(dataDir(), `todos_${sid}.json`);
+  return join(dataDir(), `todos_${encodeSessionId(sid)}.json`);
 }
 
 /** 清洗单条（模型给什么都能收，但落盘的必须合法） */
@@ -159,11 +190,31 @@ export function writeTodos(sessionId: string, items: StoredTodo[]): StoredTodo[]
   return normalized;
 }
 
-/** 删除会话待办文件（会话/Agent/工作区删除时调用，避免 data/ 无限堆积） */
+/**
+ * 删除会话待办（会话/Agent/工作区删除、用户「清空」、全部完成自动清空时调用）。
+ *
+ * A-987（用户实测"删了又回来"）：只删主文件是**语义上的假删除**。`readTodos` 的候选列表是
+ * `[主文件, 主文件.bak]`——主文件一没，就会**从 `.bak` 把刚清掉的整张清单原样读回来**：
+ *   清空 → 切会话 / 重启 → 幽灵任务原地复活，用户看到的就是"不存在的任务依旧排在列表里"。
+ * 原子写留下的**每一份派生物都必须跟着一起走**，删除才成立：
+ *   - `.bak`：`writeFileAtomic` 每次写入前留的上一份完好内容（复活源头）；
+ *   - `.corrupt`：`readTodos` 对损坏主文件的**改名留证**（不删就一直挂在 data/ 里）；
+ *   - `todos_x.json.<pid><ts>.tmp`：落盘途中被强杀留下的半成品（crashGuard 只清 60s 以上的）。
+ */
 export function removeTodos(sessionId: string): void {
   const p = todoPath(sessionId);
   if (!p) { return; }
-  try { rmSync(p, { force: true }); } catch { /* 删不掉不影响会话删除本身 */ }
+  for (const suffix of ["", ".bak", ".corrupt"]) {
+    try { rmSync(`${p}${suffix}`, { force: true }); } catch { /* 删不掉不影响调用方流程 */ }
+  }
+  try {
+    const prefix = `${basename(p)}.`;
+    for (const name of readdirSync(dataDir())) {
+      if (name.startsWith(prefix) && name.endsWith(".tmp")) {
+        try { rmSync(join(dataDir(), name), { force: true }); } catch { /* 占用中则下次再说 */ }
+      }
+    }
+  } catch { /* 列目录失败不影响删除本身 */ }
 }
 
 /** 会话是否已有待办文件 */

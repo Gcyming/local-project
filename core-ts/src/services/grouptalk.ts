@@ -12,6 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { TranscriptLine } from "./brainstorm.js";
+import { isSpeechFailure } from "./grouptalkTranscript.js";
 
 export type { TranscriptLine } from "./brainstorm.js";
 
@@ -62,9 +63,17 @@ export interface GroupTalkOptions {
   onDone?: (transcript: TranscriptLine[]) => void;
 }
 
+/** A-1008：**喂给模型**的讨论记录只取真实观点 —— 发言失败的占位文本要从语境里剔除。
+ *  否则其他成员会把"某某本次发言失败：…404…"当成一条观点来回应（用户实测模型在复述这段
+ *  错误串），而且这段错误文本还会被逐轮放大。UI/历史仍保留该条（用户需要看见谁没说话）。 */
+function realSpeech(transcript: TranscriptLine[]): TranscriptLine[] {
+  return transcript.filter((l) => !l.failed);
+}
+
 function defaultPrompt(member: GroupTalkParticipant, topic: string, transcript: TranscriptLine[]): string {
-  const history = transcript.length > 1
-    ? `\n\n当前讨论记录：\n${transcript.map((l) => `【${l.speaker}】${l.content}`).join("\n\n")}`
+  const seen = realSpeech(transcript);
+  const history = seen.length > 1
+    ? `\n\n当前讨论记录：\n${seen.map((l) => `【${l.speaker}】${l.content}`).join("\n\n")}`
     : "";
   return (
     `群聊讨论：你是「${member.name}」（角色：${member.role}）。议题：${topic || "（未提供）"}${history}\n\n` +
@@ -74,8 +83,9 @@ function defaultPrompt(member: GroupTalkParticipant, topic: string, transcript: 
 
 /** contest 第二轮——互看回应轮：成员已能看到全部第一轮观点，基于他人观点补充/纠正/收敛 */
 function defaultRebuttalPrompt(member: GroupTalkParticipant, topic: string, transcript: TranscriptLine[]): string {
-  const history = transcript.length > 1
-    ? `\n\n当前全部发言（含其他成员观点）：\n${transcript.map((l) => `【${l.speaker}】${l.content}`).join("\n\n")}`
+  const seen = realSpeech(transcript);
+  const history = seen.length > 1
+    ? `\n\n当前全部发言（含其他成员观点）：\n${seen.map((l) => `【${l.speaker}】${l.content}`).join("\n\n")}`
     : "";
   return (
     `群聊讨论·回应轮：你是「${member.name}」（角色：${member.role}）。议题：${topic || "（未提供）"}${history}\n\n` +
@@ -174,7 +184,8 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
       full = buf;
     }
     const content = (full ?? "").trim() || `（${m.name} 未输出）`;
-    transcript.push({ speaker: m.name, content });
+    // A-1008：发言失败（引擎把失败原因写进了正文）→ 标注，别让它冒充该成员的观点
+    transcript.push({ speaker: m.name, content, ...(isSpeechFailure(content) ? { failed: true } : {}) });
     opts.onSpeechEnd?.({ memberId: m.id, name: m.name }, content);
   };
 
@@ -238,7 +249,8 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
       else { opts.onChunk?.({ memberId: slot.m.id, name: slot.m.name }, b.text); full += b.text; }
     }
     const content = (full ?? "").trim() || `（${slot.m.name} 未输出）`;
-    transcript.push({ speaker: slot.m.name, content });
+    // A-1008：同上——失败占位文本不得冒充成员观点
+    transcript.push({ speaker: slot.m.name, content, ...(isSpeechFailure(content) ? { failed: true } : {}) });
     opts.onSpeechEnd?.({ memberId: slot.m.id, name: slot.m.name }, content);
     speechOrder.push(slot.m);
     index++;
@@ -246,7 +258,8 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
   // A-950 补充（互看）：第二轮按第一轮完成顺序逐个"回应轮"——每个成员此时已能看到
   // 全部第一轮观点（transcript 已并入），顺序生成、后见前文。
   // A-959：回应轮不再无条件执行——寒暄/无分歧（观点高度收敛）时单轮结束，避免"问个好也讨论两轮"
-  const round1 = transcript.slice(1); // 首条 = 用户议题，其余为第一轮全体观点
+  // A-1008：收敛判定只看**真实观点**（失败占位文本既不参与相似度计算，也不该影响"要不要再来一轮"）
+  const round1 = realSpeech(transcript).slice(1); // 首条 = 用户议题，其余为第一轮全体观点
   const needRebuttal = (opts.rebuttalFilter ?? defaultRebuttalFilter)(topic, round1);
   if (needRebuttal) {
     const rebuttalMembers = speechOrder.length === members.length ? speechOrder : members;

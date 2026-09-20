@@ -521,6 +521,12 @@ export class ToolLoop {
       delete args._agent_id;
       args._agent_id = agentId;
     }
+    // 断链 C 修复：把父请求的联网开关透传给 delegate_subagent（子代理据此继承主 Agent 策略）。
+    // 先 delete 覆盖模型可能伪造的同名参数——防止用户关掉联网时模型私自把子代理联网打开。
+    if (tc.name === "delegate_subagent") {
+      delete args._network_enabled;
+      args._network_enabled = this.networkEnabled;
+    }
 
     // 注入受信 sessionId：会话级工具（待办 / 计划）据此定位本会话的存储文件。
     // ⚠️ 先 delete 再写，覆盖模型可能伪造的同名参数（防跨会话越权）。

@@ -13,6 +13,8 @@
 
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
+/** A-1008：端点拼接的唯一实现（宿主侧解析后把完整 URL 交给线程，见 makeThreadWorkerInput） */
+import { joinApiEndpoint } from "./llm/client.js";
 
 export const THREAD_MAX_ROUNDS = 5;
 
@@ -83,7 +85,13 @@ async function callOnce(input, prompt, rounds) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), input.timeoutMs || 120000);
     try {
-      const resp = await fetch((input.apiBase.replace(/\\/+$/, "") + "/v1/chat/completions"), {
+      // A-1008:apiBase 由宿主侧 makeThreadWorkerInput 用 joinApiEndpoint 解析成
+      // 完整端点（含版本段），此处不得再拼任何路径：曾在宿主侧解析后于此处再
+      // 追加一次 /v1/chat/completions —— 对智谱这类 base 自带版本号的厂商会拼成
+      // /api/paas/v4/chat/completions/v1/chat/completions（404）。
+      // ⚠️ 本段位于 RUNTIME 模板字符串内：注释里禁止出现反引号或美元大括号，
+      //    否则会提前闭合模板（已踩过一次：注释中的反引号把 RUNTIME 截断 → TS1005）。
+      const resp = await fetch(input.apiBase, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(input.apiKey ? { Authorization: "Bearer " + input.apiKey } : {}) },
         body: JSON.stringify({
@@ -290,7 +298,11 @@ export function makeThreadWorkerInput(partial: Partial<ThreadWorkerInput> & { ap
     subtaskName: partial.subtaskName ?? "Worker",
     subtaskDescription: partial.subtaskDescription,
     systemPrompt: partial.systemPrompt ?? "",
-    apiBase: partial.apiBase,
+    // A-1008：**在宿主侧把端点解析完**再交给线程。worker 源码是 `{ eval: true }` 的字符串
+    // （见文件头：vitest 加载不了 .ts worker），没法 import 端点拼接函数 —— 若让线程自己拼，
+    // 就等于同一条规则第二份实现（智谱 `…/paas/v4` 被拼成 `/v4/v1/chat/completions` 的事故
+    // 正是"两处实现"造成的）。线程侧只保留一个幂等判断。
+    apiBase: joinApiEndpoint(partial.apiBase, "/v1/chat/completions"),
     apiKey: partial.apiKey,
     model: partial.model,
     maxRounds: partial.maxRounds ?? THREAD_MAX_ROUNDS,

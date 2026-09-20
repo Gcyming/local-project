@@ -34,6 +34,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { PROJECT_ROOT } from "../paths.js";
 import { loadSlimeMemories, type SilamAffectState, type SilamBrain, type SilamReplyResult } from "./silam_brain.js";
+// S3：本地模型清单的键名与条目形状来自唯一来源（见 core-ts/src/local_models.ts）。
+// 此前本文件自定义了一份 interface（实测已漂移：缺 `vision`）并硬编码键名 2 次 ——
+// 键改名时这两处会静默失效，症状是"UI 里明明有这个模型，一发消息就报『未注册』"。
+import { LOCAL_MODELS_KEY, findLocalModelSpec, type LocalModelSpec } from "../local_models.js";
 import { appendUsage, computeRecordCost, defaultCacheReadInPrompt } from "./usage.js";
 import { buildCompressSummaryPrompt, messagesToPlainText, SUMMARIZE_INPUT_CAP } from "./context_compress.js";
 
@@ -51,15 +55,9 @@ export interface ProviderConfig {
 /** 模型池注入上限：同一供应商一次最多注入 N 个候选模型（防止 200 模型全量注入导致每次失败全池试一遍、整体超时爆炸） */
 const MODEL_POOL_MAX = 8;
 
-/** 渲染层注册的本地模型条目（存 providers.enc.json 的 _local_models 键，引擎按 id 解析路由） */
-interface LocalModelSpec {
-  id: string;
-  path: string;
-  label?: string;
-  ctx_len?: number;
-  gpu_layers?: number;
-  max_output?: number;
-}
+/** 本地模型条目的类型与键名来自唯一来源（S3）：
+ *  见文件顶部 import 的 `../local_models.js` —— 这里不再自定义 interface，
+ *  否则会与 providers.ts / shared/ipc.ts 各写一份并悄悄漂移（engine 那份实测缺 `vision`）。 */
 
 export interface SlimeEngineOptions {
   registry: AgentRegistry;
@@ -408,6 +406,16 @@ export class SlimeEngine implements ChatEngine {
       price_in_usd?: number; price_out_usd?: number;
       price_cache_read_usd?: number; price_cache_write_usd?: number;
       price_source?: string;
+      /**
+       * A-988c：用户自定义的分时档**必须在这里透传**。
+       *
+       * 漏了它会出现最恶劣的一类分裂：供应商面板（读的是 ModelSpec 全量字段）显示
+       * 「自定义分时」，而这里因为看不到 `price_tiers` 而按平铺价记账 ——
+       * 用户按界面上的峰谷价核对账单，怎么都对不上，且没有任何报错。
+       * 结构类型断言不会报错（少写一个字段编译器不管），所以改 ModelSpec 时
+       * 必须回来同步这一处 —— 与 `windowCap` 那条"每一条 done 载荷都要带"是同一类教训。
+       */
+      price_tiers?: import("shared/model-capabilities").ModelPriceTiers;
     } | undefined;
     // 请求时刻：既是记录的 `ts`，也是分时定价的取档依据。
     // **两者必须是同一个值**，否则会写出"记录落在高峰、成本却按空闲价算"的自相矛盾数据。
@@ -417,9 +425,11 @@ export class SlimeEngine implements ChatEngine {
     // 同一套优先级 —— 三处各写一遍已经分裂出真实事故（面板显示「未定价」而这里按 0.3 计费；
     // 本地端点存值缺价时仍套官方刊例价 → 跑本地模型凭空产生账单）。改优先级只需改那一个函数。
     //
-    // 优先级：**手填 / 上游结算价 > 本地端点 0 > 分时档 > 表平铺价 > 存值 > 未定价**
-    //   - **手填 / 上游优先**：用户填的可能是议价/合同价，网关回传的是本网关真实结算价，
-    //     机器不该覆盖（想让分时接管 → 清空面板里的单价输入框即可）。
+    // 优先级（详见 shared/gen/model-capabilities.ts `resolveEffectivePricing` 的注释）：
+    //   **自定义分时档 > 手填 / 上游结算价 > 本地端点 0 > 内置分时档 > 表平铺价 > 存值 > 未定价**
+    //   - **自定义分时最先**：用户填了一整张时段表，意图比"填一个数"更强（A-988c）。
+    //   - **手填 / 上游次之**：用户填的可能是议价/合同价，网关回传的是本网关真实结算价，
+    //     机器不该覆盖（想让内置分时接管 → 清空面板里的单价输入框即可）。
     //   - **本地端点恒 0**：本地常二次托管"有官方价"的模型 ID（llama.cpp 跑 deepseek-flash），
     //     官方价与它毫无关系；面板对这类端点写的也是 0，两处必须给同一个答案（共用 isLocalEndpoint）。
     //   - **分时规格 / 表压过存值**：存值是机器从**同一张表**平铺写下的快照（如 deepseek 的高峰
@@ -479,6 +489,17 @@ export class SlimeEngine implements ChatEngine {
     } catch {
       /* 状态刷新失败不中断对话 */
     }
+  }
+
+  /** A-1018：**兜底必须报因**。
+   *
+   *  此前 SILAM 兜底成功时把 `resolveRouteInternal` 的失败原因直接丢掉，用户只看到一条"正常回复"，
+   *  完全不知道选中的模型（如 `local:qwen3`）根本没跑起来 —— 实测症状就是用户拿着截图来问
+   *  "为什么用不了选中的本地模型？"（而真正原因 `--reasoning-format qwen` 非法 / 模型文件损坏
+   *  已经躺在 `error` 里被扔了）。静默兜底 = 精度杀手。
+   *  现在把原因并进**思考段**（界面就在那儿展示"（离线应答 · SILAM 大脑）"，用户不用展开新区域）。 */
+  private fallbackNotice(agent: AgentState, error: string | null): string {
+    return `⚠️ 选中的模型「${agent.model_choice || "(空)"}」不可用，本轮由 SILAM 离线大脑兜底应答。\n原因：${error ?? "无可用路由"}`;
   }
 
   /** SILAM 绝对大脑兑底（A-121/A-124）：调用方注入的离线大脑无可用时返回 null，
@@ -578,11 +599,10 @@ export class SlimeEngine implements ChatEngine {
     return null;
   }
 
-  /** 按 id 查找本地模型注册条目（providers 表内含 _local_models 键；未注册 → null） */
+  /** 按 id 查找本地模型注册条目（providers 表内含清单键；未注册 → undefined）。
+   *  S3：解析逻辑收口到 `findLocalModelSpec`（唯一实现），此处不再自己摸私有键。 */
   private findLocalModel(id: string): LocalModelSpec | undefined {
-    const raw = (this.providers as unknown as Record<string, unknown>)["_local_models"];
-    if (!Array.isArray(raw)) { return undefined; }
-    return (raw as LocalModelSpec[]).find((m) => m && typeof m === "object" && m.id === id);
+    return findLocalModelSpec(this.providers as unknown as Record<string, unknown>, id);
   }
 
   /** local:<id> → 确保对应模型的 llama-server 已就绪并返回其端口；失败返回 {ok:false,error}（具体原因透给用户，不塌缩为"未配置 API"） */
@@ -633,6 +653,11 @@ export class SlimeEngine implements ChatEngine {
       // 自动转移到「其他已配置供应商」的启用模型（如 agnes 实测完全可用）。
       // 路由排序：首选供应商显式/默认模型优先 → 首选供应商其余启用模型 → 其他供应商模型。
       const base = (cfg.api_base ?? "").replace(/\/+$/, "");
+      // ⚠️ A-1008：这里只剥 `/v1`，**故意不同步**到 joinApiEndpoint —— 别"顺手统一"。
+      // 本行做的是「剥版本段」，与「拼端点」是两种操作。若照抄通配规则把**厂商自带**的
+      // 版本段（智谱 `…/api/paas/v4`）也剥掉，下游 joinApiEndpoint 就看不到版本段 →
+      // 补回 `/v1` → `/api/paas/v1/chat/completions` → **404 回归**（就是本次要修的那个病）。
+      // 端点拼接的唯一实现在 `core-ts/src/llm/client.ts` 的 joinApiEndpoint（幂等 + 版本段通配）。
       const primaryBase = base.endsWith("/v1") ? base.slice(0, -3) : base;
 
       const enabledOf = (c: ProviderConfig): string[] => {
@@ -696,12 +721,14 @@ export class SlimeEngine implements ChatEngine {
 
       // ② 跨供应商后备：其余已配置 provider 的启用模型（按 provider 键名稳定排序，避免顺序抖动）
       const others = Object.entries(this.providers)
-        .filter(([k, p]) => k !== key && k !== "_local_models" && !p?.api_base?.startsWith("http://127.0.0.1") && !p?.api_base?.startsWith("http://localhost"))
+        .filter(([k, p]) => k !== key && k !== LOCAL_MODELS_KEY && !p?.api_base?.startsWith("http://127.0.0.1") && !p?.api_base?.startsWith("http://localhost"))
         .sort(([a], [b]) => a.localeCompare(b));
       let bias = 900;
       for (const [otherKey, otherCfg] of others) {
         const oBase = (otherCfg.api_base ?? "").trim().replace(/\/+$/, "");
         if (!oBase || !/^https?:\/\//i.test(oBase)) { continue; }
+        // ⚠️ A-1008：同上面首选供应商那处 —— 只剥 `/v1`，**不要**扩成版本段通配（会把智谱
+        // `/api/paas/v4` 剥掉 → 下游补 `/v1` → 404 回归）。拼接唯一实现在 joinApiEndpoint。
         const ob = oBase.endsWith("/v1") ? oBase.slice(0, -3) : oBase;
         const oModels = enabledOf(otherCfg);
         if (oModels.length === 0) {
@@ -974,10 +1001,12 @@ export class SlimeEngine implements ChatEngine {
       // A-121: SILAM 绝对大脑兑底——无 API/本地模型时用离线大脑应答
       const brain = await this.silamReply(opts);
       if (brain?.reply) {
+        // A-1018：兜底报因（见 fallbackNotice）
+        const notice = this.fallbackNotice(opts.agent, error);
         return {
           reply: brain.reply,
           replyRaw: brain.reply,
-          reasoning: brain.reasoning ?? null,
+          reasoning: brain.reasoning ? `${notice}\n\n${brain.reasoning}` : notice,
           model: "silam-brain",
           promptTokens: estimateTokens(opts.message),
           completionTokens: estimateTokens(brain.reply),
@@ -1151,10 +1180,10 @@ export class SlimeEngine implements ChatEngine {
       // A-121: SILAM 绝对大脑兑底——无 API/本地模型时用离线大脑应答（流式场景直接 done）
       const brain = await this.silamReply(opts);
       if (brain?.reply) {
-        // A-124 正文/思考分离：先吐思考过程（GUI 折叠展示），再吐正文
-        if (brain.reasoning) {
-          yield { type: "reasoning", content: brain.reasoning };
-        }
+        // A-124 正文/思考分离：先吐思考过程（GUI 折叠展示），再吐正文。
+        // A-1018：思考段**前置兜底原因**（即使没有思考也要吐出去，否则用户看不出这轮不是他选的模型答的）。
+        const notice = this.fallbackNotice(opts.agent, error);
+        yield { type: "reasoning", content: brain.reasoning ? `${notice}\n\n${brain.reasoning}` : notice };
         yield {
           type: "done",
           reply: brain.reply,

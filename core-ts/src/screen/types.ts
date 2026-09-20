@@ -24,6 +24,18 @@ export interface DisplayInfo {
   label: string;
   /** 可选：设备/系统缩放因子（DPI），仅信息展示用 */
   scale?: number;
+  /**
+   * A-1014：该目标坐标系的原点（虚拟桌面坐标，**可能为负**）。
+   * 为什么必须在这里：PowerShell 宿主自 A-977 起就在 `size` 探针里返回了
+   * `GetSystemMetrics(76/77)`（SM_XVIRTUALSCREEN/SM_YVIRTUALSCREEN），
+   * 但 TS 侧 `displayInfo` 只取了 width/height、**把原点丢了** → controller 的
+   * `basis.originX` 恒为 0。而整屏截图是 `CopyFromScreen($vx,$vy,...)`（图像 0 点 =
+   * 虚拟坐标 (vx,vy)）、`SetCursorPos` 用的也是虚拟坐标 —— 于是**副屏在主屏左侧/上方
+   * 时（vx/vy 为负），整屏截图后的点击会整体偏移 (vx,vy)**，且无任何提示。
+   * 按窗口截图（captureWindow）当时就带 origin，所以只有"整屏"这一条路径是错的。
+   */
+  originX?: number;
+  originY?: number;
 }
 
 /** 截图结果 */
@@ -54,6 +66,14 @@ export interface ScreenCaptureResult {
   /** 图像字节数（模型可见的证据性描述，配合反幻觉护栏） */
   bytes?: number;
   error?: string;
+  /**
+   * A-1014：**成功但有保留**的提示（ok=true 时可能有值）。
+   * 首个用例：按窗口截图时没能把窗口抢到前台（`SetForegroundWindow` 被系统拒绝）——
+   * 画面可能被其它窗口遮挡。此前这种情况要么静默、要么被当成硬失败，
+   * 两种都不对：窗口其实可见时应当照常可用，但模型**必须知道**这张图可能不是目标窗口。
+   * 工具层负责把它拼进回传给模型的正文。
+   */
+  warning?: string;
   /** A-975：本张截图叠加的标注（网格 / 元素编号框），供模型按刻度或编号定位 */
   annotate?: {
     grid: boolean;
@@ -204,6 +224,10 @@ export const NORMALIZED_MAX = 1000;
  * A-975：把「模型所见图像坐标」换算为目标物理像素。
  * 视觉模型按眼前图像估坐标 → 必须按 imageSize→deviceSize 的比例放大，
  * 而不是拿图像坐标当物理坐标用（这是"点偏"的结构性修复）。
+ *
+ * @deprecated A-1014：**不要在新代码里用**。它不接受区域原点，按窗口截图时会整体偏移。
+ *   唯一正确的换算入口是 {@link coordToDeviceInRegion}（controller 也只调它）。
+ *   保留仅因 `tests/core-ts/screen.spec.ts` 仍在测它；有测试的历史 API ≠ 该用的 API。
  */
 export function imageToDevice(value: number | undefined, imageSize: number, deviceSize: number): number | undefined {
   if (value === undefined || value === null || !Number.isFinite(value)) { return undefined; }
@@ -211,7 +235,13 @@ export function imageToDevice(value: number | undefined, imageSize: number, devi
   return Math.round((value / imageSize) * deviceSize);
 }
 
-/** 把归一化坐标换算为像素；absolute=true 时原样返回（历史兼容保留） */
+/**
+ * 把归一化坐标换算为像素；absolute=true 时原样返回（历史兼容保留）
+ *
+ * @deprecated A-1014：**不要在新代码里用**。它与 {@link coordToDeviceInRegion} 是
+ *   同一件事的两份实现（本项目「一个规则两处实现」出过两次事故），且不接受区域原点。
+ *   新代码一律走 `coordToDeviceInRegion(space, value, imageSize, regionSize, origin)`。
+ */
 export function toPixel(value: number | undefined, size: number, absolute: boolean): number | undefined {
   if (value === undefined || value === null || !Number.isFinite(value)) { return undefined; }
   if (absolute) { return Math.round(value); }

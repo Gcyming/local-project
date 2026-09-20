@@ -66,6 +66,9 @@ export interface SubAgentDef {
    * 具体映射（别名 → 模型/Agent）由装配方负责，本模块只做透传。
    */
   model?: string;
+  /** 联网搜索开关（断链 C 修复）：从父请求透传，子代理继承主 Agent 的联网策略；
+   *  缺省 undefined → 引擎侧缺省即 true（保住 A-918+「缺省即开」语义，不传即开）。 */
+  networkEnabled?: boolean;
   /** 轮次预算上限（对齐业界 `maxTurns`），由装配方在 runner 内执行 */
   maxTurns?: number;
   /** 墙钟超时（毫秒）；超时即中断并标记 timeout */
@@ -148,6 +151,8 @@ export interface SubAgentRun {
 /** 派发上下文：透传 AbortSignal，runner 可据此实现端到端取消/超时中断。 */
 export interface SubAgentRunContext {
   signal: AbortSignal;
+  /** 联网搜索开关（断链 C 修复）：父请求透传，runner 据此决定子代理能否联网；缺省 undefined = 引擎缺省即开。 */
+  networkEnabled?: boolean;
 }
 
 /**
@@ -436,6 +441,8 @@ export class SubAgentManager {
       //   预算只是**防挂死**的下限保障，不该成为常态失败源；wait 上限严格大于它。
       timeoutMs: overrides.timeoutMs ?? DEFAULT_EXEC_BUDGET_MS,
       outputSchema: overrides.outputSchema,
+      // 断链 C 修复：兜底合成子代理同样继承父请求的联网开关（未传 = undefined → 引擎缺省即开）。
+      networkEnabled: overrides.networkEnabled,
     });
   }
 
@@ -691,7 +698,9 @@ export class SubAgentManager {
       let terminal: "done" | "fail" | "timeout" | "cancelled" = "done";
       try {
         await this.fireHook(this.hooks.onStart, run, effectiveDef);
-        const reply = await this.runner(effectiveDef, { signal: controller.signal });
+        // 断链 C 修复：把父请求透传下来的联网开关交给 runner（runner 再传给 engine.stream）。
+        // 这里用 effectiveDef.networkEnabled（委派出发时已写入 def），缺省 undefined = 引擎缺省即开。
+        const reply = await this.runner(effectiveDef, { signal: controller.signal, networkEnabled: effectiveDef.networkEnabled });
         if (controller.signal.aborted) {
           terminal = classifyAbort();
           run.error =

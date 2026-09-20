@@ -37,6 +37,17 @@ export interface HistoryRecord {
   /** A-966：交错思考时间线（思考/工具调用顺序；结构对齐 GUI TimelineStepLite，见 gui/src/renderer/pages/sessionCtxMeta.ts）。
    *  随历史落库，重启后思考历程可恢复「时间线」展示，不依赖 localStorage。 */
   timeline?: Array<{ kind: string; text?: string; name?: string; label?: string; detail?: string; result?: string }>;
+  /** A-1008：群聊（brainstorm）逐成员发言。
+   *
+   *  为什么必须有这个字段：群聊此前只存「把所有发言拼成的一个大字符串」，导致
+   *  ① 读回来是一条署名会话归属 Agent 的巨长气泡 —— 看起来就像"某个 Agent 出来把大家说的
+   *     总结复述了一遍"（用户历时很久的困扰）；
+   *  ② 重启后每个成员各自的气泡全部消失，只剩那一条揉在一起的。
+   *  存了 turns，读取端才能按成员展开成多条带各自 agentName/agentId 的消息。
+   *
+   *  `ai` 字段**保持原样**（拼好的文本）：它还是模型侧的对话历史，改它等于回归整条 prompt 链路。
+   *  即「一份给人看（turns）、一份给模型看（ai）」。 */
+  turns?: Array<{ name: string; agentId?: string; content: string; failed?: boolean }>;
 }
 
 function nowIso(): string {
@@ -107,6 +118,8 @@ export async function appendHistory(
   sessionId?: string,
   reasoning?: string,
   elapsedMs?: number,
+  /** A-1008：群聊逐成员发言（可选；仅群聊路径传）。见 HistoryRecord.turns 注释。 */
+  turns?: Array<{ name: string; agentId?: string; content: string; failed?: boolean }>,
 ): Promise<void> {
   const record: HistoryRecord = {
     agent_id: agentId,
@@ -117,6 +130,8 @@ export async function appendHistory(
     session_id: sessionId,
     reasoning,
     elapsed_ms: elapsedMs,
+    // 空数组不落 —— 免得每条普通记录都多一个无用字段（历史是行式 JSON，字段会线性放大文件）
+    ...(turns && turns.length > 0 ? { turns } : {}),
   };
   await withWriteLock(async () => {
     await ensureParent();
@@ -349,6 +364,8 @@ export interface HistoryStore {
     sessionId?: string,
     reasoning?: string,
     elapsedMs?: number,
+    /** A-1008：群聊逐成员发言（可选） */
+    turns?: Array<{ name: string; agentId?: string; content: string; failed?: boolean }>,
   ): Promise<void>;
   load(agentId?: string | null, limit?: number, sessionId?: string): Promise<HistoryRecord[]>;
   popLast(agentId: string, sessionId?: string): Promise<boolean>;
@@ -408,6 +425,41 @@ export async function clearSessionHistory(agentId: string, sessionId: string): P
       }
     }
     await atomicRewrite(kept);
+    return removed;
+  });
+}
+
+/** A-1017：清空该 Agent **没有 session_id** 的遗留历史（旧格式记录，按 `::default` 聚合）。
+ *
+ *  为什么必须有：会话列表的「孤儿历史惰性迁移」把这类记录当成该 Agent 的一个默认会话。
+ *  而删除会话走的是 `clearSessionHistory(agentId, sessionId)` —— 它要求 `session_id` **完全相等**，
+ *  这些记录一条都匹配不到、原地留下 → 下一次列表刷新又按同一规则建出一个新会话
+ *  （用户体感：这个会话**删不掉**，而且每次"复活"都换一个新 sessionId）。
+ *
+ *  调用时机 = 删除该 Agent 的**最后一个**会话时：其余会话还在的话，遗留记录尚未无人认领，
+ *  不该提前销毁用户数据。
+ */
+export async function clearLegacySessionHistory(agentId: string): Promise<number> {
+  return withWriteLock(async () => {
+    const lines = await readLines();
+    if (lines.length === 0) {
+      return 0;
+    }
+    const kept: string[] = [];
+    let removed = 0;
+    for (const l of lines) {
+      try {
+        const r = JSON.parse(l) as HistoryRecord;
+        if (r.agent_id === agentId && !r.session_id) {
+          removed++;
+          continue;
+        }
+        kept.push(JSON.stringify(r));
+      } catch {
+        kept.push(l);
+      }
+    }
+    if (removed > 0) { await atomicRewrite(kept); }
     return removed;
   });
 }

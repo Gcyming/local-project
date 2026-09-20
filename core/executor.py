@@ -24,6 +24,16 @@ from .llm import call_llm, call_api_provider
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _FRAMES_DIR = _PROJECT_ROOT / "data" / "generated" / "frames"
 
+# A-987：本地 mp4 路径提取 —— **必须允许空格**。
+# 旧版写的是 `[A-Za-z]:[\\/][^\s"'<>，。]+?\.mp4`：把空格排除在外，而项目自己就在
+# `D:\pilot project\`。后果不是"少提取一条"，而是**整条视频分段拼接链静默失效**：
+#   `D:\pilot project\data\...\seg.mp4` → 正则只吃到 `D:\pilot` → os.path.exists 为假
+#   → `_extract_mp4_path` 返回 ""，`_auto_concat_videos` 因不足 2 段而直接 return ""，
+#   全程不报任何错（用户只会看到"没有拼好的视频"）。
+# 改为"**惰性收尾到 .mp4**"：后缀本身就是天然终止符，既容得下空格，又不会把后面
+# 的说明文字/第二个路径一起吞进来（`a.mp4 和 b.mp4` 必须切成两条）。
+_MP4_PATH_RE = re.compile(r"""[A-Za-z]:[\\/][^\n"'<>|]*?\.mp4""", re.IGNORECASE)
+
 # Worker 最大轮次（防死循环）
 MAX_ROUNDS = 5  # A-066: 轮次上限 3→5（429 重试消耗轮次，3 轮不够）；耗尽后可交互重置/升级
 # 总任务超时（秒）
@@ -1046,8 +1056,8 @@ def _is_video_generation_task(st) -> bool:
 
 def _extract_mp4_path(result: str) -> str:
     """从子任务结果提取第一个本地 mp4 路径（真实存在）。"""
-    import re, os as _os
-    for m in re.finditer(r"[A-Za-z]:[\\/][^\s\"'<>，。]+?\.mp4", result or ""):
+    import os as _os
+    for m in _MP4_PATH_RE.finditer(result or ""):
         p = m.group(0).strip()
         if _os.path.exists(p):
             return p
@@ -1057,11 +1067,12 @@ def _extract_mp4_path(result: str) -> str:
 async def _auto_concat_videos(subtasks: list) -> str:
     """A-059: Swarm 视频分段自动拼接——成功子任务产出的本地 mp4（按子任务顺序，
     即分段顺序）≥2 段时用 video_concat 拼成完整视频。返回拼接后本地路径（失败空串）。"""
-    import re, os as _os
+    import os as _os
     paths = []
     for st in subtasks:
         if getattr(st, "state", None) and st.state.value == "done" and st.result:
-            for m in re.finditer(r"[A-Za-z]:[\\/][^\s\"'<>，。]+?\.mp4", st.result):
+            # A-987：这里曾用 `[^\s…]+?\.mp4`，含空格路径下提取为空 → 拼接静默跳过
+            for m in _MP4_PATH_RE.finditer(st.result):
                 p = m.group(0).strip()
                 if _os.path.exists(p) and p not in paths:
                     paths.append(p)

@@ -177,6 +177,18 @@ function Resolve-Vk([string]$name) {
   throw "无法识别的按键 '$name'（可用：enter/esc/tab/ctrl+alt+delete 风格组合 / f1-f12 / a-z / 0-9 / vk:<码>）"
 }
 
+# A-1014：指针定位的**唯一入口**（所有鼠标动作都从这里走）。
+# 为什么必须收口：原先 9 处全是 SetCursorPos(...) | Out-Null —— 返回值被吞。
+# SetCursorPos 会失败（坐标越出虚拟桌面、UAC 安全桌面在前台、输入被其它进程独占），
+# 失败后随后的 mouse_event 会把点击打在**指针停留的原处**，而回传给模型的 detail 仍写着
+# "已点击 (x,y)" → 模型以为点中了（用户反馈"用的时候总是糊涂"就是这个味道：动作静默打偏）。
+# 宁可抛错让 TS 侧回传 ok=false，也不要静默点错位置。
+function Move-SlimeCursor([int]$x, [int]$y) {
+  if (-not [SlimeInput]::SetCursorPos($x, $y)) {
+    throw "无法把指针移到 ($x, $y)：SetCursorPos 被系统拒绝（坐标可能超出虚拟桌面、UAC 安全桌面正在前台、或输入被其它进程独占）"
+  }
+}
+
 function Invoke-SlimeAction($req) {
   $k = $req.kind
   $x = 0; if ($null -ne $req.x) { $x = [int]$req.x }
@@ -210,18 +222,35 @@ function Invoke-SlimeAction($req) {
       $hit = Find-SlimeWindow $needle
       if ($null -eq $hit) { return @{ detail = "未找到标题包含「$needle」的窗口"; focused = $false } }
       [SlimeInput]::ShowWindow($hit.MainWindowHandle, 9) | Out-Null   # SW_RESTORE（最小化也拉回来）
-      [SlimeInput]::SetForegroundWindow($hit.MainWindowHandle) | Out-Null
+      $asked = [SlimeInput]::SetForegroundWindow($hit.MainWindowHandle)
       Start-Sleep -Milliseconds 250
       $r = New-Object SLIME_RECT
       [SlimeInput]::RectOf($hit.MainWindowHandle, [ref]$r) | Out-Null
-      return @{ focused = $true; detail = "已聚焦窗口「$($hit.MainWindowTitle)」"; title = $hit.MainWindowTitle; x = $r.Left; y = $r.Top; width = ($r.Right - $r.Left); height = ($r.Bottom - $r.Top) }
+      $rect = @{ title = $hit.MainWindowTitle; x = $r.Left; y = $r.Top; width = ($r.Right - $r.Left); height = ($r.Bottom - $r.Top) }
+      # A-1014：**回读真实前台窗口**，不再无条件宣布成功。
+      # 原因：SetForegroundWindow 在 Windows 上经常被拒（后台进程不得抢前台、前台锁定、
+      # 用户正在别的窗口操作…），返回值此前被丢弃、函数无条件返回 focused=$true
+      # → captureWindow / screen_focus 全部据此认为"已聚焦"，接着截到/点到压在上面的
+      # **另一个窗口**，全程零提示。这是"点错窗口 / 用起来总是糊涂"的直接来源。
+      $fg = [SlimeInput]::GetForegroundWindow()
+      if ($fg -eq $hit.MainWindowHandle) {
+        return @{ focused = $true; detail = "已聚焦窗口「$($hit.MainWindowTitle)」" } + $rect
+      }
+      $nowTitle = ''
+      try {
+        $p = Get-Process | Where-Object { $_.MainWindowHandle -eq $fg } | Select-Object -First 1
+        if ($null -ne $p) { $nowTitle = [string]$p.MainWindowTitle }
+      } catch {}
+      if (-not $nowTitle) { $nowTitle = '未知窗口' }
+      # 位置照常回传（上层仍可据此区域截图/坐标换算），但**如实说明没抢到前台**。
+      return @{ focused = $false; detail = "未能把窗口「$($hit.MainWindowTitle)」带到前台（SetForegroundWindow 返回 $asked，当前前台是「$nowTitle」）——画面可能被其它窗口遮挡；请先手动点一下该窗口，或换用无需焦点的操作方式" } + $rect
     }
     'move' {
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       return @{ detail = "已移动指针到 ($x, $y)" }
     }
     'click' {
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       Start-Sleep -Milliseconds 30
       [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
       Start-Sleep -Milliseconds 20
@@ -229,7 +258,7 @@ function Invoke-SlimeAction($req) {
       return @{ detail = "已在 ($x, $y) 左键单击" }
     }
     'right_click' {
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       Start-Sleep -Milliseconds 30
       [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
       Start-Sleep -Milliseconds 20
@@ -237,7 +266,7 @@ function Invoke-SlimeAction($req) {
       return @{ detail = "已在 ($x, $y) 右键单击" }
     }
     'middle_click' {
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       Start-Sleep -Milliseconds 30
       [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, [UIntPtr]::Zero)
       Start-Sleep -Milliseconds 20
@@ -245,7 +274,7 @@ function Invoke-SlimeAction($req) {
       return @{ detail = "已在 ($x, $y) 中键单击" }
     }
     'double_click' {
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       Start-Sleep -Milliseconds 30
       for ($i = 0; $i -lt 2; $i++) {
         [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
@@ -256,7 +285,7 @@ function Invoke-SlimeAction($req) {
       return @{ detail = "已在 ($x, $y) 双击" }
     }
     'long_press' {
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       Start-Sleep -Milliseconds 30
       $ms = 800; if ($null -ne $req.durationMs) { $ms = [int]$req.durationMs }
       [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
@@ -267,14 +296,14 @@ function Invoke-SlimeAction($req) {
     'drag' {
       $tx = 0; if ($null -ne $req.x2) { $tx = [int]$req.x2 }
       $ty = 0; if ($null -ne $req.y2) { $ty = [int]$req.y2 }
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       Start-Sleep -Milliseconds 40
       [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
       $steps = 12
       for ($i = 1; $i -le $steps; $i++) {
         $ix = [int]($x + ($tx - $x) * $i / $steps)
         $iy = [int]($y + ($ty - $y) * $i / $steps)
-        [SlimeInput]::SetCursorPos($ix, $iy) | Out-Null
+        Move-SlimeCursor $ix $iy
         Start-Sleep -Milliseconds 12
       }
       [SlimeInput]::mouse_event([SlimeInput]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
@@ -282,7 +311,7 @@ function Invoke-SlimeAction($req) {
     }
     'scroll' {
       $d = -100; if ($null -ne $req.delta) { $d = [int]$req.delta }
-      [SlimeInput]::SetCursorPos($x, $y) | Out-Null
+      Move-SlimeCursor $x $y
       $notches = [int]([Math]::Round($d / 100.0))
       if ($notches -eq 0) { $notches = if ($d -gt 0) { 1 } else { -1 } }
       for ($i = 0; $i -lt [Math]::Abs($notches); $i++) {
@@ -359,7 +388,7 @@ export class DesktopScreenBackend implements ScreenBackend {
   private pending: Pending[] = [];
   private stdoutBuf = "";
   private stderrBuf = "";
-  private cachedSize: { width: number; height: number } | null = null;
+  private cachedSize: { width: number; height: number; originX: number; originY: number } | null = null;
 
   /** 平台能力：目前完整实现 Windows；其它平台如实报错（不假装支持） */
   private unsupportedReason(): string | null {
@@ -506,8 +535,13 @@ export class DesktopScreenBackend implements ScreenBackend {
     const width = Number(r.result.width ?? 0);
     const height = Number(r.result.height ?? 0);
     if (!width || !height) { throw new Error("桌面分辨率解析失败"); }
-    this.cachedSize = { width, height };
-    return { backend: "desktop", target: target || "primary", width, height, label: `主显示器 ${width}×${height}` };
+    // A-1014：**必须**把虚拟桌面原点一起收下（PowerShell 侧 `size` 分支早就返回了
+    // `GetSystemMetrics(76/77)`，此前在这里被丢弃 → 整屏坐标基准的 origin 恒为 0 →
+    // 副屏在主屏左/上（vx/vy 为负）时点击整体偏移）。取不到时按 0 处理（单屏下正确）。
+    const originX = Number(r.result.originX ?? 0) || 0;
+    const originY = Number(r.result.originY ?? 0) || 0;
+    this.cachedSize = { width, height, originX, originY };
+    return { backend: "desktop", target: target || "primary", width, height, originX, originY, label: `主显示器 ${width}×${height}` };
   }
 
   async capture(target?: string, opts?: { marks?: boolean }): Promise<ScreenCaptureResult> {
@@ -521,10 +555,15 @@ export class DesktopScreenBackend implements ScreenBackend {
       // A-975：物理分辨率（坐标落地基准）
       let devW = this.cachedSize?.width ?? 0;
       let devH = this.cachedSize?.height ?? 0;
+      // A-1014：虚拟桌面原点 —— 图像 0 点 = 虚拟坐标 (vx,vy)，必须一并回传，
+      // 否则 controller 的坐标基准 origin 为 0，副屏在左/上时点击整体偏移（见 DisplayInfo 注释）。
+      let originX = this.cachedSize?.originX ?? 0;
+      let originY = this.cachedSize?.originY ?? 0;
       if (!devW || !devH) {
         try {
           const info = await this.displayInfo(target);
           devW = info.width; devH = info.height;
+          originX = info.originX ?? 0; originY = info.originY ?? 0;
         } catch { /* 尺寸取不到不阻断截图 */ }
       }
       const bytes = Math.floor((pngBase64.length * 3) / 4);
@@ -534,6 +573,7 @@ export class DesktopScreenBackend implements ScreenBackend {
       return {
         ok: true, pngBase64, dataUrl: opt.dataUrl,
         width: devW, height: devH,
+        originX, originY,
         imageWidth: imageW, imageHeight: imageH,
         bytes: opt.bytes || bytes,
         annotate: opts?.marks !== false
@@ -569,13 +609,15 @@ export class DesktopScreenBackend implements ScreenBackend {
     const r = await this.send({ kind: "focus", title });
     if (!r.ok || !r.result) { throw new Error(r.error ?? "聚焦窗口失败"); }
     const focused = Boolean(r.result.focused);
-    return {
-      focused,
-      detail: String(r.result.detail ?? ""),
-      rect: focused
-        ? { x: Number(r.result.x ?? 0), y: Number(r.result.y ?? 0), width: Number(r.result.width ?? 0), height: Number(r.result.height ?? 0) }
-        : undefined,
+    // A-1014：**无论是否抢到前台都回传矩形**（宿主两个分支都带 rect）。
+    // 上层据此仍能区域截图与坐标换算；是否"可安全操作"由上层结合 focused 决定，
+    // 不再把"没抢到前台"一律当成"窗口不可用"（窗口其实可见时那是可用路径）。
+    const rect = {
+      x: Number(r.result.x ?? 0), y: Number(r.result.y ?? 0),
+      width: Number(r.result.width ?? 0), height: Number(r.result.height ?? 0),
     };
+    const hasRect = rect.width > 0 && rect.height > 0;
+    return { focused, detail: String(r.result.detail ?? ""), rect: hasRect ? rect : undefined };
   }
 
   /**
@@ -590,9 +632,21 @@ export class DesktopScreenBackend implements ScreenBackend {
     if (!t) { return { ok: false, error: "需要窗口标题（片段即可）" }; }
     // ① 先聚焦：顺带把最小化/被遮挡的窗口拉到前台，否则会截到压在上面的别的窗口
     const f = await this.focusWindow(t);
-    if (!f.focused || !f.rect) { return { ok: false, error: f.detail || `未找到标题包含「${t}」的窗口` }; }
+    if (!f.rect) { return { ok: false, error: f.detail || `未找到标题包含「${t}」的窗口` }; }
     const rect = f.rect;
     if (rect.width <= 0 || rect.height <= 0) { return { ok: false, error: "窗口尺寸为 0（可能已最小化）" }; }
+    // A-1014：最小化窗口在 Windows 上被放在 (-32000, -32000) 附近。此时 SW_RESTORE 也没能
+    // 救回来（否则矩形会正常）→ 截这个区域只会得到屏幕外的空白，点击也会打到屏外。
+    // 这是**真不可用**，必须硬失败并说清原因（不要截一张空白图让模型瞎猜）。
+    if (rect.x <= -30000 || rect.y <= -30000) {
+      return { ok: false, error: `窗口「${t}」仍处于最小化状态（矩形 ${rect.x},${rect.y}）——请先手动还原该窗口，或改用不依赖窗口截图的方式` };
+    }
+    // A-1014：**没能抢到前台不再等于不能截**。窗口若是可见的（只是没获得焦点），
+    // 区域截图依然正确；只有当它被别的窗口盖住时画面才不是目标窗口 ——
+    // 那种情况交一张带 warning 的图给模型，让它自己看图判断，比硬失败更有用。
+    const focusWarning = f.focused
+      ? undefined
+      : `${f.detail}；本图只保证是屏幕该区域的画面，若被其它窗口遮挡请先手动把「${t}」切到前台`;
     // ② 区域截取
     const r = await this.send({ kind: "capture", rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } });
     if (!r.ok || !r.result) { return { ok: false, error: r.error ?? "窗口截图失败" }; }
@@ -608,6 +662,7 @@ export class DesktopScreenBackend implements ScreenBackend {
       originX: rect.x, originY: rect.y,            // ★ 区域原点
       imageWidth: opt.width, imageHeight: opt.height,
       bytes: opt.bytes || bytes,
+      warning: focusWarning,
       annotate: opts?.marks !== false
         ? {
             grid: true, marks: 0,

@@ -15,6 +15,8 @@
  */
 
 import type { ApiFormat } from "./router.js";
+// 正文特征表来自 upstreamErrorScope.ts 的唯一实现（A-157 收敛：三处同源实现合并）。
+import { isModelLevelErrorText } from "./upstreamErrorScope.js";
 
 /** 模型级实时能力快照（每次成功转发后从响应刷新；TTL 过期则重探） */
 export interface CapabilitySnapshot {
@@ -35,7 +37,7 @@ export interface CapabilitySnapshot {
   /** 最近一次上游错误类型（成功则清空）——用于引擎提前规避已知失效模型 */
   lastErrorType?: string;
   /**
-   * 该 provider:model 是否被判为「模型级失效」（404 模型不存在 / "Model is unavailable" / 区域限制）。
+   * 该 provider:model 是否被判为「模型级失效」（404 查无模型 / "Model is unavailable" / 区域限制）。
    * true 时引擎（ModelRouter 前置剔除）应直接跳过该模型，不必再试一次。
    * 与 lastErrorType 区别：401/403/429 属「供应商/账号级」问题（换模型也没用，同供应商其它模型可能仍可用），
    * 此时 modelDead 保持 false——只有明确「这个模型没了/下线了」才置 true。
@@ -143,18 +145,21 @@ export interface UpstreamResponseSignal {
  * 判定一次上游失败是否属于「模型级失效」——该模型本身没了（404 不存在 / 下线 / 区域限制），
  * 此时应切换同供应商另一模型（可降级）；而 401/403/429 属「供应商/账号级」问题，换模型无用。
  * 纯函数，便于单测。与 nextAuthOnFailure 的 abandon 语义同源但更细粒度（专供 modelDead 标志）。
+ *
+ * 正文特征表来自 upstreamErrorScope.ts 的唯一实现（isModelLevelErrorText）：RegionError /
+ * "Model is unavailable" / 智谱 1211（查无此模型码）等全部命中。本函数是对它的**超集**：
+ * 保留既有宽松模式（404 / `not.*found` / `no.*model` / `model_dead`），并叠加共享判据，
+ * 不削弱任何既有契约（404→true、401/429/503+local_model_error→false 等既有断言保持不变）。
  */
 export function isModelDeadError(errorType: string | undefined, errorStatus?: number): boolean {
   const err = (errorType ?? "").toLowerCase();
-  // 404 / 明确的"模型不存在/不可用" → 模型级失效
-  if (errorStatus === 404 || /not.*found|no.*model|model.*(unavailable|not.*found)|model_dead/.test(err)) {
+  // 404 / 明确的"模型不可用/查无" → 模型级失效
+  if (errorStatus === 404 || /not.*found|no.*model|model_dead/.test(err)) {
     return true;
   }
-  // 上游在错误正文里明确标注模型不可用（RegionError / "Model is unavailable"）
-  if (/regionerror|not available in your (country|region)|model (is |not )?unavailable/i.test(err)) {
-    return true;
-  }
-  return false;
+  // 上游在错误正文里明确标注模型不可用（RegionError / "Model is unavailable" / 智谱 1211 等，
+  // 正文特征表来自 upstreamErrorScope.ts 的唯一实现）
+  return isModelLevelErrorText(err);
 }
 
 /**
@@ -209,9 +214,12 @@ export function nextAuthOnFailure(format: ApiFormat, errorType: string | undefin
     const swap: RetryDecision["authSwap"] = format === "openai" || format === "responses" ? "x-api-key" : "bearer";
     return { authSwap: swap, reason: `鉴权失败（${errorStatus ?? err}），换 ${swap} 重试` };
   }
-  // 404 模型不存在：可能该网关不暴露这个模型 → 放弃，切下一个
-  if (errorStatus === 404 || /not.*found|no.*model|model.*unavailable/.test(err)) {
-    return { abandon: true, reason: "模型不存在/不可用，切换下一候选" };
+  // 404：模型查无/该网关不暴露这个模型 → 放弃，切下一个。
+  // 正文特征表来自 upstreamErrorScope.ts 的唯一实现（isModelLevelErrorText）：RegionError /
+  // "Model is unavailable" / 智谱 1211（查无此模型码）等也算「模型不可用」→ 同样 abandon 切下一个。
+  // 分支顺序与其余语义一律不动（401/403 支在前、429 支在其后）。
+  if (errorStatus === 404 || isModelLevelErrorText(err) || /not.*found|no.*model|model.*unavailable/.test(err)) {
+    return { abandon: true, reason: "模型不可用，切换下一候选" };
   }
   // 429 配额：不降级模型（同模型重试或换 provider），标记由引擎的限流逻辑处理
   if (errorStatus === 429 || /quota|rate|too.*many/.test(err)) {

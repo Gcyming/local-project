@@ -20,6 +20,9 @@
 import { RouteEntry, ApiFormat, inferApiFormat } from "../../core-ts/src/router.js";
 import { decrypt } from "../../core-ts/src/encryption.js";
 import { isChatCapableModel, ProviderConfig } from "../../core-ts/src/services/engine.js";
+// A-1024 ②：本地模型清单的键名唯一产地。这里曾是第 2 个硬编码产地
+//（`k !== "_local_models"`）—— 键名一改，网关会静默把清单当成真供应商去建路由。
+import { LOCAL_MODELS_KEY } from "../../core-ts/src/local_models.js";
 import { ChatClient, AnthropicClient, ResponsesClient, GoogleClient, UpstreamError } from "../../core-ts/src/llm/client.js";
 import {
   LiveProbeCache,
@@ -102,7 +105,7 @@ export class LlmGateway {
 
     // 按 provider 键名稳定排序（同名模型的候选顺序可预期）
     const entries = Object.entries(providers)
-      .filter(([k]) => k !== "_local_models")
+      .filter(([k]) => k !== LOCAL_MODELS_KEY)
       .sort(([a], [b]) => a.localeCompare(b));
 
     let priority = 10000;
@@ -110,6 +113,10 @@ export class LlmGateway {
       if (!cfg || typeof cfg !== "object") { continue; }
       const base = (cfg.api_base ?? "").trim().replace(/\/+$/, "");
       if (!base || !/^https?:\/\//i.test(base)) { continue; }
+      // ⚠️ A-1008：只剥 `/v1`，**故意不同于** joinApiEndpoint 的版本段通配 —— 别"顺手统一"。
+      // 这是「剥版本段」，与「拼端点」是两种操作：若把厂商自带版本段（智谱 `…/api/paas/v4`）
+      // 也剥掉，下游 ChatClient → joinApiEndpoint 看不到版本段 → 补 `/v1` → 404 回归。
+      // 端点拼接唯一实现：core-ts/src/llm/client.ts 的 joinApiEndpoint。
       const primaryBase = base.endsWith("/v1") ? base.slice(0, -3) : base;
 
       // 启用模型（id 字符串 + selected !== false + 对话能力过滤）

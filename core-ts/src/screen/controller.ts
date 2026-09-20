@@ -243,6 +243,14 @@ export class ScreenController {
       return { ok: false, error: `获取显示信息失败：${e instanceof Error ? e.message : String(e)}` };
     }
 
+    // A-1014：基准兜底 —— 按窗口截图记的基准挂在 key `id|`（target 为空）上，而调用方
+    // 可能带 target 来执行动作（两种 key 不一致）。此时**不能**再退回 info 的 1:1 口径
+    // （那正是偏移的来源），而是直接复用最近一次带原点的基准 —— 它更可能是"模型看的那张图"。
+    if (!this.basis.get(`${id}|${target ?? ""}`)) {
+      const loose = this.basis.get(`${id}|`);
+      if (loose) { this.basis.set(`${id}|${target ?? ""}`, loose); }
+    }
+
     // A-975：元素定位优先——比坐标可靠得多（取 bounds 中心，天然规避目测漂移）
     let resolved = action;
     let locateNote = "";
@@ -262,13 +270,32 @@ export class ScreenController {
     // 坐标换算：统一折算到物理像素（A-978：带上截图区域原点，按窗口截图才不会整体偏移）
     const key = `${id}|${target ?? ""}`;
     const basis = this.basis.get(key);
+    const space = resolved.coordSpace ?? (resolved.absolute === true ? "device" : "image");
+    /**
+     * A-1014：**没有基准就是错误**，不再静默按 1:1 当物理像素用。
+     *
+     * 改前的写法是 `basis?.imageWidth ?? info.width` / `regionW = basis?.deviceWidth ?? info.width`
+     * → 没有基准时比例恰好等于 1，模型给的 image 像素被直接当成物理像素。
+     * 屏幕宽 > 1600（截图会被缩到 1600）时这是**系统性偏移**，而且因为比例"看起来正常"
+     * （1.0）连日志都看不出异常：模型说"我点了 (800,450)"，实际点在 (800,450) 而它以为的
+     * 那张图上 (800,450) 对应屏幕 (1280,720)。用户"用起来总是糊涂"有这一份。
+     *
+     * 为什么是错误而不是回退：`device` 空间本来就不需要基准，而 `image`/`normalized`
+     * 离开截图就无从解释。与其猜一个比例，不如让模型先把截图拍了 —— 引导也是明确的
+     * （工具描述本就写着"图形操作前必须先截图确认当前画面"）。
+     */
+    if (space !== "device" && !basis) {
+      return {
+        ok: false,
+        error: "坐标基准缺失：本后端还没有截图记录，无法把「所见图像坐标」换算成屏幕坐标。请先调用 screen_capture（或 screen_ui_dump 定位元素）再执行动作；若坐标本就是物理像素，请显式传 coordSpace:\"device\"。",
+      };
+    }
     const imageW = basis?.imageWidth ?? info.width;
     const imageH = basis?.imageHeight ?? info.height;
     const regionW = basis?.deviceWidth ?? info.width;
     const regionH = basis?.deviceHeight ?? info.height;
     const ox = basis?.originX ?? 0;
     const oy = basis?.originY ?? 0;
-    const space = resolved.coordSpace ?? (resolved.absolute === true ? "device" : "image");
     const scaled: ScreenAction = {
       ...resolved,
       x: coordToDeviceInRegion(space, resolved.x, imageW, regionW, ox),

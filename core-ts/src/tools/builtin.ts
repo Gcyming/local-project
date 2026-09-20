@@ -57,10 +57,32 @@ function projectRootPath(p: string, ws = ""): string {
   return join(PROJECT_ROOT, p);
 }
 
+/** 路径是否落在 root 之内（含 root 本身）。
+ *
+ *  ⚠️ Windows 磁盘大小写不敏感，而**同一个目录**在不同来源下的拼写不同：
+ *  `realpath()` 返回磁盘上的规范拼写（如 `D:\pilot project`），而 `PROJECT_ROOT` 来自
+ *  进程 cwd / `import.meta.url`，可能是小写形态（如 `d:\pilot project`）。
+ *  逐字符 `startsWith` 在 win32 上因此会把**项目内的合法路径误判为「超出项目范围」**
+ *  ——实测：先判 `d:\…`（通过），realpath 后再判 `D:\…`（被拒），
+ *  症状是 file_read/file_write/file_list/code_check 对项目内**已存在**的文件一律报越界
+ *  （不存在的新文件反而正常，因为那条路径不走 realpath 复核）。
+ *
+ *  为什么只放宽 win32：POSIX 上大小写敏感是**真实语义**（`/a/Proj` 与 `/a/proj` 是两个目录），
+ *  放宽会让大小写敏感的 macOS 卷上出现真实沙箱逃逸。
+ *  （case-insensitive 前缀比较在 core-ts/src/sandbox.ts 的 isSystemPath 已有先例。） */
+function isInsideRoot(abs: string, root: string): boolean {
+  if (process.platform === "win32") {
+    const a = abs.toLowerCase();
+    const r = root.toLowerCase();
+    return a === r || a.startsWith(r + sep);
+  }
+  return abs === root || abs.startsWith(root + sep);
+}
+
 function isInsideProject(p: string, ws = ""): boolean {
   const allowedRoots = ws ? [resolve(PROJECT_ROOT), resolve(ws)] : [resolve(PROJECT_ROOT)];
   const abs = resolve(p);
-  return allowedRoots.some((root) => abs === root || abs.startsWith(root + sep));
+  return allowedRoots.some((root) => isInsideRoot(abs, root));
 }
 
 /** 解析路径：字符串规范化 + （项目根 ∪ 工作目录）校验（不要求存在）；已存在时 realpath 防 symlink 逃逸。
@@ -696,7 +718,7 @@ interface SubAgentRunLike {
 
 /** 注入接口：只有 delegate 是必需能力，其余按能力探测（兼容老装配与测试假实现） */
 interface SubAgentManagerLike {
-  delegate: (task: string, overrides?: { model?: string; agent?: string; agentId?: string }) => SubAgentRunLike | null;
+  delegate: (task: string, overrides?: { model?: string; agent?: string; agentId?: string; networkEnabled?: boolean }) => SubAgentRunLike | null;
   wait?: (id: string, timeoutMs?: number) => Promise<SubAgentRunLike | undefined>;
   list?: () => SubAgentRunLike[];
   catalog?: () => Array<{ name: string; description: string; source: string }>;
@@ -820,9 +842,12 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   const background = args.background === true || args.background === "true";
   const waitMs = resolveWaitMs(args.timeoutMs);
 
-  const overrides: { model?: string; agent?: string } = {};
+  const overrides: { model?: string; agent?: string; networkEnabled?: boolean } = {};
   if (model) { overrides.model = model; }
   if (wantAgent) { overrides.agent = wantAgent; }
+  // 断链 C 修复：继承父请求的联网开关（tool_loop 注入的 _network_enabled，模型不可伪造）。
+  // 父关联网→子代理也关；父未传（如 CLI 环境）→ undefined，交由引擎缺省即开（A-918+ 语义）。
+  overrides.networkEnabled = typeof args._network_enabled === "boolean" ? args._network_enabled : undefined;
   const run = subagentManagerRef.delegate(task, overrides);
   if (!run) {
     // A-980-R30：点名/自动路由都没命中时，必须把**现有清单**告诉模型，否则它只会反复瞎试。
@@ -2229,6 +2254,9 @@ ${body}
         if (r.annotate.marks > 0) { bits.push(`${r.annotate.marks} 个可点元素编号框（① ② ③…）`); }
         if (bits.length > 0) { parts.push(`已叠加标注：${bits.join(" + ")}`); }
       }
+      // A-1014：成功但有保留的提示必须**显式回传**，否则模型会把"可能被遮挡的画面"
+      // 当成目标窗口的当前状态（按窗口截图时没抢到前台就是这种情况）。
+      if (r.warning) { parts.push(`⚠️ ${r.warning}`); }
       parts.push(r.annotate?.marks ? "提示：优先用「编号框」或 screen_ui_dump + selector 点击，比目测坐标更准。" : "提示：对着网格刻度读数确定坐标。");
       if (r.dataUrl) { parts.push(`@@IMG@@${r.dataUrl}`); }
       return parts.join("\n");
@@ -2381,6 +2409,7 @@ ${body}
       "在本机桌面或安卓设备上执行图形操作（鼠标/键盘/触摸），执行后自动把操作后的画面回传给你。",
       "**【最推荐】元素定位**：安卓先 screen_ui_dump 拿到元素编号 → 传 selector:{index:5}（或 selector:{text:\"登录\"} / {id:\"com.x:id/btn\"}）→ 直接点元素中心，最准。",
       "**坐标定位**：x/y 默认是你**所见截图图像的像素坐标**（左上 0,0，直接对着图量，勿做换算）。也可传 coordSpace:\"normalized\"（0-1000）或 \"device\"（物理像素）。",
+      "**A-1014：image 坐标必须建立在「最近一次截图」之上**——本后端还没有截图记录时会**直接报错「坐标基准缺失」**（不再猜比例）。所以按坐标操作前先 screen_capture；若你给的本来就是物理像素，请显式传 coordSpace:\"device\"。",
       "支持的动作 kind：",
       "  click / tap（点按，需 selector 或 x,y）",
       "  double_click（双击）／long_press（长按，可选 durationMs）",
@@ -2415,7 +2444,7 @@ ${body}
         key: { type: "string", description: "按键名（key 用），如 Enter / ctrl+c / BACK" },
         delta: { type: "number", description: "滚动量（scroll 用）：正=向上，负=向下" },
         durationMs: { type: "number", description: "时长毫秒（long_press / swipe / drag / wait）" },
-        coordSpace: { type: "string", description: "坐标语义：image（默认，所见图像像素）/ normalized（0-1000）/ device（物理像素）" },
+        coordSpace: { type: "string", description: "坐标语义：image（默认，所见图像像素，需先截图）／ normalized（0-1000，需先截图）／ device（物理像素，无需截图基准）" },
         absolute: { type: "boolean", description: "历史字段：true 等价 coordSpace=device" },
       },
       required: ["kind"],
@@ -2457,8 +2486,17 @@ ${body}
     if (!title) { return "[错误] 需要 title（窗口标题的片段即可）"; }
     try {
       const r = await screenControllerRef.focusWindow(backend, title);
-      if (!r.focused) { return `[未聚焦] ${r.detail}——可先 screen_windows 查看可用窗口标题`; }
       const rect = r.rect ? `矩形(${r.rect.x},${r.rect.y},${r.rect.width},${r.rect.height})` : "";
+      // A-1014：没抢到前台**不再等同于"没找到窗口"**——窗口可能就在那儿、只是 Windows
+      // 拒绝把前台交给后台进程（SetForegroundWindow 的已知限制）。如实说明并给出下一步，
+      // 而不是让模型以为窗口不存在、反复重试同一个标题。
+      if (!r.focused) {
+        return [
+          `[未获得前台] ${r.detail}`,
+          rect ? `窗口位置：${rect}（可用它按窗口截图或直接换算坐标）` : "",
+          "可先 screen_windows 确认标题；若窗口可见只是没被激活，可直接 screen_capture 传 window 试试区域截图。",
+        ].filter(Boolean).join("\n");
+      }
       return `[已聚焦] ${r.detail} ${rect}\n提示：接着 screen_capture 看图（网格刻度）→ screen_action 点击。`;
     } catch (e) {
       return `[错误] ${e instanceof Error ? e.message : String(e)}`;
