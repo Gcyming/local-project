@@ -10,10 +10,24 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { extractProducts, productIconUrl, parseDiffStat, parseDiffFull, diffLines, stripDiffTag } from "../../gui/src/renderer/pages/ChatPanel.js";
+/*
+ * A-990：被测目标已从 `ChatPanel.tsx` 拆到两个**无 JSX 的纯模块**。
+ * 这不只是搬家 —— 此前本文件 import 组件，等于在测试的模块图里拉进一个 5000+ 行 React 组件
+ * 及其全部静态资源；组件加一个 svg 导入就会让根工程的类型检查全线报红（实测 17 条 TS2307）。
+ * 现在测试只依赖纯逻辑，组件怎么长大都与本文件无关。
+ */
+import { extractProducts, parseDiffStat, parseDiffFull, diffLines, stripDiffTag, type ToolEvent } from "../../gui/src/renderer/pages/chatProducts.js";
+import { productIconUrl } from "../../gui/src/renderer/pages/productIcons.js";
 
-interface Ev { name: string; detail?: string; result?: string; }
-const ev = (name: string, detail?: string): Ev => ({ name, detail });
+/**
+ * 造一条工具留痕。类型用 **组件里真实导出的 `ToolEvent`**，不再自造 `Ev` + `as Ev[]` 强转 ——
+ * 强转是"字段对不上却长期只有 9 条类型错报红、没人管"的根源（`Ev` 缺 `id`/`label`）。
+ * `id` 自增、`label` 取工具名：被测的 extractProducts 只读 name/detail/result，
+ * 但对象仍必须是**完整的合法事件**，否则测的就不是真实入参形态。
+ */
+let evSeq = 0;
+const ev = (name: string, detail?: string, result?: string): ToolEvent =>
+  ({ id: (evSeq += 1), name, label: name, detail, result });
 
 /** 把 old/new 文本包成 file_write 的 result（A-172 同款 [__slime_diff__] 标记） */
 const diffResult = (oldTxt: string, newTxt: string): string =>
@@ -24,13 +38,59 @@ function iconExists(src: string): boolean {
   return /\.svg$/.test(src) && src.length > 0;
 }
 
+/* ═══════════ A-990：结构守卫 —— 纯逻辑模块不得长回组件依赖 ═══════════
+ *
+ * 为什么要有这条：本次把 `ChatPanel.tsx`（5000+ 行）里的纯函数拆出来，动机不是"文件太长"，
+ * 而是**测试只能从组件 import** 造成的双向耦合 —— 组件加一个 svg 导入，根类型检查就全线报红
+ * （实测 17 条 TS2307）。拆完如果不设守卫，下次有人图省事又会把工具函数写回组件，
+ * 或者给纯模块加一句 `import React`（"顺便渲染个东西"），耦合就悄悄回来了。
+ * 所以这里直接**读源码**把边界钉死：纯模块必须保持无 React / 无 JSX / 无（除 productIcons 外的）资源导入。
+ */
+describe("结构守卫：纯逻辑模块不得反向依赖组件或资源", () => {
+  /*
+   * ⚠️ 路径必须用 `import.meta.url` 解析，**不能**用相对 CWD 的字符串：
+   * 测试文件的 `import "../../gui/..."` 是相对**测试文件**解析的，而 `readFileSync("gui/...")`
+   * 是相对**进程工作目录**解析的 —— 两者混用会在"从别的目录跑 vitest"时静默读错文件
+   * （读不到会抛错还看得见，更糟的是读到另一个同名文件而测试全绿）。
+   */
+  const ROOT = new URL("../../", import.meta.url); // tests/core-ts/ → 仓库根
+  const read = (rel: string): string => readFileSync(new URL(rel, ROOT), "utf8");
+  const PAGES = "gui/src/renderer/pages/";
+
+  it("chatProducts.ts / liveMonitor.ts 不得 import React、react-dom 或任何静态资源", () => {
+    for (const f of ["chatProducts.ts", "liveMonitor.ts"]) {
+      const src = read(PAGES + f);
+      // 只看 import 语句，避免把文件头注释里"提到 React"也算违规
+      const imports = src.split(/\r?\n/).filter((l) => /^\s*import\b/.test(l)).join("\n");
+      expect(imports, `${f} 不该有 import 语句（当前：${imports || "无"}）`).toBe("");
+      expect(src).not.toMatch(/from\s+["']react/);
+    }
+  });
+
+  it("静态资源依赖只允许出现在 productIcons.ts（唯一的资源依赖点）", () => {
+    for (const f of ["chatProducts.ts", "liveMonitor.ts"]) {
+      expect(read(PAGES + f), `${f} 不得导入 svg/png 等资源`).not.toMatch(/\.(svg|png|jpe?g|gif|webp|ico)["']/);
+    }
+    // 反向确认：productIcons.ts 确实是那个资源依赖点（否则上面两条等于空转）
+    expect(read(PAGES + "productIcons.ts")).toMatch(/\.svg["']/);
+  });
+
+  it("测试的模块图里不得再出现 ChatPanel（这就是本次拆分的验收标准）", () => {
+    for (const name of ["tests/core-ts/live-monitor.spec.ts", "tests/core-ts/gui-products.spec.ts"]) {
+      const src = read(name);
+      const imported = src.split(/\r?\n/).filter((l) => /^\s*import\b/.test(l) && /ChatPanel\.js/.test(l));
+      expect(imported, `${name} 仍在 import 组件：${imported.join(" | ")}`).toEqual([]);
+    }
+  });
+});
+
 describe("extractProducts（产物文件提炼）", () => {
   it("优先写产物：file_write 前置、file_read 补充", () => {
     const out = extractProducts([
       ev("file_read", "core/sandbox.py"),
       ev("file_write", "core/agent.py"),
       ev("web_fetch", ""),
-    ] as Ev[]);
+    ]);
     expect(out[0]).toEqual({ rel: "core/agent.py", name: "agent.py", kind: "write", ext: "py" });
     expect(out[1]).toEqual({ rel: "core/sandbox.py", name: "sandbox.py", kind: "read", ext: "py" });
     expect(out).toHaveLength(2);
@@ -40,7 +100,7 @@ describe("extractProducts（产物文件提炼）", () => {
     const out = extractProducts([
       ev("file_write", "a.ts"),
       ev("file_read", "a.ts"),
-    ] as Ev[]);
+    ]);
     expect(out).toHaveLength(1);
     expect(out[0]).toEqual({ rel: "a.ts", name: "a.ts", kind: "write", ext: "ts" });
   });
@@ -50,7 +110,7 @@ describe("extractProducts（产物文件提炼）", () => {
       ev("file_write", "https://ex.com/a.ts"),
       ev("file_write", "   "),
       ev("file_read", ""),
-    ] as Ev[]);
+    ]);
     expect(out).toHaveLength(0);
   });
 
@@ -59,7 +119,7 @@ describe("extractProducts（产物文件提炼）", () => {
       ev("bash", "python main.py"),
       ev("web_fetch", "https://ex.com"),
       ev("file_write", "gui/src/index.ts"),
-    ] as Ev[]);
+    ]);
     expect(out).toHaveLength(1);
     expect(out[0].rel).toBe("gui/src/index.ts");
     expect(out[0].name).toBe("index.ts");
@@ -71,7 +131,7 @@ describe("extractProducts（产物文件提炼）", () => {
       ev("file_write", "Excel.xlsx"),
       ev("file_write", "model.gguf"),
       ev("file_write", "style.css"),
-    ] as Ev[]);
+    ]);
     expect(out).toEqual([
       { rel: "word.docx", name: "word.docx", kind: "write", ext: "docx" },
       { rel: "Excel.xlsx", name: "Excel.xlsx", kind: "write", ext: "xlsx" },
@@ -81,13 +141,13 @@ describe("extractProducts（产物文件提炼）", () => {
   });
 
   it("file_write 带 [__slime_diff__] 标记 → 附变更统计（+n -m 数据源）", () => {
-    const out = extractProducts([{ name: "file_write", detail: "a.ts", result: diffResult("line1\nline2\n", "line1\nline2\nline3\nline4\n") }] as Ev[]);
+    const out = extractProducts([ev("file_write", "a.ts", diffResult("line1\nline2\n", "line1\nline2\nline3\nline4\n"))]);
     expect(out[0].diff).toEqual({ add: 2, del: 0 });
   });
 
   it("无 diff 标记 / 损坏 base64 → 不附变更统计（卡片不显示 +n -m）", () => {
-    expect(extractProducts([ev("file_write", "a.ts")] as Ev[])[0].diff).toBeUndefined();
-    expect(extractProducts([{ name: "file_write", detail: "a.ts", result: "[__slime_diff__]!!!|###[/__slime_diff__]" }] as Ev[])[0].diff).toBeUndefined();
+    expect(extractProducts([ev("file_write", "a.ts")])[0].diff).toBeUndefined();
+    expect(extractProducts([ev("file_write", "a.ts", "[__slime_diff__]!!!|###[/__slime_diff__]")])[0].diff).toBeUndefined();
   });
 });
 
@@ -169,7 +229,7 @@ describe("diffLines（行级 LCS diff——产物卡展开红绿行）", () => {
   });
 
   it("extractProducts 对带标记的 file_write 同时附 diff 计数与 diffFull 全文", () => {
-    const out = extractProducts([{ name: "file_write", detail: "a.ts", result: diffResult("a\nb\n", "a\nb\nc\n") }] as Ev[]);
+    const out = extractProducts([ev("file_write", "a.ts", diffResult("a\nb\n", "a\nb\nc\n"))]);
     expect(out[0].diff).toEqual({ add: 1, del: 0 });
     expect(out[0].diffFull).toEqual({ old: "a\nb\n", new: "a\nb\nc\n" });
   });

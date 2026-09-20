@@ -9,9 +9,15 @@ import { inferModelCapabilities, isAggregatorGateway, sortEfforts, MODEL_CAPABIL
 
 describe("inferModelCapabilities（模型 ID 推断，单一真相源）", () => {
   it("deepseek 全系识别为思考模型（含 v4-pro，此前漏判的回归锚点）", () => {
-    expect(inferModelCapabilities("deepseek-v4-pro")).toEqual({ supported: true, efforts: ["low", "high", "max"], vendor: "deepseek", thinkingParam: "reasoning_effort", endpoint: "openai", context: 1048576, maxOut: 65536 });
-    expect(inferModelCapabilities("deepseek-reasoner")).toEqual({ supported: true, efforts: ["low", "high", "max"], vendor: "deepseek", thinkingParam: "reasoning_effort", endpoint: "openai", context: 1048576, maxOut: 65536 });
-    expect(inferModelCapabilities("DeepSeek-R1")).toEqual({ supported: true, efforts: ["low", "high", "max"], vendor: "deepseek", thinkingParam: "reasoning_effort", endpoint: "openai", context: 1048576, maxOut: 65536 });
+    // maxOut = 393216（384K）：官方英文定价页 "MAX OUTPUT: 384K"，此前本表写 65536（64K）低 6 倍。
+    // 双重印证：官方 CONTEXT LENGTH 1M / MAX OUTPUT 384K + LiteLLM 首方条目 max_output_tokens=393216。
+    expect(inferModelCapabilities("deepseek-v4-pro")).toEqual({ supported: true, efforts: ["low", "high", "max"], vendor: "deepseek", thinkingParam: "reasoning_effort", endpoint: "openai", context: 1048576, maxOut: 393216 });
+    expect(inferModelCapabilities("deepseek-reasoner")).toEqual({ supported: true, efforts: ["low", "high", "max"], vendor: "deepseek", thinkingParam: "reasoning_effort", endpoint: "openai", context: 1048576, maxOut: 393216 });
+    expect(inferModelCapabilities("DeepSeek-R1")).toEqual({ supported: true, efforts: ["low", "high", "max"], vendor: "deepseek", thinkingParam: "reasoning_effort", endpoint: "openai", context: 1048576, maxOut: 393216 });
+    // A-989：当前官方模型名是 deepseek-flash（服务 DeepSeek-V4.1-Flash），v4-flash 是退休别名 —— 必须都被识别
+    expect(inferModelCapabilities("deepseek-flash").vendor).toBe("deepseek");
+    expect(inferModelCapabilities("deepseek-v4.1-flash").vendor).toBe("deepseek");
+    expect(inferModelCapabilities("deepseek-v4-flash").vendor).toBe("deepseek");
   });
 
   it("gpt-5 支持 xhigh/max，o 系列仅 low/medium/high", () => {
@@ -20,7 +26,8 @@ describe("inferModelCapabilities（模型 ID 推断，单一真相源）", () =>
   });
 
   it("claude opus/sonnet 支持 xhigh/max，其余 claude 仅 low/medium/high", () => {
-    expect(inferModelCapabilities("claude-sonnet-4-6")).toEqual({ supported: true, efforts: ["low", "medium", "high", "xhigh", "max"], vendor: "claude", thinkingParam: "reasoning_effort", endpoint: "anthropic", context: 200000, maxOut: 64000 });
+    // A-989：Sonnet 4.5 起官方支持 1M 上下文（此前本表供应商级兜底写死 200K，把 1M 锁成 200K）
+    expect(inferModelCapabilities("claude-sonnet-4-6")).toEqual({ supported: true, efforts: ["low", "medium", "high", "xhigh", "max"], vendor: "claude", thinkingParam: "reasoning_effort", endpoint: "anthropic", context: 1048576, maxOut: 64000 });
     expect(inferModelCapabilities("claude-haiku-4-5")).toEqual({ supported: true, efforts: ["low", "medium", "high"], vendor: "claude", thinkingParam: "reasoning_effort", endpoint: "anthropic", context: 200000, maxOut: 64000 });
   });
 

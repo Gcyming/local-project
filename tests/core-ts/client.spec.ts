@@ -1,5 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import { ChatClient, AnthropicClient, ResponsesClient, GoogleClient, UpstreamError, RETRY_429_BACKOFF } from "../../core-ts/src/llm/client.js";
+import { ChatClient, AnthropicClient, ResponsesClient, GoogleClient, UpstreamError, RETRY_429_BACKOFF, joinApiEndpoint } from "../../core-ts/src/llm/client.js";
+import type { ChatMessage, ChatResponse } from "../../shared/gen/schemas.js";
+
+/**
+ * 取首个 choice 的 message。
+ *
+ * `ChatChoice.message` 在 `shared/gen/schemas.ts` 里是 **optional**（wire 上确实可能没有，
+ * 例如只带 finish_reason 的响应），所以 `r.choices[0].message.content` 属于潜在的
+ * undefined 解引用 —— 这就是本文件 7 条 TS2532 的共同根因。
+ *
+ * 用**显式抛错**而非 `?.`：这些用例断言的是具体文本，message 缺失即失败；
+ * 写成 `?.` 会把"整个 message 没了"降级成 `expected undefined to be '答案'`，看不出真因。
+ */
+function firstMessage(r: ChatResponse): ChatMessage {
+  const m = r.choices[0]?.message;
+  if (!m) { throw new Error("响应缺少 choices[0].message（schema 里该字段可选，但本用例要求它存在）"); }
+  return m;
+}
 
 function sseBody(lines: string[]): Response {
   const text = lines.join("\n") + "\n";
@@ -36,12 +53,21 @@ describe("ChatClient（OpenAI 兼容，语义移植自 core/llm.py _RETRY_429_BA
     await mk("https://gw.example.com/v1/chat/completions").chat({ messages: [] });
     // 完整路径 + 尾斜杠
     await mk("https://gw.example.com/v1/chat/completions/").chat({ messages: [] });
+    // ⚠️ A-1008 回归：厂商 base 自带**非 /v1** 的版本段。智谱官方 base =
+    //    https://open.bigmodel.cn/api/paas/v4，旧逻辑只硬化 endsWith("/v1") →
+    //    拼出 /api/paas/v4/v1/chat/completions → 上游 404（用户实测群里某成员每轮发言都失败）。
+    await mk("https://open.bigmodel.cn/api/paas/v4").chat({ messages: [] });
+    await mk("https://open.bigmodel.cn/api/paas/v4/").chat({ messages: [] });
+    await mk("https://open.bigmodel.cn/api/paas/v4/chat/completions").chat({ messages: [] });
     expect(urls).toEqual([
       "https://gw.example.com/v1/chat/completions",
       "https://gw.example.com/v1/chat/completions",
       "https://gw.example.com/v1/chat/completions",
       "https://gw.example.com/v1/chat/completions",
       "https://gw.example.com/v1/chat/completions",
+      "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+      "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+      "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     ]);
   });
 
@@ -945,8 +971,8 @@ describe("ResponsesClient（OpenAI Responses API，GPT-5 系列）", () => {
     expect(captured.body.input).toEqual([{ role: "user", content: "hi" }]);
     expect(captured.body.instructions).toBe("你是助手");
     expect(captured.body.reasoning).toEqual({ effort: "high" });
-    expect(r.choices[0].message.content).toBe("答案");
-    expect(r.choices[0].message.reasoning_content).toBe("思考中...");
+    expect(firstMessage(r).content).toBe("答案");
+    expect(firstMessage(r).reasoning_content).toBe("思考中...");
     expect(r.usage?.prompt_tokens).toBe(5);
   });
 });
@@ -967,8 +993,8 @@ describe("GoogleClient（Gemini generateContent）", () => {
     expect(captured.url).toContain("gemini-3-flash:generateContent");
     expect(captured.body.contents).toEqual([{ role: "user", parts: [{ text: "hi" }] }]);
     expect(captured.body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "HIGH" });
-    expect(r.choices[0].message.content).toBe("回答");
-    expect(r.choices[0].message.reasoning_content).toBe("思考");
+    expect(firstMessage(r).content).toBe("回答");
+    expect(firstMessage(r).reasoning_content).toBe("思考");
     expect(r.usage?.prompt_tokens).toBe(5);
   });
 });
@@ -994,7 +1020,7 @@ describe("ResponsesClient 工具往返", () => {
     ] } as any);
     expect(captured.body.input.some((i: any) => i.type === "function_call_output" && i.call_id === "call_1")).toBe(true);
     expect(captured.body.input.some((i: any) => i.type === "function_call" && i.name === "get_weather")).toBe(true);
-    expect(r.choices[0].message.tool_calls?.[0].function.name).toBe("get_weather");
+    expect(firstMessage(r).tool_calls?.[0].function.name).toBe("get_weather");
   });
 });
 
@@ -1005,8 +1031,8 @@ describe("GoogleClient 工具往返", () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
     const c = new GoogleClient({ baseUrl: "https://g", apiKey: "k", fetchImpl });
     const r = await c.chat({ model: "gemini-3", messages: [{ role: "user", content: "查天气" }] } as any);
-    expect(r.choices[0].message.tool_calls?.[0].function.name).toBe("get_weather");
-    expect(r.choices[0].message.tool_calls?.[0].function.arguments).toBe(JSON.stringify({ city: "beijing" }));
+    expect(firstMessage(r).tool_calls?.[0].function.name).toBe("get_weather");
+    expect(firstMessage(r).tool_calls?.[0].function.arguments).toBe(JSON.stringify({ city: "beijing" }));
   });
 });
 
@@ -1155,5 +1181,69 @@ describe("parseBillingExpr（new-api 分档计费公式解析）", () => {
     const r = parseBillingExpr("len <= abc ? tier(\"a\", p*1) : tier(\"b\", p*2)");
     expect(r?.boundary).toBeUndefined();
     expect(r?.tiers).toEqual([]);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────
+ * A-1008：API 端点拼接**唯一实现**的正交用例。
+ *
+ * 为什么单独立一组：上面那组走 ChatClient.chat()（含 fetch mock，只覆盖 openai 形态）。
+ * 端点规则被 Chat / Anthropic / Responses / Gemini(含 streamGenerateContent) / thread_worker
+ * **六处**调用 —— 必须在**规则层**穷举，否则「改一处漏四处」会再次发生
+ * （智谱 /v4 被拼成 /v4/v1/chat/completions 即此类事故）。
+ * ───────────────────────────────────────────────────────────── */
+describe("joinApiEndpoint（A-1008 端点拼接唯一实现）", () => {
+  it("base 无版本段 → 补上 path 的版本段", () => {
+    expect(joinApiEndpoint("https://gw.example.com", "/v1/chat/completions"))
+      .toBe("https://gw.example.com/v1/chat/completions");
+  });
+
+  it("base 带 /v1 → 不重复补版本段", () => {
+    expect(joinApiEndpoint("https://api.deepseek.com/v1", "/v1/chat/completions"))
+      .toBe("https://api.deepseek.com/v1/chat/completions");
+  });
+
+  it("⚠️ 回归：base 带非 /v1 的厂商版本段（智谱 /v4）→ 不再插入 /v1", () => {
+    expect(joinApiEndpoint("https://open.bigmodel.cn/api/paas/v4", "/v1/chat/completions"))
+      .toBe("https://open.bigmodel.cn/api/paas/v4/chat/completions");
+  });
+
+  it("字母后缀版本段（/v1beta）整体吃掉 → 不产生 /v1beta/v1beta", () => {
+    expect(joinApiEndpoint("https://generativelanguage.googleapis.com/v1beta", "/v1beta/models/gemini-2.5-pro:generateContent"))
+      .toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent");
+  });
+
+  it("尾斜杠归一（含多重斜杠）", () => {
+    expect(joinApiEndpoint("https://gw.example.com/v1/", "/v1/chat/completions"))
+      .toBe("https://gw.example.com/v1/chat/completions");
+    expect(joinApiEndpoint("https://gw.example.com///", "/v1/chat/completions"))
+      .toBe("https://gw.example.com/v1/chat/completions");
+  });
+
+  it("幂等：已含完整 path（可带尾斜杠）→ 原样返回，可重复调用", () => {
+    const full = "https://gw.example.com/v1/chat/completions";
+    expect(joinApiEndpoint(full, "/v1/chat/completions")).toBe(full);
+    expect(joinApiEndpoint(full + "/", "/v1/chat/completions")).toBe(full);
+    expect(joinApiEndpoint(full, "/v1/chat/completions")).toBe(full);
+    const zp = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+    expect(joinApiEndpoint(zp, "/v1/chat/completions")).toBe(zp);
+  });
+
+  it("base 已含功能段（无版本，极端自定义网关）→ 原样返回", () => {
+    expect(joinApiEndpoint("https://gw.example.com/chat/completions", "/v1/chat/completions"))
+      .toBe("https://gw.example.com/chat/completions");
+  });
+
+  it("空 base → 退化为 path（不产出畸形相对串）", () => {
+    expect(joinApiEndpoint("", "/v1/chat/completions")).toBe("/v1/chat/completions");
+  });
+
+  it("Anthropic / Responses / Gemini(流式) 三种 path 同样走通", () => {
+    expect(joinApiEndpoint("https://api.anthropic.com", "/v1/messages"))
+      .toBe("https://api.anthropic.com/v1/messages");
+    expect(joinApiEndpoint("https://api.openai.com/v1", "/v1/responses"))
+      .toBe("https://api.openai.com/v1/responses");
+    expect(joinApiEndpoint("https://generativelanguage.googleapis.com", "/v1beta/models/m:streamGenerateContent?alt=sse"))
+      .toBe("https://generativelanguage.googleapis.com/v1beta/models/m:streamGenerateContent?alt=sse");
   });
 });

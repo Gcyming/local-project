@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ChatService, ChatEngine, ChatEngineCall, EngineChunk, ChatEngineResult, parseSwarmAnalysis, extractThinkingFromReply, createThinkingStripper, promoteOrphanThinking, splitUntaggedThinking } from "../../core-ts/src/services/chat.js";
 import { AgentRegistry, AgentState, emptyPersona } from "../../core-ts/src/services/agents.js";
-import { HistoryStore, HistoryRecord } from "../../core-ts/src/services/history.js";
+import { memoryHistoryStore, type MemoryHistoryStore } from "./helpers/memoryHistoryStore.js";
 import { ServerA2ABus } from "../../core-ts/src/a2a.js";
 import { AlarmBus } from "../../core-ts/src/services/stats.js";
 
@@ -57,31 +57,6 @@ class FakeEngine implements ChatEngine {
     }
     return this.streamImpl(opts);
   });
-}
-
-class MemHistory implements HistoryStore {
-  records: HistoryRecord[] = [];
-  async append(agentId: string, user: string, ai: string, success = true, sessionId?: string, reasoning?: string, elapsedMs?: number): Promise<void> {
-    this.records.push({
-      agent_id: agentId, user, ai, success,
-      timestamp: new Date().toISOString(),
-      session_id: sessionId,
-      reasoning,
-      elapsed_ms: elapsedMs,
-    });
-  }
-  async load(agentId: string | null = null, limit = 200): Promise<HistoryRecord[]> {
-    return this.records.filter((r) => agentId === null || r.agent_id === agentId).slice(-limit);
-  }
-  async popLast(agentId: string): Promise<boolean> {
-    for (let i = this.records.length - 1; i >= 0; i--) {
-      if (this.records[i].agent_id === agentId) {
-        this.records.splice(i, 1);
-        return true;
-      }
-    }
-    return false;
-  }
 }
 
 function quietLogger(): Pick<Console, "warn" | "info" | "debug"> {
@@ -138,7 +113,7 @@ describe("ChatService.analyze", () => {
     dir = await mkdtemp(join(tmpdir(), "slime-chat-"));
     reg = await makeRegistry(dir, [makeAgent()]);
     engine = new FakeEngine();
-    service = new ChatService({ registry: reg, engine, logger: quietLogger() });
+    service = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
   });
 
   afterEach(async () => {
@@ -159,7 +134,9 @@ describe("ChatService.analyze", () => {
   it("解析失败 → 降级 chat + 告警日志", async () => {
     engine.chatImpl = async () => ({ reply: "我不会 JSON。" });
     const logger = quietLogger();
-    const svc = new ChatService({ registry: reg, engine, logger });
+    // A-1017：**必须**注入内存 history —— 缺省值是 fileHistoryStore，会把测试数据写进
+    // 真实 config/history.jsonl（本轮幽灵会话事故的源头之一）。
+    const svc = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger });
     const r = await svc.analyze("agent_test1", "hello");
     expect(r.action).toBe("chat");
     expect(r.parse_ok).toBe(false);
@@ -171,7 +148,7 @@ describe("ChatService.chat", () => {
   let dir: string;
   let reg: AgentRegistry;
   let engine: FakeEngine;
-  let history: MemHistory;
+  let history: MemoryHistoryStore;
   let bus: ServerA2ABus;
   let service: ChatService;
   const alarms = new AlarmBus();
@@ -182,7 +159,7 @@ describe("ChatService.chat", () => {
     dir = await mkdtemp(join(tmpdir(), "slime-chat-"));
     reg = await makeRegistry(dir, [makeAgent()]);
     engine = new FakeEngine();
-    history = new MemHistory();
+    history = memoryHistoryStore();
     service = new ChatService({ registry: reg, engine, history, bus, alarms, logger: quietLogger() });
   });
 
@@ -360,7 +337,7 @@ describe("ChatService.stream", () => {
   let dir: string;
   let reg: AgentRegistry;
   let engine: FakeEngine;
-  let history: MemHistory;
+  let history: MemoryHistoryStore;
   let service: ChatService;
   const alarms = new AlarmBus();
 
@@ -369,7 +346,7 @@ describe("ChatService.stream", () => {
     dir = await mkdtemp(join(tmpdir(), "slime-stream-"));
     reg = await makeRegistry(dir, [makeAgent()]);
     engine = new FakeEngine();
-    history = new MemHistory();
+    history = memoryHistoryStore();
     service = new ChatService({ registry: reg, engine, history, alarms, logger: quietLogger() });
   });
 

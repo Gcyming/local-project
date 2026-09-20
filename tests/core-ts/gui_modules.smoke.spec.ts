@@ -151,6 +151,53 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(r2.ok).toBe(false);
   });
 
+  it("A-988 回归：缓存价 0（缓存免费）必须活过读盘往返，不能被 sanitizeModels 抹成「未定价」", async () => {
+    /*
+     * 事故形态：`sanitizeModels` 里给两个缓存价字段多写了一层 `&& value > 0` 过滤
+     * （上下文窗口那种字段加 `> 0` 是对的 —— 0 个 token 的窗口没有意义；
+     *   但价格字段的 0 是**合法价**："该网关缓存命中免费"是真实计费口径）。
+     *
+     * 后果链条（全程静默，界面上「看起来是个数字」）：
+     *   用户手填 缓存命中 = 0  →  sanitizeModels 抹成 undefined
+     *   → resolveCacheRates 的 stored 分支落空 → 走倍率推导 0.1× 输入价
+     *   → 缓存命中的 token 被按 0.1× 输入价收费。本来是免费的，被记成了钱。
+     *
+     * 而且 sanitizeModels 在 **saveProvider（1592 行）和 listProviders（230 行）两处都跑**，
+     * 所以这个 0 连磁盘都进不去 —— 必须两端都保住。
+     */
+    await makeSandbox();
+    const saved = await saveProvider({
+      key: "cachefree", api_base: "https://api.cachefree.com/v1", api_key: "sk-aaaaaaaaaaaa",
+      models: [{
+        id: "deepseek-flash", context_window: 1048576, max_output: 65536, selected: true,
+        price_in_usd: 0.3, price_out_usd: 1.2,
+        price_cache_read_usd: 0, price_cache_write_usd: 0,
+        price_source: "manual",
+      }],
+    });
+    expect(saved.ok).toBe(true);
+
+    const m = listProviders()[0].models[0];
+    // 0 必须原样活着 —— 不能变成 undefined（未定价），也不能被当成"空"而回退
+    expect(m.price_cache_read_usd).toBe(0);
+    expect(m.price_cache_write_usd).toBe(0);
+    // 与此同时，真正的 undefined（未定价）不能被这里顺手写成 0 —— 两者语义相反，都别混
+    expect(m.price_in_usd).toBe(0.3);
+    expect(m.price_source).toBe("manual");
+  });
+
+  it("A-988 回归：未定价的缓存价仍是 undefined，不能被 0 顶替", async () => {
+    await makeSandbox();
+    await saveProvider({
+      key: "noprice", api_base: "https://api.noprice.com/v1", api_key: "sk-bbbbbbbbbbbb",
+      models: [{ id: "m1", selected: true, price_in_usd: 1, price_out_usd: 2 }],
+    });
+    const m = listProviders()[0].models[0];
+    // 「没填」= undefined，交给 resolveCacheRates 去推导；绝不能悄悄写成 0（那是"免费"）
+    expect(m.price_cache_read_usd).toBeUndefined();
+    expect(m.price_cache_write_usd).toBeUndefined();
+  });
+
   it("providers：本地模型 保存/列表/删除/扫描/名称冲突 闭环（隔离沙箱）", async () => {
     const dir = await makeSandbox();
     const modelDir = join(dir, "models");

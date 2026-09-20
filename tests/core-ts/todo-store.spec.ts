@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   todoPath, readTodos, writeTodos, removeTodos, hasTodos,
   normalizeTodos, renderTodos, todoProgress, todosToPlanStatus,
@@ -99,6 +99,84 @@ describe("todoStore — 读写与容错", () => {
     removeTodos(sid);
     expect(hasTodos(sid)).toBe(false);
     removeTodos(sid); // 重复删不抛
+  });
+});
+
+describe("todoStore — 清空必须是真删除（A-987：用户实测'删了又回来'）", () => {
+  it("removeTodos 连带删掉 .bak —— 否则 readTodos 会从备份把整张清单读回来", () => {
+    writeTodos(sid, [todo("a", "第一版")]);
+    writeTodos(sid, [todo("a", "第一版"), todo("b", "第二版")]); // 第二次写盘 → 留了一份 .bak
+    const p = todoPath(sid)!;
+    expect(existsSync(`${p}.bak`)).toBe(true); // 前提成立，否则这条测试是空转
+
+    removeTodos(sid);
+    expect(existsSync(p)).toBe(false);
+    expect(existsSync(`${p}.bak`)).toBe(false);
+    // 关键断言：清空之后读盘必须真的是空的 —— 这里曾经会把刚删掉的清单整张读回来
+    expect(readTodos(sid)).toEqual([]);
+  });
+
+  it("removeTodos 连带清掉损坏留证 .corrupt（不删就永远挂在 data/ 里）", () => {
+    writeTodos(sid, [todo("a", "任务")]);
+    const p = todoPath(sid)!;
+    writeFileSync(`${p}.corrupt`, "{ 坏文件");
+    removeTodos(sid);
+    expect(existsSync(`${p}.corrupt`)).toBe(false);
+  });
+
+  it("removeTodos 连带清掉同前缀的落盘半成品 .tmp（强杀留下的）", () => {
+    const p = todoPath(sid)!;
+    writeFileSync(`${p}.abc123.tmp`, "{ 半分片");
+    removeTodos(sid);
+    expect(existsSync(`${p}.abc123.tmp`)).toBe(false);
+  });
+
+  it("删除是幂等的：连删两次、删一个从没写过的会话都不抛", () => {
+    writeTodos(sid, [todo("a", "任务")]);
+    removeTodos(sid);
+    removeTodos(sid);
+    removeTodos(`${MARK}never_written_${Date.now().toString(36)}`);
+    expect(readTodos(sid)).toEqual([]);
+  });
+});
+
+describe("todoStore — 会话 id 必须转成单段合法文件名（A-987：NTFS 数据流幽灵文件）", () => {
+  /**
+   * 复现条件（本机 node 实测）：Windows 上 `fs.writeFileSync("data/xxx:yyy.json", …)` **不报错**，
+   * 但它不会创建 `xxx:yyy.json`，而是创建一个 **0 字节的 `xxx`**、把内容塞进它的隐藏数据流。
+   * 子代理会话 id 恰恰长这样：`__subagent__:<runId>`（含冒号）→ 现场遗留物 `data/todos___subagent__`。
+   */
+  it("含冒号的子代理 id 不再产生 0 字节幽灵文件，且读写往返正常", () => {
+    const sub = `${MARK}sub:run123`;
+    writeTodos(sub, [todo("a", "子代理任务")]);
+
+    const p = todoPath(sub)!;
+    // ⚠️ 只能断言 **basename**：完整路径里的 `D:` 是盘符，不是文件名的一部分
+    expect(basename(p)).not.toContain(":"); // 冒号一旦进文件名就会被 NTFS 当数据流
+    expect(p.endsWith(".json")).toBe(true);
+
+    // 未编码时的 ADS 基名（无扩展名）绝不能出现在盘上
+    expect(existsSync(join(DATA_DIR, `todos_${sub}`))).toBe(false);
+    // 内容必须落在主文件本体里（而不是某个读不到的数据流里）
+    expect(JSON.parse(readFileSync(p, "utf8")).items).toHaveLength(1);
+    expect(readTodos(sub).map((t) => t.content)).toEqual(["子代理任务"]);
+  });
+
+  it("不同 runId 各有独立文件，互不覆盖（未编码时它们共用同一个基名文件）", () => {
+    const a = `${MARK}sub:runA`;
+    const b = `${MARK}sub:runB`;
+    writeTodos(a, [todo("a", "A 的任务")]);
+    writeTodos(b, [todo("b", "B 的任务")]);
+    expect(todoPath(a)).not.toBe(todoPath(b));
+    expect(readTodos(a).map((t) => t.content)).toEqual(["A 的任务"]);
+    expect(readTodos(b).map((t) => t.content)).toEqual(["B 的任务"]);
+    // 删 A 不能把 B 一起带走（共用基名时 rmSync 会连坐）
+    removeTodos(a);
+    expect(readTodos(b).map((t) => t.content)).toEqual(["B 的任务"]);
+  });
+
+  it("普通会话 id 编码前后一字不变（既有文件无需迁移）", () => {
+    expect(todoPath(sid)!.endsWith(`todos_${sid}.json`)).toBe(true);
   });
 });
 

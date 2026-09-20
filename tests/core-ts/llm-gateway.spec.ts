@@ -11,6 +11,24 @@ import { LlmGateway, LlmGatewayError } from "../../gateway-ts/src/llmGateway.js"
 import { UpstreamError } from "../../core-ts/src/llm/client.js";
 import { LiveProbeCache } from "../../core-ts/src/probe-live.js";
 import type { ProviderConfig } from "../../core-ts/src/services/engine.js";
+import type { ChatMessage, ChatResponse } from "../../shared/gen/schemas.js";
+
+/**
+ * 取首个 choice 的 message。
+ *
+ * `ChatChoice.message` 在 `shared/gen/schemas.ts` 里声明为 **optional**（wire 上确实可能没有它，
+ * 例如只带 finish_reason 的响应），所以 `resp.choices[0].message.content` 是潜在的 undefined
+ * 解引用 —— 这正是 tsc 常年报的 TS2532。
+ *
+ * 这里用**显式抛错**而不是 `?.`：用例要断言具体文本，message 缺失本身就是失败。
+ * 写成 `resp.choices[0].message?.content` 的话，失败信息会退化成
+ * `expected undefined to be 'hi'`，看不出"其实整个 message 没了"。
+ */
+function firstMessage(r: ChatResponse): ChatMessage {
+  const m = r.choices[0]?.message;
+  if (!m) { throw new Error("响应缺少 choices[0].message（schema 里该字段可选，但本用例要求它存在）"); }
+  return m;
+}
 
 /** 构造测试 providers 表（模拟 providers.enc.json 解密结果） */
 function makeProviders(): Record<string, ProviderConfig> {
@@ -38,6 +56,10 @@ function makeProviders(): Record<string, ProviderConfig> {
     deepseek: {
       api_base: "https://api.deepseek.com/v1",
       api_key: "sk-ds",
+      // `model` 是 ProviderConfig 的**必填**字段（默认模型）。此处原先漏了它 ——
+      // tsc 一直报 TS2741，但门禁常年是红的，于是"这个 fixture 其实构造不出合法配置"
+      // 这件事一直没人发现。补上，让 fixture 与真实配置同形。
+      model: "deepseek-chat",
       api_format: "openai",
       models: [
         { id: "deepseek-chat", selected: true, price_in_usd: 0.27, price_out_usd: 1.1 },
@@ -134,7 +156,7 @@ describe("LlmGateway chat 非流式", () => {
     expect(capturedModel).toBe("gpt-4o");
     // 回显客户端请求名（而非内部 route 名）
     expect(resp.model).toBe("gpt-4o");
-    expect(resp.choices[0].message.content).toBe("hi");
+    expect(firstMessage(resp).content).toBe("hi");
   });
 
   it("未命中模型抛 404 LlmGatewayError", async () => {
@@ -266,7 +288,7 @@ describe("LlmGateway 探针层第 2 层（实时响应探测）", () => {
     });
     // 无 liveProbe 不应抛
     const resp = await g.chat({ model: "gpt-4o", messages: [] } as never, "gpt-4o");
-    expect(resp.choices[0].message.content).toBe("ok");
+    expect(firstMessage(resp).content).toBe("ok");
     expect(g.allCapabilitySnapshots()).toEqual([]);
   });
 

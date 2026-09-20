@@ -14,6 +14,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 import { spawn, execFileSync } from "node:child_process";
+import { emptyCapability, type LocalServerCapability } from "../../core-ts/src/model_introspect.js";
 import {
   VRAMMonitor, ModelBackend, ModelServerManager,
   findFreePort, basePortFor, verifyLlamaServerPid,
@@ -64,9 +65,15 @@ function okFetch(): typeof fetch {
   return (async () => ({ status: 200, json: async () => ({ status: "ok" }) })) as unknown as typeof fetch;
 }
 
-/** probeImpl：指定端口视为有活实例 */
-function liveProbe(ports: number[]): (port: number) => Promise<boolean> {
-  return async (port) => ports.includes(port);
+/** S4-B：probeImpl 的返回形状从布尔变成**能力快照**（含三态 state 与服务器自述身份）。
+ *  布尔把"加载中"和"什么都没有"压成同一个答案，正是重复拉起同一个模型的根因。 */
+function readyCap(alias?: string): LocalServerCapability {
+  return { ...emptyCapability("ready"), effectiveCtx: 8192, alias: alias ?? null, modelPath: null };
+}
+
+/** probeImpl：指定端口视为有**就绪**实例 */
+function liveProbe(ports: number[]): (port: number) => Promise<LocalServerCapability> {
+  return async (port) => (ports.includes(port) ? readyCap() : emptyCapability("down"));
 }
 
 beforeEach(() => {
@@ -139,7 +146,7 @@ describe("ModelBackend", () => {
 // ── ModelServerManager ────────────────────────────────────
 
 describe("ModelServerManager", () => {
-  function makeManager(overrides: { registryPath?: string; fetchImpl?: typeof fetch; probeImpl?: (port: number) => Promise<boolean> } = {}) {
+  function makeManager(overrides: { registryPath?: string; fetchImpl?: typeof fetch; probeImpl?: (port: number) => Promise<LocalServerCapability> } = {}) {
     const tmp = mkdtempSync(join(tmpdir(), "ms-"));
     return { tmp, cfg: makeCfg(tmp), mgr: new ModelServerManager(makeCfg(tmp), {
       registryPath: overrides.registryPath ?? join(tmp, "registry.json"),
@@ -277,7 +284,10 @@ describe("孤儿回收（OrphanRecovery）", () => {
       });
       dispatchExec((cmd) => cmd === "netstat" ? `  TCP    127.0.0.1:${EMBED_PORT}   0.0.0.0:0    LISTENING    4242\n` : "");
       const live = await mgr.probeLive("embedding", cfg.embedding);
-      expect(live).toEqual([EMBED_PORT, 4242]);
+      // S4-B：返回的是 {port, pid, cap}（cap 带三态与服务器自述身份），不再是 [port, pid]
+      expect(live?.port).toBe(EMBED_PORT);
+      expect(live?.pid).toBe(4242);
+      expect(live?.cap.state).toBe("ready");
       const live2 = await mgr.probeLive("chat", cfg.chat);
       expect(live2).toBeNull();
     } finally {

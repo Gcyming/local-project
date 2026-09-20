@@ -31,7 +31,10 @@ beforeAll(() => {
   work = mkdtempSync(join(tmpdir(), "slime-read-"));
   resetRegistry();
   reg = new (getRegistry().constructor as typeof ToolRegistry)();
-  registerBuiltinTools(reg, { registry: reg });
+  // ⚠️ `registerBuiltinTools(target?: ToolRegistry)` **只有一个参数**。
+  //    这里原先多传了 `{ registry: reg }`：JS 会静默丢弃多余的实参，测试照样通过，
+  //    于是"我注入了 registry"成了一种错觉（tsc 一直在报 TS2554，只是门禁常年是红的没人看）。
+  registerBuiltinTools(reg);
 });
 afterAll(() => {
   try { rmSync(work, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }

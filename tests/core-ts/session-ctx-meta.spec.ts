@@ -137,3 +137,57 @@ describe("storage key 隔离", () => {
     expect(sessionCtxStorageKey("a1", "s2")).not.toBe(sessionCtxStorageKey("a1", "s1"));
   });
 });
+/** A-1021b：A-966 的 history.jsonl 时间线此前**只写不读**。
+ *
+ *  线上证据（config/history.jsonl）：第 96/98 行（在当前会话里结束）带 timeline，
+ *  第 97 行——elapsed_ms=349872，与用户截图"回复耗时 349.9s"完全一致——timeline 缺失，
+ *  于是那条回复的思考历程只剩 reasoning 文本、塌成一个节点。
+ *  原因之一是"流式期间切走会话"时 onDone 走早退分支、不落盘；
+ *  但**即使落盘了，加载侧也从不读它** —— 这里锁死第二条：记录自带的 timeline 必须能被回填。 */
+describe("attachTimelineToHistory —— 记录自带 timeline 的兜底（A-1021b）", () => {
+  // 磁盘形态：kind 是 string（shared/ipc.ts 的 ConversationMessage.timeline），不是字面量联合
+  const recordTl = [
+    { kind: "think", text: "先看结构" },
+    { kind: "tool", name: "file_read", label: "读取 a.ts", detail: "a.ts" },
+    { kind: "think", text: "再改" },
+  ];
+
+  it("localStorage 无该序数 → 采用记录自带的 timeline（不再塌成单节点）", () => {
+    const msgs = [
+      { role: "user", content: "改一下" },
+      { role: "assistant", content: "好", reasoning: "先看结构\n\n再改", timeline: recordTl },
+    ];
+    const out = attachTimelineToHistory(msgs, mkMeta(0, 0, {}));
+    expect(out[1].assistantOrdinal).toBe(1);
+    expect(out[1].timeline).toHaveLength(3);
+    expect(out[1].timeline![1]).toMatchObject({ kind: "tool", name: "file_read" });
+  });
+
+  it("meta 为 null（无 localStorage）同样能靠记录恢复", () => {
+    const msgs = [{ role: "assistant", content: "好", reasoning: "r", timeline: recordTl }];
+    expect(attachTimelineToHistory(msgs, null)[0].timeline).toHaveLength(3);
+  });
+
+  it("localStorage 有值 → 优先 localStorage（保持既有行为，不改已工作路径）", () => {
+    const msgs = [{ role: "assistant", content: "好", reasoning: "r", timeline: recordTl }];
+    const meta = mkMeta(0, 0, { 1: [{ kind: "think", text: "来自 localStorage" }] });
+    const out = attachTimelineToHistory(msgs, meta);
+    expect(out[0].timeline).toHaveLength(1);
+    expect(out[0].timeline![0]).toEqual({ kind: "think", text: "来自 localStorage" });
+  });
+
+  it("两边都没有 → undefined（交给调用方退文本形态）", () => {
+    const msgs = [{ role: "assistant", content: "好", reasoning: "r" }];
+    expect(attachTimelineToHistory(msgs, mkMeta(0, 0, {}))[0].timeline).toBeUndefined();
+  });
+
+  it("记录里的空数组不当作有效时间线（不给折叠卡造幽灵节点）", () => {
+    const msgs = [{ role: "assistant", content: "好", reasoning: "r", timeline: [] }];
+    expect(attachTimelineToHistory(msgs, null)[0].timeline).toBeUndefined();
+  });
+
+  it("user 消息不带 timeline / 序数（记录里的 timeline 挂在 assistant 上）", () => {
+    const msgs = [{ role: "user", content: "u", timeline: recordTl }];
+    expect(attachTimelineToHistory(msgs, null)[0]).toEqual({ assistantOrdinal: undefined });
+  });
+});

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ModelRouter, type RouteEntry } from "../../core-ts/src/router.js";
-import { UpstreamError } from "../../core-ts/src/llm/client.js";
+import { UpstreamError, ChatClient } from "../../core-ts/src/llm/client.js";
 
 describe("ModelRouter（路由表 + 降级链声明）", () => {
   const local: RouteEntry = {
@@ -232,7 +232,7 @@ describe("ModelRouter 探针层第 2 层：前置剔除已知失效模型（setD
   });
 
   it("setDeadModelCheck(null) 复位 → 回到纯 priority 降级链（不剔除）", () => {
-    const router = makeDeadRouter((p, m) => m === "gpt-4o-dead", true);
+    const router = makeDeadRouter((_p, m) => m === "gpt-4o-dead", true);
     expect(router.fallbackChain("chat").length).toBe(2);
     router.setDeadModelCheck(null);
     expect(router.fallbackChain("chat").length).toBe(3);
@@ -241,5 +241,46 @@ describe("ModelRouter 探针层第 2 层：前置剔除已知失效模型（setD
   it("未注入 check（默认）→ 全量降级链不受影响", () => {
     const router = makeDeadRouter(() => false, false); // 未注入
     expect(router.fallbackChain("chat").length).toBe(3);
+  });
+});
+
+/**
+ * A-157 收敛 e2e 验收：智谱 glm-4.5-air:free 返回 400 + 1211「模型不存在」→ 自动降级到
+ * glm-4.5-air（而非整链红字）。这是本次修复的验收标准。
+ *
+ * 桩 fetch：按请求 body 的 `model` 区分——含 `:free` → 返回真实事故 400 正文（智谱 1211）；
+ * 否则 → 返回最小可用 SSE。clientFactory 走默认 ChatClient，仅注入 fetchImpl（参考本 spec /
+ * client.spec.ts 既有注入手法，不新造机制）。路由 model 由 router.withModel 注入 body，
+ * 故桩能据此分辨首选/次选。
+ */
+describe("A-157 收敛 e2e：智谱 glm-4.5-air:free(400/1211) 自动降级到 glm-4.5-air", () => {
+  const routes: RouteEntry[] = [
+    { name: "zhipu:glm-4.5-air:free", model: "glm-4.5-air:free", priority: 1000, roles: ["chat"], kind: "cloud", baseUrl: "https://fake.example" },
+    { name: "zhipu:glm-4.5-air", model: "glm-4.5-air", priority: 999, roles: ["chat"], kind: "cloud", baseUrl: "https://fake.example" },
+  ];
+
+  const stub = (async (_url: string, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    const model: string = typeof body.model === "string" ? body.model : "";
+    if (model.includes(":free")) {
+      return new Response(
+        '{"error":{"code":"1211","message":"模型不存在，请检查模型代码。"}}',
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(
+      'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  }) as unknown as typeof fetch;
+
+  it("首选 400（智谱 1211）→ 降级到次选，routeName 证明真的换了模型", async () => {
+    const router = new ModelRouter(
+      routes,
+      () => new ChatClient({ baseUrl: "https://fake.example", apiKey: "k", fetchImpl: stub }),
+    );
+    const r = await router.chatStream({ messages: [{ role: "user", content: "hi" }] }, () => {});
+    expect(r.text).toBe("ok");
+    expect(r.routeName).toBe("zhipu:glm-4.5-air");
   });
 });

@@ -350,7 +350,9 @@ describe("损坏行容错", () => {
     const records = await usage.loadUsage();
     // 期望至少读到原 2 行 OK + 新 1 行 = 3 行（损坏行被跳过）
     expect(records.length).toBeGreaterThanOrEqual(2);
-    const hasGarbage = records.some((r) => (r as Record<string, unknown>).agent_id === undefined);
+    // UsageRecord 与 Record<string, unknown> 无公共属性 → 必须先过 unknown 再转
+    // （直接 `as Record<...>` 会被 tsc 判为"可能是笔误"的 TS2352）
+    const hasGarbage = records.some((r) => (r as unknown as Record<string, unknown>).agent_id === undefined);
     expect(hasGarbage).toBe(false);
     void beforeStat; void afterStat;
   });

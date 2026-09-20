@@ -522,3 +522,52 @@ describe("ToolLoop.runStream（真流式工具循环：思考/正文边到边实
     expect(exec).toHaveBeenCalledWith({ v: "1" });
   });
 });
+
+/**
+ * A-1009：路径范围判定的 win32 大小写回归守卫。
+ *
+ * 真实现象（2026-09-18 实测）：`realpath()` 返回磁盘规范拼写 `D:\pilot project\…`，
+ * 而 `PROJECT_ROOT` 来自 cwd / import.meta.url 是小写 `d:\pilot project` →
+ * 逐字符 startsWith 判定为「超出项目范围」→ **项目内已存在的文件一律读不到**
+ * （不存在的新文件反而正常：那条路径不走 realpath 复核，所以症状很迷惑）。
+ * 本组用例钉死「大小写不构成越界」，同时钉死「越界仍然必须被拒」。
+ */
+describe("文件工具：路径范围判定（win32 大小写 + 越界守卫）", () => {
+  let reg: ToolRegistry;
+  let work: string;
+
+  beforeEach(async () => {
+    resetRegistry();
+    registerBuiltinTools();
+    reg = getRegistry();
+    work = await mkdtemp(join(PROJECT_ROOT, "data", "tool-tmp-"));
+  });
+
+  afterEach(async () => {
+    await rm(work, { recursive: true, force: true });
+  });
+
+  it("项目内**已存在**的文件可读（realpath 规范化拼写后仍判定为项目内）", async () => {
+    const f = join(work, "a.txt");
+    await writeFile(f, "hello", "utf-8");
+    expect(await reg.get("file_read")!.executeFn({ path: f })).toBe("hello");
+    expect(await reg.get("file_list")!.executeFn({ path: work })).toContain("a.txt");
+  });
+
+  it.skipIf(process.platform !== "win32")("盘符大小写翻转后仍是同一个文件（win32 大小写不敏感）", async () => {
+    const f = join(work, "b.txt");
+    await writeFile(f, "world", "utf-8");
+    const flipped = f.replace(/^([a-zA-Z])(:)/, (_m, d: string, colon: string) => (d === d.toUpperCase() ? d.toLowerCase() : d.toUpperCase()) + colon);
+    expect(flipped).not.toBe(f);
+    expect(await reg.get("file_read")!.executeFn({ path: flipped })).toBe("world");
+  });
+
+  it("反向守卫：项目外路径（含 .. 上溯）仍被拒绝，放宽大小写不等于放行越界", async () => {
+    const outside = join(tmpdir(), "slime-nonexistent-guard.txt");
+    expect(await reg.get("file_read")!.executeFn({ path: outside })).toContain("路径超出项目范围");
+    expect(await reg.get("file_list")!.executeFn({ path: outside })).toContain("路径超出项目范围");
+    expect(await reg.get("file_write")!.executeFn({ path: outside, content: "x" })).toContain("路径超出项目范围");
+    const escape = join(PROJECT_ROOT, "..", "slime-escape-guard.txt");
+    expect(await reg.get("file_read")!.executeFn({ path: escape })).toContain("路径超出项目范围");
+  });
+});

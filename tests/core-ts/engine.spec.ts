@@ -723,7 +723,13 @@ describe("SlimeEngine SILAM 兑底 reasoning 透传（A-124 正文/思考分离�
     });
     expect(result.model).toBe("silam-brain");
     expect(result.reply).toBe(BRAIN_REPLY);
-    expect(result.reasoning).toBe(BRAIN_REASONING);
+    /* A-1018：兜底不再静默 —— 思考段**前置**失败原因（否则用户看不出这轮不是他选的模型答的，
+     * 只能拿着截图问"为什么用不了选中的本地模型"）。所以这里断言"包含"而不是"等于"：
+     * 原因前缀 + 大脑自己的思考。 */
+    expect(result.reasoning).toContain("api:missing-key");
+    expect(result.reasoning).toContain("SILAM 离线大脑兜底");
+    expect(result.reasoning).toContain(BRAIN_REASONING);
+    expect(result.reasoning?.startsWith("⚠️")).toBe(true);
   });
 
   it("stream 显式 silam：先 reasoning 事件，done 携带 reply + reasoning", async () => {

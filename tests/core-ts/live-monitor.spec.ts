@@ -11,7 +11,8 @@
  * 本文件锁死这条通道的语义（跨会话隔离、过期快照不采用）。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { publishLiveMonitor, readLiveMonitor } from "../../gui/src/renderer/pages/ChatPanel.js";
+// A-990：从 `liveMonitor.ts` 直取（原先 import 整个 ChatPanel 组件，纯内存读写被拖进组件模块图）
+import { publishLiveMonitor, readLiveMonitor } from "../../gui/src/renderer/pages/liveMonitor.js";
 
 const snap = (sessionId: string) => ({
   sessionId, used: 12345, cap: 524288, replyTokens: 300,

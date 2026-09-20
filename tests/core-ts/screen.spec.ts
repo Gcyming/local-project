@@ -9,6 +9,7 @@
  *  - 工具注册表：riskKind / effectiveRiskKind / autoApprovable 默认值 + 类别闸门
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { toPixel, NORMALIZED_MAX, coordToDeviceInRegion } from "../../core-ts/src/screen/types.js";
 import { ScreenController } from "../../core-ts/src/screen/controller.js";
 import { AndroidScreenBackend, parseUiHierarchy, type AdbLike } from "../../core-ts/src/screen/backends/android.js";
@@ -114,16 +115,29 @@ describe("ScreenController — 后端分发 / 能力校验 / 互斥 / 紧急停�
     expect(be.performed[0].absolute).toBe(true);
   });
 
-  it("无截图基准时 image 语义按 1:1 直通（不虚报缩放）", async () => {
+  it("A-1014 无截图基准 + image 语义 → 明确报错（不再静默按 1:1 当物理像素）", async () => {
     const ctl2 = new ScreenController();
     const be2 = new FakeBackend();
     ctl2.register(be2);
-    await ctl2.perform("desktop", { kind: "click", x: 500, y: 500 });
+    const r = await ctl2.perform("desktop", { kind: "click", x: 500, y: 500 });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/坐标基准缺失/);
+    // 关键：绝不能把 image 坐标当物理坐标下发（改前就是这么静默点掉 (500,500) 的）
+    expect(be2.performed).toHaveLength(0);
+  });
+
+  it("A-1014 显式 coordSpace=device 时不依赖基准（物理像素本就无需换算）", async () => {
+    const ctl2 = new ScreenController();
+    const be2 = new FakeBackend();
+    ctl2.register(be2);
+    const r = await ctl2.perform("desktop", { kind: "click", x: 500, y: 500, coordSpace: "device" });
+    expect(r.ok).toBe(true);
     expect(be2.performed[0].x).toBe(500);
     expect(be2.performed[0].y).toBe(500);
   });
 
   it("coordSpace=normalized 显式 0-1000 语义仍按分辨率缩放", async () => {
+    await ctl.capture("desktop"); // A-1014：缩放离开截图基准无从解释，先建立基准
     await ctl.perform("desktop", { kind: "click", x: 500, y: 500, coordSpace: "normalized" });
     expect(be.performed[0].x).toBe(500); // 1000 宽 × 500/1000
     expect(be.performed[0].y).toBe(250); // 500 高 × 500/1000
@@ -136,31 +150,39 @@ describe("ScreenController — 后端分发 / 能力校验 / 互斥 / 紧急停�
   });
 
   it("动作成功后自动复截一次", async () => {
+    await ctl.capture("desktop"); // 建立坐标基准（A-1014 后 image 语义必须先有基准）
     const r = await ctl.perform("desktop", { kind: "click", x: 1, y: 1 });
     expect(r.ok).toBe(true);
     expect(r.capture?.ok).toBe(true);
-    expect(be.captureCount).toBe(1);
+    expect(be.captureCount).toBe(2); // 1 次显式建立基准 + 1 次动作后复截
   });
 
   it("wait 动作不复截", async () => {
-    const waitBe = new FakeBackend();
-    // wait 不在 actions 里 → 用一个支持 wait 的后端
-    const b2: ScreenBackend = { ...waitBe, actions: new Set<ScreenAction["kind"]>(["wait"]) } as unknown as ScreenBackend;
     const c2 = new ScreenController();
-    c2.register(b2);
-    await c2.perform("desktop", { kind: "wait", durationMs: 1 });
-    expect(waitBe.captureCount).toBe(0);
+    const waitBe = new FakeBackend();
+    // 注意：不能写 `{ ...waitBe }` —— 类方法是原型属性，展开会丢（旧写法因此一直在空转）
+    waitBe.actions.clear();
+    waitBe.actions.add("wait");
+    c2.register(waitBe);
+    await c2.capture("desktop"); // 建立基准，确保真的走到了 perform 分支
+    const before = waitBe.captureCount;
+    const r = await c2.perform("desktop", { kind: "wait", durationMs: 1 });
+    expect(r.ok).toBe(true);
+    expect(waitBe.performed).toHaveLength(1); // 动作确实下发了（不是被基准检查提前拦掉）
+    expect(waitBe.captureCount).toBe(before); // 且 wait 不触发复截
   });
 
   it("动作失败时不复截", async () => {
+    await ctl.capture("desktop");
     be.failNext = true;
     const r = await ctl.perform("desktop", { kind: "click", x: 1, y: 1 });
     expect(r.ok).toBe(false);
-    expect(be.captureCount).toBe(0);
+    expect(be.captureCount).toBe(1); // 只有建立基准那一次，失败动作不再复截
     expect(r.capture).toBeUndefined();
   });
 
   it("紧急停止后拒绝后续动作，resume 后恢复", async () => {
+    await ctl.capture("desktop"); // 基准先备好：halt 只拦动作，不该与坐标基准混淆
     ctl.halt();
     expect(ctl.isHalted()).toBe(true);
     const r1 = await ctl.perform("desktop", { kind: "click", x: 1, y: 1 });
@@ -179,7 +201,7 @@ describe("ScreenController — 后端分发 / 能力校验 / 互斥 / 紧急停�
       actions: new Set<ScreenAction["kind"]>(["click", "type"]),
       listTargets: async () => [],
       displayInfo: async () => ({ backend: "desktop", target: "p", width: 100, height: 100, label: "s" }),
-      capture: async () => ({ ok: true, dataUrl: "data:image/png;base64,AA" }),
+      capture: async () => ({ ok: true, dataUrl: "data:image/png;base64,AA", width: 100, height: 100, imageWidth: 100, imageHeight: 100 }),
       perform: async (a: ScreenAction) => {
         order.push(`${a.kind}:start`);
         await new Promise((r) => setTimeout(r, 5));
@@ -189,6 +211,7 @@ describe("ScreenController — 后端分发 / 能力校验 / 互斥 / 紧急停�
     } as unknown as ScreenBackend;
     seq.register(slow);
     seq.autoCapture = false;
+    await seq.capture("desktop"); // A-1014：建立基准，动作才会真正下发给后端
     await Promise.all([
       seq.perform("desktop", { kind: "click", x: 1, y: 1 }),
       seq.perform("desktop", { kind: "type", text: "a" }),
@@ -583,3 +606,190 @@ class WindowBackend implements ScreenBackend {
     return { ok: true, detail: `did ${action.kind}` };
   }
 }
+
+/* ───────────────────────── A-1014：多屏原点 / 基准兜底 / 聚焦诚实 / 源码守卫 ───────────────────────── */
+
+/** 副屏在主屏左侧的假桌面后端：虚拟桌面原点为负（Windows 常见布局） */
+class SecondaryBackend implements ScreenBackend {
+  readonly id = "desktop" as const;
+  readonly actions = new Set<ScreenAction["kind"]>(["click"]);
+  performed: ScreenAction[] = [];
+  async listTargets(): Promise<DisplayInfo[]> {
+    return [{
+      backend: "desktop", target: String.raw`\\.\DISPLAY2`, width: 1920, height: 1080,
+      label: "副屏", originX: -1920, originY: 0,
+    }];
+  }
+  async displayInfo(): Promise<DisplayInfo> { return (await this.listTargets())[0]; }
+  async capture(): Promise<ScreenCaptureResult> {
+    return {
+      ok: true, dataUrl: "data:image/png;base64,AAA",
+      width: 1920, height: 1080, imageWidth: 1600, imageHeight: 900,
+      originX: -1920, originY: 0, bytes: 2,
+    };
+  }
+  async perform(action: ScreenAction): Promise<ScreenActionResult> {
+    this.performed.push(action);
+    return { ok: true, detail: `did ${action.kind}` };
+  }
+}
+
+describe("A-1014 多屏虚拟桌面原点 — 副屏（负原点）不再整体偏移", () => {
+  it("显示信息透传 originX/originY（副屏原点为负）", async () => {
+    const ctl = new ScreenController();
+    ctl.register(new SecondaryBackend());
+    const info = await ctl.displayInfo("desktop");
+    expect(info.originX).toBe(-1920);
+    expect(info.originY).toBe(0);
+  });
+
+  it("副屏截图后点击：图像坐标按比例折算并加上负原点", async () => {
+    const ctl = new ScreenController();
+    const be = new SecondaryBackend();
+    ctl.register(be);
+    await ctl.capture("desktop"); // 图像 1600×900 = 设备 1920×1080 缩小后（比例 1.2）
+    // 模型在图内量到 (100, 50) → 设备 (−1920 + 100×1.2, 0 + 50×1.2) = (−1800, 60)
+    await ctl.perform("desktop", { kind: "click", x: 100, y: 50 });
+    expect(be.performed[0].x).toBe(-1800);
+    expect(be.performed[0].y).toBe(60);
+    expect(be.performed[0].absolute).toBe(true);
+  });
+
+  it("后端不回传原点时按 0 处理（不产生 NaN/undefined 坐标）", async () => {
+    const ctl = new ScreenController();
+    const be = new FakeBackend(); // displayInfo / capture 都不带 origin 字段
+    ctl.register(be);
+    await ctl.capture("desktop");
+    const r = await ctl.perform("desktop", { kind: "click", x: 10, y: 10 });
+    expect(r.ok).toBe(true);
+    expect(Number.isFinite(be.performed[0].x)).toBe(true);
+    expect(Number.isFinite(be.performed[0].y)).toBe(true);
+  });
+});
+
+describe("A-1014 基准兜底 — 按窗口截图建的基准能被「带 target 的动作」复用", () => {
+  it("captureWindow 记在 `desktop|` 上的基准，执行时带 target 也能命中（不再一律报基准缺失）", async () => {
+    const ctl = new ScreenController();
+    const be = new WindowBackend();
+    ctl.register(be);
+    await ctl.captureWindow("desktop", "记事本");
+    // 两种 key 不一致：截图记 `desktop|`，动作带 target → `desktop|记事本`
+    const r = await ctl.perform("desktop", { kind: "click", x: 100, y: 50 }, "记事本");
+    expect(r.ok).toBe(true);
+    expect(be.performed[0].x).toBe(500); // 400 原点 + 100（图像未缩放）
+    expect(be.performed[0].y).toBe(350); // 300 原点 + 50
+  });
+
+  it("既无基准也无物理语义 → 报错而不是猜一个比例", async () => {
+    const ctl = new ScreenController();
+    ctl.register(new WindowBackend());
+    const r = await ctl.perform("desktop", { kind: "click", x: 100, y: 50 }, "记事本");
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/坐标基准缺失/);
+  });
+});
+
+/** 抢不到前台窗口的假后端（SetForegroundWindow 被系统拒绝的真实情形） */
+class UnfocusedBackend implements ScreenBackend {
+  readonly id = "desktop" as const;
+  readonly actions = new Set<ScreenAction["kind"]>(["click"]);
+  async listTargets(): Promise<DisplayInfo[]> { return [await this.displayInfo()]; }
+  async displayInfo(): Promise<DisplayInfo> {
+    return { backend: "desktop", target: "primary", width: 1920, height: 1080, label: "fake" };
+  }
+  async capture(): Promise<ScreenCaptureResult> {
+    return { ok: true, dataUrl: "data:image/png;base64,AAA", width: 1920, height: 1080, bytes: 2 };
+  }
+  async perform(): Promise<ScreenActionResult> { return { ok: true }; }
+  async focusWindow() {
+    return {
+      focused: false,
+      detail: "未能把窗口「记事本」带到前台（SetForegroundWindow 返回 False，当前前台是「其它窗口」）——画面可能被遮挡",
+      rect: { x: 0, y: 0, width: 800, height: 600 },
+    };
+  }
+  async captureWindow(): Promise<ScreenCaptureResult> {
+    return {
+      ok: true, dataUrl: "data:image/png;base64,AAA",
+      width: 800, height: 600, imageWidth: 800, imageHeight: 600,
+      originX: 0, originY: 0, bytes: 2,
+      warning: "窗口「记事本」未在前台（当前前台是「其它窗口」），画面可能被其它窗口遮挡",
+    };
+  }
+}
+
+describe("A-1014 聚焦诚实 — 抢不到前台不再谎报成功", () => {
+  it("focusWindow 未抢到前台 → focused:false，但仍回传矩形（位置可用，下层窗口照样能截）", async () => {
+    const ctl = new ScreenController();
+    ctl.register(new UnfocusedBackend());
+    const r = await ctl.focusWindow("desktop", "记事本");
+    expect(r.focused).toBe(false);
+    expect(r.detail).toMatch(/未能把窗口/);
+    expect(r.rect).toEqual({ x: 0, y: 0, width: 800, height: 600 });
+  });
+
+  it("captureWindow 把 warning 带回来（上层才能如实告知遮挡风险）", async () => {
+    const ctl = new ScreenController();
+    ctl.register(new UnfocusedBackend());
+    const r = await ctl.captureWindow("desktop", "记事本");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toMatch(/未在前台/);
+  });
+
+  it("后端不支持按窗口截图 → 明确报错（不静默退回整屏）", async () => {
+    const ctl = new ScreenController();
+    ctl.register(new FakeBackend());
+    const r = await ctl.captureWindow("desktop", "记事本");
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/不支持按窗口截图/);
+  });
+});
+
+/* ───────────────────────── A-1014 源码守卫（产物层做不了，只能在源码层钉死） ───────────────────────── */
+
+describe("A-1014 源码守卫 — 指针定位只有一条路 / 聚焦不谎报 / 换算只有一处", () => {
+  const readSrc = (rel: string): string => readFileSync(new URL(rel, import.meta.url), "utf8");
+  /** 剥注释后再断言（注释里会故意写"旧写法"，不剥就是假红灯）。
+   *  除 JS 注释外还要剥 PowerShell 的 `#` 行注释 —— desktop.ts 内嵌大段 PS 脚本，
+   *  那些说明文字里同样会引用旧写法。 */
+  const stripComments = (s: string): string => s
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^[ \t]*\/\/.*$/gm, "")
+    .replace(/^[ \t]*#.*$/gm, "");
+
+  const desktopSrc = stripComments(readSrc("../../core-ts/src/screen/backends/desktop.ts"));
+  const controllerSrc = stripComments(readSrc("../../core-ts/src/screen/controller.ts"));
+
+  it("desktop.ts：指针定位收口到 Move-SlimeCursor，SetCursorPos 只允许出现在「声明 + 守卫调用」两处", () => {
+    expect(desktopSrc).toContain("function Move-SlimeCursor");
+    const uses = desktopSrc.match(/SetCursorPos\(/g) ?? [];
+    expect(uses).toHaveLength(2);
+    // 也不再有任何被管道吞掉返回值的写法
+    expect(desktopSrc).not.toMatch(/SetCursorPos\([^)]*\)\s*\|\s*Out-Null/);
+  });
+
+  it("desktop.ts：Move-SlimeCursor 校验返回值并在失败时抛错（不再静默打偏）", () => {
+    const i = desktopSrc.indexOf("function Move-SlimeCursor");
+    const body = desktopSrc.slice(i, desktopSrc.indexOf("\n}\n", i));
+    expect(body).toMatch(/-not \[SlimeInput\]::SetCursorPos/);
+    expect(body).toMatch(/throw/);
+  });
+
+  it("desktop.ts：focus 通过回读真实前台窗口判断，不再无条件宣布成功", () => {
+    const i = desktopSrc.indexOf("'focus' {");
+    const body = desktopSrc.slice(i, desktopSrc.indexOf("'move' {", i));
+    expect(body).toContain("GetForegroundWindow()");
+    expect(body).toMatch(/focused = \$false/);
+  });
+
+  it("controller.ts：没有基准且非 device 语义 → 直接报错（守「坐标基准缺失」这条线）", () => {
+    expect(controllerSrc).toMatch(/space !== "device" && !basis/);
+    expect(controllerSrc).toContain("坐标基准缺失");
+  });
+
+  it("coordToDeviceInRegion 是唯一生效的换算实现（controller 不 import 已弃用的 toPixel/imageToDevice）", () => {
+    expect(controllerSrc).toContain("coordToDeviceInRegion(");
+    expect(controllerSrc).not.toMatch(/\btoPixel\(/);
+    expect(controllerSrc).not.toMatch(/\bimageToDevice\(/);
+  });
+});

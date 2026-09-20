@@ -187,3 +187,27 @@ describe("LiveProbeCache.hydrate + 进程级共享单例", () => {
   });
 });
 
+describe("A-157 收敛：智谱 1211 / 中文「模型不存在」被共享特征表识别", () => {
+  // 智谱真实事故正文（含数字码 1211 + 中文文案），由上游错误正文特征表唯一实现识别
+  const zhipuErr =
+    'upstream|上游错误 400: {"error":{"code":"1211","message":"模型不存在，请检查模型代码。"}}';
+
+  it("extractSnapshot：智谱 glm-4.5-air:free 返回 1211 → modelDead=true（该标死的标死）", () => {
+    const s = extractSnapshot("zhipu", "glm-4.5-air:free", {
+      ok: false,
+      errorStatus: 400,
+      errorType: zhipuErr,
+    });
+    expect(s.modelDead).toBe(true);
+  });
+
+  it("nextAuthOnFailure：智谱 1211 正文 → abandon=true（该降级的降级）", () => {
+    const d = nextAuthOnFailure("openai", zhipuErr, 400);
+    expect(d.abandon).toBe(true);
+  });
+
+  it("回归：5xx（非 400）→ abandon=true；429 限流 → 不带 abandon", () => {
+    expect(nextAuthOnFailure("openai", "upstream", 500).abandon).toBe(true);
+    expect(nextAuthOnFailure("openai", "rate_limited", 429).abandon).toBeUndefined();
+  });
+});

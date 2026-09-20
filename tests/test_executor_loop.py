@@ -312,6 +312,98 @@ class TestClaimsGuard:
         claims = find_unverified_claims(f"已生成 {missing}")
         assert any(str(missing) in c for c in claims)
 
+    # ── A-987：空间路径截断（假指控根因）+ 精度优先改造 ──────────────
+
+    def test_absolute_path_with_space_extracted_whole(self):
+        """A-987 根因回归（用户实测假指控）：项目自己就在 `D:\\pilot project\\`，含空格的
+        绝对路径曾被 `[^\\s…]+` 截断成 `D:\\pilot`，于是**每个真实文件都被报成幻觉**，
+        而 Merger 把这条当硬信号直接写进 errors。这里直接锁住正则的取值行为。"""
+        from core.claims import _PATH_RE
+        bs = chr(92)
+        target = f"D:{bs}pilot project{bs}data{bs}real_claim_probe.png"
+        hits = [m.group(1) for m in _PATH_RE.finditer(f"已保存到 {target}（共 3 个文件）")]
+        assert target in hits, hits
+
+    def test_real_project_path_with_space_not_flagged(self):
+        """A-987：项目真实文件（路径含空格）不得被判为"文件不存在"。
+        项目根不含空格时该场景无法构造，跳过（与既有风格一致）。"""
+        import core.claims as claims_mod
+        if " " not in str(claims_mod._PROJECT_ROOT):
+            return
+        real = claims_mod._PROJECT_ROOT / "core" / "claims.py"
+        assert real.is_file()
+        assert find_unverified_claims(f"已保存到 {real}") == []
+
+    def test_fake_absolute_path_with_space_reported_whole(self):
+        """A-987：含空格的**不存在**路径必须整条报出 —— 碎片化报告（`D:\\zz…`）本身
+        就是在误导调用方，也无法让人据此判断模型到底在说什么。"""
+        bs = chr(92)
+        fake = f"D:{bs}zz_no_such_dir_abc987{bs}sub dir{bs}report.md"
+        claims = find_unverified_claims(f"报告已生成：{fake}")
+        assert any(c == fake for c in claims), claims
+
+    def test_truncated_fragment_never_flagged(self, tmp_path):
+        """A-987（精度优先的核心兜底）：被截断的路径碎片若仍是某个真实条目的**前缀**，
+        判定为解析噪声、绝不指控 —— "对每个真实文件喊狼来了"正是从这里来的。"""
+        from pathlib import Path
+        from core.claims import _looks_like_truncated_fragment
+        (tmp_path / "pilot project").mkdir()
+        assert _looks_like_truncated_fragment(Path(str(tmp_path / "pilot"))) is True
+        # 与任何真实条目都不构成前缀关系 → 不是碎片，照常核验
+        assert _looks_like_truncated_fragment(Path(str(tmp_path / "pilot_zzz_absent"))) is False
+        # 端到端：碎片不进入指控列表
+        assert find_unverified_claims(f"已保存到 {tmp_path / 'pilot'}") == []
+
+    def test_two_paths_in_one_sentence_not_merged(self, tmp_path):
+        """A-987：贪婪匹配会把 "a.png 和 b.png" 拼成一条**不存在的**路径（新的假阳性形态）；
+        惰性收尾到已知扩展名后必须切成两条，各自核验。"""
+        a = tmp_path / "a.png"
+        b = tmp_path / "b.png"
+        a.write_bytes(b"x")
+        b.write_bytes(b"y")
+        assert find_unverified_claims(f"已保存 {a} 和 {b}") == []
+
+    def test_fenced_code_block_paths_ignored(self):
+        """A-987：围栏代码块里是**示例代码**，不是对工作结果的声称。厂商共识（Anthropic
+        的"给 Agent 一个能跑的检查"一节）针对的是结果声称；核验示例代码纯属制造假阳性。"""
+        bs = chr(92)
+        reply = (
+            "已写入 core/claims.py\n"
+            "参考用法（**非本次产出**）：\n"
+            "```python\n"
+            f'open(r"D:{bs}zz_demo_not_exist_xyz{bs}output.png", "wb")\n'
+            "```\n"
+        )
+        assert find_unverified_claims(reply) == []
+
+    def test_evidence_trigger_needs_digit_and_unit(self):
+        """A-987（触发精度）：`字节/kb/mb` 曾是**裸子串**触发 —— 英文 "number"/"Remember"
+        里就含 "mb"，一段与文件无关的说明会让整段进入核验、把误报面凭空放大。
+        改为"数字 + 单位"后不该再误触发；真正的证据性描述仍必须触发。"""
+        assert find_unverified_claims("Remember the number of steps: 3. See docs/ghost_never_abc123.md for details.") == []
+        claims = find_unverified_claims("完整路径 docs/ghost_never_abc123.md")
+        assert any("ghost_never_abc123.md" in c for c in claims)
+
+    def test_audit_claims_structured_result(self, tmp_path):
+        """A-987：`audit_claims` 给出结构化结果 —— 类别（missing/size_mismatch）+ 同目录
+        最接近的真实文件名（把指控变成可自我纠正的反馈，照 Anthropic 的"证据要具体"原则）。"""
+        from core.claims import audit_claims
+        (tmp_path / "report_final.md").write_text("x", encoding="utf-8")
+        audit = audit_claims(f"已生成 {tmp_path / 'report_fianl.md'}")  # 拼错
+        assert [i.kind for i in audit.issues] == ["missing"]
+        assert audit.issues[0].severity == "high"
+        assert audit.issues[0].suggestion == "report_final.md"
+        # 旧的字符串接口保持兼容（CLI / Merger / slime_server 仍按 list[str] 用）
+        assert find_unverified_claims(f"已生成 {tmp_path / 'report_fianl.md'}") == [str(tmp_path / "report_fianl.md")]
+
+    def test_audit_records_skipped_reasons(self):
+        """A-987：被跳过项要可归因（否则"护栏是不是又在喊狼来了"只能靠猜）。"""
+        bs = chr(92)
+        from core.claims import audit_claims
+        audit = audit_claims(f"已生成\n```\nD:{bs}x{bs}y.png\n```\n")
+        assert audit.issues == []
+        assert audit.skipped.get("fenced_block") == 1
+
 
 # ── Worker 状态机（轮次耗尽 → failed）──────────────────────
 
@@ -717,6 +809,22 @@ class TestVideoChainRefFrame:
         assert _extract_mp4_path(f"本地文件: {real}（100 字节）") == str(real)
         assert _extract_mp4_path("失败") == ""
         assert _extract_mp4_path(f"本地文件: {tmp_path / 'nope.mp4'}") == ""
+
+    def test_extract_mp4_path_with_space(self, tmp_path):
+        """A-987：项目自己就在 `D:\\pilot project\\` —— 旧的 `[^\\s…]+?\\.mp4` 在含空格路径下
+        会截断成 `D:\\pilot`、存在性检查失败 → 返回 ""，
+        **视频分段拼接整段静默跳过且不报任何错**（用户只会看到"没有拼好的视频"）。
+        注意：本用例若跑在无空格的临时目录下是**测不出**这个 bug 的，故自建含空格的子目录。"""
+        from core.executor import _extract_mp4_path
+        d = tmp_path / "pilot project" / "out"
+        d.mkdir(parents=True)
+        real = d / "seg.mp4"
+        real.write_bytes(b"mp4")
+        assert _extract_mp4_path(f"本地文件: {real}（100 字节）") == str(real)
+        # 同句两个路径必须切成两条（惰性收尾到 .mp4），不得合并成一条不存在的路径
+        other = tmp_path / "seg2.mp4"
+        other.write_bytes(b"mp4")
+        assert _extract_mp4_path(f"本地文件: {other} 和 {real}") == str(other)
 
     def test_worker_message_injects_ref_frame(self):
         """ref_frame 注入 Worker 消息（模型在 agnes_generate_video 的 image 参数使用）"""
