@@ -19,7 +19,13 @@ const builderCfg = JSON.parse(readFileSync(resolve(guiDir, "electron-builder.jso
 const releaseDir = resolve(guiDir, (process.env.SLIME_OUT_DIR || "").trim() || builderCfg.directories?.output || "release");
 
 const args = process.argv.slice(2);
-const publishFlag = args.includes("--publish always") ? "--publish always" : "--publish never";
+// ⚠️ 不能用 args.includes("--publish always")：shell 会把 --publish always 拆成
+// **两个** argv 元素，那种写法永远匹配不上 → 静默退化成 --publish never（实测踩到：
+// 构建成功、产物齐全，但远端 Release 是 404）。这里三种写法都认。
+const publishOn = args.some((a) => a === "--publish=always")
+  || args.some((a, i) => a === "--publish" && args[i + 1] === "always")
+  || args.includes("--publish always");
+const publishFlag = publishOn ? "--publish always" : "--publish never";
 // SLIME_OUT_DIR：一次性覆盖输出目录。
 // 用途：electron-builder 每次打包都会 emptyDir(appOutDir)，若上一次的产物被 Defender /
 // 索引器之类瞬时锁住，unlink app.asar 会 EBUSY 且重试也解不开。换一个全新的输出目录

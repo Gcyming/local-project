@@ -35,6 +35,9 @@ const ROOT = resolve(import.meta.dirname, "..");
  * "系统自带" ≠ "在 PATH 里"：`tar.exe` 在 `%SystemRoot%\System32`，但打包/受限环境下的
  * 进程 PATH 未必包含 System32 —— 同一个坑已经让用户在安装版里吃到 `spawn tar ENOENT`
  * （platform-tools 装不上、llama 解压失败）。这里按绝对路径解析，解析不到再回退裸名。
+ *
+ * ⚠️ 必须**懒解析**：`isWindows` 在本文件靠后声明，模块顶层直接求值会命中 TDZ
+ * （`Cannot access 'isWindows' before initialization`，实测把 prepare-runtime 整个跑挂）。
  */
 function systemExe(name) {
   if (isWindows) {
@@ -44,7 +47,11 @@ function systemExe(name) {
   }
   return name;
 }
-const TAR = systemExe(isWindows ? "tar.exe" : "tar");
+let _tarExe;
+function tarExe() {
+  if (!_tarExe) { _tarExe = systemExe(isWindows ? "tar.exe" : "tar"); }
+  return _tarExe;
+}
 const isWindows = platform() === "win32";
 const pythonCmd = isWindows ? "py" : "python3";
 const llamaZip = join(ROOT, `llama-${isWindows ? "win" : "linux"}.zip`);
@@ -215,13 +222,13 @@ if (!existsSync(llamaBin)) {
         log(`下载二进制包 ${binAsset.name} (${Math.round(binAsset.size / 1024 / 1024)} MB)`);
         await downloadWithRetry(proxyUrls(binAsset.browser_download_url), binFile, 2, 600_000);
         // zip：Windows 内置 bsdtar 可解压
-        exec(TAR, ["-xf", binFile, "-C", llamaDir]);
+        exec(tarExe(), ["-xf", binFile, "-C", llamaDir]);
 
         if (runtimeAsset?.browser_download_url) {
           const cudartFile = join(ROOT, "llama-cudart-win.zip");
           log(`下载 CUDA 运行时 ${runtimeAsset.name} (${Math.round(runtimeAsset.size / 1024 / 1024)} MB)`);
           await downloadWithRetry(proxyUrls(runtimeAsset.browser_download_url), cudartFile, 2, 600_000);
-          exec(TAR, ["-xf", cudartFile, "-C", llamaDir]);
+          exec(tarExe(), ["-xf", cudartFile, "-C", llamaDir]);
         }
       }
     } else {
@@ -234,7 +241,7 @@ if (!existsSync(llamaBin)) {
         const file = join(ROOT, "llama-linux.tar.gz");
         log(`下载 ${vulkan.name} (${Math.round(vulkan.size / 1024 / 1024)} MB)`);
         await downloadWithRetry(proxyUrls(vulkan.browser_download_url), file, 2, 600_000);
-        exec(TAR, ["-xzf", file, "-C", llamaDir]);
+        exec(tarExe(), ["-xzf", file, "-C", llamaDir]);
       }
     }
 
