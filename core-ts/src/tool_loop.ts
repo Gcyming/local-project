@@ -43,8 +43,13 @@ function truncateWithDiffTag(raw: string, limit: number): string {
   return `${without.slice(0, limit)}\n${m[0]}`;
 }
 
-/** 产物变更标记（base64 的 add/del 统计）；展示与入上下文两条截断路径都要保留它 */
-const DIFF_TAG_RE = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/;
+/**
+ * 产物变更标记（base64 的 old|new 全文）；展示与入上下文两条截断路径都要保留它。
+ *
+ * A-1034：**导出**供 `services/chat.ts` 把标记一并写进思考记录 —— 历史回看时
+ * 只能从思考记录重建工具节点，若这里各写一份正则，改一处必漂。
+ */
+export const DIFF_TAG_RE = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/;
 
 /** 回传给界面展示的工具结果字符上限（默认值） */
 const DISPLAY_LIMIT_DEFAULT = 1200;

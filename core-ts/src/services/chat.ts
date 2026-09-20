@@ -37,6 +37,8 @@ import { consolidateMemoryNow } from "../memory/store.js";
 import { EventSequence, ServiceEvent } from "./events.js";
 import { AlarmBus, getAlarmBus, AlarmSeverity } from "./stats.js";
 import { getSession } from "./sessions.js";
+// A-1034：diff 标记正则的唯一出处（tool_loop 负责截断时保护它，这里负责把它写进思考记录）
+import { DIFF_TAG_RE } from "../tool_loop.js";
 
 // ── 常量（对齐 slime_server.py）────────────────────────────
 
@@ -90,10 +92,48 @@ export function toolDisplayName(name: string): string {
   return TOOL_DISPLAY_LABELS[name] ?? name;
 }
 
-/** 组装「工具调用记录」思考块（无思考模型也能在思考过程留痕；同一工具多次调用逐行记录） */
-export function composeToolCallBlock(toolNames: string[]): string {
+/**
+ * A-1034：写进思考记录的 diff 标记**源码字符上限**（old + new 合计）。
+ *
+ * 为什么思考记录里也要带 diff：工具结果本身（含标记）只在**本轮内存**里存在，
+ * 落盘的历史只有 assistant 的 `reasoning`。此前 `composeToolCallBlock` 只写工具名，
+ * 于是重新打开会话时工具节点没有 result → 产物卡与思考历程**都展不开改动对比**
+ * （用户报「改动的产物无法展开查看改动对比」的根因）。
+ *
+ * 为什么要设上限：标记是 base64，体积 ≈ 1.33×；思考记录进会话文件。
+ * 这里的取值比产物卡的 `PRODUCT_DIFF_PERSIST_MAX`(120000) 更保守，因为它是
+ * **逐行**追加到同一条 reasoning 里的，不是每条产品一份。
+ * 超限则只写 `DIFF_TRIMMED_TAG`，让界面如实说"详情未随记录保存"而不是点开空白。
+ * （已确认 reasoning **不回灌上游上下文** —— GUI 只发 `r.ai`，所以不存在毒化上下文的风险。）
+ */
+const TRACE_DIFF_MAX = 60_000;
+
+/** 超限时写进思考记录的位置占位：告知"曾有改动、但详情没存" */
+const DIFF_TRIMMED_TAG = "[__slime_diff_trimmed__]";
+
+/** 从工具结果里取出可直接写进思考记录的 diff 片段（无标记/超限各有对应形态）。
+ *  导出供守卫直测阈值边界 —— 只测"函数能跑"等于没测。 */
+export function diffTagForTrace(result: unknown): string | undefined {
+  if (typeof result !== "string") { return undefined; }
+  const m = DIFF_TAG_RE.exec(result);
+  if (!m) { return undefined; }
+  const tag = m[0];
+  // base64 长度 → 源码长度估算足够做闸门，不必真解码
+  if (tag.length > TRACE_DIFF_MAX * 1.4) { return DIFF_TRIMMED_TAG; }
+  return tag;
+}
+
+/** 组装「工具调用记录」思考块（无思考模型也能在思考过程留痕；同一工具多次调用逐行记录）。
+ *
+ * `diffTags` 与 `toolNames` **按下标对齐**（缺项 = 该次调用没有改动信息）。
+ * 标记附在行尾，渲染层 `splitToolTrace` → `traceEntriesToToolSteps` 会把它拆回
+ * `result` 字段，历史回看时才拿得到 diff。 */
+export function composeToolCallBlock(toolNames: string[], diffTags?: Array<string | undefined>): string {
   if (toolNames.length === 0) { return ""; }
-  const lines = toolNames.map((n) => `- ⟳ ${toolDisplayName(n)}`);
+  const lines = toolNames.map((n, i) => {
+    const tag = diffTags?.[i];
+    return `- ⟳ ${toolDisplayName(n)}${tag ? ` ${tag}` : ""}`;
+  });
   return `### 工具调用记录\n${lines.join("\n")}`;
 }
 
@@ -1930,6 +1970,8 @@ export class ChatService {
     const toolEventNames: string[] = [];
     /** 本次所有工具调用（主循环 + 委托 + 强制工具轮），持久化进思考过程留痕 */
     const reasoningToolNames: string[] = [];
+    // A-1034：与 reasoningToolNames 下标对齐的 diff 标记（缺项 = 该次调用无改动信息）
+    const reasoningToolDiffTags: Array<string | undefined> = [];
     let model = "";
     let promptTokens = 0;
     let completionTokens = 0;
@@ -1975,6 +2017,8 @@ export class ChatService {
           const tname = String(chunk.name ?? "");
           toolEventNames.push(tname);
           reasoningToolNames.push(tname);
+          // A-1034：把 diff 标记一起留痕（内存里的 chunk.result 含标记，落盘后就只剩这一份）
+          reasoningToolDiffTags.push(diffTagForTrace(chunk.result));
           yield emitChunk(chunk);
         } else if (chunk.type === "reasoning" || chunk.type === "progress") {
           if (chunk.type === "reasoning") {
@@ -2033,6 +2077,7 @@ export class ChatService {
             }
             for (const ev of forced.events) {
               reasoningToolNames.push(String((ev as { name?: string }).name ?? ""));
+              reasoningToolDiffTags.push(diffTagForTrace((ev as { result?: unknown }).result));
               yield emitChunk(ev);
             }
             fullReply = forced.reply || fullReply;
@@ -2139,6 +2184,7 @@ export class ChatService {
             }
             if (evt.type === "tool") {
               reasoningToolNames.push(String(evt.name ?? ""));
+              reasoningToolDiffTags.push(diffTagForTrace((evt as { result?: unknown }).result));
             }
             yield emitChunk(evt);
           }
@@ -2313,7 +2359,7 @@ export class ChatService {
         }
         // 工具调用留痕：无思考模型不产出 reasoning，工具记录会随流结束丢失；
         // 把本次工具调用合并进思考记录，持久化后历史回看/切换会话仍可见（N14）
-        const toolBlock = composeToolCallBlock(reasoningToolNames);
+        const toolBlock = composeToolCallBlock(reasoningToolNames, reasoningToolDiffTags);
         if (toolBlock) {
           reasoningBuf = reasoningBuf ? `${reasoningBuf}\n\n${toolBlock}` : toolBlock;
         }

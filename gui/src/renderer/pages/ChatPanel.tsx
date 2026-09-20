@@ -1275,16 +1275,25 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             <DiffBlock oldText={oldForDiff} newText={newForDiff} />
           )}
           {/* A-1029：**详情被阈值挡掉时必须说出来**。
-              判据 `diffStat && !parsedDiff` = "这次确实有改动（计数解析出来了），但全文拿不到"。
-              这条提示就是 A-1029 的全部教训：原来阈值一过就返回 null，界面上什么都不显示 →
-              用户体感是"以前能看、现在看不了"，而且**无从判断是坏了还是太大**。
-              现在的阈值（DIFF_FULL_MAX_RENDER）已经远高于真实文件，走到这里说明确实异常巨大。 */}
-          {diffNoticeKind(diffStat, oldForDiff !== null, false) === "too-large" && (
+              判据一律走 `diffNoticeKind`（纯函数），`.tsx` 只把返回值映射成文案 ——
+              判据散进 JSX 就只能靠"字符串还在不在"来守卫，抓不住 `false && 原条件`。
+              A-1034：第三参不再写死 `false`，而是接 `tool.diffTrimmed`
+              （历史留痕里 `[__slime_diff_trimmed__]` 占位还原而来）—— 否则"详情未随记录保存"
+              这一档在思考历程里永远显示不出来。两档分开写，判据仍是同一个函数。 */}
+          {diffNoticeKind(diffStat, oldForDiff !== null, !!tool.diffTrimmed) === "too-large" && (
             <div style={{ marginTop: 6, display: "flex", alignItems: "flex-start", gap: 4, fontSize: 11.5, color: "var(--text-dim)" }}>
               <WarningIcon size={12} style={{ flexShrink: 0, marginTop: 2, color: "#fbbf24" }} />
               <span style={{ flex: 1 }}>
                 本次改动过大（超过 {Math.round(DIFF_FULL_MAX_RENDER / 1000)}k 字符），未内联展示前后对比；
                 改动行数见上方徽标，文件可在右侧栏打开查看。
+              </span>
+            </div>
+          )}
+          {diffNoticeKind(diffStat, oldForDiff !== null, !!tool.diffTrimmed) === "trimmed" && (
+            <div style={{ marginTop: 6, display: "flex", alignItems: "flex-start", gap: 4, fontSize: 11.5, color: "var(--text-dim)" }}>
+              <WarningIcon size={12} style={{ flexShrink: 0, marginTop: 2, color: "#fbbf24" }} />
+              <span style={{ flex: 1 }}>
+                这次改动有前后对比，但详情过大，未随会话记录保存；改动行数见上方徽标，文件可在右侧栏打开查看。
               </span>
             </div>
           )}
@@ -1712,7 +1721,10 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             : [
                 ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: "think" as const, text: t })),
                 ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label.replace(/^⟳\s*/, ""), detail: t.detail })),
-                ...tracedTools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label })),
+                // A-1034：**必须带上 `result`**。此前这里只映射 name/label，把从留痕还原的
+                // diff 标记整条丢掉 → 重新打开会话后思考历程里的写入卡片展不开改动对比
+                // （用户报「思考历程中的改动也无法查看」的直接成因）。
+                ...tracedTools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label, result: t.result, diffTrimmed: t.diffTrimmed })),
               ];
           if (timeline.length === 0 && localFiles.length === 0 && localUrls.length === 0) return null;
           return (

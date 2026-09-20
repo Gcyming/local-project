@@ -137,6 +137,37 @@ export function splitToolTrace(text: string): ToolTraceSplit {
 export interface TracedToolStep {
   name?: string;
   label: string;
+  /**
+   * A-1034：从留痕里还原出来的工具结果（**只含 diff 标记**）。
+   *
+   * 为什么需要：历史消息落盘的只有 `reasoning`，工具结果本身只存在于本轮内存。
+   * core-ts 现在把 diff 标记一并写进 `### 工具调用记录` 的行尾，这里把它拆回 `result`，
+   * 产物卡与思考历程在**重新打开会话后**才展得开改动对比（此前是空白）。
+   */
+  result?: string;
+  /** A-1034：改动详情因超限**未随记录保存**（界面要如实说明，不能点开一片空白） */
+  diffTrimmed?: boolean;
+}
+
+/** 留痕行尾的"改动详情未保存"占位（与 core-ts `chat.ts` 的 `DIFF_TRIMMED_TAG` 同字面量） */
+export const TRACE_DIFF_TRIMMED_MARKER = "[__slime_diff_trimmed__]";
+
+/** 行尾机器标记：完整 diff 标记 或「详情未保存」占位 */
+const TRACE_MARKER_RE = /\[__slime_diff__\][A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\[\/__slime_diff__\]|\[__slime_diff_trimmed__\]/;
+
+/**
+ * 把留痕行拆成「人读的部分」与「机器标记」。
+ *
+ * ⚠️ 拆分**必须在 lookup 之前**做：`existing`（真实时间线上的展示标签）里不含标记，
+ * 若拿带标记的原文去比对，历史回退路径永远匹配不上 → 同一次调用会重复出一个节点。
+ */
+export function splitTraceDiff(raw: string): { text: string; result?: string; diffTrimmed?: boolean } {
+  const src = raw ?? "";
+  const m = TRACE_MARKER_RE.exec(src);
+  if (!m) { return { text: src.trim() }; }
+  const text = src.replace(m[0], "").replace(/\s+/g, " ").trim();
+  if (m[0] === TRACE_DIFF_TRIMMED_MARKER) { return { text, diffTrimmed: true }; }
+  return { text, result: m[0] };
 }
 
 /**
@@ -206,12 +237,14 @@ export function traceEntriesToToolSteps(
   const pool = existing.map((t) => (t.label ?? t.name ?? "").replace(/^⟳\s*/, "").trim()).filter((s) => s.length > 0);
   const out: TracedToolStep[] = [];
   for (const raw of entries) {
-    const entry = (raw ?? "").trim();
+    // A-1034：先把行尾的机器标记拆出来，再参与比对与查表
+    const { text: entry, result, diffTrimmed } = splitTraceDiff(raw ?? "");
     if (!entry) { continue; }
     const hit = pool.indexOf(entry);
     if (hit >= 0) { pool.splice(hit, 1); continue; }
     const mapped = lookup(entry);
-    out.push(mapped ? { name: mapped.name, label: mapped.label } : { label: entry });
+    const base = mapped ? { name: mapped.name, label: mapped.label } : { label: entry };
+    out.push(result || diffTrimmed ? { ...base, result, diffTrimmed } : base);
   }
   return out;
 }
