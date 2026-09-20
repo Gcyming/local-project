@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 import { createPlan, updateStage, advanceByLabel, planProgress, planToJSON, parsePlan, type PlanStageStatus } from "../planning/plan.js";
 import { PROTECTED_DIRS_SET, SENSITIVE_FILENAMES_SET, WRITE_BLOCK_SUFFIXES_SET } from "shared/security-policy";
-import { extractDocText, docKindFromExt, legacyBinaryName } from "../doc_text.js";
+import { extractDocText, docKindFromExt, legacyBinaryName, extractOleText, oleKindFromExt } from "../doc_text.js";
 import type { MemoryStore } from "../memory/store.js";
 import type {
   DisplayInfo,
@@ -222,6 +222,43 @@ async function readLineWindow(
   }
 }
 
+/** A-1036：旧版格式在提示里的可读名 */
+const OLE_KIND_LABEL: Record<string, string> = { doc: "DOC 97-2003", xls: "XLS 97-2003", ppt: "PPT 97-2003" };
+function docKindLabel(kind: string): string { return OLE_KIND_LABEL[kind] ?? kind.toUpperCase(); }
+
+/**
+ * A-1036：把「文档 → 文本」的结果套用与纯文本**完全一致**的分页与字节上限语义。
+ * 新格式（ZIP 容器）与旧版（OLE2）两条路径共用这一份实现 —— 此前是内联在 docx 分支里的，
+ * 加旧版格式时要再抄一遍，抄一份漂一份。
+ */
+function finishDocResult(
+  extracted: { text: string; info: string[]; truncated: boolean },
+  offset: number,
+  limit: number,
+  label: string,
+): string {
+  const all = extracted.text.split(/\r?\n/);
+  const start = Math.min(offset - 1, all.length);
+  let lines = all.slice(start, start + limit);
+  let truncatedByBytes = false;
+  if (Buffer.byteLength(lines.join("\n"), "utf-8") > MAX_READ_BYTES) {
+    let keep = lines.length;
+    while (keep > 1 && Buffer.byteLength(lines.slice(0, keep).join("\n"), "utf-8") > MAX_READ_BYTES) {
+      keep = Math.max(1, Math.floor(keep * 0.7));
+    }
+    lines = lines.slice(0, keep);
+    truncatedByBytes = true;
+  }
+  const head = `[${label} 已转为文本] ${extracted.info.join(" | ")}`
+    + `${extracted.truncated ? "（原文过长，抽取阶段已截断）" : ""}\n`;
+  const lastLine = start + lines.length;
+  if (lastLine < all.length || truncatedByBytes) {
+    return `${head}${lines.join("\n")}\n[已截断: 本次返回第 ${start + 1}-${lastLine} 行，全文共 ${all.length} 行。`
+      + `继续读取请传 offset=${lastLine + 1} limit=${limit}]`;
+  }
+  return `${head}${lines.join("\n")}`;
+}
+
 async function fileRead(args: Record<string, unknown>): Promise<string> {
   const path = String(args.path ?? "");
   if (!path) {
@@ -254,12 +291,20 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
     // PK 开头的二进制乱码（用户实测「无法阅读 PPT / WORD / EXCEL」，Agent 只能反过来求用户贴内容）。
     // 这里先分派到 doc_text 抽取正文，再套用与纯文本**同一套** offset/limit 分页语义。
     const ext = extname(p).toLowerCase();
+    const oleKind = oleKindFromExt(ext);
     const legacy = legacyBinaryName(ext);
-    if (legacy) {
-      // 反向承诺：旧版二进制格式读不了就**说清楚**，绝不吐乱码让模型瞎猜
-      return `[错误] 暂不支持 ${legacy} 二进制格式（${ext}）: ${path}。`
-        + `请用 Office/WPS 另存为 .docx/.xlsx/.pptx 后再读；`
-        + "若只需要其中一小段内容，也可以直接把它贴给我。";
+    if (oleKind) {
+      // A-1036：旧版 .doc/.xls/.ppt 是 **OLE2 复合文档**，不是 ZIP —— 走 CFB 容器 + 各自的
+      // 流格式（.doc piece table / .xls BIFF SST / .ppt 文本原子）真解析，
+      // 不再只报"不支持"、也不再吐二进制乱码。
+      let extracted: ReturnType<typeof extractOleText>;
+      try {
+        extracted = extractOleText(await readFile(p), oleKind);
+      } catch (e) {
+        return `[错误] ${legacy} 文档解析失败: ${path}: ${e instanceof Error ? e.message : String(e)}`
+          + "（可尝试用 Office/WPS 另存为 .docx/.xlsx/.pptx 后重读）";
+      }
+      return finishDocResult(extracted, offset, limit, docKindLabel(oleKind));
     }
     const docKind = docKindFromExt(ext);
     if (docKind) {
@@ -269,27 +314,7 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
       } catch (e) {
         return `[错误] 文档解析失败: ${path}: ${e instanceof Error ? e.message : String(e)}`;
       }
-      const all = extracted.text.split(/\r?\n/);
-      const start = Math.min(offset - 1, all.length);
-      let lines = all.slice(start, start + limit);
-      let truncatedByBytes = false;
-      if (Buffer.byteLength(lines.join("\n"), "utf-8") > MAX_READ_BYTES) {
-        let keep = lines.length;
-        while (keep > 1 && Buffer.byteLength(lines.slice(0, keep).join("\n"), "utf-8") > MAX_READ_BYTES) {
-          keep = Math.max(1, Math.floor(keep * 0.7));
-        }
-        lines = lines.slice(0, keep);
-        truncatedByBytes = true;
-      }
-      const head = `[${docKind.toUpperCase()} 已转为文本] ${extracted.info.join(" | ")}`
-        + `${extracted.truncated ? "（原文过长，抽取阶段已截断）" : ""}\n`;
-      const lastLine = start + lines.length;
-      let tail = "";
-      if (lastLine < all.length || truncatedByBytes) {
-        tail = `\n[已截断: 本次返回第 ${start + 1}-${lastLine} 行，全文共 ${all.length} 行。`
-          + `继续读取请传 offset=${lastLine + 1} limit=${limit}]`;
-      }
-      return `${head}${lines.join("\n")}${tail}`;
+      return finishDocResult(extracted, offset, limit, docKind);
     }
     const win = await readLineWindow(p, offset, limit);
     let content = win.lines.join("\n");
