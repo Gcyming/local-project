@@ -459,8 +459,10 @@ function extractXlsBinary(buf: Buffer, maxChars: number): DocExtractResult {
   const wb = cfb.readStream("Workbook") ?? cfb.readStream("Book") ?? cfb.readStreamLike("Workbook");
   if (!wb) { throw new Error("不是有效的 .xls：缺少 Workbook 流"); }
 
-  const sheets: string[] = [];
-  const records: Array<{ type: number; data: Buffer }> = [];
+  // 一遍记录扫描：收 BOUNDSHEET（表名 + 该表在流中的起始偏移）与全部记录
+  const recs: Array<{ type: number; data: Buffer; off: number }> = [];
+  const bounds: Array<{ name: string; pos: number }> = [];
+  const sstBlocks: Buffer[] = [];
   let p = 0;
   while (p + 4 <= wb.length) {
     const type = wb.readUInt16LE(p);
@@ -468,35 +470,153 @@ function extractXlsBinary(buf: Buffer, maxChars: number): DocExtractResult {
     const start = p + 4;
     if (len > wb.length - start) { break; }
     const data = wb.subarray(start, start + len);
-    if (type === 0x0085 && len >= 8) {                 // BOUNDSHEET：1B 位置 + 1B 隐藏 + 1B 类型 + 名字
+    recs.push({ type, data, off: p });
+    if (type === 0x0085 && len >= 8) {
+      // BOUNDSHEET：lbPlyPos(4) + grbit(2) + cch(1) + grbit(1) + 名字
       const cch = data[6];
-      const grbit = data[7];
-      const nameBytes = data.subarray(8, 8 + (grbit & 0x01 ? cch * 2 : cch));
-      sheets.push(grbit & 0x01 ? nameBytes.toString("utf16le") : latin1(nameBytes));
+      const nameGrbit = data[7];
+      const nb = data.subarray(8, 8 + (nameGrbit & 0x01 ? cch * 2 : cch));
+      bounds.push({
+        name: nameGrbit & 0x01 ? nb.toString("utf16le") : latin1(nb),
+        pos: data.readUInt32LE(0),
+      });
     }
-    if (type === 0x00fc || type === 0x003c) { records.push({ type, data }); }
+    if (type === 0x00fc || type === 0x003c) { sstBlocks.push(data); }
     p = start + len;
   }
+  const sst = sstBlocks.length > 0 ? readSstStrings(sstBlocks) : [];
 
-  const texts: string[] = [];
-  const sstBlocks: Buffer[] = [];
-  for (const r of records) {
-    if (r.type === 0x00fc && sstBlocks.length > 0) { break; }   // 第二张 SST 不再拼
-    sstBlocks.push(r.data);
-  }
-  if (sstBlocks.length > 0) {
-    texts.push(...readSstStrings(sstBlocks));
+  // 每张表的记录区间：按 BOUNDSHEET 的流偏移升序切换（A-1036：数值单元格此前完全拿不到 ——
+  // 只抽 SST 的话，一张全是数字的表读出来几乎是空的）
+  const ordered = [...bounds].sort((a, b) => a.pos - b.pos);
+  const sheetNameAt = (off: number): string => {
+    let name = "";
+    for (const b of ordered) { if (off >= b.pos) { name = b.name; } else { break; } }
+    return name || "Sheet1";
+  };
+  const grids = new Map<string, Map<number, Map<number, string>>>();
+  const put = (sheet: string, row: number, col: number, value: string): void => {
+    if (value === "" || row >= XLSX_MAX_ROWS || col >= XLSX_MAX_COLS) { return; }
+    let g = grids.get(sheet);
+    if (!g) { g = new Map(); grids.set(sheet, g); }
+    let r = g.get(row);
+    if (!r) { r = new Map(); g.set(row, r); }
+    r.set(col, value);
+  };
+
+  for (const rec of recs) {
+    const d = rec.data;
+    const sheet = sheetNameAt(rec.off);
+    switch (rec.type) {
+      case 0x00fd: {                       // LABELSST：指向共享字符串表
+        if (d.length < 10) { break; }
+        const isst = d.readUInt32LE(6);
+        put(sheet, d.readUInt16LE(0), d.readUInt16LE(2), sst[isst] ?? "");
+        break;
+      }
+      case 0x0204: {                       // LABEL：内联字符串
+        if (d.length < 8) { break; }
+        put(sheet, d.readUInt16LE(0), d.readUInt16LE(2), biffString(d, 6));
+        break;
+      }
+      case 0x0203: {                       // NUMBER：8 字节 IEEE 双精度
+        if (d.length < 14) { break; }
+        put(sheet, d.readUInt16LE(0), d.readUInt16LE(2), fmtNum(d.readDoubleLE(6)));
+        break;
+      }
+      case 0x027e: {                       // RK：压缩数值
+        if (d.length < 10) { break; }
+        put(sheet, d.readUInt16LE(0), d.readUInt16LE(2), fmtNum(rkToNumber(d.readUInt32LE(6))));
+        break;
+      }
+      case 0x00bd: {                       // MULRK：一行里连续多个 RK
+        if (d.length < 6) { break; }
+        const row = d.readUInt16LE(0);
+        const colFirst = d.readUInt16LE(2);
+        const n = Math.floor((d.length - 6) / 6);
+        for (let k = 0; k < n; k += 1) {
+          put(sheet, row, colFirst + k, fmtNum(rkToNumber(d.readUInt32LE(4 + k * 6 + 2))));
+        }
+        break;
+      }
+      case 0x0006: {                       // FORMULA：只取**数值型**缓存结果
+        if (d.length < 14) { break; }
+        // 结果字节 6..13；0xFFFF 开头的不是数字（字符串/布尔/错误/空）→ 跳过
+        if (d[6] === 0xff && d[7] === 0xff) { break; }
+        put(sheet, d.readUInt16LE(0), d.readUInt16LE(2), fmtNum(d.readDoubleLE(6)));
+        break;
+      }
+      default:
+        break;
+    }
   }
 
   const info: string[] = [];
-  if (sheets.length > 0) { info.push(`工作表：${sheets.join("、")}`); }
-  info.push(`共享字符串表：${texts.length} 条`);
-  const body = texts
-    .map((t) => t.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim())
-    .filter((t) => t.length > 0)
-    .join("\n");
-  if (body) { info.push("说明：按字符串首次出现顺序输出，未重建单元格坐标"); }
-  return clamp(body, maxChars, info);
+  const blocks: string[] = [];
+  for (const [name, g] of grids) {
+    if (g.size === 0) { continue; }
+    const rows = [...g.keys()].sort((a, b) => a - b);
+    let maxCol = 0;
+    for (const r of g.values()) { for (const c of r.keys()) { if (c + 1 > maxCol) { maxCol = c + 1; } } }
+    const header = Array.from({ length: maxCol }, (_, i) => colName(i)).join(" | ");
+    const body = rows.map((ri) => {
+      const r = g.get(ri) ?? new Map<number, string>();
+      const cells = Array.from({ length: maxCol }, (_, ci) => r.get(ci) ?? "");
+      return `${ri + 1}\t${cells.join(" | ")}`.trimEnd();
+    });
+    info.push(`「${name}」${rows.length} 行 × ${maxCol} 列`);
+    blocks.push(`## 表：${name}\n行号\t${header}\n${body.join("\n")}`);
+  }
+
+  if (blocks.length > 0) {
+    info.unshift(`xls：${[...grids.keys()].length} 张有内容的表`);
+    if (blocks.length < bounds.length && bounds.length > 0) {
+      info.push(`另有 ${bounds.length - blocks.length} 张空表未列出`);
+    }
+    return clamp(blocks.join("\n\n"), maxChars, info);
+  }
+
+  // 没有解析出任何单元格 → 退回共享字符串表（图表页等特殊结构仍能拿到文字）
+  const texts = sst.map((t) => t.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim()).filter(Boolean);
+  const names = bounds.length > 0 ? `工作表：${bounds.map((b) => b.name).join("、")}` : "未取到工作表名";
+  info.push(names, `回退：仅共享字符串表 ${texts.length} 条（未解析出单元格，可能是图表页）`);
+  return clamp(texts.join("\n"), maxChars, info);
+}
+
+/** BIFF 的 XLUnicodeString（cch + grbit + 字符） */
+function biffString(d: Buffer, at: number): string {
+  if (at + 3 > d.length) { return ""; }
+  const cch = d.readUInt16LE(at);
+  const wide = (d[at + 2] & 0x01) !== 0;
+  const start = at + 3;
+  const need = cch * (wide ? 2 : 1);
+  if (start + need > d.length) { return ""; }
+  return wide ? d.subarray(start, start + need).toString("utf16le") : latin1(d.subarray(start, start + need));
+}
+
+/**
+ * BIFF 的 RK 数值编码（把 8 字节 double 压缩到 4 字节的常见情形）。
+ * 位 0 = 是否除以 100；位 1 = 是否整数（30 位有符号）；否则低 30 位是 double 的高 4 字节。
+ */
+function rkToNumber(rk: number): number {
+  let v: number;
+  if ((rk & 0x02) !== 0) {
+    v = rk >> 2;
+  } else {
+    const b = Buffer.alloc(8);
+    b.writeUInt32LE(0, 0);
+    b.writeUInt32LE(rk & 0xfffffffc, 4);
+    v = b.readDoubleLE(0);
+  }
+  if ((rk & 0x01) !== 0) { v /= 100; }
+  return v;
+}
+
+/** 数值显示：整数不带小数点，浮点去掉浮点噪声（12 位有效数字足够） */
+function fmtNum(v: number): string {
+  if (!Number.isFinite(v)) { return ""; }
+  if (Number.isInteger(v)) { return String(v); }
+  return String(Number(v.toPrecision(12)));
 }
 
 /**

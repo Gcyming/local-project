@@ -64,8 +64,11 @@ describe("A-1034 ① 系统可执行文件用绝对路径（不再是裸命令�
 
   it("构建脚本不再直接 exec(\"tar\")（走 systemExe 绝对路径解析）", () => {
     const src = readFileText(join(ROOT, "scripts/prepare-runtime.mjs"));
+    // 原意图：不得裸调外部命令，必须经绝对路径解析。A-1036 起解析改成**懒求值**
+    // （`const TAR = …` 写在 isWindows 声明之前会命中 TDZ），所以这里断"有没有解析"而不是"哪种写法"。
     expect(src.includes('exec("tar"')).toBe(false);
-    expect(src.includes("const TAR = systemExe(")).toBe(true);
+    expect(src).toMatch(/function systemExe\(/);
+    expect(src).toMatch(/exec\(tarExe\(\),/);
   });
 
   it("adb 解压不再调用外部命令，改用内置 zip 模块", () => {

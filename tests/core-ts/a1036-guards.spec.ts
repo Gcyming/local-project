@@ -170,3 +170,127 @@ describe("A-1036 ③ 路由与格式判定", () => {
     expect(/extractOleText\(await readFile\(p\), oleKind\)/.test(bad)).toBe(false);
   });
 });
+
+describe("A-1036 ④ .xls 单元格网格（BIFF8：标签 + 数字 + 表名）", () => {
+  /** BIFF 记录：type(2) + len(2) + data */
+  const biff = (type: number, payload: Buffer): Buffer => {
+    const h = Buffer.alloc(4);
+    h.writeUInt16LE(type, 0);
+    h.writeUInt16LE(payload.length, 2);
+    return Buffer.concat([h, payload]);
+  };
+  /** SST（共享字符串表）：cstTotal + cstUnique + 每条 cch/grbit/字符
+   *  ⚠️ grbit 位 0 = 16 位字符。**非 ASCII 必须置位**，否则读回来是乱码
+   *  （真写入器就是这么做的）。 */
+  const sstRec = (strings: string[]): Buffer => {
+    const parts: Buffer[] = [Buffer.alloc(8)];
+    parts[0].writeUInt32LE(strings.length, 0);
+    parts[0].writeUInt32LE(strings.length, 4);
+    for (const s of strings) {
+      const wide = /[^\x00-\x7f]/.test(s);
+      const b = wide ? Buffer.from(s, "utf16le") : Buffer.from(s, "latin1");
+      const h = Buffer.alloc(3);
+      h.writeUInt16LE(s.length, 0);
+      h[2] = wide ? 0x01 : 0;
+      parts.push(h, b);
+    }
+    return biff(0x00fc, Buffer.concat(parts));
+  };
+  /** BOUNDSHEET：lbPlyPos(4) + grbit(2) + cch(1) + nameGrbit(1) + 名字
+   *  ⚠️ nameGrbit 位 0 = 名字是 16 位字符。**非 ASCII 必须走 16 位** ——
+   *  真实 .xls 的日文表名（作業リスト）就是靠这个标志解出来的；夹具里用 latin1 写中文会得到乱码。 */
+  const boundsheet = (name: string, pos: number): Buffer => {
+    const wide = /[^\x00-\x7f]/.test(name);
+    const nb = wide ? Buffer.from(name, "utf16le") : Buffer.from(name, "latin1");
+    const p = Buffer.alloc(8);
+    p.writeUInt32LE(pos, 0);
+    p.writeUInt16LE(0, 4);
+    p[6] = wide ? name.length : nb.length;
+    p[7] = wide ? 1 : 0;
+    return biff(0x0085, Buffer.concat([p, nb]));
+  };
+  /** 单元格记录（row/col/xf 都在前 6 字节） */
+  const cellHead = (row: number, col: number): Buffer => {
+    const b = Buffer.alloc(6);
+    b.writeUInt16LE(row, 0);
+    b.writeUInt16LE(col, 2);
+    return b;
+  };
+  const labelSst = (row: number, col: number, isst: number): Buffer => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(isst, 0);
+    return biff(0x00fd, Buffer.concat([cellHead(row, col), b]));
+  };
+  const numberCell = (row: number, col: number, v: number): Buffer => {
+    const b = Buffer.alloc(8);
+    b.writeDoubleLE(v, 0);
+    return biff(0x0203, Buffer.concat([cellHead(row, col), b]));
+  };
+  /** RK 整数编码：位 1 = 整数，位 0 = 除以 100 */
+  const rkCell = (row: number, col: number, v: number): Buffer => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE((v << 2) | 0x02, 0);
+    return biff(0x027e, Buffer.concat([cellHead(row, col), b]));
+  };
+
+  function buildXls(): Buffer {
+    // 全局区：BOF + BOUNDSHEET(pos=0，单表场景下等价"从流首开始") + SST + EOF
+    const globals = Buffer.concat([
+      biff(0x0809, Buffer.alloc(4)),
+      boundsheet("数据表", 0),
+      sstRec(["名称", "数量", "苹果"]),
+      biff(0x000a, Buffer.alloc(0)),
+    ]);
+    // 表数据区
+    const sheet = Buffer.concat([
+      biff(0x0809, Buffer.alloc(4)),
+      labelSst(0, 0, 0),          // A1 = 名称
+      labelSst(0, 1, 1),          // B1 = 数量
+      labelSst(1, 0, 2),          // A2 = 苹果
+      numberCell(1, 1, 10.52),    // B2 = 10.52（NUMBER）
+      rkCell(2, 1, 42),           // B3 = 42（RK 整数编码）
+      biff(0x000a, Buffer.alloc(0)),
+    ]);
+    return buildCfb("Workbook", Buffer.concat([globals, sheet, Buffer.alloc(6000)]));
+  }
+
+  it("抽出的网格含表名、行标签与**数值**（数值此前完全拿不到）", () => {
+    const r = extractOleText(buildXls(), "xls");
+    expect(r.info.join()).toContain("数据表");
+    expect(r.text).toContain("## 表：数据表");
+    expect(r.text).toContain("名称");
+    expect(r.text).toContain("苹果");
+    // 关键：NUMBER 与 RK 两条路径都要出数（只抽 SST 的话这两格是空的）
+    expect(r.text, "NUMBER 单元格必须解出").toContain("10.52");
+    expect(r.text, "RK 单元格必须解出").toContain("42");
+    // 列头与行号让模型能定位
+    expect(r.text).toContain("A | B");
+    expect(r.text).toMatch(/\n1\t/);
+  });
+
+  it("RK 编码：整数位与除 100 位都要正确", () => {
+    const rk = (v: number): number => (v << 2) | 0x02;
+    expect(rk(42)).toBe(170);
+    // 除 100 的情形：(1052<<2)|0x03 → 10.52
+    const p = Buffer.alloc(4);
+    p.writeUInt32LE((1052 << 2) | 0x03, 0);
+    expect(Math.abs(((p.readUInt32LE(0) >> 2) / 100) - 10.52) < 1e-9).toBe(true);
+  });
+
+  it("空表如实标注，不假装有内容", () => {
+    const globals = Buffer.concat([
+      biff(0x0809, Buffer.alloc(4)),
+      boundsheet("空表", 0),
+      sstRec([]),
+      biff(0x000a, Buffer.alloc(0)),
+    ]);
+    const r = extractOleText(buildCfb("Workbook", Buffer.concat([globals, Buffer.alloc(6000)])), "xls");
+    // 没有任何单元格 → 走共享字符串表回退路径，并在 info 里说明
+    expect(r.info.join()).toMatch(/回退|0 条/);
+  });
+
+  it("缺 Workbook 流 → 明确报错", () => {
+    expect(() => extractOleText(buildCfb("Book1", Buffer.alloc(5000)), "xls"))
+      .toThrow(/缺少 Workbook 流/);
+  });
+});
