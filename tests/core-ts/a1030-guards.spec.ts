@@ -39,7 +39,11 @@ const ROOT = join(__dirname, "..", "..");
 const SKIP_DIRS = new Set(["node_modules", "out", "dist", ".git"]);
 
 /** 源码树（这些目录下出现 `.js` 一律视为编译影子）。 */
-const SHADOW_ROOTS = ["gui/src", "core-ts/src", "gateway-ts/src", "shared"];
+// ⚠️ `tests` 必须一并扫描：A-1030 首版只列了四棵源码树，漏了 tests/，
+// 结果 tests/core-ts 下攒了 109 个 *.spec.js 影子（每个都有同名 .spec.ts）没被任何守卫发现，
+// 还差点被整批提交进仓库。vitest 的 include 只收 .spec.ts 所以**不会被执行**，
+// 但任何 import "./xxx.js" 的解析仍会命中影子 —— 同样的"锁错对象"陷阱。
+const SHADOW_ROOTS = ["gui/src", "core-ts/src", "gateway-ts/src", "shared", "tests"];
 
 /** 只做类型检查、必须永不 emit 的配置。 */
 const TYPECHECK_ONLY_CFG = ["tsconfig.base.json", "gui/tsconfig.json"];
