@@ -48,11 +48,16 @@ linux/      Linux 兼容子项目脚本
 
 | 能力 | 实现位置 |
 | --- | --- |
-| 情绪状态（动态层） | `core-ts/src/mind/emotion.ts` |
-| 行为模式沉淀 + 艾宾浩斯衰减 + 归档 | `core-ts/src/mind/behavior.ts` |
-| 分层提示注入（行为 / 情绪风格 / 自我叙事） | `core-ts/src/mind/hooks.ts` |
-| 向量记忆（LanceDB）+ 双向链接 + 多阶段检索 | `core-ts/src/memory/` |
-| 知识晋升：Pattern → Rule → Skill → Persona trait | `core-ts/src/memory/knowledge.ts` |
+| 情绪状态（动态层）：每轮对话后按 成功/情绪/新颖度/称赞 全信号更新并落盘 | `core-ts/src/mind/emotion.ts`，写入点 `core-ts/src/services/chat.ts` |
+| 行为模式沉淀 + 艾宾浩斯衰减 + 归档（L3→L2） | `core-ts/src/mind/behavior.ts`（`ConsolidationEngine`） |
+| 分层提示注入：行为模式 + 情绪状态 + 自我叙事 | `core-ts/src/mind/hooks.ts` 的 `buildMindSegments`，接线于 `gui/src/main/index.ts` 的 `hooks.fixedSegments` |
+| 向量记忆（LanceDB）+ 实体图双向链接 + 四阶段检索 | `core-ts/src/memory/`（`store.ts` 用 `three_layer`/`graph`/`embed_cache`；`retrieve.ts` 四阶段） |
+| 记忆分层巩固：working → episodic → semantic，与行为巩固同频触发 | `core-ts/src/memory/store.ts` 的 `consolidateMemoryNow` |
+| 知识沉淀：Pattern 记录 → 优先级升级 → 生成 Rule | `core-ts/src/memory/knowledge.ts` |
+
+> ⚠️ 「Pattern → Rule → Skill → Persona trait」这条完整晋升链**只走到 Rule 为止**：
+> `generateSkill()` 与 `review()`（唯一会写 `persona.traits` 的入口）在运行代码里**没有任何调用者**，
+> 只有测试引用。也就是说 Skill 与 trait 两层是「有实现、没接线」，不应当作已具备的能力对外描述。
 
 ### 工具与权限
 
@@ -60,6 +65,8 @@ linux/      Linux 兼容子项目脚本
 | --- | --- |
 | 工具注册表（权限位 read / write / terminal / network） | `core-ts/src/tools/registry.ts` |
 | 内置工具：文件、命令、`web_fetch`、`web_search`（Bing 主 + 百度兜底）、adb 系列、浏览器、`ask_user` 等 | `core-ts/src/tools/builtin.ts` |
+| Office 文档读取：docx（段落+表格）、pptx（按页）、xlsx（按表输出网格）自动转文本 | `core-ts/src/doc_text.ts` |
+| 零依赖 ZIP 读取/解压（只用 `node:zlib`，含 Zip-Slip 防护） | `core-ts/src/zip.ts` |
 | MCP 客户端：stdio + Streamable HTTP(SSE) 双传输，重连上限 10 次 | `core-ts/src/mcp.ts` |
 | 沙箱：L0–L5 分级决策链，默认只读，支持会话级白名单 | `core-ts/src/sandbox.ts` |
 | 技能装配：外部 `SKILL.md` 装入 Agent 上下文 | `core-ts/src/skills.ts` |

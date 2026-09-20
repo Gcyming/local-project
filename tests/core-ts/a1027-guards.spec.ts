@@ -182,7 +182,14 @@ describe("A-1027 ③：解析结果必须真的接到渲染上（否则是假修
   });
 
   it("解析出的工具节点真的进了 timeline 数组", () => {
-    expect(chatCode, "解析出来却不渲染 = 白修").toContain("...tracedTools.map((t) => ({ kind: \"tool\" as const, name: t.name, label: t.label }))");
+    // A-1034：断言从"整行字面量"改为"映射表达式必须产出 name/label（可带其它字段）"——
+    // 原写法只要给节点加一个字段（例如 A-1034 补的 result）就会误红，
+    // 而它真正要守的是"解析出来必须渲染"，不是"字段不能增加"。
+    const m = /\.\.\.tracedTools\.map\(\(t\) => \(\{([\s\S]{0,220}?)\}\)\)/.exec(chatCode);
+    expect(m, "解析出来却不渲染 = 白修：找不到 tracedTools 的映射表达式").not.toBeNull();
+    const body = m![1];
+    expect(body, "映射出的节点必须带上工具名").toMatch(/name:\s*t\.name/);
+    expect(body, "映射出的节点必须带上展示标签").toMatch(/label:\s*t\.label/);
     expect(chatCode).toContain("traceEntriesToToolSteps(trace.traces, matchToolLabel, tools)");
   });
 
