@@ -53,11 +53,26 @@ linux/      Linux 兼容子项目脚本
 | 分层提示注入：行为模式 + 情绪状态 + 自我叙事 | `core-ts/src/mind/hooks.ts` 的 `buildMindSegments`，接线于 `gui/src/main/index.ts` 的 `hooks.fixedSegments` |
 | 向量记忆（LanceDB）+ 实体图双向链接 + 四阶段检索 | `core-ts/src/memory/`（`store.ts` 用 `three_layer`/`graph`/`embed_cache`；`retrieve.ts` 四阶段） |
 | 记忆分层巩固：working → episodic → semantic，与行为巩固同频触发 | `core-ts/src/memory/store.ts` 的 `consolidateMemoryNow` |
-| 知识沉淀：Pattern 记录 → 优先级升级 → 生成 Rule | `core-ts/src/memory/knowledge.ts` |
+| 知识沉淀：Pattern 记录 → 优先级升级 → 生成 Rule → 生成技能 → 写入人格特征 | `core-ts/src/memory/knowledge.ts` |
 
-> ⚠️ 「Pattern → Rule → Skill → Persona trait」这条完整晋升链**只走到 Rule 为止**：
-> `generateSkill()` 与 `review()`（唯一会写 `persona.traits` 的入口）在运行代码里**没有任何调用者**，
-> 只有测试引用。也就是说 Skill 与 trait 两层是「有实现、没接线」，不应当作已具备的能力对外描述。
+三方向是**闭环**的（A-1035 补齐了此前"有实现没接线"的四条断线）：
+
+```
+对话结束 → 情绪全信号更新 ┐
+           行为 reinforce  ├→ 落盘
+           知识 recordPattern ┘
+                ├─ 越阈值 → applyPromotion：生成 SKILL.md + 写 persona.traits
+                └─ 工具使用成败 → tool.<name>.success/fail 也算知识
+                          ↓ 下一轮读回
+情绪 mood → topK（检索条数）
+知识高频项 → ConsolidationEngine.knowledgeTraits → 行为模式
+知识可见集 → SkillRegistry(extraDirs) → skill_search / skill_lookup 可被 Agent 调用
+```
+
+自动生成的技能落在 `Knowledge/Agent Memory/generated_skills/`，通过额外扫描根进入
+技能注册表 —— Agent 用 `skill_search` 搜、`skill_lookup` 读，**能真正调用**，
+而不只是磁盘上的文件。工具与 MCP 的调用结果会回写成 `tool.*` pattern，
+反复成功的用法自动沉淀为可复用技能。
 
 ### 工具与权限
 

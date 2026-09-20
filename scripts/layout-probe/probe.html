@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!--
+  ⚠️ 这个页面是「模型调试表」的**手工复刻品**，不是真组件渲染出来的。
+     它的唯一职责：让 scripts/layout-probe/main.cjs 用真实 Chromium + 真实 index.css
+     量出「一段文字在本机字体下要占多少像素」，从而给列宽定预算。
+
+     ⚠️ 改了 ProvidersPanel.tsx 里的 th 宽/内边距/单元格内容时，**必须同步改这里**，
+        否则量到的是过时复刻品 —— "测过了"变成假证据。
+        权威守卫是 tests/core-ts/pricing-tiers.spec.ts 里的
+        「A-988：列宽预算必须容得下最坏内容」——它直接读真实源码算，不会漂移。
+        这里只负责在**布局发生变化时**重新推导那几个实测常量（26.7 / 50.05 / 40 / 103.93）。
+-->
+<title>slime 模型调试表 · 布局预算探针</title>
+<!-- 直接引用**真实**的样式表：这样验证的就是用户实际会看到的 CSS，而不是复刻品 -->
+<link rel="stylesheet" href="../../gui/src/renderer/index.css" />
+<style>
+  /* 复刻弹窗卡片的实际约束：卡片 width:680、padding 16 → 内容区 648（646 实测） */
+  html, body { margin: 0; padding: 0; background: #16161a; }
+  #stage { width: 680px; }
+  #card { width: 680px; box-sizing: border-box; padding: 16px; }
+  /* 复刻模型调试区：外层滚动容器（overflow:auto 那个）。maxHeight 会给纵向滚动条，
+     滚动条吃掉 ~15px 宽度 —— 这是"纸面算得下、实际放不下"的经典原因，必须复现。 */
+  .provider-model-table { width: 100%; max-height: 260px; overflow: auto; box-sizing: border-box; }
+  /* 最坏情况模拟：本机量的滚动条只有 4px，但 Windows 默认滚动条约 17px。
+     加 13px 右内边距 = 把表格可用宽度压到"17px 滚动条"下的真实预算。 */
+  body.force-narrow .provider-model-table { padding-right: 13px; }
+  /* 由测量脚本写入：当前要预演的列宽方案（与 ProvidersPanel.tsx 的 th width 必须逐字一致） */
+  .cw1 { width: 9%; }    /* 启用 —— 必须容下 40px 的 ToggleSwitch */
+  .cw3 { width: 9.5%; }  /* 上下文K —— 表头 "上下文K" 是全表最长的窄列表头 */
+  .cw4 { width: 9.5%; }  /* 输出K */
+  .cw5 { width: 6.5%; }  /* 图片 */
+  .cw6 { width: 20%; }   /* 定价来源 —— 必须容下 内置表+峰谷分时+▼ ≈104px */
+  .cw7 { width: 24.5%; } /* 单价 $/M —— 必须容下 "0.000001" 50.1px */
+  .toggle { display: inline-block; width: 40px; height: 22px; border-radius: 11px; background: var(--success, #3fb950); vertical-align: middle; }
+  .badge { font-size: 10px; padding: 1px 4px; border-radius: 3px; color: var(--text-secondary); background: rgba(127,127,127,0.14); }
+  .badge.tier { color: var(--accent, #8b7bf7); background: rgba(139,123,247,0.12); }
+  .caret { font-size: 8px; color: var(--text-dim); line-height: 1; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="card" class="card">
+    <div class="provider-model-table">
+      <table style="width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed;">
+        <thead>
+          <tr style="text-align: left; color: var(--text-muted); font-size: 12px;">
+            <th class="cw1" style="padding: 5px 6px 5px 8px; white-space: nowrap;">启用</th>
+            <th style="padding: 5px 8px;">模型 ID</th>
+            <th class="cw3" style="padding: 5px 6px; white-space: nowrap;">上下文K</th>
+            <th class="cw4" style="padding: 5px 6px; white-space: nowrap;">输出K</th>
+            <th class="cw5" style="padding: 5px 6px; white-space: nowrap;">图片</th>
+            <th class="cw6" style="padding: 5px 6px; white-space: nowrap;">定价来源</th>
+            <th class="cw7" style="padding: 5px 8px 5px 6px; white-space: nowrap;">单价 $/M<span style="color: var(--text-dim); font-weight: 400;"> 输/出</span></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+// 12 行 → 超过 maxHeight:260 → 触发纵向滚动条，量到的才是"真实可用宽度"
+const IDS = [
+  "deepseek-flash", "deepseek-v4-flash-vision-exp", "gpt-4o", "claude-sonnet-4",
+  "gemini-2.5-pro", "qwen3-32b", "kimi-k2", "glm-4.6", "grok-4", "o3-mini",
+  "llama-4-maverick", "mistral-large",
+];
+const IN = 'padding:3px 6px;border-radius:4px;border:1px solid var(--border-hover);background:var(--bg-input);color:var(--text);font-size:12px;box-sizing:border-box;';
+
+document.getElementById("rows").innerHTML = IDS.map((id, i) => `
+  <tr style="border-top:1px solid var(--border);">
+    <td style="padding:5px 6px 5px 8px;"><span class="toggle"></span></td>
+    <td style="padding:5px 8px;"><span title="${id}" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${id}</span></td>
+    <td style="padding:5px 6px;"><input id="ctx${i}" type="number" value="1024" style="width:100%;${IN}" /></td>
+    <td style="padding:5px 6px;"><input id="out${i}" type="number" value="64" style="width:100%;${IN}" /></td>
+    <td style="padding:5px 6px;"><input type="checkbox" /></td>
+    <td style="padding:5px 6px;white-space:nowrap;overflow:hidden;">
+      <button id="bdg${i}" type="button" style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;padding:1px 2px;margin:0;border:none;background:transparent;font:inherit;text-align:left;">
+        <span class="badge">内置表</span><span class="badge tier">峰谷分时</span><span class="caret">▼</span>
+      </button>
+    </td>
+    <td style="padding:5px 8px 5px 6px;">
+      <div style="display:flex;gap:5px;">
+        <input id="pin${i}" type="number" value="0.3" style="width:100%;${IN}flex:1 1 0;min-width:0;" />
+        <input id="pout${i}" type="number" value="1.2" style="width:100%;${IN}flex:1 1 0;min-width:0;" />
+      </div>
+    </td>
+  </tr>`).join("");
+</script>
+</body>
+</html>

@@ -48,7 +48,9 @@ export function setStatusSink(fn: (s: UpdateStatus) => void): void {
   statusSink = fn;
 }
 
-/** 配置 feed URL（enabled 且 feed_url 非空时用自定义源，否则回退 github publish 字段） */
+/** 配置 feed URL（enabled 且 feed_url 非空时用自定义源，否则回退 github publish 字段）
+ *  A-980-R30：GitHub 仓库 Gcyming/local-project 是**公开**的（release v0.0.1 已含 latest.yml 差分资产）——
+ *  private 改 false，否则 electron-updater 按私有仓库带认证逻辑访问公开仓库会检查失败。 */
 function configureFeed(): void {
   const cfg = readUpdateConfig();
   if (cfg.feedUrl) {
@@ -58,7 +60,7 @@ function configureFeed(): void {
       provider: "github",
       owner: "Gcyming",
       repo: "local-project",
-      private: true,
+      private: false,
     });
   }
 }
@@ -122,14 +124,17 @@ function broadcastStatus(): void {
   console.info(`[updater] status: ${currentStatus.status}`, currentStatus);
 }
 
-/** 手动触发更新检查（可由渲染层调用） */
+/** 手动触发更新检查（可由渲染层调用）。
+ *  A-980-R30：**手动检查不再受 slime.toml [update].enabled 限制**——用户主动点「手动检查」
+ *  就应去 GitHub 检查；enabled 只由 initUpdater（启动自动检查）使用。dev 模式下 electron-updater
+ *  不可用，返回 disabled + 提示，避免 UI 挂"检查失败"。 */
 export async function checkForUpdate(): Promise<UpdateStatus> {
-  const cfg = readUpdateConfig();
-  if (!cfg.enabled) {
-    currentStatus = { status: "disabled" };
+  if (process.env.NODE_ENV === "development") {
+    currentStatus = { status: "disabled", error: "开发模式不支持检查更新（打包版可用）" };
     broadcastStatus();
     return currentStatus;
   }
+  configureFeed();
   try {
     const info = await autoUpdater.checkForUpdates();
     // 注意：checkForUpdates() 即使无新版本也会返回 updateInfo（远程当前版本），
@@ -149,6 +154,7 @@ export async function checkForUpdate(): Promise<UpdateStatus> {
     return currentStatus;
   } catch (err) {
     currentStatus = { status: "error", error: err instanceof Error ? err.message : String(err) };
+    broadcastStatus();
     return currentStatus;
   }
 }

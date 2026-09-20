@@ -7,6 +7,9 @@
  */
 import React, { type JSX } from "react";
 import type { StatsSnapshot } from "../../shared/ipc.js";
+import { alertAsync } from "../dialog.js";
+import PlanPanel from "./PlanPanel.js";
+import TraceViewer from "./TraceViewer.js";
 
 interface UpdateStatus {
   status: string;
@@ -25,6 +28,18 @@ interface TrendPoint {
 const ACCENT = "#38bdf8";
 const WARN = "#fbbf24";
 const DANGER = "#f87171";
+
+/** 加载等待秒数时钟（A-129）：自持 1s 计时只重渲染自身 span，
+    去掉之前每秒 setNowTick 触发的整面板重渲染（含柱状图/折线图/表格） */
+function LoadingClock({ since }: { since: number }): JSX.Element {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const sec = Math.max(0, Math.round((now - since) / 1000));
+  return <span style={{ fontSize: 11, color: WARN, marginLeft: 6 }}>已等待 {sec}s</span>;
+}
 
 /** 迷你折线图（SVG polyline + 网格线） */
 function TrendLine({ data, color, height = 110 }: { data: number[]; color: string; height?: number }): JSX.Element {
@@ -76,7 +91,6 @@ export default function StatusPanel(): JSX.Element {
   const [trend, setTrend] = React.useState<TrendPoint[]>([]);
   /** 各角色进入 loading 的时刻（展示「已等待 N 秒」，区分加载中与卡死） */
   const [loadingSince, setLoadingSince] = React.useState<Record<string, number>>({});
-  const [, setNowTick] = React.useState(0);
   const api = React.useRef<any>(null);
 
   React.useEffect(() => {
@@ -119,13 +133,7 @@ export default function StatusPanel(): JSX.Element {
     };
   }, []);
 
-  /** 有角色处于 loading 时每秒重渲染，让「已等待 N 秒」实时跳动 */
-  const anyLoading = (stats?.servers ?? []).some((s) => s.state === "loading");
-  React.useEffect(() => {
-    if (!anyLoading) return;
-    const t = window.setInterval(() => setNowTick((n) => n + 1), 1000);
-    return () => window.clearInterval(t);
-  }, [anyLoading]);
+  /** 「已等待 N 秒」实时跳动已由 LoadingClock 自计时完成（A-129），面板不再每秒重渲染 */
 
   async function handleCheckUpdate() {
     const res = await api.current?.update?.check();
@@ -140,7 +148,7 @@ export default function StatusPanel(): JSX.Element {
   async function handleRetryEmbedding() {
     const res = await api.current?.model?.startEmbedding?.();
     if (res?.error) {
-      window.alert(`向量模型启动失败：${res.error}`);
+      void alertAsync(`向量模型启动失败：${res.error}`);
     }
     void api.current?.stats?.snapshot?.().then(setStats);
   }
@@ -148,7 +156,6 @@ export default function StatusPanel(): JSX.Element {
   const servers = stats?.servers ?? [];
   const agents = stats?.agents ?? { total: 0, roots: 0, leaves: 0, byLifecycle: {}, maxDepth: 0 };
   const sessions = stats?.sessions ?? { totalRecords: 0, recent: 0 };
-  const alarms = stats?.alarms ?? [];
 
   // 更新状态兜底：渲染层未收到主进程推送时，默认"未启用"（避免只有一个按钮显异常感）
   const updateStatusSafe = updateStatus ?? { status: "disabled" };
@@ -168,7 +175,6 @@ export default function StatusPanel(): JSX.Element {
     { label: "会话记录", value: sessions.totalRecords, color: "#a78bfa" },
     { label: "24h 活跃", value: sessions.recent, color: WARN },
     { label: "模型实例", value: servers.length },
-    { label: "告警", value: alarms.length, color: alarms.length > 0 ? DANGER : undefined },
   ];
 
   return (
@@ -277,9 +283,7 @@ export default function StatusPanel(): JSX.Element {
                           : s.state}
                       </span>
                       {s.state === "loading" && loadingSince[s.role] && (
-                        <span style={{ fontSize: 11, color: WARN, marginLeft: 6 }}>
-                          已等待 {Math.max(0, Math.round((Date.now() - loadingSince[s.role]) / 1000))}s
-                        </span>
+                        <LoadingClock since={loadingSince[s.role]} />
                       )}
                       {typeof s.error === "string" && s.error && (
                         <div style={{
@@ -316,45 +320,17 @@ export default function StatusPanel(): JSX.Element {
         )}
       </section>
 
-      {/* 告警表 */}
-      <section className="card" style={{ marginBottom: 14, borderColor: alarms.length > 0 ? "var(--danger-soft)" : undefined }}>
-        <h3 style={{ marginTop: 0, fontSize: 14, color: alarms.length > 0 ? DANGER : undefined }}>
-          告警（{alarms.length}）
-        </h3>
-        {alarms.length === 0 ? (
-          <p style={{ color: "var(--text-dim)", fontSize: 12 }}>暂无告警</p>
-        ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead>
-              <tr style={{ color: "var(--text-muted)", textAlign: "left" }}>
-                <th style={{ padding: "4px 8px" }}>级别</th>
-                <th style={{ padding: "4px 8px" }}>来源</th>
-                <th style={{ padding: "4px 8px" }}>消息</th>
-                <th style={{ padding: "4px 8px" }}>时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {alarms.slice(-12).reverse().map((a) => (
-                <tr key={a.seq} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "6px 8px" }}>
-                    <span style={{
-                      color: a.severity === "critical" ? DANGER : a.severity === "warning" ? WARN : "var(--text-muted)",
-                      fontWeight: 700,
-                    }}>
-                      {a.severity}
-                    </span>
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>{a.source}</td>
-                  <td style={{ padding: "6px 8px", color: "var(--text)" }}>{a.message}</td>
-                  <td style={{ padding: "6px 8px", color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                    {new Date(a.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      {/* E: 任务进度（Plan 一等对象）+ D: 链路视图（trace 可观测）
+          A-980-R30：保留——数据源真实（plan:update / trace:update 广播），仅在有任务/对话时才有内容；
+          空态由子组件给出引导文案，不算"死面板"。告警表已删除（主进程从不产出 alarms，永远为空）。 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14, alignItems: "start" }}>
+        <section className="card">
+          <PlanPanel />
+        </section>
+        <section className="card">
+          <TraceViewer />
+        </section>
+      </div>
 
       {/* 自动更新 */}
       <section className="card" style={{ marginBottom: 14 }}>
@@ -378,7 +354,7 @@ export default function StatusPanel(): JSX.Element {
           )}
           {updateStatusSafe.status === "disabled" && !updateStatusSafe.error && (
             <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              自动更新未启用（可在 slime.toml [update] 段配置 feed_url 后开启）
+              自动检查未开启（可点「手动检查」随时对比 GitHub Release；如需启动时自动检查，在 slime.toml [update] 段配置 enabled = true）
             </span>
           )}
           {updateStatusSafe.status === "up-to-date" && (

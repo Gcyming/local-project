@@ -1,0 +1,121 @@
+{
+  "valid": {
+    "ChatMessage": {
+      "role": "user",
+      "content": "你好"
+    },
+    "ChatRequest": {
+      "messages": [
+        { "role": "system", "content": "你是助手" },
+        { "role": "user", "content": "你好" }
+      ],
+      "stream": true,
+      "max_tokens": 512,
+      "temperature": 0.7
+    },
+    "ChatResponse": {
+      "id": "chatcmpl-x1",
+      "object": "chat.completion",
+      "created": 1710000000,
+      "model": "qwen2.5-3b",
+      "choices": [
+        {
+          "index": 0,
+          "message": { "role": "assistant", "content": "你好" },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+    },
+    "ChatCompletionChunk": {
+      "id": "chatcmpl-s1",
+      "object": "chat.completion.chunk",
+      "created": 1710000000,
+      "model": "qwen2.5-3b",
+      "choices": [{ "index": 0, "delta": { "content": "你" }, "finish_reason": null }]
+    },
+    "EmbeddingsRequest": {
+      "model": "bge-m3",
+      "input": ["你好，世界"]
+    },
+    "EmbeddingsRequestBatch": {
+      "model": "bge-m3",
+      "input": ["a", "b", "c"]
+    },
+    "EmbeddingsResponse": {
+      "object": "list",
+      "data": [
+        { "object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3] }
+      ],
+      "model": "bge-m3",
+      "usage": { "prompt_tokens": 2, "total_tokens": 2 }
+    },
+    "RetrieveRequest": {
+      "agent_id": "agent_003285fd",
+      "query": "最近学习过的技能",
+      "top_k": 10,
+      "max_hops": 2
+    },
+    "RetrieveResponse": {
+      "agent_id": "agent_003285fd",
+      "query": "最近学习过的技能",
+      "count": 1,
+      "stages": { "seeds": 1, "link_walked": 1, "tag_filtered": 1, "ranked": 1 },
+      "items": [
+        {
+          "id": "mem_2a02ae76",
+          "content": "用 file_read 处理请求成功",
+          "category": "lesson",
+          "tags": ["tool"],
+          "importance": 6,
+          "links": ["mem_other"],
+          "backlinks": [],
+          "weight": 0.72
+        }
+      ]
+    },
+    "HealthResponse": {
+      "status": "ok",
+      "service": "slime-infer-sidecar",
+      "port": 19100,
+      "vram": { "total_gb": 8.0, "free_gb": 4.3, "used_gb": 3.7 },
+      "instances": [
+        {
+          "role": "chat",
+          "model": "qwen2.5-3b",
+          "port": 18082,
+          "pid": 12345,
+          "state": "ready",
+          "persistent": false,
+          "external": false,
+          "vram_gb": { "total_gb": 8.0, "free_gb": 4.3 }
+        }
+      ]
+    },
+    "StatsResponse": {
+      "vram": { "total_gb": 8.0, "free_gb": 4.3, "used_gb": 3.7 },
+      "instances": [],
+      "memory": { "dir": "Knowledge/Agent Memory", "lancedb_enabled": false, "lancedb_uri": "" }
+    },
+    "ModelLoadRequest": { "role": "chat" },
+    "ModelLoadResponse": { "ok": true, "port": 18082, "state": "ready", "detail": "" },
+    "ModelUnloadResponse": { "ok": true, "state": "idle" }
+  },
+  "invalid": {
+    "ChatRequest_missing_messages": { "stream": true },
+    "ChatMessage_bad_role": { "role": "robot", "content": "x" },
+    "ChatResponse_bad_object": {
+      "id": "x",
+      "object": "not-a-completion",
+      "created": 1,
+      "model": "m",
+      "choices": []
+    },
+    "RetrieveRequest_bad_agent": { "agent_id": "agent!bad/name", "query": "x" },
+    "ModelLoadRequest_bad_role": { "role": "video" },
+    "ModelLoadResponse_missing_ok": { "port": 18082 }
+  },
+  "_notes": {
+    "EmbeddingsRequest_empty_input": "契约 schema 不表达 minItems（双端均接受空数组）；sidecar 实现层对空 input 返回 400（属运行时守卫，非契约约束）"
+  }
+}

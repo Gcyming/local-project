@@ -1,0 +1,12 @@
+{
+  "name": "shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./schemas": "./gen/schemas.ts",
+    "./security-policy": "./gen/security-policy.ts",
+    "./model-capabilities": "./gen/model-capabilities.ts",
+    "./group-roster": "./gen/groupRoster.ts"
+  }
+}

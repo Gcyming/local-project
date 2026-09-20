@@ -6,7 +6,9 @@
  */
 import { contextBridge, ipcRenderer, IpcRendererEvent } from "electron";
 import type {
-  StreamChunk, ChatInput, AgentInfo, StatsSnapshot, SidecarStatus,
+  StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus,
+  LlmGatewayConfigDTO, LlmGatewayStatusDTO, LlmGatewayNewTokenDTO,
+  LlmGatewayUpdateTokenDTO, LlmGatewayTokenOpResultDTO,
   AgentExportResult, AgentImportResult, AgentImportConflictStrategy,
   ProviderSummary, ModelSpec, ConfigOverview, LocalModelSpec, AgentDetail,
   SessionItem, ConversationMessage, SessionConfig, ApprovalMode,
@@ -14,8 +16,13 @@ import type {
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
-  GitDetect, GitInfo, GitAction, GitCloneResult, WorkspaceReadFileResult,
+  GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, WorkspaceReadFileResult,
   ContextMenuItem, WorkspaceContextMenuParams, WorkspaceCreateResult,
+  ResidentState, SubAgentRunView,
+  CtxBuckets,
+  TraceSnapshot, PlanInfo, CompressResult,
+  ToolProfileDTO,
+  NotifyConfigDTO,
 } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
@@ -28,6 +35,12 @@ function onMessage<T>(channel: string, cb: (payload: T) => void) {
 contextBridge.exposeInMainWorld("slimeAPI", {
   chat: {
     stream: (input: ChatInput) => ipcRenderer.invoke("slime:chat:stream", input),
+    /** A-966：done 后把该条回复的交错思考时间线回填 history.jsonl（重启保持时间线展示） */
+    attachTimeline: (agentId: string, sessionId: string | undefined, timeline: unknown[]) =>
+      ipcRenderer.invoke("slime:chat:attachTimeline", { agentId, sessionId, timeline }) as Promise<{ ok: boolean }>,
+    /** A-161: 回滚持久化 —— 截断该会话历史到目标用户消息之前（回滚后重启不再复现旧消息） */
+    truncateFrom: (agentId: string, sessionId: string | undefined, userMsg: string) =>
+      ipcRenderer.invoke("slime:history:truncateFrom", { agentId, sessionId, userMsg }) as Promise<{ ok: boolean; removed?: number; error?: string }>,
     /** P0: 新对话（重置历史，返回空 OK） */
     newConversation: (agentId: string) =>
       ipcRenderer.invoke("slime:chat:new", { agentId }) as Promise<{ ok: boolean }>,
@@ -37,13 +50,36 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 主动中断当前 Agent 输出（key=sessionId ?? agentId） */
     cancel: (key: string) =>
       ipcRenderer.invoke("slime:chat:cancel", { key }) as Promise<{ ok: boolean; error?: string; active?: number }>,
+    /** A-973：查询指定会话是否仍有进行中的流（渲染层恢复时判定"进行中/已结算"的真相源） */
+    isActive: (key: string) =>
+      ipcRenderer.invoke("slime:chat:isActive", { key }) as Promise<{ active: boolean }>,
+    /** A-969：上下文自动压缩（GUI 发送前触发；摘要写回会话 meta，后续发送自动用摘要头+最近 N 轮）
+     *  A-974-R3：used 为渲染层实测的输入侧占用（含系统提示/工具定义），供主进程与历史估算取大值判阈值 */
+    compress: (sessionId: string, ratio: number, used?: number) =>
+      ipcRenderer.invoke("slime:chat:compress", { sessionId, ratio, used }) as Promise<CompressResult>,
     onChunk: (cb: (chunk: StreamChunk) => void) => onMessage<StreamChunk>("slime:chat:chunk", cb),
-    onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean }) => void) =>
-      onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean }>(
+    onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => void) =>
+      onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }>(
         "slime:chat:done", cb,
       ),
-    onError: (cb: (err: { message: string }) => void) =>
-      onMessage<{ message: string }>("slime:chat:error", cb),
+    onError: (cb: (err: { message: string; sessionId?: string }) => void) => onMessage<{ message: string; sessionId?: string }>("slime:chat:error", cb),
+    /** A-918：流终态广播（done/error/取消统一出口）——渲染层校准 per-session 流快照，防"切回仍在生成"假活跃 */
+    onStreamEnded: (cb: (ev: { sessionId?: string }) => void) => onMessage<{ sessionId?: string }>("slime:chat:streamEnded", cb),
+  },
+  /** A-976：右侧栏浏览器控制——主进程下发指令、renderer 在 <webview> 上执行后回传结果 */
+  browser: {
+    onCommand: (cb: (cmd: { id: string; kind: string } & Record<string, unknown>) => void) =>
+      onMessage<{ id: string; kind: string } & Record<string, unknown>>("slime:browser:command", cb),
+    sendResult: (payload: { id: string; ok: boolean; data?: unknown; error?: string }) =>
+      ipcRenderer.send("slime:browser:result", payload),
+    /** A-980-R：站点 window.open 被主进程拒绝 / frame 深链未注册的通知（kind: popup-denied｜need-install） */
+    onPopupNotice: (cb: (p: { url: string; ts: number; kind?: string; scheme?: string }) => void) =>
+      onMessage<{ url: string; ts: number; kind?: string; scheme?: string }>("slime:browser:popup-notice", cb),
+  },
+  /** A-980-R2：深度链接「真实打开」——探测系统协议处理器并交给系统应用打开（未注册则返回诊断） */
+  protocol: {
+    open: (url: string) =>
+      ipcRenderer.invoke("slime:protocol:open", url) as Promise<{ ok?: boolean; url?: string; scheme?: string; handler?: string; reason?: string }>,
   },
   model: {
     /** 本地模型加载进度（渲染层弹出 slime 主题加载弹窗） */
@@ -56,22 +92,74 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     list: () => ipcRenderer.invoke("slime:sessions:list") as Promise<SessionItem[]>,
     load: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:load", { sessionId }) as Promise<ConversationMessage[]>,
-    create: (agentId?: string, title?: string) =>
-      ipcRenderer.invoke("slime:sessions:create", { agentId, title }) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** A-980-R18：分页加载更早历史（聊天顶部「加载更早的消息」分段胶囊） */
+    loadEarlier: (payload: { sessionId: string; beforeTs: string; limit?: number }) =>
+      ipcRenderer.invoke("slime:sessions:loadEarlier", payload) as Promise<{ messages: ConversationMessage[]; hasMore: boolean }>,
+    /** 新建会话：以目标工作文件夹为主（workspace），会话内指定调用 Agent（agentId）；memberIds=可选团队成员；type=brainstorm 群聊头脑风暴 */
+    create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: string[]; type?: "normal" | "brainstorm" }) =>
+      ipcRenderer.invoke("slime:sessions:create", opts) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** 会话内切换调用的 Agent（保留工作文件夹/标题/历史） */
+    setAgent: (sessionId: string, agentId: string) =>
+      ipcRenderer.invoke("slime:sessions:setAgent", { sessionId, agentId }) as Promise<{ ok: boolean }>,
+    /** A-943：切换会话模式（normal 普通 / brainstorm 群聊头脑风暴） */
+    setType: (sessionId: string, type: "normal" | "brainstorm") =>
+      ipcRenderer.invoke("slime:sessions:setType", { sessionId, type }) as Promise<{ ok: boolean; type?: string }>,
+    /** 团队会话成员更新（组长=会话当前 agentId；空数组=退回单人会话） */
+    setMembers: (sessionId: string, memberIds: string[]) =>
+      ipcRenderer.invoke("slime:sessions:setMembers", { sessionId, memberIds }) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** A-1011 群聊成员思考推理强度（effort=null 清除覆盖，回落群聊默认 high） */
+    setMemberEffort: (sessionId: string, memberId: string, effort: string | null) =>
+      ipcRenderer.invoke("slime:sessions:setMemberEffort", { sessionId, memberId, effort }) as Promise<{ ok: boolean; memberEfforts?: Record<string, string>; leaderEffort?: string }>,
+    /** 会话级工作目录更新（以文件夹为主：绑定/更换工作文件夹） */
+    setWorkspace: (sessionId: string, workspace: string | null) =>
+      ipcRenderer.invoke("slime:sessions:setWorkspace", { sessionId, workspace }) as Promise<{ ok: boolean; workspace?: string }>,
     rename: (sessionId: string, title: string) =>
       ipcRenderer.invoke("slime:sessions:rename", { sessionId, title }) as Promise<{ ok: boolean }>,
     remove: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:remove", { sessionId }) as Promise<{ ok: boolean }>,
     clear: (sessionId: string) =>
       ipcRenderer.invoke("slime:sessions:clear", { sessionId }) as Promise<{ ok: boolean }>,
-    config: (input: { agentId: string; approval?: ApprovalMode; workspace?: string | null }) =>
+    config: (input: { agentId: string; sessionId?: string; approval?: ApprovalMode; workspace?: string | null }) =>
       ipcRenderer.invoke("slime:sessions:config", input) as Promise<{ ok: boolean; approval: ApprovalMode; workspace: string }>,
-    configGet: (agentId: string) =>
-      ipcRenderer.invoke("slime:sessions:configGet", { agentId }) as Promise<SessionConfig>,
+    configGet: (input: { agentId: string; sessionId?: string }) =>
+      ipcRenderer.invoke("slime:sessions:configGet", input) as Promise<SessionConfig>,
     pickFolder: () =>
       ipcRenderer.invoke("slime:sessions:pickFolder") as Promise<{ ok: boolean; path?: string; error?: string }>,
     removeAgent: (agentId: string) =>
       ipcRenderer.invoke("slime:sessions:removeAgent", { agentId }) as Promise<{ ok: boolean }>,
+    /** 删除工作文件夹分组：清除该 workspace 下全部会话与历史（文件夹与 Agent 保留） */
+    removeWorkspace: (workspace: string) =>
+      ipcRenderer.invoke("slime:sessions:removeWorkspace", { workspace }) as Promise<{ ok: boolean; count?: number }>,
+    loadTodos: (sessionId: string) =>
+      ipcRenderer.invoke("slime:sessions:loadTodos", { sessionId }) as Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>,
+  },
+  /**
+   * A-980-R27：会话级待办任务（右侧栏「待办任务」面板）。
+   *
+   * ⚠️ 此前这里**只有类型声明、没有运行时实现** —— `slimeAPI.tasks` 在运行时是 undefined，
+   * 于是渲染层的 `api.tasks.loadTodos()` / `api.tasks.onTodos()` 全部落空：
+   * 既拉不到历史待办，也订阅不到新推送。这是待办面板"永远空白"的成因之一
+   * （另两个：todo_write 没拿到 sessionId 写错了文件；工具写完后主进程不广播）。
+   * 类型声明骗过了 tsc，所以只靠编译检查发现不了——这类"声明与实现不同步"必须靠端到端断言兜。
+   */
+  tasks: {
+    loadTodos: (sessionId: string) =>
+      ipcRenderer.invoke("slime:sessions:loadTodos", { sessionId }) as Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>,
+    onTodos: (cb: (data: { sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }) => void) =>
+      onMessage<{ sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>("slime:tasks:todos", cb),
+    /**
+     * A-986：把渲染层手改后的整张清单**落盘**。
+     *
+     * ⚠️ 这条通道此前**完全不存在**（只有 load + 订阅），于是"手动勾选"是个纯内存操作：
+     * 下一次 `slime:tasks:todos` 广播（工具写入 / 切会话 / 重启读盘）就用盘上的旧内容覆盖回来，
+     * 用户勾了半天等于没勾；主进程的「全部完成 → 自动清空」也永远不会被触发
+     * （它挂在 broadcastTodos 上）。用户实测："我直接手动全部勾选了还是没反应"。
+     */
+    saveTodos: (sessionId: string, todos: Array<{ id: string; content: string; status: string; completedAt?: string }>) =>
+      ipcRenderer.invoke("slime:tasks:saveTodos", { sessionId, todos }) as Promise<{ ok: boolean; todos?: Array<{ id: string; content: string; status: string; completedAt?: string }>; error?: string }>,
+    /** A-986：整张清空（删文件 + 广播空列表）。恢复这个手动入口 —— 见 RightSidebar 里的说明。 */
+    clearTodos: (sessionId: string) =>
+      ipcRenderer.invoke("slime:tasks:clearTodos", { sessionId }) as Promise<{ ok: boolean }>,
   },
   extras: {
     list: () => ipcRenderer.invoke("slime:extras:list") as Promise<ExtrasList>,
@@ -89,6 +177,24 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 删除技能（递归删除目录） */
     skillDelete: (name: string) =>
       ipcRenderer.invoke("slime:extras:skillDelete", { name }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：GUI 表单新建技能（生成 config/skills/<name>/SKILL.md） */
+    skillAdd: (input: { name: string; description: string; content?: string }) =>
+      ipcRenderer.invoke("slime:extras:skillAdd", input) as Promise<{ ok: boolean; error?: string; name?: string }>,
+    /** A-918++：联网搜索技能市场（anthropics/skills 官方仓库） */
+    skillMarketSearch: (query?: string) =>
+      ipcRenderer.invoke("slime:extras:skillMarketSearch", { query }) as Promise<{ ok: boolean; skills?: Array<{ name: string; description: string }>; error?: string }>,
+    /** A-918++：从官方仓库安装技能 */
+    skillMarketInstall: (name: string) =>
+      ipcRenderer.invoke("slime:extras:skillMarketInstall", { name }) as Promise<{ ok: boolean; error?: string; name?: string }>,
+    /** A-918++：读取数据源认证（GitHub Token） */
+    registryAuthGet: () =>
+      ipcRenderer.invoke("slime:extras:registryAuthGet") as Promise<{ githubToken?: string }>,
+    /** A-918++：保存数据源认证（GitHub Token，加密） */
+    registryAuthSet: (auth: { githubToken?: string }) =>
+      ipcRenderer.invoke("slime:extras:registryAuthSet", auth) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：内嵌 BrowserWindow 打开 GitHub Token 生成页 */
+    openGithubAuth: () =>
+      ipcRenderer.invoke("slime:extras:openGithubAuth") as Promise<{ ok: boolean; error?: string }>,
     /** MCP 服务器状态列表（含已禁用的） */
     mcpList: () => ipcRenderer.invoke("slime:extras:mcpList") as Promise<McpServerInfo[]>,
     /** 启用/禁用 MCP 服务器 */
@@ -99,10 +205,42 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 删除 MCP 服务器（从 slime.toml 移除块） */
     mcpDelete: (name: string) =>
       ipcRenderer.invoke("slime:extras:mcpDelete", { name }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：GUI 表单新增 MCP 服务器（追加 [[mcp_servers]] 块） */
+    mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) =>
+      ipcRenderer.invoke("slime:extras:mcpAdd", input) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：MCP 官方 registry 联网搜索 */
+    mcpRegistrySearch: (query?: string) =>
+      ipcRenderer.invoke("slime:mcpRegistrySearch", { query }) as Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; error?: string }>,
+    /** A-918++：从官方 registry 安装 MCP */
+    mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) =>
+      ipcRenderer.invoke("slime:mcpRegistryInstall", { card }) as Promise<{ ok: boolean; error?: string }>,
+  },
+  runtime: {
+    /** A-918++：运行环境一览（node/python/git/llama/models 状态） */
+    list: () => ipcRenderer.invoke("slime:runtime:list") as Promise<{
+      ok: boolean; items?: Array<{
+        kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string;
+        action?: { label: string; kind: string; url?: string; path?: string; target?: string };
+      }>; error?: string;
+    }>,
+    /** A-918++：缺失项动作（打开官网/目录） */
+    open: (action: { label?: string; kind?: string; url?: string; path?: string }) =>
+      ipcRenderer.invoke("slime:runtime:open", { action }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：重建 Python venv（系统 Python → venv → pip install -r requirements.txt） */
+    installPython: () =>
+      ipcRenderer.invoke("slime:runtime:installPython") as Promise<{ ok: boolean; log?: string; error?: string }>,
   },
   files: {
     /** 导入文件对话框：返回本地路径（聊天输入区附件） */
     pick: () => ipcRenderer.invoke("slime:files:pick") as Promise<{ ok: boolean; path?: string; error?: string }>,
+  },
+  images: {
+    /** 识图：选择图片（多选≤4）→ 主进程编码 data URL（给聊天输入区附件 / 直接发送） */
+    pick: () => ipcRenderer.invoke("slime:images:pick") as Promise<{
+      ok: boolean;
+      images?: Array<{ name: string; mime: string; dataUrl: string }>;
+      error?: string;
+    }>,
   },
   permissions: {
     get: () => ipcRenderer.invoke("slime:permissions:get") as Promise<GuiPermissions>,
@@ -131,15 +269,45 @@ contextBridge.exposeInMainWorld("slimeAPI", {
   },
   suggest: (text: string) =>
     ipcRenderer.invoke("slime:chat:suggest", { text }) as Promise<SuggestionItem[]>,
+  dialog: {
+    /** 异步确认框（A-151）：主进程原生对话框，不阻塞渲染层 JS——替代 window.confirm */
+    confirm: (message: string, detail?: string) =>
+      ipcRenderer.invoke("slime:dialog:confirm", { message, detail }) as Promise<{ ok: boolean; confirmed: boolean; error: string | null }>,
+    /** 异步提示框（A-151）：替代 window.alert */
+    alert: (message: string, detail?: string) =>
+      ipcRenderer.invoke("slime:dialog:alert", { message, detail }) as Promise<{ ok: boolean; error: string | null }>,
+  },
   stats: {
     snapshot: () => ipcRenderer.invoke("slime:stats:snapshot") as Promise<StatsSnapshot>,
     poll: (start: boolean) => ipcRenderer.invoke("slime:stats:poll", start),
     onPoll: (cb: (snapshot: StatsSnapshot) => void) => onMessage<StatsSnapshot>("slime:stats:update", cb),
   },
+  /** 使用统计（Settings「使用统计」面板数据源） */
+  usage: {
+    snapshot: (params?: { sinceIso?: string; untilIso?: string; limit?: number }) =>
+      ipcRenderer.invoke("slime:usage:snapshot", params ?? {}) as Promise<UsageSnapshot>,
+    clear: () => ipcRenderer.invoke("slime:usage:clear") as Promise<{ ok: boolean }>,
+    /** 用当前生效价格重算历史成本（修正"写入时还没有价"的 0 成本记录） */
+    recompute: () => ipcRenderer.invoke("slime:usage:recompute") as Promise<UsageRecomputeResult>,
+  },
+  /** D：全链路可观测（引擎事件轨迹，TraceViewer 用） */
+  trace: {
+    get: (sessionId: string) =>
+      ipcRenderer.invoke("slime:trace:get", sessionId) as Promise<TraceSnapshot | null>,
+    onUpdate: (cb: (payload: { sessionId: string; trace: TraceSnapshot }) => void) =>
+      onMessage<{ sessionId: string; trace: TraceSnapshot }>("slime:trace:update", cb),
+  },
+  /** E：Plan 一等对象（任务进度卡片 / PlanPanel 用） */
+  plan: {
+    get: (sessionId: string) =>
+      ipcRenderer.invoke("slime:plan:get", sessionId) as Promise<PlanInfo | null>,
+    onUpdate: (cb: (payload: { sessionId: string; plan: PlanInfo }) => void) =>
+      onMessage<{ sessionId: string; plan: PlanInfo }>("slime:plan:update", cb),
+  },
   agents: {
     list: () => ipcRenderer.invoke("slime:agents:list") as Promise<AgentInfo[]>,
-    create: (name: string, role: string) =>
-      ipcRenderer.invoke("slime:agents:create", { name, role }) as Promise<AgentInfo>,
+    create: (name: string, role: string, toolProfile?: ToolProfileDTO) =>
+      ipcRenderer.invoke("slime:agents:create", { name, role, toolProfile }) as Promise<AgentInfo>,
     fork: (parentId: string, name: string, role: string) =>
       ipcRenderer.invoke("slime:agents:fork", { parentId, name, role }) as Promise<AgentInfo>,
     /** P0: 选中 Agent（渲染层通知主进程当前活跃 Agent） */
@@ -172,6 +340,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     minimize: () => ipcRenderer.invoke("slime:window:minimize"),
     maximize: () => ipcRenderer.invoke("slime:window:maximize"),
     quit: () => ipcRenderer.invoke("slime:window:quit"),
+    /** A-967：退出模式——直接退出 / 最小化到后台托盘常驻 */
+    setExitMode: (mode: "quit" | "background") =>
+      ipcRenderer.invoke("slime:window:setExitMode", mode) as Promise<{ ok: boolean; mode: "quit" | "background" }>,
+    getExitMode: () =>
+      ipcRenderer.invoke("slime:window:getExitMode") as Promise<{ mode: "quit" | "background" }>,
   },
   theme: {
     /** 主题切换：同步标题栏系统按钮 overlay 配色 */
@@ -179,9 +352,12 @@ contextBridge.exposeInMainWorld("slimeAPI", {
   },
   providers: {
     list: () => ipcRenderer.invoke("slime:providers:list") as Promise<ProviderSummary[]>,
-    fetchModels: (baseUrl: string, apiKey: string) =>
-      ipcRenderer.invoke("slime:providers:fetchModels", { baseUrl, apiKey }) as Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }>,
-    save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }) =>
+    fetchModels: (baseUrl: string, apiKey: string, apiFormat: "openai" | "anthropic" | "responses" | "google" | "auto" = "auto") =>
+      ipcRenderer.invoke("slime:providers:fetchModels", { baseUrl, apiKey, api_format: apiFormat }) as Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }>,
+    /** 一键刷新：用已保存的密钥重新探测上游模型列表并就地更新（无需重新填写配置） */
+    refresh: (key: string) =>
+      ipcRenderer.invoke("slime:providers:refresh", { key }) as Promise<{ ok: boolean; total?: number; added?: number; removed?: number; error?: string }>,
+    save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto"; models?: unknown[] }) =>
       ipcRenderer.invoke("slime:providers:save", input) as Promise<{ ok: boolean; error?: string }>,
     remove: (key: string) =>
       ipcRenderer.invoke("slime:providers:remove", { key }) as Promise<{ ok: boolean; error?: string }>,
@@ -194,6 +370,15 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:providers:localScan", { dir }) as Promise<{ ok: boolean; models?: Array<{ path: string; label: string }>; error?: string }>,
     localPick: () =>
       ipcRenderer.invoke("slime:providers:localPick") as Promise<{ ok: boolean; path?: string; error?: string }>,
+  },
+  silam: {
+    /** A-954：自研 SILAM 脑可用性（供应商选择面板用它决定是否展示 silam） */
+    status: () => ipcRenderer.invoke("slime:silam:status") as Promise<{ enabled: boolean }>,
+    /** A-963：读取某 Agent 的 SILAM 情感/成长态（fear/desire/树节点/step） */
+    getState: (agentId: string) =>
+      ipcRenderer.invoke("slime:silam:state", { agentId }) as Promise<{
+        fear?: number; desire?: number; n_nodes?: number; step?: number; langLoaded?: boolean;
+      } | null>,
   },
   config: {
     overview: () => ipcRenderer.invoke("slime:config:overview") as Promise<ConfigOverview>,
@@ -218,6 +403,44 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 卸载 Slime：启动 NSIS 卸载器并退出应用 */
     uninstall: () =>
       ipcRenderer.invoke("slime:settings:uninstall") as Promise<{ ok: boolean; error?: string }>,
+  },
+  /**
+   * A-980-R26：系统通知 + 可定制提示音（设置 → 通用）。
+   * 配置与音频都在主进程侧落盘（config/notifications.json + config/notification-sounds/），
+   * 渲染层只负责界面与「播自定义提示音」——主进程没有音频播放能力。
+   */
+  notify: {
+    get: () => ipcRenderer.invoke("slime:notify:get") as Promise<{ ok: boolean; config: NotifyConfigDTO; soundReady: boolean }>,
+    set: (patch: { enabled?: boolean; soundEnabled?: boolean }) =>
+      ipcRenderer.invoke("slime:notify:set", patch) as Promise<{ ok: boolean; config?: NotifyConfigDTO; soundReady?: boolean; error?: string }>,
+    pickSound: () =>
+      ipcRenderer.invoke("slime:notify:sound:pick") as Promise<{ ok: boolean; canceled?: boolean; name?: string | null; size?: number; config?: NotifyConfigDTO; error?: string }>,
+    clearSound: () =>
+      ipcRenderer.invoke("slime:notify:sound:clear") as Promise<{ ok: boolean; config?: NotifyConfigDTO; error?: string }>,
+    soundData: () =>
+      ipcRenderer.invoke("slime:notify:sound:data") as Promise<{ ok: boolean; dataUrl?: string; name?: string; size?: number; error?: string }>,
+    test: () => ipcRenderer.invoke("slime:notify:test") as Promise<{ ok: boolean; config?: NotifyConfigDTO }>,
+    /** 主进程 → 渲染层：该播自定义提示音了（系统默认音不用走这里） */
+    onPlaySound: (cb: () => void) => onMessage<Record<string, never>>("slime:notify:playsound", cb),
+  },
+  /** LLM 网关（设置 → LLM 网关） */
+  llmGateway: {
+    get: () => ipcRenderer.invoke("slime:llmgw:get") as Promise<{ ok: boolean; config: LlmGatewayConfigDTO; status: LlmGatewayStatusDTO }>,
+    set: (cfg: LlmGatewayConfigDTO) => ipcRenderer.invoke("slime:llmgw:set", cfg) as Promise<{ ok: boolean; error?: string; status: LlmGatewayStatusDTO }>,
+    status: () => ipcRenderer.invoke("slime:llmgw:status") as Promise<LlmGatewayStatusDTO>,
+    restart: () => ipcRenderer.invoke("slime:llmgw:restart") as Promise<{ ok: boolean; error?: string; status: LlmGatewayStatusDTO }>,
+    /** 新增令牌（B 档：key 由系统生成） */
+    tokenAdd: (input: LlmGatewayNewTokenDTO) =>
+      ipcRenderer.invoke("slime:llmgw:token:add", input) as Promise<LlmGatewayTokenOpResultDTO>,
+    /** 修改令牌字段 */
+    tokenUpdate: (input: LlmGatewayUpdateTokenDTO) =>
+      ipcRenderer.invoke("slime:llmgw:token:update", input) as Promise<LlmGatewayTokenOpResultDTO>,
+    /** 删除令牌 */
+    tokenRemove: (key: string) =>
+      ipcRenderer.invoke("slime:llmgw:token:remove", { key }) as Promise<LlmGatewayTokenOpResultDTO>,
+    /** 启用/停用令牌 */
+    tokenToggle: (key: string, active: boolean) =>
+      ipcRenderer.invoke("slime:llmgw:token:toggle", { key, active }) as Promise<LlmGatewayTokenOpResultDTO>,
   },
   mind: {
     configGet: () => ipcRenderer.invoke("slime:mind:configGet") as Promise<MindConfigInfo>,
@@ -253,6 +476,13 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 右侧栏「工作树」：读取文件内容（支持 text/image/binary，主进程校验锚定） */
     readFile: (root: string, rel: string) =>
       ipcRenderer.invoke("slime:workspace:readFile", { root, rel }) as Promise<WorkspaceReadFileResult>,
+    /** A-173：按绝对路径读取文件（聊天消息内点击文件链接在右侧栏打开） */
+    readFileAbs: (path: string) =>
+      ipcRenderer.invoke("slime:workspace:readFileAbs", { path }) as Promise<WorkspaceReadFileResult>,
+    /** A-980-R32：把聊天/产物里点到的"路径"解析成真实存在的绝对路径（多基准候选 + 目录识别）。
+     *  root=渲染层手里的工作目录（可能为空）、sessionId=会话锚点（主进程据此查权威工作目录）。 */
+    openTarget: (rel: string, opts?: { root?: string; sessionId?: string }) =>
+      ipcRenderer.invoke("slime:workspace:openTarget", { rel, root: opts?.root, sessionId: opts?.sessionId }) as Promise<{ ok: boolean; path?: string; isDir?: boolean; tried?: string[]; error?: string }>,
     /** 构建右键菜单模板（主进程侧校验路径） */
     contextmenu: (root: string, params: WorkspaceContextMenuParams) =>
       ipcRenderer.invoke("slime:workspace:contextmenu", { root, params }) as Promise<{ ok: boolean; items?: ContextMenuItem[]; error?: string }>,
@@ -265,6 +495,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 文件资源管理器：返回某目录的父级（"上级"逐级向上浏览） */
     getParent: (path: string) =>
       ipcRenderer.invoke("slime:workspace:getParent", { path }) as Promise<{ ok: boolean; parent?: string | null; diskRoot?: boolean; error?: string }>,
+    /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等） */
+    openPath: (path: string) =>
+      ipcRenderer.invoke("slime:shell:openPath", { path }) as Promise<{ ok: boolean; error?: string }>,
   },
   term: {
     /** 右侧栏「终端」：执行命令并返回输出 */
@@ -296,23 +529,156 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 克隆远程仓库 */
     clone: (url: string) =>
       ipcRenderer.invoke("slime:git:clone", { url }) as Promise<GitCloneResult>,
+    /** A-968：读取指定文件的变更 diff（红绿标注渲染用） */
+    diff: (path: string, file: string) =>
+      ipcRenderer.invoke("slime:git:diff", { path, file }) as Promise<GitDiffResult>,
+    /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用）
+     *  A-1029：`code` 让渲染层能区分"不是仓库 / 无提交 / 文件不在 HEAD"，
+     *  而不是把所有失败都当成同一句英文 stderr 展示给用户。 */
+    showFile: (rel: string, workspace: string, ref?: string) =>
+      ipcRenderer.invoke("slime:git:showFile", { rel, workspace, ref }) as Promise<{ ok: boolean; content?: string; error?: string; code?: "not-repo" | "no-head" | "not-found" }>,
   },
   data: {
     /** 重置本地数据（清空 Provider / Agent / 会话与历史；记忆文件保留） */
     reset: () => ipcRenderer.invoke("slime:data:reset") as Promise<{ ok: boolean; error?: string }>,
   },
+  resident: {
+    /** 后台常驻快照（定时任务 + 子代理，A-910） */
+    state: () => ipcRenderer.invoke("slime:resident:state") as Promise<ResidentState>,
+    /** 新增定时任务（写回 data/schedules.json + 运行态落盘） */
+    schedulerAdd: (p: { name: string; cron: string; prompt: string; agentId?: string }) =>
+      ipcRenderer.invoke("slime:resident:scheduler:add", p) as Promise<{ ok: boolean; id?: string; error?: string }>,
+    /** 删除定时任务（同步从 schedules.json 移除） */
+    schedulerRemove: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:remove", { id }) as Promise<{ ok: boolean }>,
+    schedulerPause: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:pause", { id }) as Promise<{ ok: boolean }>,
+    schedulerResume: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:resume", { id }) as Promise<{ ok: boolean }>,
+    /** 立即触发一次（事件/手动） */
+    schedulerTrigger: (id: string) => ipcRenderer.invoke("slime:resident:scheduler:trigger", { id }) as Promise<{ ok: boolean }>,
+    /** 派发后台子代理（fire-and-forget；结果落盘 subagent-*.md） */
+    subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) =>
+      ipcRenderer.invoke("slime:resident:subagent:spawn", p) as Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>,
+    /** 取消后台子代理（运行中 → Abort 中断；排队中 → 直接标记 cancelled） */
+    subagentCancel: (id: string) =>
+      ipcRenderer.invoke("slime:resident:subagent:cancel", { id }) as Promise<{ ok: boolean }>,
+    /** A-980-R31：清空子代理历史记录（落盘 + 已终态的内存痕迹；在途任务保留） */
+    subagentClear: () =>
+      ipcRenderer.invoke("slime:resident:subagent:clear") as Promise<{ ok: boolean; cleared: number; dropped: number }>,
+    /** 按 description 自动委派子代理（命中 代码审查/调研/数据分析 专家，后台并行执行） */
+    subagentDelegate: (p: { task: string; agentId?: string }) =>
+      ipcRenderer.invoke("slime:resident:subagent:delegate", p) as Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>,
+    /** A-942：设置全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
+    subagentSetDefaultModel: (model: string) =>
+      ipcRenderer.invoke("slime:resident:subagent:setDefaultModel", { model }) as Promise<{ ok: boolean; defaultModel?: string; error?: string }>,
+    /** A-918+：读取用户选定的子代理（自建 agent id 列表） */
+    subagentGetSelection: () =>
+      ipcRenderer.invoke("slime:resident:subagent:getSelection") as Promise<{ ok: boolean; selectedAgentIds?: string[] }>,
+    /** A-918+：保存用户选定的子代理（自建 agent id 列表） */
+    subagentSetSelection: (selectedAgentIds: string[]) =>
+      ipcRenderer.invoke("slime:resident:subagent:setSelection", { selectedAgentIds }) as Promise<{ ok: boolean; selectedAgentIds?: string[]; error?: string }>,
+    /** A-918++：订阅后台实时推送（subagent start/complete/error、定时任务触发、监控状态等），返回 cleanup */
+    onUpdate: (cb: (payload: unknown) => void) => onMessage<unknown>("slime:resident:update", cb),
+  },
+  /** A-950：群聊状态事件（成员 thinking/speaking/done + 思考增量）——群聊专属右侧栏用 */
+  brainstorm: {
+    onEvent: (cb: (payload: { sessionId: string; memberId: string; name: string; state?: string; chunk?: string; content?: string }) => void) =>
+      onMessage<{ sessionId: string; memberId: string; name: string; state?: string; chunk?: string; content?: string }>("slime:brainstorm:event", cb),
+  },
+  requests: {
+    /** 读请求频率配置（并发上限 / 断流重连基间隔，A-916） */
+    get: () => ipcRenderer.invoke("slime:requests:get") as Promise<{ concurrency: number; reconnectBaseMs: number }>,
+    set: (p: { concurrency?: number; reconnectBaseMs?: number }) =>
+      ipcRenderer.invoke("slime:requests:set", p) as Promise<{ ok: boolean; concurrency?: number; reconnectBaseMs?: number; error?: string }>,
+  },
+  adb: {
+    /** A-918++：检测 adb 是否就绪（含版本/来源） */
+    detect: () => ipcRenderer.invoke("slime:adb:detect") as Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>,
+    /** A-918++：下载官方 platform-tools 便携包（进度经 onDownloadProgress 监听） */
+    download: () => ipcRenderer.invoke("slime:adb:download") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string } }>,
+    /** A-918++：列出已连接设备 */
+    devices: () => ipcRenderer.invoke("slime:adb:devices") as Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>,
+    /** A-918++：无线连接设备（host 形如 192.168.1.10:5555） */
+    connect: (host: string) => ipcRenderer.invoke("slime:adb:connect", { host }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：断开无线连接 */
+    disconnect: (host: string) => ipcRenderer.invoke("slime:adb:disconnect", { host }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：在指定设备执行 shell 命令 */
+    shell: (serial: string, command: string) => ipcRenderer.invoke("slime:adb:shell", { serial, command }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：安装 APK（serial + 本地 apk 路径） */
+    install: (serial: string, apkPath: string) => ipcRenderer.invoke("slime:adb:install", { serial, apkPath }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：卸载应用（serial + 包名） */
+    uninstall: (serial: string, pkg: string) => ipcRenderer.invoke("slime:adb:uninstall", { serial, pkg }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：截图（返回 PNG base64） */
+    screencap: (serial: string) => ipcRenderer.invoke("slime:adb:screencap", { serial }) as Promise<{ ok: boolean; pngBase64?: string; error?: string }>,
+    /** A-918++：从设备拉取文件到本地 */
+    pull: (serial: string, remote: string, local: string) => ipcRenderer.invoke("slime:adb:pull", { serial, remote, local }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：推送本地文件到设备 */
+    push: (serial: string, local: string, remote: string) => ipcRenderer.invoke("slime:adb:push", { serial, local, remote }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：重启设备 */
+    reboot: (serial: string) => ipcRenderer.invoke("slime:adb:reboot", { serial }) as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：启动/停止 ADB 服务（连模拟器前需 start-server） */
+    startServer: () => ipcRenderer.invoke("slime:adb:startServer") as Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>,
+    killServer: () => ipcRenderer.invoke("slime:adb:killServer") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    /** A-918++：下载进度监听（主进程 → 渲染层） */
+    onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => onMessage<{ state: string; percent: number; receivedMB: number; totalMB: number; error?: string }>("slime:adb:downloadProgress", cb),
+  },
+  http: {
+    /** A-918++：把本地目录作为静态服务启动（默认 127.0.0.1 仅本机；传 host:"0.0.0.0" 才局域网可访问） */
+    serve: (p: { dir: string; port?: number; host?: string; spa?: boolean }) =>
+      ipcRenderer.invoke("slime:http:serve", p) as Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }>,
+    /** A-918++：停止指定服务 */
+    stop: (id: string) => ipcRenderer.invoke("slime:http:stop", { id }) as Promise<{ ok: boolean; error?: string }>,
+    /** A-918++：停止全部服务 */
+    stopAll: () => ipcRenderer.invoke("slime:http:stopAll") as Promise<{ ok: boolean; stopped: number }>,
+    /** A-918++：列出运行中的服务 */
+    list: () => ipcRenderer.invoke("slime:http:list") as Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>>,
+    /** A-918++：用系统默认浏览器打开某个访问地址 */
+    open: (url: string) => ipcRenderer.invoke("slime:http:open", { url }) as Promise<{ ok: boolean; error?: string }>,
+  },
+  screen: {
+    /** 图形控制：列出可用后端与目标（桌面 / 安卓设备） */
+    info: () => ipcRenderer.invoke("slime:screen:info") as Promise<{
+      enabled: boolean;
+      halted: boolean;
+      backends: string[];
+      targets: Array<{ backend: string; target: string; width: number; height: number; label: string }>;
+    }>,
+    /** 图形控制：紧急停止（中断后续所有图形动作） */
+    halt: () => ipcRenderer.invoke("slime:screen:halt") as Promise<{ ok: boolean }>,
+    /** 图形控制：恢复 */
+    resume: () => ipcRenderer.invoke("slime:screen:resume") as Promise<{ ok: boolean }>,
+    /** 图形控制：截图（GUI 预览用，返回已瘦身的 data URL） */
+    capture: (p?: { backend?: string; target?: string }) =>
+      ipcRenderer.invoke("slime:screen:capture", p ?? {}) as Promise<{ ok: boolean; dataUrl?: string; width?: number; height?: number; error?: string }>,
+  },
+  /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
+  onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string; from?: "site" | "user" }) => void) =>
+    onMessage<{ kind: "url"; url: string; name?: string; from?: "site" | "user" }>("slime:sidebar:open", cb),
 });
 
 declare global {
   interface Window {
     slimeAPI: {
-chat: {
+      chat: {
         stream: (input: ChatInput) => Promise<unknown>;
+        truncateFrom: (agentId: string, sessionId: string | undefined, userMsg: string) => Promise<{ ok: boolean; removed?: number; error?: string }>;
         newConversation: (agentId: string) => Promise<{ ok: boolean }>;
         retryLast: (agentId: string, sessionId?: string) => Promise<{ ok: boolean; error?: string }>;
+        cancel: (key: string) => Promise<{ ok: boolean; error?: string; active?: number }>;
+        isActive: (key: string) => Promise<{ active: boolean }>;
+        compress: (sessionId: string, ratio: number, used?: number) => Promise<CompressResult>;
         onChunk: (cb: (chunk: StreamChunk) => void) => () => void;
-        onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number> }) => void) => () => void;
-        onError: (cb: (err: { message: string }) => void) => () => void;
+        onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => void) => () => void;
+        onError: (cb: (err: { message: string; sessionId?: string }) => void) => () => void;
+        onStreamEnded: (cb: (ev: { sessionId?: string }) => void) => () => void;
+      };
+      /** A-976：右侧栏浏览器控制通道 */
+      browser: {
+        onCommand: (cb: (cmd: { id: string; kind: string } & Record<string, unknown>) => void) => () => void;
+        sendResult: (payload: { id: string; ok: boolean; data?: unknown; error?: string }) => void;
+        onPopupNotice: (cb: (p: { url: string; ts: number; kind?: string; scheme?: string }) => void) => () => void;
+      };
+      /** A-980-R2：深度链接真实打开（探测系统处理器并交给系统应用） */
+      protocol: {
+        open: (url: string) => Promise<{ ok?: boolean; url?: string; scheme?: string; handler?: string; reason?: string }>;
       };
       model: {
         onLoading: (cb: (s: ModelLoadingStatus) => void) => () => void;
@@ -321,14 +687,21 @@ chat: {
       conversations: {
         list: () => Promise<SessionItem[]>;
         load: (sessionId: string) => Promise<ConversationMessage[]>;
-        create: (agentId?: string, title?: string) => Promise<{ ok: boolean; session?: SessionItem }>;
+        create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: Array<string | { id: string; model?: string; effort?: string }>; leaderModel?: string; type?: "normal" | "brainstorm" }) => Promise<{ ok: boolean; session?: SessionItem }>;
+        setAgent: (sessionId: string, agentId: string) => Promise<{ ok: boolean }>;
+        setMembers: (sessionId: string, memberIds: string[]) => Promise<{ ok: boolean; session?: SessionItem }>;
+        /** A-1011：群聊成员思考推理强度（effort=null 清除覆盖，回落群聊默认 high） */
+        setMemberEffort: (sessionId: string, memberId: string, effort: string | null) => Promise<{ ok: boolean; memberEfforts?: Record<string, string>; leaderEffort?: string }>;
+        setWorkspace: (sessionId: string, workspace: string | null) => Promise<{ ok: boolean; workspace?: string }>;
         rename: (sessionId: string, title: string) => Promise<{ ok: boolean }>;
         remove: (sessionId: string) => Promise<{ ok: boolean }>;
         clear: (sessionId: string) => Promise<{ ok: boolean }>;
-        config: (input: { agentId: string; approval?: ApprovalMode; workspace?: string | null }) => Promise<{ ok: boolean; approval: ApprovalMode; workspace: string }>;
-        configGet: (agentId: string) => Promise<SessionConfig>;
+        config: (input: { agentId: string; sessionId?: string; approval?: ApprovalMode; workspace?: string | null }) => Promise<{ ok: boolean; approval: ApprovalMode; workspace: string }>;
+        configGet: (input: { agentId: string; sessionId?: string }) => Promise<SessionConfig>;
         pickFolder: () => Promise<{ ok: boolean; path?: string; error?: string }>;
         removeAgent: (agentId: string) => Promise<{ ok: boolean }>;
+        removeWorkspace: (workspace: string) => Promise<{ ok: boolean; count?: number }>;
+        loadTodos: (sessionId: string) => Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>;
       };
       extras: {
         list: () => Promise<ExtrasList>;
@@ -337,12 +710,34 @@ chat: {
         skillOpen: (name: string) => Promise<{ ok: boolean; error?: string }>;
         skillsRootOpen: () => Promise<{ ok: boolean; error?: string }>;
         skillDelete: (name: string) => Promise<{ ok: boolean; error?: string }>;
+        skillAdd: (input: { name: string; description: string; content?: string }) => Promise<{ ok: boolean; error?: string; name?: string }>;
+        skillMarketSearch: (query?: string) => Promise<{ ok: boolean; skills?: Array<{ name: string; description: string }>; error?: string }>;
+        skillMarketInstall: (name: string) => Promise<{ ok: boolean; error?: string; name?: string }>;
+        registryAuthGet: () => Promise<{ githubToken?: string }>;
+        registryAuthSet: (auth: { githubToken?: string }) => Promise<{ ok: boolean; error?: string }>;
+        openGithubAuth: () => Promise<{ ok: boolean; error?: string }>;
         mcpList: () => Promise<McpServerInfo[]>;
         mcpToggle: (name: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
         mcpOpen: () => Promise<{ ok: boolean; error?: string }>;
         mcpDelete: (name: string) => Promise<{ ok: boolean; error?: string }>;
+        mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+        mcpRegistrySearch: (query?: string) => Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; error?: string }>;
+        mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) => Promise<{ ok: boolean; error?: string }>;
+      };
+      runtime: {
+        list: () => Promise<{
+          ok: boolean; items?: Array<{
+            kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string;
+            action?: { label: string; kind: string; url?: string; path?: string; target?: string };
+          }>; error?: string;
+        }>;
+        open: (action: { label?: string; kind?: string; url?: string; path?: string }) => Promise<{ ok: boolean; error?: string }>;
+        installPython: () => Promise<{ ok: boolean; log?: string; error?: string }>;
       };
       files: { pick: () => Promise<{ ok: boolean; path?: string; error?: string }> };
+      images: {
+        pick: () => Promise<{ ok: boolean; images?: Array<{ name: string; mime: string; dataUrl: string }>; error?: string }>;
+      };
       permissions: {
         get: () => Promise<GuiPermissions>;
         set: (patch: Partial<Record<keyof GuiPermissions, unknown>>) => Promise<{ ok: boolean; permissions: GuiPermissions; error?: string }>;
@@ -351,6 +746,12 @@ chat: {
         onRequest: (cb: (req: PermissionRequestUI) => void) => () => void;
         onTimeout: (cb: (req: { requestId: string }) => void) => () => void;
         resolve: (decision: PermissionDecision) => Promise<{ ok: boolean }>;
+      };
+      tasks: {
+        loadTodos: (sessionId: string) => Promise<{ ok: boolean; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }>;
+        onTodos: (cb: (data: { sessionId: string; todos: Array<{ id: string; content: string; status: string; completedAt?: string }> }) => void) => () => void;
+        saveTodos: (sessionId: string, todos: Array<{ id: string; content: string; status: string; completedAt?: string }>) => Promise<{ ok: boolean; todos?: Array<{ id: string; content: string; status: string; completedAt?: string }>; error?: string }>;
+        clearTodos: (sessionId: string) => Promise<{ ok: boolean }>;
       };
       askUser: {
         onRequest: (cb: (req: AskUserRequestUI) => void) => () => void;
@@ -363,9 +764,14 @@ chat: {
         poll: (start: boolean) => Promise<{ ok: boolean }>;
         onPoll: (cb: (snapshot: StatsSnapshot) => void) => () => void;
       };
+      usage: {
+        snapshot: (params?: { sinceIso?: string; untilIso?: string; limit?: number }) => Promise<UsageSnapshot>;
+        clear: () => Promise<{ ok: boolean }>;
+        recompute: () => Promise<UsageRecomputeResult>;
+      };
       agents: {
         list: () => Promise<AgentInfo[]>;
-        create: (name: string, role: string) => Promise<AgentInfo>;
+        create: (name: string, role: string, toolProfile?: ToolProfileDTO) => Promise<AgentInfo>;
         fork: (parentId: string, name: string, role: string) => Promise<AgentInfo>;
         select: (agentId: string) => Promise<void>;
         detail: (agentId: string) => Promise<AgentDetail | null>;
@@ -381,12 +787,13 @@ chat: {
         terminate: () => Promise<void>;
         onStatus: (cb: (status: SidecarStatus) => void) => () => void;
       };
-      window: { minimize: () => Promise<void>; maximize: () => Promise<void>; quit: () => Promise<void> };
+      window: { minimize: () => Promise<void>; maximize: () => Promise<void>; quit: () => Promise<void>; setExitMode: (mode: "quit" | "background") => Promise<{ ok: boolean; mode: "quit" | "background" }>; getExitMode: () => Promise<{ mode: "quit" | "background" }> };
       theme: { set: (theme: string) => Promise<void> };
       providers: {
         list: () => Promise<ProviderSummary[]>;
-        fetchModels: (baseUrl: string, apiKey: string) => Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }>;
-        save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; models?: unknown[] }) => Promise<{ ok: boolean; error?: string }>;
+        fetchModels: (baseUrl: string, apiKey: string, apiFormat?: "openai" | "anthropic" | "responses" | "google" | "auto") => Promise<{ ok: boolean; models?: ModelSpec[]; error?: string }>;
+        refresh: (key: string) => Promise<{ ok: boolean; total?: number; added?: number; removed?: number; error?: string }>;
+        save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto"; models?: unknown[] }) => Promise<{ ok: boolean; error?: string }>;
         remove: (key: string) => Promise<{ ok: boolean; error?: string }>;
         localList: () => Promise<LocalModelSpec[]>;
         localSave: (input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean }) => Promise<{ ok: boolean; error?: string }>;
@@ -409,6 +816,26 @@ chat: {
         autostartSet: (enabled: boolean) => Promise<{ ok: boolean; enabled: boolean; error?: string }>;
         uninstall: () => Promise<{ ok: boolean; error?: string }>;
       };
+      /** A-980-R26：系统通知 + 可定制提示音（设置 → 通用） */
+      notify: {
+        get: () => Promise<{ ok: boolean; config: NotifyConfigDTO; soundReady: boolean }>;
+        set: (patch: { enabled?: boolean; soundEnabled?: boolean }) => Promise<{ ok: boolean; config?: NotifyConfigDTO; soundReady?: boolean; error?: string }>;
+        pickSound: () => Promise<{ ok: boolean; canceled?: boolean; name?: string | null; size?: number; config?: NotifyConfigDTO; error?: string }>;
+        clearSound: () => Promise<{ ok: boolean; config?: NotifyConfigDTO; error?: string }>;
+        soundData: () => Promise<{ ok: boolean; dataUrl?: string; name?: string; size?: number; error?: string }>;
+        test: () => Promise<{ ok: boolean; config?: NotifyConfigDTO }>;
+        onPlaySound: (cb: () => void) => () => void;
+      };
+      llmGateway: {
+        get: () => Promise<{ ok: boolean; config: LlmGatewayConfigDTO; status: LlmGatewayStatusDTO }>;
+        set: (cfg: LlmGatewayConfigDTO) => Promise<{ ok: boolean; error?: string; status: LlmGatewayStatusDTO }>;
+        status: () => Promise<LlmGatewayStatusDTO>;
+        restart: () => Promise<{ ok: boolean; error?: string; status: LlmGatewayStatusDTO }>;
+        tokenAdd: (input: LlmGatewayNewTokenDTO) => Promise<LlmGatewayTokenOpResultDTO>;
+        tokenUpdate: (input: LlmGatewayUpdateTokenDTO) => Promise<LlmGatewayTokenOpResultDTO>;
+        tokenRemove: (key: string) => Promise<LlmGatewayTokenOpResultDTO>;
+        tokenToggle: (key: string, active: boolean) => Promise<LlmGatewayTokenOpResultDTO>;
+      };
       mind: {
         configGet: () => Promise<MindConfigInfo>;
         configSet: (patch: { vectorTool?: VectorTool; memoryRoot?: string }) => Promise<{ ok: boolean; vectorTool: VectorTool; memoryRoot: string }>;
@@ -428,10 +855,19 @@ chat: {
       workspace: {
         list: (root: string, rel: string) => Promise<WorkspaceListResult>;
         readFile: (root: string, rel: string) => Promise<WorkspaceReadFileResult>;
+        readFileAbs: (path: string) => Promise<WorkspaceReadFileResult>;
+        /** A-980-R32：多基准候选解析路径（返回真实绝对路径 + 是否目录 + 试过的候选） */
+        openTarget: (rel: string, opts?: { root?: string; sessionId?: string }) => Promise<{ ok: boolean; path?: string; isDir?: boolean; tried?: string[]; error?: string }>;
+        /** 文件资源管理器：系统对话框选择任意文件夹作为浏览根 */
+        pickBrowseRoot: () => Promise<{ ok: boolean; path?: string; error?: string }>;
+        /** 文件资源管理器：返回某目录的父级 */
+        getParent: (path: string) => Promise<{ ok: boolean; parent?: string | null; diskRoot?: boolean; error?: string }>;
         /** 构建右键菜单模板（主进程侧校验路径） */
         contextmenu: (root: string, params: WorkspaceContextMenuParams) => Promise<{ ok: boolean; items?: ContextMenuItem[]; error?: string }>;
         /** 新建文件/文件夹 */
         create: (params: { root: string; parentRel: string; name: string; isDir: boolean }) => Promise<WorkspaceCreateResult>;
+        /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等） */
+        openPath: (path: string) => Promise<{ ok: boolean; error?: string }>;
       };
       term: {
         exec: (cmd: string, cwd?: string) => Promise<TermResult>;
@@ -445,9 +881,71 @@ chat: {
         pull: (path: string) => Promise<GitAction>;
         checkout: (path: string, branch: string) => Promise<GitAction>;
         clone: (url: string) => Promise<GitCloneResult>;
+        diff: (path: string, file: string) => Promise<GitDiffResult>;
       };
       data: {
         reset: () => Promise<{ ok: boolean; error?: string }>;
+      };
+      dialog: {
+        confirm: (message: string, detail?: string) => Promise<{ ok: boolean; confirmed: boolean; error: string | null }>;
+        alert: (message: string, detail?: string) => Promise<{ ok: boolean; error: string | null }>;
+      };
+      resident: {
+        state: () => Promise<ResidentState>;
+        schedulerAdd: (p: { name: string; cron: string; prompt: string; agentId?: string }) => Promise<{ ok: boolean; id?: string; error?: string }>;
+        schedulerRemove: (id: string) => Promise<{ ok: boolean }>;
+        schedulerPause: (id: string) => Promise<{ ok: boolean }>;
+        schedulerResume: (id: string) => Promise<{ ok: boolean }>;
+        schedulerTrigger: (id: string) => Promise<{ ok: boolean }>;
+        subagentSpawn: (p: { name: string; task: string; systemPrompt?: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
+        subagentCancel: (id: string) => Promise<{ ok: boolean }>;
+        subagentClear: () => Promise<{ ok: boolean; cleared: number; dropped: number }>;
+        subagentDelegate: (p: { task: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
+        subagentGetSelection: () => Promise<{ ok: boolean; selectedAgentIds?: string[] }>;
+        subagentSetSelection: (selectedAgentIds: string[]) => Promise<{ ok: boolean; selectedAgentIds?: string[]; error?: string }>;
+        onUpdate: (cb: (payload: unknown) => void) => () => void;
+      };
+      requests: {
+        get: () => Promise<{ concurrency: number; reconnectBaseMs: number }>;
+        set: (p: { concurrency?: number; reconnectBaseMs?: number }) => Promise<{ ok: boolean; concurrency?: number; reconnectBaseMs?: number; error?: string }>;
+      };
+      adb: {
+        detect: () => Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>;
+        download: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string } }>;
+        devices: () => Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>;
+        connect: (host: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        disconnect: (host: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        shell: (serial: string, command: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        install: (serial: string, apkPath: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        uninstall: (serial: string, pkg: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        screencap: (serial: string) => Promise<{ ok: boolean; pngBase64?: string; error?: string }>;
+        pull: (serial: string, remote: string, local: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        push: (serial: string, local: string, remote: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        reboot: (serial: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        startServer: () => Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>;
+        killServer: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
+        onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => () => void;
+      };
+      http: {
+        serve: (p: { dir: string; port?: number; host?: string; spa?: boolean }) => Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }>;
+        stop: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        stopAll: () => Promise<{ ok: boolean; stopped: number }>;
+        list: () => Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>>;
+        open: (url: string) => Promise<{ ok: boolean; error?: string }>;
+      };
+      /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
+      onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string; from?: "site" | "user" }) => void) => () => void;
+      /** 图形控制能力（screen_*）：桌面 + 安卓统一 */
+      screen: {
+        info: () => Promise<{
+          enabled: boolean;
+          halted: boolean;
+          backends: string[];
+          targets: Array<{ backend: string; target: string; width: number; height: number; label: string }>;
+        }>;
+        halt: () => Promise<{ ok: boolean }>;
+        resume: () => Promise<{ ok: boolean }>;
+        capture: (p?: { backend?: string; target?: string }) => Promise<{ ok: boolean; dataUrl?: string; width?: number; height?: number; error?: string }>;
       };
     };
   }

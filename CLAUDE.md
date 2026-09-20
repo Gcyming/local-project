@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 技术栈
 
-- Python 3.10+ / FastAPI / Rich CLI / LanceDB / llama.cpp（PySide6 规划中，见阶段三-遗留）
+- **双栈**：Python 3.10+ / FastAPI / Rich CLI（服务端 `slime_server.py` + 命令行）+ TypeScript 栈（`core-ts/` 引擎 / `gateway-ts/` 薄壳 / **Electron GUI（`gui/`，现状主界面）**）；LanceDB + llama.cpp（BGE-M3 向量 + Qwen 本地模型）
 - 参考项目：Mybutler（记忆/进化）、A-C-C（多 Agent 调度）、Campanula（主题风格）
 
 ## 核心设计原则
@@ -51,6 +51,8 @@ py -m pytest -q                                         # pytest 全量（根目
 
 ## 架构总览
 
+> **双栈现状（2026-09-04 复盘对齐）**：对话主链路在 **Electron GUI（`gui/`）**——`gui/src/main/index.ts` 直接函数调用 core-ts 引擎（`services/chat.ts` → `services/engine.ts` 模型路由 / 工具循环），**不走 HTTP 回环**；Python 端 `slime_server.py` / CLI 为并行服务端与命令行形态，双端共用 `shared/` 契约单源。下方请求流对应 Python 端一次 Swarm 任务，core-ts 语义等价。
+
 ### 请求流（一次 Swarm 任务）
 
 ```
@@ -71,7 +73,7 @@ slime_server.py (FastAPI + Bearer 认证中间件)
 - **媒体生成工具**（`tools/agnes_media.py`，A-035/A-048 起）：`agnes_prompt_build`（规则式提示词构建）/ `agnes_generate_image` / `agnes_generate_video` / `agnes_video_status`。真实生成 + 真实字节数证据 + 进度事件（A-050：CLI 进度条）；**同请求媒体生成合计限 1 次**（A-050-R3 防乱调）；密钥按调用方 Agent 的 provider 分配（A-048-R4，各 Agent 独立 Agnes 账号）。**编造检测 → 强制工具轮**（A-049，`slime_server.py`）：生成类请求 + 零工具调用 + 完成态声称 → 自动追加强制轮（只注入媒体工具子集 + 精简提示词），逼模型真实调用。
 - **幻觉护栏**（`core/claims.py`，A-044 起）：CLI 每次回复后核验"已保存/已生成"类声称（含证据性描述如"文件大小/完整路径/字节"，A-048-R6）引用的路径真实存在；媒体产物裸文件名查 `data/generated/`（A-050-R2），URL 残片与域名样式片段跳过（A-050-R），编造路径红字警告。
 - **沙箱**（`core/sandbox.py`）：权限分 L0–L5，`slime.toml [sandbox]` 配置自动批准/需确认/强制拒绝级别；全局单例 + 按 Agent 覆盖。
-- **MCP**（`core/mcp_client.py`）：自研传输抽象 `_Transport → _StdioTransport / _HTTPTransport`，把外部 MCP server 的工具桥接为 `mcp_` / `mcp_res_` / `mcp_prompt_` 前缀注入同一注册表。stdio 双帧嗅探（JSONL / Content-Length）+ 后台 reader 循环 + 自动重连；详见 `docs/mcpfix.md`。
+- **MCP**（`core/mcp_client.py`）：自研传输抽象 `_Transport → _StdioTransport / _HTTPTransport`，把外部 MCP server 的工具桥接为 `mcp_` / `mcp_res_` / `mcp_prompt_` 前缀注入同一注册表。stdio 双帧嗅探（JSONL / Content-Length）+ 后台 reader 循环 + 自动重连；OAuth 2.1 远程授权见 `core/mcp_oauth.py`。
 - **配置**：Provider 加密存 `config/providers.enc.json`（`core/encryption.py`）；全局默认值 `config/global_config.json`（`core/global_config.py`）；`slime.toml` 管功能开关与 MCP/模型/沙箱参数。
 
 ## 阶段实现状态
@@ -82,7 +84,9 @@ slime_server.py (FastAPI + Bearer 认证中间件)
 | 阶段一-补丁 | 认证中间件、CORS 收窄、SLIME_PORT、输入校验、promote 走 API | ✅ 完成 |
 | 阶段二 | 自我分裂（多进程）、身份铁律输出过滤、对话持久化、记忆、进化、上下文压缩、工具注册表、沙箱权限、社交接入、技能引擎 | ✅ 完成 |
 | 阶段三 | MCP 协议支持（stdio/HTTP/OAuth 2.1）、社交接入增强（企业微信+个人微信桥接）、本地模型管理（llama.cpp BGE-M3 + Qwen 3B） | ✅ 完成 |
-| 阶段三-遗留 | GUI 桌面客户端（PySide6）——`gui/` 目录未开工；requirements.txt 无 PySide6 | ❌ 未开工（见 docs/REVIEW_AGENT.md A-007） |
+| 阶段 4–5D | 双栈迁移 + Electron 落地（与 README 阶段表一致）：sidecar 化 → Node 壳原型（契约单源）→ 双路径路由（OOM 降级链）→ 心智/记忆/工具/沙箱/Swarm 全模块 TS 化 → gateway-ts 薄壳 + core-ts Service API → MCP/Skill/进化压缩/社交 TS 化 + 身份移民 v1.2 → Electron 打包分发（安装版+便携版）→ 工程加固（安全扫描/压测/Fuse/自动更新） | ✅ 完成 |
+| 阶段 8–13（GUI） | Electron GUI 全面落地：会话创建流重构、权限交互升级（工作目录外授权 + ask_user + 会话白名单）、模型兼容/列表优化、右侧栏（工作树/终端/浏览器/Git + 概览/待办/上下文/事件流四区）、思考/工具折叠卡、下载进度、双主题、自动更新、上下文圆环 | ✅ 完成 |
+| 遗留（A-007 已作废） | ~~PySide6 桌面客户端——gui/ 未开工~~：A-007 为 2026-08-15 用户指示「GUI 先不做」的登记；此后已按 Electron 路线完整落地（`gui/` 为现状主界面），PySide6 方案作废 | ✅ 已由 Electron 替代 |
 
 ## 关键约束
 

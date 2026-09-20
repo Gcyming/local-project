@@ -1,80 +1,157 @@
 # =====================================================================
 # slime 项目 .gitignore
-#   黄金法则：凡能用工具再生成的东西（构建产物 / 运行时数据 / 模型资产 /
-#   依赖产物 / 缓存），一律不入库。
-#   核心知识产权策略：引擎源码（core/*、core-ts/*、tools/* 等）不随仓库
-#   发布，仓库仅保留 GUI 壳 / 文档 / 配置模板 / 部署脚本。
+#
+#   政策（2026-09-17 改）：**核心源码随仓库公开**，供他人阅读与审阅；
+#   只排除三类东西 ——
+#     ① 密钥与隐私（config/ 里的 API Key、data/ 里的对话与用量、知识库）
+#     ② 可再生成的产物（构建输出 / 依赖 / 缓存 / 打包件）
+#     ③ 资产与体积（模型权重 / llama.cpp 二进制 / 虚拟环境 / 第三方抽取物）
+#
+#   ⚠️ 改本文件前先跑一次密钥审计：
+#       git grep -nEI "(sk-[A-Za-z0-9]{16,}|ak_[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY)" -- .
+#     一旦密钥进了公开历史，删文件也没用（历史里永久可查），只能换密钥 + 重写历史。
 # =====================================================================
 
-# ── 引擎源码（核心知识产权，不随仓库发布）──────────────────────────────
-core/
-core-ts/
-gateway-ts/
-tools/
-social/
-sidecar/
-shared/
-skills/
-scripts/
-tests/
-slime_server.py
-slime_cli.py
-slime_launcher.py
-qa.py
-run_tests.py
-pytest.ini
-requirements.txt
+# ── 密钥 / 敏感配置（**最高优先级，任何情况下都不得入库**）──────────────
+# config/ 下含：providers.enc.json（加密的 API Key）、auth_token.enc、global_config.json…
+config/
+configs/
+*.enc
+*.secret
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.token
+*.tokens
+*.cookie*
+credentials*
+*_credential*
+auth*.json
+auth_token*
+.providers.enc*
+.whitelist.json
+.slime_pass*
+.env
+.env.*
+# 会话临时文件（config/ 下那种 a88b7992.sess.tmp，可能含对话片段）
+*.sess.tmp
+
+# ── 隐私数据 / 运行时状态（对话历史、用量、审计、待办、知识库）──────────
+# data/ 下含：history.jsonl、audit.jsonl、usage.jsonl、sessions、subagent-runs…
+# Knowledge/ 是个人知识库（上万文件）—— 两者都属于"用户自己的数据"，绝非项目代码。
+data/
+Knowledge/
+# AI 工作记忆与本地工具状态（含内部复盘、会话摘录）
+.workbuddy/
+
+# ── 本地实例配置（模板见 gui/template/slime.toml，可按模板重建）─────────
+slime.toml
+server.log
+sidecar.log
+# GUI 运行期生成的 providers/agents/history
+gui/config/
+*.tsbuildinfo
+
+# ── 可再生成的产物（构建 / 依赖 / 缓存 / 打包）──────────────────────────
+node_modules/
+dist/
+out/
+release/
+release-linux/
+gui/release*/
+gui/out/
+gui/dist-v9/
+gui/dist-v*/
+# Electron 打包用的大体积资源（可重新下载）
+gui/resources/
+uv.lock
+*.blockmap
+*.prof
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.pytest-tmp/
+.turbo/
+.cache/
+
+# ── 崩溃安全写的副产物（A-989，运行时自动生成，不入库）──────────────────
+# atomic_write_text 写前留 `.bak`；read_*_safe 把坏文件改名 `.corrupt` 留证；
+# `*.tmp` 是原子写的暂存名。三者都是"上一次崩溃的现场"，进库只会污染 diff。
+*.bak
+*.corrupt
+*.tmp
+
+# ── 资产 / 第三方 / 虚拟环境（体积大，且非本项目源码）────────────────────
+llama.cpp/
+models/
+BGE-M3/
+Local model/
+*.gguf
+runtime/
+.venv/
+venv/
+env/
+tools/ffmpeg/
+
+# ── 本地数据暂存 / 冒烟 / 一次性调试（易泄露内部结构，不入库）────────────
+_model_stage/
+_smoke_cloud/
+_nf.txt
+_fix_*.py
+.slime_*_patch.py
+*.log
+*.tmp
+*.bak
+*.backup
+*.orig
+*.rej
+*.patch
+# 一次性补丁 / 冒烟脚本（历史调试残留，不是产品的一部分）
+.tools/*
+!.tools/verify_package.py
+# vitest 运行时产生的临时配置（每次跑测试都会生成，会被误提交）
+vitest.config.ts.timestamp-*.mjs
+*.timestamp-*.mjs
+# 本地启动包装脚本（含本机路径，按 README 的启动方式即可）
 slime
 slime-server
 slime.cmd
 slime.ps1
 slime-server.ps1
 
-# ── 密钥 / 敏感配置（双重保险：即使放开 config/ 也拦得住）──────────────
-config/auth_token.json
-config/auth_token.enc
-config/providers.enc.json
-*.enc
-*.secret
-*.key
-.slime_pass
+# ── 逆向 / 抽取物（**不得公开**：来自第三方应用的代码，法律与合规风险）──
+# scripts/ 下混有 extracted-app / extracted-latest / extracted-v2 / extracted-v3（从别的
+# 应用里抽出的代码）与抓包残留，因此整个目录默认排除，只放行两个自研脚本。
+/scripts/*
+!/scripts/build-safety-check.mjs
+!/scripts/contract-check.mjs
+# dist:win / dist:win:publish 依赖的三个自研构建脚本（不含任何第三方代码）。
+# 不放行的话，新克隆的仓库跑 npm run dist:win 会因为缺脚本直接失败。
+!/scripts/preflight-clean.mjs
+!/scripts/prepare-runtime.mjs
+!/scripts/retry-build.mjs
+# scripts/layout-probe/ —— 模型调试表的**布局预算探针**（自研，不含任何第三方代码）：
+#   probe.html 是那张表的手工复刻品，main.cjs 是 Electron 启动器；用来量
+#   「一段文字在本机字体下要占多少像素」，给列宽定预算（起因：用户截图里数字被裁成 "10:" / "{"）。
+#   权威守卫在 tests/core-ts/pricing-tiers.spec.ts 的「A-988：列宽预算」那条，
+#   这里只在布局变化时用来重新推导实测常量。
+!/scripts/layout-probe/
+# 探针的运行产物：每次跑都整体重写，只对当次测量有意义，不入库
+/scripts/layout-probe/result.json
+/scripts/layout-probe/run.log
 
-# ── 运行时数据 / 本地配置（可再生成，不入库）────────────────────────────
-config/
-data/
-Knowledge/
-# 本地实例配置（模板见 gui/template/slime.toml），可再生成，不入库
-slime.toml
-server.log
-# GUI 运行期生成的 providers/agents/history
-gui/config/
-*.tsbuildinfo
+# ── 用户自己的产物项目（不是 slime 源码）──────────────────────────────
+/apps/
 
-# ── 虚拟环境 / 依赖产物 ────────────────────────────────────────────────
-.venv/
-venv/
-env/
-runtime/
-node_modules/
-dist/
-out/
-uv.lock
-
-# ── 构建产物（electron-builder 输出，可再生成）──────────────────────────
-gui/release*/
-release/
-release-linux/
-*.blockmap
-
-# ── GUI 缓存资产（可重新下载，不入库）───────────────────────────────────
-gui/resources/
-
-# ── 二进制 / 模型资产（不入库）──────────────────────────────────────────
-tools/ffmpeg/
-BGE-M3/
-llama.cpp/
-Local model/
-*.gguf
+# ── Agent Git 治理（影子仓库 / 并行 worktree）──────────────────────────
+.slime/
+.slime-worktrees/
+# 仓库损坏时手工备份出来的 .git 副本（含完整对象库，绝不是源码）
+.git.broken-bak-*/
 
 # ── OS / IDE / 工具残留 ────────────────────────────────────────────────
 Thumbs.db
@@ -84,12 +161,25 @@ Thumbs.db
 .reasonix/
 .playwright-mcp/
 
-# ── Agent Git 治理（P0，影子仓库等）─────────────────────────────────────
-.slime/
-.slime-worktrees/
-
-# ── Python 运行时缓存 ──────────────────────────────────────────────────
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+# ── 明确放行：核心源码与文档（2026-09-17 起公开，供他人阅读审阅）────────
+#   下面这些 not 规则都带前导 / 限定「仓库根」，避免误伤 gui/src/shared 这类同名子目录。
+!/core/
+!/core-ts/
+!/gateway-ts/
+!/tools/
+!/social/
+!/sidecar/
+!/shared/
+!/skills/
+!/tests/
+!/docs/
+!/linux/
+!/windows/
+!/desktop/
+!/slime_server.py
+!/slime_cli.py
+!/slime_launcher.py
+!/qa.py
+!/run_tests.py
+!/pytest.ini
+!/requirements.txt

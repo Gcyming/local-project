@@ -1,0 +1,73 @@
+# shared/security-policy.yaml — 安全策略单一真相源（双栈共用）
+#
+# 背景：此前 TS 侧（core-ts/src/tools/classifier.ts）与 Python 侧（tools/builtin.py）
+# 各自维护一份"受保护目录 / 敏感文件"清单，双端漂移导致主链路缺失引擎源码写入保护。
+# 本文件为唯一来源，由 scripts/gen_security_policy.py 生成：
+#   - shared/gen/security-policy.ts  （Node / Electron 主链路）
+#   - shared/gen/security-policy.py  （Python 服务端 / CLI 形态）
+# 生成物禁止手改；改这里后重跑生成器。
+#
+# 口径：清单命中的写入一律拒绝（block），不进入审批——防社工绕过。
+
+# ① 受保护源码目录（相对 slime 安装/项目根；**根外同名目录不判定**，避免误伤用户工作区）
+protected_dirs:
+  - core-ts        # TS 引擎（调度/沙箱/工具轮）
+  - core           # Python 引擎（服务端/CLI 形态）
+  - tools          # 工具注册表与内置工具
+  - social         # 社交接入
+  - sidecar        # 推理 / SILAM 自研脑
+  - shared         # 双端契约单源（openapi.yaml + 生成物）
+  - gateway-ts     # HTTP 薄壳
+  - config         # 加密配置
+  - configs        # 词表等配置
+  - scripts        # 构建/生成/部署脚本
+  - gui            # Electron 主进程与渲染层（宿主）
+  - linux          # Linux 部署子项目
+  - windows        # Windows 部署子项目
+  - runtime        # 内置运行时
+  - skills         # 技能库
+  - tests          # 测试基线（篡改测试=篡改验收标准）
+  - .git           # 版本历史
+
+# ② 敏感文件名（写 → block；大小写不敏感比对）
+sensitive_filenames:
+  - .slime_pass          # passphrase
+  - providers.enc.json   # 加密供应商凭据
+  - auth_token.enc
+  - auth_token.json
+  - slime.toml           # 主配置（含功能开关/MCP/沙箱参数）
+  - agents.json          # Agent 注册表
+  - global_config.json
+  - history.jsonl        # 会话历史
+  - audit.jsonl          # 审计日志（安全事件溯源）
+  - .git/config
+  - passphrase
+  - password
+  - id_rsa
+  - id_ed25519
+  - slime_server.py    # 服务端入口（引擎代码）
+  - slime_cli.py       # CLI 入口（引擎代码）
+  - slime_launcher.py  # 启动器
+  - requirements.txt   # 依赖锁定
+  - qa.py              # QA 门禁（篡改=篡改验收标准）
+  - run_tests.py
+  - pytest.ini
+
+# ③ 写入阻断后缀——分两种场景，口径刻意不同：
+#   write_block_suffixes          引擎锚定写入（file_write 工具；TS builtin 与 Python builtin 共用）
+#                                 含 .toml：slime 自身配置多为 toml，且写入锚定项目根
+#   classifier_write_block_suffixes  工作区写入（classifier 审批判定；Agent 操作用户项目）
+#                                 刻意不含 .toml，否则会阻断用户项目里 pyproject.toml 等合法写入
+write_block_suffixes:
+  - .enc
+  - .toml
+  - .key
+  - .pem
+  - .p12
+  - .pfx
+classifier_write_block_suffixes:
+  - .enc
+  - .key
+  - .pem
+  - .p12
+  - .pfx

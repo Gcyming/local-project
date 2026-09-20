@@ -3,22 +3,32 @@
  * - 独立于引擎关键配置：写入 config/gui_permissions.json（备份 + 原子写），绝不触碰
  *   slime.toml / providers.enc.json / agents.json 等权威配置。
  * - globalApproval 作为会话级审批的兜底默认（无 sandbox_override 时使用）。
- * - 工具权限与 MCP/技能开关作为「面向用户的全局控制台」持久化，供后续接入引擎审计/启用。
+ * - approvalAllowPaths：自定义审批白名单（目录/仓库命中免审批，custom 档生效）。
+ * - 工具权限与 MCP/技能开关：**已全部接入执行点**（不再是只落盘的假开关）——
+ *   `toolRead/toolWrite/toolTerminal/screenEnabled/mcpEnabled/skillsEnabled` 六个开关由
+ *   `gui/src/main/index.ts` 的 `setToolCategoryGate` 实时读取，每次工具调用都重新判定
+ *   （改设置无需重启引擎）；`globalApproval` → 会话级审批兜底默认；`approvalAllowPaths` → 审批白名单。
+ *   判据见 `tests/core-ts/network-gate.spec.ts`（前缀闸门 + 行为对照）。
  */
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
-export type ApprovalMode = "auto" | "confirm" | "strict";
+/** 审批档位：manual 手动 / auto 自动 / none 无需 / custom 自定义（旧值 strict/confirm 兼容为 manual） */
+export type ApprovalMode = "manual" | "auto" | "none" | "custom";
 
 export interface GuiPermissions {
-  /** 全局默认审批模式（会话未单独配置时使用） */
+  /** 全局默认审批模式（会话未单独配置时使用）；旧值 strict/confirm 读入时按 manual 兼容 */
   globalApproval: ApprovalMode;
-  /** 工具权限类别（对应 Tool.permissions ∈ {read,write,terminal,network}） */
+  /** 自定义审批白名单（设置·权限·预设放行目录/仓库）：命中路径免审批 */
+  approvalAllowPaths: string[];
+  /** 工具权限类别（对应 Tool.permissions ∈ {read,write,terminal}；network 开关见 networkEnabled） */
   toolRead: boolean;
   toolWrite: boolean;
+  /** terminal 类：shell / 命令执行 —— 含 ADB shell（需先开启才能操作设备命令行） */
   toolTerminal: boolean;
-  toolNetwork: boolean;
+  /** 图形控制总开关（screen_* 工具：桌面鼠标键盘注入 + 安卓触摸控制）——高危，默认关闭 */
+  screenEnabled: boolean;
   /** 全局功能开关 */
   mcpEnabled: boolean;
   skillsEnabled: boolean;
@@ -26,15 +36,17 @@ export interface GuiPermissions {
 
 const DEFAULTS: GuiPermissions = {
   globalApproval: "auto",
+  approvalAllowPaths: [],
   toolRead: true,
   toolWrite: true,
   toolTerminal: false,
-  toolNetwork: false,
+  screenEnabled: false,
   mcpEnabled: true,
   skillsEnabled: true,
 };
 
-const VALID_APPROVALS: ApprovalMode[] = ["auto", "confirm", "strict"];
+const VALID_APPROVALS: ApprovalMode[] = ["manual", "auto", "none", "custom"];
+const LEGACY_APPROVALS: Record<string, ApprovalMode> = { strict: "manual", confirm: "manual" };
 
 let rootOverride: string | null = null;
 export function setRootOverrideForTest(root: string | null): void {
@@ -48,7 +60,17 @@ function permPath(): string {
 }
 
 function isApproval(v: unknown): v is ApprovalMode {
-  return typeof v === "string" && (VALID_APPROVALS as string[]).includes(v);
+  if (typeof v !== "string") {
+    return false;
+  }
+  return (VALID_APPROVALS as string[]).includes(v) || v in LEGACY_APPROVALS;
+}
+
+function normalizeApproval(v: unknown): ApprovalMode {
+  if (typeof v === "string") {
+    return LEGACY_APPROVALS[v] ?? (isApproval(v) ? (v as ApprovalMode) : DEFAULTS.globalApproval);
+  }
+  return DEFAULTS.globalApproval;
 }
 
 export function getPermissions(): GuiPermissions {
@@ -62,12 +84,16 @@ export function getPermissions(): GuiPermissions {
       return { ...DEFAULTS };
     }
     const o = raw as Record<string, unknown>;
+    const allowRaw = Array.isArray(o.approvalAllowPaths)
+      ? (o.approvalAllowPaths as unknown[]).filter((x): x is string => typeof x === "string")
+      : DEFAULTS.approvalAllowPaths;
     return {
-      globalApproval: isApproval(o.globalApproval) ? o.globalApproval : DEFAULTS.globalApproval,
+      globalApproval: normalizeApproval(o.globalApproval),
+      approvalAllowPaths: allowRaw,
       toolRead: typeof o.toolRead === "boolean" ? o.toolRead : DEFAULTS.toolRead,
       toolWrite: typeof o.toolWrite === "boolean" ? o.toolWrite : DEFAULTS.toolWrite,
       toolTerminal: typeof o.toolTerminal === "boolean" ? o.toolTerminal : DEFAULTS.toolTerminal,
-      toolNetwork: typeof o.toolNetwork === "boolean" ? o.toolNetwork : DEFAULTS.toolNetwork,
+      screenEnabled: typeof o.screenEnabled === "boolean" ? o.screenEnabled : DEFAULTS.screenEnabled,
       mcpEnabled: typeof o.mcpEnabled === "boolean" ? o.mcpEnabled : DEFAULTS.mcpEnabled,
       skillsEnabled: typeof o.skillsEnabled === "boolean" ? o.skillsEnabled : DEFAULTS.skillsEnabled,
     };
@@ -79,12 +105,19 @@ export function getPermissions(): GuiPermissions {
 export function setPermissions(patch: Partial<GuiPermissions>): { ok: boolean; permissions: GuiPermissions; error?: string } {
   const next = { ...getPermissions() };
   if (patch.globalApproval !== undefined) {
-    if (!isApproval(patch.globalApproval)) {
+    const norm = normalizeApproval(patch.globalApproval);
+    if (!isApproval(norm)) {
       return { ok: false, permissions: next, error: "非法的审批模式" };
     }
-    next.globalApproval = patch.globalApproval;
+    next.globalApproval = norm;
   }
-  for (const k of ["toolRead", "toolWrite", "toolTerminal", "toolNetwork", "mcpEnabled", "skillsEnabled"] as const) {
+  if (patch.approvalAllowPaths !== undefined) {
+    if (!Array.isArray(patch.approvalAllowPaths)) {
+      return { ok: false, permissions: next, error: "审批白名单必须是路径数组" };
+    }
+    next.approvalAllowPaths = patch.approvalAllowPaths.filter((x) => typeof x === "string");
+  }
+  for (const k of ["toolRead", "toolWrite", "toolTerminal", "screenEnabled", "mcpEnabled", "skillsEnabled"] as const) {
     if (patch[k] !== undefined) {
       next[k] = Boolean(patch[k]);
     }

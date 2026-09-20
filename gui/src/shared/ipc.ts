@@ -3,6 +3,8 @@
  * 事件流统一格式 {seq,type,data}（v2.6 定案；IPC 结构化克隆）。
  * GUI 通过 IPC 调用 core-ts 服务 API 直接回传，不经过 HTTP/gateway-ts。
  */
+// 只引类型（`import type` 编译期擦除，不会把 shared 的运行时实现拖进 main 的依赖图）
+import type { ModelPriceTiers, PriceCurrency } from "../../../shared/gen/model-capabilities.js";
 
 export const IPC_CHANNELS = {
   // 聊天
@@ -22,12 +24,19 @@ export const IPC_CHANNELS = {
   sessions_config_get: "slime:sessions:configGet",
   sessions_pick_folder: "slime:sessions:pickFolder",
   sessions_remove_agent: "slime:sessions:removeAgent",
+  sessions_remove_workspace: "slime:sessions:removeWorkspace",
+  sessions_set_members: "slime:sessions:setMembers",
   // 加号/命令面板 + 输入联想
   extras_list: "slime:extras:list",
   chat_suggest: "slime:chat:suggest",
   // 状态
   stats_snapshot: "slime:stats:snapshot",
   stats_poll: "slime:stats:poll",
+  // 使用统计（Settings「使用统计」面板数据源）
+  usage_snapshot: "slime:usage:snapshot",
+  usage_clear: "slime:usage:clear",
+  /** 用当前生效价格重算历史成本（修正"写入时还没有价"的 0 成本记录） */
+  usage_recompute: "slime:usage:recompute",
   // Agent 管理
   agent_list: "slime:agents:list",
   agent_create: "slime:agents:create",
@@ -66,6 +75,15 @@ export const IPC_CHANNELS = {
   settings_autostart_get: "slime:settings:autostart:get",
   settings_autostart_set: "slime:settings:autostart:set",
   settings_uninstall: "slime:settings:uninstall",
+  // LLM 网关（设置 → LLM 网关）
+  llmgw_get: "slime:llmgw:get",
+  llmgw_set: "slime:llmgw:set",
+  llmgw_status: "slime:llmgw:status",
+  llmgw_restart: "slime:llmgw:restart",
+  llmgw_token_add: "slime:llmgw:token:add",
+  llmgw_token_update: "slime:llmgw:token:update",
+  llmgw_token_remove: "slime:llmgw:token:remove",
+  llmgw_token_toggle: "slime:llmgw:token:toggle",
   // 心智中枢（记忆/学习/进化/情绪整合）
   mind_config_get: "slime:mind:configGet",
   mind_config_set: "slime:mind:configSet",
@@ -81,22 +99,115 @@ export const IPC_CHANNELS = {
   // 文件资源管理器：系统对话框选浏览根 / 上级目录
   workspace_pick_browse_root: "slime:workspace:pickBrowseRoot",
   workspace_get_parent: "slime:workspace:getParent",
+  /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等右侧栏无力渲染的格式） */
+  shell_open_path: "slime:shell:openPath",
   term_exec: "slime:term:exec",
 } as const;
 
+/**
+ * A-980-R4：**浏览器类协议名单**——`bitbrowser://`、`chrome://`、`msedge://` 这类协议的目标是
+ * 「唤起另一款浏览器加载当前页面/云控指令」，对 slime 右侧栏浏览毫无价值。
+ * 若按「探测→已注册就 shell.openExternal」处理，用户装了 BitBrowser 时会被拉起，
+ * BitBrowser 自己加载不了 `bitbrowser://cc` 这类指令 → 它界面顶部弹黄色横幅报错（丑、按钮变形）。
+ * 因此浏览器类协议一律**不唤醒外部应用**，静默拦截 + 渲染层轻提示（治本而非屏蔽）。
+ * 其余真实应用协议（weixin:// / mailto: / qq:// / taobao:// 等）仍走「探测→已注册才打开」通道。
+ */
+export const BROWSER_SCHEMES = new Set([
+  "bitbrowser", "chrome", "msedge", "edge", "firefox", "opera", "opear", "vivaldi", "brave",
+  "qqbrowser", "sogou", "browser360", "360se", "360chrome", "maxthon", "baidubrowser",
+  "ucbrowser", "quark",
+]);
+
+/** URL 是否属于浏览器唤起类协议（应为 true → 拦截不唤起外部应用） */
+export function isBrowserSchemeUrl(url: string): boolean {
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec((url ?? "").trim());
+  if (!m) { return false; }
+  return BROWSER_SCHEMES.has(m[1].toLowerCase());
+}
+
 export interface StreamChunk {
   seq: number;
-  type: "chunk" | "tool" | "reasoning" | "progress" | "done" | "error" | "heartbeat";
+  type: "chunk" | "tool" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member";
   data: {
     content?: string;
     name?: string;
+    /** A-162: 工具调用的参数原文（tool 事件；前端提取网址/文件路径展示细节行） */
+    args?: string;
+    /** 工具执行结果（tool 事件；供阶段卡展示/留痕） */
+    result?: string;
+    /** SILAM 大脑思考过程（type="done"/"chunk" 事件携带，折叠展示） */
+    reasoning?: string;
+    /** 团队会话：成员发言事件（type="member"）的发声 Agent ID */
+    agentId?: string;
+    /** A-1008：member 事件的「发言结束通知」（true 时 content 为空）——用于把该成员刚生成的气泡
+     *  按结果降级（目前只用于 failed）。判据只有整段正文才成立，故不能塞进逐段到达的 chunk。 */
+    speechEnd?: boolean;
+    /** A-1008：member 事件对应发言失败（正文是失败占位文本，UI 降级为错误样式） */
+    failed?: boolean;
     model?: string;
     promptTokens?: number;
     completionTokens?: number;
     elapsedMs?: number;
     timings?: Record<string, number>;
     message?: string;
+    /** 该流所属会话（main 进程注入；渲染层据此过滤，杜绝切会话后旧流串扰） */
+    sessionId?: string;
   };
+}
+
+// ── D：全链路可观测（trace/span，LangSmith/LangGraph 语义） ────────────────
+export type TraceEventKind =
+  | "route_select" | "memory_retrieve" | "tool_call" | "tool_result"
+  | "reasoning_chunk" | "reply_chunk" | "done" | "eval";
+
+export interface TraceSpan {
+  id: string;
+  name: string;
+  kind: TraceEventKind;
+  parentId?: string;
+  startedAt: number;
+  endedAt?: number;
+  data?: Record<string, unknown>;
+}
+
+export interface TraceSnapshot {
+  id: string;
+  sessionId?: string;
+  spans: TraceSpan[];
+  startedAt: number;
+  endedAt?: number;
+}
+
+// ── E：Plan 一等对象（plan_create/plan_update/todo_write → 会话级 Plan） ─────
+export type PlanStageStatus = "pending" | "in_progress" | "done" | "failed" | "skipped";
+export type PlanStatus = "planning" | "active" | "done" | "failed";
+
+export interface PlanStage {
+  id: string;
+  label: string;
+  detail?: string;
+  status: PlanStageStatus;
+}
+
+export interface PlanInfo {
+  id: string;
+  sessionId?: string;
+  description: string;
+  stages: PlanStage[];
+  createdAt: number;
+  updatedAt: number;
+  status: PlanStatus;
+  /** A-980-R29：`"plan"`=plan_create 真 Plan；`"todo"`=由待办清单派生的只读镜像（优先级更低） */
+  source?: "plan" | "todo";
+}
+
+/** 待办任务项（右侧栏「待办任务」面板 / todo_write 工具落盘结构） */
+export interface TodoItemDTO {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  /** 完成时刻（ISO）——转入 completed 时由 todo_write 自动打戳，界面据此展示"何时完成" */
+  completedAt?: string;
 }
 
 export interface ChatInput {
@@ -109,6 +220,8 @@ export interface ChatInput {
   sessionId?: string;
   /** 联网搜索开关：false 时 web_search/web_fetch 工具被静默拒绝 */
   networkEnabled?: boolean;
+  /** 识图图片（data URL 列表，data:image/png;base64,...） */
+  images?: string[];
 }
 
 /** 本地模型加载进度（主进程 → 渲染层，slime:model:loading） */
@@ -128,14 +241,39 @@ export interface AgentInfo {
   lifecycle: string;
 }
 
-/** 侧栏会话项（项目 = Agent，项目内独立会话） */
+/** A-980-R22：Agent 工具面白名单（skill/MCP 差异化配置；与 core-ts agentTools.ToolProfile 同构） */
+export interface ToolProfileDTO {
+  mode: "default" | "custom";
+  /** 启用的技能名（extras.skillList 的 name） */
+  skills: string[];
+  /** 启用的 MCP 服务器名（extras.mcpList 的 name，运行时按 mcp_<server>_* 前缀匹配工具） */
+  mcp: string[];
+}
+
+/** 侧栏会话项（以目标工作文件夹为主分组；会话内指定调用 Agent，可随时切换） */
 export interface SessionItem {
   sessionId: string;
   agentId: string;
   agentName: string;
+  /** 目标工作文件夹（会话级；旧数据可能为空 → 归入「未绑定文件夹」组） */
+  workspace?: string;
   title: string;
   count: number;
   lastTime: string;
+  /** 团队会话成员 Agent id 列表（组长 = agentId；不含组长；空/缺省 = 单人会话） */
+  memberIds?: string[];
+  /** 团队会话成员 Agent 名称（与 memberIds 同序，渲染徽章用） */
+  memberNames?: string[];
+  /** A-954：成员入群模型（memberId → model_choice 串） */
+  memberModels?: Record<string, string>;
+  /** A-954：群聊组长（会话归属 Agent）入群模型 */
+  leaderModel?: string;
+  /** A-1011：成员推理强度覆盖（memberId → effort；缺省 = 群聊默认 high） */
+  memberEfforts?: Record<string, string>;
+  /** A-1011：群聊组长的推理强度覆盖（缺省 = 群聊默认 high） */
+  leaderEffort?: string;
+  /** A-943 会话模式：brainstorm = 群聊头脑风暴（左侧特殊渲染）；缺省 normal */
+  type?: "normal" | "brainstorm";
 }
 
 /** 会话消息（历史加载） */
@@ -143,14 +281,26 @@ export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
   time: string;
+  /** A-980-R18：原始 ISO 时间戳（分页加载更早历史时作 beforeTs 定位锚；旧字段兼容缺省） */
+  ts?: string;
   /** 该条回复的推理/思考过程（assistant，Markdown；旧记录无此字段） */
   reasoning?: string;
   /** 该条回复的耗时（毫秒，assistant；旧记录无此字段） */
   elapsedMs?: number;
+  /** A-966：交错思考时间线（思考/工具调用顺序；随历史落库，重启恢复时间线展示） */
+  timeline?: Array<{ kind: string; text?: string; name?: string; label?: string; detail?: string; result?: string }>;
+  /** 发言人 Agent 名称（团队会话成员发言；缺省 = 会话组长/当前 Agent） */
+  agentName?: string;
+  /** 发言人 Agent ID（团队会话成员发言） */
+  agentId?: string;
+  /** A-1008：该条实为「发言失败」占位文本（`（名字 本次发言失败：…）`），不是这位成员真说过的话。
+   *  UI 据此降级为错误样式——不加这个标记时，一段上游报错串会伪装成成员观点常驻在群聊里。 */
+  failed?: boolean;
 }
 
 /** 会话级审批模式（映射沙箱档位） */
-export type ApprovalMode = "auto" | "confirm" | "strict";
+/** 审批档位：manual 手动 / auto 自动 / none 无需 / custom 自定义（旧值 strict/confirm 兼容为 manual） */
+export type ApprovalMode = "manual" | "auto" | "none" | "custom";
 
 /** 权限请求选项（渲染层选择题 UI：列出每个选项的结果，供用户抉择） */
 export interface PermissionOption {
@@ -172,6 +322,8 @@ export interface PermissionRequestUI {
   actions: Array<{ action: string; target: string; level: number }>;
   /** 选择题选项（含各选项结果） */
   options: PermissionOption[];
+  /** 触发该请求的流所属会话（main 注入；切会话后旧会话残留请求可据此丢弃，避免输入框被无关选择题卡住） */
+  sessionId?: string;
 }
 
 /** 渲染层 → 主进程：用户对权限请求的决策 */
@@ -191,8 +343,16 @@ export interface AskUserRequestUI {
   agentName: string;
   /** 问题正文（模型给出，含各选项后果说明） */
   question: string;
-  /** 建议选项（可为空数组，此时展示自填输入） */
+  /** 决策分类徽章（如"部署方案"/"架构取舍"） */
+  header?: string;
+  /** 建议选项 = 各方向主体（可为空数组，此时展示自填输入） */
   options: string[];
+  /** 与 options 平行的后果说明（选择该选项的影响） */
+  consequences?: string[];
+  /** 模型自评推荐项下标（UI 标注「⭐ 推荐」） */
+  recommendation?: number;
+  /** 触发该请求的流所属会话（main 注入；切会话后旧会话残留提问可据此丢弃，避免输入框被无关提问卡住） */
+  sessionId?: string;
 }
 
 /** 渲染层 → 主进程：用户对 ask_user 的回答 */
@@ -207,10 +367,14 @@ export interface AskUserDecision {
 /** 全局权限控制（设置「权限」专栏；gui_permissions.json 持久化） */
 export interface GuiPermissions {
   globalApproval: ApprovalMode;
+  /** 自定义审批白名单（目录/仓库命中免审批，custom 档生效） */
+  approvalAllowPaths: string[];
   toolRead: boolean;
   toolWrite: boolean;
+  /** terminal 类：shell / 命令执行（含 ADB shell） */
   toolTerminal: boolean;
-  toolNetwork: boolean;
+  /** 图形控制总开关（screen_* 工具：桌面输入注入 + 安卓触摸控制） */
+  screenEnabled: boolean;
   mcpEnabled: boolean;
   skillsEnabled: boolean;
 }
@@ -247,6 +411,8 @@ export interface AgentDetail {
   max_context?: number;
   max_output?: number;
   lifecycle: string;
+  /** A-980-R22：工具面白名单（skill/MCP 差异化配置） */
+  tool_profile?: ToolProfileDTO;
 }
 
 export interface StatsSnapshot {
@@ -255,6 +421,131 @@ export interface StatsSnapshot {
   sessions: { totalRecords: number; recent: number };
   alarms: Array<{ seq: number; severity: string; source: string; message: string; timestamp: string }>;
   timestamp: string;
+}
+
+/** LLM 网关配置（设置 → LLM 网关） */
+/** LLM 网关令牌定义（B 档：每令牌独立速率/日配额/模型白名单） */
+export interface LlmGatewayTokenDTO {
+  key: string;
+  label?: string;
+  active?: boolean;
+  /** 每分钟请求数上限（0/undefined = 不限） */
+  ratePerMin?: number;
+  /** 每日请求数上限（UTC 自然日；0/undefined = 不限） */
+  dailyQuota?: number;
+  /** 模型白名单（空 = 全部可用） */
+  models?: string[];
+  note?: string;
+}
+/** LLM 网关配置（设置 → LLM 网关） */
+export interface LlmGatewayConfigDTO {
+  enabled: boolean;
+  port: number;
+  apiKey: string;
+  tokens: LlmGatewayTokenDTO[];
+}
+/** 新增令牌输入（key 由系统生成） */
+export interface LlmGatewayNewTokenDTO {
+  label?: string;
+  ratePerMin?: number;
+  dailyQuota?: number;
+  models?: string[];
+  note?: string;
+}
+/** 修改令牌输入（按 key 定位） */
+export interface LlmGatewayUpdateTokenDTO {
+  key: string;
+  label?: string;
+  active?: boolean;
+  ratePerMin?: number;
+  dailyQuota?: number;
+  models?: string[];
+  note?: string;
+}
+/** 令牌 CRUD 统一返回 */
+export interface LlmGatewayTokenOpResultDTO {
+  ok: boolean;
+  token?: LlmGatewayTokenDTO;
+  restarted?: boolean;
+  error?: string;
+  status?: LlmGatewayStatusDTO;
+  tokens?: LlmGatewayTokenDTO[];
+}
+/** LLM 网关运行状态 */
+export interface LlmGatewayStatusDTO {
+  ok: boolean;
+  running: boolean;
+  port: number;
+  enabled: boolean;
+  apiKeyConfigured: boolean;
+  error?: string;
+  /** 当前配置里的令牌数 */
+  tokenCount?: number;
+}
+
+/** 使用统计快照（Settings「使用统计」面板一次拉取） */
+export interface UsageRecordRow {
+  ts: string;
+  agent_id: string;
+  session_id: string;
+  model: string;
+  provider_key: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  elapsed_ms: number;
+  cost_usd: number;
+  success: boolean;
+  error?: string;
+}
+export interface UsageSnapshot {
+  records: UsageRecordRow[];
+  /** 本地时区偏移分钟数（东八区=+480）—— 由主进程从 process.env.TZ 或系统推断 */
+  tzOffsetMin: number;
+  totalRecords: number;
+  /**
+   * A-990-B：`"供应商key::模型id"` → 用户在「定价」面板为该模型**手选**的计价币种。
+   *
+   * 为什么由主进程下发而不是渲染层自己去读配置：统计面板只看 `usage.jsonl` 的账目记录
+   * （里面有 provider_key / model，但没有币种偏好），而币种偏好存在 providers 配置里。
+   * 让面板再走一趟 `providers.list()` 也能拿到，但会多一次 IPC 往返 + 一份可能过期的快照；
+   * 与账目**同一次**下发才能保证"这份报表用的币种"与"这份数据"是同一时刻的。
+   *
+   * 只包含**用户手选过**的条目（未手选的留空 → 渲染层按归属地推断），
+   * 所以旧版主进程/渲染层混跑时这个字段缺失也只是"退回按归属地"，不会报错。
+   */
+  modelCurrencies?: Record<string, PriceCurrency>;
+}
+
+/** 历史成本回填结果（`slime:usage:recompute`） */
+export interface UsageRecomputeResult {
+  ok: boolean;
+  /** 被改写的记录数（只统计"0 → 有价"，具体数值见 usage.ts recomputeOne） */
+  updated: number;
+  /** 成功解析（未损坏）的记录总数 */
+  scanned: number;
+  /** 回填后全部记录的成本合计（USD） */
+  totalCostUsd: number;
+  /**
+   * A-971：有 token 但**查不到任何价**的记录数。用于区分两种"updated=0"：
+   * 真·没有可回填项（unpriced=0） vs 价格解析全线失守（unpriced≈全库）。
+   * 没有这个数字时，后者会被界面上的"无可回填项"伪装成成功。
+   */
+  unpriced: number;
+  /**
+   * 未定价的模型 ID（按记录数降序，最多 5 个）。
+   * 只给条数不够用：`m1`/`free-a` 这类自建模型本就不在价目表里，条数会长期很大，
+   * 一律报"解析失守"就成了狼来了；列出模型名，用户才能判断是"该手填单价"还是"该查链路"。
+   */
+  unpricedModels: string[];
+  /**
+   * 回填的记录中**有多少条是按峰谷分时取档**（`price_tier` 非空）。
+   * 分时定价是"看不见的计算逻辑"，只报"回填 N 条"无法区分「一律按均价算」与「逐条按时刻分档」——
+   * 这个数字就是"分时功能对我的历史账目真的生效了"的证据。
+   */
+  tiered: number;
 }
 
 export type SidecarStatus = {
@@ -291,6 +582,54 @@ export interface ModelSpec {
   context_window?: number;
   max_output?: number;
   vision?: boolean;
+  thinking?: boolean;
+  thinking_efforts?: string[];
+  /** 是否启用（聊天模型选择只列出启用项；旧记录无此字段视为启用） */
+  selected?: boolean;
+  price_in_usd?: number;
+  price_out_usd?: number;
+  /** 缓存读取单价 USD / 1M tokens（cache 命中，通常远低于 prompt） */
+  price_cache_read_usd?: number;
+  /** 缓存写入/创建单价 USD / 1M tokens（通常高于 prompt） */
+  price_cache_write_usd?: number;
+  /**
+   * 定价来源 —— 与主进程 ModelSpec 保持同名字段（缺了它 UI 无法区分「未定价」和「免费」，
+   * 也无法在保存时把用户的「手填」标记回传，见 providers.ts mergeModelPrice）。
+   */
+  price_source?: "upstream" | "table" | "manual";
+  /**
+   * A-988c：用户自定义的分时（峰谷）档位。
+   *
+   * ⚠️ **必须与主进程 ModelSpec 的同名字段保持同步** —— 缺了它会有两个后果：
+   *   ① 面板里编辑的时段表过不了 IPC 的类型检查（编译期就断）；
+   *   ② 即使编译期绕过去，保存时也会被静默丢弃（用户以为存了、重启后没了）。
+   * 这两个字段（price_source / price_tiers）都是"用户显式意图"，规则见 providers.ts mergeModelPrice。
+   */
+  price_tiers?: ModelPriceTiers;
+  /**
+   * A-990：用户为**该模型**手选的计价币种（"手动调整币种填入"）。
+   *
+   * 缺省（undefined）= 按归属地推断（`pricingDisplayCurrency`）。用户选了就压过推断 ——
+   * 他可能拿的是转售价/合同价账单，币种与厂商所在地不一致；或他就想用美元核对国内模型的账。
+   *
+   * ⚠️ 它**只决定输入/显示的单位**，不改变记账：`price_in_usd` 等四个字段**恒存 USD**，
+   * 录入时经 `toUsdAmount` 折算、显示时经 `convertFromUsd` 折算。这样账目单位唯一，
+   * 引擎与历史回填逻辑一行都不用改。
+   * ⚠️ 与主进程 ModelSpec 同名字段必须**同步**（理由同 price_tiers：不同步会在保存时被静默丢弃）。
+   */
+  price_currency?: PriceCurrency;
+  /**
+   * A-988d：上游声明的**时段价目**（OpenRouter `pricing.overrides`，UTC）转成的分时规格。
+   * 名字里的 `candidate` 是刻意的：**它是候选，不参与取价**，只有用户点「导入上游时段」
+   * 把它拷进 `price_tiers` 才生效。取价一律只看 `price_tiers`。
+   */
+  pricing_time_tiers_candidate?: ModelPriceTiers;
+  /** A-988d：上游声明的上下文长度分档（纯展示 —— slime 取价没有"按上下文长度"这一维） */
+  pricing_context_tiers?: Array<{ fromInputTokens?: number; prompt?: number; completion?: number }>;
+  /** A-988d：上游按次/按张计费单价（纯展示，用于提示"该模型不是按 token 计价"） */
+  pricing_per_request?: { request?: number; image?: number; webSearch?: number; internalReasoning?: number; audio?: number };
+  /** 端点格式覆盖（per-model）：聚合网关下不同模型可能走不同端点 */
+  api_format?: "openai" | "anthropic" | "responses" | "google" | "auto";
 }
 
 /** 渲染层可见的脱敏 Provider 摘要（绝不含明文 api_key） */
@@ -300,14 +639,20 @@ export interface ProviderSummary {
   has_key: boolean;
   key_hint: string;
   model: string | null;
+  api_format: "openai" | "anthropic" | "responses" | "google" | "auto";
   models: ModelSpec[];
 }
 
-/** 本地模型注册项（model_choice=local:<id>） */
+/** 本地模型注册项（model_choice=local:<id>）。
+ *
+ *  ⚠️ S3：字段集合的**唯一来源**是 `core-ts/src/local_models.ts` 的 `LocalModelSpec`。
+ *  这里保留一份是因为**渲染层不能 import core-ts**（那是 node 侧代码），本文件是跨进程契约投影。
+ *  两份必须逐字段一致 —— 由 `tests/core-ts/a1024-guards.spec.ts` 强制（字段名与可选性都比对，
+ *  否则会重演"engine 那份悄悄缺 `vision`"）。改这里就要同步改那边，反之亦然。 */
 export interface LocalModelSpec {
   id: string;
   path: string;
-  label: string;
+  label?: string;
   ctx_len?: number;
   gpu_layers?: number;
   max_output?: number;
@@ -442,7 +787,7 @@ export interface WorkspaceListResult {
 }
 
 /** 文件内容 MIME 类型映射 */
-export type FileMime = "text" | "image" | "binary";
+export type FileMime = "text" | "image" | "binary" | "pdf" | "office";
 
 /** 工作树文件读取结果（点击文件打开新标签页用） */
 export interface WorkspaceReadFileResult {
@@ -565,4 +910,135 @@ export interface GitCloneResult {
   ok: boolean;
   path?: string;
   error?: string;
+}
+
+/* ── Git 变更 diff（红绿标注渲染，A-968） ── */
+
+/** diff 单行（add=新增绿 / del=删除红 / ctx=上下文） */
+export interface GitDiffLine {
+  type: "add" | "del" | "ctx";
+  text: string;
+}
+
+/** diff 块（@@ 头 + 行序列） */
+export interface GitDiffHunk {
+  header: string;
+  lines: GitDiffLine[];
+}
+
+/** 单文件变更 diff */
+export interface GitDiffFile {
+  /** 相对仓库根的文件路径 */
+  file: string;
+  /** modified=已跟踪文件修改 / untracked=未跟踪（整体视为新增）/ deleted=已删除 */
+  status: "modified" | "untracked" | "deleted";
+  additions: number;
+  deletions: number;
+  hunks: GitDiffHunk[];
+}
+
+/** git diff 读取结果（file 参数传单个文件；留空 = 全工作区） */
+export interface GitDiffResult {
+  ok: boolean;
+  files?: GitDiffFile[];
+  error?: string;
+}
+
+/* ── 系统通知 + 可定制提示音（A-980-R26，设置 → 通用） ── */
+
+/**
+ * 通知配置（落盘 config/notifications.json）。
+ * 语义：`enabled` 是总开关；`soundEnabled` 仅在总开关打开时有意义。
+ * `soundFile` 为空 = 用系统默认提示音；非空 = 用户上传的音频（存于 config/notification-sounds/）。
+ */
+export interface NotifyConfigDTO {
+  /** 总开关：Agent 任务完成 / 需要选择 / 出错 / 意外终止时是否弹系统通知 */
+  enabled: boolean;
+  /** 弹通知时是否发出提示音 */
+  soundEnabled: boolean;
+  /** 自定义音频落盘文件名（null = 系统默认音） */
+  soundFile: string | null;
+  /** 自定义音频的原始文件名（仅界面展示） */
+  soundName: string | null;
+}
+
+/* ── 上下文自动压缩（A-969） ── */
+
+/** 上下文自动压缩结果（GUI 发送前调用；动画展示后继续原消息发送） */
+export interface CompressResult {
+  ok: boolean;
+  /** skipped：未达触发阈值 / 历史过短，未执行压缩 */
+  skipped?: boolean;
+  /** truncated：摘要轮失败 / 无模型可用，降级硬裁剪（保留最近 K 轮） */
+  truncated?: boolean;
+  /** 模型生成的摘要文本（truncated/skipped 时无） */
+  summary?: string;
+  /** 本次压缩剔除的历史轮次数 */
+  dropped?: number;
+  /** 压缩前输入侧估算 tokens */
+  used?: number;
+  /** 当前窗口上限 tokens */
+  cap?: number;
+  error?: string;
+}
+
+/** 后台常驻：定时任务视图（ResidentPanel 消费，A-910） */
+export interface ResidentJobView {
+  id: string;
+  name: string;
+  cron: string;
+  prompt: string;
+  agentId?: string;
+  nextRun?: number;
+  lastRun?: number;
+  lastResult?: string;
+  paused?: boolean;
+  running?: boolean;
+}
+
+/** 后台常驻：子代理运行视图 */
+export interface SubAgentRunView {
+  id: string;
+  name: string;
+  /**
+   * A-980-R31：补齐 `timeout` / `cancelled`。
+   * 此前声明只有 4 态，但运行时本来就会下发超时/取消——类型在骗人，渲染层只好各自兜底，
+   * 于是「超时中断」在监测栏下拉里被显示成原始英文 `timeout`（STATUS_META 缺这一项）。
+   */
+  status: "pending" | "running" | "done" | "fail" | "timeout" | "cancelled";
+  /** A-980-R31：派发时的任务指令（详情弹窗据此回答"这次到底让它干什么"） */
+  task?: string;
+  /** A-980-R31：本次生效的墙钟预算（毫秒，undefined/0 = 不限时） */
+  timeoutMs?: number;
+  startedAt?: number;
+  finishedAt?: number;
+  /** 结果摘要（完整产出落盘 data/generated/subagent-*.md）；中断时保留**中断前已产出的部分** */
+  result?: string;
+  error?: string;
+  /** 实际路由到的模型（可核验"执行档"是否真的生效） */
+  model?: string;
+  /** 命中的声明式定义名（自动委派审计） */
+  definitionName?: string;
+  /** 结构化自评（outputSchema 契约） */
+  structured?: { status: string; summary: string; artifacts: string[]; confidence: number };
+}
+
+/** 后台常驻：整体快照 */
+export interface ResidentState {
+  scheduler: ResidentJobView[];
+  subagents: SubAgentRunView[];
+  /** A-942：全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
+  defaultModel?: string;
+}
+
+/** A-939 上下文分桶（引擎 done 事件携带，随 slime:chat:done 透传渲染层） */
+export interface CtxBuckets {
+  system: number;
+  rules: number;
+  memory: number;
+  workspace: number;
+  planning: number;
+  tools: number;
+  history: number;
+  message: number;
 }

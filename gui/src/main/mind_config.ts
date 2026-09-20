@@ -3,7 +3,7 @@
  * - vectorTool: "bge"（高优：真实 BGE-M3 嵌入）| "basic"（基础：LanceDB + 哈希占位向量）
  * - memoryRoot: 记忆 JSON 存储根（空 = 默认 Knowledge/Agent Memory；改动需重启生效）
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 
@@ -20,6 +20,35 @@ function statSyncSafe(p: string): ReturnType<typeof statSync> | null {
     return statSync(p);
   } catch {
     return null;
+  }
+}
+
+/**
+ * 是不是一个**真的可执行文件**（而不是残缺下载、HTML 错误页、git-lfs 指针）。
+ *
+ * 判据是文件头魔数，**不是体积**。体积门槛踩过坑：llama.cpp 官方预编译包是
+ * shared-libs 布局 —— 真正的代码在 `ggml-*.dll` / `llama.dll` 里，`llama-server.exe`
+ * 只是个薄壳（本机实测 **9216 字节**，`--version` 正常输出 `build 10509`）。
+ * 原先要求 ≥ 1MB，于是随手放进来的一个**完全可用**的二进制被判成"缺失"，
+ * 界面只剩下载按钮 —— 而重新下载一百遍也是同一个 9KB 的壳。
+ * 魔数判据与构建布局无关，且照样拦得住 3KB 残片（`PK`/`<html`）与空文件。
+ */
+function looksLikeExecutable(p: string): boolean {
+  const st = statSyncSafe(p);
+  if (!st || !st.isFile() || st.size < 1024) { return false; }
+  try {
+    const fd = openSync(p, "r");
+    try {
+      const buf = Buffer.alloc(4);
+      if (readSync(fd, buf, 0, 4, 0) < 4) { return false; }
+      if (buf[0] === 0x4d && buf[1] === 0x5a) { return true; }                              // Windows PE "MZ"
+      if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) { return true; } // ELF
+      return buf[0] === 0x23 && buf[1] === 0x21;                                            // "#!" 脚本
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
   }
 }
 
@@ -107,9 +136,11 @@ export function readDepStatus(): DepStatus {
     bgeModel,
     localModelsDir,
     ok: {
-      // 存在 + 最小大小校验：残缺/中断的下载文件（如 3KB 的 bge 残片）不得误判为就绪，
-      // 否则依赖状态显示"✅"、下载按钮消失，模型永远 idle 且无法重新下载。
-      llamaBin: Boolean(llamaBin) && existsSync(llamaBin) && (statSyncSafe(llamaBin)?.size ?? 0) >= 1 * 1024 * 1024,
+      // 存在 + **可执行性**校验：残缺/中断的下载文件（如 3KB 的 bge 残片、HTML 错误页）
+      // 不得误判为就绪，否则依赖状态显示"✅"、下载按钮消失，模型永远 idle 且无法重新下载。
+      // ⚠️ llamaBin 的判据是文件头魔数而不是体积门槛（见 looksLikeExecutable 的注释：
+      // shared-libs 布局下合法 exe 只有 9KB，"≥1MB"会把它判成缺失）。
+      llamaBin: Boolean(llamaBin) && looksLikeExecutable(llamaBin),
       bgeModel: Boolean(bgeModel) && existsSync(bgeModel) && (statSyncSafe(bgeModel)?.size ?? 0) >= 500 * 1024 * 1024,
       localModelsDir: Boolean(localModelsDir) && existsSync(localModelsDir) && countGguf(localModelsDir) > 0,
     },
@@ -181,14 +212,17 @@ export function readModelServerConfig(): ModelServerToml {
 
 export type TomlKey = "llama_bin" | "model_path" | "models_dir";
 
-/** 自动更新配置（slime.toml [update] 段；默认关闭避免无发布源时反复报"检查失败"） */
+/** 自动更新配置（slime.toml [update] 段；默认**开启**——GitHub Release 发布源已就绪，见 updater.ts。
+ *  不想自动检查时显式配 enabled = false；feed_url 可覆盖为自定义源）。 */
 export interface UpdateConfig {
   enabled: boolean;
   feedUrl: string;
 }
 
 export function readUpdateConfig(): UpdateConfig {
-  let enabled = false;
+  // A-980-R30：默认 true（此前默认 false 是因为"无发布源时反复报检查失败"——现已接入 GitHub release，
+  // 见 updater.ts configureFeed）；读不到 enabled 键或值非法时保持默认。
+  let enabled = true;
   let feedUrl = "";
   try {
     const tomlPath = resolve(PROJECT_ROOT, "slime.toml");
