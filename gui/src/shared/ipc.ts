@@ -3,6 +3,8 @@
  * 事件流统一格式 {seq,type,data}（v2.6 定案；IPC 结构化克隆）。
  * GUI 通过 IPC 调用 core-ts 服务 API 直接回传，不经过 HTTP/gateway-ts。
  */
+// 只引类型（`import type` 编译期擦除，不会把 shared 的运行时实现拖进 main 的依赖图）
+import type { ModelPriceTiers, PriceCurrency } from "../../../shared/gen/model-capabilities.js";
 
 export const IPC_CHANNELS = {
   // 聊天
@@ -137,6 +139,11 @@ export interface StreamChunk {
     reasoning?: string;
     /** 团队会话：成员发言事件（type="member"）的发声 Agent ID */
     agentId?: string;
+    /** A-1008：member 事件的「发言结束通知」（true 时 content 为空）——用于把该成员刚生成的气泡
+     *  按结果降级（目前只用于 failed）。判据只有整段正文才成立，故不能塞进逐段到达的 chunk。 */
+    speechEnd?: boolean;
+    /** A-1008：member 事件对应发言失败（正文是失败占位文本，UI 降级为错误样式） */
+    failed?: boolean;
     model?: string;
     promptTokens?: number;
     completionTokens?: number;
@@ -257,6 +264,14 @@ export interface SessionItem {
   memberIds?: string[];
   /** 团队会话成员 Agent 名称（与 memberIds 同序，渲染徽章用） */
   memberNames?: string[];
+  /** A-954：成员入群模型（memberId → model_choice 串） */
+  memberModels?: Record<string, string>;
+  /** A-954：群聊组长（会话归属 Agent）入群模型 */
+  leaderModel?: string;
+  /** A-1011：成员推理强度覆盖（memberId → effort；缺省 = 群聊默认 high） */
+  memberEfforts?: Record<string, string>;
+  /** A-1011：群聊组长的推理强度覆盖（缺省 = 群聊默认 high） */
+  leaderEffort?: string;
   /** A-943 会话模式：brainstorm = 群聊头脑风暴（左侧特殊渲染）；缺省 normal */
   type?: "normal" | "brainstorm";
 }
@@ -278,6 +293,9 @@ export interface ConversationMessage {
   agentName?: string;
   /** 发言人 Agent ID（团队会话成员发言） */
   agentId?: string;
+  /** A-1008：该条实为「发言失败」占位文本（`（名字 本次发言失败：…）`），不是这位成员真说过的话。
+   *  UI 据此降级为错误样式——不加这个标记时，一段上游报错串会伪装成成员观点常驻在群聊里。 */
+  failed?: boolean;
 }
 
 /** 会话级审批模式（映射沙箱档位） */
@@ -487,6 +505,18 @@ export interface UsageSnapshot {
   /** 本地时区偏移分钟数（东八区=+480）—— 由主进程从 process.env.TZ 或系统推断 */
   tzOffsetMin: number;
   totalRecords: number;
+  /**
+   * A-990-B：`"供应商key::模型id"` → 用户在「定价」面板为该模型**手选**的计价币种。
+   *
+   * 为什么由主进程下发而不是渲染层自己去读配置：统计面板只看 `usage.jsonl` 的账目记录
+   * （里面有 provider_key / model，但没有币种偏好），而币种偏好存在 providers 配置里。
+   * 让面板再走一趟 `providers.list()` 也能拿到，但会多一次 IPC 往返 + 一份可能过期的快照；
+   * 与账目**同一次**下发才能保证"这份报表用的币种"与"这份数据"是同一时刻的。
+   *
+   * 只包含**用户手选过**的条目（未手选的留空 → 渲染层按归属地推断），
+   * 所以旧版主进程/渲染层混跑时这个字段缺失也只是"退回按归属地"，不会报错。
+   */
+  modelCurrencies?: Record<string, PriceCurrency>;
 }
 
 /** 历史成本回填结果（`slime:usage:recompute`） */
@@ -567,6 +597,37 @@ export interface ModelSpec {
    * 也无法在保存时把用户的「手填」标记回传，见 providers.ts mergeModelPrice）。
    */
   price_source?: "upstream" | "table" | "manual";
+  /**
+   * A-988c：用户自定义的分时（峰谷）档位。
+   *
+   * ⚠️ **必须与主进程 ModelSpec 的同名字段保持同步** —— 缺了它会有两个后果：
+   *   ① 面板里编辑的时段表过不了 IPC 的类型检查（编译期就断）；
+   *   ② 即使编译期绕过去，保存时也会被静默丢弃（用户以为存了、重启后没了）。
+   * 这两个字段（price_source / price_tiers）都是"用户显式意图"，规则见 providers.ts mergeModelPrice。
+   */
+  price_tiers?: ModelPriceTiers;
+  /**
+   * A-990：用户为**该模型**手选的计价币种（"手动调整币种填入"）。
+   *
+   * 缺省（undefined）= 按归属地推断（`pricingDisplayCurrency`）。用户选了就压过推断 ——
+   * 他可能拿的是转售价/合同价账单，币种与厂商所在地不一致；或他就想用美元核对国内模型的账。
+   *
+   * ⚠️ 它**只决定输入/显示的单位**，不改变记账：`price_in_usd` 等四个字段**恒存 USD**，
+   * 录入时经 `toUsdAmount` 折算、显示时经 `convertFromUsd` 折算。这样账目单位唯一，
+   * 引擎与历史回填逻辑一行都不用改。
+   * ⚠️ 与主进程 ModelSpec 同名字段必须**同步**（理由同 price_tiers：不同步会在保存时被静默丢弃）。
+   */
+  price_currency?: PriceCurrency;
+  /**
+   * A-988d：上游声明的**时段价目**（OpenRouter `pricing.overrides`，UTC）转成的分时规格。
+   * 名字里的 `candidate` 是刻意的：**它是候选，不参与取价**，只有用户点「导入上游时段」
+   * 把它拷进 `price_tiers` 才生效。取价一律只看 `price_tiers`。
+   */
+  pricing_time_tiers_candidate?: ModelPriceTiers;
+  /** A-988d：上游声明的上下文长度分档（纯展示 —— slime 取价没有"按上下文长度"这一维） */
+  pricing_context_tiers?: Array<{ fromInputTokens?: number; prompt?: number; completion?: number }>;
+  /** A-988d：上游按次/按张计费单价（纯展示，用于提示"该模型不是按 token 计价"） */
+  pricing_per_request?: { request?: number; image?: number; webSearch?: number; internalReasoning?: number; audio?: number };
   /** 端点格式覆盖（per-model）：聚合网关下不同模型可能走不同端点 */
   api_format?: "openai" | "anthropic" | "responses" | "google" | "auto";
 }
@@ -582,11 +643,16 @@ export interface ProviderSummary {
   models: ModelSpec[];
 }
 
-/** 本地模型注册项（model_choice=local:<id>） */
+/** 本地模型注册项（model_choice=local:<id>）。
+ *
+ *  ⚠️ S3：字段集合的**唯一来源**是 `core-ts/src/local_models.ts` 的 `LocalModelSpec`。
+ *  这里保留一份是因为**渲染层不能 import core-ts**（那是 node 侧代码），本文件是跨进程契约投影。
+ *  两份必须逐字段一致 —— 由 `tests/core-ts/a1024-guards.spec.ts` 强制（字段名与可选性都比对，
+ *  否则会重演"engine 那份悄悄缺 `vision`"）。改这里就要同步改那边，反之亦然。 */
 export interface LocalModelSpec {
   id: string;
   path: string;
-  label: string;
+  label?: string;
   ctx_len?: number;
   gpu_layers?: number;
   max_output?: number;

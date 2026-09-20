@@ -9,6 +9,15 @@
  */
 import React from "react";
 import { PlusIcon } from "../components/Icon.js";
+/*
+ * A-1012：群聊席位上限（**含组长**）与其判据来自共享纯模块 —— 引擎侧组装参与名单用的是
+ * 同一个模块的同一个函数（`gui/src/main/index.ts` 的 `groupParticipantIds`）。
+ * 为什么必须同源：此前上限只以 `.slice(0, 5)` 的形式活在引擎里，界面毫不知情 →
+ * 用户能邀请 7 个 Agent 进群，第 6 位起卡片照常显示、照样能点「思考·X」，引擎却从不读。
+ * 本弹窗是**唯一**的加人入口（渲染层没有任何地方调用 `sessions.setMembers`），
+ * 所以在这里拦住就等于从源头堵住。
+ */
+import { GROUP_MAX_PARTICIPANTS, isGroupRosterFull } from "../../../../shared/gen/groupRoster.js";
 
 export interface DraftProvider {
   key: string;
@@ -75,11 +84,28 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
   const draftProviders = props.draftProviders ?? [];
 
   /* ── 群聊成员入群/退群/换模特方（model 选定的瞬间即正式入群；第一个入群者 = 组长/会话归属） ── */
+  /**
+   * A-1012：群聊是否已满员（**含组长**）。满员后只允许对**已入群**成员换模型，
+   * 不允许再拉人进来 —— 这正是引擎 `GROUP_MAX_PARTICIPANTS` 的席位口径（相同纯模块）。
+   */
+  const groupFull = isGroupRosterFull(members.length);
+  /**
+   * A-1012：右侧配置面板正停在一位「因满员而无法入群」的候选上。
+   * 这条路径只在"先展开某候选的配置面板、随后别处入群致满"时出现；
+   * 不特判的话用户选模型会**毫无反应**（入口守卫静默丢弃），看起来像程序坏了。
+   */
+  const cfgBlocked = groupFull && Boolean(cfgAgent) && !members.some((m) => m.id === cfgAgent);
+
   const joinDraftMember = React.useCallback((a: { id: string; name: string }, model: string): void => {
     setMembers((prev) => {
       const idx = prev.findIndex((m) => m.id === a.id);
       const entry = { id: a.id, name: a.name, model };
-      return idx >= 0 ? prev.map((m, i) => (i === idx ? entry : m)) : [...prev, entry];
+      // 已在群里 = 换模型，永远允许（不受上限约束）
+      if (idx >= 0) { return prev.map((m, i) => (i === idx ? entry : m)); }
+      // A-1012：**新增**成员受席位上限约束。这里是唯一入群入口，界面已禁用超限候选，
+      // 此守卫是兜底（防将来新增调用点绕过界面）—— 超限静默丢弃，不改动原数组。
+      if (isGroupRosterFull(prev.length)) { return prev; }
+      return [...prev, entry];
     });
   }, []);
   const leaveDraftMember = React.useCallback((id: string): void => {
@@ -246,7 +272,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
         {/* 第二步：普通 = 选择对话 Agent；群聊 = 成员三步入群（成员 → 供应商 → 模型，A-954） */}
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700 }}>
           {type === "brainstorm"
-            ? "② 群成员三步入群（点成员 → 选供应商 → 选模型即入群，第一个入群者为组长；已入群 ≥2 可创建）"
+            ? `② 群成员三步入群（点成员 → 选供应商 → 选模型即入群，第一个入群者为组长；已入群 ≥2 可创建，最多 ${GROUP_MAX_PARTICIPANTS} 人）`
             : "② 选择对话的 Agent（单击选中；子任务会自动委派子代理）"}
         </div>
         {type === "brainstorm" ? (
@@ -256,9 +282,17 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
               {agents.map((a) => {
                 const joined = members.find((m) => m.id === a.id);
                 const cfg = cfgAgent === a.id;
+                // A-1012：满员后「未入群」的候选直接禁止操作（已入群者仍可点开换模型）。
+                // 禁用而不是"点了没反应"——这正是本项目「不给假旋钮」的同一条原则。
+                const blocked = groupFull && !joined;
                 return (
                   <button key={a.id}
+                    disabled={blocked}
+                    title={blocked
+                      ? `已达群聊上限 ${GROUP_MAX_PARTICIPANTS} 人（含组长）。请先让某位成员「退出群聊」后腾出席位。`
+                      : undefined}
                     onClick={() => {
+                      if (blocked) { return; }
                       if (cfg) { setCfgAgent(null); setCfgProvider(null); return; }
                       const saved = resolveSavedModel(a.id);
                       if (saved) {
@@ -277,7 +311,9 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
                     }}
                     style={{
                       display: "block", width: "100%", textAlign: "left",
-                      padding: "6px 10px", marginBottom: 4, borderRadius: 8, cursor: "pointer",
+                      padding: "6px 10px", marginBottom: 4, borderRadius: 8,
+                      cursor: blocked ? "not-allowed" : "pointer",
+                      opacity: blocked ? 0.45 : 1,
                       border: joined || cfg ? "1.5px solid var(--accent)" : "1px solid var(--border)",
                       background: cfg ? "var(--bg-hover)" : joined ? "var(--accent-soft)" : "var(--bg-input)",
                     }}>
@@ -292,6 +328,8 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
                         }}>
                           已入群 · {joined.model}
                         </span>
+                      ) : blocked ? (
+                        <span style={{ fontSize: 10, color: "var(--warning)", whiteSpace: "nowrap" }}>已满员</span>
                       ) : cfg ? (
                         <span style={{ fontSize: 10, color: "var(--warning)", whiteSpace: "nowrap" }}>待选模型</span>
                       ) : null}
@@ -315,7 +353,12 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
               flex: 1, minWidth: 0, maxHeight: 214, overflowY: "auto",
               border: "1px solid var(--border)", borderRadius: 8, padding: 8, background: "var(--bg-input)",
             }}>
-              {!cfgAgent ? (
+              {cfgBlocked ? (
+                <div style={{ fontSize: 11.5, color: "var(--warning)", lineHeight: 1.7 }}>
+                  已达群聊上限 {GROUP_MAX_PARTICIPANTS} 人（含组长），无法再邀请新成员入群。<br />
+                  请先在上方让某位成员「退出群聊」腾出席位，或直接创建群聊。
+                </div>
+              ) : !cfgAgent ? (
                 <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.7 }}>
                   点击左侧成员，为其选择入群模型：<br />① 供应商 → ② 模型（选定即入群）。<br />
                   <span style={{ color: "var(--accent-hover)" }}>已配置过供应商/模型的角色会直接沿用自动入群</span>。
@@ -487,6 +530,11 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
           {type === "brainstorm" && members.length < 2 && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
               {members.length === 0 ? "请先为至少 2 名成员选好模型入群" : "再入群 1 名成员即满 2 人，可创建"}
+            </span>
+          )}
+          {type === "brainstorm" && groupFull && (
+            <span style={{ fontSize: 11, color: "var(--warning)", whiteSpace: "nowrap" }}>
+              已达群聊上限 {GROUP_MAX_PARTICIPANTS} 人（含组长）
             </span>
           )}
         </div>

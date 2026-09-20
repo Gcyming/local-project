@@ -34,6 +34,13 @@
   --todo-sweep: 0.36s;
   --todo-sweep-ease: cubic-bezier(0.33, 0, 0.2, 1);
 
+  /* ── A-1015：展开 / 收起衔接动画的唯一节拍（全局共享）───────────────────────
+     缓动与左右侧栏的宽度过渡（.sidebar / .right-sidebar）**逐字同源**：
+     decelerate cubic-bezier(0,0,0.2,1) = 起步快、收尾缓。
+     时长 0.45s（侧栏 0.5s）——同一节奏，小范围高度位移略短一档才不显拖沓。 */
+  --collapse-dur: 0.45s;
+  --collapse-ease: cubic-bezier(0, 0, 0.2, 1);
+
   /* ── 代码增删 diff 配色（VS Code diffEditor 范式：绿=新增、红=删除、蓝=修改） ── */
   --diff-add: #3fb950;
   --diff-add-bg: rgba(46, 160, 67, 0.16);
@@ -45,7 +52,26 @@
 
   /* ── 尺寸 ── */
   --titlebar-h: 40px;
-  --sidebar-w: 200px;
+  /* A-1018：两侧栏的**默认宽度改为比例自适应**（纯 CSS，无 JS resize 状态）。
+     为什么必须走 CSS：A-975-R4 试过"winW state + resize 监听 + 派生宽度"，踩的是
+     **反馈环**——布局宽度依赖 innerWidth，而布局变化（横向滚动条出现/消失）又改变 innerWidth。
+     百分比 + clamp 是由浏览器一次性解算的，不存在这个环。
+     · 左栏 17.5% / 右栏 21.5% —— 沿用 A-980-R24 定稿的版式比例（左 17.5 / 中 60.9 / 右 21.6）
+     · 上下限就是"最大/最小宽度比例限制"：左 [240, 520]、右 [260, 720]
+     · 用户在界面上手动拖动过之后，App 会改用 px 内联宽度覆盖（自定义优先），
+       此时这两个变量不再生效 —— 拖动是显式意图，不该被窗口缩放抹掉。
+     ⚠️ 上下限必须与 App 的 SIDEBAR_MIN_W/SIDEBAR_MAX_W、rightSidebarMinW() 以及主进程
+        WIN_MIN.width 保持一致（三栏下限之和 = 窗口最小宽度，见 WIN_MIN 注释）。 */
+  /* ── 侧栏宽度：**必须用 vw，不能用 %**（A-1019 根因） ──
+     这里曾经写 `clamp(240px, 17.5%, 520px)`。百分比宽度的包含块是 `.app`，
+     而在**固有尺寸计算（intrinsic sizing）**阶段百分比无法解析 → flex item 退化成
+     auto → 外层 `.right-wrapper` 按内容的 max-content 算出 431px（实测恒定 431.087px），
+     比右栏真正的 260px 宽了 171px → 窗口一窄就先把右栏顶出屏幕。
+     vw 是"相对视口"的绝对量，固有尺寸阶段可解析，且不会像 % 那样形成
+     「布局宽度依赖容器宽、容器宽又依赖布局」的反馈环（A-1018 已踩过 resize 反馈环）。
+     数值上与 17.5% / 21.5% 等价（`.app` 宽度 == 视口宽度），只修计算阶段，不改视觉比例。 */
+  --sidebar-w: clamp(240px, 17.5vw, 520px);
+  --right-sidebar-w: clamp(260px, 21.5vw, 720px);
   --radius-lg: 12px;
   --radius-md: 10px;
   --radius-sm: 6px;
@@ -191,12 +217,19 @@ code,
 }
 
 /* ── 应用骨架 ── */
+/* A-1019：这里**不许**再有比"三栏硬下限之和"更大的 min-width。
+   曾经是 `min-width: 1100px`（A-948 写的），而窗口地板 WIN_MIN.width 只有 900
+   → 窗口能缩到 [900,1100) 这段"死区"里，整个 `.app` 被钉在 1100，
+   右栏（及标题栏右上角的开关按钮）被推出屏幕外，`.app` 自己的 overflow-x:auto 也救不了
+   （因为被钉宽的是它自己，不是它内部）。
+   现在地板交给**三栏各自的 min-width**（左 240 + 聊 380 + 右 260 = 880 ≤ WIN_MIN 900），
+   布局真正跟随窗口。守卫见 tests/core-ts/a1018-guards.spec.ts ①。 */
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;
   background: var(--bg);
-  min-width: 1100px; /* A-948：固定基准最小宽度——能完整容纳侧栏+主区+右栏的全部按钮/文本；窗口更小时内容不压缩，整体横向滚动 */
+  min-width: 0;
   overflow-x: auto;
 }
 
@@ -248,10 +281,12 @@ code,
 }
 
 /* ── 主体（侧栏 + 内容） ── */
+/* A-1019：同 `.app` —— 不许有超过"三栏硬下限之和"的 min-width（曾为 640px，虽小于 880
+   但语义上是又一个独立的硬地板，容易与三栏下限再次漂移）。地板统一由三栏 min-width 决定。 */
 .body {
   display: flex;
   flex: 1;
-  min-width: 640px; /* A-947：固定最窄宽度（侧栏可收起）；窗口更窄时整体出现横向滚动，内容不被截断 */
+  min-width: 0;
   min-height: 0;
   overflow-x: auto;
 }
@@ -723,6 +758,107 @@ code,
 @keyframes compressBar { 0% { width: 6%; opacity: 0.6; } 40% { width: 55%; } 70% { width: 72%; opacity: 1; } 100% { width: 92%; opacity: 0.75; } }
 .compress-bar { animation: compressBar 2.2s ease-in-out infinite; }
 
+/* ── A-1015：统一「展开 / 收起」衔接动画 ───────────────────────────────────────
+   【为什么以前是"生硬跳变"】此前全仓所有折叠容器都是 `{cond && <div>}` 条件渲染：
+   收起时元素**当场卸载**，浏览器没有第二帧可插值 → 再好的 transition 也无从播放。
+   所以本类要求内容**始终挂在 DOM 里**，只切换 `.is-open`。
+
+   【高度怎么插值】用 grid-template-rows `0fr ↔ 1fr`：0fr / 1fr 都是**可插值长度**，
+   不需要 JS 测高、不需要写死 max-height（写死会在内容变矮时留下"动画走完了但还在等"的停顿）。
+
+   【用法】
+     <div className={`collapse${open ? " is-open" : ""}`}>
+       <div>…内容…</div>
+     </div>
+   ⚠️ 直接子元素只允许一个（它是那一行 grid），且由它自己 overflow:hidden 负责裁切。
+   ⚠️ 内容里有"只在展开时才该算的东西"（如 diff 行）请用 useMemo 按开合态缓存，
+      否则常驻挂载会让它每次渲染都重算。 */
+.collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--collapse-dur) var(--collapse-ease),
+    opacity var(--collapse-dur) var(--collapse-ease);
+}
+.collapse.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.collapse > * {
+  min-height: 0;
+  overflow: hidden;
+  /* 收起态把内部移出 Tab 序列 / 读屏范围。visibility 不能跟着高度一起过渡，
+     否则内容"瞬间消失"而不是被高度裁掉；用 0s 过渡 + 整段时长 delay 推迟到动画结束。 */
+  visibility: hidden;
+  /* A-1016：收起态**直接跳过渲染/布局**。
+     折叠内容是**常驻挂载**的（A-1015b），只靠 grid 0fr + overflow:hidden 裁掉 ——
+     于是它仍然参与**每一次**布局。长会话里就是成百上千个 diff 行在每一次分栏/浮窗
+     几何动画中逐帧重排。实测（6 个收起态重折叠体 + 宽度动画）：
+       现状 49.9fps / 16-of-35 帧掉帧 / 每帧布局 11~18ms / 累计 298.7ms
+       加本行 62.2fps / 0 掉帧 / 0.5ms / 15.1ms（天花板"干脆不挂载"是 61.6fps / 12.6ms）
+     ⚠️ content-visibility 是**离散**属性：必须配 `transition-behavior: allow-discrete`
+        ＋「0s 时长 + 整段时长 delay」，与上面 visibility 完全同款。
+        否则收起动画会被**瞬间抹掉**（裸 CV 实测：外层高度第 0 帧就归 0，插值不再发生）；
+        加上延迟后实测 456ms（≈ --collapse-dur）才跳过渲染，收起过程与不加时逐帧一致。
+     ⚠️ 展开方向必须是 0 延迟：1fr 要靠内容的本征高度才能插值。 */
+  content-visibility: hidden;
+  transition:
+    visibility 0s linear var(--collapse-dur),
+    content-visibility 0s linear var(--collapse-dur);
+  transition-behavior: allow-discrete;
+}
+.collapse.is-open > * {
+  visibility: visible;
+  content-visibility: visible;
+  transition:
+    visibility 0s linear 0s,
+    content-visibility 0s linear 0s;
+  transition-behavior: allow-discrete;
+}
+/* ⚠️ 若某处折叠内容里含 <webview>：去掉该处 .collapse 的 opacity（参照 ref-webview.md——
+   opacity<1 的祖先会让 webview 能进网站但站内点哪儿都没反应）。右栏浏览器是 tab 切换、
+   不是折叠容器，故当前无此情况。 */
+
+/* A-1015b：**绝对定位浮层**的进出场（下拉菜单 / 气泡）。
+   为什么不复用 .collapse：浮层不在文档流里，"从 0 高度长出来"没有意义，还会把锚点定位算歪
+   （top/left 是按按钮实时测的）。浮层要的是"淡入 + 轻微位移/缩放"，不是高度插值。
+   与 .collapse 同一节拍变量 → 观感是一家人。
+
+   ⚠️ 三件套缺一不可：
+   · visibility:hidden —— 收起后不进 Tab 序列 / 不被读屏看见；
+   · pointer-events:none —— 收起后**必须**让点击穿透，否则浮层虽然看不见却挡在按钮上，
+     表现为"点按钮没反应"（浮层覆盖了触发按钮自己）；
+   · visibility 用 0s 过渡 + delay 推迟到动画结束，否则收起瞬间就消失。
+   延迟时长刻意用同一个 --pop-dur，不要手写。 */
+:root {
+  --pop-dur: 0.18s;
+}
+.pop {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.985);
+  transform-origin: top right;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--pop-dur) var(--collapse-ease),
+    transform var(--pop-dur) var(--collapse-ease),
+    visibility 0s linear var(--pop-dur);
+}
+.pop.is-open {
+  opacity: 1;
+  transform: none;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--pop-dur) var(--collapse-ease),
+    transform var(--pop-dur) var(--collapse-ease),
+    visibility 0s linear 0s;
+}
+/* 向上弹出的气泡（锚点在下方）：位移方向反过来才自然 */
+.pop.pop-up { transform: translateY(4px) scale(0.985); transform-origin: bottom left; }
+.pop.pop-up.is-open { transform: none; }
+
 /* A-918++：代码语法高亮（VS Code Dark+ 主流配色：注释绿灰/字符串橙红/数字浅绿/关键字紫红） */
 .hl-c { color: #6a9955; font-style: italic; }     /* comment 绿灰斜（VS Code） */
 .hl-s { color: #ce9178; }                        /* string 橙红（VS Code） */
@@ -770,6 +906,20 @@ code,
    挂到外层 wrapper 上、几何 done 后移除。 */
 .right-wrapper-no-min .right-sidebar {
   min-width: 0 !important;
+}
+/* A-1016-F3：右栏**宽度过渡期间**把 `<webview>` 的 guest 钉在固定宽度上，只靠祖先
+   `overflow:hidden` 裁切——不让 OOPIF 逐帧跨进程 resize。
+   实测（右栏宽度动画 + 真实 <webview>）：逐帧改 guest 宽度 → 3 帧掉帧 / dtP95 21ms；
+   钉住宽度 + 裁切 → 0 掉帧 / dtP95 不变。（把内层 `contain` 加上仍有 3 帧掉帧 →
+   成本在**跨进程 resize** 本身，不在 guest 内部重排。）
+   `--right-pin-w` 由 App 在动画开始时写目标宽度（展开=目标宽；收起=当前宽，取二者较大的一侧，
+   guest 全程不缩），动画结束（几何稳定）时 App 移除类与变量 → guest 只 resize 一次。
+   ⚠️ 必须同时写类和变量：只写类会让 `var()` 落空 → 声明退化为 unset → guest 宽度丢失。
+      故给了 `100%` 兜底（即便变量缺失也只是退回原行为，不会坏）。
+   ⚠️ 这是**过渡期间**的临时覆盖，不是常驻状态：不要改成无条件生效。 */
+.right-wrapper-pin webview {
+  width: var(--right-pin-w, 100%) !important;
+  flex: 0 0 auto !important;
 }
 .right-sidebar-resizer {
   position: absolute;
@@ -1199,6 +1349,17 @@ body.slime-resizing {
   font-weight: 600;
   flex-shrink: 0;
 }
+/* A-1018：图标版徽标 —— 外层尺寸槽位与文字徽标一致（高度/圆角/底色都沿用），
+   只把内容换成工具图标并居中；宽度取 22px 的固定值，让一行行图标竖直对齐。
+   ⚠️ 不能用 padding:1px 6px 那套：图标会被塞成 19×13 的扁条，看起来像糊了一块。 */
+.task-badge-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 16px;
+  padding: 0;
+}
 .task-label {
   color: var(--text-secondary);
   overflow: hidden;
@@ -1523,6 +1684,61 @@ body.slime-resizing {
 .think-tool-detail {
   font-size: 11px; color: var(--text-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* A-1018：让 detail **吃掉全部剩余宽度** —— 这样紧随其后的「状态」与「展开箭头」
+     会被顶到行尾，每一行的徽标都落在同一条竖线上。
+     此前 detail 不参与伸缩：它的宽度 = 内容宽度，剩余空白留在行尾 →
+     badge 紧跟 detail 之后，detail 一长一短，徽标就"有的靠左有的靠右"
+     （用户原话："这个成功与否以及展开的标识有的左有的右，没有一个对齐标准"）。 */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.think-tool-name { flex-shrink: 0; }
+/* A-1018：状态词长短不一（成功 / 失败 / 调用中 / 已执行）→ 给固定最小宽度，
+   跨行竖直对齐；flexShrink:0 保证不会被 detail 挤压。
+   ⚠️ A-1021 修正：原来靠 `text-align: right` 做对齐，结果文字**贴右边缘**而不是居中
+   （用户原话"这个字不在文本框正中心"）。
+   「跨行竖直对齐」用**固定宽度 + 内容居中**同样能实现，而且文字在胶囊里真正居中 → 两全。
+   ⚠️ 这里**故意不写 height / line-height**：`.think-tool-btn` 没有声明 line-height，
+     胶囊高度本来就由行盒（10px 字体 ≈ 13px）自然决定；一旦钉死 height:18px 就会把胶囊
+     拔高 5px —— 那是用户没要求的**尺寸变更**，属于"顺手改坏"。只修居中，不动尺寸。
+     （`* { box-sizing: border-box }` 已全局生效，无需在此重复声明。） */
+.think-tool-status {
+  flex-shrink: 0;
+  min-width: 3.6em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── A-1018：文件改动**行数徽标**（+N 绿 / -N 红）──────────────────────────────
+   产物卡与思考历程的工具卡**共用同一份实现**（`DiffStatBadge`）——此前只有产物卡有，
+   用户在 Agent 工作途中看不到"改了多少行"。
+   颜色取主题变量（--diff-add/--diff-del），不写死十六进制：换主题时跟着走。
+   数字变化时重放一次 pop 动画（React 侧用 key={`${add}-${del}`} 触发重挂载）→
+   这就是用户要的"像你工作时那样动态标出改动数目"。 */
+.diff-stat {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* 数字等宽 → 变化时不会左右抖 */
+}
+.diff-stat-add { color: var(--diff-add, #3fb950); }
+.diff-stat-del { color: var(--diff-del, #f85149); margin-left: 4px; }
+@keyframes slime-diff-stat-pop {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+/* 动画挂在**内层两个数字**上（而不是 .diff-stat 壳）：React 侧给这两个 span 挂了
+   `key={a${add}} / key={d${del}}`，数字一变就重挂载 → 动画重放。
+   挂壳上不行 —— 组件根节点的 key 由父组件决定，壳自己不会因数值变化而重挂载。 */
+.diff-stat-add,
+.diff-stat-del { display: inline-block; animation: slime-diff-stat-pop 0.32s cubic-bezier(0, 0, 0.2, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .diff-stat-add,
+  .diff-stat-del { animation: none; }
 }
 .think-divider {
   border: none; border-top: 1px solid var(--border);
@@ -1994,4 +2210,173 @@ body.slime-resizing {
   .todo-check-path { stroke-dashoffset: 0; }
   .todo-row[data-status="completed"] .todo-text-inner::after { width: 100%; }
   .todo-row[data-status="completed"] .todo-text-veil { clip-path: inset(0 0 0 0); }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * A-988：供应商弹窗「模型调试」表格 —— 数字输入框的拥挤根因修复
+ *
+ * 症状（用户截图）：上下文K 显示成 "10:"、输出K 显示成 "{"，看起来像"列挤在一起"。
+ * 真凶不是列宽，是 **number 输入框自带的上下箭头（spinner）**：
+ *   列宽 60px − 单元格左右 padding 16px = 输入框 44px；spinner 又占掉约 18px，
+ *   只剩 ~26px 的内文区，12px 字号下连 "1024"（约 27px）都放不下 → 被裁成 "10:"。
+ * 这不是"加宽列"能解决的：列宽一路加下去会把「单价」列顶出容器
+ * （见 ProvidersPanel.tsx 里那条"故意不设 minWidth"的注释，就是这么踩出来的）。
+ * 把 spinner 关掉，44px 里立刻有 32px 给文字，四位数绰绰有余。
+ *
+ * 作用域限定在表格内（而不是全局 input[type=number]）：这个面板是**密集数字录入**场景，
+ * 键盘上下键（step）与直接输入都还能用，只去掉占位的箭头；别处的数字框行为不受影响。
+ * ───────────────────────────────────────────────────────────────────────── */
+.provider-model-table input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.provider-model-table input[type="number"]::-webkit-outer-spin-button,
+.provider-model-table input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* 单元格统一：内容垂直居中（拨片 22px 高 vs 输入框 24px 高，不居中的话行内基线会错位，
+   看起来就像"上下间距不匀"） */
+.provider-model-table th,
+.provider-model-table td { vertical-align: middle; }
+
+/* A-988：价目明细（点「定价来源」徽标展开）。整块铺满容器宽度，
+   四个费率字段各得 ~150px，不必再和 40px 的窄框搏斗。
+   A-1000：它已从"表格里的一行"（`tr.price-detail-row > td`）改为弹窗内的普通区块
+   （`div.price-detail-block`）—— 明细不在表格里了，就不该再带表格语义；
+   原先 `<tr>` 嵌在 `<div>` 下是非法 DOM 嵌套，宽度由浏览器的匿名表格盒决定、不受外层控制。 */
+.price-detail-block {
+  padding: 0;
+  border-top: 1px dashed var(--border);
+  background: var(--bg-secondary, var(--bg-card));
+  width: 100%;
+  box-sizing: border-box;
+}
+.price-detail-block:hover { background: transparent; }
+
+/* ── A-1018：slime 主题确认/提示弹窗（替代系统原生 dialog）─────────────────────
+   用户原话："还有很多弹窗都是系统风格弹窗，你给我绑定 slime 程序主题，
+   同时改一下位置，左边确认，右边取消，这才符合直觉。"
+   配色全部跟随主题变量（beta 主题=黑里透蓝毛玻璃），按钮顺序由 JSX 决定（左确认右取消）。
+   ⚠️ 不写 inline position 值：静态守卫会把"条件渲染 + 绝对定位"当成残留浮层。 */
+.dlg-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200; /* 高于本地模型加载面板（1000），低于系统级提示 */
+  background: rgba(2, 6, 23, 0.66);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.dlg-card {
+  width: 420px;
+  max-width: 92vw;
+  max-height: 92vh; /* A-999：弹窗 card 一律 92vh，不固定 height */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-hover);
+  background: var(--bg-card, var(--bg-secondary));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+.dlg-title {
+  flex-shrink: 0;
+  padding: 14px 18px 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.dlg-body {
+  /* 唯一滚动容器：内容再长也不撑破 card */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 0 18px 4px;
+}
+.dlg-message {
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dlg-detail {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dlg-actions {
+  flex-shrink: 0; /* 按钮钉底，不随内容滚动 */
+  display: flex;
+  justify-content: flex-end; /* 左确认、右取消：DOM 顺序即视觉顺序 */
+  gap: 10px;
+  padding: 14px 18px 16px;
+}
+
+/* ── A-1018：内嵌浏览器加载失败**整页错误页**（取代"细红条 + 一片白"）──────────
+   覆盖在 webview 之上（父容器已是 position:relative），背景不透明 → 白色空白区被彻底盖住。
+   位置/配色走本类，不在 JSX 写 inline position：静态守卫 ⑬ 只认 inline absolute。 */
+.browser-error-page {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px 24px;
+  text-align: center;
+  background: var(--bg, #05070e);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.browser-error-icon { color: var(--warning, #f0b429); opacity: 0.9; }
+.browser-error-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.6;
+  max-width: 460px;
+}
+.browser-error-url {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-error-code {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11.5px;
+  color: var(--text-dim, var(--text-muted));
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary, transparent);
+}
+.browser-error-hint {
+  font-size: 12.5px;
+  line-height: 1.85;
+  color: var(--text-muted);
+  max-width: 470px;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.browser-error-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  flex-shrink: 0;
 }

@@ -13,6 +13,8 @@ import { confirmAsync } from "../dialog.js";
 import { playCustomNotifySound, invalidateNotifySoundCache } from "../notifySound.js";
 // A-975：自动压缩配置变更广播（右栏阈值刻度线据此即时跟随）
 import { AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
+// A-990-D：主页实时监测的消费币种偏好（localStorage + 广播；右栏「会话指标」跟随）
+import { readLedgerCurrencyPref, saveLedgerCurrencyPref, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
 
 interface Props {
   theme?: ThemeName;
@@ -95,6 +97,8 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
   });
   // A-980-R26：系统通知 + 可定制提示音
   const [nCfg, setNCfg] = React.useState<NotifyConfigDTO>({ enabled: false, soundEnabled: true, soundFile: null, soundName: null });
+  // A-990-D：主页（右侧栏「会话指标」）实时监测的消费币种
+  const [ledgerCur, setLedgerCur] = React.useState<LedgerCurrencyPref>(() => readLedgerCurrencyPref());
   const [nBusy, setNBusy] = React.useState(false);
   const [soundBusy, setSoundBusy] = React.useState(false);
   const api = React.useRef<any>(null);
@@ -418,6 +422,33 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
             </label>
           </div>
         )}
+      </div>
+
+      {/* A-990-D：主页实时监测的消费币种（用户明确要求放在「通用」栏） */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>消费币种（主页实时监测）</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.6 }}>
+          右侧栏「会话指标 · 会话费用」用哪种币种显示。
+          <br />
+          <b>自动</b>：按"这笔钱主要花在哪个币种的模型上"推断 —— 国内厂商的模型（官方以 ¥ 刊例）
+          按人民币显示，海外模型按美元显示；你在「模型供应商 → 定价」里给某模型手选过币种时以你的选择为准。
+          <br />
+          <b>固定人民币 / 固定美元</b>：不论模型归属地一律按该币种显示（折算只影响显示，不影响记账 ——
+          账目恒以 USD 记录，历史账不会因此变化）。
+        </div>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, marginTop: 10, maxWidth: 320 }}>
+          显示币种
+          <select className="input-field" value={ledgerCur}
+            onChange={(e) => {
+              const v: LedgerCurrencyPref = e.target.value === "CNY" ? "CNY" : e.target.value === "USD" ? "USD" : "auto";
+              setLedgerCur(saveLedgerCurrencyPref(v));
+              showNotice(true, `消费币种已设为「${v === "auto" ? "自动推断" : v === "CNY" ? "¥ 人民币" : "$ 美元"}」（右栏会话指标立即生效）`);
+            }}>
+            <option value="auto">自动（按模型币种推断，推荐）</option>
+            <option value="CNY">固定 ¥ 人民币</option>
+            <option value="USD">固定 $ 美元</option>
+          </select>
+        </label>
       </div>
 
       {/* 开机自启 */}

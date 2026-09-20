@@ -107,6 +107,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 团队会话成员更新（组长=会话当前 agentId；空数组=退回单人会话） */
     setMembers: (sessionId: string, memberIds: string[]) =>
       ipcRenderer.invoke("slime:sessions:setMembers", { sessionId, memberIds }) as Promise<{ ok: boolean; session?: SessionItem }>,
+    /** A-1011 群聊成员思考推理强度（effort=null 清除覆盖，回落群聊默认 high） */
+    setMemberEffort: (sessionId: string, memberId: string, effort: string | null) =>
+      ipcRenderer.invoke("slime:sessions:setMemberEffort", { sessionId, memberId, effort }) as Promise<{ ok: boolean; memberEfforts?: Record<string, string>; leaderEffort?: string }>,
     /** 会话级工作目录更新（以文件夹为主：绑定/更换工作文件夹） */
     setWorkspace: (sessionId: string, workspace: string | null) =>
       ipcRenderer.invoke("slime:sessions:setWorkspace", { sessionId, workspace }) as Promise<{ ok: boolean; workspace?: string }>,
@@ -529,9 +532,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-968：读取指定文件的变更 diff（红绿标注渲染用） */
     diff: (path: string, file: string) =>
       ipcRenderer.invoke("slime:git:diff", { path, file }) as Promise<GitDiffResult>,
-    /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用） */
+    /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用）
+     *  A-1029：`code` 让渲染层能区分"不是仓库 / 无提交 / 文件不在 HEAD"，
+     *  而不是把所有失败都当成同一句英文 stderr 展示给用户。 */
     showFile: (rel: string, workspace: string, ref?: string) =>
-      ipcRenderer.invoke("slime:git:showFile", { rel, workspace, ref }) as Promise<{ ok: boolean; content?: string; error?: string }>,
+      ipcRenderer.invoke("slime:git:showFile", { rel, workspace, ref }) as Promise<{ ok: boolean; content?: string; error?: string; code?: "not-repo" | "no-head" | "not-found" }>,
   },
   data: {
     /** 重置本地数据（清空 Provider / Agent / 会话与历史；记忆文件保留） */
@@ -682,9 +687,11 @@ declare global {
       conversations: {
         list: () => Promise<SessionItem[]>;
         load: (sessionId: string) => Promise<ConversationMessage[]>;
-        create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: Array<string | { id: string; model?: string }>; leaderModel?: string; type?: "normal" | "brainstorm" }) => Promise<{ ok: boolean; session?: SessionItem }>;
+        create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: Array<string | { id: string; model?: string; effort?: string }>; leaderModel?: string; type?: "normal" | "brainstorm" }) => Promise<{ ok: boolean; session?: SessionItem }>;
         setAgent: (sessionId: string, agentId: string) => Promise<{ ok: boolean }>;
         setMembers: (sessionId: string, memberIds: string[]) => Promise<{ ok: boolean; session?: SessionItem }>;
+        /** A-1011：群聊成员思考推理强度（effort=null 清除覆盖，回落群聊默认 high） */
+        setMemberEffort: (sessionId: string, memberId: string, effort: string | null) => Promise<{ ok: boolean; memberEfforts?: Record<string, string>; leaderEffort?: string }>;
         setWorkspace: (sessionId: string, workspace: string | null) => Promise<{ ok: boolean; workspace?: string }>;
         rename: (sessionId: string, title: string) => Promise<{ ok: boolean }>;
         remove: (sessionId: string) => Promise<{ ok: boolean }>;

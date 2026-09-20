@@ -11,7 +11,7 @@
  * 非破坏性：仅新增于 gui/，不修改 core-ts/gateway-ts/sidecar/legacy。
  */
 import "./boot.js"; // 数据根引导：必须最先执行（在 core-ts 模块级常量求值前设置 SLIME_ROOT）
-import { INSTALL_ROOT } from "./boot.js";
+import { INSTALL_ROOT, BUNDLE_ROOT } from "./boot.js";
 // A-980-R31：子代理运行记录落盘（内存态 + 历史合并、终态快照持久化）
 import { clearSubagentRuns, mergedSubagentRuns, syncSubagentRuns } from "./subagentStore.js";
 // A-984：主进程事件循环卡死看门狗（埋点 + 掉拍检测 → data/watchdog.log）
@@ -149,7 +149,12 @@ import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, statSync, re
 import { spawn, exec, execFile, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
-import { getModelServer, ModelServerManager, setModelServer } from "../../../core-ts/src/model_server.js";
+import { installAdBlocker } from "./adblock.js";
+import { basePortFor, getModelServer, ModelServerManager, setModelServer } from "../../../core-ts/src/model_server.js";
+// S1：本地服务能力**问询**（`/props` + `/v1/models`）。纯逻辑在 core-ts/src/model_introspect.ts，
+// 这里只拿"发请求 + 缓存"的部分；resolveSessionWindowCap 是它目前唯一的读取者。
+import { capabilityMatchesModel, clearLocalCapabilityCache, getLocalCapability, isLoopbackBaseUrl, probeManagedChatCapability } from "./localServerProbe.js";
+import { resolveWindowCap } from "../../../core-ts/src/model_introspect.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
@@ -160,6 +165,8 @@ import { StreamChunkBatcher } from "./streamBatch.js";
 import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
 import { adbService, type AdbDetect, type AdbDevice, type AdbCmdResult, type AdbScreencapResult, type AdbDownloadProgress } from "./adb.js";
 import { annotateBitmap } from "../shared/imageAnnotate.js";
+// A-1012：群聊席位上限与参与名单判据的**唯一实现**（引擎与建群弹窗共用，杜绝"上限只有引擎知道"）
+import { groupParticipantIds } from "../../../shared/gen/groupRoster.js";
 import { httpServer } from "./httpServer.js";
 import { createServer } from "node:http";
 import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
@@ -596,7 +603,9 @@ async function* streamGroupTalkFlow(opts: {
   };
   // 成员流式发言（engine.stream：思考/正文边到边；思考摘要另发状态事件）
   const toParticipant = (agent: AgentState): GroupTalkParticipant => {
-    const thinking = { ...agent, reasoning_effort: "high" as const };
+    // A-1011：推理强度不再写死 high —— 由成员组装处按会话成员卡设置注入（readEffort ?? "high"），
+    // 这里只做兜底（万一调用方没注入，保持改前的 high 行为）。
+    const thinking = { ...agent, reasoning_effort: agent.reasoning_effort || "high" };
     return {
       id: agent.id,
       name: agent.name,
@@ -661,7 +670,6 @@ async function* streamGroupTalkFlow(opts: {
   const emitMember = (m: { name: string; memberId: string }, payload: Record<string, unknown>): void => {
     memberEvents.push({ seq: ++seq, type: "member", data: { name: m.name, agentId: m.memberId, ...payload } });
   };
-
   void broadcastStatus; // 状态经 slime:brainstorm:event 广播（thinking 实时）
   let flowDone = false;
   let runErr: Error | null = null;
@@ -677,6 +685,11 @@ async function* streamGroupTalkFlow(opts: {
     onChunk: (m, text) => emitMember(m, { content: text }),
     onSpeechEnd: (m, full) => {
       broadcastStatus({ memberId: m.memberId, name: m.name, state: "done", content: full, ...quotaOf(m.memberId) });
+      // A-1008：本次发言失败 → 追加一条"结束通知"，让渲染层把该成员刚生成的气泡降级为错误样式。
+      // 判据只在"整段正文"上成立（chunk 逐段到达时判不出），所以不能塞进上面的 onChunk。
+      // 顺序安全：memberEvents 是同一个 FIFO 队列，本事件必然排在该成员最后一个 chunk 之后
+      // （contest 回放路径同样成立——onSpeechEnd 在每个 slot 回放循环结束处触发）。
+      if (isSpeechFailure(full)) { emitMember(m, { speechEnd: true, failed: true }); }
     },
     onDone: () => { /* 落库在下方 */ },
   }).then((r) => ({ r })).catch((e: unknown) => {
@@ -693,10 +706,21 @@ async function* streamGroupTalkFlow(opts: {
   if (runErr) { throw runErr; }
   const res = (await flow)!;
   // A-948：群聊发言落库（带名字聚合）——重启可恢复
+  // A-1008：**同时**落结构化 turns —— 只落那个拼好的大字符串会让 GUI 侧读回来变成
+  // "一条署名会话归属 Agent、内容把所有人揉在一起"的巨长气泡：这正是用户历时很久的
+  // 「总有一个 Agent 出来把所有内容总结复述一遍」+「重启后只剩那个总结的 Agent」的同一根因。
+  // `ai` 仍是拼好的文本（模型侧历史照旧），`turns` 只多存一份给界面按成员展开。
   if (opts.sessionId && res.r.transcript.length > 1) {
     try {
-      const body = res.r.transcript.slice(1).map((l) => `【${l.speaker}】${l.content}`).join("\n\n");
-      await appendHistory(opts.members[0].id, (opts.topic ?? "").trim() || "（群聊议题）", body, true, opts.sessionId, undefined, Date.now() - started);
+      const idByName = new Map(opts.members.map((m) => [m.name, m.id]));
+      const turns = res.r.transcript.slice(1).map((l) => ({
+        name: l.speaker,
+        agentId: idByName.get(l.speaker),
+        content: l.content,
+        ...(l.failed ? { failed: true } : {}),
+      }));
+      const body = formatSpeakerBlob(turns);
+      await appendHistory(opts.members[0].id, (opts.topic ?? "").trim() || "（群聊议题）", body, true, opts.sessionId, undefined, Date.now() - started, turns);
     } catch (e) {
       console.warn(`[grouptalk] 群聊历史落库失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -721,9 +745,10 @@ import {
   listSessions, getSession, createSession, renameSession, removeSession,
   ensureDefaultSession, setSessionMembers, setSessionType, removeSessionsForAgent, removeSessionsForWorkspace,
   setSessionAgent, setSessionWorkspace, setSessionSummary, touchSessionWithMessage, SESSIONS_PATH,
-  memberIdsOf, memberModelsOf, type MemberEntry,
+  memberIdsOf, memberModelsOf, memberEffortsOf, setSessionMemberEffort, type MemberEntry,
 } from "../../../core-ts/src/services/sessions.js";
-import { loadHistoryForSession, loadHistoryForSessionBefore, clearSessionHistory } from "../../../core-ts/src/services/history.js";
+import { loadHistoryForSession, loadHistoryForSessionBefore, clearSessionHistory, clearLegacySessionHistory } from "../../../core-ts/src/services/history.js";
+import { formatSpeakerBlob, isSpeechFailure, expandHistoryRecord, type ExpandedMessage } from "../../../core-ts/src/services/grouptalkTranscript.js";
 import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO } from "../../../core-ts/src/services/context_compress.js";
 import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
 // A-980-R32：点击路径的多基准候选解析（纯逻辑，vitest 直测）
@@ -741,6 +766,10 @@ let silamBrain: SilamBrain | null = null;
 const activeChats = new Map<string, AbortController>();
 /** agentId → 该 Agent 当前流的会话 key（perm/ask 请求据此打会话标签；供渲染层切会话时丢弃旧会话残留请求） */
 const agentStreamSessionMap = new Map<string, string>();
+/** A-1017：最近一次本地模型请求的取消键 —— 「正在加载本地模型」面板上的「取消加载」按它中断加载。
+ *  面板本身改由 ModelServerManager 的状态广播驱动（不再由本文件预判），广播那一刻拿不到本次流的 key，
+ *  只能在这里记一笔。用"最近一次"是合理的：加载必然由某次请求触发，且 chat 实例同时只有一个。 */
+let lastChatCancelKey: string | null = null;
 let sandbox: SandboxManager | null = null;
 /** 权限请求 → 渲染层等待用户抉择的挂起解析器（requestId → resolver） */
 const pendingPerms = new Map<string, (decision: PermissionDecision) => void>();
@@ -774,14 +803,41 @@ function isTrustedSender(sender: Electron.WebContents): boolean {
   }
 }
 
+/** 已注册的 IPC channel（A-1020 去重防护用，见 `handleTrusted`） */
+const REGISTERED_CHANNELS = new Set<string>();
+
 /**
  * 安全基线（官方清单 #17）：所有 IPC handler 统一走 sender 白名单校验。
  * 校验失败直接 reject，渲染层收到 rejected promise。
+ *
+ * ⚠️ A-1020：对同一 channel 调两次 `ipcMain.handle` 会**直接 throw**
+ *   （`Attempted to register a second handler for 'xxx'`）。而 `registerIpcHandlers`
+ *   是**线性注册**的大函数 —— 任何一条 throw 都会让**它之后的所有 handler 全部失去注册**，
+ *   并且是在 `app.whenReady` 阶段抛的，表现为**整个应用打不开**。
+ *   实测踩坑：A-1019 给 `slime:theme:set` 补持久化时**加了新 handler 却忘删旧的**，
+ *   于是 `dev` 直接起不来（用户原话："打都打不开了"）。
+ *
+ *   两层防护（缺一不可）：
+ *     ① 这里：重复注册时**先摘掉旧的再注册**，把失败模式从"app 打不开"降级为
+ *        "app 能开 + 一行醒目的 console.error"。**不静默** —— 静默失败同样致命。
+ *     ② CI：`tests/core-ts/a1020-guards.spec.ts` 扫源码，重复 channel 直接红。
  */
 function handleTrusted<T>(
   channel: string,
   fn: (event: Electron.IpcMainInvokeEvent, payload: T) => unknown,
 ): void {
+  if (REGISTERED_CHANNELS.has(channel)) {
+    console.error(
+      `[gui:main] ⚠️ IPC channel 重复注册: "${channel}" —— 旧的 handler 已被覆盖。` +
+      `多半是"加了新 handler 却忘删旧的"，请在 gui/src/main/index.ts 里删掉其中一处。`,
+    );
+    try {
+      ipcMain.removeHandler(channel);
+    } catch (e) {
+      console.error(`[gui:main] removeHandler("${channel}") 失败:`, e);
+    }
+  }
+  REGISTERED_CHANNELS.add(channel);
   ipcMain.handle(channel, (event, payload: T) => {
     if (!isTrustedSender(event.sender)) {
       throw new Error("sender 校验失败");
@@ -1147,8 +1203,9 @@ async function ensureServices(): Promise<void> {
         // 只是让一个**没人监听**的信号变成 aborted——模型流照旧跑到自然结束
         // （实测：120s 预算实跑 332.3s），最后收尾时再按 signal.aborted 把它**归因**为"超时中断"。
         // 即：不是模型慢，是中断从来没生效过。现在把 signal 透传进去（引擎 abort → 底层请求中断 → 携部分正文收尾）。
-        // networkEnabled 有意不传：引擎侧缺省即 true（tool_loop `networkEnabled ?? true`），
-        // 子代理的联网工具本就可用，不必在这里重复下发（传了反而容易和用户开关打架）。
+        // 断链 C 修复：继承父请求的联网开关（ctx.networkEnabled 由 SubAgentManager.execute 透传）。
+        // 用户关掉联网后，主 Agent 派出的子代理也必须关（否则「关了还偷偷联网」）；
+        // 父未传时 ctx.networkEnabled 为 undefined → 引擎缺省即 true（保住 A-918+「缺省即开」）。
         let reply = "";
         const acc: string[] = [];
         for await (const ev of engine.stream({
@@ -1158,6 +1215,7 @@ async function ensureServices(): Promise<void> {
           systemPrompt: system,
           sessionId: subagentSessionId,
           signal: ctx?.signal,
+          networkEnabled: ctx?.networkEnabled,
           ...(subToolsOnly ? { toolsOnly: subToolsOnly } : {}),
         })) {
           // 注意顺序：先消费事件、再判中断。引擎在 abort 之后会 yield 一个**携带部分正文**的 done，
@@ -1457,14 +1515,31 @@ async function ensureServices(): Promise<void> {
 
 // ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────
 
-/** BGE-M3 真实嵌入（llama-server 8999 /v1/embeddings，OpenAI 兼容；失败由 MemoryStore 降级哈希） */
+/** 嵌入端点端口（S2：端口只有一个真值来源）。
+ *
+ *  ⚠️ 这里**不许**写死 `8999`。原先 `bgeEmbed` 直连字面量 `http://127.0.0.1:8999`，
+ *  绕过了 `basePortFor()` —— 用户一旦在 `slime.toml [model_server.embedding].port` 改了端口，
+ *  管理器会在**新**端口起 BGE，而这里仍问**旧**端口 → 嵌入永远失败 → `MemoryStore`
+ *  **静默降级成哈希**（用户无感，只是记忆检索质量悄悄变差）。原先"恰好一致"只是配置没改过的巧合。
+ *
+ *  两级取值，都不新增判据：① 服务已就绪 → 端口由管理器**自述**（唯一真值）；
+ *  ② 未就绪 → 用与管理器启动时**同一个** `basePortFor` 按配置推导（不可能漂移）。 */
+function embeddingBaseUrl(): string {
+  const live = getModelServer()?.getPort("embedding");
+  if (live && live > 0) { return `http://127.0.0.1:${live}`; }
+  const cfg = readModelServerConfig();
+  const port = basePortFor("embedding", cfg.embedding ?? {}, cfg.chat ?? {});
+  return `http://127.0.0.1:${port}`;
+}
+
+/** BGE-M3 真实嵌入（llama-server `/v1/embeddings`，OpenAI 兼容；失败由 MemoryStore 降级哈希） */
 function bgeEmbed(): { embed: (text: string) => Promise<number[]> } {
   return {
     embed: async (text: string): Promise<number[]> => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 8000);
       try {
-        const resp = await fetch("http://127.0.0.1:8999/v1/embeddings", {
+        const resp = await fetch(`${embeddingBaseUrl()}/v1/embeddings`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model: "bge-m3", input: text }),
@@ -1679,6 +1754,25 @@ async function forkAgent(parent: AgentState, name: string, role: string): Promis
   return child;
 }
 
+/**
+ * 一次流式请求的累积器（正文 / 模型 / 耗时 / timings）。
+ *
+ * ⚠️ A-1008：`fullReply` **只累积本会话 Agent 自己的正文**（`type === "chunk"`）。
+ *
+ * 事故：这里原本无条件 `fullReply += chunk.data.content`，把**所有**带 content 的事件都算进去 ——
+ * 包括群聊的 `member` 事件（成员发言）。而群聊的 done 事件 `reply` 恒为 `""`（收束由用户），
+ * `cleanReply ?? session.fullReply` 于是回退到这个被污染的 `fullReply`，值 = **全体成员发言首尾相接、
+ * 不带任何 `【名字】` 归属标记的一大坨**。
+ *
+ * 渲染层 onDone 见到非空 `reply` 就追加一条 assistant 气泡（没有 agentName/agentId）→ 头部退回
+ * **会话归属 Agent** 的名字、也没有「成员」徽标。**这就是用户历时很久的**
+ * 「在它们说完话，总是有一个 Agent 出来总结重复一遍所有内容」——它不是引擎多跑了一轮，
+ * 而是这条 done 回退污染的假回复。同一根因的另一半（重启后成员气泡全丢）在落库形状，
+ * 见 core-ts/src/services/grouptalkTranscript.ts 的文件头。
+ *
+ * `reasoning` 事件同样不计入（思考不是正文，界面上另有折叠卡）；`member` 事件是**别人的**发言，
+ * 更不属于本会话 Agent 的回复。
+ */
 function createStreamSession() {
   let fullReply = "";
   let model = "";
@@ -1686,10 +1780,10 @@ function createStreamSession() {
   const timings: Record<string, number> = {};
   return {
     pushChunk(chunk: StreamChunk) {
-      if (chunk.data.content) fullReply += chunk.data.content;
-      if (chunk.data.model) model = chunk.data.model;
-      if (chunk.data.elapsedMs) elapsedMs = chunk.data.elapsedMs;
-      if (chunk.data.timings) Object.assign(timings, chunk.data.timings);
+      if (chunk.type === "chunk" && chunk.data.content) { fullReply += chunk.data.content; }
+      if (chunk.data.model) { model = chunk.data.model; }
+      if (chunk.data.elapsedMs) { elapsedMs = chunk.data.elapsedMs; }
+      if (chunk.data.timings) { Object.assign(timings, chunk.data.timings); }
     },
     get fullReply() { return fullReply; },
     get model() { return model; },
@@ -1698,11 +1792,31 @@ function createStreamSession() {
   };
 }
 
-/** A-933 上下文窗口上限（单一事实源，随 done 事件下发，环与右栏共用同一值）：
- *  1) Agent 显式配置 max_context 优先（对齐 Claude Code 可自定义窗口阈值语义）；
- *  2) 否则按本次实际使用模型解析 context_window——本地模型取 llama.cpp ctx_len，
- *     远端模型在 provider 模型规格（含内置启发推断）中按 id 匹配；
- *  3) 解析失败返回 undefined（渲染层用自己的兜底路径，不阻断 done 下发）。 */
+/** A-933 上下文窗口上限（单一事实源，随 done 事件下发，环与右栏共用同一值）。
+ *
+ *  ── S1 重写（2026-09-19）：从「层层推断」改成「显式覆盖 + **问服务器**」─────────────
+ *  原实现是一条 6 级级联：agent.max_context → 本地模型条目 ctx_len → slime.toml chat.ctx_len
+ *  → provider 规格 → undefined（然后渲染层再回落家族能力表）。
+ *  问题不在某一级写错了，而在**真值来源选错了**：级联里没有任何一级知道
+ *  "llama-server 这次到底分配了多少 KV"。家族能力表写的是模型**训练时**的窗口
+ *  （qwen3 = 524K），而服务实际按 `-c 8192` 分配 —— 于是界面显示"还剩 480K"，
+ *  请求却被上游 400 顶回：`exceeds the available context size (8192 tokens)`（A-1018 ③）。
+ *
+ *  现在的优先级（决策函数唯一出处：`core-ts/src/model_introspect.ts` 的 resolveWindowCap）：
+ *    ① `agent.max_context`            —— 用户显式配置，最高优先（允许故意设小）
+ *    ② **问本机服务器**（`/props.n_ctx`）—— 权威。覆盖"配置里写的"和"文件里推的"
+ *    ③ `slime.toml` 的 ctx_len        —— **同域**兜底：它就是启动时下发的 `-c`，仅服务器问不到时用
+ *    ④ provider 规格 `context_window` —— 远端模型
+ *  任何一步都不再回落到家族能力表。
+ *
+ *  ⚠️ 两类"本地模型"都要覆盖（配置里看不出区别）：
+ *    (a) slime 托管的 llama-server —— 端口从 ModelServerManager 拿，并**校验在服务的模型身份**
+ *        （一次只服务一个模型；拿 A 的窗口回答 B 就是换个位置重演同一个 bug）；
+ *    (b) 指向本机的普通 provider（如 `api_base = http://127.0.0.1:8800/v1`）—— 用户自己拉的进程，
+ *        slime 的启动记录里没有它，唯一判据就是发请求。
+ *  详见 `gui/src/main/localServerProbe.ts`。
+ *
+ *  解析失败仍返回 undefined（渲染层有自己的兜底路径，不阻断 done 下发）。 */
 async function resolveSessionWindowCap(agentId: string, modelId: string): Promise<number | undefined> {
   try {
     if (agentId && agentRegistry) {
@@ -1717,18 +1831,81 @@ async function resolveSessionWindowCap(agentId: string, modelId: string): Promis
       modelId.replace(/^api:[^:]*:/, "").replace(/^local:/, ""),
       modelId.split(":").pop() ?? modelId,
     ])).filter(Boolean);
-    for (const id of candidates) {
-      const local = listLocalModels().find((m) => m.id === id || m.label === id);
-      if (local?.ctx_len && local.ctx_len > 0) { return local.ctx_len; }
+
+    const localSpec = listLocalModels().find(
+      // label 可选（历史条目可能没有）→ 显式判非空再比对，别把 undefined 塞进 includes
+      (m) => candidates.includes(m.id) || (typeof m.label === "string" && candidates.includes(m.label)),
+    );
+    let serverCtx: number | undefined;
+    let plannedCtx: number | undefined;
+
+    /* ②a slime 托管的本地模型 —— 问服务器，并确认它服务的就是这个模型 */
+    if (localSpec || modelId.startsWith("local:")) {
+      const cap = await probeManagedChatCapability({ path: localSpec?.path, ids: candidates }).catch(() => null);
+      if (cap?.effectiveCtx != null && capabilityMatchesModel(cap, { path: localSpec?.path, ids: candidates })) {
+        serverCtx = cap.effectiveCtx;
+      }
+      /* ③ 同域兜底：`-c` 的真实取值 =
+         模型条目自己的 ctx_len（ModelServerManager.ensure 的 opts.ctxLen 优先级更高）
+         ?? slime.toml chat.ctx_len。这两者是**同一个值**的输入侧，不是另一份真相。 */
+      const chatCfgCtx = Number((readModelServerConfig()?.chat as { ctx_len?: number } | undefined)?.ctx_len ?? 0);
+      plannedCtx = localSpec?.ctx_len && localSpec.ctx_len > 0
+        ? localSpec.ctx_len
+        : (chatCfgCtx > 0 ? chatCfgCtx : undefined);
+      logLocalCapGap(cap?.state ?? "down", serverCtx);
     }
+
+    /* ②b 指向本机的普通 provider（用户自己拉起的 llama-server）—— 同样问服务器 */
+    if (serverCtx === undefined) {
+      for (const p of listProviders()) {
+        const base = typeof p.api_base === "string" ? p.api_base : "";
+        if (!isLoopbackBaseUrl(base)) { continue; }
+        const owns = (p.models ?? []).some((m) => candidates.includes(m.id))
+          || (typeof p.model === "string" && candidates.includes(p.model));
+        if (!owns) { continue; }
+        const cap = await getLocalCapability(base).catch(() => null);
+        /* 这个 baseUrl 就是该模型的地址 —— provider 配置本身即身份证据（trustedEndpoint）。 */
+        if (cap?.effectiveCtx != null && capabilityMatchesModel(cap, { trustedEndpoint: true })) {
+          serverCtx = cap.effectiveCtx;
+          break;
+        }
+      }
+    }
+
+    /* ④ 远端 provider 的模型规格 */
+    let providerCtx: number | undefined;
     for (const id of candidates) {
       for (const p of listProviders()) {
         const m = (p.models ?? []).find((x) => x.id === id);
-        if (m?.context_window && m.context_window > 0) { return m.context_window; }
+        if (m?.context_window && m.context_window > 0) { providerCtx = m.context_window; break; }
       }
+      if (providerCtx !== undefined) { break; }
     }
+
+    return resolveWindowCap({ serverCtx, plannedCtx, providerSpecCtx: providerCtx }).ctx;
   } catch { /* ignore */ }
   return undefined;
+}
+
+/** 本地服务"问不到窗口"时的状态迁移日志（**去重**：只在状态变化时打一次）。
+ *
+ *  它是"就绪但拿不到 n_ctx"这个**回归信号**的唯一读取者 —— 没有它，llama.cpp 改字段名后
+ *  界面只会静默地退回兜底值，我们看不到任何异常。
+ *  S4 会把 `state` 提升成下发字段（那时这里降级为纯日志）。 */
+let lastLocalCapWarn: string | null = null;
+function logLocalCapGap(state: string, serverCtx: number | undefined): void {
+  const key = `${state}|${serverCtx ?? "-"}`;
+  if (key === lastLocalCapWarn) { return; }
+  lastLocalCapWarn = key;
+  if (state === "ready" && serverCtx === undefined) {
+    console.warn(
+      "[gui:cap] 本地服务已就绪但解析不出 n_ctx —— 端点半结构可能变了；" +
+      "已回落到 slime.toml 的 ctx_len。请检查 /props.default_generation_settings.n_ctx " +
+      "与 /v1/models.data[].meta.n_ctx 的字段名（见 core-ts/src/model_introspect.ts 的文件头实测记录）。",
+    );
+  } else if (state === "loading") {
+    console.info("[gui:cap] 本地模型加载中（/props 503 unavailable_error），窗口上限本次取兜底值");
+  }
 }
 
 /** A-980-R26：通知标题用的 Agent 显示名（查不到就回落到 Agent id / 通用文案，绝不抛） */
@@ -1850,14 +2027,12 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
   };
 }
 
-/** 本地模型是否已就绪（决定是否弹「加载本地模型」面板；未注册/未启动/模型不匹配 → false） */
-function isLocalModelReady(agent: AgentState): boolean {
-  const id = agent.model_choice.slice("local:".length).trim();
-  const spec = listLocalModels().find((m) => m.id === id);
-  const mgr = getModelServer();
-  if (!mgr) { return false; }
-  return mgr.isChatReady(spec?.path ?? "");
-}
+/* A-1017：`isLocalModelReady(agent)` 已删除。
+ * 它做的事是"调用方自己再查一次就绪没有"——先另读一份 providers 表拿到 spec.path，再拿路径去
+ * `mgr.isChatReady(path)` 做**裸字符串比较**；只要这个路径与"管理器里实际加载的 model_path"有出入
+ * （引擎用的是它构造时的 providers 快照，本文件读的是实时盘上文件），就**永久判否** →
+ * 模型已就绪却每轮对话都弹全屏「正在加载本地模型」。判据不该由调用方重新推导，它只有一个真值来源：
+ * ModelServerManager 自己的实例状态。现在由管理器的状态广播驱动面板（见 initModelServerManager）。 */
 
 /** A-980-R24：窗口启动尺寸**固定按屏幕工作区比例**（不再沿用上次退出尺寸）。
  *
@@ -1867,7 +2042,63 @@ function isLocalModelReady(agent: AgentState): boolean {
  *  （另一个附带好处：窗口渲染尺寸稳定 → 首帧布局/动画节拍也稳定，不再随上次窗口大小漂移。） */
 interface WindowState { width: number; height: number; x?: number; y?: number; }
 const WIN_STATE_PATH = resolveExtra("../config/winstate.json");
-const WIN_MIN = { width: 800, height: 560 };
+/** 窗口最小尺寸 —— **由布局自身的硬下限推导，不是拍脑袋定的**（A-1018）。
+ *
+ *  三栏（都展开时）各自的"再也不能小"的宽度：
+ *    · 左栏 `.sidebar`      min-width 240px（= App 的 SIDEBAR_MIN_W）
+ *    · 聊天主区 `.main`     min-width 380px（= App 的 CHAT_MIN_W，保底可读）
+ *    · 右栏 `.right-sidebar` min-width 260px
+ *  合计 880px。窗口再窄时：右栏 wrapper 会被 flex 压缩，而内层 `.right-sidebar` 的
+ *  min-width 260 顶着不让，于是它**超出 wrapper 并被 `overflow:hidden` 裁掉** ——
+ *  右栏**右上角的展开/折叠按钮正好被裁到视野外**（用户原话："右侧边栏的展开折叠按钮消失，
+ *  同时聊天栏目的内容跑到屏幕外"）。所以最小宽度必须 ≥ 三栏下限之和。
+ *  880 + 边框/滚动条余量 → **900**。
+ *
+ *  ⚠️ 改这三个 min-width 中任意一个，这里必须同步重算（否则又会挤出上面那两个症状）。
+ *     高度 560 保持原值：纵向没有这类"三栏并列"的硬约束。 */
+const WIN_MIN = { width: 900, height: 560 };
+
+/* ── 主题持久化（A-1019）────────────────────────────────────────────────────────
+ * 为什么主进程要自己存一份主题：
+ *   渲染层的主题存在 localStorage 里，**主进程读不到**；而 `titleBarOverlay.color`
+ *   必须在**创建窗口时**就已经正确，否则会先显示一帧错误配色 —— alpha 主题下
+ *   那三个系统按钮（最小化/还原/关闭）背后会闪一块比标题栏更深的色块
+ *   （用户原话：「这三个按钮有个明显的色块背景，给我去了」）。
+ *   A-1018 只修了「切换主题」这条路径，启动路径仍是写死 beta 色 → 残留。
+ *   现在：窗口创建时读本文件；渲染层挂载后调 `slime:theme:set` 会把它写回来。
+ * 文件位置沿用既有约定（每个功能一个 config/*.json：notifications / winstate / mind …）。 */
+const THEME_CFG_PATH = join(PROJECT_ROOT, "config", "theme.json");
+
+/** 读取持久化主题；缺省 = beta（与渲染层 theme.ts 的 getTheme() 默认值保持一致） */
+function readPersistedTheme(): "alpha" | "beta" {
+  try {
+    const p = JSON.parse(readFileSync(THEME_CFG_PATH, "utf8")) as { theme?: string };
+    return p.theme === "alpha" ? "alpha" : "beta";
+  } catch {
+    return "beta";
+  }
+}
+
+function writePersistedTheme(theme: string): void {
+  try {
+    mkdirSync(join(PROJECT_ROOT, "config"), { recursive: true });
+    writeFileSync(THEME_CFG_PATH, JSON.stringify({ theme: theme === "alpha" ? "alpha" : "beta" }, null, 2), "utf8");
+  } catch (e) {
+    /* 持久化失败不影响本次运行，只是下次启动 overlay 初值可能不对 */
+    console.warn("[gui:main] 写入主题配置失败:", e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** 标题栏系统按钮 overlay 配色：`color` 必须等于标题栏的**实际合成色**，否则按钮后面就是一块色块。
+ *  · alpha：`.titlebar { background: var(--bg-secondary) }` = `#1e293b`（不透明）
+ *  · beta ：`--bg-secondary: rgba(15,22,40,.6)` 叠在 `--bg: #05070e` 上
+ *           = 0.6×(15,22,40) + 0.4×(5,7,14) = (11,16,30) = `#0b101e`
+ *  改主题配色时（--bg-secondary / --bg 一动）这里必须同步重算。 */
+function titleBarColors(theme: string): { color: string; symbolColor: string } {
+  return theme === "alpha"
+    ? { color: "#1e293b", symbolColor: "#e2e8f0" }
+    : { color: "#0b101e", symbolColor: "#e6f1ff" };
+}
 /** 默认尺寸比例（× 主屏工作区宽/高，用户指定版式） */
 const WIN_DEFAULT_RATIO = { width: 0.78, height: 0.90 };
 /** 默认尺寸下限（首启/超小屏时保证可用工作面的最小逻辑窗口） */
@@ -1930,7 +2161,9 @@ function createWindow(): void {
     icon: join(INSTALL_ROOT, "build", "icon.png"),
     // Campanula 式自绘标题栏：隐藏系统标题栏，Windows overlay 渲染窗口按钮
     titleBarStyle: "hidden",
-    titleBarOverlay: { color: "#10172a", symbolColor: "#e6f1ff", height: 40 },
+    // A-1018/A-1019：初值必须等于**当前持久化主题**的标题栏合成色，否则启动瞬间那三个
+    // 系统按钮背后会闪一块比标题栏更亮或更暗的色块。此处读 config/theme.json（见 titleBarColors）。
+    titleBarOverlay: { ...titleBarColors(readPersistedTheme()), height: 40 },
     webPreferences: {
       contextIsolation: true, sandbox: true, nodeIntegration: false,
       nodeIntegrationInSubFrames: false,
@@ -2094,21 +2327,18 @@ function registerIpcHandlers(): void {
     try {
     await ensureServices();
     const agentId = resolveAgentId(input.agentId);
-    // 本地模型对话：仅当对应 llama-server 尚未就绪（首载/切换模型）时弹「加载进度」面板；
-    // 已就绪则直接对话，不再每次弹窗打扰
+    // A-1017：「正在加载本地模型」面板**不再在这里预判**。
+    // 此前是 `needLoadingPanel = isLocalModel && !isLocalModelReady(agent)` —— 判断依据由调用方
+    // 自己重新推导（另读一份 providers 表 + 裸字符串比路径），与"管理器里实际加载了哪个模型"
+    // 一旦有出入就**永久判否**：模型明明已就绪，每轮对话仍弹一次全屏加载面板（用户报的"每次都加载"）。
+    // 现在唯一真值来源 = ModelServerManager 的状态广播（见 initModelServerManager 的 onChatState）：
+    // 真的开始加载才弹、就绪/失败/取消即关。这里只登记取消键，供面板上的「取消加载」按钮使用。
     const loadingAgent = await agentRegistry!.findAgent(agentId).catch(() => undefined);
-    const isLocalModel = !!loadingAgent?.model_choice?.startsWith("local:");
-    const needLoadingPanel = isLocalModel && !isLocalModelReady(loadingAgent!);
     const cancelKey = input.sessionId ?? agentId;
     const controller = new AbortController();
     activeChats.set(cancelKey, controller);
     agentStreamSessionMap.set(input.agentId, cancelKey); // 授权/提问请求按当前流打会话标签
-    if (needLoadingPanel) {
-      mainWindow?.webContents.send("slime:model:loading", {
-        loading: true, message: `正在加载本地模型「${loadingAgent!.model_choice!.slice("local:".length)}」…首次加载可能需要数十秒`,
-        key: cancelKey,
-      });
-    }
+    lastChatCancelKey = cancelKey;
     let history = input.history ? (input.history as any) : [];
     // 会话上下文注入：无显式 history 时按 session_id 加载
     if (history.length === 0) {
@@ -2153,17 +2383,31 @@ function registerIpcHandlers(): void {
                 if (typeof brainMeta!.leaderModel === "string" && brainMeta!.leaderModel) { modelEntries.push([loadingAgent!.id, brainMeta!.leaderModel]); }
                 const modelCaps = await Promise.all(modelEntries.map(async ([id, model]) => [id, await resolveSessionWindowCap("", model)] as const));
                 const capBy = new Map(modelCaps);
-                const roster = [
-                  loadingAgent!,
-                  ...(await Promise.all(
-                    memberIdsOf(brainMeta!.members).map((id) => agentRegistry!.findAgent(id).catch(() => null)),
-                  )).filter((a): a is AgentState => a !== null),
-                ].filter((a, i, arr) => arr.findIndex((x) => x.id === a.id) === i).slice(0, 5);
+                // A-1012：参与名单（**组长 + 成员、按 id 去重、取前 GROUP_MAX_PARTICIPANTS 位**）由共享纯函数
+                // 唯一决定 —— 建群弹窗用同一个函数拦人，两头不可能再漂移。
+                // ⚠️ 此前这里是内联 `.slice(0, 5)` 字面量，而界面毫不知情 → 用户能邀请 7 个 Agent，
+                //    第 6 位起卡片照常显示、照样可点「思考·X」，引擎却从不读（静默丢弃 = 假旋钮）。
+                // 截断仍保留作兜底：上限引入之前建的旧会话、以及脏数据仍可能超员。
+                const participantIds = groupParticipantIds(loadingAgent?.id, memberIdsOf(brainMeta!.members));
+                // 组长**无条件在场**（他是会话归属 Agent，原来就不经 findAgent 过滤，这里保持原语义）；
+                // 其余按名单顺序解析，解析不到的（Agent 已被删除）直接跳过而**不拉后续成员补位** ——
+                // 否则"界面按名单算出的参会者"与"引擎实际参会者"会错位，界面就会标错人。
+                const otherMembers = await Promise.all(
+                  participantIds
+                    .filter((id) => id !== loadingAgent?.id)
+                    .map((id) => agentRegistry!.findAgent(id).catch(() => null)),
+                );
+                const roster: AgentState[] = [
+                  ...(loadingAgent ? [loadingAgent] : []),
+                  ...otherMembers.filter((a): a is AgentState => a !== null),
+                ];
+                const effortMap = memberEffortsOf(brainMeta!.members);
                 return roster.map((a) => {
                   const model = a.id === loadingAgent!.id ? brainMeta!.leaderModel : modelMap[a.id];
-                  if (!model) { return a; }
+                  // A-1011：必须总是显式赋 reasoning_effort（缺省 "high"），否则会回落该 Agent 的全局设置（行为回归）
+                  const effort = a.id === loadingAgent!.id ? brainMeta!.leaderEffort : effortMap[a.id];
                   const cap = capBy.get(a.id);
-                  return { ...a, model_choice: model, ...(cap && cap > 0 ? { max_context: cap } : {}) };
+                  return { ...a, ...(model ? { model_choice: model } : {}), ...(cap && cap > 0 ? { max_context: cap } : {}), reasoning_effort: effort || "high" };
                 });
               })(),
               topic: req.message,
@@ -2264,9 +2508,9 @@ function registerIpcHandlers(): void {
         if (agentStreamSessionMap.get(input.agentId) === cancelKey) {
           agentStreamSessionMap.delete(input.agentId);
         }
-        if (needLoadingPanel) {
-          mainWindow?.webContents.send("slime:model:loading", { loading: false });
-        }
+        // A-1017：面板显隐由管理器状态广播驱动，这里是**兜底**——取消发生在 ensure 之前时
+        // 不会产生任何状态迁移，广播也就不来，必须在流结束时无条件收口（渲染层置 false 是幂等的）。
+        mainWindow?.webContents.send("slime:model:loading", { loading: false });
       }
     })();
     return { ok: true };
@@ -2398,18 +2642,10 @@ function registerIpcHandlers(): void {
   handleTrusted<{ agentId: string; sessionId?: string }>("slime:chat:retry", async (_event, payload) => {
     await ensureServices();
     const agentId = payload.agentId || resolveAgentId(undefined);
-    const loadingAgent = await agentRegistry!.findAgent(agentId).catch(() => undefined);
-    const isLocalModel = !!loadingAgent?.model_choice?.startsWith("local:");
-    const needLoadingPanel = isLocalModel && !isLocalModelReady(loadingAgent!);
-    if (needLoadingPanel) {
-      mainWindow?.webContents.send("slime:model:loading", {
-        loading: true, message: `正在加载本地模型「${loadingAgent!.model_choice!.slice("local:".length)}」…首次加载可能需要数十秒`,
-      });
-    }
+    // A-1017：同 slime:chat:stream —— 加载面板不再由这里预判，改由管理器状态广播驱动。
     const { popLastRecordForAgentExport } = await import("../../../core-ts/src/services/history.js");
     const last = await popLastRecordForAgentExport(agentId, payload.sessionId);
     if (!last || !last.user) {
-      if (needLoadingPanel) { mainWindow?.webContents.send("slime:model:loading", { loading: false }); }
       return { ok: false, error: "无历史可重试" };
     }
     const req: ChatRequest = {
@@ -2424,6 +2660,7 @@ function registerIpcHandlers(): void {
     // 授权/提问请求按当前流打会话标签（retry 流的会话 = payload.sessionId）
     const retryCancelKey = payload.sessionId ?? agentId;
     agentStreamSessionMap.set(agentId, retryCancelKey);
+    lastChatCancelKey = retryCancelKey; // A-1017：供加载面板的「取消加载」中断本次加载
     // 干净正文：优先取 chatService done 事件全量清洗后的 reply（同 slime:chat:stream）
     let cleanReply: string | undefined;
     // A-939 上下文分桶（随 done 事件透传给渲染层分桶托盘）
@@ -2489,7 +2726,8 @@ function registerIpcHandlers(): void {
           if (agentStreamSessionMap.get(agentId) === retryCancelKey) {
             agentStreamSessionMap.delete(agentId);
           }
-          if (needLoadingPanel) { mainWindow?.webContents.send("slime:model:loading", { loading: false }); }
+          // A-1017：兜底收口（同 slime:chat:stream —— 面板由管理器状态广播驱动）
+          mainWindow?.webContents.send("slime:model:loading", { loading: false });
         }
       })();
     });
@@ -2515,7 +2753,7 @@ function registerIpcHandlers(): void {
       if (r.timestamp > agg.lastTime) { agg.lastTime = r.timestamp; }
       byKey.set(key, agg);
     }
-    const items: Array<{ sessionId: string; agentId: string; agentName: string; workspace?: string; title: string; count: number; lastTime: string; memberIds?: string[]; memberNames?: string[]; memberModels?: Record<string, string>; leaderModel?: string; type?: "normal" | "brainstorm" }> = [];
+    const items: Array<{ sessionId: string; agentId: string; agentName: string; workspace?: string; title: string; count: number; lastTime: string; memberIds?: string[]; memberNames?: string[]; memberModels?: Record<string, string>; leaderModel?: string; memberEfforts?: Record<string, string>; leaderEffort?: string; type?: "normal" | "brainstorm" }> = [];
     for (const meta of metas) {
       // 旧记录（无 session_id）按 "default" 聚合，归入该 Agent 首个会话
       const agg = byKey.get(`${meta.agentId}::${meta.id}`) ?? byKey.get(`${meta.agentId}::default`);
@@ -2533,6 +2771,8 @@ function registerIpcHandlers(): void {
         memberNames,
         memberModels: memberModelsOf(meta.members),
         leaderModel: meta.leaderModel,
+        memberEfforts: memberEffortsOf(meta.members),
+        leaderEffort: meta.leaderEffort,
         type: meta.type,
       });
     }
@@ -2540,6 +2780,18 @@ function registerIpcHandlers(): void {
     for (const [key, agg] of byKey) {
       const agentId = key.split("::")[0];
       if (!metas.some((m) => m.agentId === agentId)) {
+        // A-1017：**只有 Agent 仍然存在才迁移**。
+        // 此前无条件 `ensureDefaultSession(agentId)` → 历史里任何孤儿 agent_id 都会被建成
+        // 一个绑定不存在 Agent 的**幽灵会话**：模型一个都选不了（引擎 findAgent 返回 undefined
+        // → 404「Agent 不存在」），而且删掉之后下一次列表刷新又照原样建回来。
+        // 孤儿 agent_id 的现实来源：测试漏注入 history store 把夹具写进了真实 history.jsonl
+        // （测试侧已修 + 有守卫），以及历史上被删除的 Agent。
+        if (!names.has(agentId)) {
+          console.warn(
+            `[gui:main] 跳过孤儿历史的会话迁移：Agent「${agentId}」不存在（${agg.count} 条记录，未建会话）`,
+          );
+          continue;
+        }
         const meta = await ensureDefaultSession(agentId);
         const memberIds = memberIdsOf(meta.members);
         items.push({
@@ -2604,6 +2856,9 @@ function registerIpcHandlers(): void {
         memberIds,
         memberNames: memberIds.map((id) => names.get(id) ?? id),
         memberModels: memberModelsOf(meta.members),
+        leaderModel: meta.leaderModel,
+        memberEfforts: memberEffortsOf(meta.members),
+        leaderEffort: meta.leaderEffort,
         type: meta.type,
       },
     };
@@ -2630,6 +2885,16 @@ function registerIpcHandlers(): void {
     const removed = await removeSession(payload.sessionId);
     if (meta) {
       await clearSessionHistory(meta.agentId, meta.id);
+      // A-1017：该 Agent 的**最后一个**会话被删掉时，连**没有 session_id 的遗留历史**一起清。
+      // 不清的后果：遗留记录留在盘上 → 下一次 `sessions:list` 的孤儿迁移又把它建成新会话
+      // → 用户体感"这个会话删不掉"，且每次复活都换一个新 sessionId。
+      const rest = (await listSessions()).filter((s) => s.agentId === meta.agentId);
+      if (rest.length === 0) {
+        const purged = await clearLegacySessionHistory(meta.agentId);
+        if (purged > 0) {
+          console.info(`[gui:main] 会话删除时清理遗留历史（无 session_id）: agent=${meta.agentId} 条数=${purged}`);
+        }
+      }
     }
     // A-980-R29：会话删了，它的 Plan（内存 Map）与待办文件（data/todos_<sid>.json）也要一起走。
     // 此前两条都只增不减 → 内存常驻 + data/ 目录无限堆积。
@@ -2637,6 +2902,46 @@ function registerIpcHandlers(): void {
     console.info(`[gui:main] 会话已删除: session=${payload.sessionId}`);
     return { ok: removed };
   });
+
+  /** A-1008：历史记录 → GUI 消息。
+   *
+   *  群聊记录（type=brainstorm 且有逐成员发言）必须**按成员展开成多条**，每条带自己的
+   *  agentName/agentId。此前一律只产出一条不带归属的 assistant 消息 → 渲染层回退到会话归属
+   *  Agent 的名字，于是"把所有人发言揉在一起的一条巨长气泡"看起来就像某个 Agent 出来总结复述，
+   *  且重启后成员气泡全丢（它们从未落库）。这是同一根因的两个症状，见 ref-grouptalk.md。
+   *
+   *  旧记录（只有拼好的大字符串、没有 turns）走 `parseSpeakerBlob` 还原，用户历史里已有的
+   *  记录也能直接恢复成逐成员气泡，不必等重开一轮。
+   *
+   *  实现已搬到 `core-ts/src/services/grouptalkTranscript.ts` 的 `expandHistoryRecord`
+   *  （纯函数）—— 内联在 IPC handler 里等于测不到，而"一条记录展开成几条气泡"正是这个
+   *  历时很久的故障的最后一环，必须可回归。这里只保留一个同签名包装，调用点不用改。
+   */
+  const historyRecordToMessages = (
+    r: HistoryRecord,
+    groupNames?: ReadonlySet<string>,
+  ): ExpandedMessage[] => expandHistoryRecord(r, groupNames);
+
+  /** 群聊会话的成员名集合（用于判断某条记录该不该按发言块展开；undefined = 非群聊会话） */
+  const groupNamesOf = async (meta: { id?: string; type?: string; members?: unknown }): Promise<ReadonlySet<string> | undefined> => {
+    if (meta.type !== "brainstorm") { return undefined; }
+    try {
+      const ids = memberIdsOf(meta.members as MemberEntry[] | undefined);
+      const agents = await Promise.all(ids.map((id) => agentRegistry!.findAgent(id).catch(() => null)));
+      const names = agents.filter((a): a is AgentState => a !== null).map((a) => a.name);
+      // 会话归属 Agent 也可能发言（roster 含 loadingAgent）→ 一并纳入
+      if (meta.id) {
+        const owner = await getSession(meta.id).catch(() => null);
+        if (owner?.agentId) {
+          const a = await agentRegistry!.findAgent(owner.agentId).catch(() => null);
+          if (a) { names.push(a.name); }
+        }
+      }
+      return new Set(names);
+    } catch {
+      return undefined;
+    }
+  };
 
   /** 加载某会话的完整消息（聊天面板显示历史） */
   handleTrusted<{ sessionId: string }>("slime:sessions:load", async (_event, payload) => {
@@ -2648,25 +2953,8 @@ function registerIpcHandlers(): void {
     // 旧记录（无 session_id）归入创建最早的会话
     const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
     const records = await loadHistoryForSession(meta.agentId, meta.id, 500, firstSession);
-    const messages: Array<{ role: "user" | "assistant"; content: string; time: string; ts?: string; reasoning?: string; elapsedMs?: number; timeline?: unknown[] }> = [];
-    for (const r of records) {
-      if (r.user) {
-        messages.push({ role: "user", content: r.user, time: r.timestamp, ts: r.timestamp });
-      }
-      if (r.ai) {
-        messages.push({
-          role: "assistant",
-          content: r.ai,
-          time: r.timestamp,
-          ts: r.timestamp,
-          reasoning: r.reasoning,
-          elapsedMs: r.elapsed_ms,
-          // A-966：历史附带交错时间线（重启后思考历程保持时间线展示）
-          timeline: r.timeline as unknown[] | undefined,
-        });
-      }
-    }
-    return messages;
+    const groupNames = await groupNamesOf(meta);
+    return records.flatMap((r) => historyRecordToMessages(r, groupNames));
   });
 
   /** A-980-R18：分页加载更早历史（聊天顶部「加载更早的消息」分段胶囊点击再载；首屏只载最近 500 条） */
@@ -2681,19 +2969,8 @@ function registerIpcHandlers(): void {
     const { records, hasMore } = await loadHistoryForSessionBefore(
       meta.agentId, meta.id, payload.limit ?? 200, firstSession, payload.beforeTs,
     );
-    const messages: Array<{ role: "user" | "assistant"; content: string; time: string; ts?: string; reasoning?: string; elapsedMs?: number; timeline?: unknown[] }> = [];
-    for (const r of records) {
-      if (r.user) {
-        messages.push({ role: "user", content: r.user, time: r.timestamp, ts: r.timestamp });
-      }
-      if (r.ai) {
-        messages.push({
-          role: "assistant", content: r.ai, time: r.timestamp, ts: r.timestamp,
-          reasoning: r.reasoning, elapsedMs: r.elapsed_ms, timeline: r.timeline as unknown[] | undefined,
-        });
-      }
-    }
-    return { messages, hasMore };
+    const groupNames = await groupNamesOf(meta);
+    return { messages: records.flatMap((r) => historyRecordToMessages(r, groupNames)), hasMore };
   });
 
   /** A-966：渲染层 done 后把该条回复的交错时间线回填到 history.jsonl（重启恢复时间线，不依赖 localStorage） */
@@ -2808,8 +3085,24 @@ function registerIpcHandlers(): void {
         lastTime: updated.updatedAt,
         memberIds,
         memberNames: memberIds.map((id) => names.get(id) ?? id),
+        memberModels: memberModelsOf(updated.members),
+        leaderModel: updated.leaderModel,
+        memberEfforts: memberEffortsOf(updated.members),
+        leaderEffort: updated.leaderEffort,
       },
     };
+  });
+
+  /** A-1011 群聊成员思考推理强度（会话级覆盖；仅影响该群聊，不写 Agent 全局配置）
+   *  - effort=null 清除覆盖 → 回落群聊默认 high
+   *  - 组长（meta.agentId）写 leaderEffort，其余成员写 members 条目 */
+  handleTrusted<{ sessionId: string; memberId: string; effort: string | null }>("slime:sessions:setMemberEffort", async (_event, payload) => {
+    await ensureServices();
+    const updated = await setSessionMemberEffort(payload.sessionId, payload.memberId, payload.effort ?? null);
+    if (!updated) { throw new Error("会话不存在或该成员不在群聊中"); }
+    const eff = payload.effort ? payload.effort : "(默认 high)";
+    console.info(`[gui:main] 群聊成员推理强度: session=${payload.sessionId} member=${payload.memberId} → ${eff}`);
+    return { ok: true, memberEfforts: memberEffortsOf(updated.members), leaderEffort: updated.leaderEffort };
   });
 
   /** 会话级工作目录更新（"以文件夹为主"：会话切换/新建时绑定文件夹） */
@@ -2946,6 +3239,18 @@ function registerIpcHandlers(): void {
       try { await clearSessionHistory(s.agentId, s.sessionId); } catch { /* 忽略单条历史清理失败 */ }
       // A-980-R29：待办文件与 Plan 一并清理（与上面两个删除入口口径一致）
       purgeSessionPlanning(s.sessionId);
+    }
+    // A-1017：涉及到的 Agent 若已**再无任何会话**，连它没有 session_id 的遗留历史一起清 ——
+    // 否则下一次 `sessions:list` 的孤儿迁移会把它们重新建成幽灵会话（同 sessions:remove）。
+    const rest = await listSessions();
+    for (const aid of new Set(removed.map((s) => s.agentId))) {
+      if (rest.some((s) => s.agentId === aid)) { continue; }
+      try {
+        const purged = await clearLegacySessionHistory(aid);
+        if (purged > 0) {
+          console.info(`[gui:main] 工作文件夹删除时清理遗留历史（无 session_id）: agent=${aid} 条数=${purged}`);
+        }
+      } catch { /* 忽略单条历史清理失败 */ }
     }
     console.info(`[gui:main] 工作文件夹会话已删除: workspace=${workspace} count=${removed.length}`);
     return { ok: true, count: removed.length };
@@ -3174,10 +3479,10 @@ function registerIpcHandlers(): void {
     try {
       // Node（Electron 内嵌）
       items.push({ kind: "node", label: "Node.js", version: `v${process.versions.node}`, ok: true, source: "bundled", note: "GUI 由 Electron 内嵌 Node 驱动" });
-      // Python venv（随包）
+      // Python venv（随包）—— 随包依赖，必须走 resolveBundled（开发模式在项目根，不在 gui/）
       const pyExe = process.platform === "win32"
-        ? resolveExtra("runtime/venv/Scripts/python.exe")
-        : resolveExtra("runtime/venv/bin/python");
+        ? resolveBundled("runtime/venv/Scripts/python.exe")
+        : resolveBundled("runtime/venv/bin/python");
       const pyOk = existsSync(pyExe);
       items.push({ kind: "python", label: "Python（随包 venv）", path: pyExe, sizeText: fileSize(pyExe), ok: pyOk, source: pyOk ? "bundled" : "missing", ...(pyOk ? {} : { note: "缺少随包 venv——请重新运行 prepare-runtime 或重装" }) });
       // Git（系统）
@@ -3194,8 +3499,8 @@ function registerIpcHandlers(): void {
       });
       // llama.cpp（随包二进制）
       const llamaExe = process.platform === "win32"
-        ? resolveExtra("llama.cpp/build/bin/llama-server.exe")
-        : resolveExtra("llama.cpp/build/bin/llama-server");
+        ? resolveBundled("llama.cpp/build/bin/llama-server.exe")
+        : resolveBundled("llama.cpp/build/bin/llama-server");
       const llamaOk = existsSync(llamaExe);
       items.push({
         kind: "llama", label: "llama.cpp（本地推理）", path: llamaExe, sizeText: fileSize(llamaExe), ok: llamaOk,
@@ -3203,7 +3508,7 @@ function registerIpcHandlers(): void {
         ...(llamaOk ? {} : { note: "缺失——重新运行 prepare-runtime 下载或到 设置→供应商→本地模型 配置" }),
       });
       // 模型目录（随包 npz + 按需 GGUF）
-      const modelRoot = resolveExtra("models");
+      const modelRoot = resolveBundled("models");
       const ggufFiles: Array<{ p: string; n: string }> = [];
       try {
         const scan = (dir: string, depth: number): void => {
@@ -3257,12 +3562,16 @@ function registerIpcHandlers(): void {
     }
   });
 
-  /** A-918++：重建 Python venv（系统 Python → INSTALL_ROOT/../runtime/venv → pip install -r requirements.txt）。
+  /** A-918++：重建 Python venv（系统 Python → BUNDLE_ROOT/runtime/venv → pip install -r requirements.txt）。
    *  走 spawn 系统 Python（PATH 的 python.exe）。完成后 renderer 调 load() 刷新。 */
   handleTrusted<void>("slime:runtime:installPython", async (): Promise<{ ok: boolean; log?: string; error?: string }> => {
-    const venvDir = resolveExtra("../runtime/venv");
-    const reqFile = resolveExtra("../requirements.txt");
-    // Windows 下 vbox 路径用 resolveExtra("../runtime/venv")（gui/runtime/venv 错误）
+    const venvDir = resolveBundled("runtime/venv");
+    const reqFile = resolveBundled("requirements.txt");
+    /*
+     * 这两行原先是 `resolveExtra("../runtime/venv")` 的字符串绕行 —— 注释自陈"gui/runtime/venv 错误"。
+     * 它只在**开发模式**蒙对（`gui/../` 恰好是项目根），打包模式下 `../` 会指到安装根的**上一级**，
+     * 于是"重建 venv"在正式安装包里必然失败。改用 resolveBundled 后两个模式同时正确。
+     */
     const isWin = process.platform === "win32";
     const venvPip = isWin ? join(venvDir, "Scripts", "pip.exe") : join(venvDir, "bin", "pip");
     const sysPy = isWin ? "python.exe" : "python3";
@@ -3315,16 +3624,45 @@ function registerIpcHandlers(): void {
   /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用；rel 相对仓库根） */
   handleTrusted<{ rel: string; workspace: string; ref?: string }>(
     "slime:git:showFile",
-    async (_event, p): Promise<{ ok: boolean; content?: string; error?: string }> => {
+    async (_event, p): Promise<{ ok: boolean; content?: string; error?: string; code?: "not-repo" | "no-head" | "not-found" }> => {
       const rel = (p?.rel ?? "").trim();
       const ws = (p?.workspace ?? "").trim();
       const ref = p?.ref || "HEAD";
       if (!rel || !ws) { return { ok: false, error: "缺少参数" }; }
+      /**
+       * A-1029：**先探测仓库，再说话**。
+       *
+       * 原先直接把 `git show` 的 stderr 截 300 字回给界面，于是非 Git 工作区（用户实测
+       * `D:\试验场` 下没有 `.git`）会抛出原始英文：
+       *   `fatal: not a git repository (or any of the parent directories): .git`
+       * 用户看到这句只会认为"功能坏了"，既不知道**原因**（这个目录本来就不是仓库），
+       * 也不知道**还能怎么办**（其实本次改动的 before/after 就内嵌在聊天区的工具卡里）。
+       *
+       * 现有的三个容错分支（exists on disk / did not match any file / unknown revision）
+       * 漏掉的正是最常见的那一类。故这里显式探测，并把"下一步去哪看"写进文案。
+       */
+      const inside = await runGit(["rev-parse", "--is-inside-work-tree"], ws);
+      if (inside.code !== 0 || inside.stdout.trim() !== "true") {
+        return {
+          ok: false,
+          code: "not-repo",
+          error: `「${ws}」不在 Git 仓库内（该目录及其上层都找不到 .git），因此没有可对比的 Git 历史版本。` +
+            `要查看本次改动的前后差异，请用聊天区「写入文件」工具卡里的「变更详情」（那份对比是随消息一起记录的，不依赖 Git）。`,
+        };
+      }
       const r = await runGit(["show", `${ref}:${rel}`], ws);
       if (r.code !== 0) {
         // 若文件在 HEAD 不存在（新增文件）→ 空内容 diff 全新增
         if (/exists on disk, but not in|did not match any file|path .* unknown revision/i.test(r.stderr)) {
           return { ok: true, content: "" };
+        }
+        // A-1029：仓库存在但没有提交（空仓库）→ 同样给可读解释，而不是原始 porcelain 提示
+        if (/does not have any commits yet|unknown revision or path not in the working tree/i.test(r.stderr)) {
+          return {
+            ok: false,
+            code: "no-head",
+            error: `「${ws}」是 Git 仓库但还没有任何提交，没有可比对的 HEAD 版本。先提交一次再对比。`,
+          };
         }
         return { ok: false, error: r.stderr.slice(0, 300) || `git show 失败（${r.code}）` };
       }
@@ -3411,6 +3749,14 @@ function registerIpcHandlers(): void {
     // 图形控制总开关（高危能力，默认关闭）
     if (!perms.screenEnabled && tool.name.startsWith("screen_")) {
       return { allowed: false, reason: "图形控制已在「设置 → 权限」中关闭" };
+    }
+    // 断链 B 修复：MCP / 技能 全局开关（此前只有 UI 落盘、全仓无读取者 = 假开关）。
+    // 工具名前缀是唯一运行时可靠判据：mcp_*（core-ts/src/mcp.ts:1021）/ skill_*（core-ts/src/skills.ts:215/502/532）。
+    if (!perms.mcpEnabled && tool.name.startsWith("mcp_")) {
+      return { allowed: false, reason: "MCP 已在「设置 → 权限」中关闭" };
+    }
+    if (!perms.skillsEnabled && tool.name.startsWith("skill_")) {
+      return { allowed: false, reason: "技能已在「设置 → 权限」中关闭" };
     }
     const has = (p: string): boolean => tool.permissions.includes(p as never);
     // 只读工具：仅当「读」类别被关闭时才拦（避免误伤纯检索）
@@ -3691,10 +4037,23 @@ function registerIpcHandlers(): void {
       untilIso: payload?.untilIso,
       limit: payload?.limit ?? 5000,
     });
+    /*
+     * A-990-B：把"用户手选的计价币种"与账目一起下发（见 UsageSnapshot.modelCurrencies 注释）。
+     * 只收集**用户真的手选过**的条目；未手选的留空，渲染层会按模型归属地推断。
+     * 键用 `供应商key::模型id`：同一个模型 id 在不同中转站可能是两笔不同的账
+     * （价格/币种都可能不同），只按 model 归并会让两行显示成同一个币种。
+     */
+    const modelCurrencies: Record<string, string> = {};
+    for (const p of listProviders()) {
+      for (const mo of (p.models ?? [])) {
+        if (mo.price_currency) { modelCurrencies[`${p.key}::${mo.id}`] = mo.price_currency; }
+      }
+    }
     return {
       records,
       tzOffsetMin,
       totalRecords: records.length,
+      modelCurrencies,
     } as unknown as UsageSnapshot;
   });
 
@@ -4781,13 +5140,16 @@ function registerIpcHandlers(): void {
     }
   });
 
-  /** 主题切换：同步标题栏系统按钮 overlay 配色（alpha=slate / beta=黑里透蓝） */
+  /** 主题切换：持久化 + 同步标题栏系统按钮 overlay 配色（配色表见上方 `titleBarColors`）
+   *
+   *  ⚠️ A-1018：overlay 的 `color` 必须等于标题栏的**实际合成色**，否则那三个系统按钮后面会出现
+   *  一块明显的色块（用户原话："最小化/还原/关闭这三个按钮有个明显的色块背景，给我去了"）。
+   *  ⚠️ A-1019：光在**切换时**纠正还不够 —— 窗口创建的那一刻就需要对（`titleBarOverlay` 的初值），
+   *  否则 alpha 主题用户每次启动都会先闪一帧 beta 色的色块。故这里同时**持久化**，
+   *  由窗口创建处 `titleBarColors(readPersistedTheme())` 读出。 */
   handleTrusted<{ theme: string }>("slime:theme:set", (_event, p) => {
-    if (p.theme === "beta") {
-      mainWindow?.setTitleBarOverlay({ color: "#10172a", symbolColor: "#e6f1ff", height: 40 });
-    } else {
-      mainWindow?.setTitleBarOverlay({ color: "#1e293b", symbolColor: "#e2e8f0", height: 40 });
-    }
+    writePersistedTheme(p.theme);
+    mainWindow?.setTitleBarOverlay({ ...titleBarColors(p.theme), height: 40 });
   });
   handleTrusted<void>("slime:settings:autostart:get", async (): Promise<{ ok: boolean; enabled: boolean }> => {
     try {
@@ -4885,8 +5247,11 @@ function registerIpcHandlers(): void {
   handleTrusted<void>("slime:notify:test", async () => {
     notifyUser({
       kind: "test",
-      title: "slime 通知测试",
-      body: "若你看到这条通知，说明系统通知已打通；提示音按你的设置播放。",
+      // A-1021：标题是**事件文案**（见 notifyIdentity.ts 的分工说明）。
+      // 用户要核对的「头部那行应用名」由 ensureNotificationIdentity() 注册的 DisplayName 决定，
+      // 不是这个字段 —— 所以正文里把该看的地方点名说出来。
+      title: "通知测试",
+      body: "请核对通知**头部那行应用名**是不是本程序的名字（不是 com.slime.gui）；提示音按你的设置播放。",
     });
     return { ok: true, config: readNotifyConfig() };
   });
@@ -5267,6 +5632,11 @@ function main(): void {
       app.on("will-quit", () => { markCleanExit(); });
       // 本地模型生命周期管理器（llama-server：BGE 嵌入 / 对话 GGUF），解析自 slime.toml [model_server]
       initModelServerManager();
+      /* A-1018：内嵌浏览器（右侧栏 <webview>，分区 persist:slime-browser）的广告/跟踪器拦截。
+         装在该分区上而不是 defaultSession —— 只作用于我们的内嵌浏览器，不影响主进程自身的网络请求。
+         默认开启；`config/adblock/settings.json` 里 `enabled:false` 可关；
+         更多规则丢 `config/adblock/*.txt`（EasyList 派生的域名形态即可）。详见 adblock.ts 头注释。 */
+      installAdBlocker(session.fromPartition("persist:slime-browser"), PROJECT_ROOT);
       registerIpcHandlers();
       registerUpdaterHandlers(); // 注册自动更新 IPC handler
       // 更新状态推送到渲染进程（StatusPanel 监听 slime:update:status）
@@ -5405,9 +5775,24 @@ function emitBoot(s: { phase: string; backendReady: boolean; message?: string })
   bootSink?.(s);
 }
 
-/** 打包模式下 electron-builder extraFiles 落到安装根（与 resources/ 平级） */
+/** 安装根：**应用自身资源**（build/icon.png、data/、config/、Knowledge/） */
 function resolveExtra(subpath: string): string {
   return join(INSTALL_ROOT, subpath);
+}
+
+/**
+ * 随包资源根：`llama.cpp/`、`runtime/venv/`、`models/`、`slime_server.py`、`requirements.txt`。
+ *
+ * ⚠️ 与 `resolveExtra` 是**两个不同的根**，混用就是"运行环境怎么都检测不到"的根因：
+ * 打包模式下两者相等（extraFiles 都落到安装根），但开发模式下随包依赖留在**项目根**
+ * （prepare-runtime 的落点、也是 core-ts PROJECT_ROOT / mind_config / downloader 用的那个），
+ * 而应用自身资源在 `gui/`。过去随包资源走 `resolveExtra` → 全部落在 `gui/…` → 齐报缺失。
+ *
+ * 判断"该用哪个"只看一件事：**这个文件是 electron-builder `extraFiles.from: "../…"` 搬来的吗**。
+ * 是 → 本函数；`build/icon.png`、`data/`、`config/` 这类应用自身资源 → `resolveExtra`。
+ */
+function resolveBundled(subpath: string): string {
+  return join(BUNDLE_ROOT, subpath);
 }
 
 async function startPythonBackend(): Promise<void> {
@@ -5415,9 +5800,9 @@ async function startPythonBackend(): Promise<void> {
   // 定位 Python venv（Windows: Scripts/python.exe，Linux/macOS: bin/python）
   const venvSub = process.platform === "win32" ? "Scripts" : "bin";
   const venvPyName = process.platform === "win32" ? "python.exe" : "python";
-  const venvPython = resolveExtra(join("runtime", "venv", venvSub, venvPyName));
+  const venvPython = resolveBundled(join("runtime", "venv", venvSub, venvPyName));
 
-  const serverScript = resolveExtra("slime_server.py");
+  const serverScript = resolveBundled("slime_server.py");
   if (!existsSync(venvPython) || !existsSync(serverScript)) {
     console.warn("[gui:backend] Python backend not found, running without server");
     emitBoot({ phase: "degraded", backendReady: false, message: "后端组件缺失，将以受限模式运行" });
@@ -5426,8 +5811,8 @@ async function startPythonBackend(): Promise<void> {
 
   const env: Record<string, string | undefined> = { ...process.env, SLIME_PORT };
   if (process.platform !== "win32") {
-    // Linux/macOS：llama-server 动态库加载（extraFiles 布局：app 根/llama.cpp/build/bin）
-    const libDir = resolveExtra(join("llama.cpp", "build", "bin"));
+    // Linux/macOS：llama-server 动态库加载（随包布局：资源根/llama.cpp/build/bin）
+    const libDir = resolveBundled(join("llama.cpp", "build", "bin"));
     env.LD_LIBRARY_PATH = libDir + (env.LD_LIBRARY_PATH ? `:${env.LD_LIBRARY_PATH}` : "");
   }
   // 非 detached：让 python sidecar 随主进程生命周期结束（否则主程序退出/崩溃后其
@@ -5482,6 +5867,35 @@ function initModelServerManager(): void {
       chat_est_gb: cfg.chat_est_gb,
       embedding: cfg.embedding,
       chat: cfg.chat,
+    }, {
+      // A-1017：「正在加载本地模型」面板的唯一驱动源。
+      // 此前是每条对话开始前由本文件预判"这次要加载吗"（另读一份 providers 表 + 裸路径比较）——
+      // 与引擎实际加载的 model_path 一旦不一致就永久判否，于是模型已就绪也每轮弹一次全屏面板。
+      // 现在只在管理器**真的**进入 loading 时才弹，进入 ready/idle 即刻收（不再等整轮回答结束）。
+      onChatState: (ev) => {
+        /* S4-D：状态一有迁移就作废能力缓存。
+           为什么不能只靠 2s TTL：`probeManagedChatCapability()` 调 `getLocalCapability()`
+           时**不传 alias**，于是缓存 key 只到端口 —— 而模型切换/重载**恰好发生在同一个端口上**。
+           不清缓存，切换后最多 2s 内会拿**上一个模型**的 n_ctx 去回答，
+           正是 A-1018 ③ 的形状（界面按旧模型显示窗口）。
+           失效点放在这里而不是各个调用方：状态广播是"这个端口上发生了什么"的唯一真值来源。
+           ⚠️ 必须在下面的窗口判空**之前** —— 无窗口时同样要作废。 */
+        clearLocalCapabilityCache();
+        const w = mainWindow;
+        if (!w || w.isDestroyed()) { return; }
+        if (ev.state === "loading") {
+          w.webContents.send("slime:model:loading", {
+            loading: true,
+            message: `正在加载本地模型「${ev.modelName || basename(ev.modelPath)}」…首次加载可能需要数十秒`,
+            key: lastChatCancelKey ?? undefined,
+          });
+          console.info(`[gui:main] 本地模型开始加载: ${ev.modelName} (${ev.modelPath})`);
+        } else {
+          w.webContents.send("slime:model:loading", { loading: false });
+          if (ev.state === "ready") { console.info(`[gui:main] 本地模型已就绪: ${ev.modelName}`); }
+          else if (ev.error) { console.warn(`[gui:main] 本地模型未就绪(${ev.state}): ${ev.modelName} — ${ev.error}`); }
+        }
+      },
     });
     setModelServer(mgr);
     void mgr.startup(); // 后台预加载常驻 BGE 嵌入实例（不阻塞主窗口）

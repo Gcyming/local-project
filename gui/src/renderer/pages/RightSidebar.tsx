@@ -10,15 +10,24 @@ import {
   GitIcon, PlusIcon, DashboardIcon,
   CheckboxIcon, CirclePlusIcon, LoadingCircleIcon,
   TerminalIcon, FolderIcon, ArrowLeftIcon, ArrowRightIcon2,
-  CloseIcon, RefreshIcon, CheckIcon, RepeatIcon, PaperclipIcon, EditIcon,
+  CloseIcon, RefreshIcon, CheckIcon, RepeatIcon, PaperclipIcon, EditIcon, WarningIcon,
+  DoneIcon, type IconProps,
 } from "../components/Icon.js";
 import { alertAsync, confirmAsync } from "../dialog.js";
 import { SIDEBAR_OPEN_EVENT, requestSidebarOpen, type SidebarOpenPayload } from "./Markdown.js";
 import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
 import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
+import { failTitle, failHint, failCodeName } from "./browserErrors.js";
 import BrainstormPanel from "./BrainstormPanel.js";
-import { onCtxUpdate, readLiveMonitor, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
+import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT, resolveToolLabel } from "./ChatPanel.js";
+// A-990：在途快照的读写已从 ChatPanel 拆到 liveMonitor.ts —— 纯内存取样不该依赖整个组件
+import { readLiveMonitor } from "./liveMonitor.js";
 import { setBrowserHost, registerWebview, unregisterWebview, executeBrowserCommand, isWebNavUrl, normalizeBrowserUrl } from "./browserBridge.js";
+// A-990：会话总账的币种与金额格式统一取共享层 —— 右栏不允许再出现硬编码汇率
+// （旧实现是 `costUsd * 7.25`，与共享层 USD_CNY_RATE=7.2 不一致 → 同一笔账两处显示不同数）
+import { pricingDisplayCurrency, formatUsdAs, type PriceCurrency } from "../../../../shared/gen/model-capabilities.js";
+// A-990-D：主页实时监测的消费币种（「通用」设置里可手选；`auto` = 沿用上面的推断）
+import { readLedgerCurrencyPref, resolveLedgerCurrency, LEDGER_CURRENCY_EVENT, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
 
 type TabType = "tasks" | "terminal" | "browser" | "git" | "file";
 
@@ -107,6 +116,9 @@ interface TaskEvent {
   time: string;
   kind: "tool" | "thinking" | "progress" | "done" | "error";
   label: string;
+  /** A-1018：工具事件携带**原始工具名**（如 web_search / browser_wait）——行首据此渲染
+   *  该工具自己的图标，而不是「工具」两个字。同时让 label 用人类可读名，不再裸奔工具名。 */
+  tool?: string;
 }
 
 /* ── webview 标签 ── */
@@ -172,6 +184,9 @@ export default function RightSidebar(props: {
   /** A-954：成员入群模型（memberId → model 串）与组长入群模型 */
   memberModels?: Record<string, string>;
   leaderModel?: string;
+  /** A-1011：群聊成员/组长思考推理强度覆盖（缺省 = 群聊默认 high；仅影响该群聊，不写 Agent 全局） */
+  memberEfforts?: Record<string, string>;
+  leaderEffort?: string;
 }): JSX.Element {
   // 群聊下初始 tabs 为空（任务页不默认建）；普通会话初始仍默认「任务」
   const [tabs, setTabs] = React.useState<TabInstance[]>(() =>
@@ -680,42 +695,46 @@ export default function RightSidebar(props: {
             收起入口统一由标题栏那一个承担。 */}
       </div>
 
-      {menuOpen && (
-        <div
-          ref={menuRef}
-          style={{
-            position: "absolute", zIndex: 9999,
-            // A-980-R24：跟随「新建」加号按钮定位（此前无 top/left → 永远贴在侧栏最左端）
-            top: menuPos?.top ?? 34,
-            left: menuPos?.left ?? 6,
-            background: "var(--dropdown-bg, #252537)",
-            border: "1px solid var(--border)", borderRadius: 6, padding: 4,
-            minWidth: 140, boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {TAB_TYPE_META.map((m) => {
-            const MIcon = m.icon;
-            return (
-              <button
-                key={m.type}
-                onClick={(e) => { e.stopPropagation(); addTab(m.type); }}
-                style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  width: "100%", padding: "6px 10px",
-                  background: "transparent", border: "none", borderRadius: 4,
-                  color: "var(--text-primary)", cursor: "pointer", fontSize: 13, textAlign: "left",
-                }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--hover-bg, rgba(255,255,255,0.08))"; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
-              >
-                <MIcon size={15} />
-                <span>{m.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {/* A-1015b：菜单浮层加进出场（常驻挂载 + .pop.is-open）。原先是 `{menuOpen && …}`——
+          弹出是瞬间出现、关闭是瞬间消失。绝对定位因此不算"折叠"，用位移 + 淡入淡出，
+          不做高度插值（top/left 是按按钮实时测的，改高度没意义）。
+          ⚠️ 常驻挂载后必须保证收起态 pointer-events:none（在 .pop 里）——
+          否则这个不可见的浮层会盖住下面的按钮，"点加号没反应"。 */}
+      <div
+        ref={menuRef}
+        className={`pop${menuOpen ? " is-open" : ""}`}
+        style={{
+          position: "absolute", zIndex: 9999,
+          // A-980-R24：跟随「新建」加号按钮定位（此前无 top/left → 永远贴在侧栏最左端）
+          top: menuPos?.top ?? 34,
+          left: menuPos?.left ?? 6,
+          background: "var(--dropdown-bg, #252537)",
+          border: "1px solid var(--border)", borderRadius: 6, padding: 4,
+          minWidth: 140, boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {TAB_TYPE_META.map((m) => {
+          const MIcon = m.icon;
+          return (
+            <button
+              key={m.type}
+              onClick={(e) => { e.stopPropagation(); addTab(m.type); }}
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                width: "100%", padding: "6px 10px",
+                background: "transparent", border: "none", borderRadius: 4,
+                color: "var(--text-primary)", cursor: "pointer", fontSize: 13, textAlign: "left",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--hover-bg, rgba(255,255,255,0.08))"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+            >
+              <MIcon size={15} />
+              <span>{m.label}</span>
+            </button>
+          );
+        })}
+      </div>
 
       {/* ── 内容区 ── */}
       <div className="right-body" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
@@ -725,6 +744,8 @@ export default function RightSidebar(props: {
             memberIds={props.memberIds ?? []}
             memberModels={props.memberModels ?? {}}
             leaderModel={props.leaderModel}
+            memberEfforts={props.memberEfforts ?? {}}
+            leaderEffort={props.leaderEffort}
             leaderId={props.agentId ?? ""}
             providerModels={props.providerModels}
           />
@@ -858,6 +879,10 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
   const [detecting, setDetecting] = React.useState(false);
   const [notExists, setNotExists] = React.useState(false);
   const [moreOpen, setMoreOpen] = React.useState(false);
+  /** A-1015b：分支下拉从原生 <select> 换成自绘 button + .pop 列表。
+      原生 select 的选项面板由**操作系统绘制**（不在 DOM 里），无法参与任何 CSS 过渡 →
+      展开/收起必然是"啪"地出现。自绘列表才能跟全仓其他浮层同一节拍。 */
+  const [branchOpen, setBranchOpen] = React.useState(false);
   const [modal, setModal] = React.useState<null | "clone" | "manual">(null);
   const [manualInput, setManualInput] = React.useState("");
   /** A-968：文件变更 diff（红绿标注）——点击变更文件时加载 */
@@ -1038,12 +1063,19 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
     }
   }, [api, browseRoot]);
 
+  /** A-1015b：目录展开改「先取回子项、再开」。
+      两个毛病一起修：
+      ① 原写在 setState updater 里触发 loadDir（副作用进 updater）—— strict 模式下 updater
+         会被调用两次 → 重复请求；
+      ② 先开、后加载：.collapse 的插值目标（子项容器高度）此刻还是 0，
+         观感是"点了没反应"，等数据回来才由 0 突现。先 await 再置 true，动画才有东西可插。 */
   const toggleDir = (rel: string): void => {
-    setFileExpanded((prev) => {
-      const next = { ...prev, [rel]: !(prev[rel] ?? false) };
-      if (next[rel] && !fileCache[rel]) { void loadDir(rel); }
-      return next;
-    });
+    if (fileExpanded[rel] ?? false) { setFileExpanded((prev) => ({ ...prev, [rel]: false })); return; }
+    if (fileCache[rel]) { setFileExpanded((prev) => ({ ...prev, [rel]: true })); return; }
+    void (async () => {
+      await loadDir(rel);
+      setFileExpanded((prev) => ({ ...prev, [rel]: true }));
+    })();
   };
 
   const handleFileClick = (e: React.MouseEvent, rel: string, name: string, isDir: boolean): void => {
@@ -1221,6 +1253,19 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
     return () => document.removeEventListener("mousedown", handler);
   }, [moreOpen]);
 
+  const branchWrapRef = React.useRef<HTMLSpanElement | null>(null);
+  React.useEffect(() => {
+    if (!branchOpen) { return; }
+    const onDown = (e: MouseEvent): void => {
+      if (!branchWrapRef.current) { return; }
+      if (!branchWrapRef.current.contains(e.target as Node)) { setBranchOpen(false); }
+    };
+    const onKey = (e: KeyboardEvent): void => { if (e.key === "Escape") { setBranchOpen(false); } };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [branchOpen]);
+
   /* ─ 文件树渲染 ── */
   const getBreadcrumb = (rel: string): string[] => {
     if (!rel) return ["项目根"];
@@ -1250,41 +1295,46 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
     );
   };
 
-  const renderTreeRow = (entry: WorkspaceEntry, depth: number): JSX.Element[] => {
+  /** A-1015b：目录展开改成「目录行 + .collapse 容器」两层结构。
+      原先是把子项数组铺平回同一个列表（`...(isOpen ? renderDirChildren(…) : [])`）——
+      展开/收起直接增删 DOM 节点，结构上没有可插值的容器，所以从来没有动画。
+      现在每个目录自成一个 wrapper：第一行是目录行，紧跟一个 .collapse 容器，
+      容器唯一子元素是装子项的 div（.collapse 是 display:grid，直接子元素就是那一行 grid，
+      因此子项必须先包一层，不能直接摊进来）。
+      ⚠️ 常驻挂载 → 昂贵内容要 memo；这里子项列表是轻量 DOM，且深度受限，不做 memo。 */
+  const renderTreeRow = (entry: WorkspaceEntry, depth: number): JSX.Element => {
     const pad = 8 + depth * 14;
     if (entry.isDir) {
       const isOpen = fileExpanded[entry.rel] ?? false;
-      return [
-        <div key={entry.rel} className="tree-row file-tree-row" style={{ paddingLeft: pad, cursor: "pointer" }}
-          title={entry.rel || "/"} onClick={(e) => handleFileClick(e, entry.rel, entry.name, true)}
-          onContextMenu={(e) => handleFileContextMenu(e, entry.rel, entry.name, true, 0)}>
-          <ChevronIcon size={11} rotate={isOpen ? 90 : 0} />
-          <FolderIcon size={13} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-          <span className="tree-name tree-dir">{entry.name}</span>
-          {isOpen && fileLoading === entry.rel && <span className="tree-hint" style={{ fontSize: 10, marginLeft: 4 }}>加载中…</span>}
-        </div>,
-        ...(isOpen ? renderDirChildren(entry.rel, depth + 1) : []),
-      ];
-    } else {
-      return [
-        <div key={entry.rel}
-          className={`tree-row tree-file ${selectedFile === entry.rel ? "file-tree-row-selected" : ""}`}
-          style={{ paddingLeft: pad + 14, cursor: "pointer" }}
-          title={`${entry.rel}（${fmtSize(entry.size)}）`}
-          onClick={(e) => handleFileClick(e, entry.rel, entry.name, false)}
-          onContextMenu={(e) => handleFileContextMenu(e, entry.rel, entry.name, false, entry.size)}>
-          <span className="tree-name">{entry.name}</span>
-          <span className="tree-size">{fmtSize(entry.size)}</span>
-        </div>,
-      ];
+      return (
+        <div key={entry.rel}>
+          <div className="tree-row file-tree-row" style={{ paddingLeft: pad, cursor: "pointer" }}
+            title={entry.rel || "/"} onClick={(e) => handleFileClick(e, entry.rel, entry.name, true)}
+            onContextMenu={(e) => handleFileContextMenu(e, entry.rel, entry.name, true, 0)}>
+            <ChevronIcon size={11} rotate={isOpen ? 90 : 0} />
+            <FolderIcon size={13} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
+            <span className="tree-name tree-dir">{entry.name}</span>
+            {fileLoading === entry.rel && <span className="tree-hint" style={{ fontSize: 10, marginLeft: 4 }}>加载中…</span>}
+          </div>
+          <div className={`collapse${isOpen ? " is-open" : ""}`}>
+            <div>
+              {(fileCache[entry.rel] ?? []).map((e) => renderTreeRow(e, depth + 1))}
+            </div>
+          </div>
+        </div>
+      );
     }
-  };
-
-  const renderDirChildren = (rel: string, depth: number): JSX.Element[] => {
-    const entries = fileCache[rel] ?? [];
-    const result: JSX.Element[] = [];
-    for (const e of entries) { result.push(...renderTreeRow(e, depth)); }
-    return result;
+    return (
+      <div key={entry.rel}
+        className={`tree-row tree-file ${selectedFile === entry.rel ? "file-tree-row-selected" : ""}`}
+        style={{ paddingLeft: pad + 14, cursor: "pointer" }}
+        title={`${entry.rel}（${fmtSize(entry.size)}）`}
+        onClick={(e) => handleFileClick(e, entry.rel, entry.name, false)}
+        onContextMenu={(e) => handleFileContextMenu(e, entry.rel, entry.name, false, entry.size)}>
+        <span className="tree-name">{entry.name}</span>
+        <span className="tree-size">{fmtSize(entry.size)}</span>
+      </div>
+    );
   };
 
   return (
@@ -1355,16 +1405,19 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
           {initialized && (
             <button className="right-mini-btn" title="刷新" onClick={() => { if (repoPath) { void loadGitInfo(repoPath); } }} style={{ marginRight: 4 }}><RefreshIcon size={12} /></button>
           )}
-          <button className="right-mini-btn" title="仓库菜单" onClick={() => setMoreOpen((v) => !v)} style={{ fontWeight: 700 }}><ChevronIcon size={12} rotate={90} /></button>
-          {moreOpen && (
-            <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 30, minWidth: 230, background: "var(--panel-bg, #1c2128)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 10px 24px rgba(0,0,0,0.35)", padding: 4, fontSize: 12 }}>
-              <MenuItem label="切回工作目录" disabled={!hasWorkspace || loading} hint="（自动关联）" onClick={() => props.workspace && void bindWorkspace(props.workspace)} />
-              <MenuItem label="手动指定路径…" disabled={loading} hint="（Ctrl+V 粘贴）" onClick={() => { setMoreOpen(false); setModal("manual"); setManualInput(""); }} />
-              <MenuItem label="克隆远程仓库…" disabled={loading} onClick={() => { setMoreOpen(false); setModal("clone"); setCloneUrl(""); }} />
-              {repoPath && <MenuItem label="在资源管理器中打开" disabled={!repoPath} onClick={() => { setMoreOpen(false); const shell = (window as unknown as { slimeAPI?: { os?: { openPath?: (p: string) => Promise<unknown> } } }).slimeAPI?.os; if (shell?.openPath) { void shell.openPath(repoPath); } }} />}
-              {initialized && repoPath && <MenuItem label="切换为其他仓库…" disabled={loading} onClick={() => { setMoreOpen(false); setModal("manual"); setManualInput(repoPath); }} />}
-            </div>
-          )}
+          {/* A-1015b：箭头加开合反馈（90°=朝下 表示"有下拉"，270°=朝上 表示"已展开"） */}
+          <button className="right-mini-btn" title="仓库菜单" onClick={() => setMoreOpen((v) => !v)} style={{ fontWeight: 700 }}><ChevronIcon size={12} rotate={moreOpen ? 270 : 90} /></button>
+          {/* A-1015b：菜单浮层常驻 + .pop 进出场（原先 `{moreOpen && …}` 弹/收都是瞬跳）。
+              绝对定位不做高度插值（top 是按按钮实时测的，改高度没意义），用位移 + 淡入淡出。
+              `.pop` 自带 pointer-events:none（收起态）—— 常驻浮层不设它就会盖住按钮本身。
+              外部点击关闭的 effect 只在 moreOpen=true 时注册，所以浮层常驻不会带来误关。 */}
+          <div className={`pop${moreOpen ? " is-open" : ""}`} style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 30, minWidth: 230, background: "var(--panel-bg, #1c2128)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 10px 24px rgba(0,0,0,0.35)", padding: 4, fontSize: 12 }}>
+            <MenuItem label="切回工作目录" disabled={!hasWorkspace || loading} hint="（自动关联）" onClick={() => props.workspace && void bindWorkspace(props.workspace)} />
+            <MenuItem label="手动指定路径…" disabled={loading} hint="（Ctrl+V 粘贴）" onClick={() => { setMoreOpen(false); setModal("manual"); setManualInput(""); }} />
+            <MenuItem label="克隆远程仓库…" disabled={loading} onClick={() => { setMoreOpen(false); setModal("clone"); setCloneUrl(""); }} />
+            {repoPath && <MenuItem label="在资源管理器中打开" disabled={!repoPath} onClick={() => { setMoreOpen(false); const shell = (window as unknown as { slimeAPI?: { os?: { openPath?: (p: string) => Promise<unknown> } } }).slimeAPI?.os; if (shell?.openPath) { void shell.openPath(repoPath); } }} />}
+            {initialized && repoPath && <MenuItem label="切换为其他仓库…" disabled={loading} onClick={() => { setMoreOpen(false); setModal("manual"); setManualInput(repoPath); }} />}
+          </div>
         </div>
       </div>
 
@@ -1401,7 +1454,7 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
             )}
             {browseRoot && (
               <div>
-                {(fileCache[""] ?? []).map((e) => renderTreeRow(e, 0)).flat()}
+                {(fileCache[""] ?? []).map((e) => renderTreeRow(e, 0))}
               </div>
             )}
           </div>
@@ -1463,9 +1516,32 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                     </span>
                   )}
                   {branches.length > 0 && (
-                    <select value={branch} onChange={(e) => switchBranch(e.target.value)} disabled={loading} style={{ marginLeft: "auto", maxWidth: 110, padding: "2px 6px", background: "var(--input-bg, #161b22)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-primary)", fontSize: 11 }} title="切换分支">
-                      {branches.map((b) => <option key={b} value={b}>{b}</option>)}
-                    </select>
+                    <span ref={branchWrapRef} style={{ position: "relative", marginLeft: "auto", display: "inline-flex" }}>
+                      {/* A-1015b：自绘分支下拉（原 <select> 的选项面板由系统绘制，任何 CSS 过渡都进不去） */}
+                      <button
+                        onClick={() => setBranchOpen((v) => !v)}
+                        disabled={loading}
+                        title={`切换分支（共 ${branches.length} 个）`}
+                        style={{ maxWidth: 118, padding: "2px 6px", background: "var(--input-bg, #161b22)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-primary)", fontSize: 11, cursor: loading ? "not-allowed" : "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 84 }}>{branch}</span>
+                        <ChevronIcon size={10} rotate={branchOpen ? 270 : 90} style={{ flexShrink: 0 }} />
+                      </button>
+                      <div
+                        className={`pop${branchOpen ? " is-open" : ""}`}
+                        style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 40, minWidth: 168, maxHeight: 240, overflowY: "auto", background: "var(--dropdown-bg, #252537)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 10px 24px rgba(0,0,0,0.35)", padding: 4, fontSize: 12 }}
+                      >
+                        {branches.map((b) => (
+                          <div key={b} className="ctx-menu-item"
+                            onClick={() => { setBranchOpen(false); if (b !== branch) { switchBranch(b); } }}
+                            title={b}
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 4, cursor: "pointer", color: b === branch ? "var(--accent, #58a6ff)" : "var(--text-secondary)" }}>
+                            <span style={{ width: 10, flexShrink: 0 }}>{b === branch ? "✓" : ""}</span>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </span>
                   )}
                 </div>
 
@@ -1812,8 +1888,15 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   const [diffHead, setDiffHead] = React.useState<string | null>(null);
   const [diffLoading, setDiffLoading] = React.useState(false);
   const [diffError, setDiffError] = React.useState("");
+  /**
+   * A-1029：diff 失败的**种类**。区分"不是 Git 仓库"（信息性——这个目录本来就没有历史版本）
+   * 与真正的读取错误（红色告警）。此前两者共用一句 `diffError`，用户看到一屏红字
+   * `fatal: not a git repository`，既不知道原因也不知道下一步——而其实那个目录
+   * 压根不该走 Git 对比，本次改动的 before/after 正躺在聊天区的工具卡里。
+   */
+  const [diffErrorCode, setDiffErrorCode] = React.useState<"" | "not-repo" | "no-head" | "not-found">("");
   // A-918++：切换查看的文件时重置 diff（避免把上一个文件的 HEAD 版本误贴到新文件）
-  React.useEffect(() => { setDiffMode(false); setDiffHead(null); setDiffError(""); }, [preview?.rel]);
+  React.useEffect(() => { setDiffMode(false); setDiffHead(null); setDiffError(""); setDiffErrorCode(""); }, [preview?.rel]);
   /** 左右分栏：左侧文件列表宽度占比（%） */
   const [split, setSplit] = React.useState(40);
   const splitRef = React.useRef<HTMLDivElement>(null);
@@ -2097,10 +2180,18 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
         return <div style={{ flex: 1, padding: 16, color: "var(--text-dim)", fontSize: 12 }}>读取 Git HEAD 版本…</div>;
       }
       if (diffHead === null) {
+        /* A-1029：按**失败种类**分色。
+           "不是 Git 仓库"是**信息**而不是错误——这个目录本来就没有历史版本，用户没做错什么，
+           真正有用的信息是"去哪看这次改动"。全屏红字 `fatal: not a git repository` 只会让人
+           以为功能坏了。剩下的（读取失败、文件不在 HEAD）才保留红色告警。 */
+        const infoOnly = diffErrorCode === "not-repo" || diffErrorCode === "no-head";
         return (
-          <div style={{ flex: 1, padding: 16, fontSize: 12, color: diffError ? "var(--danger)" : "var(--text-dim)" }}>
-            {diffError || "（此文件未纳入 Git / HEAD 无此版本）"}
-            <div style={{ marginTop: 8 }}>
+          <div style={{ flex: 1, padding: 16, fontSize: 12, color: infoOnly ? "var(--text-muted)" : diffError ? "var(--danger)" : "var(--text-dim)", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+              {infoOnly && <WarningIcon size={13} style={{ flexShrink: 0, marginTop: 2, color: "#fbbf24" }} />}
+              <span style={{ flex: 1 }}>{diffError || "（此文件未纳入 Git / HEAD 无此版本）"}</span>
+            </div>
+            <div>
               <button className="btn" style={{ padding: "4px 12px", fontSize: 12 }} onClick={() => void toggleDiff()}>返回原文件</button>
             </div>
           </div>
@@ -2143,18 +2234,24 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   const toggleDiff = async (): Promise<void> => {
     if (!preview || preview.mime !== "text") { return; }
     if (diffMode) { setDiffMode(false); return; }
-    if (!workspaceRoot) { setDiffMode(true); setDiffError("未设置工作目录，无法对比 Git HEAD"); setDiffHead(null); return; }
-    setDiffMode(true); setDiffLoading(true); setDiffError(""); setDiffHead(null);
+    if (!workspaceRoot) { setDiffMode(true); setDiffError("未设置工作目录，无法对比 Git HEAD"); setDiffErrorCode("not-repo"); setDiffHead(null); return; }
+    setDiffMode(true); setDiffLoading(true); setDiffError(""); setDiffErrorCode(""); setDiffHead(null);
     try {
       const rel = preview.rel ?? "";
-      if (!rel) { setDiffError("文件不在工作区内，无法对比 Git"); }
+      if (!rel) { setDiffError("文件不在工作区内，无法对比 Git"); setDiffErrorCode("not-found"); }
       else {
         const res = await api?.git?.showFile?.(rel, workspaceRoot);
         if (res?.ok) { setDiffHead(res.content ?? ""); }
-        else { setDiffError(res?.error ?? "git show 失败"); }
+        else {
+          // A-1029：把主进程给出的**失败种类**原样接下（渲染层不再自己猜文案），
+          // 非仓库/无 HEAD 走信息性提示，其余才当错误。
+          setDiffError(res?.error ?? "读取 Git 版本失败");
+          setDiffErrorCode((res?.code as typeof diffErrorCode) ?? "");
+        }
       }
     } catch (e) {
       setDiffError(`对比失败：${e instanceof Error ? e.message : String(e)}`);
+      setDiffErrorCode("");
     } finally {
       setDiffLoading(false);
     }
@@ -2263,6 +2360,17 @@ function fmtSize(n: number): string {
   reasoningTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  /**
+   * A-990「以模型所属地决定总账币种」：累计成本里**来自人民币归属地模型**的那部分
+   * （与 `costUsd` 同一记账单位，都是 USD —— 只是按成本来源模型归属地做了归集）。
+   *
+   * 为什么需要它：右栏「会话费用」原先硬编码 `costUsd * 7.25`（且 7.25 与共享层的
+   * `USD_CNY_RATE=7.2` 不一致，同一笔账两处显示不同数）。现在改为：
+   *   - 币种由**本会话成本主要来自哪个归属地的模型**决定（见 `usageCurrency`）；
+   *   - 金额经共享层唯一折算点 `convertFromUsd` 换算，格式由 `formatMoney` 统一
+   *     （不再 `toFixed(4)` 印出 `¥12.3000` 这种长尾 —— 用户原话"看着不舒服"）。
+   */
+  costUsdFromCn: number;
   /** A-974-R6：推理 token 含**估算成分**（上游 usage 从不回传 reasoning_tokens 时，用实际收到的
    *  思考文本按 ≈4 字符/token 折算并明示为估算，避免该行永远显示 0 造成"侦测不到"的误解）。 */
   reasoningEstimated?: boolean;
@@ -2271,9 +2379,15 @@ function fmtSize(n: number): string {
 interface ModelPriceInfo {
   price_in_usd?: number;
   price_out_usd?: number;
+  /**
+   * A-990-B：用户在「定价」面板为该模型手选的计价币种。
+   * 右栏的总账币种**优先看它**（`pricingDisplayCurrency`：用户选择 > 归属地推断）——
+   * 否则会出现"面板里我选了 ¥，右栏却按 $"的分裂。
+   */
+  price_currency?: PriceCurrency;
 }
 
-const EMPTY_USAGE: AccumUsage = { requests: 0, elapsedMs: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, costUsd: 0 };
+const EMPTY_USAGE: AccumUsage = { requests: 0, elapsedMs: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, costUsd: 0, costUsdFromCn: 0 };
 
 export type TaskStatus = "pending" | "in_progress" | "completed";
 
@@ -2285,6 +2399,20 @@ export interface TodoItem {
   blocks?: string[];
   /** A-980-R27：完成时刻（ISO）。由 todo_write 落盘时打戳，这里只读用于展示"何时完成" */
   completedAt?: string;
+}
+
+/**
+ * A-987：主进程回传/推送的待办 → 渲染层 `TodoItem`（映射只有这一处，别在调用点各写一遍）。
+ *
+ * `id` 必须有兜底：它是渲染 key，为空会让 React 复用错行（表现为勾了 A 行亮 B 行）。
+ */
+function toTodoItems(raw: Array<{ id?: string; content?: string; status?: string; completedAt?: string }>): TodoItem[] {
+  return raw.map((t) => ({
+    id: t.id ?? `auto-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    content: String(t.content ?? ""),
+    status: (t.status as TaskStatus) ?? "pending",
+    completedAt: t.completedAt,
+  }));
 }
 
 /**
@@ -2447,9 +2575,15 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
   // A-918++：流式输出监测——仅流式时显示"会话指标"，平时隐藏（订阅 chat onChunk/onDone/onError）
   const [isStreaming, setIsStreaming] = React.useState(false);
   React.useEffect(() => {
-    const off1 = api.chat?.onChunk?.(() => setIsStreaming(true));
-    const off2 = api.chat?.onDone?.(() => setIsStreaming(false));
-    const off3 = api.chat?.onError?.(() => setIsStreaming(false));
+    /* ⚠️ `api` 自身必须带可选链：preload 未就绪 / 沙箱未注入时 `slimeAPI` 是 undefined，
+       此前只在第二层（chat）带了可选链，会在读第一层属性时当场抛
+       "Cannot read properties of undefined (reading 'chat')"
+       —— 这个异常发生在**渲染阶段**，会被 ErrorBoundary 拦下并替换整棵组件树
+       （用户看到的是"界面渲染出错"，而不是某个按钮失灵）。降级为"没有流式指标"是可接受的，
+       整页白屏不可接受。 */
+    const off1 = api?.chat?.onChunk?.(() => setIsStreaming(true));
+    const off2 = api?.chat?.onDone?.(() => setIsStreaming(false));
+    const off3 = api?.chat?.onError?.(() => setIsStreaming(false));
     return () => { off1?.(); off2?.(); off3?.(); };
   }, [api]);
   /** A-975：自动压缩触发占比——阈值刻度线与「距压缩」余量同源；设置面板保存后立即跟随（不再写死 80%） */
@@ -2463,16 +2597,36 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       window.removeEventListener("storage", sync);
     };
   }, []);
+  /**
+   * A-990-D：主页实时监测的消费币种（「通用」设置里手选，`auto` = 沿用推断）。
+   * 订阅方式与上面的 `acRatio` 一致：本窗口事件 + `storage`（另一个窗口改了也要跟随）。
+   * 为什么必须订阅而不是渲染时现读：右栏只在数据变化时重渲，用户改完设置回到聊天页
+   * 可能很久不重渲 → 他会以为没生效，然后再改一遍。
+   */
+  const [ledgerPref, setLedgerPref] = React.useState<LedgerCurrencyPref>(() => readLedgerCurrencyPref());
+  React.useEffect(() => {
+    const sync = (): void => setLedgerPref(readLedgerCurrencyPref());
+    const onEvent = (e: Event): void => {
+      const d = (e as CustomEvent<LedgerCurrencyPref>).detail;
+      setLedgerPref(d === "USD" || d === "CNY" || d === "auto" ? d : readLedgerCurrencyPref());
+    };
+    window.addEventListener(LEDGER_CURRENCY_EVENT, onEvent);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(LEDGER_CURRENCY_EVENT, onEvent);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
   React.useEffect(() => {
     if (!active) { return; }
     let cancelled = false;
     const refreshModel = async (): Promise<void> => {
       try {
-        const list = await api.agents.list?.();
+        const list = await api?.agents?.list?.();
         if (cancelled || !list) { return; }
         const hit = (list as Array<{ id: string; name: string }>).find((a) => a.name === props.agentName) || (list as Array<{ id: string }>)[0];
         if (!hit) { return; }
-        const d = await api.agents.detail(hit.id) as { model_choice?: string } | null;
+        const d = await api?.agents?.detail?.(hit.id) as { model_choice?: string } | null;
         if (cancelled) { return; }
         if (d?.model_choice !== undefined) { setModelChoice(d.model_choice); }
       } catch { /* ignore */ }
@@ -2491,13 +2645,18 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     let cancelled = false;
     const refresh = async (): Promise<void> => {
       try {
-        const ps = await api.providers.list();
+        const ps = await api?.providers?.list?.();
         if (cancelled) { return; }
         const m = new Map<string, ModelPriceInfo>();
         for (const p of ps) {
           for (const mod of (p.models ?? [])) {
             if (mod.price_in_usd || mod.price_out_usd) {
-              m.set(mod.id, { price_in_usd: mod.price_in_usd, price_out_usd: mod.price_out_usd });
+              m.set(mod.id, {
+                price_in_usd: mod.price_in_usd,
+                price_out_usd: mod.price_out_usd,
+                // A-990-B：把用户手选的币种一起带过来，总账币种要用它
+                price_currency: mod.price_currency,
+              });
             }
           }
         }
@@ -2705,7 +2864,24 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       const p = loadPersisted();
       if (p) { setTodos(p.todos); setUsage(p.usage); } else { setTodos([]); setUsage(EMPTY_USAGE); }
       const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-      void api?.tasks?.loadTodos?.(props.sessionId).catch(() => {});
+      // A-987：**磁盘才是真源，localStorage 只是上次的镜像** —— 上面的 `loadPersisted()`
+      // 只配当"立即出画面"的草稿，随后必须被主进程读盘的结果覆盖掉。
+      // 此前这里写的是 `void api?.tasks?.loadTodos?.(...)`（返回值直接丢弃，指望广播回来纠正），
+      // 三个后果都实测过：
+      //   ① 用户点「清空」→ 主进程删盘 + 广播空列表；但只要渲染层这一轮恰好没收到广播，
+      //      localStorage 里那份旧清单就会在下一次切会话时**原样铺回面板**；
+      //   ② IPC 失败被 `.catch(() => {})` 吞掉 → 内存清了、盘子还在，切走再切回就"删了又回来"；
+      //   ③ 打开会话先闪一下旧清单再被广播纠正（肉眼可见的错帧）。
+      // 现在把返回值的**显式**取用补上，并带会话守卫：异步返回时若已切走/卸载，一律丢弃
+      // （否则会把上一个会话的清单写进当前面板 —— 竞态的经典形态）。
+      let alive = true;
+      void api?.tasks?.loadTodos?.(props.sessionId)
+        .then((r: { todos?: Array<{ id?: string; content?: string; status?: string; completedAt?: string }> } | undefined) => {
+          if (!alive || !r || !Array.isArray(r.todos)) { return; }
+          setTodos(toTodoItems(r.todos));
+        })
+        .catch(() => { /* 读盘失败保留草稿：下一次广播/切会话会再对齐 */ });
+      return () => { alive = false; };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.agentId, props.sessionId]);
     // 订阅主进程推送的任务列表（todo_write 工具写入后由主进程广播；按 sessionId 过滤）
@@ -2717,13 +2893,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
         // `if (props.sessionId && data.sessionId !== props.sessionId) return;`
         // —— props.sessionId 为空时整条守卫被跳过，任何会话（含空会话的孤儿文件）的推送都会被收下。
         if (!props.sessionId || !data.sessionId || data.sessionId !== props.sessionId) { return; }
-        const mapped: TodoItem[] = data.todos.map((t) => ({
-          id: t.id ?? `auto-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          content: t.content,
-          status: (t.status as TaskStatus) ?? "pending",
-          completedAt: t.completedAt,
-        }));
-        setTodos(mapped);
+        setTodos(toTodoItems(data.todos));
       });
       return () => { off(); };
     }, [props.sessionId]);
@@ -2850,10 +3020,10 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
   /** 分组标题只在**存在多个分组**时才显示：同状态一堆任务时，标题纯属占高（用户："该紧凑的不紧凑"）。 */
   const multiGroup = [todoGroups.active, todoGroups.pending, todoGroups.done].filter((g) => g.length > 0).length > 1;
 
-  const pushEvent = React.useCallback((kind: TaskEvent["kind"], label: string): void => {
+  const pushEvent = React.useCallback((kind: TaskEvent["kind"], label: string, tool?: string): void => {
     const now = new Date();
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-    setEvents((prev) => [{ id: ++idRef.current, time, kind, label }, ...prev].slice(0, 200));
+    setEvents((prev) => [{ id: ++idRef.current, time, kind, label, ...(tool ? { tool } : {}) }, ...prev].slice(0, 200));
   }, []);
 
   React.useEffect(() => {
@@ -2872,10 +3042,13 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
           else if (args.url && typeof args.url === "string") { detail = args.url; }
           else if (args.query && typeof args.query === "string") { detail = args.query; }
         } catch { /* args 不可解析 → 无细节 */ }
+        // A-1018：工具名走**唯一映射** resolveToolLabel（与思考历程的工具卡同源）→ 显示人类可读名，
+        // 不再是 `⟳ 调用工具 web_search` 这种裸工具名。detail 必须保留：下方「会话文件」tab
+        // 靠正则从 label 里抽扩展名文件，去掉它那个 tab 会恒空。
         const label = name.startsWith("delegate:")
-          ? ` 传唤子 Agent「${name.slice(9)}」`
-          : `⟳ 调用工具 ${name}${detail ? ` ${detail}` : ""}`;
-        pushEvent("tool", label);
+          ? `传唤子 Agent「${name.slice(9)}」`
+          : `${resolveToolLabel(name).label}${detail ? ` ${detail}` : ""}`;
+        pushEvent("tool", label, name);
       } else if (t === "reasoning") { setRunning(true); }
       else if (t === "progress") { pushEvent("progress", c.data?.progress ?? c.data?.content ?? "子任务进行中…"); }
       else if (t === "chunk") { setRunning(true); }
@@ -2884,7 +3057,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       // A-933 会话隔离：本面板只记账当前会话的流（用实时 ref，杜绝陈旧 props 误过滤）
       if (m.sessionId != null && m.sessionId !== sessionIdRef.current) { return; }
       setRunning(false);
-      pushEvent("done", m?.interrupted ? "⏹ 已中断" : "✓ 回复完成");
+      pushEvent("done", m?.interrupted ? "⏹ 已中断" : "回复完成");
       pricesRefreshRef.current?.(); // 本轮可能首次用到某模型 → 立即刷新定价（费用/命中率不留 30s 空窗）
       const t = m?.timings ?? {};
       const pt = typeof t.promptTokens === "number" ? t.promptTokens : 0;
@@ -2901,11 +3074,19 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       const markingEstimated = rtReal <= 0 && reasonEst > 0;
       // 费用计算：从模型缓存读取定价；无定价时 cost=0
       const cost = computeModelCost(m?.model ?? "", pt, ct, modelPricesRef.current);
+      // A-990：同时记录这笔费用来自哪个归属地的模型 —— 右栏总账从此按"钱主要花在哪边的模型"
+      // 选显示币种（用户指令：以模型所属地决定），不再无脑乘 7.25 假装成人民币。
+      // A-990-B：币种判定走 `pricingDisplayCurrency` —— **用户在定价面板手选的币种优先**，
+      // 没选过才回落到归属地推断。否则用户选了 ¥ 而右栏仍按 $ 显示，又是一处"两处不一样"。
+      const modelForCost = m?.model ?? "";
+      const costCur = pricingDisplayCurrency(modelForCost, modelPricesRef.current.get(modelForCost)?.price_currency);
+      const costFromCn = costCur === "CNY" ? cost : 0;
       setUsage((prev) => ({
         requests: prev.requests + 1, elapsedMs: prev.elapsedMs + em,
         promptTokens: prev.promptTokens + pt, completionTokens: prev.completionTokens + ct,
         reasoningTokens: prev.reasoningTokens + rt, cacheReadTokens: prev.cacheReadTokens + cr,
         costUsd: prev.costUsd + cost,
+        costUsdFromCn: prev.costUsdFromCn + costFromCn,
         ...(prev.reasoningEstimated || markingEstimated ? { reasoningEstimated: true } : {}),
       }));
       resetLiveTurn(); // 本轮已结算进累计（含估算），清空在途值
@@ -2931,12 +3112,18 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     return () => { off1(); off2(); off3(); off4?.(); off5?.(); };
   }, [api, pushEvent, modelPricesRef]);
 
-  const badge = (k: TaskEvent["kind"]): { color: string; bg: string; text: string } => {
+  /**
+   * 活动记录行首徽标。
+   * `Icon` 存在时 → 渲染**图标**代替文字胶囊（`done` 用 `完成.svg` 转出来的 DoneIcon）。
+   */
+  const badge = (k: TaskEvent["kind"]): { color: string; bg: string; text: string; Icon?: (p: IconProps) => JSX.Element } => {
     switch (k) {
       case "tool": return { color: "var(--accent)", bg: "var(--accent-soft)", text: "工具" };
       case "thinking": return { color: "var(--accent-hover)", bg: "var(--accent-soft)", text: "思考" };
       case "progress": return { color: "var(--warning)", bg: "rgba(251,191,36,0.12)", text: "进度" };
-      case "done": return { color: "var(--success)", bg: "var(--success-soft)", text: "完成" };
+      // A-1021：`done` 不再显示文字「完成」——在整列图标/短词徽标里冒出一个绿色文字胶囊显得突兀
+      // （用户实测截图）。改用 `D:\下载\完成.svg` 转出来的 DoneIcon（绿底白勾）。
+      case "done": return { color: "var(--success)", bg: "var(--success-soft)", text: "完成", Icon: DoneIcon };
       case "error": return { color: "var(--danger)", bg: "var(--danger-soft)", text: "失败" };
     }
   };
@@ -3040,7 +3227,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
             <span>会话指标</span>
             {isStreaming && <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", animation: "thinkGlow 1.4s ease-in-out infinite", flexShrink: 0 }} />}
           </div>
-          <MetricsGrid usage={usage} live={{ reply: liveTurn.reply, reason: liveTurn.reason, elapsedMs: liveElapsed }} />
+          <MetricsGrid usage={usage} pref={ledgerPref} live={{ reply: liveTurn.reply, reason: liveTurn.reason, elapsedMs: liveElapsed }} />
           <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.5, display: "flex", alignItems: "center", gap: 5 }}>
             {isStreaming
               ? "流式中 · 指标随本轮输出实时刷新"
@@ -3088,21 +3275,26 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
               <div style={{ width: `${todoPct}%`, height: "100%", background: todoPct === 100 ? "var(--success)" : "var(--accent)", borderRadius: 999, transition: "width .3s ease, background-color .3s ease" }} />
             </div>
           )}
-          {!collapsedTodos && (
-            <div role="list" style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 220, overflowY: "auto", marginBottom: 5 }}>
-              {/* A-980-R28：会话未就绪只给一句中性提示，不渲染任何数据 */}
-              {!sessionReady && <div className="tree-hint" style={{ padding: "4px 0", fontSize: 11.5 }}>正在加载会话…</div>}
-              {sessionReady && todos.length === 0 && <div className="tree-hint" style={{ padding: "4px 0", fontSize: 11.5 }}>暂无任务 — Agent 规划后会自动显示，也可手动添加</div>}
-              {/* 分组顺序固定：进行中 → 待办 → 已完成（完成项沉底，见 index.css 注释里的 GOV.UK 研究发现）。
-                  分组标题**只在出现两种以上状态时**才显示：同状态一堆任务时标题纯属占高。 */}
-              {sessionReady && multiGroup && todoGroups.active.length > 0 && <TodoGroupLabel text="进行中" count={todoGroups.active.length} tone="accent" />}
-              {sessionReady && todoGroups.active.map(renderTodoRow)}
-              {sessionReady && multiGroup && todoGroups.pending.length > 0 && <TodoGroupLabel text="待办" count={todoGroups.pending.length} tone="muted" />}
-              {sessionReady && todoGroups.pending.map(renderTodoRow)}
-              {sessionReady && multiGroup && todoGroups.done.length > 0 && <TodoGroupLabel text="已完成" count={todoGroups.done.length} tone="success" />}
-              {sessionReady && todoGroups.done.map(renderTodoRow)}
+          {/* A-1015：常驻 + 高度插值。此前是 `{!collapsedTodos && …}`，收起瞬间卸载 → 生硬跳变。
+              ⚠️ 三层结构必需：.collapse(grid 容器) > 纯 div(grid 行, 负责 overflow 裁切) > 原内容。
+              role="list" 那一层自己还有 maxHeight:220 + overflowY:auto，与 grid 行的 overflow 不冲突。 */}
+          <div className={`collapse${collapsedTodos ? "" : " is-open"}`}>
+            <div>
+              <div role="list" style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 220, overflowY: "auto", marginBottom: 5 }}>
+                {/* A-980-R28：会话未就绪只给一句中性提示，不渲染任何数据 */}
+                {!sessionReady && <div className="tree-hint" style={{ padding: "4px 0", fontSize: 11.5 }}>正在加载会话…</div>}
+                {sessionReady && todos.length === 0 && <div className="tree-hint" style={{ padding: "4px 0", fontSize: 11.5 }}>暂无任务 — Agent 规划后会自动显示，也可手动添加</div>}
+                {/* 分组顺序固定：进行中 → 待办 → 已完成（完成项沉底，见 index.css 注释里的 GOV.UK 研究发现）。
+                    分组标题**只在出现两种以上状态时**才显示：同状态一堆任务时标题纯属占高。 */}
+                {sessionReady && multiGroup && todoGroups.active.length > 0 && <TodoGroupLabel text="进行中" count={todoGroups.active.length} tone="accent" />}
+                {sessionReady && todoGroups.active.map(renderTodoRow)}
+                {sessionReady && multiGroup && todoGroups.pending.length > 0 && <TodoGroupLabel text="待办" count={todoGroups.pending.length} tone="muted" />}
+                {sessionReady && todoGroups.pending.map(renderTodoRow)}
+                {sessionReady && multiGroup && todoGroups.done.length > 0 && <TodoGroupLabel text="已完成" count={todoGroups.done.length} tone="success" />}
+                {sessionReady && todoGroups.done.map(renderTodoRow)}
+              </div>
             </div>
-          )}
+          </div>
           <div style={{ display: "flex", gap: 4 }}>
             <input value={todoInput} disabled={!sessionReady} onChange={(e) => setTodoInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { addTodo(); } }}
@@ -3139,7 +3331,14 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
             detailOpen={detailOpen}
             onToggleDetail={() => setDetailOpen((v) => !v)}
           />
-          {detailOpen && <UsageBreakdown usage={usage} live={liveTurn} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />}
+          {/* A-1015：明细块从 `{detailOpen && …}` 改为**常驻 + 高度插值**。
+              此前展开明细会让这张卡**当场变高**（用户："卡片还会伸长，这不能在同一个地方控制"），
+              收起时又是瞬间塌陷。现在整块走 .collapse，卡片高度连续伸展/收缩。 */}
+          <div className={`collapse${detailOpen ? " is-open" : ""}`}>
+            <div>
+              <UsageBreakdown usage={usage} live={liveTurn} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />
+            </div>
+          </div>
         </div>
 
         {/* A-937：分隔线 + 活动记录 / 会话文件 并列 tab（横向收纳）
@@ -3160,10 +3359,25 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
                 {events.length === 0 && <div className="tree-hint">暂无活动 — Agent 开始工作后，工具调用 / 思考 / 进度会实时显示在这里</div>}
                 {events.map((ev) => {
                   const b = badge(ev.kind);
+                  /* A-1018/A-1028：行首符号槽位**只有一种**写法。
+                     工具事件 → 该工具自己的图标（与思考历程的工具卡同源映射）；
+                     终端状态（done）→ `b.Icon`。两者都走 `.task-badge .task-badge-icon`
+                     的同一尺寸/圆角/软底色槽位 —— 此前 `done` 走的是"透明底 + 13px + 不挂
+                     .task-badge"的旁路，于是同一列里它既更大、又自带一块实心绿底，与上下行
+                     的单色小图标不是一套语言（用户截图："改一下图标颜色风格，要求与上面符号一致"）。 */
+                  const RowIcon = (ev.tool ? resolveToolLabel(ev.tool).Icon : null) ?? b.Icon ?? null;
+                  const rowTitle = ev.tool ? resolveToolLabel(ev.tool).label : b.text;
                   return (
                     <div key={ev.id} className="task-row">
                       <span className="task-time">{ev.time}</span>
-                      <span className="task-badge" style={{ color: b.color, background: b.bg }}>{b.text}</span>
+                      {RowIcon ? (
+                        <span className="task-badge task-badge-icon" title={rowTitle}
+                          style={{ color: b.color, background: b.bg }}>
+                          <RowIcon size={11} />
+                        </span>
+                      ) : (
+                        <span className="task-badge" style={{ color: b.color, background: b.bg }}>{b.text}</span>
+                      )}
                       <span className="task-label" title={ev.label}>{ev.label}</span>
                     </div>
                   );
@@ -3300,7 +3514,9 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
       )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
         <button onClick={onToggleDetail} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", cursor: "pointer", padding: "1px 4px", fontSize: 10.5, color: "var(--text-secondary)" }} title={detailOpen ? "收起明细" : "展开 token 明细"}>
-          <span style={{ fontSize: 8, transform: detailOpen ? "rotate(90deg)" : "none", transition: "transform .2s", color: "var(--text-muted)" }}>▶</span>
+          {/* A-1015：字符箭头 ▶ 换成图标库 ChevronIcon（= chevron-right.svg 原样），
+              旋转节拍由组件自带（走全局 --collapse-dur），不再自写 transition .2s。 */}
+          <ChevronIcon size={10} rotate={detailOpen ? 90 : 0} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
           明细 {detailOpen ? "收起" : "展开"}
         </button>
         <span>{compressCount > 0 ? `距压缩 ${fmtK(compressCount)}` : "距压缩 已达阈值"}</span>
@@ -3309,11 +3525,13 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
   );
 }
 
-function MetricsGrid({ usage, live }: {
+function MetricsGrid({ usage, live, pref = "auto" }: {
   usage: AccumUsage;
   /** A-975：本轮在途量（正文/思考 token + 已耗时）——流式期间「运行时间 / 累计 tokens」也随之走字，
    *  不再整轮只在 done 跳一次（用户反馈"各项数值刷新慢"）。 */
   live?: { reply: number; reason: number; elapsedMs: number };
+  /** A-990-D：「通用」设置里手选的消费币种；`auto` = 沿用下面的成本占比推断 */
+  pref?: LedgerCurrencyPref;
 }): JSX.Element {
   const liveReply = live?.reply ?? 0;
   const liveReason = live?.reason ?? 0;
@@ -3322,11 +3540,25 @@ function MetricsGrid({ usage, live }: {
   // 分母用 promptTokens 本身：Anthropic/OpenAI 的 input_tokens 已包含 cache_read 部分，
   // 避免「promptTokens + cacheReadTokens」重复计入导致命中率低估。
   const cacheHit = usage.promptTokens > 0 ? (usage.cacheReadTokens / usage.promptTokens) * 100 : 0;
+  /*
+   * A-990：会话总账币种**由模型所属地决定**（用户指令），不用一个全局常量拍板。
+   *
+   * 规则：看这笔账的钱主要花在**哪个归属地**的模型上 —— 国内厂商的模型占多数就用 ¥ 显示，
+   * 否则用 $。为什么按成本占比而不是"最后一个模型"：一个会话中途换模型很常见，
+   * 按最后用过的那次会让总账币种在切模型时来回跳；按成本占比则稳定反映"这笔账主要付给谁"。
+   * 成本为 0 时该单元格显示"—"，不涉及币种。
+   *
+   * ⚠️ 这里**绝不**再出现硬编码汇率：旧实现是 `costUsd * 7.25`（还写成 toFixed(4)），
+   * 既与共享层 `USD_CNY_RATE`(7.2) 打架，又把 ¥12.30 印成 ¥12.3000。
+   * 现在折算走 `convertFromUsd`（唯一出处）、格式走 `formatMoney`（去尾零）。
+   */
+  const ledgerCurrency: PriceCurrency = resolveLedgerCurrency(pref,
+    usage.costUsd > 0 && usage.costUsdFromCn > usage.costUsd - usage.costUsdFromCn ? "CNY" : "USD");
   const items: Array<[string, string, boolean?]> = [
     ["平均命中", usage.requests === 0 && !inFlight ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
     ["运行时间", fmtMsSmart(usage.elapsedMs + liveElapsed)],
     ["累计 tokens", fmtK(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens + liveReply + liveReason)],
-    ["会话费用", usage.requests === 0 ? "—（未配置单价）" : usage.costUsd === 0 ? "—" : `¥${(usage.costUsd * 7.25).toFixed(4)}`],
+    ["会话费用", usage.requests === 0 ? "—（未配置单价）" : usage.costUsd === 0 ? "—" : formatUsdAs(usage.costUsd, ledgerCurrency)],
     ["请求数", String(usage.requests)],
     ["", inFlight ? "含本轮在途" : "—"],
   ];
@@ -3388,25 +3620,26 @@ function UsageBreakdown({ usage, live, detailOpen, onToggleDetail }: {
         </div>
       </div>
       <div onClick={onToggleDetail} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 11, color: "var(--text-muted)", userSelect: "none" }}>
-        <span style={{ display: "inline-block", transition: "transform .15s ease", transform: detailOpen ? "rotate(90deg)" : "rotate(0deg)", fontWeight: 700 }}>▶</span>
+        <ChevronIcon size={10} rotate={detailOpen ? 90 : 0} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
         <span style={{ fontWeight: 600 }}>明细</span>
       </div>
-      {detailOpen && (
-        <div style={{ marginTop: 6, borderRadius: 4, background: "rgba(139,148,158,0.06)", border: "1px solid var(--border)", padding: "8px 10px", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.65 }}>
-          <div style={{ display: "flex", justifyContent: "space-between" }}><span>提示词 Tokens（输入）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{prompt.toLocaleString()}</span></div>
-          <div title={liveReply > 0 ? `累计 ${usage.completionTokens.toLocaleString()} + 本轮在途 ≈${liveReply.toLocaleString()}` : undefined} style={{ display: "flex", justifyContent: "space-between" }}><span>回复 Tokens（输出）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reply.toLocaleString()}</span></div>
-          <div
-            title={[liveReason > 0 ? `累计 ${usage.reasoningTokens.toLocaleString()} + 本轮在途 ≈${liveReason.toLocaleString()}` : "",
-              usage.reasoningEstimated ? "上游 usage 未回传 reasoning_tokens，其中含按实收思考文本 ≈4 字符/token 折算的估算值（上游一旦回传真实值即以其为准）" : ""].filter(Boolean).join("；") || undefined}
-            style={{ display: "flex", justifyContent: "space-between" }}>
-            <span>推理 Tokens（思考）{usage.reasoningEstimated && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · 估算</span>}</span>
-            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reasoning.toLocaleString()}</span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between" }}><span>缓存读 Tokens（命中）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{cache.toLocaleString()}</span></div>
-          <div style={{ height: 1, background: "var(--border)", margin: "6px 0" }} />
-          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontWeight: 700, color: "var(--text-primary)" }}>合计</span><span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "var(--text-primary)" }}>{total.toLocaleString()}</span></div>
+      {/* A-1015：此处**去掉** detailOpen 门控。本组件只在 detailOpen=true 时被渲染
+          （外层 ContextWindowBar 那一层已由 .collapse 门控），所以原来的 `{detailOpen && …}`
+          在此恒为真；若保留，"点明细收起"时这段高度会瞬间归零、外层插值目标突变 → 动画跳。 */}
+      <div style={{ marginTop: 6, borderRadius: 4, background: "rgba(139,148,158,0.06)", border: "1px solid var(--border)", padding: "8px 10px", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.65 }}>
+        <div style={{ display: "flex", justifyContent: "space-between" }}><span>提示词 Tokens（输入）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{prompt.toLocaleString()}</span></div>
+        <div title={liveReply > 0 ? `累计 ${usage.completionTokens.toLocaleString()} + 本轮在途 ≈${liveReply.toLocaleString()}` : undefined} style={{ display: "flex", justifyContent: "space-between" }}><span>回复 Tokens（输出）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reply.toLocaleString()}</span></div>
+        <div
+          title={[liveReason > 0 ? `累计 ${usage.reasoningTokens.toLocaleString()} + 本轮在途 ≈${liveReason.toLocaleString()}` : "",
+            usage.reasoningEstimated ? "上游 usage 未回传 reasoning_tokens，其中含按实收思考文本 ≈4 字符/token 折算的估算值（上游一旦回传真实值即以其为准）" : ""].filter(Boolean).join("；") || undefined}
+          style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>推理 Tokens（思考）{usage.reasoningEstimated && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · 估算</span>}</span>
+          <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reasoning.toLocaleString()}</span>
         </div>
-      )}
+        <div style={{ display: "flex", justifyContent: "space-between" }}><span>缓存读 Tokens（命中）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{cache.toLocaleString()}</span></div>
+        <div style={{ height: 1, background: "var(--border)", margin: "6px 0" }} />
+        <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontWeight: 700, color: "var(--text-primary)" }}>合计</span><span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "var(--text-primary)" }}>{total.toLocaleString()}</span></div>
+      </div>
     </div>
   );
 }
@@ -3510,20 +3743,9 @@ function TerminalTab(props: { workspace: string }): JSX.Element {
 
 /* ═══════════════ 浏览器（独立实例） ═══════════════ */
 
-/** 加载失败错误码 → 可读文案（webview did-fail-load，避免"白屏无提示"） */
-function failTitle(code: number): string {
-  switch (code) {
-    case -102: return "连接被拒绝（服务未启动或端口未监听）";
-    case -105: return "域名无法解析";
-    case -106: return "连接被中断";
-    case -109: return "无法访问网络";
-    case -130: return "证书错误";
-    case -137: return "服务器无响应（超时）";
-    case -201: return "连接被重置";
-    case -7: return "超时";
-    default: return `失败（错误码 ${code}）`;
-  }
-}
+/* A-1018：错误码 → 可读标题/建议 的实现已移到 `./browserErrors.ts`（纯逻辑不许住 .tsx），
+   并把旧表里两个错项修正（-130 不在证书段、-201 实为 ERR_CERT_DATE_INVALID）。
+   全页错误页见下方 `BrowserTabInstance` 的 `.browser-error-page`。 */
 
 /* ── 站点"新建页跳转"（A-975-R3：**已撤掉注入脚本，回归纯原生**）────────────────────────────
  * 历史：这里曾注入一段脚本，把 `window.open` 整个覆盖成"永远 return null"，并在捕获阶段
@@ -3698,10 +3920,20 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
       // 新窗口/新标签页改由主进程 setWindowOpenHandler 统一接住派发，站点侧零侵入。
     };
     // A-980-R3：加载失败可见化（ERR_CONNECTION_REFUSED 等）——过滤 about:blank/-3(ABORTED 重定向)误报
-    const onFail = (e: { url?: string; errorCode?: number }): void => {
-      if (!e || !e.url || e.url === "about:blank" || e.errorCode === -3) { return; }
-      setFailInfo({ url: e.url, code: e.errorCode ?? 0 });
+    /* A-1021：**字段名修复**——原实现读 `e.url`，但 Electron 的 `DidFailLoadEvent` 只有
+     * `{ errorCode, errorDescription, validatedURL, isMainFrame }`（见 electron.d.ts 19838），
+     * **根本没有 `url` 字段**。于是 `!e.url` 对每一次真实失败都为真 → onFail 在第一道守卫就
+     * return，`setFailInfo` 从未被调用 → 错误页恒不显示（用户实测"网页无法加载时什么都不显示"）。
+     * 同理 `errorCode` 是有的，-3/ABORTED 过滤一直生效，只是永远走不到。
+     * 教训：手写的事件形状 `{ url?: string }` 看着合理、tsc 也不报错（结构类型 + 可选字段），
+     * 但它不是 Electron 的契约 → 必须用官方类型 `Electron.DidFailLoadEvent` 而不是自造接口。 */
+    const onFail = (e: Electron.DidFailLoadEvent): void => {
+      const url = e?.validatedURL ?? "";
+      // about:blank 占位导航、以及 -3(ERR_ABORTED，重定向/主动 abort) 属正常噪声，不上错误页
+      if (!url || url === "about:blank" || e?.errorCode === -3) { return; }
+      setFailInfo({ url, code: e?.errorCode ?? 0 });
       setLoading(false);
+      setCanBack(wv.canGoBack()); setCanFwd(wv.canGoForward());
     };
     // A-980-R2：自定义协议链接（bitbrowser://、weixin://、mailto: 等）**不再静默拦截**——
     // preventDefault 阻止 Chromium 自己处理（防系统弹「获取打开此链接的应用」），然后探测系统
@@ -3820,7 +4052,9 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%", background: "var(--bg, #fff)" }}>
       <div className="right-pane-head browser-bar" style={{ flexShrink: 0 }}>
         <button className="right-mini-btn" title="后退" disabled={!canBack} onClick={() => { wv?.goBack(); }}>‹</button>
-        <button className="right-mini-btn" title="前进" disabled={!canFwd} onClick={() => { wv?.goForward(); }}><ChevronIcon size={12} rotate={90} /></button>
+        {/* A-1015：ChevronIcon 基准方向是**右**（= chevron-right.svg 原样），"前进"应为 0°。
+            此前写 rotate={90} → 箭头朝下，方向语义错了（同排"后退"用的是字符 ‹ 朝左）。 */}
+        <button className="right-mini-btn" title="前进" disabled={!canFwd} onClick={() => { wv?.goForward(); }}><ChevronIcon size={12} rotate={0} /></button>
         <button className="right-mini-btn" title="刷新" disabled={!active} onClick={() => { wv?.reload(); }}><RefreshIcon size={12} /></button>
         <input className="term-input browser-url" value={inputUrl} placeholder="输入网址，回车访问" onChange={(e) => setInputUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { go(); } }} />
         <button className="right-mini-btn" title="访问" onClick={go}><ArrowRightIcon2 size={12} /></button>
@@ -3834,11 +4068,24 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
           </div>
         )}
         {loading && active && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--accent, #58a6ff)", zIndex: 10 }} />}
-        {/* A-980-R3：加载失败可见条（不白屏无反馈；重试=刷新当前页） */}
+        {/* A-1018：加载失败 → **整页错误页**（对标主流浏览器：原因 + 网址 + 错误标识 + 建议 + 重试）。
+            此前只有一条细红条贴在工具栏下方，下面仍是一整片白 —— 用户原话"打不开的都只会显示白屏，
+            不会像现在的浏览器一样弹出无法连接、连接失败等一系列的原因或者标识"。
+            定位/配色走 index.css 的 `.browser-error-page`（不在 JSX 写 inline position：
+            静态守卫 ⑬ 会把"条件渲染 + inline absolute"当成收起即卸载的残留浮层）。 */}
         {failInfo && (
-          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8, margin: "0 8px 6px", padding: "5px 10px", fontSize: 11, color: "var(--danger, #f85149)", background: "rgba(248,81,73,0.08)", border: "1px solid rgba(248,81,73,0.28)", borderRadius: 6 }}>
-            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={failInfo.url}>无法连接 {failInfo.url} —— {failTitle(failInfo.code)}</span>
-            <button style={{ flexShrink: 0, minWidth: 44, padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(248,81,73,0.35)", background: "transparent", color: "var(--danger, #f85149)", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => { setFailInfo(null); try { (webviewRef.current as unknown as Electron.WebviewTag | null)?.reload(); } catch { /* 忽略 */ } }}>重试</button>
+          <div className="browser-error-page">
+            <div className="browser-error-icon"><WarningIcon size={40} /></div>
+            <div className="browser-error-title">{failTitle(failInfo.code)}</div>
+            <div className="browser-error-url" title={failInfo.url}>{failInfo.url}</div>
+            <div className="browser-error-code">
+              {failCodeName(failInfo.code) ? `${failCodeName(failInfo.code)} · ` : ""}错误码 {failInfo.code}
+            </div>
+            <div className="browser-error-hint">{failHint(failInfo.code)}</div>
+            <div className="browser-error-actions">
+              <button className="btn primary" onClick={() => { setFailInfo(null); try { (webviewRef.current as unknown as Electron.WebviewTag | null)?.reload(); } catch { /* 忽略 */ } }}>重试</button>
+              <button className="btn" onClick={() => { void navigator.clipboard?.writeText(failInfo.url).catch(() => undefined); }}>复制网址</button>
+            </div>
           </div>
         )}
         {/* A-976：webview **常驻挂载**（空白页用 about:blank）——保证任何浏览器页都可被 Agent 操作，
@@ -3900,25 +4147,31 @@ function ChangeGroup(props: { title: string; files: string[]; glyph: string; col
         onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--hover-bg, rgba(255,255,255,0.05))"; }}
         onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
         title={props.collapsed ? "展开" : "折叠"}>
-        <span style={{ display: "inline-block", transition: "transform 0.15s", transform: props.collapsed ? "rotate(-90deg)" : "rotate(0deg)", fontSize: 10, opacity: 0.7 }}><ChevronIcon size={10} rotate={props.collapsed ? 0 : 90} /></span>
+        {/* A-1015：旋转交给 ChevronIcon 自己（组件自带 --collapse-dur 节拍）。此前外层 span 还写了
+            `rotate(-90deg)` + `transition .15s` → 两层旋转叠加（-90+0 / 0+90），且 .15s 与折叠
+            动画 0.45s 不同步，观感是"箭头先转完、内容再长"。 */}
+        <ChevronIcon size={10} rotate={props.collapsed ? 0 : 90} style={{ opacity: 0.7, flexShrink: 0 }} />
         <span style={{ fontWeight: 500 }}>{props.title}</span>
         <span style={{ fontSize: 10, color: "var(--text-muted)", background: "var(--input-bg, #161b22)", borderRadius: 8, padding: "0 6px" }}>{props.files.length}</span>
       </div>
-      {!props.collapsed && (
-        <div style={{ paddingLeft: 6 }}>
-          {props.files.map((f) => (
-            <div key={f} onClick={() => props.onFileClick?.(f)}
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 6px", borderRadius: 4, fontSize: 11, cursor: props.onFileClick ? "pointer" : "default" }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--hover-bg, rgba(255,255,255,0.05))"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
-              title={"点击查看该文件的代码变更（红绿标注）"}>
-              <span style={{ width: 16, textAlign: "center", fontFamily: "Consolas, monospace", fontSize: 11, fontWeight: 700, color: g.color, flexShrink: 0 }}>{g.label}</span>
-              <span style={{ flex: 1, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "Consolas, 'Courier New', monospace" }} title={f}>{f}</span>
-              <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, opacity: 0.7 }}>查看</span>
-            </div>
-          ))}
+      {/* A-1015：常驻 + 高度插值（此前 `{!props.collapsed && …}` 收起即卸载 → 生硬跳变） */}
+      <div className={`collapse${props.collapsed ? "" : " is-open"}`}>
+        <div>
+          <div style={{ paddingLeft: 6 }}>
+            {props.files.map((f) => (
+              <div key={f} onClick={() => props.onFileClick?.(f)}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 6px", borderRadius: 4, fontSize: 11, cursor: props.onFileClick ? "pointer" : "default" }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--hover-bg, rgba(255,255,255,0.05))"; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+                title={"点击查看该文件的代码变更（红绿标注）"}>
+                <span style={{ width: 16, textAlign: "center", fontFamily: "Consolas, monospace", fontSize: 11, fontWeight: 700, color: g.color, flexShrink: 0 }}>{g.label}</span>
+                <span style={{ flex: 1, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "Consolas, 'Courier New', monospace" }} title={f}>{f}</span>
+                <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, opacity: 0.7 }}>查看</span>
+              </div>
+            ))}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

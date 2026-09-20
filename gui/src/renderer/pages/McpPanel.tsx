@@ -279,7 +279,11 @@ export default function McpPanel(): JSX.Element {
       </div>
 
       {/* A-918++：GUI 表单新增 MCP 服务器（直达，不再要求手动编辑 slime.toml） */}
-      {addOpen && (
+      {/* A-1015：常驻 + 高度插值（此前 `{addOpen && …}` 展开/收起都是瞬时跳变，与侧栏节奏不一致）。
+          wrapper 两层是必需的：.collapse(grid 容器) > 纯 div(grid 行，负责 overflow 裁切) → 原卡片。
+          内容缩进**刻意不动**——这一带刚出过结构事故（A-999），只加壳不重排，把 diff 压到最小。 */}
+      <div className={`collapse${addOpen ? " is-open" : ""}`}>
+      <div>
         <div className="card" style={{ padding: "14px 16px", marginBottom: 14 }}>
           <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>添加 MCP 服务器</div>
           <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: "10px 12px", alignItems: "center" }}>
@@ -336,10 +340,15 @@ export default function McpPanel(): JSX.Element {
             </span>
           </div>
         </div>
-      )}
+      </div>
+      </div>
 
       {/* A-918++：插件广场——官方 MCP registry（Linux Foundation）联网搜索 + 内置精选兜底 */}
-      {marketOpen && (() => {
+      {/* A-1015：同样常驻 + 高度插值。常驻后的额外成本可忽略：搜索框只在 marketOpen
+          时可见，所以 marketQuery 变化必然发生在展开态，不存在"收起时因输入而重渲染列表"。 */}
+      <div className={`collapse${marketOpen ? " is-open" : ""}`}>
+      <div>
+      {(() => {
         const q = marketQuery.trim().toLowerCase();
         const regList = (registryServers ?? []).map((s) => ({ ...s, __registry: true as const }));
         const builtinList = MCP_MARKETPLACE.map((m) => ({ ...m, name: m.name, desc: m.desc, tags: m.tags }));
@@ -437,6 +446,9 @@ export default function McpPanel(): JSX.Element {
         </div>
         );
       })()}
+      </div>
+      </div>
+      {/* A-1015：marketOpen 闭（原为 `{marketOpen && (() => …)()}` 条件渲染 → 常驻 + 高度插值） */}
 
       {notice && (
         <div style={{

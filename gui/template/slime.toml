@@ -117,7 +117,18 @@ dim = 1024
 models_dir = ""
 port_start = 18082
 gpu_layers = 99
-ctx_len = 8192
+# 8192 太小：多轮对话累积到 13811 tokens 时会被上游 400 顶回
+#（"request (13811 tokens) exceeds the available context size (8192 tokens)"）。
+ctx_len = 32768
+# KV cache 量化类型（下发为 llama-server 的 -ctk/-ctv）。默认 q8_0。
+# ⚠️ 与上面的 ctx_len 是**成对**的一项，不要只改一个：
+#   ctx=32768 时 KV cache 在 f16 下要 3.5GB，加上 1.8GB 权重会把 8GB 显存吃满
+#   → `failed to allocate buffer for kv cache` / `cudaMalloc failed: out of memory`。
+#   换成 q8_0 后 KV 显存减半、速度仅约 -2%，是"几乎不花速度换能跑起来"的划算解。
+#   只把 ctx_len 提到 32768 而漏了这一项，新装用户会一启动就 OOM。
+# 允许取值（llama-server --help）：f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
+# 想退回 llama.cpp 默认（不量化）：写 "f16" 或 "none"。
+kv_type = "q8_0"
 persistent = false
 idle_unload_min = 10
 max_instances = 1
@@ -162,8 +173,11 @@ tool_signal = true         # 环2 工具成败 → 情绪（默认开，可单�
 behavior_levers = true     # 三杠杆 + promote（默认开，可单独关）
 
 # ── 自动更新 ──────────────────────────────────────────────
-# enabled=false（默认）：不发起任何网络请求，状态面板显示"自动更新未启用"，
-#   避免无发布源时反复报"检查失败: net::ERR_CONNECTION_CLOSED"。
+# 本发行模板**显式关闭**：不发起任何网络请求，状态面板显示"自动更新未启用"，
+#   避免未配置发布源时反复报"检查失败: net::ERR_CONNECTION_CLOSED"。
+# ⚠️ 注意「模板值」与「代码缺省」是两回事，且这里是**有意不同**：
+#   配置里**没有** [update] 段时，readUpdateConfig() 的缺省是 enabled = **true**
+#   （发布源已就绪，见 gui/src/main/updater.ts）。删掉本段 = 打开自动更新。
 # 启用方式：enabled = true，并填写 feed_url（electron-updater 的 generic feed，
 #   指向发布 latest.yml 的目录，如 https://example.com/slime/releases/）。
 # 留空 feed_url 时回退 electron-builder publish 字段（github provider）。

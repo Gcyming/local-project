@@ -11,15 +11,26 @@
  * - 提示音：**自定义音频由渲染层播放**（主进程没有音频播放能力）——
  *   主进程只负责把"该响了"的信号发给渲染层；系统默认音则由 Notification.silent=false 交给系统响。
  *
- * ⚠️ Windows 上通知要能正确归属到本应用，必须设置 AppUserModelID，且**要与安装器快捷方式的
- *    AUMID 一致**（见 gui/electron-builder.json 的 appId = com.slime.gui）。不一致时通知
- *    会没有来源标识甚至不显示。
+ * ⚠️ Windows 上通知要能正确归属到本应用：AUMID 必须与安装器快捷方式的 AUMID 一致
+ *    （见 gui/electron-builder.json 的 appId = com.slime.gui），**且**要注册一个可显示的应用名
+ *    （`HKCU\Software\Classes\AppUserModelId\<AUMID>` 的 DisplayName），否则 toast 头部会
+ *    显示成 AUMID 原文（用户实测症状）。完整说明见 `notifyIdentity.ts`。
  */
 import { app, Notification } from "electron";
 import type { BrowserWindow } from "electron";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
+/*
+ * A-1021：通知的**身份与文案**（AUMID / 头部显示名 / 载荷构造）已移到 `notifyIdentity.ts`
+ * —— 那里不 import electron，所以能被 `tests/core-ts/a1021-guards.spec.ts` 直接导入断言
+ * （本文件顶层 import electron，测试里导不进来）。
+ * 本文件从此只当"Electron 适配层"：读配置、拷音频、注册身份、真的弹通知。
+ */
+import { buildNotificationPayload, applyWindowsNotificationIdentity, APP_AUMID } from "./notifyIdentity.js";
+
+// re-export：公开面不变（`APP_AUMID` / `APP_DISPLAY_NAME` 的唯一出处仍在 notifyIdentity.ts）
+export { APP_AUMID, APP_DISPLAY_NAME, buildNotificationPayload, type NotifyPayload } from "./notifyIdentity.js";
 
 /** 通知类型：决定标题语气与（未来可能的）分组/免打扰策略 */
 export type NotifyKind = "done" | "choice" | "error" | "aborted" | "test";
@@ -106,10 +117,37 @@ let getWindowRef: (() => BrowserWindow | null) | null = null;
 /** 注入主窗口获取器（避免 notify.ts 反向依赖 index.ts 造成循环 import） */
 export function initNotify(deps: { getWindow: () => BrowserWindow | null }): void {
   getWindowRef = deps.getWindow;
-  // Windows 通知归属：与 electron-builder.json 的 appId 保持一致
+  ensureNotificationIdentity();
+}
+
+/**
+ * 注册系统通知的**应用身份**（Windows）。
+ *
+ * 这一步决定 toast 头部那行显示什么（A-1021 的真实根因，详见 `notifyIdentity.ts`）：
+ * 没有它，Windows 只能把 AUMID 原文 `com.slime.gui` 顶上去。
+ *
+ * 两个动作缺一不可：
+ *  ① `app.setAppUserModelId(APP_AUMID)` —— 告诉 Windows 这条通知属于哪个身份
+ *     （不设 → 通知归不到本应用，通知中心里可能根本找不到它）；
+ *  ② 往 `HKCU\Software\Classes\AppUserModelId\<AUMID>` 写 `DisplayName` ——
+ *     给这个身份一个**人能看懂的名字**（未打包应用的正规做法，无需管理员）。
+ *
+ * ⚠️ 在**创建主窗口之前**调用（本函数由 index.ts 在 `new BrowserWindow` 之前调）：
+ *    身份越早确定，第一条通知就越不可能带着旧品牌信息出去。
+ * ⚠️ 失败**不静默**：通知照常能弹，但头部会退回包名 —— 这正是用户截图里那个现象，
+ *    所以必须留下一行可归因的 warn，而不是让下一个人再去猜。
+ */
+function ensureNotificationIdentity(): void {
+  if (process.platform !== "win32") { return; }
   try {
-    if (process.platform === "win32") { app.setAppUserModelId("com.slime.gui"); }
-  } catch { /* 非关键路径，失败仅影响通知来源标识 */ }
+    app.setAppUserModelId(APP_AUMID);
+  } catch (e) {
+    console.warn(`[notify] 设置 AppUserModelId 失败（通知可能无法归属到本应用）：${(e as Error)?.message ?? String(e)}`);
+  }
+  const r = applyWindowsNotificationIdentity();
+  if (!r.ok) {
+    console.warn(`[notify] 注册通知应用名失败（toast 头部会显示成包名 ${APP_AUMID}）：${r.detail}`);
+  }
 }
 
 /** 让渲染层播放自定义提示音（系统默认音由 Notification.silent=false 负责，不走这里） */
@@ -134,6 +172,19 @@ export function notifyUser(ev: { kind: NotifyKind; title: string; body: string }
   const cfg = readNotifyConfig();
   // 测试通知无视总开关（用户点"发送测试"就是要立刻看到效果），但仍遵守提示音设置
   if (!cfg.enabled && ev.kind !== "test") { return; }
+  /* A-1018：**只在 slime 不在前台时才弹系统通知**（用户原话："我像的应该是 slime 程序不在操作
+     界面时才弹通知"）。
+     为什么必须挡在这里：系统通知是给"用户在看别的窗口"准备的——用户就盯着 slime 时，
+     通知既多余、又会盖住界面（Windows 通知在右下角浮出、还可能抢焦点）。
+     `test` 仍然放行：那是用户在设置页主动点"发送测试"，不弹就等于功能坏了。
+     判据用 **isFocused()**（当前是否前台活动窗口），而不是 isVisible()——窗口可见但在后台
+     （被别的应用盖住）时，用户看不到界面，正是最需要通知的场景。 */
+  if (ev.kind !== "test") {
+    const w = getWindowRef?.() ?? null;
+    try {
+      if (w && !w.isDestroyed() && w.isFocused()) { return; }
+    } catch { /* 拿不到焦点状态时按"不在前台"处理，宁可多弹一次也不静默吞掉 */ }
+  }
   let supported = true;
   try { supported = Notification.isSupported(); } catch { supported = false; }
   if (!supported) {
@@ -141,10 +192,13 @@ export function notifyUser(ev: { kind: NotifyKind; title: string; body: string }
     return;
   }
   const custom = cfg.soundEnabled ? customSoundPath() : null;
+  const payload = buildNotificationPayload(ev);
   try {
     const n = new Notification({
-      title: ev.title,
-      body: ev.body,
+      // 标题 = **事件文案**（「xxx 已完成」/「… 出错」）；程序名不在这里，它是身份行的事
+      // （由 ensureNotificationIdentity() 注册的 DisplayName 决定）。分工见 notifyIdentity.ts。
+      title: payload.title,
+      body: payload.body,
       silent: !cfg.soundEnabled || Boolean(custom),
       icon: join(PROJECT_ROOT, "build", "icon.png"),
     });

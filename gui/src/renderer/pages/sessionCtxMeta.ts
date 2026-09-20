@@ -80,22 +80,54 @@ export function updateSessionCtxMeta(
   return prev;
 }
 
+/** 历史记录里 timeline 的**宽松形态**：落盘 JSON 里 `kind` 就是 string（见 shared/ipc.ts 的
+ *  `ConversationMessage.timeline`），与 `TimelineStepLite.kind` 的联合类型不同名。
+ *  之所以要收下来而不是把入参直接声明成 `TimelineStepLite[]`：那样 `ConversationMessage[]`
+ *  会因为 `kind: string` 不可赋值而**编译不过**，于是调用方只能先自行断言——
+ *  把"边界断言"推到每个调用点，哪天多一个调用点就多一处漏断言的机会。
+ *  收窄只做一次，就在下面 `adoptRecordTimeline`。 */
+export interface LooseTimelineStep {
+  kind: string;
+  text?: string;
+  name?: string;
+  label?: string;
+  detail?: string;
+  result?: string;
+  items?: PlanItemLite[];
+  state?: "start" | "done";
+}
+
+/** 磁盘 timeline → 内部 TimelineStepLite。仅收窄 `kind` 的字面量类型，运行期不改数据。 */
+function adoptRecordTimeline(tl: readonly LooseTimelineStep[] | undefined): TimelineStepLite[] | undefined {
+  if (!tl || tl.length === 0) { return undefined; }
+  return tl as unknown as TimelineStepLite[];
+}
+
 /** 加载历史消息时按 assistant 序数回填持久化的交错时间线。
  *  返回每条消息应挂载的 stages 骨架：{ timeline?, reasoning?, assistantOrdinal }。
- *  @param msgs 历史加载消息（main 的 conversations.load 结构：role/content/time/reasoning/elapsedMs…）
- *  @param meta 持久化的会话元数据（无 → 全部回退文本形态）
- *  @param totalLink 需要工具留痕时由调用方补 stages.tools（本函数只给 timeline/reasoning/序数） */
+ *  @param msgs 历史加载消息（main 的 conversations.load 结构：role/content/time/reasoning/elapsedMs/timeline…）
+ *  @param meta 持久化的会话元数据（无 → 回退到消息自带的 timeline，再退到文本形态）
+ *  @param totalLink 需要工具留痕时由调用方补 stages.tools（本函数只给 timeline/reasoning/序数）
+ *
+ *  ⚠️ A-1021b：**两个来源，缺一不可**。
+ *   ① localStorage（`timelineByAssistantIdx`，按 assistant 序数）—— 增量、便宜，但有两条已知失效路径：
+ *      序数漂移（失败轮/群聊成员发言/恢复占位都参与计数）与「流式期间切走会话」（写盘被 onDone 的
+ *      非当前会话分支早退跳过）。
+ *   ② **消息自带的 `timeline`**（A-966 落在 history.jsonl 的同一份数据）—— 与记录同生共死，不受上述
+ *      两条路径影响。**此前这一路完全没被读**（写进去了、加载时不看），所以那两条路径一旦命中就必然
+ *      丢掉整条时间线，思考历程塌成"一大段无节点文本"。这里补上兜底顺序：localStorage 优先，其次记录自带。 */
 export function attachTimelineToHistory(
-  msgs: Array<{ role: string; reasoning?: string; content?: string }>,
+  msgs: Array<{ role: string; reasoning?: string; content?: string; timeline?: readonly LooseTimelineStep[] }>,
   meta: SessionCtxMeta | null,
 ): Array<{ timeline?: TimelineStepLite[]; reasoning?: string; assistantOrdinal?: number }> {
   let aiOrd = 0;
   return msgs.map((m) => {
     if (m.role !== "assistant") { return { assistantOrdinal: undefined }; }
     aiOrd += 1;
-    const tl = meta?.timelineByAssistantIdx?.[aiOrd];
+    const stored = meta?.timelineByAssistantIdx?.[aiOrd];
+    const fromMeta = stored && stored.length > 0 ? stored : undefined;
     return {
-      timeline: tl && tl.length > 0 ? tl : undefined,
+      timeline: fromMeta ?? adoptRecordTimeline(m.timeline),
       reasoning: m.reasoning,
       assistantOrdinal: aiOrd,
     };

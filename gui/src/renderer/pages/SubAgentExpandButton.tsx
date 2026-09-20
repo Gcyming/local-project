@@ -5,6 +5,7 @@
 import React, { type JSX, useEffect, useState } from "react";
 import SubAgentModal from "./SubAgentModal.js";
 import SubagentAvatar from "../components/SubagentAvatar.js";
+import { ChevronIcon } from "../components/Icon.js";
 
 interface SubRun {
   id: string;
@@ -75,18 +76,18 @@ export default function SubAgentExpandButton(): JSX.Element | null {
           animation: active.length > 0 ? "liveDot 1.5s ease-in-out infinite" : "none",
         }} />
         <span style={{ fontWeight: 600 }}>{runs.length}</span>
-        <span style={{
-          transform: open ? "rotate(180deg)" : "none",
-          transition: "transform 0.2s",
-          display: "inline-block",
-        }}>
-          ▲
-        </span>
+        {/* A-1015：字符 ▲（靠 rotate(180deg) 翻面）+ 自写 0.2s 过渡，换成图标库 ChevronIcon：
+            旋转由组件自带（走全局 --collapse-dur），与全仓展开箭头同约定（open ? 90 : 0）。 */}
+        <ChevronIcon size={10} rotate={open ? 90 : 0} style={{ flexShrink: 0 }} />
       </button>
 
-      {/* 展开列表 */}
-      {open && (
-        <div
+      {/* 展开列表：A-1015b 改 **常驻挂载 + .pop 进出场**（原先 `{open && …}` 弹出/收起都是瞬跳）。
+          锚点在下方 → 用 `.pop-up`（向上弹出的位移方向）。绝对定位不做高度插值
+          （bottom/right 是按按钮实时定位的，"从 0 高度长出来"没意义还会算歪锚点）。
+          ⚠️ `.pop` 收起态自带 pointer-events:none —— 常驻浮层不设它就会盖住触发按钮，
+          表现为"点箭头没反应"。 */}
+      <div
+          className={`pop pop-up${open ? " is-open" : ""}`}
           style={{
             position: "absolute", bottom: "100%", right: 14, marginBottom: 8,
             width: 320, maxHeight: 400, overflow: "auto",
@@ -137,8 +138,7 @@ export default function SubAgentExpandButton(): JSX.Element | null {
               );
             })}
           </div>
-        </div>
-      )}
+      </div>
 
       {/* 详情弹窗 */}
       {selectedId && (

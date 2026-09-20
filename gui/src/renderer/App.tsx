@@ -13,6 +13,7 @@ import RightSidebar from "./pages/RightSidebar.js";
 import { SIDEBAR_OPEN_EVENT } from "./pages/Markdown.js";
 import type { DownloadProgressInfo, BootStatus } from "../shared/ipc.js";
 import { ChevronIcon, EditIcon, MenuIcon, PlusIcon, SettingsIcon, SidebarLeftIcon, SidebarRightIcon } from "./components/Icon.js";
+import { ThemeDialogHost } from "./components/ThemeDialog.js";
 /** A-943 群聊头脑风暴图标（用户选定 D:\下载\团队.svg） */
 import teamSvg from "./assets/team.svg";
 /** A-945 会话列表图标（用户选定 D:\下载\当前会话.svg） */
@@ -21,6 +22,9 @@ import currentSessionSvg from "./assets/current-session.svg";
 import floatIconUrl from "./assets/icon.ico?url";
 import { getTheme, applyTheme, type ThemeName } from "./theme.js";
 import { confirmAsync } from "./dialog.js";
+// A-1008：「联网搜索」开关的唯一读写入口（此前这里用 `=== "1"`、ChatPanel 用 `!== "0"`，
+// 同一份偏好两个默认值 → 没点过开关时欢迎语那条流把 web_search/web_fetch 静默拒掉）
+import { readNetworkEnabled } from "./networkToggle.js";
 // A-980-R26：自定义通知提示音播放端（主进程没有音频能力，只发"该响了"的信号）
 import { subscribeNotifySound } from "./notifySound.js";
 
@@ -71,6 +75,10 @@ interface SessionItem {
   memberModels?: Record<string, string>;
   /** A-954：群聊组长（会话归属 Agent）入群模型 */
   leaderModel?: string;
+  /** A-1011：群聊成员思考推理强度覆盖（memberId → effort；缺省 = 群聊默认 high） */
+  memberEfforts?: Record<string, string>;
+  /** A-1011：群聊组长思考推理强度覆盖（缺省 = 群聊默认 high） */
+  leaderEffort?: string;
   /** A-943：会话模式（brainstorm = 群聊头脑风暴，左侧特殊渲染） */
   type?: "normal" | "brainstorm";
 }
@@ -533,6 +541,13 @@ export default function App(): JSX.Element {
     if (Number.isFinite(v)) { return Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, v)); }
     return Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, Math.round(window.innerWidth * SIDEBAR_RATIO.left)));
   });
+  /** A-1018：用户是否**手动拖过**左栏宽度。
+   *  · false（首次运行/从未拖过）→ **不**下发内联宽度，交给 CSS 的
+   *    `--sidebar-w: clamp(240px, 17.5%, 520px)` —— 随窗口自适应，并天然带最大/最小限制；
+   *  · true → 用 px 内联覆盖（拖动是显式意图，不该被窗口缩放抹掉）。
+   *  为什么不做成"JS 监听 resize 重算"：A-975-R4 踩过反馈环（布局宽度依赖 innerWidth，
+   *  而布局变化又会改变 innerWidth），详见 index.css 里 `--sidebar-w` 的注释。 */
+  const [sidebarCustom, setSidebarCustom] = React.useState(() => Number.isFinite(parseInt(localStorage.getItem('slime_sidebar_w') ?? "", 10)));
   /** 右侧栏（工作树/任务/终端/浏览器）展开状态 */
   const [rightOpen, setRightOpen] = React.useState(true);
   const [rightWidth, setRightWidth] = React.useState(() => {
@@ -545,6 +560,9 @@ export default function App(): JSX.Element {
     // A-980-R24：首启按屏幕比例（右 21.6%），与左栏同一套版式来源（用户给定截图实测）
     return Math.min(max, Math.max(minW, Math.round(window.innerWidth * SIDEBAR_RATIO.right)));
   });
+  /** A-1018：右栏是否被**手动拖过**——语义同 `sidebarCustom`（false → 交给 CSS 的
+   *  `--right-sidebar-w: clamp(260px, 21.5%, 720px)` 随窗口自适应）。 */
+  const [rightCustom, setRightCustom] = React.useState(() => Number.isFinite(parseInt(localStorage.getItem('slime_rightbar_w') ?? "", 10)));
   /* ⚠️ A-975-R4 撤回：这里曾加过一套「按 window.innerWidth 状态算有效宽度」的响应式方案
    * （winW state + resize 监听 + effSidebarWidth/effRightWidth 派生）。
    * **踩坑**：布局宽度依赖 innerWidth、而布局变化又会改变 innerWidth（横向滚动条出现/消失）
@@ -648,6 +666,9 @@ export default function App(): JSX.Element {
         preFloatRightWidthRef.current = null;
         floatClosingRef.current = false;
         // 还原侧栏 DOM opacity/transition（切会话时侧栏不动画，防残留态）
+        // A-1016-F3：一并摘掉宽度动画期间的 webview 钉子——这条取消路径**不会**重启动画，
+        // 漏了就会让 guest 永远停在旧宽度（窗口再变宽时它仍是钉住的那个值）。
+        setRightWebviewPin(null);
         const le = leftSidebarRef.current;
         if (le) { le.style.transition = ""; le.style.opacity = ""; }
         const rw = rightWrapperRef.current;
@@ -958,8 +979,7 @@ export default function App(): JSX.Element {
       if (!res?.session || !selectedAgentId) { return; }
       const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
       if (!api?.chat?.stream) { return; }
-      let netOn = false;
-      try { netOn = localStorage.getItem("slime_network_enabled") === "1"; } catch { /* ignore */ }
+      const netOn = readNetworkEnabled();
       void api.chat.stream({ agentId: selectedAgentId, message: text.trim(), sessionId, networkEnabled: netOn }).catch((e: unknown) => {
         console.error("[app] welcome stream failed:", e);
       });
@@ -1245,6 +1265,10 @@ export default function App(): JSX.Element {
         </div>
       )}
 
+      {/* A-1018：slime 主题确认/提示弹窗宿主（confirmAsync/alertAsync 的渲染层实现）。
+          常驻挂载（自己按需渲染），全仓 38 处调用点无需改动。 */}
+      <ThemeDialogHost />
+
       {/* 本地模型加载进度弹窗（slime 主题；llama-server 首次加载可能数十秒~两分钟） */}
       {modelLoading.loading && (
         <div style={{
@@ -1321,7 +1345,9 @@ export default function App(): JSX.Element {
         <aside
           ref={leftSidebarRef}
           className={`sidebar${sidebarOpen ? "" : " collapsed"}${leftMin0 ? " sidebar-no-min" : ""}`}
-          style={{ width: sidebarWidth, flexShrink: 1, minWidth: sidebarOpen ? SIDEBAR_MIN_W : 0 }}
+          /* A-1018：未手动拖过时**不下发内联宽度** → 由 CSS 的
+             `--sidebar-w: clamp(240px, 17.5%, 520px)` 随窗口比例自适应（拖动过则用 px 覆盖） */
+          style={{ width: sidebarCustom ? sidebarWidth : undefined, flexShrink: 1, minWidth: sidebarOpen ? SIDEBAR_MIN_W : 0 }}
         >
           {sidebarOpen && <div className="sidebar-resizer" onPointerDown={handleSidebarResize} />}
           <div className="brand">
@@ -1614,10 +1640,12 @@ export default function App(): JSX.Element {
           memberIds={selectedSession?.memberIds ?? []}
           memberModels={selectedSession?.memberModels ?? {}}
           leaderModel={selectedSession?.leaderModel}
+          memberEfforts={selectedSession?.memberEfforts ?? {}}
+          leaderEffort={selectedSession?.leaderEffort}
           workspace={sessionWorkspace}
           providerModels={providerModels}
           dl={dl}
-          width={rightWidth}
+          width={rightCustom ? rightWidth : undefined}
           onResize={handleRightbarResize}
         />
         </div>
@@ -1673,6 +1701,7 @@ export default function App(): JSX.Element {
    *  指针捕获后事件一律回到本元素，不再被 guest 截走；blur / pointercancel 仍是兜底。 */
   function handleSidebarResize(e: React.PointerEvent): void {
     e.preventDefault();
+    setSidebarCustom(true); // A-1018：一旦用户手动拖过，就按 px 记住（不再走 CSS 比例自适应）
     const captureEl = e.currentTarget as HTMLElement;
     try { captureEl.setPointerCapture(e.pointerId); } catch { /* 指针 id 已失效则忽略 */ }
     document.body.classList.add("slime-resizing");
@@ -1727,6 +1756,7 @@ export default function App(): JSX.Element {
 
   function handleRightbarResize(e: React.PointerEvent): void {
     e.preventDefault();
+    setRightCustom(true); // A-1018：同左栏——拖过就按 px 记住
     const captureEl = e.currentTarget as HTMLElement;
     // A-980-R27：与左栏同一套——指针捕获，避免指针划过 `<webview>`（OOPIF）时
     // mousemove/mouseup 被 guest 进程吃掉 → 拖拽卡死且 slime-resizing 残留
@@ -1739,19 +1769,12 @@ export default function App(): JSX.Element {
     // 重渲染（ChatPanel/RightSidebar/设置面板全重渲）→ 主线程阻塞 → 鼠标卡死、宽度跟不上。
     // 现在拖动期间直接改右栏 DOM 的 style.width（零 React 重渲染），松开才 setRightWidth 落 state。
     const asideEl = document.querySelector<HTMLElement>(".right-sidebar");
-    // A-980-R27：上限必须**减掉左栏与主区的最小占位**。旧实现只留 48px 缝隙，右栏一拖宽
-    // 这一行就溢出，而左栏是可收缩的（flex-shrink:1）→ 溢出量被它吃掉，用户看到的就是
-    // "拖右栏会拽动左侧边栏"；左栏被压窄后右栏左缘跟着左移，鼠标↔宽度映射随之漂移，
-    // 越拖越不跟手（"卡住"）。左栏宽度取**实测值**（可能已被窗口挤过），不是 state。
+    // A-1016-F3：上限收敛到 `rightSidebarMaxW()`——与展开动画的钉宽**共用同一份实现**，
+    // 避免"同一约束两处各写一遍 → 两个默认值"（此前这里的公式是内联的）。
     // ⚠️ 浮层已唤出时例外：此时主区是 fixed 浮层（`.main-float` min-width:0），不需要给它留位，
     // 而且右栏宽度掉到 `innerWidth-340` 以下会让 mainIsFloatLayout 变假、浮层被瞬间卸载——
     // 所以浮层态沿用"可占满窗口"的旧上限，拖一下不会把浮层挤掉。
-    const leftEl = leftSidebarRef.current;
-    const leftW = leftEl ? leftEl.getBoundingClientRect().width : 0;
-    const floatActive = floatStateRef.current !== "none";
-    const maxW = Math.max(360, floatActive
-      ? window.innerWidth - 48
-      : Math.min(window.innerWidth - 48, window.innerWidth - leftW - CHAT_MIN_W));
+    const maxW = rightSidebarMaxW();
     // A-980-R29：右栏**最窄宽度** = 截图比例（minW），拖拽中下限就到此为止——
     // 不再解锁 CSS min-width（R27 为治"卡住"临时设过 minWidth:0 + 下限 0，副作用是右栏能无限拖窄，
     // 用户实测"右侧边栏的最小宽度限制没了"）。minW ≥ 260 ≥ CSS min-width，所以 CSS 也不会顶回宽度。
@@ -1850,6 +1873,59 @@ export default function App(): JSX.Element {
     animateLeftSidebar(!sidebarOpen);
   }
 
+  /** A-1016-F3：右栏**实际可达**的最大宽度——拖拽与展开动画**共用这一份实现**。
+   *
+   *  实测模型（index.css）：`.main { flex: 1 1 0%; min-width: 380px }`（flex-basis 0）、
+   *  左侧栏 `flexShrink:0`、右栏 wrapper `flexShrink:1`。于是当
+   *  `左 + 右(请求) + 380 > innerWidth` 时，**全部收缩量都由右栏 wrapper 承担**
+   *  （主区 basis 为 0 → 加权收缩量 0，只会停在 min-width:380），
+   *  右栏实际宽度 = `innerWidth - 左 - CHAT_MIN_W`。
+   *  实测对齐：1280 窗口请求 820 → 实际 640 = 1280-260-380。
+   *
+   *  ⚠️ 为什么不"强制布局实测最终宽度"：那样必须临时改元素样式再读布局，而**任何在改动态下的
+   *  强制布局都会污染浏览器缓存的 computed style**——还原后若不额外 flush，下一帧的样式变化
+   *  被判为"无变化"，**过渡根本不启动**（实测：aside 全程 316.96 一动不动）。
+   *  要修就得再 flush 一次，等于每次展开前白做两次全量布局。公式法零布局、零 DOM 改动。
+   *  ⚠️ 上限必须**减掉左栏与主区的最小占位**（A-980-R27）：旧实现只留 48px 缝隙，右栏一拖宽
+   *  这一行就溢出，而左栏是可收缩的 → 溢出量被它吃掉，用户看到的是"拖右栏会拽动左侧边栏"；
+   *  左栏被压窄后右栏左缘跟着左移，鼠标↔宽度映射随之漂移，越拖越不跟手（"卡住"）。
+   *  左栏宽度取**实测值**（可能已被窗口挤过），不是 state。
+   *  ⚠️ 浮层态例外：主区是 fixed 浮层（`.main-float` min-width:0），不占位 → 沿用"可占满窗口"上限。 */
+  function rightSidebarMaxW(): number {
+    const leftEl = leftSidebarRef.current;
+    const leftW = leftEl ? leftEl.getBoundingClientRect().width : 0;
+    const floatActive = floatStateRef.current !== "none";
+    return Math.max(360, floatActive
+      ? window.innerWidth - 48
+      : Math.min(window.innerWidth - 48, window.innerWidth - leftW - CHAT_MIN_W));
+  }
+
+  /** A-1016-F3：右栏宽度过渡期间钉住 `<webview>` guest 的宽度（只裁切、不逐帧跨进程 resize）。
+   *
+   *  背景：右栏里嵌着 Chromium OOPIF（`<webview>`）。宽度过渡每帧都会改 guest 的布局宽度，
+   *  触发**跨进程** reflow → 实测 7 帧掉帧 / dtP95 21.8ms、guest 宿主宽度跨度 560px；
+   *  把 guest 钉在固定宽度、仅靠祖先 `overflow:hidden` 裁切 → 掉帧 ≤1、跨度 0px
+   *  （内层加 `contain` 仍掉帧 → 成本在跨进程 resize 本身，不在 guest 内部重排）。
+   *
+   *  `px = null` 解除（动画结束/被打断）。只在**真的会动**时才挂：已经收起到 0 宽时再"收起"是
+   *  空操作，钉住反而会让 guest 先撑宽再塌回，白做两次 resize。
+   *  ⚠️ 与 `<webview>` 的合成铁律无关：这里动的是 guest **自身**的 width，
+   *     没有给任何祖先加 opacity/filter/transform/backdrop-filter。 */
+  function setRightWebviewPin(px: number | null): void {
+    const el = rightWrapperRef.current;
+    if (!el) { return; }
+    // 右栏里没嵌任何 `<webview>`（没开浏览器页）→ 没有跨进程 resize 可省，直接走原路径，
+    // 不挂类（省掉一次对整个 wrapper 子树的样式失效）。
+    const hasGuest = px !== null && !!document.querySelector(".right-sidebar webview");
+    if (px === null || !(px > 1) || !hasGuest) {
+      el.classList.remove("right-wrapper-pin");
+      el.style.removeProperty("--right-pin-w");
+      return;
+    }
+    el.style.setProperty("--right-pin-w", `${Math.round(px)}px`);
+    el.classList.add("right-wrapper-pin");
+  }
+
   /** A-980-R24：右侧栏收起/展开（与左栏同一套几何同步动画）；nextWidth 可选——直达目标宽度。
    *
    *  ⚠️ 历史坑（务必保留此约束）：右栏 wrapper 里嵌着 `<webview>`（Chromium OOPIF），
@@ -1861,7 +1937,17 @@ export default function App(): JSX.Element {
   function animateRightSidebar(nextOpen: boolean, nextWidth?: number): void {
     rightFadeCancelRef.current?.();
     rightFadeCancelRef.current = null;
+    // A-1016-F3：上一轮被打断时钉子可能还挂着 → 先摘，再按本轮重新决定（避免脏 pin 叠加）
+    setRightWebviewPin(null);
     const el = rightWrapperRef.current;
+    // A-1016-F3：钉住宽度。**只在该次动画真的会改变宽度时**才挂：
+    //   · 展开 → 请求宽可能超过实际可达（wrapper 会被窗口压窄，见 rightSidebarMaxW），
+    //     按**可达值**钉，解除时才不会有"820 猛缩到 640"的落差；
+    //   · 收起 → 钉在当前实测宽（guest 全程不缩、只被裁掉），已是 0 就是空操作，不挂。
+    const pinTarget = nextOpen
+      ? Math.min(nextWidth ?? rightWidth, rightSidebarMaxW())
+      : (document.querySelector<HTMLElement>(".right-sidebar")?.getBoundingClientRect().width ?? 0);
+    if (pinTarget > 1) { setRightWebviewPin(pinTarget); }
     if (nextOpen) {
       if (nextWidth !== undefined) { setRightWidth(nextWidth); }
       if (el) { el.style.opacity = "0"; }
@@ -1873,7 +1959,7 @@ export default function App(): JSX.Element {
       rightFadeCancelRef.current = runGeometrySyncFade(
         () => rightWrapperRef.current,
         (p, done) => {
-          if (done) { setRightMin0(false); }
+          if (done) { setRightMin0(false); setRightWebviewPin(null); }
           const node = rightWrapperRef.current;
           if (!node) { return; }
           node.style.opacity = done ? "" : String(p);
@@ -1888,6 +1974,7 @@ export default function App(): JSX.Element {
       rightFadeCancelRef.current = runGeometrySyncFade(
         () => rightWrapperRef.current,
         (p, done) => {
+          if (done) { setRightWebviewPin(null); }
           const node = rightWrapperRef.current;
           if (!node) { return; }
           node.style.opacity = done ? "" : String(p);

@@ -9,10 +9,20 @@ import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Agent as HttpKeepAliveAgent } from "node:http";
 import { Agent as HttpsKeepAliveAgent } from "node:https";
-import { inferModelCapabilities, resolveModelPriceTier, isAggregatorGateway, isLocalEndpoint, sortEfforts } from "../../../shared/gen/model-capabilities.js";
+import {
+  inferModelCapabilities, resolveModelPriceTier, isAggregatorGateway, isLocalEndpoint, sortEfforts,
+  resolveEffectivePricing,
+  normalizePriceTiers, type ModelPriceTiers, type ModelPriceTier, type PriceCurrency,
+} from "../../../shared/gen/model-capabilities.js";
 import { probe, type ProbeObservation, type ProbeResult } from "../../../core-ts/src/probe.js";
 // 仅类型导入（编译期擦除，不产生运行时循环依赖）：历史成本回填的解析器签名
 import type { PriceResolver, UsagePrice } from "../../../core-ts/src/services/usage.js";
+// S3：本地模型的类型与清单键名来自 core-ts 的**唯一来源** —— 此前本文件另有一份
+// `LocalModelSpec` 定义与 `LOCAL_MODELS_KEY` 常量，与 engine.ts / shared/ipc.ts 三份并存
+// 且已经漂移（engine 那份缺 `vision`；本文件把 `label` 写成必填，而 `localModelsOf()`
+// 实际只校验 `id`/`path`，属类型谎言）。现在改键名只需改一处，三方必然同步。
+import { LOCAL_MODELS_KEY, localModelSpecs, type LocalModelSpec } from "../../../core-ts/src/local_models.js";
+export type { LocalModelSpec };
 
 /** API 端点格式：OpenAI Chat Completions / Anthropic Messages / 自动检测 */
 export type ApiFormat = "openai" | "anthropic" | "responses" | "google" | "auto";
@@ -46,6 +56,17 @@ export interface ModelSpec {
   /** 上游分档计费模式标记（如 "tiered_expr"） */
   pricing_mode?: string;
   /**
+   * A-988d：上游声明的**时段价目**（OpenRouter `pricing.overrides`，UTC 口径）转成的分时规格。
+   *
+   * ⚠️ 这是**候选**，不参与取价 —— 取价只用 `price_tiers`（用户确认过的）。
+   * 名字里带 `candidate` 就是为了让任何一个读到它的人不会误以为它在生效。
+   */
+  pricing_time_tiers_candidate?: ModelPriceTiers;
+  /** A-988d：上游声明的上下文长度分档（LiteLLM `*_above_200k_tokens` / one-api `tiers[]`），纯展示 */
+  pricing_context_tiers?: UpstreamContextTier[];
+  /** A-988d：上游按次/按张计费单价（`pricing.request` / `image` / `web_search` / `audio`…），纯展示 */
+  pricing_per_request?: { request?: number; image?: number; webSearch?: number; internalReasoning?: number; audio?: number };
+  /**
    * 定价来源 —— 决定「一键刷新」时新探测到的价格能否覆盖旧值，以及 UI 如何标注可信度：
    *   - `"upstream"`：本次探测从上游 /models 或网关 /api/pricing 拿到（最权威）
    *   - `"table"`   ：来自内置家族价目表（离线兜底，可能滞后于官方调价）
@@ -54,6 +75,25 @@ export interface ModelSpec {
    * 缺省 `undefined` = 历史数据（无来源信息），按"可被覆盖"处理。
    */
   price_source?: "upstream" | "table" | "manual";
+  /**
+   * A-988c：用户自定义的分时（峰谷）档位。
+   *
+   * 为什么存在模型条目里而不是单独一张表：它必须**跟着"哪个供应商的哪个模型"走** ——
+   * 同一个 deepseek-flash 在不同中转站可能一套议价时段一套官方时段，放全局表就没法区分。
+   *
+   * ⚠️ 这份数据**永不被自动探测覆盖**（与手填价同级），见 mergeModelPrice。
+   */
+  price_tiers?: ModelPriceTiers;
+  /**
+   * A-990：用户为该模型手选的计价币种（"手动调整币种填入"）。
+   *
+   * ⚠️ **绝不改变这四个价格字段的单位** —— `price_in_usd` 等恒存 USD，用户选 ¥ 只影响
+   * 面板输入框与价格行的**显示/录入单位**（录入时经 `toUsdAmount` 折算一次）。
+   * 若让存储值随币种变，`usage.jsonl` 的账目、历史成本回填、引擎取价会同时错 7.2 倍
+   * 且**没有任何报错** —— 这正是本项目"表里只有一个数字看不出币种"那类事故的翻版。
+   * 缺省（undefined）= 按归属地推断，见 `pricingDisplayCurrency`。
+   */
+  price_currency?: PriceCurrency;
   /**
    * 该模型的端点格式覆盖（per-model）。聚合网关下不同模型可能走不同端点
    * （如 claude→anthropic/messages、gpt→openai/chat、其余→openai）。缺省 = 跟随供应商级 api_format。
@@ -86,21 +126,7 @@ export interface ProviderSummary {
   models: ModelSpec[];
 }
 
-/** 本地模型注册项（存 providers.enc.json 的 _local_models 特殊键） */
-export interface LocalModelSpec {
-  id: string;
-  /** 模型文件绝对路径（.gguf） */
-  path: string;
-  label: string;
-  /** 上下文长度（llama.cpp ctx_len） */
-  ctx_len?: number;
-  /** GPU 层数 */
-  gpu_layers?: number;
-  max_output?: number;
-  vision?: boolean;
-}
-
-const LOCAL_MODELS_KEY = "_local_models";
+/* S3：清单键名与条目类型已上移到 core-ts/src/local_models.ts（见文件顶部 import）。 */
 
 const KEY_RE = /^[a-zA-Z0-9_\-\u4e00-\u9fa5]{1,64}$/;
 const MAX_MODELS = 200;
@@ -189,9 +215,15 @@ function sanitizeModels(raw: unknown): ModelSpec[] | undefined {
           ? ((rawM as any).thinking_efforts as string[]).filter((e: unknown) => typeof e === "string" && e) : undefined,
         price_in_usd: typeof (rawM as any).price_in_usd === "number" ? (rawM as any).price_in_usd : undefined,
         price_out_usd: typeof (rawM as any).price_out_usd === "number" ? (rawM as any).price_out_usd : undefined,
-        price_cache_read_usd: typeof (rawM as any).price_cache_read_usd === "number" && (rawM as any).price_cache_read_usd > 0
+        // ⚠️ 这里**不能**像上面 context_window 那样加 `> 0` 过滤。
+        //    价格字段的 `0` 是**合法且有含义**的（"缓存命中免费"是真实存在的计费口径），
+        //    而 `undefined` 才表示"未定价"。`sanitizeModels` 是**每次读盘都跑**的，
+        //    一旦在这里把 0 过滤掉，用户手填的 0 会在下一次读配置时被静默销毁 →
+        //    落回 resolveCacheRates 的倍率推导（0.1× 输入价）→ 明明是免费的被记成收费。
+        //    同一行的 price_in_usd / price_out_usd 也没有这个判断，保持四者对称。
+        price_cache_read_usd: typeof (rawM as any).price_cache_read_usd === "number"
           ? (rawM as any).price_cache_read_usd : undefined,
-        price_cache_write_usd: typeof (rawM as any).price_cache_write_usd === "number" && (rawM as any).price_cache_write_usd > 0
+        price_cache_write_usd: typeof (rawM as any).price_cache_write_usd === "number"
           ? (rawM as any).price_cache_write_usd : undefined,
         pricing_tiered: (rawM as any).pricing_tiered === true,
         pricing_formula: typeof (rawM as any).pricing_formula === "string" && (rawM as any).pricing_formula
@@ -201,6 +233,39 @@ function sanitizeModels(raw: unknown): ModelSpec[] | undefined {
         // 定价来源（manual 标记必须落库，否则"一键刷新"会抹掉用户手填的价格）
         price_source: (rawM as any).price_source === "upstream" || (rawM as any).price_source === "table"
           || (rawM as any).price_source === "manual" ? (rawM as any).price_source : undefined,
+        /*
+         * A-990：用户手选的计价币种。
+         *
+         * ⚠️ 本函数是**白名单重建**（逐个字段拷出来），漏掉一个字段它就会在**每次读盘**时
+         * 被静默抹掉 —— 表现是"我选了 ¥，重启/刷新后又变回 $"，
+         * 而因为没有任何报错，排查会从 UI 一层层往下怀疑，最后才发现是这里少了一行。
+         * （`price_tiers` 当初踩的就是同一个坑，注释已写明。）
+         * 只接受两个合法值：数据来自磁盘 JSON，可能被手改成任意字符串。
+         */
+        price_currency: (rawM as any).price_currency === "USD" || (rawM as any).price_currency === "CNY"
+          ? (rawM as any).price_currency : undefined,
+        // A-988c：用户自定义分时档。这份数据来自磁盘 JSON（可被手改、也可能被旧版本写坏），
+        // 必须过一遍校验再进内存 —— 一个 NaN 的 startMin 会让时段判定全部落空（静默按兜底档
+        // 计费，用户永远查不出原因），一个非数字 priceIn 会把成本写成 NaN 污染整张账目表。
+        // 校验不过 = 当成"没有自定义分时"，退回内置表/手填价，**不会**半途而废地用半个坏档位。
+        price_tiers: normalizePriceTiers((rawM as any).price_tiers),
+        // A-988d：上游采集到的候选分时档（同样来自磁盘，同样要校验）
+        pricing_time_tiers_candidate: normalizePriceTiers((rawM as any).pricing_time_tiers_candidate),
+        pricing_context_tiers: Array.isArray((rawM as any).pricing_context_tiers)
+          ? ((rawM as any).pricing_context_tiers as Array<Record<string, unknown>>)
+              .filter((t) => t && typeof t === "object")
+              .map((t) => ({
+                ...(typeof t.fromInputTokens === "number" && t.fromInputTokens >= 0
+                  ? { fromInputTokens: Math.floor(t.fromInputTokens) } : {}),
+                ...(typeof t.prompt === "number" && t.prompt >= 0 ? { prompt: t.prompt } : {}),
+                ...(typeof t.completion === "number" && t.completion >= 0 ? { completion: t.completion } : {}),
+              }))
+              .filter((t) => Object.keys(t).length > 0)
+          : undefined,
+        pricing_per_request: (rawM as any).pricing_per_request && typeof (rawM as any).pricing_per_request === "object"
+          ? Object.fromEntries(Object.entries((rawM as any).pricing_per_request as Record<string, unknown>)
+              .filter(([, v]) => typeof v === "number" && Number.isFinite(v) && v >= 0))
+          : undefined,
         // 端点格式透传（per-model 覆盖，聚合网关多端点用）
         api_format: (rawM as any).api_format === "anthropic" || (rawM as any).api_format === "openai" || (rawM as any).api_format === "auto"
           ? (rawM as any).api_format : undefined,
@@ -642,13 +707,309 @@ async function tryFetchModels(url: string, apiKey: string, format: ApiFormat): P
  * 3. 用户手动填写（在 saveProvider 中合并）
  */
 
-/** OpenRouter 等中转站 pricing 是 per-token 美元字符串（"0.00001" = $10/1M tokens）；
- *  slime 的 price_in_usd 语义是 per-1M 美元（RightSidebar 按 tokens×price/1e6 计算成本），
- *  故 ×1e6 统一单位，避免成本统计错 100 万倍。 */
-function toPerMillion(v: unknown): number | undefined {
-  const n = typeof v === "string" ? parseFloat(v) : (typeof v === "number" ? v : NaN);
-  return Number.isFinite(n) && n > 0 ? n * 1_000_000 : undefined;
+/**
+ * 上游价格字段的**三套单位约定**（A-988d 调研结论，逐家核对官方文档/源码）：
+ *   A. **per-token 美元**：OpenRouter `pricing.prompt`（字符串 "0.000003"）、
+ *      LiteLLM `input_cost_per_token`（0.000003）→ 需 ×1e6 才是 slime 的 USD/1M。
+ *   B. **per-1M 美元**：自建网关常见 `input_cost_per_1m_tokens`、`prompt_price`（2.5）→ 直接用。
+ *   C. **无名乘数**：new-api `model_ratio`（0.1125）→ ×2（换算依据见 newApiConfigMap 注释）。
+ * 单位判错会让成本整体错 100 万倍 —— 这正是 A-970 事故的两个根因之一（另一个是人民币二次换算）。
+ * 所以**字段名优先**：带 `per_token`/`_cost_per_token` 的一律按 A；带 `per_1m`/`per_million` 的按 B；
+ * 名字里没有单位信息时（如 `prompt`、`input_price`）才用值域判定。
+ *
+ * 值域判定的安全性：真实的 per-token 价必然 < 0.001（$1000/1M 是最贵模型的量级），
+ * 而 per-1M 价几乎必然 ≥ 0.001。所以 `n < 1e-3 → 按 per-token` 不会误判两个方向上的真实数据。
+ */
+type PriceUnit = "per_token" | "per_million" | "auto";
+
+/**
+ * 把上游的某个金额字段解析成 **USD / 1M tokens**。
+ *
+ * ⚠️ 与旧版 `toPerMillion` 的关键差别：**`0` 被如实返回，而不是当成"没有值"**。
+ * 旧版 `n > 0 ? n*1e6 : undefined` 会把官方"限时免费"报的 0 丢掉 → 上层回退到内置表的旧价
+ * → 给免费模型凭空计费。这与 `mergeModelPrice` 注释里 ② 那条是同一个教训（`0` 也算"给了"）。
+ * `undefined` 只表示"上游没给这个字段"。
+ */
+function parseUsdPerMillion(v: unknown, unit: PriceUnit = "auto"): number | undefined {
+  let n: number;
+  if (typeof v === "number") { n = v; }
+  else if (typeof v === "string" && v.trim() !== "") {
+    // 有些网关把价格塞进可读字符串（"$0.000003" / "0.000003 USD"）→ 剥掉非数字前后缀
+    const cleaned = v.trim().replace(/^\$/, "").replace(/\s*(usd|USD|\/1m|\/1M)\s*$/, "");
+    n = Number(cleaned);
+  } else { return undefined; }
+  if (!Number.isFinite(n) || n < 0) { return undefined; }
+  if (n === 0) { return 0; } // 显式免费
+  const perToken = unit === "per_token" || (unit === "auto" && n < 1e-3);
+  return perToken ? n * 1_000_000 : n;
 }
+
+/** 从对象里按**点号路径**取值（`"pricing.prompt"`）；任一层缺失/非对象都返回 undefined */
+function pickPath(obj: Record<string, unknown>, path: string): unknown {
+  let cur: unknown = obj;
+  for (const key of path.split(".")) {
+    if (!cur || typeof cur !== "object") { return undefined; }
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+/**
+ * A-988d：**上游价格字段探针表**。这是"彻底覆盖各家厂商"的落点 —— 新增一家只需追加一行。
+ *
+ * 为什么必须做成表（而不是继续 `a ?? b ?? c` 手写）：
+ *   - 漏读一个字段名 = 该家模型**整条链静默无价**（A-970 实测 1606 条记录 100% 成本为 0，
+ *     根因之一就是只读 OpenRouter 风格的 `pricing.prompt`）；
+ *   - 手写链里很容易出现"某一路忘了乘 1e6"的不对称（旧版 `toPerMillion` 就只在部分分支用）；
+ *   - 表能一眼看出**哪些槽位是空的**，这正是"探针覆盖是否完整"的可审性。
+ *
+ * 顺序 = 优先级（先精确后模糊）：OpenRouter 命名 → LiteLLM 命名 → 通用命名。
+ */
+const UPSTREAM_PRICE_FIELDS: Array<{
+  slot: "prompt" | "completion" | "cacheRead" | "cacheWrite" | "cacheWrite1h";
+  paths: Array<[string, PriceUnit]>;
+}> = [
+  {
+    slot: "prompt",
+    paths: [
+      ["pricing.prompt", "auto"],              // OpenRouter（per-token 字符串）
+      ["input_cost_per_token", "per_token"],   // LiteLLM model cost map
+      ["input_cost_per_1m_tokens", "per_million"],
+      ["input_cost_per_million_tokens", "per_million"],
+      ["prompt_price", "auto"],                // 部分自建网关
+      ["input_price", "auto"],
+      ["prompt", "auto"],                      // new-api 扁平形态
+    ],
+  },
+  {
+    slot: "completion",
+    paths: [
+      ["pricing.completion", "auto"],
+      ["output_cost_per_token", "per_token"],
+      ["output_cost_per_1m_tokens", "per_million"],
+      ["output_cost_per_million_tokens", "per_million"],
+      ["completion_price", "auto"],
+      ["output_price", "auto"],
+      ["completion", "auto"],
+    ],
+  },
+  {
+    // 缓存**命中**（= 缓存读取）。各家命名最混乱的一项，列出全部已知写法。
+    slot: "cacheRead",
+    paths: [
+      ["pricing.input_cache_read", "auto"],          // OpenRouter
+      ["pricing.cache_read", "auto"],                // 旧 OpenRouter / 自建
+      ["cache_read_input_token_cost", "per_token"],  // LiteLLM
+      ["cache_read_input_token_cost_per_1m", "per_million"],
+      ["cached_input_cost", "per_token"],            // 部分网关
+      ["input_cache_read_cost", "auto"],
+      ["cache_read_price", "auto"],
+      ["cached_input_price", "auto"],
+      ["cache_read", "auto"],
+    ],
+  },
+  {
+    // 缓存**写入**（= cache creation / 缓存创建）。
+    slot: "cacheWrite",
+    paths: [
+      ["pricing.input_cache_write", "auto"],              // OpenRouter
+      ["pricing.cache_creation", "auto"],                 // 旧 OpenRouter
+      ["cache_creation_input_token_cost", "per_token"],   // LiteLLM
+      ["cache_creation_input_token_cost_per_1m", "per_million"],
+      ["cache_write_5m_cost", "auto"],                    // one-api 5 分钟档
+      ["cache_creation_price", "auto"],
+      ["input_cache_write_cost", "auto"],
+      ["cache_creation", "auto"],
+      ["cache_write", "auto"],
+    ],
+  },
+  {
+    // Anthropic 的 **1 小时缓存写入档**（2× 输入价）。单独一个槽位：
+    // 与 5 分钟档差 1.6 倍，合并成一个"写入价"会让长 TTL 缓存少记 37%。
+    slot: "cacheWrite1h",
+    paths: [
+      ["pricing.input_cache_write_1h", "auto"],
+      ["cache_write_1h_cost", "auto"],
+      ["cache_write_1h_ratio", "auto"],
+    ],
+  },
+];
+
+/**
+ * 相对 prompt 价的**乘数型**缓存字段（new-api / one-api 系用倍率而非绝对价）。
+ * 语义：`缓存价 = 输入价 × 该字段值`。`0` 是合法值（显式表示"不收费"）。
+ */
+const CACHE_RATIO_FIELDS: Array<{ slot: "cacheRead" | "cacheWrite" | "cacheWrite1h"; names: string[] }> = [
+  { slot: "cacheRead", names: ["cache_ratio", "cached_input_ratio", "cache_read_ratio"] },
+  { slot: "cacheWrite", names: ["create_cache_ratio", "cache_write_5m_ratio", "cache_creation_ratio", "cache_write_ratio"] },
+  { slot: "cacheWrite1h", names: ["cache_write_1h_ratio"] },
+];
+
+/** OpenRouter `pricing.overrides[]` 的一项：**按 UTC 时段**切换的价目（A-988c 分时定价的上游形态） */
+export interface UpstreamTimeOverride {
+  /** 该档适用的最小输入 token 数（配合上下文分档，缺省 = 无门槛） */
+  minPromptTokens?: number;
+  /** UTC 起/止，HHMM 整数（`1600` = 16:00 UTC）；`start > end` = **跨午夜** */
+  utcStart?: number;
+  utcEnd?: number;
+  /** 生效星期（0=周日…6=周六）；缺省 = 每天 */
+  utcDays?: number[];
+  prompt?: number;
+  completion?: number;
+  cacheRead?: number;
+}
+
+/** 上游声明的**上下文长度分档**（LiteLLM `*_above_200k_tokens` / one-api `tiers[].input_token_threshold`） */
+export interface UpstreamContextTier {
+  /** 该档起始的输入 token 数（含） */
+  fromInputTokens?: number;
+  prompt?: number;
+  completion?: number;
+}
+
+const UTC_DAY_INDEX: Record<string, number> = {
+  sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2,
+  wed: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4,
+  fri: 5, friday: 5, sat: 6, saturday: 6,
+};
+
+/** HHMM 整数 → 当天分钟数；非法返回 undefined（`"16:00"` 与 `1600` 都接受） */
+function hhmmToMinute(v: unknown): number | undefined {
+  let h: number;
+  let m: number;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    h = Math.floor(v / 100); m = v % 100;
+  } else if (typeof v === "string" && /^\d{1,2}:?\d{2}$/.test(v.trim())) {
+    const s = v.trim();
+    const parts = s.includes(":") ? s.split(":") : [s.slice(0, s.length - 2), s.slice(-2)];
+    h = Number(parts[0]); m = Number(parts[1]);
+  } else { return undefined; }
+  if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 23 || m < 0 || m > 59) { return undefined; }
+  return h * 60 + m;
+}
+
+/**
+ * 解析 OpenRouter 风格 `pricing.overrides[]` —— 上游自己声明的**时段价目**。
+ *
+ * ⚠️ 这里刻意**不直接生效**：它只是被采集下来作为"候选"，由用户在分时编辑器里显式导入。
+ * 理由：上游 overrides 用的是 **UTC**（字段名就叫 `utc_start/utc_end/utc_days`），
+ * 而 slime 的账单口径要按供应商计费时区解释；自动套用会把时区语义搞反 8 小时。
+ * 用户点导入时我们把它整份按 `timezone: "UTC"` 落地（语义完全等价，无需换算），
+ * 想改成别的时区由用户在界面上改 —— 全程可见、可核对。
+ */
+export function parsePricingOverrides(raw: unknown): UpstreamTimeOverride[] | undefined {
+  if (!Array.isArray(raw)) { return undefined; }
+  const out: UpstreamTimeOverride[] = [];
+  for (const o of raw) {
+    if (!o || typeof o !== "object") { continue; }
+    const r = o as Record<string, unknown>;
+    const prompt = parseUsdPerMillion(r.prompt, "auto");
+    const completion = parseUsdPerMillion(r.completion, "auto");
+    const cacheRead = parseUsdPerMillion(r.input_cache_read ?? r.cache_read, "auto");
+    if (prompt === undefined && completion === undefined && cacheRead === undefined) { continue; }
+    const days = Array.isArray(r.utc_days)
+      ? [...new Set(r.utc_days
+          .map((d) => (typeof d === "string" ? UTC_DAY_INDEX[d.trim().toLowerCase()] : d))
+          .filter((d): d is number => Number.isInteger(d) && (d as number) >= 0 && (d as number) <= 6))]
+        .sort((a, b) => a - b)
+      : undefined;
+    const minPrompt = typeof r.min_prompt_tokens === "number" && r.min_prompt_tokens > 0
+      ? Math.floor(r.min_prompt_tokens) : undefined;
+    const utcStart = hhmmToMinute(r.utc_start);
+    const utcEnd = hhmmToMinute(r.utc_end);
+    // 既没有时段也没有 token 门槛 → 这不是"分档"，是整份覆盖，采集下来没有意义
+    if (utcStart === undefined && utcEnd === undefined && minPrompt === undefined) { continue; }
+    // 两侧都给了且相等 → 空窗口（`inAnyWindow` 会直接跳过，永不命中）。
+    // 采集它只会让 UI 多出一条永远不生效的档位；与 overridesToPriceTiers 的跳过规则保持一致。
+    if (utcStart !== undefined && utcEnd !== undefined && utcStart === utcEnd) { continue; }
+    out.push({
+      ...(minPrompt !== undefined ? { minPromptTokens: minPrompt } : {}),
+      ...(utcStart !== undefined ? { utcStart } : {}),
+      ...(utcEnd !== undefined ? { utcEnd } : {}),
+      ...(days && days.length > 0 ? { utcDays: days } : {}),
+      ...(prompt !== undefined ? { prompt } : {}),
+      ...(completion !== undefined ? { completion } : {}),
+      ...(cacheRead !== undefined ? { cacheRead } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * 把上游的时段 override 转成 slime 的分时规格（`timezone: "UTC"`）。
+ *
+ * 只处理**有时段**的 override：只有 `min_prompt_tokens` 的那些属于"上下文长度分档"，
+ * 不是分时，混进档位表会让"现在按哪个价"变得无法解释。
+ * 边界处理：只有 start 没有 end（或反之）时补成"另一侧兜到边界"，避免生成半开窗口。
+ */
+export function overridesToPriceTiers(overrides: UpstreamTimeOverride[], baseIn: number, baseOut: number): ModelPriceTiers | undefined {
+  const tiers: ModelPriceTier[] = [];
+  for (const [i, o] of overrides.entries()) {
+    if (o.utcStart === undefined && o.utcEnd === undefined) { continue; }
+    const startMin = o.utcStart ?? 0;
+    const endMin = o.utcEnd ?? 1439;
+    if (startMin === endMin) { continue; } // 空窗口，跳过（语义见 inAnyWindow 注释）
+    tiers.push({
+      id: `upstream${tiers.length + 1}`,
+      label: `上游档位 ${i + 1}（UTC）`,
+      windows: [{ ...(o.utcDays ? { days: o.utcDays } : {}), startMin, endMin }],
+      priceIn: o.prompt ?? baseIn,
+      priceOut: o.completion ?? o.prompt ?? baseOut,
+      ...(o.cacheRead !== undefined ? { priceCacheRead: o.cacheRead } : {}),
+    });
+  }
+  if (tiers.length === 0) { return undefined; }
+  // 补兜底档：上游 overrides 只描述"例外时段"，其余时间仍走基准价；
+  // 少了它，非命中时段会落到 tiers[0]（一个真实但错误的高价档）→ 凭空多收。
+  tiers.push({ id: "base", label: "其余时段（基准价）", windows: [], priceIn: baseIn, priceOut: baseOut });
+  return { timezone: "UTC", tiers };
+}
+
+/**
+ * 解析「上下文长度分档」。
+ *   - LiteLLM：`input_cost_per_token_above_200k_tokens` / `..._above_128k_tokens`
+ *   - one-api：`tiers: [{ input_token_threshold, input_cost_per_million_tokens, ... }]`
+ * 这些是**按输入长度加价**，与分时无关，因此只采集用于提示，不参与取价
+ * （slime 的取价入口按 token 单价 + 时刻，没有"按上下文长度"这一维；强行套会算错）。
+ */
+export function parseContextTiers(item: Record<string, unknown>): UpstreamContextTier[] | undefined {
+  const out: UpstreamContextTier[] = [];
+  // ① LiteLLM 的后缀形态：字段名里自带门槛（above_200k_tokens）
+  for (const [k, v] of Object.entries(item)) {
+    const m = /^input_cost_per_(?:token|1m_tokens)_above_(\d+)(k?)_tokens$/.exec(k);
+    if (!m) { continue; }
+    const prompt = parseUsdPerMillion(v, k.includes("per_token") ? "per_token" : "auto");
+    if (prompt === undefined) { continue; }
+    const threshold = Number(m[1]) * (m[2] === "k" ? 1000 : 1);
+    const completionKey = k.replace("input_cost", "output_cost");
+    out.push({
+      fromInputTokens: threshold,
+      prompt,
+      ...(typeof item[completionKey] !== "undefined"
+        ? { completion: parseUsdPerMillion(item[completionKey], k.includes("per_token") ? "per_token" : "auto") } : {}),
+    });
+  }
+  // ② one-api 的数组形态：tiers[].input_token_threshold
+  if (Array.isArray(item.tiers)) {
+    for (const t of item.tiers) {
+      if (!t || typeof t !== "object") { continue; }
+      const r = t as Record<string, unknown>;
+      const threshold = typeof r.input_token_threshold === "number" ? r.input_token_threshold : undefined;
+      const prompt = parseUsdPerMillion(
+        r.input_cost_per_million_tokens ?? r.input_cost_per_token ?? r.input_price, "auto");
+      const completion = parseUsdPerMillion(
+        r.output_cost_per_million_tokens ?? r.output_cost_per_token ?? r.output_price, "auto");
+      if (prompt === undefined && completion === undefined) { continue; }
+      out.push({
+        ...(threshold !== undefined ? { fromInputTokens: threshold } : {}),
+        ...(prompt !== undefined ? { prompt } : {}),
+        ...(completion !== undefined ? { completion } : {}),
+      });
+    }
+  }
+  return out.length > 0 ? out.sort((a, b) => (a.fromInputTokens ?? 0) - (b.fromInputTokens ?? 0)) : undefined;
+}
+
 
 /**
  * new-api / one-api 的「倍率配置」端点（/api/ratio_config，部分网关公开无需鉴权）：
@@ -772,10 +1133,26 @@ export type NewApiPricing = {
   promptCacheRead?: number;
   /** 缓存写入/创建 $/1M（同上） */
   promptCacheCreate?: number;
+  /**
+   * 缓存写入的 **1 小时 TTL 档** $/1M（Anthropic 为 2× 输入价，5 分钟档是 1.25×）。
+   * 单列一档而不是并进 `promptCacheCreate`：两档差 1.6 倍，混用会让长 TTL 缓存少记 37%。
+   */
+  promptCacheWrite1h?: number;
+  /** OpenRouter `pricing.discount`：本周期折扣比例（非 token 单价，仅供 UI 提示） */
+  discount?: number;
   /** 上游计费模式（如 "tiered_expr"） */
   billingMode?: string;
   /** 解析后的分档计费（上游声明 billing_expr 时存在） */
   tiered?: ParsedBillingExpr;
+  /**
+   * A-988d：上游自己声明的**时段价目**（OpenRouter `pricing.overrides`，UTC 口径）。
+   * **采集但不自动生效** —— 由用户在分时编辑器里显式导入（见 overridesToPriceTiers）。
+   */
+  timeOverrides?: UpstreamTimeOverride[];
+  /** A-988d：上游声明的**上下文长度分档**（LiteLLM `*_above_200k_tokens` / one-api `tiers[]`） */
+  contextTiers?: UpstreamContextTier[];
+  /** A-988d：按次/按张计费单价（`pricing.request` / `image` / `web_search` / `audio` …） */
+  perRequest?: { request?: number; image?: number; webSearch?: number; internalReasoning?: number; audio?: number };
 };
 
 export function newApiConfigMap(data: unknown): Map<string, { pricing?: NewApiPricing }> {
@@ -784,27 +1161,49 @@ export function newApiConfigMap(data: unknown): Map<string, { pricing?: NewApiPr
   const d = data as Record<string, unknown>;
   const ratioMap = d.model_ratio;
   const compMap = d.completion_ratio;
-  const cacheMap = d.cache_ratio;
-  const cacheCreateMap = d.create_cache_ratio;
+  // 缓存倍率的**别名集合**（new-api 各版本 + one-api 的字段名都收进来）：
+  // 只认一个名字 = 换一个网关版本就静默丢缓存价（用户看到的现象是"缓存价突然变未定价了"）。
+  const pickMap = (names: string[]): Record<string, unknown> | undefined => {
+    for (const n of names) {
+      const v = d[n];
+      if (v && typeof v === "object") { return v as Record<string, unknown>; }
+    }
+    return undefined;
+  };
+  const cacheMap = pickMap(["cache_ratio", "cached_input_ratio", "cache_read_ratio"]);
+  const cacheCreateMap = pickMap(["create_cache_ratio", "cache_creation_ratio", "cache_write_ratio", "cache_write_5m_ratio"]);
+  const cacheWrite1hMap = pickMap(["cache_write_1h_ratio"]);
   const billingExprMap = d.billing_expr;
   const billingModeMap = d.billing_mode;
   if (!ratioMap || typeof ratioMap !== "object") { return out; }
   for (const [id, r] of Object.entries(ratioMap as Record<string, unknown>)) {
-    if (typeof r !== "number" || !(r > 0)) { continue; }
+    /*
+     * `model_ratio`（**基数**倍率）必须 > 0，`0` 一律跳过。
+     *
+     * 这不与「`0` 也是合法价格」矛盾 —— 两者的字段语义不同：
+     *   · `model_ratio` 是 token 单价本身。**new-api 自己的管理接口就拒绝存储 ≤ 0 的倍率**
+     *     （输入非法时前端/后端会报"倍率必须大于 0"），所以在这里读到 0 只能是
+     *     占位残留/半写坏的配置，把它当成"免费"会让整个供应商的账单静默变成 $0
+     *     —— 正是 A-970「错的低价比没有价格危害大得多」。
+     *   · `cache_ratio` / `create_cache_ratio` 是**相对 prompt 的乘数**，new-api 允许 0，
+     *     语义明确就是"缓存不收费" → 那些一律用 `>= 0` 保留（见下面的 rel()）。
+     *   · 另一条独立的声明路径（OpenRouter 式 `pricing.prompt: "0"`）是显式的绝对价，
+     *     那里的 0 仍如实采信（见 parseUsdPerMillion）。
+     */
+    if (typeof r !== "number" || !Number.isFinite(r) || r <= 0) { continue; }
     const cr = (compMap && typeof compMap === "object")
       ? (compMap as Record<string, unknown>)[id] : undefined;
     const completionRatio = typeof cr === "number" && cr > 0 ? cr : 1;
     const perMillion = r * 2; // 1 倍率 = $2/1M tokens
-    // cache_ratio / create_cache_ratio：相对 prompt 价的乘数（0~N）
-    // 例：deepseek-chat ratio=0.135、cache_ratio=0.25 → cacheRead = 0.135*2*0.25 = $0.0675/1M
-    const cacheR = (cacheMap && typeof cacheMap === "object")
-      ? (cacheMap as Record<string, unknown>)[id] : undefined;
-    const cacheC = (cacheCreateMap && typeof cacheCreateMap === "object")
-      ? (cacheCreateMap as Record<string, unknown>)[id] : undefined;
-    const promptCacheRead = (typeof cacheR === "number" && cacheR > 0)
-      ? perMillion * cacheR : undefined;
-    const promptCacheCreate = (typeof cacheC === "number" && cacheC > 0)
-      ? perMillion * cacheC : undefined;
+    // 缓存倍率是**相对 prompt 价的乘数**，`0` 合法（显式表示不收费）→ 用 `>= 0` 而不是 `> 0`。
+    // 旧写法 `> 0` 会把官方的"缓存免费"当成"没有配置"，回退到别处的值 → 免费被记成收费。
+    const rel = (map: Record<string, unknown> | undefined): number | undefined => {
+      const v = map?.[id];
+      return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+    };
+    const cacheR = rel(cacheMap);
+    const cacheC = rel(cacheCreateMap);
+    const cache1h = rel(cacheWrite1hMap);
     // billing_expr / billing_mode：分档计费（语义独立，**不**覆盖 flat prompt/completion 值——
     // slime 仍按 model_ratio 计费，遇到分档模型时 UI 应提示"上游实际按上下文长度加价"）
     const exprStr = (billingExprMap && typeof billingExprMap === "object")
@@ -817,8 +1216,9 @@ export function newApiConfigMap(data: unknown): Map<string, { pricing?: NewApiPr
       pricing: {
         prompt: perMillion,
         completion: perMillion * completionRatio,
-        promptCacheRead,
-        promptCacheCreate,
+        promptCacheRead: cacheR !== undefined ? perMillion * cacheR : undefined,
+        promptCacheCreate: cacheC !== undefined ? perMillion * cacheC : undefined,
+        promptCacheWrite1h: cache1h !== undefined ? perMillion * cache1h : undefined,
         billingMode,
         tiered,
       },
@@ -859,37 +1259,69 @@ export function parseUpstreamModelItems(items: Array<Record<string, unknown>>): 
       ? newApiRatioRaw : undefined;
     const newApiComp = typeof (d as any).completion_ratio === "number" && (d as any).completion_ratio > 0
       ? (d as any).completion_ratio : 1;
-    const prompt = d.pricing && typeof d.pricing === "object"
-      ? toPerMillion((d.pricing as any).prompt)
-      : (newApiRatio !== undefined ? newApiRatio * 2 : undefined);
-    const completion = d.pricing && typeof d.pricing === "object"
-      ? toPerMillion((d.pricing as any).completion)
-      : (prompt !== undefined ? prompt * newApiComp : undefined);
-    // 缓存价：OpenRouter 风格 pricing.cache_read / cache_creation 是 per-token 字符串（×1e6），
-    // 优先采用；缺失则从 new-api 顶层 cache_ratio / create_cache_ratio（相对 prompt 乘数）派生
-    const cacheReadFromObj = d.pricing && typeof d.pricing === "object" && typeof (d.pricing as any).cache_read === "string"
-      ? toPerMillion((d.pricing as any).cache_read) : undefined;
-    const cacheCreateFromObj = d.pricing && typeof d.pricing === "object" && typeof (d.pricing as any).cache_creation === "string"
-      ? toPerMillion((d.pricing as any).cache_creation) : undefined;
-    const cacheRRaw = (d as any).cache_ratio;
-    const cacheCRaw = (d as any).create_cache_ratio;
-    const cacheReadFromRatio = (typeof cacheRRaw === "number" && cacheRRaw > 0 && prompt !== undefined)
-      ? prompt * cacheRRaw : undefined;
-    const cacheCreateFromRatio = (typeof cacheCRaw === "number" && cacheCRaw > 0 && prompt !== undefined)
-      ? prompt * cacheCRaw : undefined;
-    // 分档计费（独立字段，不影响 prompt/completion flat 值）
+
+    // ── A-988d：表驱动取价（覆盖 OpenRouter / LiteLLM / one-api / 自建网关的字段名）──
+    const bySlot: Record<string, number | undefined> = {};
+    for (const f of UPSTREAM_PRICE_FIELDS) {
+      for (const [path, unit] of f.paths) {
+        const v = parseUsdPerMillion(pickPath(d, path), unit);
+        if (v !== undefined) { bySlot[f.slot] = v; break; }
+      }
+    }
+    // new-api 的乘数口径兜底：pricing/model_price 都没给时才用 model_ratio 换算
+    const prompt = bySlot.prompt ?? (newApiRatio !== undefined ? newApiRatio * 2 : undefined);
+    const completion = bySlot.completion
+      ?? (prompt !== undefined && (newApiRatio !== undefined || bySlot.prompt !== undefined)
+        ? prompt * newApiComp : undefined);
+
+    // 缓存价的**乘数型**来源（相对 prompt）：new-api / one-api 系大量使用
+    const ratioOf = (names: string[]): number | undefined => {
+      for (const n of names) {
+        const v = (d as any)[n];
+        if (typeof v === "number" && Number.isFinite(v) && v >= 0) { return v; }
+      }
+      return undefined;
+    };
+    const fromRatio: Record<string, number | undefined> = {};
+    for (const f of CACHE_RATIO_FIELDS) {
+      const r = ratioOf(f.names);
+      if (r !== undefined && prompt !== undefined) { fromRatio[f.slot] = prompt * r; }
+    }
+
+    // 分档计费（new-api billing_expr，独立字段，不影响 flat 值）
     const billingExprStr = typeof (d as any).billing_expr === "string" ? (d as any).billing_expr : undefined;
     const billingModeStr = typeof (d as any).billing_mode === "string" && (d as any).billing_mode
       ? (d as any).billing_mode : undefined;
     const tieredParsed = billingExprStr !== undefined ? parseBillingExpr(billingExprStr, billingModeStr) : undefined;
+
+    // A-988d 新增采集：上游时段档（OpenRouter overrides）与上下文长度档（LiteLLM / one-api）
+    const timeOverrides = parsePricingOverrides((d as any).pricing?.overrides ?? (d as any).overrides);
+    const contextTiers = parseContextTiers(d);
+    // 按次/按张计费的单价（不参与 token 计费，仅用于提示"这个模型不是按 token 计价"）
+    const perRequest = {
+      request: parseUsdPerMillion((d as any).pricing?.request, "per_million"),
+      image: parseUsdPerMillion((d as any).pricing?.image, "per_million"),
+      webSearch: parseUsdPerMillion((d as any).pricing?.web_search, "per_million"),
+      internalReasoning: parseUsdPerMillion((d as any).pricing?.internal_reasoning, "per_million"),
+      audio: parseUsdPerMillion((d as any).pricing?.audio, "per_million"),
+    };
+    const hasPerRequest = Object.values(perRequest).some((v) => v !== undefined);
+
     const pricing: NewApiPricing | undefined = prompt !== undefined
       ? {
           prompt,
           completion,
-          promptCacheRead: cacheReadFromObj ?? cacheReadFromRatio,
-          promptCacheCreate: cacheCreateFromObj ?? cacheCreateFromRatio,
+          promptCacheRead: bySlot.cacheRead ?? fromRatio.cacheRead,
+          promptCacheCreate: bySlot.cacheWrite ?? fromRatio.cacheWrite,
+          promptCacheWrite1h: bySlot.cacheWrite1h ?? fromRatio.cacheWrite1h,
+          /** OpenRouter `pricing.discount`：本周期的折扣比例（**不是** token 单价，原样带上供 UI 提示） */
+          discount: typeof (d as any).pricing?.discount === "string"
+            ? parseFloat((d as any).pricing.discount) : undefined,
           billingMode: billingModeStr,
           tiered: tieredParsed,
+          timeOverrides,
+          contextTiers,
+          ...(hasPerRequest ? { perRequest } : {}),
         }
       : undefined;
     // 上游上下文窗口字段名各家不一（OpenRouter=context_length；new-api/one-api 系=context_window/
@@ -1002,6 +1434,42 @@ export async function probeUpstreamTwoPhase(
   return details;
 }
 
+/**
+ * 写进 provider 配置的 `context_window` 的**唯一决策点**。
+ *
+ * 优先级：上游服务回传 > 家族能力表（**仅远端**）> 已有保存值（**仅远端**）> 旧正则启发式（**仅远端**）
+ *
+ * ⚠️ S5（A-1018 ③）：**本地 / 内网端点在「上游回传」之后就到此为止**。
+ * 家族表存的是模型**训练时**的窗口（qwen3 / dots = 524K），而本机 llama-server 的实际窗口
+ * 只由启动参数 `-c` 决定 —— 并且**问得到**（`/props.n_ctx`，唯一决策点见 core-ts 的
+ * `resolveWindowCap`）。在这里塞一个训练窗口，它会落进 provider 配置的 `context_window`，
+ * 再被渲染层当成会话上限：环里显示"还剩 480K"，请求却被上游 400 顶回
+ * `exceeds the available context size (8192 tokens)`。
+ *
+ * ⚠️ 为什么「已有保存值」对本地端点也要丢：这个字段的值**本来就是本函数自动填的**，
+ * 不是用户手填的。留着它就等于把旧代码写坏的 524K 永久继承下去 ——
+ * 正是注释里反复出现的「错值自杀锁」。丢掉之后 `resolveWindowCap` 会用探测到的真实值补上。
+ *
+ * ⚠️ 把规则收在这个函数里（而不是散在调用点）是为了它能被**直接测到**：
+ * 一旦被改回"本地端点也吃家族兜底"，行为测试立刻红（见 tests/gui/…）。
+ */
+export function providerCtxWindow(input: {
+  baseUrl: string;
+  modelId: string;
+  upstreamCtx?: number;
+  savedCtx?: number;
+}): number | undefined {
+  const up = input.upstreamCtx;
+  if (typeof up === "number" && up > 0) { return Math.floor(up); }
+  if (isLocalEndpoint(input.baseUrl)) { return undefined; }
+  const family = inferModelCapabilities(input.modelId).context;
+  if (typeof family === "number" && family > 0) { return family; }
+  const saved = input.savedCtx;
+  if (typeof saved === "number" && saved > 0) { return saved; }
+  const inferred = inferModelDefaults(input.modelId).context_window;
+  return typeof inferred === "number" && inferred > 0 ? inferred : undefined;
+}
+
 /** 基于模型 ID 命名规律推断默认元数据（覆盖 OpenAI/Anthropic/DeepSeek/Gemini/自建等所有场景） */
 function inferModelDefaults(modelId: string): Partial<ModelSpec> {
   // ① 优先取能力表（单一真相源，含 2026 新模型如 gpt-6 / gemini-3.x 的兜底值）；
@@ -1069,11 +1537,22 @@ function inferModelDefaults(modelId: string): Partial<ModelSpec> {
  *
  * ⚠️ 为什么必须做这个合并：`saveProvider` / `refreshProviderModels` 都是拿 enrich 的全新结果
  * 覆盖 models 数组，若不合并，用户手填的价格会在"一键刷新"后**静默消失**。
+ *
+ * A-988c：`price_tiers`（用户自定义分时）**与手填价同级、永不被覆盖**（见下方 ⓪）。
+ * 它的信号量级比单个数字更大 —— 用户为此填了一整张时段表，被抹掉是远比"丢一个价"严重的损失。
  */
 export function mergeModelPrice(
-  prev: Pick<ModelSpec, "price_in_usd" | "price_out_usd" | "price_cache_read_usd" | "price_cache_write_usd" | "price_source"> | undefined,
-  next: Pick<ModelSpec, "price_in_usd" | "price_out_usd" | "price_cache_read_usd" | "price_cache_write_usd" | "price_source">,
-): Pick<ModelSpec, "price_in_usd" | "price_out_usd" | "price_cache_read_usd" | "price_cache_write_usd" | "price_source"> {
+  prev: Pick<ModelSpec, "price_in_usd" | "price_out_usd" | "price_cache_read_usd" | "price_cache_write_usd" | "price_source" | "price_tiers" | "price_currency"> | undefined,
+  next: Pick<ModelSpec, "price_in_usd" | "price_out_usd" | "price_cache_read_usd" | "price_cache_write_usd" | "price_source" | "price_tiers" | "price_currency">,
+): Pick<ModelSpec, "price_in_usd" | "price_out_usd" | "price_cache_read_usd" | "price_cache_write_usd" | "price_source" | "price_tiers" | "price_currency"> {
+  // ⓪ 自定义分时是最强的用户意图表达（一整张时段表），无条件保留旧值。
+  //    唯一能清掉它的入口是面板里的「关闭」按钮（那会显式把 price_tiers 置为 undefined，
+  //    走的是用户主动保存路径，不经过本函数的新值分支）。
+  const keepTiers = prev?.price_tiers;
+  // A-990：用户手选的币种同理 —— 自动探测**永远不产出** price_currency，
+  // 所以这个字段唯一的变化来源就是用户操作。不在这里保留，一键刷新就会把它抹掉，
+  // 表现是"我明明选了 ¥，刷新一下自己变回 $"（用户会认为是随机行为，根本查不到原因）。
+  const keepCurrency = prev?.price_currency;
   if (prev?.price_source === "manual") {
     return {
       price_in_usd: prev.price_in_usd,
@@ -1081,6 +1560,8 @@ export function mergeModelPrice(
       price_cache_read_usd: prev.price_cache_read_usd,
       price_cache_write_usd: prev.price_cache_write_usd,
       price_source: "manual",
+      price_tiers: keepTiers,
+      price_currency: next.price_currency ?? keepCurrency,
     };
   }
   return {
@@ -1089,6 +1570,8 @@ export function mergeModelPrice(
     price_cache_read_usd: next.price_cache_read_usd !== undefined ? next.price_cache_read_usd : prev?.price_cache_read_usd,
     price_cache_write_usd: next.price_cache_write_usd !== undefined ? next.price_cache_write_usd : prev?.price_cache_write_usd,
     price_source: next.price_source ?? prev?.price_source,
+    price_tiers: next.price_tiers ?? keepTiers,
+    price_currency: next.price_currency ?? keepCurrency,
   };
 }
 
@@ -1155,6 +1638,21 @@ export function inferPricingFromUrl(baseUrl: string, modelId: string, at?: Date 
  *
  * 返回 `source` 会写回 ModelSpec：UI 用它标注可信度，下次刷新用它保护手填值。
  * 注意 `value: 0` 是**有意义的**（官方限时免费 / 本地推理），与"没有值"完全不同。
+ *
+ * ⚠️ 2026-09-18 修正（原实现写成 `upstream > 0`，把上游显式声明的 0 也当成"没给"）：
+ *   上游 `0` 是**权威的"免费"声明**，不是缺失。依据：
+ *     - OpenRouter 官方模型列表文档：`pricing` 各字段 "**A value of `"0"` indicates the
+ *       feature is free**"，字段不存在才用省略表达（"Price keys absent from an entry
+ *       inherit the base price"）—— 即"0"与"缺失"是两种不同的信号；
+ *     - Google AIP-149《Unset field values》：需要区分"有意义的默认值（0/false/空串）"与
+ *       "未设置"时，**必须**做 presence tracking（TS 里就是 `number | undefined`）；
+ *     - Google JSON Style Guide 同型先例：`"balance": 0` 必须保留，因为 0 是有意义的取值。
+ *   本文件另外三处早就按这个语义写：`parseUsdPerMillion`（"`0` 被如实返回，而不是当成
+ *   '没有值'"）、`mergeModelPrice`（"`0` 也算「给了」"）、`inferPricingFromUrl`（本地端点
+ *   返回 0 = 免费）。**唯独这里残留 `> 0`，等于在最后一跳把上游免费声明丢掉**，
+ *   然后回落到内置表非零价 → **给免费模型凭空计费**（与"免费档被付费档吃掉"同一族事故，
+ *   方向是高估）。三条依据 + 三处同源实现一致，故统一为"上游给了就算给了（含 0）"。
+ *   上游确实不打算声明价格时，走的是**字段缺失**（undefined）而不是填 0。
  */
 export function resolvePrice(
   saved: number | undefined,
@@ -1163,7 +1661,8 @@ export function resolvePrice(
   table: number | undefined,
 ): { value?: number; source?: "upstream" | "table" | "manual" } {
   if (savedIsManual && typeof saved === "number") { return { value: saved, source: "manual" }; }
-  if (typeof upstream === "number" && upstream > 0) { return { value: upstream, source: "upstream" }; }
+  // `typeof upstream === "number"` 而非 `upstream > 0`：0 是"上游声明免费"，必须原样采纳
+  if (typeof upstream === "number") { return { value: upstream, source: "upstream" }; }
   if (typeof table === "number") { return { value: table, source: "table" }; }
   if (typeof saved === "number") { return { value: saved, source: undefined }; }
   return {};
@@ -1196,38 +1695,28 @@ export function makePriceResolver(table: ProvidersTable): PriceResolver {
     index.set(key, rec);
   }
 
-  // price_out 缺失时退回 price_in：输出通常更贵，退成输入价会低估，但总好过按 0 计（更低估）
-  const fromSpec = (m: ModelSpec): UsagePrice => ({
-    priceIn: m.price_in_usd,
-    priceOut: m.price_out_usd ?? m.price_in_usd,
-    priceCacheRead: m.price_cache_read_usd,
-    priceCacheWrite: m.price_cache_write_usd,
-  });
-
   return (providerKey: string, model: string, ts?: string): UsagePrice | undefined => {
     const rec = index.get(providerKey);
     const specs = Array.isArray(rec?.models) ? rec.models : [];
     const hit = specs.find((m) => m.id === model);
-    // ①② 手填 / 上游价：用户或网关说了算（单一价，不分时）
-    if (hit && (hit.price_source === "manual" || hit.price_source === "upstream")
-      && typeof hit.price_in_usd === "number") {
-      return fromSpec(hit);
-    }
-    // ③ 内置价目表（本地/内网端点命中"显式 0 = 免费"分支，回填保持 0，正确）
-    //    `ts` 传入 → 分时模型按该时刻取档；同时把档位 id 带回给 recomputeOne 落盘
-    const t = inferPricingFromUrl(String(rec?.api_base ?? ""), model, ts);
-    if (t.price_in_usd !== undefined) {
-      return {
-        priceIn: t.price_in_usd,
-        priceOut: t.price_out_usd ?? t.price_in_usd,
-        priceCacheRead: t.price_cache_read_usd,
-        priceCacheWrite: undefined,
-        tierId: t.tier_id,
-      };
-    }
-    // ④ 表里也没价 → 退回存的值（可能是用户环境的自定义价）
-    if (hit && typeof hit.price_in_usd === "number") { return fromSpec(hit); }
-    return undefined;
+    /*
+     * A-988c：**本函数不再自建一套优先级**，直接调 `resolveEffectivePricing`。
+     *
+     * 旧实现手写了 ①手填/上游 ②本地 0 ③内置表 ④存值 四条分支 —— 是"三处各写一遍"里的第三处。
+     * 它在 A-988c 之后立刻出了偏差：看不到 `price_tiers`（用户自定义分时档），
+     * 于是"重算历史成本"算出来的口径与当时实际记账的口径不一致 ——
+     * 用户点了重算，历史账单反而和实时账单对不上（比不算还糟）。
+     * 供应商已被删除（rec 为 undefined）时仍按模型 ID + 内置表算，保住历史账目可读性。
+     */
+    const eff = resolveEffectivePricing(model, String(rec?.api_base ?? ""), hit, ts);
+    if (eff.origin === "none") { return undefined; }
+    return {
+      priceIn: eff.priceIn,
+      priceOut: eff.priceOut,
+      priceCacheRead: eff.priceCacheRead,
+      priceCacheWrite: eff.priceCacheWrite,
+      tierId: eff.tierId,
+    };
   };
 }
 
@@ -1281,18 +1770,17 @@ export async function enrichModels(baseUrl: string, apiKey: string, format: ApiF
   const models = baseModels.map((m) => {
     const upstream = upstreamDetails.get(m.id);
 
-    // context_window：上游 > **家族能力表（高置信）** > 已有保存值 > 旧启发式推断
+    // context_window：**唯一决策点 = providerCtxWindow()**（优先级与"S5 本地端点不兜底"的理由
+    // 全写在那个函数上方的注释里 —— 别再在这里就地拼一条并行链路）。
     // ⚠️ 为什么家族表要压过「已有保存值」：值一旦被写错（如小红书 dots 曾按 128K 落库），
     // 老逻辑「上游 > 已有 > 推断」在网关不回传窗口时会永远沿用错值 —— 用户反复点刷新也仍是 128K
-    // （"一直刷新默认为128K"的根因）。家族表是人工核对的单一真相源，命中即纠正。
-    const ctxFromUpstream = upstream?.context_length;
-    const ctxFromFamily = inferModelCapabilities(m.id).context;
-    const ctxFromInference = inferModelDefaults(m.id).context_window;
-    const ctxWindow = ctxFromUpstream && ctxFromUpstream > 0
-      ? Math.floor(ctxFromUpstream)
-      : (ctxFromFamily && ctxFromFamily > 0 ? ctxFromFamily
-        : (typeof m.context_window === "number" && m.context_window > 0 ? m.context_window
-          : (ctxFromInference && ctxFromInference > 0 ? ctxFromInference : undefined)));
+    // （"一直刷新默认为128K"的根因）。家族表是人工核对的单一真相源，命中即纠正（仅远端）。
+    const ctxWindow = providerCtxWindow({
+      baseUrl,
+      modelId: m.id,
+      upstreamCtx: upstream?.context_length,
+      savedCtx: typeof m.context_window === "number" ? m.context_window : undefined,
+    });
 
     // ── pricing：优先级 = 上游探测 > 内置价目表 > 传入的已有值（见 resolvePrice 注释）──
     // 旧写法 `priceIn && priceIn > 0 ? ... : (m.price_in_usd ?? 推断)` 有两个致命问题：
@@ -1313,6 +1801,21 @@ export async function enrichModels(baseUrl: string, apiKey: string, format: ApiF
     const pricingTiered = tieredUpstream?.tiered ?? (m.pricing_tiered === true);
     const pricingFormula = tieredUpstream?.raw ?? m.pricing_formula;
     const pricingMode = upstream?.pricing?.billingMode ?? m.pricing_mode;
+
+    /*
+     * A-988d：上游声明的**时段档**与**上下文长度档**，采集为"候选"而不是直接生效。
+     *
+     * 为什么只采集：上游 overrides 是 UTC 口径、且只描述"例外时段"，直接套用会把时区语义
+     * 搞错 8 小时，还会丢掉非命中时段的基准价。所以它只落成 `pricing_time_tiers_candidate`，
+     * 由用户在分时编辑器里点「导入上游时段」才变成生效的 `price_tiers`（那一步是显式意图）。
+     * `pricing_context_tiers` 纯展示：slime 的取价没有"按上下文长度"这一维，套上去只会算错。
+     */
+    const timeOv = upstream?.pricing?.timeOverrides;
+    const timeTiersCandidate = timeOv && timeOv.length > 0
+      ? overridesToPriceTiers(timeOv, rIn.value ?? 0, rOut.value ?? 0)
+      : undefined;
+    const contextTiers = upstream?.pricing?.contextTiers;
+    const perRequest = upstream?.pricing?.perRequest;
 
     // vision：上游 > 启发式推断 > 已有值
     const vision = upstream?.architecture?.input_modalities
@@ -1378,6 +1881,10 @@ export async function enrichModels(baseUrl: string, apiKey: string, format: ApiF
       pricing_tiered: pricingTiered === true,
       pricing_formula: pricingFormula,
       pricing_mode: pricingMode,
+      // A-988d：上游分时/长度分档与按次价的**采集**（候选，不参与取价）
+      pricing_time_tiers_candidate: timeTiersCandidate ?? m.pricing_time_tiers_candidate,
+      pricing_context_tiers: contextTiers ?? m.pricing_context_tiers,
+      pricing_per_request: perRequest ?? m.pricing_per_request,
       selected: m.selected !== false,
       api_format: modelEndpoint,
     };
@@ -1720,17 +2227,11 @@ export function clearAllProviders(): { ok: boolean; error?: string } {
 
 const GGUF_EXTS = [".gguf", ".ggml"];
 
-function localModelsOf(table: Record<string, unknown>): LocalModelSpec[] {
-  const raw = table[LOCAL_MODELS_KEY];
-  if (!Array.isArray(raw)) { return []; }
-  return raw.filter((m): m is LocalModelSpec =>
-    typeof m === "object" && m !== null &&
-    typeof (m as LocalModelSpec).id === "string" &&
-    typeof (m as LocalModelSpec).path === "string");
-}
+/* S3：原 `localModelsOf(table)` 已删除 —— 它只是 `localModelSpecs` 的一层薄封装，
+ * 而那层封装正是"过滤判据可以有第二份实现"的地方。调用点直接用 core-ts 的唯一实现。 */
 
 export function listLocalModels(): LocalModelSpec[] {
-  return localModelsOf(loadTable());
+  return localModelSpecs(loadTable());
 }
 
 function persistTable(table: ProvidersTable): { ok: boolean; error?: string } {
@@ -1765,7 +2266,7 @@ export function saveLocalModel(input: { id: string; path: string; label?: string
   if (!existsSync(path)) {
     return { ok: false, error: `模型文件不存在：${path}` };
   }
-  const existing = localModelsOf(table);
+  const existing = localModelSpecs(table);
   const next: LocalModelSpec[] = [
     ...existing.filter((m) => m.id !== id),
     {
@@ -1784,8 +2285,8 @@ export function saveLocalModel(input: { id: string; path: string; label?: string
 
 export function removeLocalModel(id: string): { ok: boolean; error?: string } {
   const table = loadTable();
-  const next = localModelsOf(table).filter((m) => m.id !== id);
-  if (next.length === localModelsOf(table).length) {
+  const next = localModelSpecs(table).filter((m) => m.id !== id);
+  if (next.length === localModelSpecs(table).length) {
     return { ok: true };
   }
   (table as unknown as Record<string, unknown>)[LOCAL_MODELS_KEY] = next;

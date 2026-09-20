@@ -11,28 +11,30 @@ import React, { type CSSProperties, type JSX } from "react";
 import { createPortal } from "react-dom";
 import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets } from "../../shared/ipc.js";
 import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
-import { sanitizeThinking, normalizeThinkingText, stripMarkdown } from "./thinkingText.js";
+/** A-1008：「联网搜索」开关的唯一读写实现（与 App.tsx 共用，禁在本文件复写 localStorage 口径） */
+import { readNetworkEnabled, writeNetworkEnabled } from "../networkToggle.js";
+import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel } from "./thinkingText.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
-import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, type IconProps } from "../components/Icon.js";
+import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, type IconProps } from "../components/Icon.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
 /** A-980-R19/R21：悬浮窗唤出按钮图标（用户指定目录 message-circle.svg——聊天悬浮窗=对话气泡） */
 import floatToggleIcon from "../../../icon/icon_fpbc119q3rk/message-circle.svg";
-// A-1007：产物卡文件类型图标（拷贝自 gui/icon/icon_fpbc119q3rk，vite 静态资源按 URL 字符串导入）
-import wordIcon from "../assets/icons/word.svg";
-import excelIcon from "../assets/icons/Excel.svg";
-import pdfIcon from "../assets/icons/pdf.svg";
-import pptIcon from "../assets/icons/ppt.svg";
-import pythonIcon from "../assets/icons/python.svg";
-import cssIcon from "../assets/icons/css.svg";
-import tsIcon from "../assets/icons/ts.svg";
-import gitIcon from "../assets/icons/git.svg";
-import llamaIcon from "../assets/icons/llama.svg";
-import fileTextIcon from "../assets/icons/file-text.svg";
-import codeIcon from "../assets/icons/code.svg";
-import fileZipIcon from "../assets/icons/file-zip.svg";
-import imageIcon from "../assets/icons/image.svg";
-import terminalIcon from "../assets/icons/terminal.svg";
-import fileInfoIcon from "../assets/icons/file-info.svg";
+/*
+ * A-990：产物卡的品牌图标映射（连同那 15 个 svg 导入）已移到 `productIcons.ts`。
+ * 原因是它被 `tests/core-ts/gui-products.spec.ts` 直接测试 —— 那些资源导入留在组件里，
+ * 会让测试的模块图包含整个 5000 行组件（并曾把根类型检查拖红 17 条 TS2307）。
+ * 这里只保留**视图专用**的两个图标（悬浮窗唤出、折叠箭头），它们不参与任何单测。
+ */
+import { productIconUrl, fileInfoIcon } from "./productIcons.js";
+// A-990：纯逻辑分家 —— 工具留痕/产物解析与在途快照都不该住在组件里（见两个模块的文件头注释）
+import {
+  stripDiffTag, parseDiffFull, parseDiffStat, diffLines, extractProducts, slimProductsForPersist,
+  diffNoticeKind,
+  DIFF_FULL_MAX_RENDER,
+  type ToolEvent, type ProductItem,
+} from "./chatProducts.js";
+// 本组件只**写**在途快照；取样方是右栏（readLiveMonitor 由 RightSidebar 直接引用）
+import { publishLiveMonitor } from "./liveMonitor.js";
 // SubAgentBar 已移除（A-978：监测栏按钮是唯一子代理入口）
 import { confirmAsync, alertAsync } from "../dialog.js";
 import { useReasoningPreset, presetEffortsOf, presetLabelOf, useThinkingPreset, thinkingForcedOff } from "../reasoning.js";
@@ -92,7 +94,10 @@ export function readAutoCompressCfg(): AutoCompressCfg {
 }
 
 /** 工具类型标签映射：将内部 tool name 转为用户友好的中文名 + 图标库 SVG 组件（A-1xx：弃用 emoji） */
-const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentType<IconProps> }> = {
+/* A-1018：**导出**给 RightSidebar 复用 —— 右侧「活动记录」此前自己拼
+   `⟳ 调用工具 web_search https://…`（裸工具名 + 字符），与思考历程的工具卡各说各话。
+   现在两边共用这一份映射：名字用人类可读的 `label`，图标用同一个 `Icon`。 */
+export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentType<IconProps> }> = {
   web_search: { label: "网络搜索", Icon: SearchIcon },
   web_fetch: { label: "网页抓取", Icon: InternetIcon },
   file_read: { label: "读取文件", Icon: RefFileIcon },
@@ -145,12 +150,23 @@ const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentType<Ico
   browser_wait: { label: "等待页面", Icon: ClockIcon },
 };
 
-function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
+export function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
   const mapped = TOOL_LABELS[name];
   if (mapped) { return mapped; }
   // 未知工具：去掉 delegate: 等前缀后显示
   const clean = name.startsWith("delegate:") ? name.slice(9) : name;
   return { label: clean, Icon: BoltIcon };
+}
+
+/**
+ * A-1027：把「工具调用记录」里的一行文本**反查**回工具身份（两步：按展示名反查 → 按工具名直查）。
+ *
+ * ⚠️ 逻辑本体在 `thinkingText.ts` 的 `resolveToolEntry()`（纯函数，vitest 可直测），这里只是
+ * **把图标表注入进去**的薄壳。为什么必须分开：反查住在 `.tsx` 里时守卫只能断言"那几行代码在不在"，
+ * 把它短路成 `return null` 守卫依然全绿（A-1027 变异 ③ 实测漏网）—— 纯逻辑住 `.tsx` 是治不好的。
+ */
+export function matchToolLabel(entry: string): { name: string; label: string } | null {
+  return resolveToolEntry(entry, TOOL_LABELS);
 }
 
 /**
@@ -213,6 +229,8 @@ interface Message {
   agentName?: string;
   /** 发言人 Agent ID（团队会话成员发言；用于区分组长与成员） */
   agentId?: string;
+  /** A-1008：群聊成员本次发言失败（正文是失败占位文本，不是观点）→ 气泡降级为错误样式 */
+  failed?: boolean;
   /** A-163/A-166：阶段折叠卡结构化数据（完成消息时由 tool 留痕+思考组装；渲染为「参考内容/思考过程」折叠项） */
   stages?: {
     /** 读过的本地文件（file_read） */
@@ -313,6 +331,21 @@ export function clearSessionStream(sid: string): void {
  * **正在流式的槽一律保留** —— 多会话并行流式是设计目标，绝不能为了省内存把别人的在途状态删掉。
  */
 const STREAM_CACHE_MAX_SLOTS = 12;
+
+/** A-1021b：终止按钮的几何**唯一出处**（此前是 36/36 两处硬编码 + 图标 size 手填，三者各自漂移）。
+ *
+ *  `StopIcon` 的方块占图标盒 51.2%（x,y ∈ [250,774] / 1024），所以"方块占圆底多少"由
+ *  `STOP_ICON_SIZE × 0.512 ÷ STOP_BTN_SIZE` 决定，**不是**由图标 size 本身决定。
+ *
+ *  历史踩坑：
+ *   - 旧值 18 → 方块 18×0.512 ≈ 9.2px = 圆底 26%：看着"标特别小"；
+ *   - 上一轮改成 36（= 撑满按钮）→ 方块 18.4px = 圆底 **51%**，用户实测"你这个也太大了"。
+ *  行业惯例（Material FAB / YouTube 播控）方块约占圆底 **38%~42%**，取 40%：
+ *    `28 × 0.512 = 14.3px ÷ 36 = 39.8%` ✔
+ *  ⚠️ 以后只改 `STOP_BTN_SIZE`，图标尺寸由 `STOP_ICON_SIZE` 派生，勿再手填数字。 */
+const STOP_BTN_SIZE = 36;
+const STOP_ICON_SIZE = Math.round((STOP_BTN_SIZE * 0.40) / 0.512);
+
 export function pruneStreamCache(keep?: string): void {
   const store = perSessionStreamCache.current;
   const keys = Object.keys(store);
@@ -335,49 +368,11 @@ export function onCtxUpdate(cb: (p: CtxUpdatePayload) => void): () => void {
   return () => window.removeEventListener("slime:ctx:update", h);
 }
 
-/**
- * 流式在途监测快照（A-982）。
- *
- * 架构：ChatPanel 每帧把在途数值写进这个**模块级对象**，右侧栏**自己按拍子取样**。
- *
- * 为什么不再只靠 CustomEvent 推送（这是"右栏不实时"反复出现三次的根因）：
- * 事件链上任何一处守卫失效都会让数值**静默冻结、且一行报错都没有** ——
- *   ① `p.sessionId !== sessionIdRef.current` 就把事件丢掉（空串/跨会话切换/恢复态很容易不匹配）；
- *   ② 发送前后 120ms 节流窗口 + 右栏 1s 合并窗口叠加；
- *   ③ 右栏被卸载重挂（收起/展开、切换会话）时订阅重建，重建瞬间的事件全部落空。
- * 这类"事件没到"的故障无法被测试发现（事件本身没错），只能靠**改变架构**根治：
- * 右栏改成"拉"（poll）而不是"推"（push）——只要 ChatPanel 还在写快照，右栏就一定看得到。
- * 事件通道保留（history/校准等一次性通知仍走它），但实时性**不再依赖**它。
- *
- * 对齐业界做法：Cline 的 token 进度条由 `TaskHeader` 从**单一 webview 状态通道**（gRPC
- * `subscribeToState`）读取 `lastApiReqTotalTokens` 渲染，而不是靠逐值事件推送 ——
- * 单一数据源 + 组件自取，天然没有"某个事件没到就冻住"的状态。
+/*
+ * A-990：在途监测快照（A-982）已整体移到 `liveMonitor.ts`。
+ * 它是纯内存读写、被右栏直接取样 —— 住在组件里会让右栏与测试都不得不 import 整个 ChatPanel。
+ * 模块头注释保留了"为什么改成拉取式而不是事件推送"的完整事故分析。
  */
-export interface LiveMonitorSnapshot {
-  sessionId: string;
-  used: number;
-  cap: number;
-  replyTokens: number;
-  reasonTokens: number;
-  elapsedMs: number;
-  streaming: boolean;
-  /** 写入时刻（ms）——取样方可据此判断快照是否已过期（陈旧快照不覆盖校准值） */
-  updatedAt: number;
-}
-const liveMonitor = { current: null as LiveMonitorSnapshot | null };
-
-/** ChatPanel 每帧写入（纯内存赋值，不触发任何 React 渲染） */
-export function publishLiveMonitor(snap: Omit<LiveMonitorSnapshot, "updatedAt">): void {
-  liveMonitor.current = { ...snap, updatedAt: Date.now() };
-}
-/** 右栏按拍子取样。sessionId 不匹配 → null（跨会话隔离）；快照过旧（>3s 无更新）→ null */
-export function readLiveMonitor(sessionId: string, maxAgeMs = 3000): LiveMonitorSnapshot | null {
-  const s = liveMonitor.current;
-  if (!s) { return null; }
-  if (sessionId && s.sessionId && s.sessionId !== sessionId) { return null; }
-  if (Date.now() - s.updatedAt > maxAgeMs) { return null; }
-  return s;
-}
 
 /** 流式入参（自动重连时按原样重发；字段与 preload ChatInput 对齐） */
 type ChatStreamReq = {
@@ -476,30 +471,11 @@ function explainStreamError(msg: string, attemptCount?: number): string {
   ].join("\n");
 }
 
-interface ToolEvent {
-  id: number;
-  /** 原始 tool name（如 web_search、delegate:alice） */
-  name: string;
-  /** 用户可见标签（已语义化） */
-  label: string;
-  /** A-162：具体抓手（访问的网址 / 查询词 / 文件路径），供阶段卡工具行展示 */
-  detail?: string;
-  /** A-172：工具执行结果（上游已截断 200 字符；成功=返回内容，失败=失败原因表述） */
-  result?: string;
-}
-
-/** A-1007：产物卡条目。kind 为写/读（暂无删除类工具，删除体现为 diff 的红色 - 行）。 */
-export type ProductKind = "write" | "read";
-export interface ProductItem {
-  rel: string;
-  name: string;
-  kind: ProductKind;
-  ext: string;
-  /** 变更统计（+n -m）——由 file_write result 内嵌 [__slime_diff__] 标记解析 */
-  diff?: { add: number; del: number };
-  /** 变更全文（old/new 原文）——产物卡点击展开 diff 详情用；超过大小上限省略 */
-  diffFull?: { old: string; new: string };
-}
+/*
+ * A-990：`ToolEvent` / `ProductKind` / `ProductItem` 已移到 `chatProducts.ts`
+ * （见该模块头注释：它们不该只对组件可见，否则测试只能自造类型 + 强转，
+ * 把"字段对不上"藏成类型错）。这里通过顶部的 import 使用同名类型。
+ */
 
 /** 分组统计：按工具类型聚合 */
 interface ToolGroup {
@@ -509,176 +485,13 @@ interface ToolGroup {
   count: number;
 }
 
-/**
- * base64 → UTF-8 文本。**渲染进程绝对不能用 `Buffer`**。
- *
- * ⚠️ 这是一个"测试全绿、线上全废"的经典环境差事故（A-979）：
- * 主进程 BrowserWindow 是 `contextIsolation: true, sandbox: true, nodeIntegration: false`，
- * 渲染层**没有 `Buffer` 全局**，`Buffer.from(...)` 抛 `ReferenceError`；
- * 而 `parseDiffStat/parseDiffFull` 里的 `try/catch` 会把它吞成 `null` ——
- * 于是"产物卡的 +n/-m"与"工具行的红绿 diff 块"**全部静默失效**，一行报错都没有。
- * 更隐蔽的是 `gui-products.spec.ts` 在 **Node 里**跑（那里有 Buffer）→ 测试 100% 通过。
- * 结论：渲染层一律用 `atob` + `TextDecoder`，并且**加源码守卫禁止 `Buffer.` 出现在 renderer**。
- */
-function b64ToText(b64: string): string {
-  try {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i += 1) { bytes[i] = bin.charCodeAt(i); }
-    return new TextDecoder("utf-8").decode(bytes);
-  } catch { return ""; }
-}
-
-/**
- * 从工具结果文本里**彻底剥离** `[__slime_diff__]old|new[/__slime_diff__]` 机器标记。
- *
- * 为什么要"彻底"而不是"配对就删"：这个标记是给**程序**读的（base64 全文，动辄几十 KB），
- * 一旦原样漏进界面就是截图里那几行乱码。而它可能因为任何一环截断/中断而**不闭合**
- * （工具结果有 1200/24000 字符两道截断、流式可被打断、历史记录可能来自旧版本）。
- * 只处理"配对成功"的情况 = 只要有一处不配对，用户就会看到一整屏 base64。
- * 故分三步：① 删配对标记；② 删未闭合的起始标记**及其后全部内容**；③ 删孤立结束标记。
- */
-export function stripDiffTag(raw: string | undefined): string {
-  if (!raw || !raw.includes("__slime_diff__")) { return raw ?? ""; }
-  return raw
-    .replace(/\[__slime_diff__\][\s\S]*?\[\/__slime_diff__\]/g, "")
-    .replace(/\[__slime_diff__\][\s\S]*$/g, "")
-    .replace(/\[\/__slime_diff__\]/g, "")
-    .replace(/[ \t]+$/gm, "")
-    .trim();
-}
-
-/** A-1007：产物卡工具集——扩展名→品牌 SVG 图标映射、diff 变更统计解析、产物提炼（vitest 可直测的纯函数）。
- *  解析 file_write result 内嵌的 [__slime_diff__]base64(old)|base64(new)[/__slime_diff__] 变更统计
- *  （A-172 同款标记）：行级近似（new 相对 old 净增/净删行数）；无标记/base64 损坏 → null（不显示 +n -m）。 */
-export function parseDiffStat(result: string | undefined): { add: number; del: number } | null {
-  if (!result) { return null; }
-  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
-  if (!m) { return null; }
-  const oldTxt = b64ToText(m[1]);
-  const newTxt = b64ToText(m[2]);
-  if (!oldTxt && !newTxt) { return null; }
-  const oldLines = new Set(oldTxt.split("\n"));
-  const newLines = new Set(newTxt.split("\n"));
-  let add = 0, del = 0;
-  for (const l of newLines) { if (l && !oldLines.has(l)) { add += 1; } }
-  for (const l of oldLines) { if (l && !newLines.has(l)) { del += 1; } }
-  return add > 0 || del > 0 ? { add, del } : null;
-}
-
-/** 解析 file_write result 内嵌 diff 标记的**全文**（old/new 原文，产物卡点击展开 diff 详情用）。
- *  与 parseDiffStat 同规：无标记/base64 损坏/空串 → null；old+new 合计超过 maxChars → null
- *  （大文件仅显示计数，不撑爆 localStorage 与渲染）。 */
-export function parseDiffFull(result: string | undefined, maxChars = 20000): { old: string; new: string } | null {
-  if (!result) { return null; }
-  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
-  if (!m) { return null; }
-  const oldTxt = b64ToText(m[1]);
-  const newTxt = b64ToText(m[2]);
-  if (!oldTxt && !newTxt) { return null; }
-  if (oldTxt.length + newTxt.length > maxChars) { return null; }
-  return { old: oldTxt, new: newTxt };
-}
-
-/** 行级 diff（LCS 回溯，保序）：old/new 逐行标 eq/add/del——产物卡展开后的红绿 diff 详情。
- *  纯函数，vitest 可直测。行数受 parseDiffFull 20k 字符上限约束，DP 表规模可控。 */
-export function diffLines(oldTxt: string, newTxt: string): Array<{ type: "eq" | "add" | "del"; text: string }> {
-  const a = oldTxt ? oldTxt.split("\n") : [];
-  const b = newTxt ? newTxt.split("\n") : [];
-  const n = a.length, m = b.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const out: Array<{ type: "eq" | "add" | "del"; text: string }> = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { out.push({ type: "eq", text: a[i] }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
-    else { out.push({ type: "add", text: b[j] }); j++; }
-  }
-  while (i < n) { out.push({ type: "del", text: a[i] }); i++; }
-  while (j < m) { out.push({ type: "add", text: b[j] }); j++; }
-  return out;
-}
-
-/** 扩展名 → 产物卡图标 URL（按文件类型品牌色；未匹配回退通用 file-text） */
-export function productIconUrl(ext: string | undefined): string {
-  switch ((ext ?? "").toLowerCase()) {
-    case "doc": case "docx":
-      return wordIcon;
-    case "xls": case "xlsx": case "csv":
-      return excelIcon;
-    case "pdf":
-      return pdfIcon;
-    case "ppt": case "pptx":
-      return pptIcon;
-    case "py": case "ipynb":
-      return pythonIcon;
-    case "css":
-      return cssIcon;
-    case "ts": case "tsx": case "mdx":
-      return tsIcon;
-    case "js": case "jsx": case "mjs": case "cjs":
-      return codeIcon;
-    case "gitignore":
-      return gitIcon;
-    case "gguf":
-      return llamaIcon;
-    case "png": case "jpg": case "jpeg": case "gif": case "webp": case "svg":
-      return imageIcon;
-    case "zip": case "tar": case "gz":
-      return fileZipIcon;
-    case "sh": case "bash":
-      return terminalIcon;
-    case "env": case "log": case "license":
-      return fileTextIcon;
-    case "html": case "htm": case "json": case "md": case "go": case "rs":
-    case "toml": case "yml": case "yaml": case "xml": case "sql": case "txt":
-    default:
-      return fileInfoIcon;
-  }
-}
-
-/** A-1007：从工具留痕提炼本轮真实产物文件（vitest 可直测的纯函数）——
- *  优先 file_write（写/改），file_read 作补充；去重、过滤 URL/空串/非文件；写入者排前。
- *  file_write 的 result 若带 [__slime_diff__] 标记 → 附 diff 变更统计 + diffFull 全文（点击产物卡展开详情）。
- *  返回 { ext, ... } 均带扩展名以备图标映射。 */
-export function extractProducts(events: ToolEvent[]): ProductItem[] {
-  const out: ProductItem[] = [];
-  const wrote = new Set<string>();
-  const reads: Array<{ rel: string; name: string; ext: string }> = [];
-  const base = (rel: string): string => (rel.split(/[\\/]/).pop() ?? rel);
-  const extOf = (name: string): string => (name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "");
-  for (const t of events) {
-    if (t.name !== "file_write" && t.name !== "file_read") { continue; }
-    const rel = (t.detail ?? "").trim();
-    if (!rel || /^https?:\/\//i.test(rel)) { continue; }
-    const name = base(rel);
-    const ext = extOf(name);
-    if (t.name === "file_write") {
-      if (wrote.has(rel)) { continue; }
-      wrote.add(rel);
-      const diff = parseDiffStat(t.result);
-      const diffFull = parseDiffFull(t.result);
-      out.push(diff
-        ? diffFull
-          ? { rel, name, kind: "write", ext, diff, diffFull }
-          : { rel, name, kind: "write", ext, diff }
-        : { rel, name, kind: "write", ext });
-    } else {
-      reads.push({ rel, name, ext });
-    }
-  }
-  for (const r of reads) {
-    if (wrote.has(r.rel)) { continue; } // 已作为写产物展示，不再重复
-    wrote.add(r.rel);
-    out.push({ ...r, kind: "read" });
-  }
-  return out;
-}
+/* A-990：本段（b64ToText / stripDiffTag / parseDiffStat / parseDiffFull / diffLines /
+ * productIconUrl / extractProducts）已按职责拆到两个纯模块：
+ *   · chatProducts.ts —— 工具留痕与 diff 的纯字符串/数组处理（含 ToolEvent/ProductItem 类型）
+ *   · productIcons.ts —— 扩展名→品牌图标映射（唯一的静态资源依赖点）
+ * 拆分的理由不是"文件太长"，而是**测试只能从组件 import 纯函数**导致的双向耦合：
+ * 测试模块图里出现整个 5000 行组件 → 组件加一个 svg 导入就让根类型检查全线报红（17 条 TS2307）。
+ * 现在测试只依赖这两个无 JSX 模块，组件怎么长大都与它无关。 */
 
 /** A-1007：产物持久化（localStorage 会话级，按 assistant 序数；对齐 A-163 时间线用 sessionCtxMeta 的会话级持久化思路）。
  *  历史消息体（ConversationMessage）只落 reasoning/timeline，不含 stages——产物若不另存，
@@ -698,7 +511,10 @@ export function writeSessionProducts(agentId: string, sessionId: string, ordinal
   if (!products || products.length === 0) { return; }
   try {
     const prev = readSessionProducts(agentId, sessionId);
-    prev[String(ordinal)] = products;
+    // A-1029：落盘前**必须**过一遍瘦身（超限条目的 diffFull 摘掉 + 打 diffTrimmed）。
+    // 摘掉的是磁盘副本，内存里那份完整 diffFull 不受影响 → 本轮对话照常能看全；
+    // 不打标记的话，回填后用户只会看到点开一片空白，根本不知道"详情没存下来"。
+    prev[String(ordinal)] = slimProductsForPersist(products);
     localStorage.setItem(`${PRODUCTS_STORAGE_PREFIX}${agentId}_${sessionId}`, JSON.stringify(prev));
   } catch { /* ignore */ }
 }
@@ -1211,8 +1027,9 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   const [expanded, setExpanded] = React.useState(Boolean(autoExpand));
   // 思考步：可展开条目——摘要行（去 markdown 符号）默认收起，展开后按 Markdown 渲染全文
   if (step.kind === "think" && step.text) {
-    // 旧格式残留清理：「### 工具调用记录」及其后续标记段（增量时间线本身不会产生，仅防御历史数据）
-    const cleanThink = sanitizeThinking(step.text.replace(/\n?### 工具调用记录\n[\s\S]*$/g, ""));
+    // 旧格式残留清理：「### 工具调用记录」段（增量时间线本身不会产生，仅防御历史数据）
+    // A-1027：改走唯一解析实现（`[\s\S]*$` 会从 marker 一路吞到文末；解析器以「下一个同级标题」为界）
+    const cleanThink = sanitizeThinking(splitToolTrace(step.text).text);
     if (!cleanThink.trim()) { return <span style={{ display: "none" }} />; }
     const preview = stripMarkdown(normalizeThinkingText(cleanThink)).slice(0, 120);
     return (
@@ -1227,7 +1044,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
           }}
         >
           <span className="think-step-mark" style={{ flexShrink: 0 }} />
-          <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)", transition: "transform 0.18s" }} />
+          <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
           <span style={{
             fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5, overflow: "hidden",
             textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0,
@@ -1235,11 +1052,15 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             {preview || "思考…"}{(cleanThink.length > 120) ? "…" : ""}
           </span>
         </button>
-        {expanded && (
-          <div className="think-step-text" style={{ marginTop: 4 }}>
-            <Markdown text={cleanThink} />
+        {/* A-1015：内容**常驻挂载**，只切 is-open —— 此前是 `{expanded && …}`，收起时元素当场
+            卸载，没有任何一帧可供插值，所以只能是生硬跳变（用户："都是生硬的展开、收起"）。 */}
+        <div className={`collapse${expanded ? " is-open" : ""}`}>
+          <div>
+            <div className="think-step-text" style={{ marginTop: 4 }}>
+              <Markdown text={cleanThink} />
+            </div>
           </div>
-        )}
+        </div>
       </div>
     );
   }
@@ -1258,7 +1079,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             onClick={() => setExpanded((v) => !v)}
             title={expanded ? "收起任务规划" : "展开任务规划（全部条目与状态）"}
           >
-            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)", transition: "transform 0.18s" }} />
+            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
             <TodoListIcon size={12} style={{ flexShrink: 0, color: "var(--accent-hover)" }} />
             <span className="plan-card-title">任务规划</span>
             <span className="plan-card-progress" data-all-done={done === items.length && items.length > 0 ? "1" : "0"}>
@@ -1268,18 +1089,21 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
               <span className="plan-card-active" title={active.content}>· {active.content}</span>
             )}
           </button>
-          {expanded && (
-            <div className="plan-card-list">
-              {items.map((it, i) => (
-                <div key={`${i}\u0001${it.content}`} className="plan-item" data-status={it.status}>
-                  <span className="plan-item-mark" aria-hidden="true">
-                    {it.status === "completed" ? "✓" : it.status === "in_progress" ? "▶" : "○"}
-                  </span>
-                  <span className="plan-item-text">{it.content}</span>
-                </div>
-              ))}
+          {/* A-1015：任务规划列表同样常驻 + 高度插值（清单长度固定，无重算成本） */}
+          <div className={`collapse${expanded ? " is-open" : ""}`}>
+            <div>
+              <div className="plan-card-list">
+                {items.map((it, i) => (
+                  <div key={`${i}\u0001${it.content}`} className="plan-item" data-status={it.status}>
+                    <span className="plan-item-mark" aria-hidden="true">
+                      {it.status === "completed" ? "✓" : it.status === "in_progress" ? "▶" : "○"}
+                    </span>
+                    <span className="plan-item-text">{it.content}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          )}
+          </div>
         </div>
       </div>
     );
@@ -1319,14 +1143,22 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   const parsedDiff = parseDiffFull(rawResult);
   const oldForDiff = parsedDiff?.old ?? null;
   const newForDiff = parsedDiff?.new ?? null;
+  /* A-1018：文件改动行数（+N/-N）。`parseDiffStat` 只在结果里带 `[__slime_diff__]` 标记时
+     才返回非 null → 只有真正产生改动的写入类卡片会显示徽标，读取类卡片不会凭空多一个。
+     它读的是**本条工具事件当前的 result**，所以 Agent 还在写的时候数字会随事件一起长大。 */
+  const diffStat = parseDiffStat(rawResult);
   const displayResult = stripDiffTag(rawResult);
   const r = displayResult.trim();
   // A-976：子代理委派 / 提示类前缀是成功/中性消息，绝不判失败
   const isSuccessPrefix = /^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存)\]/i.test(r);
   const isFail = !isSuccessPrefix && r.length > 0 && /^(\[错误\]|\[失败\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
   const hasBody = !!tool.detail || !!r;
-  const statusLabel = !r ? (isWrite ? "已执行" : "调用中") : isFail ? "失败" : "成功";
-  const statusTitle = isFail ? "执行失败" : "执行成功";
+  // A-1028：状态词走纯模块 `toolStatusLabel`（**结果未记录 ≠ 结果为空**）。
+  // 之前这里是 `!r ? (isWrite ? "已执行" : "调用中") : …` —— 历史回退路径解析出的 tool 节点
+  // 只有名字没有结果，于是**已经结束的回复**里每张卡都标着"调用中/已执行"（用户实测截图）。
+  const hasResult = typeof tool.result === "string";
+  const statusLabel = toolStatusLabel(tool.result, isFail);
+  const statusTitle = !hasResult ? "本次调用的结果未随记录保存（仅留痕）" : isFail ? "执行失败" : "执行成功";
   // A-174：detail 是可点击抓手——file_* 为文件路径（点击→右侧建文件页），http(s) 为网址（点击→右侧建浏览器页）；
   // 查询词（web_search 的“查询: xxx”）不是文件也不是网址，仅作展示不可点击
   const isQueryDetail = /^查询[:：]/.test(tool.detail ?? "");
@@ -1359,7 +1191,16 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   return (
     <div className="think-tool-node">
       <div className="think-tool-mark" style={{ background: isFail ? "#f87171" : statusColor }} />
-      <div className="think-tool-btn" data-status={isFail ? "fail" : "ok"} style={{ display: "flex", flexWrap: "nowrap", alignItems: "center", gap: 5 }}>
+      {/* A-1018：**整行点击 = 展开/收起**（此前只有行尾那个小箭头能展开，而"点卡片"在不同卡片上
+          行为不一致 —— 有的直接跳右侧栏，用户："这些有的卡片点击直接就会在右侧跳转了，
+          那展开有什么意义？…点击卡片最好是只能展开"）。
+          现在卡片点击**只做展开**；要跳转必须点具体的文件/网址链接（detail 上的 <a>/<span>，
+          onClickDetail 自带 stopPropagation，不会误触发行展开）。 */}
+      <div className="think-tool-btn" data-status={isFail ? "fail" : "ok"}
+        onClick={() => { if (hasBody) { setExpanded(!expanded); } }}
+        role={hasBody ? "button" : undefined}
+        title={hasBody ? (expanded ? "点击收起详情" : "点击展开详情") : statusTitle}
+        style={{ display: "flex", flexWrap: "nowrap", alignItems: "center", gap: 5, cursor: hasBody ? "pointer" : "default" }}>
         <span style={{ display: "inline-flex", alignItems: "center", flexShrink: 0 }}>
           <Icon size={12} style={{ color: isFail ? "#f87171" : "var(--accent-hover)" }} />
         </span>
@@ -1385,22 +1226,32 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
         ) : (
           <span className="think-tool-detail" style={{ color: "var(--text-muted)" }}>{tool.detail}</span>
         ))}
+        {/* A-1018：改动行数徽标 —— 位置固定在「状态」之前，两者都 flexShrink:0 →
+            每一行的 +N/-N 与状态词都对齐在同一条竖线上。 */}
+        {diffStat && <DiffStatBadge add={diffStat.add} del={diffStat.del} />}
+        {/* A-1028：状态列为空（结果未记录）→ 整列省略，不留一条空白的对齐位 */}
+        {statusLabel && (
         <span
           className="think-tool-status"
           style={{ color: isFail ? "#f87171" : statusColor, flexShrink: 0 }}
           title={statusTitle}
         >{statusLabel}</span>
+        )}
         {hasBody && (
           <button
-            onClick={() => setExpanded(!expanded)}
+            /* A-1018：整行已可切换 → 这里必须 stopPropagation，否则一次点击被切换两次（互相抵消）。 */
+            onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
             title={expanded ? "收起详情" : "展开详情"}
             style={{ background: "transparent", border: "none", cursor: "pointer", padding: 0, display: "inline-flex", flexShrink: 0 }}
           >
-            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ color: "var(--text-dim)", transition: "transform 0.2s" }} />
+            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ color: "var(--text-dim)" }} />
           </button>
         )}
       </div>
-      {expanded && hasBody && (
+      {/* A-1015：`hasBody` = 数据存在性（保留条件渲染，避免空壳）；`expanded` = 开合状态 → 交给 collapse 播高度动画 */}
+      {hasBody && (
+      <div className={`collapse${expanded ? " is-open" : ""}`}>
+      <div>
         <div className="think-tool-detail-box">
           {tool.detail && (
             <div className="think-tool-detail-line">
@@ -1423,6 +1274,20 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
           {oldForDiff !== null && newForDiff !== null && (
             <DiffBlock oldText={oldForDiff} newText={newForDiff} />
           )}
+          {/* A-1029：**详情被阈值挡掉时必须说出来**。
+              判据 `diffStat && !parsedDiff` = "这次确实有改动（计数解析出来了），但全文拿不到"。
+              这条提示就是 A-1029 的全部教训：原来阈值一过就返回 null，界面上什么都不显示 →
+              用户体感是"以前能看、现在看不了"，而且**无从判断是坏了还是太大**。
+              现在的阈值（DIFF_FULL_MAX_RENDER）已经远高于真实文件，走到这里说明确实异常巨大。 */}
+          {diffNoticeKind(diffStat, oldForDiff !== null, false) === "too-large" && (
+            <div style={{ marginTop: 6, display: "flex", alignItems: "flex-start", gap: 4, fontSize: 11.5, color: "var(--text-dim)" }}>
+              <WarningIcon size={12} style={{ flexShrink: 0, marginTop: 2, color: "#fbbf24" }} />
+              <span style={{ flex: 1 }}>
+                本次改动过大（超过 {Math.round(DIFF_FULL_MAX_RENDER / 1000)}k 字符），未内联展示前后对比；
+                改动行数见上方徽标，文件可在右侧栏打开查看。
+              </span>
+            </div>
+          )}
           {r && (
             <div style={{ marginTop: tool.detail ? 6 : 0, color: isFail ? "#f87171" : "var(--text-muted)", whiteSpace: "pre-wrap", wordBreak: "break-word", display: "flex", alignItems: "flex-start", gap: 4 }}>
               {isFail
@@ -1432,10 +1297,29 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             </div>
           )}
         </div>
+      </div>
+      </div>
       )}
     </div>
   );
 });
+
+/** A-1018：文件改动的**行数徽标**（+N 绿 / -N 红）——全仓唯一实现。
+ *
+ *  为什么单独抽出来：产物卡与思考历程的**工具卡**都要显示改动行数，两处各写一套颜色/字重
+ *  迟早会漂移（这正是本项目"同一动作只有一个入口/一份实现"的老规矩）。
+ *  数据源统一用 `parseDiffStat`（它已经在读 `[__slime_diff__]` 内嵌标记），不另造解析。
+ *
+ *  `key` 用 `${add}-${del}`：数字一变就重挂载 → CSS 的 pop 动画重放一次，
+ *  于是 Agent 工作途中这个数字是"跳着长"的，而不是安静地换成新值。 */
+function DiffStatBadge({ add, del }: { add: number; del: number }): JSX.Element {
+  return (
+    <span className="diff-stat" title={`本次改动：新增 ${add} 行、删除 ${del} 行`}>
+      <span key={`a${add}`} className="diff-stat-add">+{add}</span>
+      <span key={`d${del}`} className="diff-stat-del">-{del}</span>
+    </span>
+  );
+}
 
 /** 参考内容折叠面板（A-171：独立于思考时间线，只含工作目录文件，可折叠收起） */
 function RefPanel({ files }: { files: Array<{ path: string | undefined; label: string }> }): JSX.Element {
@@ -1449,10 +1333,12 @@ function RefPanel({ files }: { files: Array<{ path: string | undefined; label: s
         <span>参考内容</span>
         <span className="think-count">（{files.length} 项）</span>
         <span style={{ marginLeft: "auto", color: "var(--text-dim)", display: "inline-flex" }}>
-          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{ transition: "transform 0.2s" }} />
+          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{}} />
         </span>
       </button>
-      {open && (
+      {/* A-1015：常驻 + 高度插值（与「思考过程」同一节拍） */}
+      <div className={`collapse${open ? " is-open" : ""}`}>
+      <div>
         <div style={{ display: "flex", flexDirection: "column", gap: 1, marginTop: 6 }}>
           {files.map((r, i) => (
             <div key={`r${i}`} className="think-item" title={r.path}
@@ -1468,7 +1354,8 @@ function RefPanel({ files }: { files: Array<{ path: string | undefined; label: s
             </div>
           ))}
         </div>
-      )}
+      </div>
+      </div>
     </div>
   );
 }
@@ -1486,10 +1373,12 @@ function UrlPanel({ urls }: { urls: Array<{ url: string; label: string }> }): JS
         <span>访问来源</span>
         <span className="think-count">（{urls.length} 项）</span>
         <span style={{ marginLeft: "auto", color: "var(--text-dim)", display: "inline-flex" }}>
-          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{ transition: "transform 0.2s" }} />
+          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{}} />
         </span>
       </button>
-      {open && (
+      {/* A-1015：常驻 + 高度插值 */}
+      <div className={`collapse${open ? " is-open" : ""}`}>
+      <div>
         <div style={{ display: "flex", flexDirection: "column", gap: 1, marginTop: 6 }}>
           {urls.map((u, i) => {
             const host = ((): string => {
@@ -1500,7 +1389,8 @@ function UrlPanel({ urls }: { urls: Array<{ url: string; label: string }> }): JS
             return <UrlPanelRow key={`u${i}`} u={u} host={host} clickable={clickable} />;
           })}
         </div>
-      )}
+      </div>
+      </div>
     </div>
   );
 }
@@ -1538,16 +1428,19 @@ const ThinkingPanel = React.memo(function ThinkingPanel({ timeline }: { timeline
         <BrainThinkingIcon size={13} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
         <span>思考过程</span>
         <span style={{ marginLeft: "auto", color: "var(--text-dim)", display: "inline-flex" }}>
-          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{ transition: "transform 0.2s" }} />
+          <ChevronIcon size={12} rotate={open ? 90 : 0} style={{}} />
         </span>
       </button>
-      {open && (
-        <div className="think-timeline" style={{ marginTop: 6 }}>
-          {timeline.map((step, i) => (
-            <TimelineNode key={`s${i}`} step={step} />
-          ))}
+      {/* A-1015：常驻 + 高度插值——思考过程是用户最常开合的一块，必须与侧栏同节奏 */}
+      <div className={`collapse${open ? " is-open" : ""}`}>
+        <div>
+          <div className="think-timeline" style={{ marginTop: 6 }}>
+            {timeline.map((step, i) => (
+              <TimelineNode key={`s${i}`} step={step} />
+            ))}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 });
@@ -1561,6 +1454,28 @@ const ThinkingPanel = React.memo(function ThinkingPanel({ timeline }: { timeline
  *  默认**只显示 2 个核心产物**（判据：有变更的写入 > 其他写入 > 读取），其余折进「还有 N 个」。 */
 const PRODUCT_CORE_LIMIT = 2;
 
+/** A-1015：diff 行的**计算与渲染一起**收进 memo 子组件。
+ *  产物卡的「变更详情」改为"常驻挂载 + 高度插值"后，diff 行不再随展开态卸载——
+ *  若把 `diffLines(...)` 留在父组件里，流式期间每帧渲染都会对**全部**产物重算 diff，
+ *  "加了动画反而卡"就是这么来的。useMemo 按文本缓存，行形状也不重复求值。 */
+const ProductDiffLines = React.memo(function ProductDiffLines({ oldText, newText }: { oldText: string; newText: string }): JSX.Element {
+  const lines = React.useMemo(() => diffLines(oldText, newText), [oldText, newText]);
+  return (
+    <>
+      {lines.map((l, k) => (
+        <div key={k} style={{
+          whiteSpace: "pre-wrap", wordBreak: "break-all", padding: "0 8px",
+          background: l.type === "add" ? "rgba(52,211,153,0.10)" : l.type === "del" ? "rgba(248,113,113,0.12)" : "transparent",
+          color: l.type === "add" ? "#34d399" : l.type === "del" ? "#f87171" : "var(--text-muted)",
+        }}>
+          <span style={{ userSelect: "none", opacity: 0.65, marginRight: 6, display: "inline-block", width: 10 }}>{l.type === "add" ? "+" : l.type === "del" ? "-" : " "}</span>
+          {l.text || " "}
+        </div>
+      ))}
+    </>
+  );
+});
+
 const ProductPanel = React.memo(function ProductPanel({ products }: { products: ProductItem[] }): JSX.Element | null {
   const [expanded, setExpanded] = React.useState<number | null>(null);
   const [open, setOpen] = React.useState(false);
@@ -1570,8 +1485,76 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
   const ranked = products
     .map((p, i) => ({ p, i, rank: p.diff ? 0 : p.kind === "write" ? 1 : 2 }))
     .sort((a, b) => (a.rank - b.rank) || (a.i - b.i));
-  const visible = open ? ranked : ranked.slice(0, PRODUCT_CORE_LIMIT);
-  const hidden = products.length - visible.length;
+  // A-1015：不再用 `visible = open ? ranked : ranked.slice(0, 2)` 控制"少渲染几张"——
+  // 那等于"展开/收起时增删 DOM"，没有任何一帧可插值（用户："卡片还会伸长…生硬"）。
+  // 现在全部常驻，由「其余」那一段整体做高度插值。
+  const rest = ranked.slice(PRODUCT_CORE_LIMIT);
+
+  /** A-1015：单张产物卡（原内联 map 体）——现在要在**核心段 / 其余段**两处渲染同一形状，故抽成函数。 */
+  const renderCard = (p: ProductItem): JSX.Element => {
+    const i = products.indexOf(p);
+    return (
+      <div key={`p${i}`} style={{ display: "flex", flexDirection: "column", maxWidth: "100%" }}>
+        <div
+          title={p.diffFull ? `点击展开变更详情（${p.diffFull.old.split("\n").length} → ${p.diffFull.new.split("\n").length} 行）` : p.rel}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (p.diffFull) { setExpanded(expanded === i ? null : i); }
+            else { requestSidebarOpen({ kind: "file", rel: p.rel, name: p.name }); }
+          }}
+          className={`prod-card${expanded === i ? " is-open" : ""}`}
+          style={{
+            display: "flex", alignItems: "center", gap: 9, cursor: "pointer",
+            maxWidth: "100%",
+            padding: "9px 12px", borderRadius: 8,
+          }}>
+          <img src={productIconUrl(p.ext || (p.name.includes(".") ? p.name.slice(p.name.lastIndexOf(".") + 1) : ""))} alt=""
+            width={20} height={20} style={{ flexShrink: 0, borderRadius: 3 }} draggable={false} />
+          <span style={{ minWidth: 0 }}>
+            <span className="prod-card-title" style={{ display: "block", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>{p.name}</span>
+            <span style={{ display: "block", fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>{p.kind === "write" ? "写入" : "读取"}</span>
+          </span>
+          <span style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, flexShrink: 0 }}>
+            {p.diff && <DiffStatBadge add={p.diff.add} del={p.diff.del} />}
+            <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {/* A-1015：字符箭头（▲/▼）换成图标库的 ChevronIcon（= chevron-right.svg 原样），
+                  并随展开态旋转 90°——与内容伸展同一条缓动，不再是"箭头先跳、内容后长"。 */}
+              {p.diffFull && (
+                <span style={{ fontSize: 10, color: "var(--accent, #58a6ff)", display: "inline-flex", alignItems: "center", gap: 2 }}>
+                  <ChevronIcon size={10} rotate={expanded === i ? 90 : 0} />
+                  <span>{expanded === i ? "收起" : "变更详情"}</span>
+                </span>
+              )}
+              {/* A-1029：详情被**落盘限流**摘掉过 → 如实说明，别让用户点开一片空白以为坏了。
+                  这一条只可能出现在"从 localStorage 回填的历史产物"上：本轮内存里的 diffFull 永远是完整的。 */}
+              {diffNoticeKind(p.diff, !!p.diffFull, !!p.diffTrimmed) === "trimmed" && (
+                <span title="本次改动的前后全文过大，未随会话记录保存；改动行数见左侧徽标"
+                  style={{ fontSize: 10, color: "var(--text-dim)", display: "inline-flex", alignItems: "center", gap: 2 }}>
+                  <WarningIcon size={10} />
+                  <span>详情未保存</span>
+                </span>
+              )}
+              <span
+                role="button" title="在右侧栏打开文件"
+                onClick={(e) => { e.stopPropagation(); requestSidebarOpen({ kind: "file", rel: p.rel, name: p.name }); }}
+                style={{ color: "var(--text-dim)", fontSize: 13, cursor: "pointer", padding: "0 2px" }}>↗</span>
+            </span>
+          </span>
+        </div>
+        {/* A-1015：变更详情改为**常驻 + 高度插值**；diff 行本身交给 ProductDiffLines 缓存。
+            外层 div 承载 grid 行（overflow:hidden 由 .collapse 的子选择器提供），内层才是原内容。 */}
+        {p.diffFull && (
+          <div className={`collapse${expanded === i ? " is-open" : ""}`}>
+            <div>
+              <div className="prod-diff" style={{ marginTop: 6, borderRadius: 8, overflow: "hidden", maxHeight: 340, overflowY: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.65 }}>
+                <ProductDiffLines oldText={p.diffFull.old} newText={p.diffFull.new} />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
   return (
     <div style={{ margin: "10px 0 2px" }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 5 }}>
@@ -1581,7 +1564,8 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
         {products.length > PRODUCT_CORE_LIMIT && (
           <button
             onClick={() => { setOpen((v) => !v); if (open) { setExpanded(null); } }}
-            title={open ? "收起，只看核心产物" : `展开全部 ${products.length} 个产物`}
+            /* A-1015b：「还有 N 个」的信息并进 title —— 左邻已写「共 N 个」，按钮再写一遍数字是冗余 */
+            title={open ? "收起，只看核心产物" : `展开其余 ${rest.length} 个产物（共 ${products.length} 个）`}
             style={{
               marginLeft: "auto", background: open ? "var(--accent-soft)" : "var(--bg-hover)",
               border: "1px solid var(--border)", cursor: "pointer", padding: "2px 8px",
@@ -1589,82 +1573,29 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
               color: open ? "var(--accent-hover)" : "var(--text-muted)", fontSize: 11, fontWeight: 600,
             }}>
             <ChevronIcon size={11} rotate={open ? 90 : 0} />
-            <span>{open ? "收起" : `展开全部 ${products.length}`}</span>
+            <span>{open ? "收起" : "展开全部"}</span>
           </button>
         )}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-        {visible.map(({ p }) => {
-          const i = products.indexOf(p);
-          return (
-          <div key={`p${i}`} style={{ display: "flex", flexDirection: "column", maxWidth: "100%" }}>
-            <div
-              title={p.diffFull ? `点击展开变更详情（${p.diffFull.old.split("\n").length} → ${p.diffFull.new.split("\n").length} 行）` : p.rel}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (p.diffFull) { setExpanded(expanded === i ? null : i); }
-                else { requestSidebarOpen({ kind: "file", rel: p.rel, name: p.name }); }
-              }}
-              className={`prod-card${expanded === i ? " is-open" : ""}`}
-              style={{
-                display: "flex", alignItems: "center", gap: 9, cursor: "pointer",
-                maxWidth: "100%",
-                padding: "9px 12px", borderRadius: 8,
-              }}>
-              <img src={productIconUrl(p.ext || (p.name.includes(".") ? p.name.slice(p.name.lastIndexOf(".") + 1) : ""))} alt=""
-                width={20} height={20} style={{ flexShrink: 0, borderRadius: 3 }} draggable={false} />
-              <span style={{ minWidth: 0 }}>
-                <span className="prod-card-title" style={{ display: "block", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>{p.name}</span>
-                <span style={{ display: "block", fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>{p.kind === "write" ? "写入" : "读取"}</span>
-              </span>
-              <span style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, flexShrink: 0 }}>
-                {p.diff && (
-                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.3, whiteSpace: "nowrap" }}>
-                    <span style={{ color: "#34d399" }}>+{p.diff.add}</span>
-                    <span style={{ color: "#f87171" }}> -{p.diff.del}</span>
-                  </span>
-                )}
-                <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  {p.diffFull && <span style={{ fontSize: 10, color: "var(--accent, #58a6ff)" }}>{expanded === i ? "收起 ▲" : "变更详情 ▼"}</span>}
-                  <span
-                    role="button" title="在右侧栏打开文件"
-                    onClick={(e) => { e.stopPropagation(); requestSidebarOpen({ kind: "file", rel: p.rel, name: p.name }); }}
-                    style={{ color: "var(--text-dim)", fontSize: 13, cursor: "pointer", padding: "0 2px" }}>↗</span>
-                </span>
-              </span>
-            </div>
-            {expanded === i && p.diffFull && (
-              <div className="prod-diff" style={{ marginTop: 6, borderRadius: 8, overflow: "hidden", maxHeight: 340, overflowY: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.65 }}>
-                {diffLines(p.diffFull.old, p.diffFull.new).map((l, k) => (
-                  <div key={k} style={{
-                    whiteSpace: "pre-wrap", wordBreak: "break-all", padding: "0 8px",
-                    background: l.type === "add" ? "rgba(52,211,153,0.10)" : l.type === "del" ? "rgba(248,113,113,0.12)" : "transparent",
-                    color: l.type === "add" ? "#34d399" : l.type === "del" ? "#f87171" : "var(--text-muted)",
-                  }}>
-                    <span style={{ userSelect: "none", opacity: 0.65, marginRight: 6, display: "inline-block", width: 10 }}>{l.type === "add" ? "+" : l.type === "del" ? "-" : " "}</span>
-                    {l.text || " "}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          );
-        })}
+        {ranked.slice(0, PRODUCT_CORE_LIMIT).map(({ p }) => renderCard(p))}
       </div>
-      {hidden > 0 && (
-        <button
-          onClick={() => setOpen(true)}
-          title={`展开其余 ${hidden} 个产物`}
-          style={{
-            marginTop: 8, background: "var(--bg-hover)", border: "1px dashed var(--border)",
-            cursor: "pointer", padding: "5px 12px", borderRadius: 8,
-            color: "var(--text-dim)", fontSize: 11.5, fontWeight: 600,
-            display: "inline-flex", alignItems: "center", gap: 4,
-          }}>
-          <ChevronIcon size={11} rotate={0} />
-          <span>还有 {hidden} 个产物（点击展开）</span>
-        </button>
-      )}
+      {/* A-1015：「其余产物」整块做高度插值（收起后不留空洞、不占竖向空间）。
+          为什么不给每张卡各配一个折叠容器：卡片网格是 flex-wrap，每张卡外再套折叠容器时
+          **宽度仍然占位**（收起只是高度 0），会在网格里留下一个个空洞；整块收才收得干净。
+          注：本容器是根 div 的块级子元素（不在上面那个 flex 容器内），所以原先写的
+          `flexBasis:"100%"` 并不生效 —— A-1015 复查时删掉，避免无效样式误导后来人。 */}
+      <div className={`collapse${open ? " is-open" : ""}`}>
+        <div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+            {rest.map(({ p }) => renderCard(p))}
+          </div>
+        </div>
+      </div>
+      {/* A-1015b：**这里原先还有第二个"展开"按钮**（虚线框「还有 N 个产物（点击展开）」），
+          与标题行右侧的「展开全部」功能完全重复 —— 用户截图："为什么这里显示了两个展开按钮？"
+          同一个动作只留**一个**入口：标题行那个（与"产物 共 N 个"同排，不额外占竖向空间）。
+          「还有 N 个」这个信息并进它的 title，不再用第二颗按钮承载。 */}
     </div>
   );
 });
@@ -1720,9 +1651,10 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             <span style={{
               fontSize: 10, fontWeight: 700, flexShrink: 0,
               padding: "0 6px", borderRadius: 8,
-              background: "var(--bg-input)", border: "1px solid var(--border)",
-              color: "var(--text-muted)",
-            }}>成员</span>
+              background: m.failed ? "var(--danger-soft)" : "var(--bg-input)",
+              border: `1px solid ${m.failed ? "var(--danger)" : "var(--border)"}`,
+              color: m.failed ? "var(--danger)" : "var(--text-muted)",
+            }}>{m.failed ? "发言失败" : "成员"}</span>
           )}
         </div>
         {/* 悬停元信息行：复制 + 模式 · 模型 · 耗时/时间（hover 时出现） */}
@@ -1753,40 +1685,77 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
           )}
         </div>
         {/* A-174：思考过程展开区——参考内容 与 思考过程 是两个互相独立的折叠面板 */}
-        {showThinking && !collapsed && (() => {
+        {/* A-1015：`showThinking` 是**数据存在性守卫**（无思考数据就不渲染空壳，保留）；
+            `collapsed` 是**开合状态**，改由 .collapse 播高度插值——此前是 `!collapsed && …`
+            条件渲染，收起瞬间卸载、没有第二帧可插值，所以只能生硬跳变（用户投诉的根因）。 */}
+        {showThinking && (() => {
           const localFiles = m.stages?.reads ?? [];
           const localUrls = m.stages?.urls ?? [];
           const tools = m.stages?.tools ?? [];
           // 交错时间线：优先使用流式记录的真实顺序；历史消息（无 timeline）回退为「完整思考 + 工具列表」
-          const cleanReasoning = (m.reasoning ?? "").replace(/\n?### 工具调用记录\n[\s\S]*$/g, "");
+          // A-1027：工具块**解析成 tool 节点**，不再整段丢弃。原先的 `/…[\s\S]*$/` 在 marker 落在
+          // 偏移 0（无思考模型把工具块写成整段 reasoning）时会把推理**砍空**，叠加历史记录里
+          // `stages` 整体缺失（实测 6 条命中记录全部如此）→ 时间线长度 0 → **整个思考面板不渲染**
+          // （按钮在、点了没反应）。留痕本来就是工具信息，丢掉它才是错的。
+          const trace = splitToolTrace(m.reasoning ?? "");
+          const cleanReasoning = trace.text;
+          // 结构化来源优先：条目已被 `stages.tools` 覆盖则不重复出节点（见 traceEntriesToToolSteps）
+          const tracedTools = traceEntriesToToolSteps(trace.traces, matchToolLabel, tools);
+          // A-1021b：兜底**也要是多节点**。此前这里整段推理只建一个 think 节点，叠加
+          // normalizeThinkingText 把段内单换行并成空格 → 整条思考历程塌成"一大坨可滚动的字"，
+          // 时间线形态（圆点 + 竖轨 + 一行摘要）全部消失。用户实测截图正是这条路径。
+          // 按模型自己的自然段落切、超上限再均衡合并（见 splitThinkingIntoSteps 的取舍说明）。
+          // ⚠️ 工具块解析出的节点排在末尾，跟随它在文本里的**记录位置**——这不是真实交错位置
+          //    （与 splitThinkingIntoSteps 同一条诚实边界），不得据此宣称调用发生的时刻。
           const timeline: TimelineStep[] = m.stages?.timeline?.length
             ? m.stages.timeline
             : [
-                ...(cleanReasoning.trim() ? [{ kind: "think" as const, text: cleanReasoning }] : []),
+                ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: "think" as const, text: t })),
                 ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label.replace(/^⟳\s*/, ""), detail: t.detail })),
+                ...tracedTools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label })),
               ];
           if (timeline.length === 0 && localFiles.length === 0 && localUrls.length === 0) return null;
           return (
-            <div style={{ margin: "8px 0 2px" }}>
-              {/* 面板零：访问来源（网页访问/搜索网址，A-918+ 补齐此前未渲染的 urls） */}
-              {localUrls.length > 0 && (
-                <UrlPanel urls={localUrls} />
-              )}
-              {/* 面板一：参考内容（只含工作目录文件；独立折叠，与思考过程互不影响） */}
-              {localFiles.length > 0 && (
-                <RefPanel files={localFiles} />
-              )}
-              {/* 面板二：思考过程（时间线：思考段落 ↔ 工具调用交错；独立折叠） */}
-              {timeline.length > 0 && (
-                <ThinkingPanel timeline={timeline} />
-              )}
+            /* A-1015：常驻 + 高度插值。注意三层层级是**必需的**：
+               .collapse(grid 容器) > 纯 div(grid 行, 负责 overflow 裁切) > 原内容(带 margin)。
+               ⚠️ 带 margin 的元素**不能**直接当 grid 行：grid 行高 0fr 时 item 自身 margin
+               不会被 overflow:hidden 裁掉（overflow 只裁自己的内容盒），那 8+2px 会漏成空白。 */
+            <div className={`collapse${collapsed ? "" : " is-open"}`}>
+              <div>
+                <div style={{ margin: "8px 0 2px" }}>
+                  {/* 面板零：访问来源（网页访问/搜索网址，A-918+ 补齐此前未渲染的 urls） */}
+                  {localUrls.length > 0 && (
+                    <UrlPanel urls={localUrls} />
+                  )}
+                  {/* 面板一：参考内容（只含工作目录文件；独立折叠，与思考过程互不影响） */}
+                  {localFiles.length > 0 && (
+                    <RefPanel files={localFiles} />
+                  )}
+                  {/* 面板二：思考过程（时间线：思考段落 ↔ 工具调用交错；独立折叠） */}
+                  {timeline.length > 0 && (
+                    <ThinkingPanel timeline={timeline} />
+                  )}
+                </div>
+              </div>
             </div>
           );
         })()}
         {/* A-975：压缩报告分隔线（在正文之前，思考卡折叠也可见） */}
         {m.compressNote && <CompressNoteLine note={m.compressNote} />}
         <div className="msg-body-divider" />
-        {m.error ? (
+        {/* A-1008：成员本次发言失败 —— 正文是上游报错串（非观点），用「失败」降级样式呈现，
+            不做 Markdown 渲染（报错串里常有 * _ ` 等字符，渲染出来会变成乱排版）。 */}
+        {m.failed ? (
+          <div style={{
+            borderLeft: "3px solid var(--danger)",
+            background: "var(--danger-soft)",
+            borderRadius: 8, padding: "8px 10px",
+            fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word",
+            color: "var(--text-secondary)",
+          }}>
+            {m.content}
+          </div>
+        ) : m.error ? (
           <div style={{
             borderLeft: "3px solid var(--danger)",
             background: "var(--danger-soft)",
@@ -1800,7 +1769,8 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
           <div style={{ lineHeight: 1.7, fontSize: 14, color: "var(--text)", wordBreak: "break-word" }}>
             {m.content ? (() => {
               // 剥离 ### 工具调用记录 段（旧格式残留，已由独立卡片展示）
-              const cleanContent = m.content.replace(/\n?### 工具调用记录\n[\s\S]*?(?=\n###|\n\n###|$)/g, "").trim();
+              // A-1027：与思考区共用唯一解析实现（旧内联正则的停止条件与它不完全一致）
+              const cleanContent = splitToolTrace(m.content).text.trim();
               return <Markdown text={cleanContent} />;
             })() : null}
           </div>
@@ -2233,17 +2203,21 @@ export default function ChatPanel({
    * 输入框配置：推理等级改为无框下拉（GhostSelect）直接弹出可选等级，不再需要折叠面板
    */
   const [extras, setExtras] = React.useState<ExtrasList | null>(null);
-  /** 联网搜索开关：默认开（A-966 用户实测"群聊搜不了"——默认关使 web_search/web_fetch 被静默拒绝）；
-   *  未显式存过 "0" 即视为开（可手动关闭后持久化），从 localStorage 恢复 */
-  const [networkEnabled, setNetworkEnabled] = React.useState(() => {
-    try { return localStorage.getItem("slime_network_enabled") !== "0"; } catch { return true; }
-  });
-  // 网络开关变化时同步写入 localStorage
+  /** 联网搜索开关：默认开（A-966 用户实测"群聊搜不了"——默认关使 web_search/web_fetch 被静默拒绝）。
+   *  A-1008：读写口径搬到 `./networkToggle.js`（唯一实现）——此前本组件 `!== "0"`（没存过=开）、
+   *  App.tsx 用 `=== "1"`（没存过=关），同一份偏好两个默认值。 */
+  const [networkEnabled, setNetworkEnabled] = React.useState(() => readNetworkEnabled());
+  // 网络开关变化时持久化（走同一个模块，不许再直接写 localStorage）
   React.useEffect(() => {
-    try { localStorage.setItem("slime_network_enabled", networkEnabled ? "1" : "0"); } catch { /* 忽略 */ }
+    writeNetworkEnabled(networkEnabled);
   }, [networkEnabled]);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = React.useState(true);
+  /** A-1015b：`atBottom` 的 ref 镜像 —— ResizeObserver / MutationObserver 的回调是**异步**的，
+   *  闭包捕获 state 会读到旧值（典型症状：贴底判断永远停在组件首次挂载时的 true）。
+   *  用 effect 统一同步，避免去改散落的每一处 setAtBottom。 */
+  const atBottomRef = React.useRef(true);
+  React.useEffect(() => { atBottomRef.current = atBottom; }, [atBottom]);
   /** A-980-R18：是否位于顶部（<8px）——顶部渐变遮罩显隐 */
   const [atTop, setAtTop] = React.useState(true);
   /** A-980-R18：更早历史分段加载状态（首屏 500 条封顶且有更早 → 顶部胶囊点击再载） */
@@ -2335,7 +2309,9 @@ export default function ChatPanel({
       };
     }
     try {
-      await api.perm.resolve(decision);
+      // ⚠️ 第一层必须 `?.`：这是 try/finally（**没有 catch**），api 缺失时抛出的异常会一路
+      // 穿到 async 边界变成 unhandled rejection —— 用户只看到"点了没反应"。
+      await api?.perm?.resolve?.(decision);
     } finally {
       setPendingPerm(null);
       setPermSubmitting(false);
@@ -2376,7 +2352,8 @@ export default function ChatPanel({
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     const decision: AskUserDecision = buildAskDecision(pendingAsk.requestId, choice, custom);
     try {
-      await api.askUser.resolve(decision);
+      // 同上：try/finally 无 catch，第一层必须 `?.`
+      await api?.askUser?.resolve?.(decision);
     } finally {
       setPendingAsk(null);
       setAskSubmitting(false);
@@ -2417,10 +2394,10 @@ export default function ChatPanel({
   /** 重连全部失败 / 不可恢复错误：红字错误+可能诱因，追加为一条错误消息并复位 UI */
   const failReconnect = React.useCallback((msg: string, maxRetry: number) => {
     // 重连耗尽的错误消息也带上本流工具留痕（A-147），并在收尾后清空避免残留
+    // A-1027：块格式走唯一产地 composeToolTrace（此前这里手写第三份，与解析器各写各的）。
+    // ⚠️ 传入的是 `t.label` 原值：它已带 `⟳ ` 前缀（见 2951 行 displayLabel），不要再补一次。
     const errTrace = toolTraceRef.current;
-    const errBlock = errTrace.length > 0
-      ? `### 工具调用记录\n${errTrace.map((t) => `- ${t.label}`).join("\n")}`
-      : "";
+    const errBlock = composeToolTrace(errTrace.map((t) => t.label));
     const errContent = explainStreamError(msg, maxRetry);
     pendingTailErrorRef.current = { content: errContent, reason: msg };
     // A-917：改为就地红字横幅（不再追加独立 assistant 消息）——用户反馈「另发一条/切会话才出现/切走即消失」全部由追加消息引起；
@@ -2734,7 +2711,7 @@ export default function ChatPanel({
       const hist = msgs.map((m, i) => {
         const a = attaches[i] ?? {};
         // A-980-R18：ts 带上原始历史时间戳（分页加载更早历史的定位锚 + 消息真实时刻）
-        const extra: Partial<Message> = { time: fmtTime(m.time), ts: m.ts, reasoning: m.reasoning, elapsedMs: m.elapsedMs, agentName: m.agentName, agentId: m.agentId };
+        const extra: Partial<Message> = { time: fmtTime(m.time), ts: m.ts, reasoning: m.reasoning, elapsedMs: m.elapsedMs, agentName: m.agentName, agentId: m.agentId, failed: m.failed };
         if (a.assistantOrdinal) {
           aiOrd = a.assistantOrdinal;
           const productFiles = productsByOrd[String(a.assistantOrdinal)] ?? [];
@@ -2928,10 +2905,9 @@ export default function ChatPanel({
         // 标记本流已展示错误：后续 done 携空正文时跳过空白气泡（避免与错误消息重复/显得卡死）
         streamErrorSeenRef.current = true;
         // 错误收尾也带上本流已发生的工具留痕：用户能从错误消息的「思考过程」看到"尝试调用过哪些工具"（A-147）
+        // A-1027：块格式走唯一产地 composeToolTrace（`t.label` 已带 `⟳ ` 前缀，不要再补）
         const errTrace = toolTraceRef.current;
-        const errBlock = errTrace.length > 0
-          ? `### 工具调用记录\n${errTrace.map((t) => `- ${t.label}`).join("\n")}`
-          : "";
+        const errBlock = composeToolTrace(errTrace.map((t) => t.label));
         setMessages((prev) => [...prev,
           makeMessage("assistant", explainStreamError(errMsg), { error: true, reasoning: errBlock || undefined }),
         ]);
@@ -2956,6 +2932,24 @@ export default function ChatPanel({
       // 团队会话：成员发言（type="member"）→ 台内流式累积（同一 Agent 期间的 chunk 追加到同一条消息），
       // 切换发言者后开启新消息；与组长整合回复并列（A-950 逐字流式，避免每 chunk 一条刷屏）
       if (c.type === "member") {
+        // A-1008：发言结束通知（仅"失败"时下发）——把该成员刚生成的气泡降级为错误样式。
+        // 为什么不在 chunk 里判：chunk 是逐段到达的，判据（整段正文是否失败占位）只有发言结束才成立。
+        if (c.data?.speechEnd) {
+          const mid = c.data?.agentId;
+          if (c.data?.failed && mid) {
+            setMessages((prev) => {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].role === "assistant" && prev[i].agentId === mid && !prev[i].error) {
+                  const next = prev.slice();
+                  next[i] = { ...next[i], failed: true };
+                  return next;
+                }
+              }
+              return prev;
+            });
+          }
+          return;
+        }
         // A-955 兜底剔除思考段；A-956 正文排版归一：换行收成空格（群聊正文规范为"一段"，模型常多发 \n 造成碎行乱排版）
         const content = stripPanelText(c.data?.content ?? "")
           .replace(/\r?\n+/g, " ")
@@ -3063,7 +3057,28 @@ export default function ChatPanel({
           // reasoning 不动：思考文本只由上面 onChunk 的 reasoning 镜像累积，done 里无思考原文，
           // 用 reply 冒充会把正文写进思考区（污染折叠卡「思考过程」）。
           const snap = perSessionStreamCache.current[sid];
-          if (snap) { snap.hasActive = false; snap.partial = m.reply; }
+          if (snap) {
+            snap.hasActive = false;
+            snap.partial = m.reply;
+            // A-1021b：**本分支必须补一次时间线落盘 —— 这里是"交错时间线"最大的单点漏斗。**
+            // 此前本分支只写 partial 就 return，于是"流式期间切走会话"这条路径上：
+            //   · history.jsonl 的 timeline（A-966 通道）不写 → 磁盘上这条记录永远没有时间线；
+            //   · 会话元数据也不写 → localStorage 里也没有。
+            // 结果：该条回复的时间线**只剩内存快照**，重启即永久丢失，重载后思考历程塌成
+            // "一大段无节点文本"（用户实测："上一次的思考历程的时间线设计怎么没了"）。
+            // 实测复现（config/history.jsonl）：第 97 行 elapsed_ms=349872（与用户截图"回复耗时 349.9s"
+            // 完全一致）timeline 缺失；而几乎同一时刻、在当前会话里结束的第 96/98 行都带 timeline
+            // —— 唯一差别就是它们的 done 没走这个早退分支。
+            //
+            // 用 `snap.timeline` 而**不是** `timelineStepsRef.current`：切走时那支 ref 已被目标会话的
+            // 时间线整体覆盖（见会话切换处的恢复），只有 onChunk 的后台镜像一直在往 snap 上累积。
+            // 不走 `updateSessionCtxMeta`（localStorage）：它按 assistant 序数索引，而本会话此刻的
+            // 序数在切走后无从得知；history.jsonl 通道按 (agentId, sessionId) 定位，无需序数，正合适。
+            if (snap.timeline && snap.timeline.length > 0) {
+              const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
+              void attachApi?.chat?.attachTimeline?.(agentId, sid, snap.timeline as unknown[]);
+            }
+          }
           return;
         }
       } else if (streamSessionRef.current !== sessionRef.current) {
@@ -3110,16 +3125,36 @@ export default function ChatPanel({
         else if (t.name === "web_fetch" && t.detail) urls.push({ url: t.detail, label: t.detail });
         else if (t.name === "web_search" && t.detail) urls.push({ url: "", label: t.detail });
       }
-      // A-918++ 兜底：m.reasoning 有值但 timeline 没有 think 节点时手动追加一个（A-170 修复后时间线只来自
+      // A-918++ 兜底：m.reasoning 有值但 timeline 没有 think 节点时手工补节点（A-170 修复后时间线只来自
       // 流式时 "reasoning" 事件，agnes/部分中转站把 reasoning_content 混在 chunk 里传上来，导致
-      // 流式阶段没追加 think 节点；onDone 时用 m.reasoning 补一个，让"思考过程"折叠里一定有节点）
+      // 流式阶段没追加 think 节点；onDone 时用 m.reasoning 补，让"思考过程"折叠里一定有节点）
+      // A-1021b：补的是**多个**节点而不是一整坨 —— 单节点会让时间线形态当场消失（见 splitThinkingIntoSteps）。
+      // 顺序保持"先已有节点、再补思考"：真实交错顺序在此不可考，不臆造工具与思考的相对位置。
       let finalTimeline = timelineStepsRef.current;
+      // A-1028：流式时间线**为空时**兜底重建。本轮事件没到渲染层（切会话竞态 / 上游把 reasoning
+      // 混进 chunk 不发 reasoning 事件）时 `timelineStepsRef` 是空的，而 done 载荷里既没有 reasoning
+      // 也没有工具列表 —— 旧代码于是把整条时间线丢掉，只在磁盘上留一段文本推理。这里用仍拿得到的
+      // 文本再解析一遍（与历史回退**同一套**实现，不另造第二份解析）。
+      if (finalTimeline.length === 0) {
+        const seedTrace = splitToolTrace(finalReasoning ?? "");
+        finalTimeline = [
+          ...splitThinkingIntoSteps(seedTrace.text).map((t) => ({ kind: "think" as const, text: t })),
+          ...traceEntriesToToolSteps(seedTrace.traces, matchToolLabel, doneTools)
+            .map((t) => ({ kind: "tool" as const, name: t.name, label: t.label })),
+        ];
+      }
       if (finalReasoning && !finalTimeline.some((s) => s.kind === "think")) {
-        finalTimeline = [...finalTimeline, { kind: "think" as const, text: finalReasoning }];
+        finalTimeline = [...finalTimeline, ...splitThinkingIntoSteps(finalReasoning).map((t) => ({ kind: "think" as const, text: t }))];
       }
       // A-1007：本轮真实产物文件（file_write 主产物 + file_read 补充；随 stages 组装）
       const products = extractProducts(doneTools);
-      const stages = finalReasoning || doneTools.length > 0
+      // A-1028：门的条件里**必须算上 finalTimeline**。此前是 `finalReasoning || doneTools.length > 0`，
+      // 只要 done 载荷既没带思考也没带工具，那条**带结果**的真实交错时间线就被整个丢掉 ——
+      // 本会话里消息不带 stages → 渲染掉回"文本重建"（工具卡无结果、无详情）；磁盘上下面按
+      // `stages?.timeline?.length` 落盘 → 同样不写 → 回看历史永远只能走兜底。
+      // 实测取证（config/history.jsonl 第 100 行，ts=2026-09-19T16:24:49，正是用户截图那条）：
+      // reasoning 里有 11 条 `### 工具调用记录`，磁盘上却没有 timeline → 重载后 11 张卡全无内容。
+      const stages = finalReasoning || doneTools.length > 0 || finalTimeline.length > 0
         ? { reads, urls, tools: doneTools, reasoning: finalReasoning, timeline: finalTimeline, products }
         : undefined;
       // error chunk 已实时展示红字错误时，本 done 携带的是空正文（main 兜底收尾）→ 不再追加空白气泡
@@ -3233,13 +3268,12 @@ export default function ChatPanel({
         // A-1007：产物随会话持久化（localStorage 按 assistant 序数）——重载/重启后按序数回填产物卡
         writeSessionProducts(agentId, sessionRef.current, assistantOrdinalRef.current, products);
         // A-966：同时把时间线回填 history.jsonl（重启恢复时间线不依赖 localStorage 存活）
-        if (stages?.timeline?.length) {
+        // A-1028：判据直接用 `finalTimeline`（不再借道 `stages`），并**删掉**原来的 else 分支 ——
+        // 它调 `attachTimeline(…, [])` 号称"幂等覆盖旧值"，而 `attachTimelineToRecord` 对空数组
+        // 第一行就 `return false`（拒绝写）：那条分支从来没有生效过，只是一句假承诺（陈旧守卫更糟）。
+        if (finalTimeline.length > 0) {
           const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
-          void attachApi?.chat?.attachTimeline?.(agentId, sessionRef.current, stages.timeline as unknown[]);
-        } else {
-          // 无时间线（如纯文本回复）也记录空数组，幂等覆盖旧值而非残留上次
-          const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
-          void attachApi?.chat?.attachTimeline?.(agentId, sessionRef.current, []);
+          void attachApi?.chat?.attachTimeline?.(agentId, sessionRef.current, finalTimeline as unknown[]);
         }
       }
       onConversationsChanged?.();
@@ -3396,11 +3430,11 @@ export default function ChatPanel({
     const prevH = el?.scrollHeight ?? 0;
     const prevT = el?.scrollTop ?? 0;
     try {
-      const res = await api.conversations.loadEarlier({ sessionId, beforeTs: olderInfo.beforeTs, limit: 200 });
-      const older: Message[] = (res.messages as ConversationMessage[]).map((m) =>
+      const res = await api?.conversations?.loadEarlier?.({ sessionId, beforeTs: olderInfo.beforeTs, limit: 200 });
+      const older: Message[] = ((res?.messages ?? []) as ConversationMessage[]).map((m) =>
         makeMessage(m.role, m.content, {
           time: fmtTime(m.time), ts: m.ts, reasoning: m.reasoning, elapsedMs: m.elapsedMs,
-          agentName: m.agentName, agentId: m.agentId,
+          agentName: m.agentName, agentId: m.agentId, failed: m.failed,
         }));
       if (older.length > 0) {
         const newOldest = older[0]?.ts;
@@ -3440,6 +3474,94 @@ export default function ChatPanel({
     });
     return () => cancelAnimationFrame(id);
   }, [messages, partial, toolEvents, reasoningTmp, atBottom]);
+
+  /**
+   * A-1015b：**内容高度一变就保持贴底**（不止"有新消息时"）。
+   *
+   * 病根：上面那个 effect 的依赖是 [messages, partial, toolEvents, reasoningTmp, atBottom]，
+   * 它们刻画的是"有没有新内容产生"。但用户**展开一个折叠块**（思考过程 / 工具详情 /
+   * 产物变更详情 / 参考内容）时这四个都不变 → effect 不重跑 → 视口不动 → 新展开出来的内容
+   * 在屏幕外，用户每次都得自己再滚一遍（用户原话："展开后不会自动追踪到最新"）。
+   *
+   * 为什么不把各折叠状态加进依赖：折叠开关散在 8 个子组件各自的 useState 里
+   * （TimelineNode.expanded / RefPanel.open / UrlPanel.open / ThinkingPanel.open /
+   * ProductPanel.open / ThinkingPanel …），逐个接回调侵入面大，而且以后新增折叠点还得
+   * 记得再接一次 —— 必然漏。"内容高度变了"才是这一切的**公共下游**，直接观察它，
+   * 一次覆盖现存与将来。折叠动画是逐帧插值的，所以这里也是逐帧跟随，看不出跳。
+   */
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) { return; }
+    let raf = 0;
+    let running = false;
+    let syncRaf = 0;
+    let lastH = -1;
+    let stable = 0;
+    /* A-1016：贴底跟随从「RO 回调里排一帧 rAF」改成**自驱 rAF 循环**。
+       病根（探针同内容同时长对照，600 行 diff）：折叠动画是**逐帧插值**的，
+       而"RO 回调排 rAF"一帧只落一次、循环被反复重启、实际跟不上插值 →
+       展开一大段内容后视口停在半路再猛跳一下 = 用户说的"抖动"。
+       实测最大贴底误差：旧写法 **2569px** → 自驱循环 **1px**。
+       代价控制：高度连续 IDLE_FRAMES 帧没变就**停表**（静默即停，不空烧 CPU），
+       内容再变时由下面两个 Observer 把表重新踢起来；用户上翻期间干脆不跑。 */
+    const IDLE_FRAMES = 20;  // ≈0.33s 高度不变 = 动画/流式已结束
+    const tick = (): void => {
+      const e = scrollRef.current;
+      if (!e) { running = false; return; }
+      const h = e.scrollHeight;                        // 本帧唯一一次强制布局读
+      if (h !== lastH) {
+        lastH = h;
+        stable = 0;
+        if (atBottomRef.current) {
+          e.scrollTop = h;                             // 直接写，等价于贴底，一步到位
+        } else {
+          running = false;                             // 循环途中用户上翻 → 停表
+          return;
+        }
+      } else if (++stable >= IDLE_FRAMES) {
+        running = false;                               // 静默即停
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    const kick = (): void => {
+      // 上翻时不打扰（与自动追踪同一策略）；回底由上面的 [atBottom] effect 接管
+      if (running || !atBottomRef.current) { return; }
+      running = true;
+      stable = 0;
+      lastH = -1;
+      raf = requestAnimationFrame(tick);
+    };
+    const ro = new ResizeObserver(kick);
+    const observed = new Set<Element>();
+    const sync = (): void => {
+      const live = scrollRef.current;
+      if (!live) { return; }
+      for (const child of Array.from(live.children)) {
+        if (!observed.has(child)) { ro.observe(child); observed.add(child); }
+      }
+      for (const ch of Array.from(observed)) {
+        // 消息被替换 / 分段重渲染后，旧节点要从观察集里摘掉，否则越攒越多
+        if (!ch.isConnected) { ro.unobserve(ch); observed.delete(ch); }
+      }
+      kick();
+    };
+    sync();
+    /* MutationObserver 只用来**发现新增/移除的顶层子元素**（消息追加、分段重渲染），
+       高度变化本身由 ResizeObserver 报。subtree:true 但 sync 用 rAF 节流 ——
+       流式期 DOM 每帧都在变，不节流会每帧跑一次全量子元素比对。 */
+    const mo = new MutationObserver(() => {
+      if (syncRaf) { return; }
+      syncRaf = requestAnimationFrame(() => { syncRaf = 0; sync(); });
+    });
+    mo.observe(el, { childList: true, subtree: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      cancelAnimationFrame(raf);
+      cancelAnimationFrame(syncRaf);
+    };
+  }, []);
 
   /** 自动增高输入框（上限 120px） */
   function autoResize(): void {
@@ -4258,7 +4380,11 @@ export default function ChatPanel({
             {lastTimings.promptTokens && ` · ${lastTimings.promptTokens}+${lastTimings.completionTokens ?? 0}tok`}
           </span>
         )}
-        <ContextRing used={ctxUsed} cap={ctxCap} loading={loading} />
+        {/* A-1011：群聊（brainstorm）**不显示**顶栏上下文圆环。
+            群聊没有「单一会话上下文」——ctxUsed/ctxCap 由单会话 done 事件驱动，群聊下恒为 0，
+            圆环只会显示成 0% 恒不动的装饰（用户实测反馈）。真实上下文占用看右栏成员卡的
+            「每成员独立上下文池」进度条（BrainstormPanel）。普通聊天保留圆环。 */}
+        {sessionType !== "brainstorm" && <ContextRing used={ctxUsed} cap={ctxCap} loading={loading} />}
         {/* A-980-R19/R21：最右侧「唤出/收起聊天悬浮窗」按钮——不挨前面的按钮组（marginLeft 拉开）；
             右栏占满不再自动出现悬浮窗，需手动点按唤出（右栏展开到最宽 + 聊天浮于其上），再点收起 */}
         <button onClick={() => onToggleFloat?.()}
@@ -4354,16 +4480,21 @@ export default function ChatPanel({
                     )}
                     <ChevronIcon size={12} rotate={reasoningOpen ? 90 : 0} style={{ opacity: 0.7 }} />
                   </button>
-                  {reasoningOpen && (
-                    <div className="think-timeline is-live" style={{ marginTop: 4 }}>
-                      {liveTimeline.map((step, i) => (
-                        <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
-                      ))}
-                      {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
-                        <span className="text-scan-light" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
-                      )}
+                  {/* A-1015：常驻 + 高度插值（与其它折叠块同节拍）。
+                      TimelineNode 的 expanded 只在挂载时取 autoExpand，靠 key={`l${i}`} 随长度变化
+                      让"最新一步"重挂载来取得自动展开——常驻挂载不改变这个机制（key 仍在变）。 */}
+                  <div className={`collapse${reasoningOpen ? " is-open" : ""}`}>
+                    <div>
+                      <div className="think-timeline is-live" style={{ marginTop: 4 }}>
+                        {liveTimeline.map((step, i) => (
+                          <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
+                        ))}
+                        {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
+                          <span className="text-scan-light" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
+                        )}
+                      </div>
                     </div>
-                  )}
+                  </div>
                 </div>
               )}
 
@@ -4497,9 +4628,10 @@ export default function ChatPanel({
 
       {/* 输入区：圆角容器 + 自动增高 + 联想 + 指令面板 + 加号栏 */}
       <div style={{ padding: "10px 16px 12px", borderTop: "1px solid var(--border)", background: "var(--bg)", position: "relative", zIndex: 30 }}>
-        {/* 输入联想（历史会话相似消息） */}
-        {suggestions.length > 0 && !loading && (
-          <div style={{
+        {/* 输入联想（历史会话相似消息）
+            A-1015b：常驻挂载 + .pop.pop-up —— 与下方 ＋ 气泡、@ 列表、指令面板同一套进出场。
+            锚点都在输入区上方 → 统一用 pop-up（向上弹出的位移方向）。 */}
+        <div className={`pop pop-up${suggestions.length > 0 && !loading ? " is-open" : ""}`} style={{
             position: "absolute", bottom: "100%", left: 16, right: 16, marginBottom: 4,
             background: "var(--bg-input)", border: "1px solid var(--border-hover)",
             borderRadius: 10, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
@@ -4524,11 +4656,10 @@ export default function ChatPanel({
               </button>
             ))}
           </div>
-        )}
 
-        {/* A-951：@成员选择器（brainstorm 输入 @ 弹出团队成员候选） */}
-        {atOpen && atList.length > 0 && (
-          <div style={{
+        {/* A-951：@成员选择器（brainstorm 输入 @ 弹出团队成员候选）
+            A-1015b：常驻挂载 + .pop.pop-up（键盘连续输入时反复开关，瞬跳最刺眼） */}
+        <div className={`pop pop-up${atOpen && atList.length > 0 ? " is-open" : ""}`} style={{
             position: "absolute", bottom: "100%", left: 16, right: 16, marginBottom: 4,
             background: "var(--bg-input)", border: "1px solid var(--border-hover)",
             borderRadius: 10, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
@@ -4557,11 +4688,9 @@ export default function ChatPanel({
               </button>
             ))}
           </div>
-        )}
 
-        {/* 指令面板（"/" 开头） */}
-        {cmdOpen && filteredCmd.length > 0 && (
-          <div style={{
+        {/* 指令面板（"/" 开头）；A-1015b：常驻挂载 + .pop.pop-up（同 @ 列表） */}
+        <div className={`pop pop-up${cmdOpen && filteredCmd.length > 0 ? " is-open" : ""}`} style={{
             position: "absolute", bottom: "100%", left: 16, right: 16, marginBottom: 4,
             background: "var(--bg-input)", border: "1px solid var(--border-hover)",
             borderRadius: 10, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
@@ -4588,16 +4717,16 @@ export default function ChatPanel({
               </button>
             ))}
           </div>
-        )}
 
-        {/* ＋ 弹窗气泡：指向左侧 ＋ 按钮，选技能 / MCP / 导入文件 */}
-        {plusOpen && (
-          <div style={{
-            position: "absolute", bottom: "100%", left: 14, marginBottom: 10, width: 312,
-            background: "var(--bg-input)", border: "1px solid var(--border-hover)",
-            borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,0.42)",
-            zIndex: 50, overflow: "hidden",
-          }}>
+        {/* ＋ 弹窗气泡：指向左侧 ＋ 按钮，选技能 / MCP / 导入文件
+            A-1015b：加 **.pop.pop-up** 进出场（绝对定位浮层不做高度插值——"从 0 高度长出来"
+            对不在文档流里的元素没有意义，还会把锚点定位算歪）。pop-up = 向上弹出的位移方向。 */}
+        <div className={`pop pop-up${plusOpen ? " is-open" : ""}`} style={{
+          position: "absolute", bottom: "100%", left: 14, marginBottom: 10, width: 312,
+          background: "var(--bg-input)", border: "1px solid var(--border-hover)",
+          borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,0.42)",
+          zIndex: 50, overflow: "hidden",
+        }}>
             {/* 指向 ＋ 的小三角 */}
             <div style={{
               position: "absolute", bottom: -6, left: 18, width: 12, height: 12,
@@ -4683,8 +4812,7 @@ export default function ChatPanel({
                 <span style={{ color: "var(--text-dim)", fontSize: 11 }}>本地文件</span>
               </button>
             </div>
-          </div>
-        )}
+        </div>
 
         <div className="glass-input" style={{
           borderRadius: 18, border: "1px solid var(--border-hover)",
@@ -5273,7 +5401,9 @@ export default function ChatPanel({
                 ...(curEfforts.length === 0 && presetEfforts ? presetEfforts.map((e) => ({ value: e, label: EFFORT_LABEL[e] ?? e, group: presetLabelOf(reasonPreset) })) : []),
               ]}
             />
-            {/* 联网搜索开关：灰色（关）→ 绿色（开），点击切换；关闭时 web_search/web_fetch 被静默拒绝 */}
+            </>
+            )}
+            {/* 联网搜索开关（A-1008：移出「群聊隐藏块」——群聊同样会调用 web_search/web_fetch，把开关藏起来等于让用户在群聊里既看不到也控不了联网）。灰色（关）→ 绿色（开），点击切换；关闭时 web_search/web_fetch 被静默拒绝 */}
             <button
               onClick={() => setNetworkEnabled((v) => !v)}
               title={networkEnabled ? "联网搜索：已启用" : "联网搜索：未启用（点击开启）"}
@@ -5295,10 +5425,7 @@ export default function ChatPanel({
               }}>
               <InternetIcon size={14} style={{ color: networkEnabled ? "#22c55e" : "var(--text-dim)" }} />
               联网搜索
-            </button>
-            </>
-            )}
-            <div style={{ flex: 1 }} />
+            </button>            <div style={{ flex: 1 }} />
             <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8, display: loading ? "none" : "block" }}>
               {input ? `${input.length} 字` : ""}
             </span>
@@ -5307,11 +5434,11 @@ export default function ChatPanel({
                 disabled={stopping}
                 title="中断当前 Agent 输出（保留已生成内容）"
                 style={{
-                  width: 36, height: 36, borderRadius: "50%",
+                  width: STOP_BTN_SIZE, height: STOP_BTN_SIZE, borderRadius: "50%",
                   border: "none",
                   background: stopping ? "var(--bg-hover)" : "var(--danger)",
                   color: stopping ? "var(--text-dim)" : "#fff",
-                  fontSize: 13, fontWeight: 700, cursor: stopping ? "not-allowed" : "pointer",
+                  cursor: stopping ? "not-allowed" : "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   transition: "background 0.12s, transform 0.08s",
                 }}
@@ -5319,7 +5446,13 @@ export default function ChatPanel({
                 onMouseLeave={(e) => { if (!stopping) { e.currentTarget.style.background = "var(--danger)"; } }}
                 onMouseDown={(e) => { if (!stopping) { e.currentTarget.style.transform = "scale(0.9)"; } }}
                 onMouseUp={(e) => { e.currentTarget.style.transform = "scale(1)"; }}>
-                {stopping ? "…" : "■"}
+                {/* A-1018：终止按钮的图形改为图标（图标源 `D:\下载\终止.svg`）。
+                    此前是文字 `■`（字号/字重还得单独调，跨字体渲染还歪），居中也不稳。
+                    A-1021：改用 **StopIcon（无外环的圆角方块）** —— 圆底的"圆"已经由本按钮承担，
+                    再套一环就是重复造型并把方块挤小（用户实测："标应该跟背景红底一样大 / 也不在正中间"）。
+                    A-1021b：尺寸从撑满（36）收敛到 `STOP_ICON_SIZE`（28）—— 方块 ≈14.3px = 圆底 39.8%，
+                    回到"圆底 + 方块"的常规比例（36 时方块占 51%，用户："你这个也太大了，正常点，小一点点"）。 */}
+                {stopping ? <LoadingCircleIcon size={20} /> : <StopIcon size={STOP_ICON_SIZE} />}
               </button>
             ) : (
               <button disabled={loading || !input.trim()}

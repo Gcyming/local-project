@@ -11,6 +11,9 @@
 
 import React, { type JSX, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshIcon } from "../components/Icon.js";
+// A-990：币种与折算一律取共享层 —— 本文件原先硬编码 `* 7.25` 且恒显示 ¥，
+// 与共享层 USD_CNY_RATE(7.2) 不一致（同一笔账两处不同数），也是"看着不舒服的小数点"来源
+import { formatMoney, formatUsdAs, pricingDisplayCurrency, type PriceCurrency } from "../../../../shared/gen/model-capabilities.js";
 
 /* ──────────────── 主题颜色 ──────────────── */
 const PALETTE = {
@@ -216,13 +219,26 @@ function fmtMs(ms: number): string {
   if (ms < 60_000) { return `${(ms / 1000).toFixed(1)}s`; }
   return `${(ms / 60_000).toFixed(1)}m`;
 }
-function fmtCost(usd: number): string {
-  // 货币：按用户区域约定；此处展示 ¥（人民币≈7.25），与右栏 MetricsGrid 一致
-  const cny = usd * 7.25;
-  if (cny < 0.01) { return `¥${cny.toFixed(4)}`; }
-  if (cny < 1) { return `¥${cny.toFixed(3)}`; }
-  return `¥${cny.toFixed(2)}`;
+function fmtCost(usd: number, currency: PriceCurrency = "USD"): string {
+  /*
+   * A-990：币种由**模型所属地**决定，金额格式交由共享层 `formatMoney` 统一。
+   *
+   * 旧实现有三处问题（都在这一行里）：
+   *   · 硬编码 `usd * 7.25` —— 第二个汇率出处，与共享层 7.2 打架；
+   *   · 恒显示 ¥ —— 海外模型的美元账单被强行折成人民币，用户无法与账单对账；
+   *   · `toFixed(4)`/`toFixed(3)` 长尾 —— 把 ¥12.30 印成 `¥12.3000`（用户原话"看着不舒服"）。
+   * 现在：调用方按模型归属地传入币种；格式走 `formatMoney`（去尾零、按量级给精度）。
+   */
+  return formatUsdAs(usd, currency);
 }
+
+/*
+ * A-990-B：`ledgerCurrencyOf` 已移到 `usageCurrency.ts`（纯函数不该住在 .tsx 里 ——
+ * 否则"要测它就得 import 一个 React 组件"，正是本仓库刚修掉的那类耦合）。
+ */
+import { ledgerCurrencyOf } from "./usageCurrency.js";
+// A-990-D：与右栏「会话指标」共用同一个币种偏好（通用设置里手选）—— 两处各读各的必然漂移
+import { readLedgerCurrencyPref, resolveLedgerCurrency, LEDGER_CURRENCY_EVENT, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
 function fmtPct(r: number, digits = 1): string {
   return `${(r * 100).toFixed(digits)}%`;
 }
@@ -271,12 +287,19 @@ interface TrendSeries {
   fmt: (v: number) => string;
 }
 
-function UsageTrend({ days, height = 170 }: { days: DailyBucket[]; height?: number }): JSX.Element {
+function UsageTrend({ days, height = 170, currency = "USD" }: {
+  days: DailyBucket[]; height?: number;
+  /** A-990：图表显示币种（按面板总账归属地选定）；**只影响格式化，不影响数值** */
+  currency?: PriceCurrency;
+}): JSX.Element {
   if (days.length === 0) {
     return <div style={{ fontSize: 12, color: "var(--text-dim)", padding: "20px 0", textAlign: "center" }}>无数据</div>;
   }
   const series: TrendSeries[] = [
-    { key: "cost", label: "成本", color: PALETTE.trend_cost, values: days.map((d) => d.cost_usd * 7.25), fmt: (v) => `¥${v.toFixed(2)}` },
+    // A-990：数值**保持 USD 原值**（这是唯一记账单位，换算只发生在展示层）。
+    // 旧实现把 `* 7.25` 混进数值管线里，一旦哪天改汇率，柱高与 hover 会一起漂移，
+    // 而且"图上的高度"暗含了币种却没有出处。现在 fmt 负责折算与格式化，数值恒为 USD。
+    { key: "cost", label: "成本", color: PALETTE.trend_cost, values: days.map((d) => d.cost_usd), fmt: (v) => formatUsdAs(v, currency) },
     { key: "req", label: "请求数", color: PALETTE.trend_req, values: days.map((d) => d.requests), fmt: (v) => `${v} 次` },
     { key: "tokens", label: "Tokens", color: PALETTE.trend_tokens, values: days.map((d) => d.total_tokens), fmt: (v) => fmtK(v) },
   ];
@@ -351,7 +374,11 @@ function UsageTrend({ days, height = 170 }: { days: DailyBucket[]; height?: numb
 
 /** 成本 Top 模型（原独立卡片，A-980-R32 整合进日趋势卡底部）：
  *  横向色条列表，一眼看出"钱花在哪些模型上"；与日趋势同处一卡，避免两张图各说一半。 */
-function TopModelCosts({ models }: { models: ModelBucket[] }): JSX.Element {
+function TopModelCosts({ models, currencyOf }: {
+  models: ModelBucket[];
+  /** A-990-B：逐模型行的币种判据（用户手选 > 归属地）。由面板统一注入，避免这里再写一套。 */
+  currencyOf: (r: { model: string; provider_key?: string }) => PriceCurrency;
+}): JSX.Element {
   const top = [...models].sort((a, b) => b.cost_usd - a.cost_usd).slice(0, 6);
   const max = Math.max(...top.map((m) => m.cost_usd), 0);
   if (top.length === 0) {
@@ -369,11 +396,11 @@ function TopModelCosts({ models }: { models: ModelBucket[] }): JSX.Element {
       {top.map((m) => {
         const full = `${m.provider_key}/${m.model}`;
         return (
-          <div key={full} title={`${full} · ${fmtCost(m.cost_usd)} · ${m.requests} 次 · ${fmtK(m.total_tokens)} tokens`}
+          <div key={full} title={`${full} · ${fmtCost(m.cost_usd, currencyOf(m))} · ${m.requests} 次 · ${fmtK(m.total_tokens)} tokens`}
             style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 130, maxWidth: 200, flex: "1 1 130px" }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 11 }}>
               <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{full}</span>
-              <span style={{ color: PALETTE.trend_cost, fontWeight: 700, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{fmtCost(m.cost_usd)}</span>
+              <span style={{ color: PALETTE.trend_cost, fontWeight: 700, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{fmtCost(m.cost_usd, currencyOf(m))}</span>
             </div>
             <div style={{ height: 4, borderRadius: 2, background: "var(--bg-hover, rgba(148,163,184,0.18))", overflow: "hidden" }}>
               <div style={{ width: `${Math.max(2, (m.cost_usd / max) * 100)}%`, height: "100%", background: PALETTE.trend_cost, opacity: 0.85 }} />
@@ -601,11 +628,42 @@ export default function UsageStatsPanel(): JSX.Element {
   // 详情表分页页码（0 基；每页 DETAIL_PAGE_SIZE 条）
   const [page, setPage] = useState(0);
 
+  /**
+   * A-990-B：`"供应商key::模型id"` → 用户手选的币种（随账目快照一起下发）。
+   * 缺失（旧主进程 / 未手选）时统一回落到归属地推断，所以这里默认空对象而不是 undefined。
+   */
+  const [modelCurrencies, setModelCurrencies] = useState<Record<string, PriceCurrency>>({});
+
+  /** A-990-D：通用设置里手选的消费币种（`auto` = 沿用下面的推断） */
+  const [ledgerPref, setLedgerPref] = useState<LedgerCurrencyPref>(() => readLedgerCurrencyPref());
+  useEffect(() => {
+    const onEvent = (e: Event): void => {
+      const d = (e as CustomEvent<LedgerCurrencyPref>).detail;
+      setLedgerPref(d === "USD" || d === "CNY" || d === "auto" ? d : readLedgerCurrencyPref());
+    };
+    const sync = (): void => setLedgerPref(readLedgerCurrencyPref());
+    window.addEventListener(LEDGER_CURRENCY_EVENT, onEvent);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(LEDGER_CURRENCY_EVENT, onEvent);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  /**
+   * 某条记录的显示币种：**用户手选 > 归属地推断**（判定收在共享层 `pricingDisplayCurrency`）。
+   * 逐模型行、逐条明细行、面板总账三处都走这一个函数 —— 三处各写一遍必然会漂移成
+   * "同一个模型在上面显示 ¥、在下面显示 $"，那类投诉在本项目已经出现过。
+   */
+  const currencyOf = React.useCallback((r: { model: string; provider_key?: string }): PriceCurrency =>
+    pricingDisplayCurrency(r.model, modelCurrencies[`${r.provider_key ?? ""}::${r.model}`]),
+  [modelCurrencies]);
+
   const refreshTimer = useRef<number | null>(null);
 
   // 从 IPC 拉取 usage 快照并聚合
   const fetchAndAggregate = React.useCallback(async () => {
-    const api = (window as unknown as { slimeAPI?: { usage?: { snapshot: (p?: unknown) => Promise<{ records: UsageRecord[]; tzOffsetMin: number }> } } }).slimeAPI;
+    const api = (window as unknown as { slimeAPI?: { usage?: { snapshot: (p?: unknown) => Promise<{ records: UsageRecord[]; tzOffsetMin: number; modelCurrencies?: Record<string, PriceCurrency> }> } } }).slimeAPI;
     if (!api?.usage) {
       setLoadError("slimeAPI.usage 不可用（请确认 preload 已暴露）");
       return;
@@ -619,6 +677,8 @@ export default function UsageStatsPanel(): JSX.Element {
       }
       const snap = await api.usage.snapshot(opts);
       setData(aggregateRecords(snap.records, snap.tzOffsetMin));
+      // A-990-B：用户手选的币种随账目一起下发（见 UsageSnapshot.modelCurrencies 注释）
+      setModelCurrencies(snap.modelCurrencies ?? {});
       setLastUpdated(Date.now());
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
@@ -681,6 +741,12 @@ export default function UsageStatsPanel(): JSX.Element {
   }, [refreshMs, fetchAndAggregate]);
 
   // IPC 已按 range 过滤了 records，data.* 已是该范围聚合结果；本组件不再二次过滤
+  // A-990：面板级总账币种 —— 由"这笔钱主要花在哪个归属地的模型"决定（用户指令：以模型所属地决定）。
+  // 逐模型的行各自用自己的归属地币种（见下方 byModel / 详情表），只有**合计类**数字才需要这个单一币种。
+  const ledger = useMemo(
+    () => resolveLedgerCurrency(ledgerPref, ledgerCurrencyOf(data.records, currencyOf)),
+    [ledgerPref, data.records, currencyOf],
+  );
   // A-980-R32：日趋势专用——补成连续日期轴（缺漏的日子补零桶，见 fillDailyGaps）
   const trendDays = useMemo(() => fillDailyGaps(data.daily, rangeDays), [data.daily, rangeDays]);
   // 按所选模型聚合的 Token 构成
@@ -786,8 +852,16 @@ export default function UsageStatsPanel(): JSX.Element {
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <KpiCard
           label="总费用"
-          value={fmtCost(data.summary.cost_usd)}
-          hint={`≈ $${data.summary.cost_usd.toFixed(4)}`}
+          value={fmtCost(data.summary.cost_usd, ledger)}
+          /*
+           * A-990：总费用按**模型归属地**选币种（`ledger`），hint 保留账目原值（USD）。
+           * 为什么要露原值：账目内部恒以 USD 记账（`usage.jsonl` 的 `cost_usd`），
+           * 用户拿人民币数字去比对账单时，需要知道"这个 ¥ 是怎么来的"，否则又是一笔对不上的账。
+           * 旧 hint 是 `≈ $${usd.toFixed(4)}` —— 4 位长尾正是用户说的"看着不舒服"。
+           */
+          hint={ledger === "CNY"
+            ? `模型归属地显示；账目原值 ${formatMoney(data.summary.cost_usd, "USD")}`
+            : "海外厂商以美元计价（按模型归属地显示）"}
           color={PALETTE.accent}
         />
         <KpiCard
@@ -849,10 +923,10 @@ export default function UsageStatsPanel(): JSX.Element {
             三色柱 = 成本 / 请求数 / Tokens（各自独立缩放，悬停看准确值）
           </div>
         </div>
-        <UsageTrend days={trendDays} height={170} />
+        <UsageTrend days={trendDays} height={170} currency={ledger} />
         <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-dim)", marginBottom: 6 }}>成本 Top 模型</div>
-          <TopModelCosts models={data.byModel} />
+          <TopModelCosts models={data.byModel} currencyOf={currencyOf} />
         </div>
       </div>
 
@@ -910,7 +984,8 @@ export default function UsageStatsPanel(): JSX.Element {
                   <Td align="right" mono>{fmtK(r.prompt_tokens)}</Td>
                   <Td align="right" mono>{fmtK(r.completion_tokens + r.reasoning_tokens)}</Td>
                   <Td align="right" mono>{fmtK(r.cache_read_tokens)}</Td>
-                  <Td align="right" mono>{fmtCost(r.cost_usd)}</Td>
+                  {/* A-990：逐条记录按**该条自己模型的**币种显示（用户手选优先，见 currencyOf；同表可中美混排） */}
+                  <Td align="right" mono>{fmtCost(r.cost_usd, currencyOf(r))}</Td>
                   <Td align="right" mono>{fmtMs(r.elapsed_ms)}</Td>
                   <Td align="center">
                     <span style={{

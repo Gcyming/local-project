@@ -32,6 +32,19 @@ const WATCHDOG_PATH = join(DATA_DIR, "watchdog.log");
 const STALE_TMP_MS = 60_000;
 /** 留证文件（.bak / .corrupt）保留时长，避免 data/ 无限堆积 */
 const FORENSIC_KEEP_MS = 30 * 24 * 3600 * 1000;
+/**
+ * **死文件**：0 字节且 24h 没动过的残留物（A-987）。
+ *
+ * 判据为什么是"0 字节 + 够老"而不是看文件名：0 字节文件承载不了任何可恢复信息，
+ * 而 24h 的静默期把"刚落盘、还没写内容"的瞬时窗口排除在外 —— 用户能看到的所有
+ * 操作痕迹（会话记录、待办、产物）都可能涉及它，所以只删**确证无用**的那一类。
+ *
+ * 现实来源：NTFS 把 `xxx:yyy` 当**备用数据流**（见 todoStore.encodeSessionId 的长注释）——
+ * `fs.writeFileSync("data/todos___subagent__:run123.json", …)` 不报错，却在 data/ 里
+ * 留下一个 0 字节的 `todos___subagent__`，而任何代码路径都读不到它（用户截图上看到的
+ * "不存在的任务"残留物就是它）。会话 id 侧已从源头修掉，这里再兜一层，兼容历史遗留。
+ */
+const DEAD_FILE_MS = 24 * 3600 * 1000;
 
 export interface CrashSweepResult {
   /** 上次是否异常退出（run.lock 残留） */
@@ -42,6 +55,8 @@ export interface CrashSweepResult {
   removedTmp: number;
   /** 清掉的陈旧留证文件数 */
   removedForensics: number;
+  /** 清掉的 0 字节死文件数 */
+  removedDead: number;
 }
 
 function appendReport(lines: string[]): void {
@@ -75,7 +90,7 @@ function watchdogTail(maxLines = 6): string[] {
  * 幂等、绝不抛：任何一步失败都不应阻止 App 起来。
  */
 export function sweepAfterCrash(): CrashSweepResult {
-  const result: CrashSweepResult = { abnormalExit: false, removedTmp: 0, removedForensics: 0 };
+  const result: CrashSweepResult = { abnormalExit: false, removedTmp: 0, removedForensics: 0, removedDead: 0 };
   try { mkdirSync(DATA_DIR, { recursive: true }); } catch { /* 忽略 */ }
 
   // ① 上次异常退出的判定：run.lock 还在 = 没走到"正常退出删标记"那一步
@@ -84,17 +99,22 @@ export function sweepAfterCrash(): CrashSweepResult {
     result.previous = readPreviousLock();
   }
 
-  // ② 清障：残留 *.tmp（原子写的半成品）+ 过期的 .bak/.corrupt 留证
+  // ② 清障：残留 *.tmp（原子写的半成品）+ 过期的 .bak/.corrupt 留证 + 0 字节死文件
   try {
     const now = Date.now();
     for (const name of readdirSync(DATA_DIR)) {
       const p = join(DATA_DIR, name);
+      let size = -1;
       let age = 0;
-      try { age = now - statSync(p).mtimeMs; } catch { continue; }
+      try { const st = statSync(p); size = st.size; age = now - st.mtimeMs; } catch { continue; }
       if (name.endsWith(".tmp") && age > STALE_TMP_MS) {
         try { unlinkSync(p); result.removedTmp += 1; } catch { /* 占用中则下次再说 */ }
       } else if ((name.endsWith(".bak") || name.endsWith(".corrupt")) && age > FORENSIC_KEEP_MS) {
         try { unlinkSync(p); result.removedForensics += 1; } catch { /* 忽略 */ }
+      } else if (size === 0 && age > DEAD_FILE_MS) {
+        // run.lock 是"上次跑着"的活判据，正被本进程复查 → 不碰（崩溃报告也要读它）
+        if (name === "run.lock") { continue; }
+        try { unlinkSync(p); result.removedDead += 1; } catch { /* 忽略 */ }
       }
     }
   } catch { /* 清理失败不影响启动 */ }
@@ -106,7 +126,7 @@ export function sweepAfterCrash(): CrashSweepResult {
       "",
       `[crashGuard] ${new Date().toISOString()} 检测到**上次异常退出**（data/run.lock 未被清理）`,
       `  上次进程：pid=${prev?.pid ?? "?"} 启动于 ${prev?.startedAt ?? "?"} 版本 ${prev?.version ?? "?"}`,
-      `  本次清障：残留临时文件 ${result.removedTmp} 个、陈旧留证 ${result.removedForensics} 个`,
+      `  本次清障：残留临时文件 ${result.removedTmp} 个、陈旧留证 ${result.removedForensics} 个、0 字节死文件 ${result.removedDead} 个`,
       `  ⚠️ 若上方 watchdog 日志非空，说明崩溃前先发生过主进程卡死（看门狗抓到了）`,
       ...watchdogTail().map((l) => `  | ${l}`),
     ]);

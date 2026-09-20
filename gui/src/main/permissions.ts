@@ -4,7 +4,11 @@
  *   slime.toml / providers.enc.json / agents.json 等权威配置。
  * - globalApproval 作为会话级审批的兜底默认（无 sandbox_override 时使用）。
  * - approvalAllowPaths：自定义审批白名单（目录/仓库命中免审批，custom 档生效）。
- * - 工具权限与 MCP/技能开关作为「面向用户的全局控制台」持久化，供后续接入引擎审计/启用。
+ * - 工具权限与 MCP/技能开关：**已全部接入执行点**（不再是只落盘的假开关）——
+ *   `toolRead/toolWrite/toolTerminal/screenEnabled/mcpEnabled/skillsEnabled` 六个开关由
+ *   `gui/src/main/index.ts` 的 `setToolCategoryGate` 实时读取，每次工具调用都重新判定
+ *   （改设置无需重启引擎）；`globalApproval` → 会话级审批兜底默认；`approvalAllowPaths` → 审批白名单。
+ *   判据见 `tests/core-ts/network-gate.spec.ts`（前缀闸门 + 行为对照）。
  */
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync } from "node:fs";

@@ -292,7 +292,11 @@ export default function SkillsPanel(): JSX.Element {
       </div>
 
       {/* A-918++：GUI 表单新建技能（生成 config/skills/<name>/SKILL.md，不再要求手动建目录） */}
-      {addOpen && (
+      {/* A-1015：常驻 + 高度插值（此前 `{addOpen && …}` 展开/收起都是瞬时跳变）。
+          wrapper 两层：.collapse(grid 容器) > 纯 div(grid 行，负责 overflow 裁切) → 原卡片。
+          内容缩进刻意不动（同 McpPanel：这一带只加壳，不重排）。 */}
+      <div className={`collapse${addOpen ? " is-open" : ""}`}>
+      <div>
         <div className="card" style={{ padding: "14px 16px", marginBottom: 14 }}>
           <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>新建技能</div>
           <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: "10px 12px", alignItems: "start" }}>
@@ -321,10 +325,15 @@ export default function SkillsPanel(): JSX.Element {
             </span>
           </div>
         </div>
-      )}
+      </div>
+      </div>
 
       {/* A-918++：Skill 广场——一键创建占位技能（带搜索/标签过滤） */}
-      {marketOpen && (() => {
+      {/* A-1015：常驻 + 高度插值。额外成本可忽略：搜索框只在 marketOpen 时可见，
+          故 marketQuery 变化必然发生在展开态，不存在"收起时因输入而重渲染列表"。 */}
+      <div className={`collapse${marketOpen ? " is-open" : ""}`}>
+      <div>
+      {(() => {
         const q = marketQuery.trim().toLowerCase();
         // A-918++：联网官方仓库结果优先；未加载/失败时回退预制列表
         const useOnline = marketOnline !== null;
@@ -431,6 +440,9 @@ export default function SkillsPanel(): JSX.Element {
         </div>
         );
       })()}
+      </div>
+      </div>
+      {/* A-1015：marketOpen 闭（原为 `{marketOpen && (() => …)()}` 条件渲染 → 常驻 + 高度插值） */}
 
       {notice && (
         <div style={{
