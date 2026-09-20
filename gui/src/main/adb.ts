@@ -10,9 +10,10 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createWriteStream } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { extractZipTo } from "../../../core-ts/src/zip.js";
 import { app } from "electron";
 import { request as httpsRequest } from "node:https";
 import { type IncomingMessage } from "node:http";
@@ -222,33 +223,28 @@ export class AdbService {
     });
   }
 
-  /** 解压 zip（无新依赖：Windows 用 tar.exe，POSIX 优先 unzip 回退 tar -xf） */
-  private extractZip(zipPath: string, destDir: string): Promise<{ ok: boolean; error?: string }> {
-    return new Promise((resolveResult) => {
-      const run = (cmd: string, args: string[]): void => {
-        execFile(cmd, args, { timeout: 120_000, windowsHide: true }, (err) => {
-          if (!err) {
-            resolveResult({ ok: true });
-            return;
-          }
-          // POSIX：unzip 失败回退 tar -xf
-          if (cmd === "unzip") {
-            execFile("tar", ["-xf", zipPath, "-C", destDir], { timeout: 120_000, windowsHide: true }, (err2) => {
-              if (!err2) { resolveResult({ ok: true }); }
-              else { resolveResult({ ok: false, error: `解压失败：${err2.message}` }); }
-            });
-            return;
-          }
-          resolveResult({ ok: false, error: `解压失败：${err.message}` });
-        });
-      };
-      if (process.platform === "win32") {
-        // Windows 10+ 内置 tar.exe 可解压 zip（argv 传参，无 shell 注入风险）
-        run("tar", ["-xf", zipPath, "-C", destDir]);
-      } else {
-        run("unzip", ["-o", zipPath, "-d", destDir]);
+  /**
+   * 解压 zip。
+   *
+   * A-1034：**不再 spawn 外部命令**。此前 Windows 用 `tar`、POSIX 用 `unzip`，
+   * 而"Windows 10+ 内置 tar.exe" **不等于它在 PATH 里** —— 打包后进程 PATH 与开发机不同，
+   * 用户实测报错就是 `spawn tar ENOENT`（红字「解压失败」）。
+   * 现在走 core-ts 的零依赖 zip 模块（node:zlib），平台无关、无外部依赖。
+   */
+  private async extractZip(zipPath: string, destDir: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const buf = await readFile(zipPath);
+      const r = extractZipTo(buf, destDir);
+      if (r.files === 0) {
+        return { ok: false, error: "解压失败：压缩包内没有可写出的文件（可能已损坏）" };
       }
-    });
+      if (r.skipped.length > 0) {
+        return { ok: false, error: `解压失败：${r.skipped.length} 个条目因路径不安全被拒绝（首个：${r.skipped[0]}）` };
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: `解压失败：${e instanceof Error ? e.message : String(e)}` };
+    }
   }
 
   /** 下载官方 platform-tools 便携包并解压到内置目录 */
