@@ -150,6 +150,8 @@ slime-server.ps1
 # ── Agent Git 治理（影子仓库 / 并行 worktree）──────────────────────────
 .slime/
 .slime-worktrees/
+# 仓库损坏时手工备份出来的 .git 副本（含完整对象库，绝不是源码）
+.git.broken-bak-*/
 
 # ── OS / IDE / 工具残留 ────────────────────────────────────────────────
 Thumbs.db
