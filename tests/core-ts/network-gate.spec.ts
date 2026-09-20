@@ -11,6 +11,7 @@
  * 注意：不 import gui/src/main/index.ts（会拉起整个主进程装配），只读取其文本做结构守卫。
  */
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { rmSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,6 +26,11 @@ import {
 import { AgentRegistry, AgentState, emptyPersona } from "../../core-ts/src/services/agents.js";
 import { memoryHistoryStore } from "./helpers/memoryHistoryStore.js";
 import { Tool, ToolRegistry, setToolCategoryGate } from "../../core-ts/src/tools/registry.js";
+
+// A-1035：知识/技能落盘根挪到临时目录（后处理链路会生成技能，不能写进仓库 Knowledge/）
+const knowTmp = await mkdtemp(join(tmpdir(), "slime-know-"));
+process.on("exit", () => { try { rmSync(knowTmp, { recursive: true, force: true }); } catch { /* 尽力而为 */ } });
+
 
 const CHAT_TS = readFileSync(
   new URL("../../core-ts/src/services/chat.ts", import.meta.url),
@@ -128,7 +134,7 @@ describe("断链 A — networkEnabled 必须原样透传到引擎（普通聊天
     const engine = new CaptureEngine();
     // A-1017：**必须**注入内存 history。缺省值是 fileHistoryStore → 直写真实
     // config/history.jsonl，本轮 76 条 agent_test1 垃圾记录就是这么来的（并催生幽灵会话）。
-    const svc = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
+    const svc = new ChatService({ dataDir: knowTmp, registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
     for await (const _ of svc.stream("agent_test1", { message: "hi", networkEnabled: false })) {
       void _;
     }
@@ -140,7 +146,7 @@ describe("断链 A — networkEnabled 必须原样透传到引擎（普通聊天
     const engine = new CaptureEngine();
     // A-1017：**必须**注入内存 history。缺省值是 fileHistoryStore → 直写真实
     // config/history.jsonl，本轮 76 条 agent_test1 垃圾记录就是这么来的（并催生幽灵会话）。
-    const svc = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
+    const svc = new ChatService({ dataDir: knowTmp, registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
     for await (const _ of svc.stream("agent_test1", { message: "hi" })) {
       void _;
     }
@@ -151,7 +157,7 @@ describe("断链 A — networkEnabled 必须原样透传到引擎（普通聊天
     const engine = new CaptureEngine();
     // A-1017：**必须**注入内存 history。缺省值是 fileHistoryStore → 直写真实
     // config/history.jsonl，本轮 76 条 agent_test1 垃圾记录就是这么来的（并催生幽灵会话）。
-    const svc = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
+    const svc = new ChatService({ dataDir: knowTmp, registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
     await svc.chat("agent_test1", { message: "hi", networkEnabled: false });
     expect(engine.chatOpts.length).toBeGreaterThanOrEqual(1);
     expect(engine.chatOpts[0].networkEnabled).toBe(false);
@@ -161,7 +167,7 @@ describe("断链 A — networkEnabled 必须原样透传到引擎（普通聊天
     const engine = new CaptureEngine();
     // A-1017：**必须**注入内存 history。缺省值是 fileHistoryStore → 直写真实
     // config/history.jsonl，本轮 76 条 agent_test1 垃圾记录就是这么来的（并催生幽灵会话）。
-    const svc = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
+    const svc = new ChatService({ dataDir: knowTmp, registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
     await svc.chat("agent_test1", { message: "hi" });
     expect(engine.chatOpts[0].networkEnabled).toBeUndefined();
   });

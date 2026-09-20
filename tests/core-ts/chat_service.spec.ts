@@ -6,6 +6,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ChatService, ChatEngine, ChatEngineCall, EngineChunk, ChatEngineResult, parseSwarmAnalysis, extractThinkingFromReply, createThinkingStripper, promoteOrphanThinking, splitUntaggedThinking } from "../../core-ts/src/services/chat.js";
@@ -63,6 +64,11 @@ function quietLogger(): Pick<Console, "warn" | "info" | "debug"> {
   return { warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
 }
 
+// A-1035：把知识/技能的落盘根挪到临时目录 —— 否则后处理链路会把自动生成的技能
+// 写进仓库真实的 Knowledge/（gitignored 但仍是污染，且难察觉）。
+const knowTmp = await mkdtemp(join(tmpdir(), "slime-chat-know-"));
+process.on("exit", () => { try { rmSync(knowTmp, { recursive: true, force: true }); } catch { /* 尽力而为 */ } });
+
 describe("parseSwarmAnalysis（A-015）", () => {
   it("整体 JSON 解析成功", () => {
     const r = parseSwarmAnalysis('{"action": "swarm", "subtasks": ["a", "b"], "reason": "多类型"}');
@@ -113,7 +119,7 @@ describe("ChatService.analyze", () => {
     dir = await mkdtemp(join(tmpdir(), "slime-chat-"));
     reg = await makeRegistry(dir, [makeAgent()]);
     engine = new FakeEngine();
-    service = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger: quietLogger() });
+    service = new ChatService({ registry: reg, engine, dataDir: knowTmp, history: memoryHistoryStore(), logger: quietLogger() });
   });
 
   afterEach(async () => {
@@ -136,7 +142,7 @@ describe("ChatService.analyze", () => {
     const logger = quietLogger();
     // A-1017：**必须**注入内存 history —— 缺省值是 fileHistoryStore，会把测试数据写进
     // 真实 config/history.jsonl（本轮幽灵会话事故的源头之一）。
-    const svc = new ChatService({ registry: reg, engine, history: memoryHistoryStore(), logger });
+    const svc = new ChatService({ registry: reg, engine, dataDir: knowTmp, history: memoryHistoryStore(), logger });
     const r = await svc.analyze("agent_test1", "hello");
     expect(r.action).toBe("chat");
     expect(r.parse_ok).toBe(false);
@@ -160,7 +166,7 @@ describe("ChatService.chat", () => {
     reg = await makeRegistry(dir, [makeAgent()]);
     engine = new FakeEngine();
     history = memoryHistoryStore();
-    service = new ChatService({ registry: reg, engine, history, bus, alarms, logger: quietLogger() });
+    service = new ChatService({ registry: reg, engine, dataDir: knowTmp, history, bus, alarms, logger: quietLogger() });
   });
 
   afterEach(async () => {
@@ -255,7 +261,7 @@ describe("ChatService.chat", () => {
   it("广播路由：<BROADCAST> 发送给所有 Agent", async () => {
     engine.chatImpl = async () => ({ reply: "<BROADCAST>全体注意</BROADCAST> 其他内容", replyRaw: "raw" });
     const infoLog = vi.fn();
-    const svc = new ChatService({ registry: reg, engine, history, bus, alarms, logger: { warn: vi.fn(), info: infoLog, debug: vi.fn() } });
+    const svc = new ChatService({ registry: reg, engine, dataDir: knowTmp, history, bus, alarms, logger: { warn: vi.fn(), info: infoLog, debug: vi.fn() } });
     bus.register("TestAgent");
     bus.register("Other");
     const r = await svc.chat("agent_test1", { message: "广播吧" });
@@ -312,6 +318,8 @@ describe("ChatService.chat", () => {
     const dataDir = await mkdtemp(join(tmpdir(), "slime-ke-"));
     const svc = new ChatService({
       registry: reg, engine, history, bus, alarms, logger: quietLogger(),
+      // A-1035：svc.chat() 会走默认后处理链路 —— 不给 dataDir 它就把生成物写进仓库 Knowledge/
+      dataDir: knowTmp,
       postProcess: { extractMemory: async () => ({ traitSignals: [{ name: "靠谱" }], userSentiment: 0.8, behaviorPatterns: [{ scenario: "答对", steps: ["a", "b"] }] }) },
     });
     await svc.chat("agent_test1", { message: "问个问题" });
@@ -347,7 +355,7 @@ describe("ChatService.stream", () => {
     reg = await makeRegistry(dir, [makeAgent()]);
     engine = new FakeEngine();
     history = memoryHistoryStore();
-    service = new ChatService({ registry: reg, engine, history, alarms, logger: quietLogger() });
+    service = new ChatService({ registry: reg, engine, dataDir: knowTmp, history, alarms, logger: quietLogger() });
   });
 
   afterEach(async () => {

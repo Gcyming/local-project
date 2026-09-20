@@ -235,16 +235,27 @@ export interface SkillRegistryOptions {
   skillDir?: string;
   /** 沙箱审批回调（REQUIRE 级权限时询问）；缺省 fail-closed 拒绝 */
   approvalCallback?: (permission: string, level: number) => boolean;
+  /**
+   * A-1035：**额外的技能扫描根**（在主 skillDir 之后扫）。
+   *
+   * 用途：知识引擎自动生成的技能落在 `<dataDir>/Knowledge/<agentId>/generated_skills/`，
+   * 不在 config/skills 下。没有这个入口，生成出来的技能只是磁盘上的文件 —— Agent
+   * 通过 `skill_search` / `skill_lookup` 依然看不到它，"能生成技能"就只是空话。
+   * 同名技能以**先扫到的为准**（主目录优先，允许人工版覆盖自动生成版）。
+   */
+  extraDirs?: string[];
 }
 
 export class SkillRegistry {
   skillDir: string;
+  extraDirs: string[];
   approvalCallback?: (permission: string, level: number) => boolean;
   private skills = new Map<string, Skill>();
   private loaded = false;
 
   constructor(opts: SkillRegistryOptions = {}) {
     this.skillDir = opts.skillDir ?? DEFAULT_SKILL_DIR;
+    this.extraDirs = opts.extraDirs ?? [];
     this.approvalCallback = opts.approvalCallback;
   }
 
@@ -252,36 +263,40 @@ export class SkillRegistry {
     return this.loaded;
   }
 
-  /** 扫描并加载所有技能，返回加载的技能名列表 */
+  /** 扫描并加载所有技能（主 skillDir + extraDirs），返回加载的技能名列表 */
   async loadSkills(): Promise<string[]> {
     this.skills.clear();
-    let entries: string[];
-    try {
-      entries = await readdir(this.skillDir);
-    } catch {
-      console.info(`[skills] 技能目录不存在: ${this.skillDir}`);
-      return [];
-    }
     const loaded: string[] = [];
-    for (const name of entries.sort()) {
-      const dir = join(this.skillDir, name);
+    // A-1035：多根扫描。主目录优先（同名时人工版覆盖自动生成版）——原来的实现
+    // 一旦主目录不存在就 `return []`，那会让"主目录缺失"连坐掉自动生成的技能。
+    for (const root of [this.skillDir, ...this.extraDirs]) {
+      let entries: string[];
       try {
-        const st = await lstat(dir);
-        if (st.isSymbolicLink()) {
-          console.warn(`[skills] 拒绝符号链接: ${name}`);
-          continue;
-        }
-        if (!st.isDirectory() || name.startsWith("__")) {
-          continue;
-        }
+        entries = await readdir(root);
       } catch {
+        console.info(`[skills] 技能目录不存在: ${root}`);
         continue;
       }
-      const skill = await this.loadSingleSkill(dir, name);
-      if (skill) {
-        this.skills.set(skill.name, skill);
-        loaded.push(skill.name);
-        console.info(`[skills] 加载技能: ${skill.name}`);
+      for (const name of entries.sort()) {
+        const dir = join(root, name);
+        try {
+          const st = await lstat(dir);
+          if (st.isSymbolicLink()) {
+            console.warn(`[skills] 拒绝符号链接: ${name}`);
+            continue;
+          }
+          if (!st.isDirectory() || name.startsWith("__")) {
+            continue;
+          }
+        } catch {
+          continue;
+        }
+        const skill = await this.loadSingleSkill(dir, name);
+        if (skill && !this.skills.has(skill.name)) {
+          this.skills.set(skill.name, skill);
+          loaded.push(skill.name);
+          console.info(`[skills] 加载技能: ${skill.name}（${root}）`);
+        }
       }
     }
     this.loaded = true;
@@ -486,12 +501,20 @@ export function resetSkillRegistry(): void {
 /** 加载技能并注册精简工具面（A-004）：skill_search / skill_lookup */
 export async function loadAllSkills(opts: {
   skillDir?: string;
+  /** A-1035：额外扫描根（如某 Agent 的 Knowledge/<id>/generated_skills），让自动生成的技能可被检索 */
+  extraDirs?: string[];
   registry?: ToolRegistry;
   approvalCallback?: (permission: string, level: number) => boolean;
 } = {}): Promise<string[]> {
   const skillReg = opts.skillDir ? new SkillRegistry({ skillDir: opts.skillDir, approvalCallback: opts.approvalCallback }) : getSkillRegistry();
   if (opts.skillDir) {
     skillReg.skillDir = opts.skillDir;
+  }
+  if (opts.extraDirs && opts.extraDirs.length > 0) {
+    skillReg.extraDirs = [...opts.extraDirs];
+  }
+  if (opts.approvalCallback) {
+    skillReg.approvalCallback = opts.approvalCallback;
   }
   const loaded = await skillReg.loadSkills();
   const toolReg = opts.registry ?? getRegistry();

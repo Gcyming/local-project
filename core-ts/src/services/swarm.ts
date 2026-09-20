@@ -245,12 +245,27 @@ export class SwarmService {
       const ce = new ConsolidationEngine();
       const total = agent.persona?.interactions?.length ?? 0;
       if (ce.shouldConsolidate(total)) {
+        // A-1035：与 chat 管线同源 —— Swarm 路径此前也是"知识→心智"断线的那一份
+        let ke: Awaited<ReturnType<typeof import("../memory/knowledge.js").getKnowledgeEngine>> | null = null;
+        try {
+          const { getKnowledgeEngine } = await import("../memory/knowledge.js");
+          ke = getKnowledgeEngine(agent.id, this.dataDir ? { dataDir: this.dataDir } : {});
+        } catch (e) {
+          this.logger.debug(`[slime] Swarm 知识引擎取用失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
         ce.consolidate({
           behavior,
           totalInteractions: total,
+          knowledgeTraits: ke ? ke.getPromotableTraits() : undefined,
           existingScenarios: new Set(behaviorPatterns.map((bp) => bp.scenario)),
           onArchived: (pat) => behavior.archive(pat),
         });
+        if (ke) {
+          const rv = ke.review(agent.persona as never);
+          if (rv.traits_reinforced > 0 || rv.patterns_resolved > 0) {
+            this.logger.info(`[slime] Swarm 知识审查: 强化 trait ${rv.traits_reinforced} · 归档 pattern ${rv.patterns_resolved}`);
+          }
+        }
         // C-记忆三层：与行为巩固同频触发记忆分层巩固（working→episodic；episodic 高访问→semantic）
         try {
           const { consolidateMemoryNow } = await import("../memory/store.js");

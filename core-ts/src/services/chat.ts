@@ -350,6 +350,14 @@ export interface ChatServiceOptions {
   /** 历史存储（缺省 config/history.jsonl 文件实现；测试注入内存实现） */
   history?: HistoryStore;
   logger?: Pick<Console, "warn" | "info" | "debug">;
+  /**
+   * A-1035：知识/记忆的落盘根（不传 = 项目根的 `Knowledge/Agent Memory`）。
+   *
+   * 为什么需要这么一个入口：后处理链路（知识 pattern / 生成技能 / 人格 trait）此前
+   * **固定**落在项目根下，嵌入方与测试都无法改道 —— 测试于是把生成的技能写进了
+   * 仓库真实的 `Knowledge/` 目录。传一个绝对路径即可完全隔离。
+   */
+  dataDir?: string;
 }
 
 export interface ChatMeta {
@@ -1621,7 +1629,11 @@ export class ChatService {
     this.alarms = opts.alarms ?? getAlarmBus();
     this.historyStore = opts.history ?? fileHistoryStore;
     this.logger = opts.logger ?? console;
+    this.knowledgeDataDir = opts.dataDir;
   }
+
+  /** A-1035：知识/记忆落盘根（见 ChatServiceOptions.dataDir） */
+  private knowledgeDataDir?: string;
 
   private alarm(source: string, message: string, severity: AlarmSeverity = "warning"): void {
     this.alarms.record(source, message, severity);
@@ -2364,7 +2376,7 @@ export class ChatService {
           reasoningBuf = reasoningBuf ? `${reasoningBuf}\n\n${toolBlock}` : toolBlock;
         }
         await this.recordInteraction(agent, req.message, persistReply, success, req.sessionId, reasoningBuf || undefined, elapsedMs > 0 ? elapsedMs : undefined);
-        void this.spawnPostProcess(agent, req.message, persistReply, success);
+        void this.spawnPostProcess(agent, req.message, persistReply, success, toolEventNames);
       }
     }
   }
@@ -2466,10 +2478,16 @@ export class ChatService {
     userMsg: string,
     reply: string,
     success: boolean,
+    tools: string[] = [],
   ): Promise<void> {
     return (async () => {
       try {
-        await this.postProcessChat(agent, userMsg, reply, success);
+        // A-1035：把 dataDir 透传下去 —— 否则知识/技能/记忆永远写项目根，
+        // 嵌入方与测试都没法改道（测试污染仓库 Knowledge/ 就是这么来的）。
+        await this.postProcessChat(agent, userMsg, reply, success, {
+          tools,
+          ...(this.knowledgeDataDir ? { dataDir: this.knowledgeDataDir } : {}),
+        });
       } catch (e) {
         this.logger.warn(`[slime] 后处理失败: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -2482,7 +2500,7 @@ export class ChatService {
     userMsg: string,
     reply: string,
     success: boolean,
-    opts: { knowledgePrefix?: string; patternSource?: string; dataDir?: string } = {},
+    opts: { knowledgePrefix?: string; patternSource?: string; dataDir?: string; tools?: string[] } = {},
   ): Promise<void> {
     const knowledgePrefix = opts.knowledgePrefix ?? "task.chat";
     const patternSource = opts.patternSource ?? "llm_extracted";
@@ -2523,10 +2541,31 @@ export class ChatService {
     let ke: ReturnType<typeof getKnowledgeEngine> | null = null;
     try {
       ke = getKnowledgeEngine(agent.id, opts.dataDir ? { dataDir: opts.dataDir } : {});
-      if (success) {
-        ke.recordPattern(`${knowledgePrefix}.success`, "task", `成功回复: ${userMsg.slice(0, 80)}`, "low");
-      } else {
-        ke.recordPattern(`${knowledgePrefix}.fail`, "task", `回复失败: ${userMsg.slice(0, 80)}`, "medium");
+      const primary = success
+        ? ke.recordPattern(`${knowledgePrefix}.success`, "task", `成功回复: ${userMsg.slice(0, 80)}`, "low")
+        : ke.recordPattern(`${knowledgePrefix}.fail`, "task", `回复失败: ${userMsg.slice(0, 80)}`, "medium");
+      // A-1035：把晋升结果**当场消费**（知识→技能／知识→人格）。
+      // 此前 recordPattern 的返回值没人接 —— 于是 promote_to_skill / promote_to_trait
+      // 只是两个没人读的字符串，generateSkill() 与写 persona.traits 的代码全部是死代码，
+      // 对外宣称的「五级跃迁」实际只走到 Rule。
+      const promoted = ke.applyPromotion(primary, agent.persona as never);
+      if (promoted.skill) {
+        this.logger.info(`[slime] 自动生成技能: ${promoted.skill.name}（来源 pattern ${String(primary.key ?? "")}）`);
+      }
+      if (promoted.trait) {
+        this.logger.info(`[slime] 人格特征强化: ${promoted.trait}（来源 pattern ${String(primary.key ?? "")}）`);
+      }
+      // A-1035：能力使用也进知识 —— 工具/skill/MCP 的成败是本 Agent 最该记住的事实，
+      // 单个工具反复成功 → recurrence 跨过阈值 → 自动沉淀成可复用技能（category=learning）。
+      // 去重 + 上限：一轮里同一工具调用多次只记一次，最多 8 个，避免知识库被刷爆。
+      const usedTools = [...new Set((opts.tools ?? []).filter((t) => t && !t.startsWith("delegate:")))].slice(0, 8);
+      for (const t of usedTools) {
+        ke.recordPattern(
+          `tool.${t}.${success ? "success" : "fail"}`,
+          "learning",
+          `工具 ${t} 在任务「${userMsg.slice(0, 40)}」中${success ? "成功" : "失败"}`,
+          success ? "low" : "medium",
+        );
       }
     } catch (e) {
       this.logger.debug(`[slime] 知识引擎更新失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -2567,9 +2606,20 @@ export class ChatService {
         ce.consolidate({
           behavior,
           totalInteractions: total,
+          // A-1035：**知识 → 心智**这一跳此前是断的（参数存在但从来没人传）。
+          // 不传 = 知识引擎里攒的高频 pattern 永远沉淀不成行为模式，三方只剩单向。
+          knowledgeTraits: ke ? ke.getPromotableTraits() : undefined,
           existingScenarios: new Set(behaviorPatterns.map((bp) => bp.scenario)),
           onArchived: (pat) => behavior.archive(pat),
         });
+        // A-1035：同频做**周期性审查**（唯一会批量写 persona.traits 的入口，此前零调用者）：
+        // 归档 90 天未出现的 pattern + 强化达标 trait + 衰减记忆。
+        if (ke) {
+          const rv = ke.review(agent.persona as never);
+          if (rv.traits_reinforced > 0 || rv.patterns_resolved > 0) {
+            this.logger.info(`[slime] 知识审查: 强化 trait ${rv.traits_reinforced} · 归档 pattern ${rv.patterns_resolved}`);
+          }
+        }
         // C-记忆三层：与行为巩固同频触发记忆分层巩固（working→episodic；episodic 高访问→semantic）
         const memStats = consolidateMemoryNow(agent.id, opts.dataDir ? { dataDir: opts.dataDir } : {});
         if (memStats.moved || memStats.pruned) {

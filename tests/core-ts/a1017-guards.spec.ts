@@ -17,10 +17,17 @@
  * 所以正常改注释不会误红。
  */
 import { describe, expect, it } from "vitest";
+import { rmSync, mkdtempSync } from "node:fs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+
+// A-1035：知识/技能落盘根挪到临时目录（后处理链路会生成技能，不能写进仓库 Knowledge/）
+const knowTmp = mkdtempSync(join(tmpdir(), "slime-know-"));
+process.on("exit", () => { try { rmSync(knowTmp, { recursive: true, force: true }); } catch { /* 尽力而为 */ } });
+
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const TESTS_DIR = join(ROOT, "tests");
@@ -87,7 +94,7 @@ interface CtorSite {
   snippet: string;
 }
 
-/** 用 AST 找 `new ChatService({...})`，并检查首个实参里有没有 `history` 属性。 */
+/** 用 AST 找 `new ChatService({ dataDir: knowTmp,...})`，并检查首个实参里有没有 `history` 属性。 */
 function chatServiceCtorSites(): CtorSite[] {
   const sites: CtorSite[] = [];
   for (const file of listFilesRecursive(TESTS_DIR, ".spec.ts")) {

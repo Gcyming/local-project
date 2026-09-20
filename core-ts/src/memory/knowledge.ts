@@ -107,6 +107,43 @@ export interface PersonaLike {
   _touch?: () => void;
 }
 
+/**
+ * A-1035：把一条知识 pattern 落成 persona trait —— **唯一实现**。
+ *
+ * 为什么必须抽出来：写 trait 这件事原先只存在于 `review()` 内部（而且 `review` 没有任何
+ * 生产调用者，见 A-1035 的接线修复）。现在有两个触发点：
+ *   ① `recordPattern` 当场跨过 trait 阈值 → 立即生效
+ *   ② 周期性 `review()` → 批量强化
+ * 两处各写一遍必然漂（本项目"同一动作只有一个入口/一份实现"的规矩）。
+ *
+ * 语义：已存在同名 trait 则**加权**（上限 1.0），不存在则新建（权重 0.45 = 弱先验，
+ * 需要后续重复强化才可信）。写入后调 `_touch()` 让 persona 的更新时间被发现。
+ */
+export function applyTraitToPersona(
+  persona: PersonaLike,
+  traitName: string,
+  sourceKey: string,
+  now: Date = new Date(),
+): { created: boolean; weight: number } {
+  const target = String(traitName ?? "").trim();
+  if (!target) { return { created: false, weight: 0 }; }
+  for (const t of persona.traits) {
+    if (String(t.name ?? "").toLowerCase() === target.toLowerCase()) {
+      t.weight = Math.min(1.0, (t.weight ?? 0.5) + 0.1);
+      persona._touch?.();
+      return { created: false, weight: t.weight };
+    }
+  }
+  persona.traits.push({
+    name: target,
+    weight: 0.45,
+    last_used: now.toISOString(),
+    source: `knowledge-pattern:${sourceKey}`,
+  });
+  persona._touch?.();
+  return { created: true, weight: 0.45 };
+}
+
 // ── KnowledgeEngine ──────────────────────────────────────
 
 export interface KnowledgeEngineOptions {
@@ -396,25 +433,14 @@ export class KnowledgeEngine {
       }
     }
 
-    // 2. 高 recurrence 的 pattern → 强化对应 trait
+    // 2. 高 recurrence 的 pattern → 强化对应 trait（走唯一实现 applyTraitToPersona）
     if (agentPersona) {
       for (const [key, p] of this.patterns.entries()) {
         if (p.recurrence >= PROMOTE_THRESHOLDS.trait && !p.resolved) {
           const traitName = this.keyToTraitName(key);
-          let found = false;
-          for (const t of agentPersona.traits) {
-            if (String(t.name ?? "").toLowerCase() === traitName.toLowerCase()) {
-              t.weight = Math.min(1.0, (t.weight ?? 0.5) + 0.1);
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            agentPersona.traits.push({ name: traitName, weight: 0.45, last_used: now.toISOString(), source: `knowledge-pattern:${key}` });
-          }
+          applyTraitToPersona(agentPersona, traitName, key, now);
           result.traits_reinforced += 1;
           result.summary.push(`强化 trait: ${traitName}（来自 pattern ${key} ×${p.recurrence}）`);
-          agentPersona._touch?.();
         }
       }
     }
@@ -456,6 +482,57 @@ export class KnowledgeEngine {
   /** 获取所有高优先级未解决的 pattern */
   getHighPriorityPatterns(): PatternEntry[] {
     return [...this.patterns.values()].filter((p) => (p.priority === "high" || p.priority === "critical") && !p.resolved);
+  }
+
+  /**
+   * A-1035：自动生成技能的目录（供 SkillRegistry 当额外扫描根）。
+   *
+   * ⚠️ 必须与 `generateSkill()` 的写入路径**逐字一致**：它写的是
+   * `<baseDir>/generated_skills/<name>`，**不含 agentId 段**。
+   * 注意这是本引擎既有的不一致（`knowledge.json` 按 agentId 分目录，而 `rules/` 与
+   * `generated_skills/` 不分）—— 本访问器只负责如实反映现状，不去"顺手统一"，
+   * 因为改目录布局会让用户已有的 `rules/` 失联。要统一得单独一轮做迁移。
+   */
+  get generatedSkillsDir(): string {
+    return resolve(this.baseDir, "generated_skills");
+  }
+
+  /**
+   * A-1035：消费 `recordPattern` 的晋升结果 —— 知识→技能／知识→人格 **唯一入口**。
+   *
+   * ⚠️ 为什么不按 `result.action` 分派：`recordPattern` 里 action 是**逐档覆盖赋值**的
+   * （escalate → rule → trait → skill），命中 skill 时 action 只剩 `"promote_to_skill"`，
+   * 而 trait 阈值其实也同时越过了 —— 按 action 分派会**静默漏掉写 trait**。
+   * 所以这里按 pattern 自身的 recurrence **逐档独立判断**，action 只用来记录日志。
+   *
+   * 幂等：技能模板已存在则不再重写（避免每轮都刷同一份文件）。trait 写入是加权，天然可重复。
+   */
+  applyPromotion(
+    result: Record<string, unknown>,
+    persona?: PersonaLike | null,
+  ): { action: string | null; skill?: { name: string; dir: string }; trait?: string } {
+    const action = typeof result.action === "string" ? result.action : null;
+    const key = typeof result.key === "string" ? result.key : "";
+    const out: { action: string | null; skill?: { name: string; dir: string }; trait?: string } = { action };
+    const p = key ? this.patterns.get(key) : undefined;
+    if (!p || p.resolved) { return out; }
+
+    if (p.recurrence >= PROMOTE_THRESHOLDS.trait && persona) {
+      const traitName = typeof result.trait_name === "string" && result.trait_name
+        ? result.trait_name
+        : this.keyToTraitName(key);
+      applyTraitToPersona(persona, traitName, key);
+      out.trait = traitName;
+    }
+
+    if (p.recurrence >= PROMOTE_THRESHOLDS.skill && (p.category === "task" || p.category === "learning")) {
+      const skillDir = join(this.generatedSkillsDir, this.keyToSkillName(key));
+      if (!existsSync(join(skillDir, "SKILL.md"))) {
+        const made = this.generateSkill(key);
+        if (made) { out.skill = made; }
+      }
+    }
+    return out;
   }
 
   getStats(): { total_patterns: number; high_priority: number; total_rules: number; pending_review: number } {

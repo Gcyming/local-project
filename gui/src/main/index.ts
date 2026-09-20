@@ -199,7 +199,8 @@ import { SlimeEngine } from "../../../core-ts/src/services/engine.js";
 import { SilamBrainClient, readSilamConfig, type SilamBrain, type SilamAffectState } from "../../../core-ts/src/services/silam_brain.js";
 import { decryptRaw } from "../../../core-ts/src/encryption.js";
 import { removeAgentHistory, loadHistory, appendHistory, attachTimelineToRecord, type HistoryRecord } from "../../../core-ts/src/services/history.js";
-import { SkillRegistry } from "../../../core-ts/src/skills.js";
+import { SkillRegistry, loadAllSkills } from "../../../core-ts/src/skills.js";
+import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate } from "../../../core-ts/src/tools/registry.js";
 import {
   getScreenController,
@@ -883,6 +884,37 @@ function gitPathOf(p?: string): { path: string; exists: true } | { path: string;
   }
 }
 
+/**
+ * A-1035：让 Agent **真正能调用技能**（含知识引擎自动生成的那些）。
+ *
+ * 病灶：GUI 此前只在"加号菜单"里用一次性 `new SkillRegistry()` 列了个清单，
+ * **从未调用 `loadAllSkills`** —— 于是 `skill_search` / `skill_lookup` 这两个工具
+ * 从来没有注册进工具表，Agent 侧"可以根据技能模块调用 skill"是一句空话
+ * （界面里看得到技能名，模型却既搜不到也读不到）。
+ *
+ * 这里一次做两件事：
+ *   ① 注册技能检索工具（注册表是全局单例，重复调用安全）
+ *   ② 把各 Agent 由知识引擎自动生成的技能目录作为**额外扫描根**
+ *      （`Knowledge/Agent Memory/<agentId>/generated_skills`）
+ *      → 打通「知识 → 技能 → 可被 Agent 调用」的最后一环
+ *
+ * 会在会话开始前调用（见 `slime:chat:stream`）：上一轮新生成的技能，下一轮就能被搜到。
+ */
+async function refreshAgentSkills(): Promise<void> {
+  try {
+    const extraDirs: string[] = [];
+    for (const a of agentRegistry?.loadedAgents ?? []) {
+      try {
+        extraDirs.push(getKnowledgeEngine(a.id).generatedSkillsDir);
+      } catch { /* 单个 Agent 算不出目录不影响其它 */ }
+    }
+    const loaded = await loadAllSkills({ registry: getRegistry(), extraDirs });
+    console.info(`[gui:skills] 技能工具已就绪，可见技能 ${loaded.length} 个（额外扫描根 ${extraDirs.length} 个）`);
+  } catch (e) {
+    console.warn("[gui:skills] 技能加载失败（不影响对话，但 Agent 将无法检索技能）:", e);
+  }
+}
+
 async function ensureServices(): Promise<void> {
   if (chatService) {
     return;
@@ -1120,6 +1152,9 @@ async function ensureServices(): Promise<void> {
     },
   });
   chatService = new ChatService({ registry: agentRegistry, engine, bus: a2aBus ?? undefined });
+  // A-1035：技能检索工具（skill_search / skill_lookup）+ 自动生成技能目录，必须在
+  // 服务就绪后立刻注册 —— 否则第一轮对话时 Agent 手里根本没有这两个工具。
+  await refreshAgentSkills();
   // ── 后台常驻定时唤醒（SchedulerService 装配，Phase 1 骨架）──
   // 对标 nanobot CronService：从 data/schedules.json 读取 cron 任务，到点用现有引擎跑一轮 AgentLoop
   // （复用模型路由/工具循环/记忆/沙箱），结果落盘 data/generated/schedule-*.md 供审计。
@@ -2326,6 +2361,9 @@ function registerIpcHandlers(): void {
   handleTrusted<ChatInput>("slime:chat:stream", async (_event, input: ChatInput) => {
     try {
     await ensureServices();
+    // A-1035：每轮开始前刷新一次技能可见集 —— 上一轮由知识引擎自动生成的技能，
+    // 下一轮就能被 skill_search 检索到（不必重启应用）。
+    await refreshAgentSkills();
     const agentId = resolveAgentId(input.agentId);
     // A-1017：「正在加载本地模型」面板**不再在这里预判**。
     // 此前是 `needLoadingPanel = isLocalModel && !isLocalModelReady(agent)` —— 判断依据由调用方
