@@ -9,6 +9,13 @@
   "electronDist": "node_modules/electron/dist",
   "files": [
     "out/**/*",
+    "!out/_zoom/**",
+    "!out/_zoom2/**",
+    "!out/bench/**",
+    "!out/layout-probe/**",
+    "!out/browser-error-probe/**",
+    "!out/_*.txt",
+    "!out/_*.json",
     "../core-ts/src/**/*",
     "../requirements.txt",
     "../slime_server.py",
@@ -19,12 +26,46 @@
     {
       "from": "../runtime/venv",
       "to": "runtime/venv",
-      "filter": ["**/*"]
+      "filter": ["**/*", "!**/__pycache__/**", "!**/tests/**", "!**/test/**"]
     },
     {
       "from": "../llama.cpp/build/bin",
       "to": "llama.cpp/build/bin",
-      "filter": ["**/*"]
+      "filter": [
+        "**/*",
+
+        "!**/ggml-cuda.dll",
+        "!**/cublas64_12.dll",
+        "!**/cublasLt64_12.dll",
+        "!**/cudart64_12.dll",
+
+        "!**/ggml-rpc.dll",
+        "!**/ggml-rpc-server.exe",
+
+        "!**/llama-bench.exe",
+        "!**/llama-bench-impl.dll",
+        "!**/llama-batched-bench.exe",
+        "!**/llama-batched-bench-impl.dll",
+        "!**/llama-completion.exe",
+        "!**/llama-completion-impl.dll",
+        "!**/llama-fit-params.exe",
+        "!**/llama-fit-params-impl.dll",
+        "!**/llama-gguf-split.exe",
+        "!**/llama-gemma3-cli.exe",
+        "!**/llama-imatrix.exe",
+        "!**/llama-llava-cli.exe",
+        "!**/llama-minicpmv-cli.exe",
+        "!**/llama-mtmd-debug.exe",
+        "!**/llama-perplexity.exe",
+        "!**/llama-perplexity-impl.dll",
+        "!**/llama-qwen2vl-cli.exe",
+        "!**/llama-quantize.exe",
+        "!**/llama-quantize-impl.dll",
+        "!**/llama-results.exe",
+        "!**/llama-template-analysis.exe",
+        "!**/llama-tokenize.exe",
+        "!**/llama-tts.exe"
+      ]
     },
     {
       "from": "../slime_server.py",
@@ -33,6 +74,10 @@
     {
       "from": "../slime_cli.py",
       "to": "slime_cli.py"
+    },
+    {
+      "from": "../requirements.txt",
+      "to": "requirements.txt"
     },
     { "from": "template/slime.toml", "to": "slime.toml" },
     { "from": "build/icon.png", "to": "build/icon.png" },

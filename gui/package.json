@@ -1,6 +1,6 @@
 {
   "name": "slime-gui",
-  "version": "0.0.3",
+  "version": "0.0.2",
   "description": "slime Electron GUI MVP (Phase 5)",
   "author": "slime",
   "repository": {
@@ -33,8 +33,8 @@
     "preview": "electron-vite preview",
     "type": "tsc -p tsconfig.json --noEmit",
     "prepare-runtime": "node ../scripts/prepare-runtime.mjs",
-    "dist:win": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs",
-    "dist:win:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs --publish always",
+    "dist:win": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs && node ./scripts/pack-cuda-runtime.mjs",
+    "dist:win:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs --publish always && node ./scripts/pack-cuda-runtime.mjs",
     "dist:linux": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish never -c.directories.output=release-linux",
     "dist:linux:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish always -c.directories.output=release-linux"
   },

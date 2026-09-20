@@ -129,6 +129,20 @@ slime-server.ps1
 /scripts/*
 !/scripts/build-safety-check.mjs
 !/scripts/contract-check.mjs
+# dist:win / dist:win:publish 依赖的三个自研构建脚本（不含任何第三方代码）。
+# 不放行的话，新克隆的仓库跑 npm run dist:win 会因为缺脚本直接失败。
+!/scripts/preflight-clean.mjs
+!/scripts/prepare-runtime.mjs
+!/scripts/retry-build.mjs
+# scripts/layout-probe/ —— 模型调试表的**布局预算探针**（自研，不含任何第三方代码）：
+#   probe.html 是那张表的手工复刻品，main.cjs 是 Electron 启动器；用来量
+#   「一段文字在本机字体下要占多少像素」，给列宽定预算（起因：用户截图里数字被裁成 "10:" / "{"）。
+#   权威守卫在 tests/core-ts/pricing-tiers.spec.ts 的「A-988：列宽预算」那条，
+#   这里只在布局变化时用来重新推导实测常量。
+!/scripts/layout-probe/
+# 探针的运行产物：每次跑都整体重写，只对当次测量有意义，不入库
+/scripts/layout-probe/result.json
+/scripts/layout-probe/run.log
 
 # ── 用户自己的产物项目（不是 slime 源码）──────────────────────────────
 /apps/

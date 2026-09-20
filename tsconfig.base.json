@@ -13,6 +13,7 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "noEmit": true,
     "declaration": false,
     "jsx": "react-jsx",
     "typeRoots": ["./node_modules/@types", "./gui/node_modules/@types"],
@@ -28,6 +29,7 @@
     "gateway-ts/src/**/*.ts",
     "shared/gen/**/*.ts",
     "tests/core-ts/**/*.ts",
-    "tests/core-ts/**/*.d.ts"
+    "tests/core-ts/**/*.d.ts",
+    "types/**/*.d.ts"
   ]
 }
