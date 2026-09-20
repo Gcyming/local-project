@@ -23,6 +23,7 @@ import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 import { createPlan, updateStage, advanceByLabel, planProgress, planToJSON, parsePlan, type PlanStageStatus } from "../planning/plan.js";
 import { PROTECTED_DIRS_SET, SENSITIVE_FILENAMES_SET, WRITE_BLOCK_SUFFIXES_SET } from "shared/security-policy";
+import { extractDocText, docKindFromExt, legacyBinaryName } from "../doc_text.js";
 import type { MemoryStore } from "../memory/store.js";
 import type {
   DisplayInfo,
@@ -249,6 +250,47 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
     // 模型拿不到任何可继续的手段 —— 实测 6.2MB 的 JSON 直接读不了，Agent 只能去写 Python 脚本绕。
     // （Claude Code 敢抛错是因为它同时提供 offset/limit + Grep 两条出路；照抄行为而不照抄退路 = 更糟。）
     // 现在一律"读得到，只是读一段"：任何情况下都返回可用的分片 + 明确的续读指引。
+    // A-1034：Office 文档（docx/pptx/xlsx）本质是 ZIP+XML 容器，按 UTF-8 解码只会得到
+    // PK 开头的二进制乱码（用户实测「无法阅读 PPT / WORD / EXCEL」，Agent 只能反过来求用户贴内容）。
+    // 这里先分派到 doc_text 抽取正文，再套用与纯文本**同一套** offset/limit 分页语义。
+    const ext = extname(p).toLowerCase();
+    const legacy = legacyBinaryName(ext);
+    if (legacy) {
+      // 反向承诺：旧版二进制格式读不了就**说清楚**，绝不吐乱码让模型瞎猜
+      return `[错误] 暂不支持 ${legacy} 二进制格式（${ext}）: ${path}。`
+        + `请用 Office/WPS 另存为 .docx/.xlsx/.pptx 后再读；`
+        + "若只需要其中一小段内容，也可以直接把它贴给我。";
+    }
+    const docKind = docKindFromExt(ext);
+    if (docKind) {
+      let extracted: ReturnType<typeof extractDocText>;
+      try {
+        extracted = extractDocText(await readFile(p), docKind);
+      } catch (e) {
+        return `[错误] 文档解析失败: ${path}: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      const all = extracted.text.split(/\r?\n/);
+      const start = Math.min(offset - 1, all.length);
+      let lines = all.slice(start, start + limit);
+      let truncatedByBytes = false;
+      if (Buffer.byteLength(lines.join("\n"), "utf-8") > MAX_READ_BYTES) {
+        let keep = lines.length;
+        while (keep > 1 && Buffer.byteLength(lines.slice(0, keep).join("\n"), "utf-8") > MAX_READ_BYTES) {
+          keep = Math.max(1, Math.floor(keep * 0.7));
+        }
+        lines = lines.slice(0, keep);
+        truncatedByBytes = true;
+      }
+      const head = `[${docKind.toUpperCase()} 已转为文本] ${extracted.info.join(" | ")}`
+        + `${extracted.truncated ? "（原文过长，抽取阶段已截断）" : ""}\n`;
+      const lastLine = start + lines.length;
+      let tail = "";
+      if (lastLine < all.length || truncatedByBytes) {
+        tail = `\n[已截断: 本次返回第 ${start + 1}-${lastLine} 行，全文共 ${all.length} 行。`
+          + `继续读取请传 offset=${lastLine + 1} limit=${limit}]`;
+      }
+      return `${head}${lines.join("\n")}${tail}`;
+    }
     const win = await readLineWindow(p, offset, limit);
     let content = win.lines.join("\n");
     // 字节上限作用在**本次分片**上（不是文件大小）—— 一行 2000 字符 × 2000 行 ≈ 4MB 仍可能超预算
@@ -1105,9 +1147,11 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
   }));
   registry.register(new Tool({
     name: "file_read",
-    description: "读取文本文件内容（按行分页）。默认返回前 2000 行、单次最多 256KB；"
+    description: "读取文件内容（按行分页）。默认返回前 2000 行、单次最多 256KB；"
       + "文件更大时不会报错，而是返回一段并在末尾给出 offset/limit 续读指引 —— "
-      + "**读大文件请直接传 offset/limit 分段读**，不要试图一次读完（会用光上下文）。",
+      + "**读大文件请直接传 offset/limit 分段读**，不要试图一次读完（会用光上下文）。"
+      + "支持 Office 文档：docx（段落+表格）、pptx（按页）、xlsx（按表输出网格），会自动转为文本；"
+      + "旧版二进制 .doc/.xls/.ppt 不支持，需要先另存为新格式。",
     parameters: {
       type: "object",
       properties: {
