@@ -16,6 +16,8 @@
  * 不拼接 shell 命令。DPI 感知在宿主启动时调用 SetProcessDPIAware 一次性解决。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   DisplayInfo,
   ScreenAction,
@@ -215,7 +217,10 @@ function Invoke-SlimeAction($req) {
       [SlimeInput]::RectOf($hit.MainWindowHandle, [ref]$r) | Out-Null
       return @{ found = $true; title = $hit.MainWindowTitle; x = $r.Left; y = $r.Top; width = ($r.Right - $r.Left); height = ($r.Bottom - $r.Top) }
     }
-    'windows' { return @{ windows = (Get-SlimeWindows) } }
+    # A-1034：用 @( ... ) 强制数组。PowerShell 会把**单元素**数组自动展开成标量，
+    # ConvertTo-Json 于是产出对象而非数组 —— 恰好只有一个可见窗口时，上层 Array.isArray 判定为假，
+    # 枚举结果静默变成空列表，用户看到的是「未枚举到可见窗口」。
+    'windows' { return @{ windows = @(Get-SlimeWindows) } }
     'focus' {
       $needle = ''; if ($null -ne $req.title) { $needle = [string]$req.title }
       if (-not $needle) { throw 'focus 需要 title' }
@@ -380,6 +385,34 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * A-1034：解析 PowerShell 宿主的**绝对路径**。
+ *
+ * 为什么不能直接拿裸名去 spawn（`powershell.exe` 这个写法本身）：**"系统自带" ≠ "在 PATH 里"**。
+ * Windows 自带的是 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`，
+ * 但打包后的进程 PATH 未必含 System32 —— 用户的另一台机器就是这样：同一个坑先让
+ * platform-tools 解压报 `spawn tar ENOENT`，再让这里宿主起不来，窗口枚举恒为空，
+ * 对外表现为「挂不上屏幕」。
+ *
+ * 顺序：System32 的 Windows PowerShell → SysWOW64 → PowerShell 7（pwsh）→ PATH 兜底。
+ * 返回试过的路径列表，失败时一并报出来，避免又变成"静默没功能"。
+ */
+export function resolvePowerShellExe(): { exe: string; tried: string[] } {
+  const tried: string[] = [];
+  const root = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+  const cands = [
+    join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    join(root, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  ];
+  const pf = process.env.ProgramFiles;
+  if (pf) { cands.push(join(pf, "PowerShell", "7", "pwsh.exe")); }
+  for (const c of cands) {
+    tried.push(c);
+    try { if (existsSync(c)) { return { exe: c, tried }; } } catch { /* 无权限访问 → 继续试下一个 */ }
+  }
+  return { exe: "powershell.exe", tried };
+}
+
 export class DesktopScreenBackend implements ScreenBackend {
   readonly id = "desktop" as const;
   readonly actions = DESKTOP_ACTIONS;
@@ -403,8 +436,10 @@ export class DesktopScreenBackend implements ScreenBackend {
     if (this.booting) { return this.booting; }
     this.booting = new Promise<void>((resolve, reject) => {
       const encoded = Buffer.from(PS_HOST, "utf16le").toString("base64");
+      // A-1034：绝对路径优先，PATH 只是最后的兜底（见 resolvePowerShellExe 的注释）
+      const host = resolvePowerShellExe();
       const proc = spawn(
-        "powershell.exe",
+        host.exe,
         ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
         { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
       );
@@ -460,7 +495,11 @@ export class DesktopScreenBackend implements ScreenBackend {
       proc.stderr.on("data", (c: string) => { this.stderrBuf += c; });
 
       proc.on("error", (e: Error) => {
-        const msg = `启动 PowerShell 失败：${e.message}`;
+        // A-1034：失败必须带上"试过哪些路径"，否则用户只能看到一句 ENOENT 无从下手
+        const hint = host.exe === "powershell.exe"
+          ? `（已尝试并回退 PATH：${host.tried.join(" | ")}）`
+          : `（路径：${host.exe}）`;
+        const msg = `启动 PowerShell 失败：${e.message}${hint}`;
         this.failAll(msg);
         if (!settled) { settled = true; clearTimeout(bootTimer); reject(new Error(msg)); }
       });
@@ -591,7 +630,22 @@ export class DesktopScreenBackend implements ScreenBackend {
     if (unsupported) { throw new Error(unsupported); }
     const r = await this.send({ kind: "windows" });
     if (!r.ok || !r.result) { throw new Error(r.error ?? "枚举窗口失败"); }
-    const list = Array.isArray(r.result.windows) ? (r.result.windows as Array<Record<string, unknown>>) : [];
+    // A-1034：**不再把"形状不对"静默当成"没有窗口"**。
+    // 旧写法 `Array.isArray(...) ? … : []` 会把单元素折叠（PowerShell 标量化）、
+    // 字段改名、宿主降级返回等一切异常都伪装成"未枚举到可见窗口" —— 用户看到的是
+    // "这功能没有"，而不是"枚举失败了"，这是本项目最贵的一类失效（静默降级）。
+    // 现在：数组直接用；对象视为单窗口（容错）；其余一律抛错，让上层如实报给模型。
+    const raw = r.result.windows;
+    let list: Array<Record<string, unknown>>;
+    if (Array.isArray(raw)) {
+      list = raw as Array<Record<string, unknown>>;
+    } else if (raw === null || raw === undefined) {
+      list = [];
+    } else if (typeof raw === "object") {
+      list = [raw as Record<string, unknown>];
+    } else {
+      throw new Error(`枚举窗口失败：宿主返回的 windows 字段形状异常（${typeof raw}）`);
+    }
     return list.map((w) => ({
       title: String(w.title ?? ""),
       pid: Number(w.pid ?? 0),
