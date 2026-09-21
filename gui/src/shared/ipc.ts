@@ -709,7 +709,18 @@ export interface MindDeps {
 export interface MindConfigInfo {
   vectorTool: VectorTool;
   memoryRoot: string;
-  memoryPaths: { knowledge: string; lance: string };
+  /**
+   * LanceDB **运行时组件**的就位状态（A-1041）。
+   * 297MB 的原生子包不再随默认安装包分发，改为「内嵌组件」：随完整版携带 / 应用内下载 / 手动放置。
+   * `ok=false` 时向量层不开，界面必须如实说明（不静默降级）；`candidates` 告诉用户可以放哪。
+   */
+  lancedb: { ok: boolean; dir?: string; error?: string; candidates: string[] };  /**
+   * 记忆存储位置（**真实绝对路径**，按目标 Agent 推导；唯一实现 core-ts 的 resolveMemoryPaths）。
+   * `memoryJson` = 该 Agent 的 memory.json；`lanceDir` = 该 Agent 的 LanceDB 目录。
+   * 两者都由自定义根目录（memoryRoot）统一决定 —— 不再出现"改了根目录只有一个跟着变"。
+   * 未选到 Agent 时为 null（界面据此提示先选 Agent，而不是编一个 `data/<agentId>/…` 假路径）。
+   */
+  memoryPaths: { memoryJson: string; lanceDir: string } | null;
   deps: MindDeps;
 }
 
@@ -750,6 +761,9 @@ export type DownloadTarget = "llama" | "bge";
 
 export type DownloadState = "idle" | "downloading" | "paused" | "done" | "error";
 
+/** A-1038：下载/解压阶段。判据（好文案、百分比算法）唯一实现在 shared/downloadPhase.ts */
+export type DownloadPhase = "download" | "extract" | "config" | "done";
+
 /** 启动引导状态（A-C-C 式启动加载面板：等待后端等进程就绪再进入主界面） */
 export interface BootStatus {
   phase: "starting" | "backend" | "ready" | "degraded";
@@ -766,10 +780,29 @@ export interface DownloadProgressInfo {
   path: string;
   error?: string;
   extractedDir?: string;
+  /** A-1038：当前阶段（下载 / 解压 / 配置 / 完成）——UI 用它渲染阶段文案 */
+  phase: DownloadPhase;
+  /** A-1038：阶段明细（"128/305 个文件" / "CUDA 运行时 xxx.zip"）；无明细为空串 */
+  detail: string;
+}
+
+/**
+ * A-1038：adb platform-tools 下载/解压进度。
+ *
+ * 此前这个形状在 `preload/index.ts` 里被**内联抄了 4 遍**（运行时声明 2 处 + 类型声明 2 处），
+ * 加一个 `detail` 字段就要改四处、漏一处就静默丢字段。抽到共享层，两侧都引用它。
+ */
+export interface AdbDownloadProgressInfo {
+  state: "downloading" | "extracting" | "done" | "error";
+  percent: number;
+  receivedMB: number;
+  totalMB: number;
+  error?: string;
+  /** 解压阶段明细（"128/305 个文件"）；下载阶段为空 */
+  detail?: string;
 }
 
 /* ── 右侧栏：工作树 / 终端 ── */
-
 /** 工作树目录项（右侧栏「工作树」标签页） */
 export interface WorkspaceEntry {
   name: string;
@@ -1041,4 +1074,26 @@ export interface CtxBuckets {
   tools: number;
   history: number;
   message: number;
+}
+
+/**
+ * A-1044：**图形操作可视化**事件（主进程 → 渲染层，通道 `slime:screen:opFocus`）。
+ *
+ * 形状与 `core-ts/src/screen/controller.ts` 的 `OperationFocusEvent` **逐字对应**——
+ * 这里只做 IPC 传输层的类型（core-ts 的类型不能直接被 renderer 的 tsconfig 引用）。
+ * ⚠️ 两侧字段名必须同步改：这类"跨进程契约"漂移不会报错，只会让界面永远不亮（静默失效）。
+ */
+export interface OperationFocusUI {
+  /** begin = 注入动作**之前**（先让用户看见"Agent 要动了"）；end = 动作结束 */
+  phase: "begin" | "end";
+  /** 后端 id：desktop（整机屏幕）/ android（设备） */
+  backend: string;
+  /** 动作种类（click / type / key / drag …） */
+  action: string;
+  /** 人话标签，悬浮提示直接显示（如「点击 (812, 431)」） */
+  label: string;
+  /** 被操作区域（**虚拟桌面/设备坐标**，不是应用内坐标）；无可信区域时 null（不画假框） */
+  region: { x: number; y: number; width: number; height: number } | null;
+  /** 本次是否需要让位给用户（true → 界面显示"正在等用户停手"） */
+  waitingUser?: boolean;
 }

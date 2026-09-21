@@ -102,6 +102,26 @@ public class SlimeInput {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out SLIME_RECT r);
   public static bool RectOf(IntPtr h, out SLIME_RECT r) { return GetWindowRect(h, out r); }
+
+  // ── A-1044：系统级「用户是否正在操作」探测（让位仲裁的唯一数据源）──
+  // 为什么用 GetLastInputInfo 而不是自己 hook 键鼠：它是 Win32 提供的**系统级**最后输入时刻，
+  // 覆盖键盘/鼠标/触摸，且**不需要**任何钩子权限（不需要管理员、不注入别的进程）。
+  // 为什么这能解决用户报的「点击被吞」：本后端注入输入用的是 SetCursorPos + mouse_event，
+  // 与用户共用**同一个物理指针**；只要知道用户手还在键鼠上，就主动停手让路，
+  // 而不是硬点上去跟用户抢指针（Windows 没有"不抢焦点地把输入送进别人窗口"的合法通道）。
+  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  [DllImport("kernel32.dll")] public static extern uint GetTickCount();
+  /** 探测失败/无效时的哨兵值（0xFFFFFFFF 本身就是"已空闲 49.7 天"，绝不可能是真的） */
+  public const uint IDLE_UNAVAILABLE = 0xFFFFFFFFu;
+  public static uint IdleMs() {
+    LASTINPUTINFO li = new LASTINPUTINFO();
+    li.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+    if (!GetLastInputInfo(ref li)) { return IDLE_UNAVAILABLE; }
+    if (li.dwTime == 0) { return IDLE_UNAVAILABLE; }   // 从未收到过输入（无人登录/会话隔离）→ 不可用
+    // GetTickCount 与 dwTime 都是 32 位毫秒计数，uint 减法在回绕（49.7 天）时仍得到正确差值
+    return GetTickCount() - li.dwTime;
+  }
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -355,6 +375,13 @@ function Invoke-SlimeAction($req) {
       if ($ms -gt 30000) { $ms = 30000 }
       Start-Sleep -Milliseconds $ms
       return @{ detail = "已等待 $ms ms" }
+    }
+    # A-1044：系统空闲时间探针（**内部动作**，不在 DESKTOP_ACTIONS 里，模型调不到）。
+    # 返回值：@{ idleMs = <uint32> } 或 @{ unavailable = $true }（探测不可用 → 上层按"不阻塞但留痕"处理）
+    'user_idle' {
+      $idle = [SlimeInput]::IdleMs()
+      if ($idle -eq [SlimeInput]::IDLE_UNAVAILABLE) { return @{ unavailable = $true } }
+      return @{ idleMs = [uint32]$idle }
     }
     default { throw "桌面后端不支持动作 '$k'" }
   }
@@ -746,6 +773,24 @@ export class DesktopScreenBackend implements ScreenBackend {
       return { ok: true, detail: String(r.result?.detail ?? "已执行") };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** A-1044：系统级空闲时间（距上次用户键鼠输入）。`null` = 探测不可用（不等于"用户没操作"）。
+   *  让位仲裁（`arbiter.ts`）唯一的数据源；非 Windows 平台如实返回 null。 */
+  async userIdleMs(): Promise<number | null> {
+    if (this.unsupportedReason()) { return null; }
+    try {
+      const r = await this.send({ kind: "user_idle" });
+      if (!r.ok || !r.result) { return null; }
+      if (r.result.unavailable === true) { return null; }
+      const v = r.result.idleMs;
+      if (typeof v !== "number" || !Number.isFinite(v)) { return null; }
+      return v;
+    } catch {
+      // 宿主未就绪/超时：探测不可用。**不抛**——让位判据的语义是"探测不到就放行但留痕"，
+      // 而不是让一次探针失败把用户的图形操作整条打断。
+      return null;
     }
   }
 

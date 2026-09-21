@@ -5,11 +5,13 @@
  * - 断点续传：Range 请求 + received 字节数；暂停=中止保留断点，恢复=续传，取消=删除文件
  * - 进度事件经回调推给渲染层（下载条 UI）
  */
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { readDepStatus, updateTomlKey } from "./mind_config.js";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
+import { extractZipTo } from "../../../core-ts/src/zip.js";
+import { clampPercent, extractDetail, extractPercent, type DownloadPhase } from "../shared/downloadPhase.js";
 
 export type DownloadTarget = "llama" | "bge";
 
@@ -25,6 +27,10 @@ export interface DownloadProgress {
   error?: string;
   /** llama.cpp zip 解压完成后的目录提示 */
   extractedDir?: string;
+  /** 当前阶段（A-1038）：下载 / 解压 / 配置 / 完成 */
+  phase: DownloadPhase;
+  /** 阶段明细（"128/305 个文件"、"CUDA 运行时 …"）；无明细为空串 */
+  detail: string;
 }
 
 export type ProgressListener = (p: DownloadProgress) => void;
@@ -51,19 +57,26 @@ const MIN_VALID_SIZE: Record<DownloadTarget, number> = {
   llama: 1 * 1024 * 1024,   // llama.cpp 预编译 zip 至少 1MB
 };
 
+/** 解压阶段推送压频窗口（毫秒）：解压是 CPU/IO 密集，逐条推会把 IPC 打满 */
+const EXTRACT_EMIT_MS = 150;
+
 interface Task {
   target: DownloadTarget;
   url: string;
   dest: string;
   fileName: string;
   /** Windows CUDA 需要叠加的 CUDA 运行时 DLL 包（cudart-*），可为空 */
-  runtime?: { name: string; url: string } | null;
+  runtime: { name: string; url: string } | null;
   received: number;
   total: number;
   state: DownloadState;
   abort: AbortController | null;
   mirrorIndex: number;
   extractedDir: string;
+  /** 当前阶段（A-1038）；解压/配置期的百分比走 phasePercent，不再看 received/total */
+  phase: DownloadPhase;
+  phasePercent: number;
+  detail: string;
 }
 
 const tasks = new Map<DownloadTarget, Task>();
@@ -86,11 +99,30 @@ function emit(p: DownloadProgress): void {
   listener?.(p);
 }
 
+/**
+ * 百分比口径**唯一判据**（A-1038）。
+ *
+ * 三个阶段各有一套分子分母，混用会拼出假数字：解压期若还拿 `received/total` 算，
+ * 条子会停在 100%（下载已满）不动 —— 正是"看起来卡死"的旧观感。
+ * 所以这里按 phase 分派，**不允许**调用方自己再算一遍。
+ */
+function currentPercent(t: Task): number {
+  if (t.phase === "extract" || t.phase === "config") {
+    return clampPercent(t.phasePercent);
+  }
+  if (t.phase === "done") {
+    return 100;
+  }
+  return t.total > 0 ? clampPercent((t.received / t.total) * 100) : 0;
+}
+
 function taskProgress(t: Task, error?: string): DownloadProgress {
   return {
     target: t.target,
     state: t.state,
-    percent: t.total > 0 ? Math.min(100, Math.round((t.received / t.total) * 100)) : 0,
+    phase: t.phase,
+    detail: t.detail,
+    percent: currentPercent(t),
     receivedMB: Math.round((t.received / 1024 / 1024) * 10) / 10,
     totalMB: Math.round((t.total / 1024 / 1024) * 10) / 10,
     path: t.dest,
@@ -196,6 +228,9 @@ async function getOrCreateTask(target: DownloadTarget): Promise<Task> {
     abort: null,
     mirrorIndex: -1,
     extractedDir: "",
+    phase: "download",
+    phasePercent: 0,
+    detail: "",
   };
   tasks.set(target, task);
   return task;
@@ -219,6 +254,9 @@ async function runTask(task: Task): Promise<void> {
     } catch { /* 忽略 stat 失败 */ }
   }
   task.state = "downloading";
+  task.phase = "download";
+  task.phasePercent = 0;
+  task.detail = "";
   emit(taskProgress(task));
   const ctrl = new AbortController();
   task.abort = ctrl;
@@ -308,13 +346,33 @@ async function runTask(task: Task): Promise<void> {
         emit(taskProgress(task, `下载不完整（${Math.round(finalSize / 1024 / 1024)}MB < 预期最小 ${Math.round(MIN_VALID_SIZE[task.target] / 1024 / 1024)}MB），请重试`));
         return;
       }
-      task.state = "done";
+      // ⚠️ 这里**不能**置 state="done"（A-1038）：对用户而言此刻还远远没完 ——
+      // llama 的包还要解压上千个文件、部署 CUDA 运行时、改写配置。
+      // 旧实现在这里就置 done，界面随即把进度条撤掉，解压期变成纯干等（用户原话"纯干等"）。
+      // 现在保持 state="downloading"、把 phase 推到 extract，收尾由下面各分支负责。
+      task.phase = "extract";
+      task.phasePercent = 0;
+      task.detail = "";
       emit(taskProgress(task));
       if (task.target === "llama") {
-        void finishLlama(task);
-      } else {
-        relocateToConfiguredPath(task);
+        const fin = await finishLlama(task);
+        task.detail = "";
+        if (fin.ok) {
+          task.state = "done";
+          task.phase = "done";
+          emit(taskProgress(task));
+        } else {
+          task.state = "error";
+          task.phase = "extract";
+          emit(taskProgress(task, fin.error));
+        }
+        return;
       }
+      relocateToConfiguredPath(task);
+      task.state = "done";
+      task.phase = "done";
+      task.detail = "";
+      emit(taskProgress(task));
       return;
     } catch (e) {
       if (ctrl.signal.aborted) {
@@ -367,8 +425,64 @@ function relocateToConfiguredPath(task: Task): void {
   console.info(`[downloader] slime.toml llama_bin 已更新: ${exe}`);
 }
 
-/** llama 收尾：Windows 先部署 CUDA 运行时 DLL 包（如需），再解压二进制包到同一目录，最后自动配置 llama_bin */
-async function finishLlama(task: Task): Promise<void> {
+/**
+ * 解压单个归档到 outDir，并把**解压期进度**实时推给宿主 task（task 为 null 时只解压、不推）。
+ *
+ * ⚠️ Windows 走零依赖 zip 模块（`node:zlib`）：这同时修掉 A-1034 的同类隐患 ——
+ * llama 这条路径此前仍在 `spawnSync("tar", ["-xf", zip])`，`tar` 在**打包后进程的 PATH 里**
+ * 并不保证存在（用户实测过 adb 侧的 `spawn tar ENOENT`）。同一个错不该在两条路径上各犯一次。
+ *
+ * ⚠️ Linux 官方只发 `.tar.gz`。`node:zlib` 能解 gzip 但解不了 tar 容器本身，
+ * 所以这条分支仍保留 `tar` —— 但失败时**必须把真实原因讲出来**（含 spawn 失败），
+ * 不许只回一句"解压失败"。
+ *
+ * 返回 Promise：zip 分支的 `extractZipTo` 是 async（逐条目让出事件循环），同步签名会拿到
+ * 一个 Promise 当结果用（tsc 会拦，但这类错误极易被 `as any` 绕过）——故统一 async。
+ */
+async function extractArchiveTo(archivePath: string, outDir: string, task: Task | null): Promise<{ ok: boolean; error?: string }> {
+  if (!/\.zip$/i.test(archivePath)) {
+    const r = spawnSync("tar", ["-xzf", archivePath, "-C", outDir], { windowsHide: true, timeout: 300_000 });
+    if (r.status !== 0) {
+      const stderr = (r.stderr?.toString() ?? "").trim();
+      const spawnErr = (r.error as NodeJS.ErrnoException | undefined)?.message;
+      return { ok: false, error: stderr || spawnErr || `tar 退出码 ${String(r.status)}` };
+    }
+    return { ok: true };
+  }
+  try {
+    const buf = readFileSync(archivePath);
+    let lastEmit = 0;
+    // 解压本身是 async（逐条目让出事件循环）—— 否则主进程被独占，进度事件只在最后一次性落地
+    const res = await extractZipTo(buf, outDir, {
+      onProgress: (p) => {
+        if (!task) { return; }
+        const now = Date.now();
+        const isLast = p.current === "";
+        if (!isLast && now - lastEmit < EXTRACT_EMIT_MS) { return; }
+        lastEmit = now;
+        task.phase = "extract";
+        task.phasePercent = extractPercent(p);
+        task.detail = extractDetail(p);
+        emit(taskProgress(task));
+      },
+    });
+    if (res.files === 0) {
+      return { ok: false, error: "压缩包内没有可写出的文件（可能已损坏）" };
+    }
+    if (res.skipped.length > 0) {
+      return { ok: false, error: `${res.skipped.length} 个条目因路径不安全被拒绝（首个：${res.skipped[0]}）` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * llama 收尾：Windows 先部署 CUDA 运行时 DLL 包（如需），再解压二进制包到同一目录，最后自动配置 llama_bin。
+ * 返回 ok=false 时**必须**由调用方把 task 置为 error —— 否则解压失败会伪装成"已完成"。
+ */
+async function finishLlama(task: Task): Promise<{ ok: boolean; error?: string }> {
   const outDir = resolve(PROJECT_ROOT, "downloads", "llama.cpp");
   mkdirSync(outDir, { recursive: true });
   const isWin = process.platform === "win32";
@@ -376,32 +490,47 @@ async function finishLlama(task: Task): Promise<void> {
   try {
     if (task.runtime) {
       const rtDest = resolve(dirname(task.dest), "llama-cudart" + ext);
-      const ok = await downloadArchive(task.runtime.url, rtDest, task);
+      // 阶段文案必须标明"CUDA 运行时"：否则用户看到条子从 100% 退回 0% 会以为是重新下载
+      const ok = await downloadArchive(task.runtime.url, rtDest, task, `CUDA 运行时 ${task.runtime.name}`);
       if (ok) {
-        const r = spawnSync("tar", isWin ? ["-xf", rtDest, "-C", outDir] : ["-xzf", rtDest, "-C", outDir], { windowsHide: true, timeout: 120_000 });
-        if (r.status !== 0) {
-          console.warn(`[downloader] CUDA 运行时解压失败: ${r.stderr?.toString() ?? "?"}`);
+        task.phase = "extract";
+        task.phasePercent = 0;
+        task.detail = "CUDA 运行时";
+        emit(taskProgress(task));
+        const r = await extractArchiveTo(rtDest, outDir, task);
+        if (!r.ok) {
+          console.warn(`[downloader] CUDA 运行时解压失败: ${r.error}`);
         }
       } else {
         console.warn("[downloader] CUDA 运行时下载失败（二进制仍使用，缺 cudart 时可能需手动补）");
       }
     }
-    const args = isWin ? ["-xf", task.dest, "-C", outDir] : ["-xzf", task.dest, "-C", outDir];
-    const r2 = spawnSync("tar", args, { windowsHide: true, timeout: 120_000 });
+    task.phase = "extract";
+    task.phasePercent = 0;
+    task.detail = "";
+    emit(taskProgress(task));
+    const r2 = await extractArchiveTo(task.dest, outDir, task);
     task.extractedDir = outDir;
-    emit(taskProgress(task, r2.status !== 0 ? `解压失败（code ${r2.status}），请手动解压 ${task.dest}` : undefined));
-    if (r2.status === 0) {
-      relocateToConfiguredPath(task);
+    if (!r2.ok) {
+      return { ok: false, error: `解压失败（${r2.error ?? "?"}），请手动解压 ${task.dest}` };
     }
+    // 解压完到"可用"之间还有写配置这一步。它通常只有几十毫秒，但**必须有出口** ——
+    // 否则用户会看到 100% 之后界面又静止一拍，同样的疑虑会再来一次。
+    task.phase = "config";
+    task.phasePercent = 100;
+    task.detail = "";
+    emit(taskProgress(task));
+    relocateToConfiguredPath(task);
+    return { ok: true };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    emit(taskProgress(task, `llama 安装失败：${msg}`));
     console.error("[downloader] finishLlama", e);
+    return { ok: false, error: `llama 安装失败：${msg}` };
   }
 }
 
 /** 下载单个归档（带镜像与断点续传；进度并入宿主 task），返回是否成功 */
-async function downloadArchive(url: string, dest: string, task: Task): Promise<boolean> {
+async function downloadArchive(url: string, dest: string, task: Task, label = ""): Promise<boolean> {
   for (const base of ["", ...GH_MIRRORS]) {
     const useUrl = base ? `${base}${url}` : url;
     try {
@@ -419,13 +548,27 @@ async function downloadArchive(url: string, dest: string, task: Task): Promise<b
       if (start > 0 && resp.status === 200) {
         start = 0; // 忽略 Range，重下
       }
+      // ⚠️ 子归档必须**整体替换** received/total（A-1038）。旧实现沿用主包残留的 received，
+      // 于是这里的分母是别的文件的字节数 → 百分比一开始就 100% 或来回跳；
+      // 触发条件又写成 `received % (CHUNK*16) === 0`（恰好 1MB 整数倍），实际几乎**永不命中**
+      // —— 等于第二条下载完全没有进度。改成与主下载一样的"时间窗压频"。
+      const lenHeader = Number(resp.headers.get("content-length") ?? 0);
+      task.phase = "download";
+      task.phasePercent = 0;
+      task.detail = label;
+      task.received = start;
+      task.total = lenHeader > 0 ? start + lenHeader : 0;
+      emit(taskProgress(task));
       const ws = createWriteStream(dest, { flags: start > 0 ? "a" : "w" });
+      let lastEmit = Date.now();
       if (resp.body) {
         for await (const chunk of resp.body as unknown as AsyncIterable<Uint8Array>) {
           ws.write(chunk);
           task.received += chunk.byteLength;
-          if (task.received % (CHUNK * 16) === 0) {
-            emit(taskProgress(task, undefined));
+          const now = Date.now();
+          if (now - lastEmit > 250) {
+            lastEmit = now;
+            emit(taskProgress(task));
           }
         }
       }
@@ -458,8 +601,14 @@ function findLlamaServer(dir: string): string | null {
   return null;
 }
 
-/** 启动/刷新时收尾：downloads/ 下已完成的文件自动归位到配置路径 */
-export function tryRelocateDownloads(): void {
+/**
+ * 启动/刷新时收尾：downloads/ 下已完成的文件自动归位到配置路径。
+ *
+ * A-1038 起为 async（内部解压走 async 的 `extractArchiveTo`）。调用方是"启动收尾"这种
+ * 不关心结果的位置，`void` 掉即可 —— 但**必须显式写 `void`**，否则 Promise 拒绝会成为
+ * unhandledRejection（本项目有全局兜底日志，但仍属噪声）。
+ */
+export async function tryRelocateDownloads(): Promise<void> {
   const deps = readDepStatus();
   const dlDir = resolve(PROJECT_ROOT, "downloads");
   try {
@@ -484,12 +633,13 @@ export function tryRelocateDownloads(): void {
         const archive = resolve(dlDir, archives[0]);
         if (!existsSync(resolve(outDir, exeName))) {
           mkdirSync(outDir, { recursive: true });
-          const args = isWin
-            ? ["-xf", archive, "-C", outDir]
-            : ["-xzf", archive, "-C", outDir];
-          const r = spawnSync("tar", args, { windowsHide: true, timeout: 120_000 });
-          if (r.status !== 0) {
-            console.warn(`[downloader] llama 归档解压失败: ${r.stderr?.toString() ?? "?"}`);
+          // A-1038：Windows 的 .zip 走内置解压（不再 spawnSync tar）。这条是"启动/刷新时收尾"
+          // 路径 —— 与 finishLlama 是**同一件事的两个入口**，此前只有后者被修过，
+          // 前者在打包环境里同样会 `spawn tar ENOENT`（A-1034 的老病）。现在两条都收敛到
+          // extractArchiveTo，行为一致、都不依赖外部命令（.tar.gz 除外，Node 解不了 tar 容器）。
+          const r = await extractArchiveTo(archive, outDir, null);
+          if (!r.ok) {
+            console.warn(`[downloader] llama 归档解压失败: ${r.error ?? "?"}`);
           }
         }
         const exe = findLlamaServer(outDir);
@@ -556,7 +706,7 @@ export function controlDownload(target: DownloadTarget, action: "pause" | "cance
 export function downloadSnapshot(target: DownloadTarget): DownloadProgress {
   const task = tasks.get(target);
   if (!task) {
-    return { target, state: "idle", percent: 0, receivedMB: 0, totalMB: 0, path: "" };
+    return { target, state: "idle", percent: 0, receivedMB: 0, totalMB: 0, path: "", phase: "download", detail: "" };
   }
   return taskProgress(task);
 }

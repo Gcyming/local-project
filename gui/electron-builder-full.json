@@ -1,0 +1,11 @@
+{
+  "$comment": "完整版打包配置（扩展默认 electron-builder.json，唯一差别：随附 LanceDB 内嵌组件）。\n\n⚠️ 默认包**不**随附组件 —— 那是 293MB 的原生模块，绝大多数用户用不到。\n只在需要「开箱即有向量记忆」时才用这份配置，且**必须先生成组件**：\n\n  （在仓库根执行）node scripts/prepare-lancedb-component.mjs resources/components/lancedb\n  （在 gui/ 执行）electron-builder --win --config electron-builder-full.json\n\n`to` 必须与 gui/src/main/__stubs/lancedb-stub.ts 的 LANCEDB_COMPONENT_DIR 逐字一致，\n否则组件会被打进另一个目录 → 运行时找不到 → **静默降级为 JSON 检索**（A-1041 前科：\n体积付了、日志干净、用户只觉得「向量记忆好像没效果」）。\n有一条守卫锁住这个一致性：tests/gui/a1041-guards.spec.ts",
+  "extends": "./electron-builder.json",
+  "extraResources": [
+    {
+      "from": "../resources/components/lancedb",
+      "to": "components/lancedb",
+      "filter": ["**/*"]
+    }
+  ]
+}

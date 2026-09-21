@@ -14,6 +14,7 @@
 import {
   DisplayInfo,
   ScreenAction,
+  ScreenActionKind,
   ScreenActionResult,
   ScreenBackend,
   ScreenBackendId,
@@ -21,6 +22,42 @@ import {
   UiElement,
   coordToDeviceInRegion,
 } from "./types.js";
+// A-1044：用户让位仲裁（人优先）+ 操作区域几何 —— 判据唯一实现见 arbiter.ts
+import {
+  decideUserYield,
+  operationRegionBox,
+  USER_ACTIVE_WINDOW_MS,
+  USER_YIELD_MAX_WAIT_MS,
+  USER_YIELD_PROBE_MS,
+  type Region,
+} from "./arbiter.js";
+
+/**
+ * A-1044：一次图形动作的「可视化事件」（呼吸灯边框 + 悬浮提示的数据源）。
+ * `phase:"begin"` 在输入注入**前**发出（让用户先看见"Agent 要动了"），`phase:"end"` 在动作结束后发出。
+ */
+export interface OperationFocusEvent {
+  phase: "begin" | "end";
+  backend: ScreenBackendId;
+  action: ScreenActionKind;
+  /** 人话标签（悬浮提示直接显示，如「点击 (812, 431)」） */
+  label: string;
+  /** 被操作区域（虚拟桌面坐标 / 设备坐标）；无可信区域时为 null（不画假框） */
+  region: Region | null;
+  /** 本次是否需要让位给用户（begin 时若为 true，界面应显示"正在等用户停手"） */
+  waitingUser?: boolean;
+}
+
+/**
+ * A-1044：**会注入输入**的动作集合。
+ * 只有这些动作需要「用户让位」等待 —— 截图 / 枚举 / dump / wait 都不碰用户的指针与焦点，
+ * 在用户操作时照常执行（让位是为了不抢，不是为了把自己整个停掉）。
+ * `mouse_move` 也在内：它同样会搬走用户看得见的物理指针。
+ */
+const USER_CONFLICT_ACTIONS: ReadonlySet<ScreenActionKind> = new Set<ScreenActionKind>([
+  "click", "double_click", "right_click", "middle_click", "long_press",
+  "mouse_move", "drag", "scroll", "type", "key", "tap", "swipe",
+]);
 
 /** controller 级错误（工具层据此回传可读原因） */
 export class ScreenError extends Error {
@@ -218,6 +255,51 @@ export class ScreenController {
     return run;
   }
 
+  /**
+   * A-1044：**操作可视化的订阅点**（GUI 主进程据此画「呼吸灯边框」+ 悬浮提示）。
+   *
+   * 为什么放在 controller 而不是各后端：这里是所有图形动作的唯一咽喉
+   * （串行化链 + 坐标换算 + 能力校验都在此），一处订阅就能覆盖桌面与安卓两条路径。
+   * 回调是 fire-and-forget：界面画框失败绝不允许影响动作执行。
+   */
+  onOperationFocus: ((e: OperationFocusEvent) => void) | null = null;
+
+  private emitFocus(e: OperationFocusEvent): void {
+    try { this.onOperationFocus?.(e); } catch { /* 可视化失败不影响动作 */ }
+  }
+
+  /**
+   * A-1044：等用户停手（人优先）。返回 `ok:false` = 等超时，**本次动作不执行**。
+   * 语义与数值判据全在 `arbiter.ts`（唯一实现），这里只负责「问空闲 → 等 → 再问」。
+   */
+  private async awaitUserIdle(backend: ScreenBackend): Promise<{ ok: true; note: string } | { ok: false; reason: string }> {
+    const started = Date.now();
+    for (;;) {
+      if (this.halted) {
+        return { ok: false, reason: "图形控制已被紧急停止（用户中断）——请重新发起任务" };
+      }
+      const idleMs = await backend.userIdleMs!();
+      const waitedMs = Date.now() - started;
+      const d = decideUserYield({
+        idleMs,
+        waitedMs,
+        activeWindowMs: USER_ACTIVE_WINDOW_MS,
+        maxWaitMs: USER_YIELD_MAX_WAIT_MS,
+        probeMs: USER_YIELD_PROBE_MS,
+      });
+      if (d.action === "proceed") {
+        return {
+          ok: true,
+          note: d.note || (d.waitedMs > 0 ? `（已让位 ${Math.round(d.waitedMs)}ms 等用户停手）` : ""),
+        };
+      }
+      if (d.action === "abort") {
+        return { ok: false, reason: d.reason };
+      }
+      await new Promise((r) => setTimeout(r, d.waitMs));
+    }
+  }
+
   private async performInner(
     id: ScreenBackendId,
     action: ScreenAction,
@@ -310,7 +392,34 @@ export class ScreenController {
 
     let result: ScreenActionResult;
     try {
-      result = await backend.perform(scaled, target, info);
+      // A-1044：**用户让位仲裁**（人优先）。放在这里而不是更早，是为了不为一个
+      // 注定会被拒的动作（缺基准/元素定位失败）白等几秒。
+      const conflictsWithUser = USER_CONFLICT_ACTIONS.has(action.kind) && !!backend.userIdleMs;
+      const focusRegion = operationRegionBox({
+        targetRegion: target && basis ? { x: ox, y: oy, width: regionW, height: regionH } : null,
+        point: { x: scaled.x, y: scaled.y },
+        fallback: basis ? { x: ox, y: oy, width: regionW, height: regionH } : null,
+      });
+      let yieldNote = "";
+      if (conflictsWithUser) {
+        // `begin` 在注入**之前**发出：用户先看到"Agent 要动了"，才有机会把手挪开（人优先的可见化）
+        this.emitFocus({ phase: "begin", backend: id, action: action.kind, label: describeAction(scaled), region: focusRegion, waitingUser: true });
+      }
+      try {
+        if (conflictsWithUser) {
+          const gate = await this.awaitUserIdle(backend);
+          if (!gate.ok) {
+            return { ok: false, error: gate.reason };
+          }
+          yieldNote = gate.note;
+        }
+        result = await backend.perform(scaled, target, info);
+        if (result.ok && yieldNote) { result.detail = `${result.detail ?? ""}${yieldNote}`; }
+      } finally {
+        if (conflictsWithUser) {
+          this.emitFocus({ phase: "end", backend: id, action: action.kind, label: describeAction(scaled), region: focusRegion });
+        }
+      }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -325,6 +434,21 @@ export class ScreenController {
     }
     return result;
   }
+}
+
+/** A-1044：把动作翻译成**人话**（悬浮提示直接展示；不出现内部坐标空间术语）。
+ *  传入的是 `scaled`（已落地为物理像素），所以显示的坐标就是屏幕上的真实位置。 */
+function describeAction(a: ScreenAction): string {
+  const names: Partial<Record<ScreenActionKind, string>> = {
+    click: "点击", double_click: "双击", right_click: "右键点击", middle_click: "中键点击",
+    long_press: "长按", tap: "点按", mouse_move: "移动指针", drag: "拖拽", scroll: "滚动",
+    type: "输入文字", key: "按键", swipe: "滑动",
+  };
+  const verb = names[a.kind] ?? a.kind;
+  if (a.kind === "type") { return `${verb}（${(a.text ?? "").length} 个字符）`; }
+  if (a.kind === "key") { return `${verb} ${a.key ?? ""}`.trim(); }
+  const hasPoint = typeof a.x === "number" && typeof a.y === "number";
+  return hasPoint ? `${verb} (${Math.round(a.x!)}, ${Math.round(a.y!)})` : verb;
 }
 
 /** A-975：按 selector 在元素列表中定位（index → id → text → desc，逐级回退） */

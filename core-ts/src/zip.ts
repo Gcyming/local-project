@@ -194,26 +194,73 @@ export interface ExtractResult {
   skipped: string[];
 }
 
+/** 解压进度快照（A-1038）：主进程据此推「解压中 N/M」给界面，不再让用户干等。 */
+export interface ExtractProgress {
+  /** 已处理（写出 + 被拒）的条目数 */
+  processed: number;
+  /** 待处理条目总数（非目录条目；被拒的也计入，否则进度永远到不了 100%） */
+  total: number;
+  /** 已写出文件数（真正的落盘数，与 processed 的差别 = 被拒数） */
+  files: number;
+  /** 已写出字节 */
+  bytes: number;
+  /** 中央目录声明的解压后总字节（权威值），用于字节口径的百分比 */
+  totalBytes: number;
+  /** 当前条目名（最后一条为空串，表示收尾） */
+  current: string;
+}
+
 /**
  * 解压到目录（等价 `unzip -o` / `tar -xf`）。
  *
  * 保留归档内的目录层级：`platform-tools/adb.exe` 会落到 `<destDir>/platform-tools/adb.exe`，
  * 与之前 tar 的行为一致，调用方的路径探测逻辑无需改动。
+ *
+ * ⚠️ **为什么是 async**（A-1038）：解压是纯 CPU/IO 密集，若一口气跑完，主进程事件循环
+ * 会被独占十几秒 —— 渲染层的 IPC 全排队，进度条只会在**结束时跳一次**（等于没有进度），
+ * 并且直接踩中 `main-freeze-guard` 的卡死判据。所以每 `yieldEvery` 个条目让出一次事件循环，
+ * 让已发出的进度事件真正落到界面上。让出的是**条目之间**，单个大条目（如 300MB 的 DLL）
+ * 的解压仍是原子的 —— 这是可接受的上限，换来的是每 1~2 秒必有一次刷新。
+ *
+ * ⚠️ 进度口径（A-1038）：
+ * - `total` 取**非目录条目数**（含将被拒的），`processed` 覆盖写出与被拒两类 ——
+ *   否则含 Zip-Slip 条目的包进度会永久卡在 99%（A-1034 的 evil.zip 就是这种包）。
+ * - 回调**逐条目触发**、不做节流：节流属于 IPC 层（谁推送谁负责压频），
+ *   zip 层只保证"报得准"。把节流塞进这里会让单元测试必须等时钟。
+ * - 无论成功失败，**最后一条**回调都会在返回前发出（`current` 为空串），
+ *   调用方据此收尾，不必自己猜是否已跑完。
  */
-export function extractZipTo(buf: Buffer, destDir: string, opts: { entries?: ZipEntry[] } = {}): ExtractResult {
+export async function extractZipTo(
+  buf: Buffer,
+  destDir: string,
+  opts: { entries?: ZipEntry[]; onProgress?: (p: ExtractProgress) => void; yieldEvery?: number } = {},
+): Promise<ExtractResult> {
   const list = opts.entries ?? listZip(buf);
   mkdirSync(destDir, { recursive: true });
   const result: ExtractResult = { files: 0, bytes: 0, skipped: [] };
-  for (const e of list) {
-    if (e.isDir) { continue; }
+  const planned = list.filter((e) => !e.isDir);
+  const totalBytes = planned.reduce((n, e) => n + e.size, 0);
+  const yieldEvery = Math.max(1, Math.floor(opts.yieldEvery ?? 4));
+  let processed = 0;
+  for (const e of planned) {
     const target = safeTarget(destDir, e.name);
-    if (!target) { result.skipped.push(e.name); continue; }
-    const data = readEntry(buf, e);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, data);
-    result.files += 1;
-    result.bytes += data.length;
+    processed += 1;
+    if (!target) {
+      result.skipped.push(e.name);
+    } else {
+      const data = readEntry(buf, e);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, data);
+      result.files += 1;
+      result.bytes += data.length;
+    }
+    opts.onProgress?.({ processed, total: planned.length, files: result.files, bytes: result.bytes, totalBytes, current: e.name });
+    // 让出事件循环：把已推的进度真正送达界面（见上方 async 说明）
+    if (processed % yieldEvery === 0) {
+      await new Promise<void>((done) => { setImmediate(done); });
+    }
   }
+  opts.onProgress?.({ processed, total: planned.length, files: result.files, bytes: result.bytes, totalBytes, current: "" });
   return result;
 }
 

@@ -11,6 +11,13 @@ import React, { type CSSProperties, type JSX } from "react";
 import { createPortal } from "react-dom";
 import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets } from "../../shared/ipc.js";
 import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
+import {
+  REQUEST_DROP_MARKER,
+  buildAskDismissDecision,
+  buildPermDismissDecision,
+  classifyRequestOwner,
+  describeRequestDrop,
+} from "./requestOwner.js";
 /** A-1008：「联网搜索」开关的唯一读写实现（与 App.tsx 共用，禁在本文件复写 localStorage 口径） */
 import { readNetworkEnabled, writeNetworkEnabled } from "../networkToggle.js";
 import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel } from "./thinkingText.js";
@@ -2277,8 +2284,16 @@ export default function ChatPanel({
       // 会话过滤：切会话后旧流（被取消但仍可能延迟送达）的权限请求一律丢弃——
       // 否则输入框会被"上一个会话"的授权选择题替换，出现"切会话后输入框卡死"（旧请求超时 300s）。
       // 无 sessionId 标签的请求回退到「流归属」判定：当前无活跃流或流与会话不一致 → 丢弃（A-151）
-      const reqSid = req.sessionId !== undefined ? req.sessionId : streamSessionRef.current;
-      if (reqSid !== sessionRef.current) { return; }
+      // ⚠️ 丢弃**必须留痕**：① 控制台可 grep ② 立刻回一个「不批准」决策，
+      //    否则主进程要干等 300s 超时，用户只看到"Agent 卡住"，界面上却什么都没有。
+      const owner = classifyRequestOwner(req.sessionId, streamSessionRef.current, sessionRef.current);
+      if (!owner.ok) {
+        const why = describeRequestDrop(owner);
+        console.warn(`${REQUEST_DROP_MARKER} 权限请求 ${req.requestId} 被丢弃：${why}`);
+        void Promise.resolve(api?.perm?.resolve?.(buildPermDismissDecision(req.requestId, why)))
+          .catch(() => { /* 请求可能已超时/不存在 → 忽略，动作本身不受影响 */ });
+        return;
+      }
       setPendingPerm(req);
       setPermOption(req.options[0]?.id ?? "allow-once");
       setPermCustom("");
@@ -2339,8 +2354,15 @@ export default function ChatPanel({
     const off = api.askUser.onRequest((req: AskUserRequestUI) => {
       // 会话过滤：切会话后旧流（被取消但仍可能延迟送达）的提问一律丢弃，避免输入框被旧"提问卡"占用。
       // 无 sessionId 标签的请求回退到「流归属」判定：当前无活跃流或流与会话不一致 → 丢弃（A-151）
-      const reqSid = req.sessionId !== undefined ? req.sessionId : streamSessionRef.current;
-      if (reqSid !== sessionRef.current) { return; }
+      // ⚠️ 同上：丢弃必须留痕 + 立刻回「跳过」决策，不能让主进程干等 300s（A-1047）。
+      const owner = classifyRequestOwner(req.sessionId, streamSessionRef.current, sessionRef.current);
+      if (!owner.ok) {
+        const why = describeRequestDrop(owner);
+        console.warn(`${REQUEST_DROP_MARKER} ask_user 提问 ${req.requestId} 被丢弃：${why}`);
+        void Promise.resolve(api?.askUser?.resolve?.(buildAskDismissDecision(req.requestId, why)))
+          .catch(() => { /* 请求可能已超时/不存在 → 忽略，动作本身不受影响 */ });
+        return;
+      }
       setPendingAsk(req);
       setAskOption(initialAskSelection(req.options));
       setAskCustom("");

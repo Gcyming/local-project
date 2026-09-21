@@ -17,6 +17,7 @@
 import { autoUpdater } from "electron-updater";
 import { app, ipcMain } from "electron";
 import { readUpdateConfig } from "./mind_config.js";
+import { normalizeReleaseNotes } from "../shared/releaseNotes.js";
 
 /** 简单 semver 比较（数字点分段；不支持的字符按 0 处理）。a > b → 正数 */
 function compareVersions(a: string, b: string): number {
@@ -96,7 +97,7 @@ export function initUpdater(): void {
   });
 
   autoUpdater.on("update-available", (info) => {
-    currentStatus = { status: "available", version: info.version, releaseNotes: info.releaseNotes as string };
+    currentStatus = { status: "available", version: info.version, releaseNotes: normalizeReleaseNotes(info.releaseNotes) };
     broadcastStatus();
   });
 
@@ -106,7 +107,13 @@ export function initUpdater(): void {
   });
 
   autoUpdater.on("update-downloaded", (info) => {
-    currentStatus = { status: "downloaded", version: info.version };
+    // ⚠️ 这里必须**带上 releaseNotes**：下载完成是状态迁移，不是新信息。
+    // 此前丢掉它 → 用户点开「已下载」时就再也看不到本版更新内容（面板直接空掉）。
+    currentStatus = {
+      status: "downloaded",
+      version: info.version,
+      releaseNotes: normalizeReleaseNotes(info.releaseNotes) || currentStatus.releaseNotes,
+    };
     broadcastStatus();
   });
 
@@ -145,7 +152,7 @@ export async function checkForUpdate(): Promise<UpdateStatus> {
       currentStatus = {
         status: "available",
         version: remote,
-        releaseNotes: info.updateInfo.releaseNotes as string,
+        releaseNotes: normalizeReleaseNotes(info.updateInfo.releaseNotes),
       };
     } else {
       currentStatus = { status: "up-to-date" };

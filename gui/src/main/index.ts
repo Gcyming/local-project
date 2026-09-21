@@ -181,7 +181,7 @@ import { ChatClient, AnthropicClient } from "../../../core-ts/src/llm/client.js"
 import { inferApiFormat, type RouteEntry } from "../../../core-ts/src/router.js";
 import { chromiumFetch } from "./providers.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
-import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult } from "../shared/ipc.js";
+import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult, ResidentState } from "../shared/ipc.js";
 import { isBrowserSchemeUrl } from "../shared/ipc.js";
 import { parseUnifiedDiff } from "./git_diff.js";
 import { initUpdater, registerUpdaterHandlers, setStatusSink } from "./updater.js";
@@ -208,7 +208,18 @@ import {
   AndroidScreenBackend,
   setImageOptimizer,
 } from "../../../core-ts/src/screen/index.js";
-import { MemoryStore } from "../../../core-ts/src/memory/store.js";
+import { MemoryStore, resolveMemoryPaths, setLancedbModuleLoader } from "../../../core-ts/src/memory/store.js";
+import { requireLancedb, lancedbComponentStatus, type LancedbComponentStatus } from "./__stubs/lancedb-stub.js";
+
+/**
+ * A-1041：桌面端注入 LanceDB 的模块加载器 —— 按「内嵌组件目录」加载真实包。
+ *
+ * 为什么不直接让 core-ts `import("@lancedb/lancedb")` 走 vite alias：
+ * 实测顶层 alias 与 main target 的 alias 都写了，rollup 仍把真实包内联进产物
+ * （`out/main/chunks/lancedb.win32-x64-msvc-*.node`，297MB）。改成注入后，
+ * bundle 里不再出现这个裸 specifier，native 无从进入 —— 安装包瘦身由此成立。
+ */
+setLancedbModuleLoader(async () => requireLancedb() as { connect: (uri: string) => Promise<unknown> });
 import { createTrace, beginSpan, endSpan, emitEvent, attachEval, type Trace, type TraceEventKind } from "../../../core-ts/src/observability/trace.js";
 import { parsePlan, type Plan, type PlanStageStatus } from "../../../core-ts/src/planning/plan.js";
 import { runGroupTalk, parseMentions, type GroupTalkParticipant, type StreamEmit, type TranscriptLine } from "../../../core-ts/src/services/grouptalk.js";
@@ -737,7 +748,7 @@ import { retrieveFromStore, formatMemoryItems } from "../../../core-ts/src/memor
 import { EmotionalState, topKForMood } from "../../../core-ts/src/mind/emotion.js";
 import { BehaviorStore } from "../../../core-ts/src/mind/behavior.js";
 import { buildMindSegments } from "../../../core-ts/src/mind/hooks.js";
-import { loadMindConfig, saveMindConfig, readDepStatus, detectLocalDeps, updateTomlKey, readModelServerConfig } from "./mind_config.js";
+import { loadMindConfig, saveMindConfig, readDepStatus, detectLocalDeps, updateTomlKey, readModelServerConfig, type VectorTool } from "./mind_config.js";
 import {
   startDownload, controlDownload, downloadSnapshot, setDownloadListener, setBgeReadyCallback, tryRelocateDownloads,
   type DownloadTarget, type DownloadProgress,
@@ -754,6 +765,8 @@ import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRE
 import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
 // A-980-R32：点击路径的多基准候选解析（纯逻辑，vitest 直测）
 import { buildTargetCandidates, normalizeTargetPath } from "./targetPath.js";
+// A-1043：初始化单飞（并发调用只真正跑一次；唯一实现见该模块头注释）
+import { singleFlight } from "./singleFlight.js";
 
 let mainWindow: BrowserWindow | null = null;
 let chatService: ChatService | null = null;
@@ -915,15 +928,46 @@ async function refreshAgentSkills(): Promise<void> {
   }
 }
 
-async function ensureServices(): Promise<void> {
+/**
+ * A-1043：**轻量**初始化 —— 只加载 AgentRegistry（一次 `agents.json` 读取 + `JSON.parse`）。
+ *
+ * 首屏的「会话列表」与「Agent 列表」只需要 Agent 名字表，**根本不需要**
+ * engine / sandbox / ChatService / SILAM 这些重家伙。以前两者都 `await ensureServices()`，
+ * 于是左栏被整条初始化链挡住（用户报的"启动后左栏空白、跟刚下载一样"）。
+ *
+ * 同样单飞：启动瞬间 agents / sessions 两个 list 一起打进来也只读一次文件。
+ */
+const ensureRegistryOnce = singleFlight<AgentRegistry>(async () => {
+  const reg = new AgentRegistry();
+  await reg.load();
+  agentRegistry = reg;
+  return reg;
+});
+
+/** 只保证 AgentRegistry 就绪（首屏只读列表用这个，不要用 `ensureServices()`）。
+ *  ⚠️ **返回它**而不是只返回 void：`agentRegistry` 是在闭包里被赋值的，TS 的控制流收窄在
+ *  任何函数调用之后都会失效 —— 若返回 void，链内 5 处用法就得靠 `!` 强行断言，
+ *  那正是"静默 TypeError → 空列表"的家族。返回值 binding 到局部常量是零断言的写法。 */
+async function ensureRegistry(): Promise<AgentRegistry> {
+  return ensureRegistryOnce();
+}
+
+/**
+ * A-1043：重初始化**单飞** —— 下面这一整条链（A2A 总线 / 沙箱 / SILAM python sidecar /
+ * engine / ChatService / 技能注册 / 调度器 / StatsService）在并发调用下**只能跑一遍**。
+ *
+ * 以前这里既没有在飞去重、`chatService` 又只在**链尾**赋值 → 启动瞬间四个首屏 list 各自
+ * 跑完整条链：初始化成本翻倍，还会撞 IPC 二次注册（`Attempted to register a second handler`）
+ * 与端口抢占（`EADDRINUSE 127.0.0.1:19011`），并且把"左侧会话列表"拖到最慢的那条链之后。
+ */
+const ensureServicesOnce = singleFlight<void>(async () => {
   if (chatService) {
     return;
   }
-  agentRegistry = new AgentRegistry();
-  await agentRegistry.load();
+  const registry = await ensureRegistry();
   // A2A 通信总线（传唤/广播/委托回传；ChatService 依赖它完成跨 Agent 协作）
   a2aBus = new ServerA2ABus();
-  for (const a of agentRegistry.loadedAgents) {
+  for (const a of registry.loadedAgents) {
     a2aBus.register(a.name);
   }
   sandbox = new SandboxManager();
@@ -1025,7 +1069,7 @@ async function ensureServices(): Promise<void> {
     });
   });
   // 从 agents.json sandbox_override 恢复会话级沙箱配置（workspace/审批档位）
-  for (const a of agentRegistry.loadedAgents) {
+  for (const a of registry.loadedAgents) {
     if (a.sandbox_override && typeof a.sandbox_override === "object") {
       try {
         sandbox.setAgentConfig(a.id, sandboxConfigFromOverride(a.sandbox_override));
@@ -1048,7 +1092,7 @@ async function ensureServices(): Promise<void> {
     console.warn(`[gui:silam] 大脑启动跳过: ${e instanceof Error ? e.message : String(e)}`);
   }
   engine = createEngine({
-    registry: agentRegistry,
+    registry,
     sandbox,
     silamBrain,
     // A-965 core-ts↔server 通报：SILAM 情绪/成长态 → server 人格演化（fire-and-forget）
@@ -1151,7 +1195,7 @@ async function ensureServices(): Promise<void> {
       });
     },
   });
-  chatService = new ChatService({ registry: agentRegistry, engine, bus: a2aBus ?? undefined });
+  chatService = new ChatService({ registry, engine, bus: a2aBus ?? undefined });
   // A-1035：技能检索工具（skill_search / skill_lookup）+ 自动生成技能目录，必须在
   // 服务就绪后立刻注册 —— 否则第一轮对话时 Agent 手里根本没有这两个工具。
   await refreshAgentSkills();
@@ -1384,12 +1428,15 @@ async function ensureServices(): Promise<void> {
       });
 
       // A-910：设置页「后台任务」IPC —— 定时任务增删/暂停恢复/立即触发、子代理派发、整体快照
-      ipcMain.handle("slime:resident:state", () => ({
+      // ⚠️ A-1048：这里**只替换提供者**，不再注册通道（通道已在启动时注册，见 registerIpcHandlers）。
+      //    此前 `ipcMain.handle` 写在惰性初始化里 → 冷启动到首次 ensureServices 之前，
+      //    渲染层的每次轮询都会抛 "No handler registered for 'slime:resident:state'"。
+      residentStateProvider = () => ({
         scheduler: scheduler.list(),
         // A-980-R31：内存运行态 + 落盘历史合并（重启后不再是空白面板 / 消失的下拉按钮）
         subagents: mergedSubagentRuns(subagents.list()),
         defaultModel: subagents.getDefaultModel(),
-      }));
+      });
       ipcMain.handle("slime:resident:scheduler:add", (_e, p: { name?: string; cron?: string; prompt?: string; agentId?: string }) => {
         if (!p?.name || !p?.cron || !p?.prompt) { return { ok: false, error: "name/cron/prompt 必填" }; }
         try {
@@ -1492,40 +1539,12 @@ async function ensureServices(): Promise<void> {
         return { ok: true, selectedAgentIds: [...subagentSelectedAgentIds] };
       });
 
-      // A-916：请求频率调节（config/requests.json）——并发上限 + 断流重连基间隔，双端（TS/Python）均可读
-      const requestsFile = join(INSTALL_ROOT, "config", "requests.json");
-      const DEFAULT_REQUESTS = { concurrency: 2, reconnectBaseMs: 3000 };
-      const readRequests = (): typeof DEFAULT_REQUESTS => {
-        try {
-          if (existsSync(requestsFile)) {
-            const p = JSON.parse(readFileSync(requestsFile, "utf8")) as Partial<typeof DEFAULT_REQUESTS>;
-            return {
-              concurrency: typeof p.concurrency === "number" && p.concurrency >= 1 && p.concurrency <= 20 ? p.concurrency : DEFAULT_REQUESTS.concurrency,
-              reconnectBaseMs: typeof p.reconnectBaseMs === "number" && p.reconnectBaseMs >= 500 && p.reconnectBaseMs <= 15000 ? p.reconnectBaseMs : DEFAULT_REQUESTS.reconnectBaseMs,
-            };
-          }
-        } catch { /* 损坏回退默认 */ }
-        return { ...DEFAULT_REQUESTS };
-      };
-      ipcMain.handle("slime:requests:get", () => readRequests());
-      ipcMain.handle("slime:requests:set", (_e, p: { concurrency?: number; reconnectBaseMs?: number }) => {
-        const cur = readRequests();
-        const next = {
-          concurrency: typeof p?.concurrency === "number" && p.concurrency >= 1 && p.concurrency <= 20 ? Math.floor(p.concurrency) : cur.concurrency,
-          reconnectBaseMs: typeof p?.reconnectBaseMs === "number" && p.reconnectBaseMs >= 500 && p.reconnectBaseMs <= 15000 ? Math.floor(p.reconnectBaseMs) : cur.reconnectBaseMs,
-        };
-        try {
-          writeFileSync(requestsFile, JSON.stringify(next, null, 2), "utf8");
-          return { ok: true, ...next };
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      });
+      // A-916（slime:requests:get / :set）已移到模块级 + 启动时注册 —— 见文件上方 readRequests 的注释。
     }
   } catch (e) {
     console.warn(`[scheduler] 启动失败（不影响主流程）: ${e instanceof Error ? e.message : String(e)}`);
   }
-  statsService = new StatsService(agentRegistry);
+  statsService = new StatsService(registry);
   // 依赖下载进度 → 渲染层（下载条 UI）
   setDownloadListener((p: DownloadProgress) => {
     mainWindow?.webContents.send("slime:mind:downloadProgress", p);
@@ -1546,6 +1565,41 @@ async function ensureServices(): Promise<void> {
     });
   });
   console.info("[gui:main] core-ts 服务已加载（ChatService/StatsService + SandboxManager）");
+});
+
+// ── A-1048：启动时就必须可应答的两个通道（此前被埋在惰性初始化里）────────────────
+//
+// 病灶（用户可见）：冷启动后控制台反复刷
+//   `Error occurred in handler for 'slime:resident:state': No handler registered`
+// 因为这两个 `ipcMain.handle` 写在了 `ensureServicesOnce()` 内部 —— 渲染层从 `createWindow()`
+// 就开始轮询，而服务初始化要等技能扫描 / scheduler / SILAM 等一串重活跑完（实测好几秒）。
+// ⇒ 通道**在启动时注册**，值由"提供者"惰性给出：初始化完成前返回空态，完成后换成真实现。
+//   顺带消掉 `ipcMain.handle` 重复注册的风险（singleFlight.ts 注释里那条 ×2 报错的同类）。
+let residentStateProvider: () => ResidentState = () => ({ scheduler: [], subagents: [], defaultModel: undefined });
+
+/** A-916：请求频率调节（config/requests.json）——并发上限 + 断流重连基间隔，双端（TS/Python）均可读。
+ *  ⚠️ 它只读一个本地 json，与 scheduler / subagent 初始化**毫无关系**，不该被惰性初始化牵连。 */
+const REQUESTS_FILE = join(INSTALL_ROOT, "config", "requests.json");
+const DEFAULT_REQUESTS = { concurrency: 2, reconnectBaseMs: 3000 };
+function readRequests(): typeof DEFAULT_REQUESTS {
+  try {
+    if (existsSync(REQUESTS_FILE)) {
+      const p = JSON.parse(readFileSync(REQUESTS_FILE, "utf8")) as Partial<typeof DEFAULT_REQUESTS>;
+      return {
+        concurrency: typeof p.concurrency === "number" && p.concurrency >= 1 && p.concurrency <= 20 ? p.concurrency : DEFAULT_REQUESTS.concurrency,
+        reconnectBaseMs: typeof p.reconnectBaseMs === "number" && p.reconnectBaseMs >= 500 && p.reconnectBaseMs <= 15000 ? p.reconnectBaseMs : DEFAULT_REQUESTS.reconnectBaseMs,
+      };
+    }
+  } catch { /* 损坏回退默认 */ }
+  return { ...DEFAULT_REQUESTS };
+}
+
+/**
+ * A-1043：对外入口**签名与语义保持不变** —— 全仓 40 处 `await ensureServices()` 无需改动。
+ * 差别在"并发调用共享同一份初始化"，而不再是各跑一遍。
+ */
+async function ensureServices(): Promise<void> {
+  await ensureServicesOnce();
 }
 
 // ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────
@@ -1599,12 +1653,43 @@ function bgeEmbed(): { embed: (text: string) => Promise<number[]> } {
 /** 每 Agent 记忆存储缓存（LanceDB 初始化失败自动降级 JSON；嵌入失败自动降级哈希） */
 const memoryStores = new Map<string, MemoryStore>();
 
+/**
+ * LanceDB **运行时组件**的就位状态（A-1041）。
+ *
+ * ⚠️ 这里曾经硬编码 `lancedbEnabled: true`，与「组件是否真的在磁盘上」完全脱钩：
+ * 组件不在时每次都要经历一次"加载失败 → 降级"，而且失败原因被吞在 MemoryStore 内部
+ * （用户只看到向量检索没结果，不知道是没装组件）。
+ *
+ * 现在是**先看组件在不在**再决定开不开：不在 → 直接不开 + 把原因交给界面（不静默）。
+ * 状态做缓存（只查 3 次 stat，不必每次都走磁盘），组件下载/就位后调
+ * `refreshLancedbComponent()` 刷新并让已缓存的 store 重建。
+ */
+let lancedbComponentCache: LancedbComponentStatus | null = null;
+
+export function lancedbComponent(): LancedbComponentStatus {
+  if (!lancedbComponentCache) { lancedbComponentCache = lancedbComponentStatus(); }
+  return lancedbComponentCache;
+}
+
+export function refreshLancedbComponent(): LancedbComponentStatus {
+  lancedbComponentCache = lancedbComponentStatus();
+  // 已缓存的 store 是在旧结论下构造的（可能已被降级）→ 全部作废重建
+  memoryStores.clear();
+  console.log(
+    lancedbComponentCache.ok
+      ? `[gui:lancedb] 组件已就位：${lancedbComponentCache.dir}`
+      : `[gui:lancedb] 组件未就位：${lancedbComponentCache.error}`,
+  );
+  return lancedbComponentCache;
+}
+
 function memoryStoreFor(agentId: string): MemoryStore {
   let s = memoryStores.get(agentId);
   if (!s) {
     const cfg = loadMindConfig();
     s = new MemoryStore(agentId, {
-      lancedbEnabled: true,
+      // 组件未就位 → 不开向量层（避免每次都走一次失败的加载），原因由界面如实展示
+      lancedbEnabled: lancedbComponent().ok,
       dataDir: cfg.memoryRoot || undefined,
       embed: cfg.vectorTool === "bge" ? bgeEmbed() : undefined,
     });
@@ -2277,6 +2362,29 @@ function binarySniff(buf: Buffer): boolean {
 function registerIpcHandlers(): void {
   // 启动状态查询（渲染层启动加载面板：错过 push 事件时拉取当前状态）
   ipcMain.handle("slime:boot:status", () => bootQuery ?? { phase: "starting", backendReady: false, message: "正在初始化…" });
+  // A-1039：应用版本号（启动面板副标题）。用 app.getVersion() 而非读文件 —— 打包后
+  // package.json 在 asar 内，且 electron-builder 会把 version 注入 app 元数据，这是权威来源。
+  ipcMain.handle("slime:app:version", () => app.getVersion());
+
+  // A-1048：这两个通道**必须在启动时就在**。渲染层从 createWindow() 就开始轮询它们，
+  // 而此前它们被注册在惰性的 `ensureServicesOnce()` 里（要等技能扫描/SILAM 等重活跑完），
+  // 于是每次冷启动都会刷一屏 "No handler registered"。值本身仍可惰性：
+  // resident 走 `residentStateProvider`（就绪前返回空态），requests 直接读本地 json。
+  ipcMain.handle("slime:resident:state", () => residentStateProvider());
+  ipcMain.handle("slime:requests:get", () => readRequests());
+  ipcMain.handle("slime:requests:set", (_e, p: { concurrency?: number; reconnectBaseMs?: number }) => {
+    const cur = readRequests();
+    const next = {
+      concurrency: typeof p?.concurrency === "number" && p.concurrency >= 1 && p.concurrency <= 20 ? Math.floor(p.concurrency) : cur.concurrency,
+      reconnectBaseMs: typeof p?.reconnectBaseMs === "number" && p.reconnectBaseMs >= 500 && p.reconnectBaseMs <= 15000 ? Math.floor(p.reconnectBaseMs) : cur.reconnectBaseMs,
+    };
+    try {
+      writeFileSync(REQUESTS_FILE, JSON.stringify(next, null, 2), "utf8");
+      return { ok: true, ...next };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
 
   /** 获取当前选中 Agent ID（优先渲染层传入，回退到第一个 root Agent） */
   function resolveAgentId(inputAgentId: string | undefined): string {
@@ -2775,12 +2883,17 @@ function registerIpcHandlers(): void {
 
   /** 会话列表：sessions.json 元数据 ∪ history 记录（按 session_id 聚合） */
   handleTrusted<void>("slime:sessions:list", async () => {
-    await ensureServices();
+    // A-1043：**这里就是"启动后左栏空白"的病灶**。原本是 `await ensureServices()`：
+    // 一个纯读操作（列元数据 + 历史聚合）被整条重初始化链（SILAM python sidecar / engine /
+    // sandbox / ChatService / 调度器）挡住，启动成本还因为无去重被并发跑两遍；
+    // 渲染层 8s 兜底门一放行，用户看到的就是"暂无会话、跟刚下载一样"。
+    // 会话列表真正需要的只有两样：Agent 名字表 + 落盘元数据/历史。
+    await ensureRegistry();
     const [metas, records] = await Promise.all([
       listSessions(),
       loadHistory(null, 100000),
     ]);
-    const names = new Map(agentRegistry!.loadedAgents.map((a) => [a.id, a.name]));
+    const names = new Map((agentRegistry?.loadedAgents ?? []).map((a) => [a.id, a.name]));
     // 历史按 (agent_id, session_id ?? 默认会话) 聚合
     const byKey = new Map<string, { agentId: string; count: number; firstUser: string; lastTime: string }>();
     for (const r of records) {
@@ -3776,6 +3889,15 @@ function registerIpcHandlers(): void {
   screenCtl.register(new AndroidScreenBackend(adbService));
   setScreenController(screenCtl);
 
+  /** A-1044：图形动作的「开始 / 结束」转发给渲染层 → 呼吸灯边框 + 悬浮提示。
+   *  订阅点选在 controller：它是所有图形动作的唯一咽喉（串行链 + 坐标换算 + 能力校验都在那），
+   *  一处订阅即覆盖「操作我的主机」（desktop）与「操作安卓设备」（android）两条路径。
+   *  fire-and-forget：窗口未就绪／渲染层没装可视化时静默降级，绝不影响动作本身
+   *  （`emitFocus` 内已吞异常，这里再兜一层是因为 webContents.send 可能撞上窗口销毁中）。 */
+  screenCtl.onOperationFocus = (e): void => {
+    try { mainWindow?.webContents.send("slime:screen:opFocus", e); } catch { /* 无窗口 → 无可视化 */ }
+  };
+
   /** A-976：右侧栏浏览器控制桥 —— Agent 的 browser_* 工具经它把指令下发到 renderer 的 <webview> 执行。
    *  与 screen_* 并列的"第三块操控面"：ADB/桌面是屏幕级，这里是应用内嵌浏览器级。 */
   setBrowserAdapter(new BrowserBridge(() => mainWindow));
@@ -4116,31 +4238,49 @@ function registerIpcHandlers(): void {
   // ── 心智中枢 IPC ────────────────────────────────────────
 
   /** 配置读取：向量工具 / 记忆位置 / 依赖状态（模型文件不在 git 仓库，换设备需手动就位） */
-  handleTrusted<void>("slime:mind:configGet", async () => {
+  handleTrusted<{ agentId?: string } | undefined>("slime:mind:configGet", async (_event, payload) => {
     // 收尾归位：downloads/ 下已完成的文件自动放到配置路径（含 llama_bin 自动改写）
+    // A-1038：tryRelocateDownloads 改为 async（内部解压走 async 路径）→ 必须 await，
+    // 否则这个 IPC 会在解压还没跑完时就返回，紧接着读到的依赖状态仍是"缺失"。
     try {
-      tryRelocateDownloads();
+      await tryRelocateDownloads();
     } catch (e) {
       console.warn(`[gui:mind] 归位收尾异常: ${e}`);
     }
     const cfg = loadMindConfig();
+    // 记忆存储位置：按目标 Agent 推导**真实绝对路径**（唯一实现 resolveMemoryPaths）。
+    // 此前返回的是字符串模板 `data/<agentId>/lancedb`（字面 `<agentId>`）—— 既不是真路径、
+    // 也永不随"存储位置"变化，于是界面出现"改了根目录只有 memory.json 那行变"的观感。
+    const agentId = typeof payload?.agentId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(payload.agentId)
+      ? payload.agentId
+      : null;
     return {
       vectorTool: cfg.vectorTool,
       memoryRoot: cfg.memoryRoot,
-      memoryPaths: {
-        knowledge: resolve(PROJECT_ROOT, "Knowledge", "Agent Memory"),
-        lance: resolve(PROJECT_ROOT, "data", "<agentId>", "lancedb"),
-      },
+      // A-1041：组件就位状态随配置一起回传 —— 界面据此如实显示"向量库能不能用"
+      lancedb: lancedbComponent(),
+      memoryPaths: agentId
+        ? resolveMemoryPaths(agentId, { dataDir: cfg.memoryRoot || undefined })
+        : null,
       deps: readDepStatus(),
     };
   });
 
-  /** 配置保存：向量工具（bge=真实 BGE-M3 嵌入 / basic=哈希占位）+ 记忆根路径（重启生效） */
+  /** 配置保存：向量工具（bge=真实 BGE-M3 嵌入 / basic=哈希占位）+ 记忆根路径（重启生效）
+   *
+   *  ⚠️ 只把**显式给出**的字段放进 patch：`saveMindConfig` 是 `{...旧值, ...patch}`，
+   *  若这里传 `memoryRoot: undefined`（渲染层只想改向量工具时就是这个形状），
+   *  JSON.stringify 会把该键整个丢掉 → 下一次读回 `""` → **用户设的自定义根目录被静默清空**。
+   *  所以改成"给了才写"（`""` 是合法值，表示"恢复默认位置"）。 */
   handleTrusted<{ vectorTool?: string; memoryRoot?: string }>("slime:mind:configSet", async (_event, payload) => {
-    const cfg = saveMindConfig({
-      vectorTool: payload.vectorTool === "basic" || payload.vectorTool === "bge" ? payload.vectorTool : undefined,
-      memoryRoot: payload.memoryRoot,
-    });
+    const patch: { vectorTool?: VectorTool; memoryRoot?: string } = {};
+    if (payload.vectorTool === "basic" || payload.vectorTool === "bge") {
+      patch.vectorTool = payload.vectorTool;
+    }
+    if (typeof payload.memoryRoot === "string") {
+      patch.memoryRoot = payload.memoryRoot;
+    }
+    const cfg = saveMindConfig(patch);
     memoryStores.clear();
     return { ok: true, vectorTool: cfg.vectorTool, memoryRoot: cfg.memoryRoot };
   });
@@ -4312,8 +4452,9 @@ function registerIpcHandlers(): void {
   });
 
   handleTrusted<void>("slime:agents:list", async () => {
-    await ensureServices();
-    return (await agentRegistry!.loadedAgents).map((a): AgentInfo => ({
+    // A-1043：首屏只等轻量注册表 —— 名字表就在 AgentRegistry 里，不需要重初始化。
+    await ensureRegistry();
+    return (agentRegistry?.loadedAgents ?? []).map((a): AgentInfo => ({
       id: a.id, name: a.name, role: a.role,
       children: a.children ?? [], parent_id: a.parent_id ?? null,
       lifecycle: a.lifecycle ?? "unknown",
@@ -5682,6 +5823,14 @@ function main(): void {
       initUpdater();             // 延迟检查更新（不阻塞首屏）
       // 启动状态推送到渲染进程（启动加载面板 slime:boot:event）
       setBootSink((s) => mainWindow?.webContents.send("slime:boot:event", s));
+      // A-1043：重初始化改为**启动期后台预热**。
+      // 以前它的唯一触发点是渲染层 IPC（agents/sessions 两个 list）→ 首屏数据被整条初始化链
+      // 挡住，8s 兜底门一放行就是"左栏空白、跟刚下载一样"。现在首屏只等轻量注册表
+      // （`slime:agents:list` / `slime:sessions:list` → `ensureRegistry()`），重活在这里并行跑，
+      // 单飞保证只跑一遍。预热失败不影响首屏（对话时会按需重试）。
+      void ensureServices().catch((e) => {
+        console.warn("[gui:main] 后台预热失败（首屏不受影响，对话时会按需重试）:", e);
+      });
       void startPythonBackend(); // 并行启动，不阻塞窗口
       // LLM 网关自动启动：配置 enabled 时随应用启动（auth token 未就绪则 fallback，网关端点用独立 key）
       void (async () => {
@@ -5868,7 +6017,7 @@ async function startPythonBackend(): Promise<void> {
     console.error(`[slime-server:err] ${data.toString().trim()}`);
   });
 
-  // 等待服务就绪（最多10秒；超时不再阻塞主窗口——渲染层加载面板展示中）
+  // 等待服务就绪（最多 10 秒；超时不再阻塞主窗口——渲染层加载面板展示中）
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
@@ -5880,8 +6029,27 @@ async function startPythonBackend(): Promise<void> {
       }
     } catch {}
   }
-  console.error("[gui:backend] slime_server.py 启动超时（10秒）");
-  emitBoot({ phase: "degraded", backendReady: false, message: "后端服务启动超时（可用性受限）" });
+  // A-1048：10 秒没就绪**不等于**起不来 —— Windows 上 Python 首次导入（tools/skills/a2a
+  // 一串 import + 技能扫描）经常超过 10 秒。旧实现在这里直接判 degraded **且不再重试**，
+  // 于是 12 秒才就绪的后端被永久标记为"可用性受限"（用户看到降级提示，后端其实好着呢）。
+  // 现在：先报"仍在启动"，后台继续探最长 50 秒，就绪即把状态升回 ready；真起不来才判 degraded。
+  console.warn("[gui:backend] slime_server.py 启动较慢（>10秒），后台继续等待就绪…");
+  emitBoot({ phase: "backend", backendReady: false, message: "后端服务仍在启动（首次导入较慢）…" });
+  void (async () => {
+    for (let i = 0; i < 100; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        const res = await fetch(`http://localhost:${SLIME_PORT}/health`, { signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+          console.info(`[gui:backend] slime_server.py 已就绪（启动耗时约 ${10 + (i + 1) * 0.5} 秒）`);
+          emitBoot({ phase: "ready", backendReady: true, message: "后端服务已就绪" });
+          return;
+        }
+      } catch { /* 继续重试 */ }
+    }
+    console.error("[gui:backend] slime_server.py 启动超时（60秒）");
+    emitBoot({ phase: "degraded", backendReady: false, message: "后端服务启动超时（可用性受限）" });
+  })().catch(() => { /* 后台探测失败不影响主流程 */ });
 }
 
 function terminatePythonBackend(): void {

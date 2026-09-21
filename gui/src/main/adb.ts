@@ -14,6 +14,8 @@ import { mkdir, rm, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { extractZipTo } from "../../../core-ts/src/zip.js";
+import { extractPercent, extractDetail } from "../shared/downloadPhase.js";
+import type { AdbDownloadProgressInfo } from "../shared/ipc.js";
 import { app } from "electron";
 import { request as httpsRequest } from "node:https";
 import { type IncomingMessage } from "node:http";
@@ -54,13 +56,7 @@ export interface AdbScreencapResult {
 }
 
 /** 下载进度（转发渲染层，驱动进度条） */
-export interface AdbDownloadProgress {
-  state: "downloading" | "extracting" | "done" | "error";
-  percent: number;
-  receivedMB: number;
-  totalMB: number;
-  error?: string;
-}
+export type AdbDownloadProgress = AdbDownloadProgressInfo;
 
 /** 官方 platform-tools 便携包（按平台区分） */
 const PLATFORM_TOOLS_URL: Record<string, string> = {
@@ -230,11 +226,30 @@ export class AdbService {
    * 而"Windows 10+ 内置 tar.exe" **不等于它在 PATH 里** —— 打包后进程 PATH 与开发机不同，
    * 用户实测报错就是 `spawn tar ENOENT`（红字「解压失败」）。
    * 现在走 core-ts 的零依赖 zip 模块（node:zlib），平台无关、无外部依赖。
+   *
+   * A-1038：补上**解压期实时进度**。此前只在开解压前推一条 `extracting`、然后一路静默到
+   * `done`，platform-tools 有上百个文件，用户看到的就是"卡住了"。现在把 zip 层的
+   * 逐条目回调压频后转出去（同一个 `onProgress` 通道，state = extracting）。
    */
-  private async extractZip(zipPath: string, destDir: string): Promise<{ ok: boolean; error?: string }> {
+  private async extractZip(zipPath: string, destDir: string, onProgress?: (p: AdbDownloadProgress) => void): Promise<{ ok: boolean; error?: string }> {
     try {
       const buf = await readFile(zipPath);
-      const r = extractZipTo(buf, destDir);
+      let lastEmit = 0;
+      const r = await extractZipTo(buf, destDir, {
+        onProgress: (p) => {
+          const now = Date.now();
+          const isLast = p.current === "";
+          if (!isLast && now - lastEmit < 150) { return; }
+          lastEmit = now;
+          onProgress?.({
+            state: "extracting",
+            percent: extractPercent(p),
+            receivedMB: 0,
+            totalMB: 0,
+            detail: extractDetail(p),
+          });
+        },
+      });
       if (r.files === 0) {
         return { ok: false, error: "解压失败：压缩包内没有可写出的文件（可能已损坏）" };
       }
@@ -262,8 +277,8 @@ export class AdbService {
       if (dl.state === "error") {
         return { ok: false, error: dl.error ?? "下载失败", progress: dl };
       }
-      onProgress?.({ state: "extracting", percent: 100, receivedMB: dl.receivedMB, totalMB: dl.totalMB });
-      const ex = await this.extractZip(zipPath, destDir);
+      onProgress?.({ state: "extracting", percent: 0, receivedMB: dl.receivedMB, totalMB: dl.totalMB, detail: "" });
+      const ex = await this.extractZip(zipPath, destDir, onProgress);
       if (!ex.ok) {
         return { ok: false, error: ex.error ?? "解压失败", progress: { state: "error", percent: 0, receivedMB: 0, totalMB: 0, error: ex.error } };
       }

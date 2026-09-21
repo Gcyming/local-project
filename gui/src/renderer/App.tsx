@@ -7,6 +7,7 @@
  */
 import React, { type JSX } from "react";
 import ChatPanel from "./pages/ChatPanel.js";
+import SplashScreen, { type SplashStep } from "./pages/SplashScreen.js";
 import NewProjectDialog from "./pages/NewProjectDialog.js";
 import SettingsDialog, { type SettingsTab } from "./pages/SettingsDialog.js";
 import RightSidebar from "./pages/RightSidebar.js";
@@ -14,6 +15,8 @@ import { SIDEBAR_OPEN_EVENT } from "./pages/Markdown.js";
 import type { DownloadProgressInfo, BootStatus } from "../shared/ipc.js";
 import { ChevronIcon, EditIcon, MenuIcon, PlusIcon, SettingsIcon, SidebarLeftIcon, SidebarRightIcon } from "./components/Icon.js";
 import { ThemeDialogHost } from "./components/ThemeDialog.js";
+/** A-1044：图形操作可视化浮层（呼吸灯边框 + 可隐藏的悬浮提示）——常驻挂载在最外层 */
+import OperationFocusOverlay from "./components/OperationFocusOverlay.js";
 /** A-943 群聊头脑风暴图标（用户选定 D:\下载\团队.svg） */
 import teamSvg from "./assets/team.svg";
 /** A-945 会话列表图标（用户选定 D:\下载\当前会话.svg） */
@@ -259,6 +262,14 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
     </div>
   );
 }
+
+/**
+ * A-1039：首屏必须到齐的数据项（模块级常量，避免每次渲染重建）。
+ *
+ * 每一项都对应一个**首屏就要用、且拉取不快**的数据源。它们此前不在启动门的判据里：
+ * 门只等「会话列表」，而 provider / 本地模型还在冷态加载 → 用户点开界面就撞上未就绪的重活。
+ */
+const FIRST_LOAD_KEYS = ["agents", "sessions", "providers", "localModels"] as const;
 
 /** 模型加载等待秒数时钟（A-129）：自持 1s 计时器只重渲染自身秒数区域，
     避免整棵 App 树随秒表每秒重渲染（含 ChatPanel / 侧栏等大子树） */
@@ -737,19 +748,46 @@ export default function App(): JSX.Element {
   const [dl, setDl] = React.useState<Record<string, DownloadProgressInfo>>({});
   /** 启动引导状态（A-C-C 式启动加载面板） */
   const [boot, setBoot] = React.useState<BootStatus | null>(null);
-  /** A-966b：首屏数据（Agent/会话列表）是否就绪——启动面板要等到它完成才隐藏 */
-  const [uiReady, setUiReady] = React.useState(false);
+  /**
+   * A-1039：首屏关键数据登记表 —— 任何一项未到齐，启动面板都不得隐藏。
+   *
+   * **用户实测（v0.0.4 打包版）**：加载动画停了、界面出来了，但点什么都卡 —— 滚动卡、
+   * 跳转卡、折叠展开也慢，重启一次就恢复正常。根因不是某个慢函数，而是**门的判据错了**：
+   * 此前「就绪」只等于「会话列表拉到了」，而 provider 列表 / 本地模型 / 定价 / 探针快照
+   * 都还在冷态加载中。首启（磁盘上什么都没缓存）撞上它们 → 全局迟滞；二次启动命中缓存 → 正常。
+   *
+   * 现在把首批必须品逐个登记，**全部到齐**才收门。失败也记为完成（不能因某个数据源拉不到
+   * 就把用户永久关在加载页），另有 firstLoadGuard 总超时兜底 —— 门绝不能变成新的卡死源。
+   */
+  const [firstLoad, setFirstLoad] = React.useState<Record<string, boolean>>({});
+  const markFirstLoad = React.useCallback((key: string): void => {
+    setFirstLoad((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+  }, []);
+  /** A-1039：门的总超时兜底（8s）——任何数据源挂掉都不得把用户关在加载页 */
+  const [firstLoadGuard, setFirstLoadGuard] = React.useState(false);
+  React.useEffect(() => {
+    const t = window.setTimeout(() => setFirstLoadGuard(true), 8000);
+    return () => window.clearTimeout(t);
+  }, []);
+  /** 首屏就绪 = 全部必须品到齐，或总超时兜底已触发 */
+  const uiReady = firstLoadGuard || FIRST_LOAD_KEYS.every((k) => firstLoad[k]);
   /** A-980-R18：启动面板最小时长标记（避免加载太快时一闪而过；用户反馈"好久没看到加载动画"） */
   const [splashMinDone, setSplashMinDone] = React.useState(false);
   React.useEffect(() => {
     const t = window.setTimeout(() => setSplashMinDone(true), 700);
     return () => window.clearTimeout(t);
   }, []);
-  /** A-980-R18：boot IPC 兜底——boot 事件/状态查询异常时 4s 后不再因 boot===null 卡住启动面板 */
-  const [bootStallGuard, setBootStallGuard] = React.useState(false);
+  /**
+   * A-1039 废弃说明：原 `bootStallGuard`（4s 后不再因 boot===null 卡住启动面板）已移除。
+   * 它存在的理由是"boot 事件可能永远不来，别把用户关在加载页" —— 这个诉求现在由
+   * `firstLoadGuard`（8s 总超时）承担，且**覆盖面更宽**：不只兜 boot 事件，还兜每一个
+   * 首屏数据源。留着它反而有害：它会让面板在首屏数据未就绪时就被放行（新的卡顿来源）。
+   */
+  /** 应用版本号（启动面板副标题；拿不到就不显示，不阻塞任何流程） */
+  const [appVersion, setAppVersion] = React.useState("");
   React.useEffect(() => {
-    const t = window.setTimeout(() => setBootStallGuard(true), 4000);
-    return () => window.clearTimeout(t);
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    void api?.boot?.version?.().then((v: string) => setAppVersion(v)).catch(() => { /* 忽略 */ });
   }, []);
   /** 本地模型加载进度（slime 主题弹窗；llama-server 首次加载可能数十秒） */
   const [modelLoading, setModelLoading] = React.useState<{ loading: boolean; message?: string; key?: string }>({ loading: false });
@@ -802,6 +840,7 @@ export default function App(): JSX.Element {
       return [];
     });
     setAgents(list);
+    markFirstLoad("agents"); // A-1039：记入启动门（此前不在门内）
     // 启动即从后端恢复各 Agent 配置（agents.json 是权威源；不依赖打开 AgentsPanel）。
     // 关键：发请求前快照该 Agent 的配置代次；返回时若代次已前进（用户刚编辑过）→ 丢弃，
     // 绝不拿旧快照覆盖用户的实时改动（推理按钮消失/思考开关点不动的不稳定根因）。
@@ -812,7 +851,7 @@ export default function App(): JSX.Element {
         applyAgentDetail(a.id, d);
       }).catch(console.error);
     }
-  }, [applyAgentDetail]);
+  }, [applyAgentDetail, markFirstLoad]);
 
   const loadSessions = React.useCallback(async (): Promise<void> => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
@@ -826,8 +865,8 @@ export default function App(): JSX.Element {
     if (key === sessionsKeyRef.current) { return; }
     sessionsKeyRef.current = key;
     setSessions(items);
-    setUiReady(true); // A-966b：会话首拉完成 → 允许启动面板隐藏
-  }, []);
+    markFirstLoad("sessions"); // A-1039：首拉完成 → 记入启动门
+  }, [markFirstLoad]);
 
   // 初始化：Agent 列表 + 会话列表 + 默认选中第一个会话
   React.useEffect(() => {
@@ -904,15 +943,23 @@ export default function App(): JSX.Element {
             vision: m.vision === true,
           })),
         })));
-      }).catch(console.error);
+        markFirstLoad("providers"); // A-1039：记入启动门
+      }).catch((e: unknown) => {
+        console.error(e);
+        markFirstLoad("providers"); // 失败也放行（否则门被单个数据源卡住）
+      });
       api.providers.localList().then((list: LocalModelBrief[]) => {
         setLocalModels(list);
-      }).catch(console.error);
+        markFirstLoad("localModels"); // A-1039：记入启动门
+      }).catch((e: unknown) => {
+        console.error(e);
+        markFirstLoad("localModels"); // 失败也放行
+      });
     };
     load();
     const timer = window.setInterval(load, 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [markFirstLoad]);
 
   /** 依赖下载进度：常驻订阅（问题修复：MindHubPanel 切 tab 卸载会丢事件） */
   React.useEffect(() => {
@@ -1229,45 +1276,41 @@ export default function App(): JSX.Element {
   const mainIsFloatLayout = rightOpen && floatState !== "none"
     && rightWidth >= Math.max(560, window.innerWidth - 340);
 
+  /**
+   * A-1039 启动门判据（**唯一出处**，守卫按此断言）。
+   *
+   * ⚠️ 旧判据漏了 `degraded`：后端缺失/超时时 `emitBoot({phase:"degraded"})`，
+   * 而旧条件里 `degraded` **不匹配任何一项** → 门当场放行。可那一刻首屏数据一项都没到，
+   * 用户点开的就是一个空壳界面（每个面板都会各自触发一轮重活）。
+   * 现在判据只看**两件事**：首屏数据是否齐（uiReady）+ 最短展示时间，与后端 phases 解耦。
+   */
+  const splashVisible = !splashMinDone || !uiReady;
+
+  /** 启动阶段清单：如实反映"在等什么"，替代纯转圈（用户反馈「纯干等」） */
+  const splashSteps: SplashStep[] = [
+    { label: "本地后端服务", done: boot?.backendReady === true || boot?.phase === "degraded" },
+    { label: "Agent 与会话列表", done: Boolean(firstLoad.agents && firstLoad.sessions) },
+    { label: "模型与供应商配置", done: Boolean(firstLoad.providers && firstLoad.localModels) },
+  ];
+  /** 状态文案：优先用主进程上报的 message，再按门内进度推导 */
+  const splashStatus = boot?.phase === "degraded"
+    ? (boot.message ?? "后端不可用，正在加载界面…")
+    : (!uiReady ? "正在加载首屏数据…" : (boot?.message ?? "正在初始化…"));
+
   return (
     <div className="app">
-      {/* 启动加载面板（A-C-C 风格）：A-980-R18 首帧即显示（boot 未到达也遮住，杜绝闪现应用界面）、
-          后端/首屏数据真正就绪前持续显示，且最短展示 700ms 保证动画可见 */}
-      {(!splashMinDone || (boot === null && !bootStallGuard) || boot?.phase === "starting" || boot?.phase === "backend" || (boot?.phase === "ready" && !uiReady)) && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 999,
-          background: "var(--bg)", display: "flex",
-          alignItems: "center", justifyContent: "center",
-        }}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{
-              width: 64, height: 64, borderRadius: 16, margin: "0 auto 14px",
-              background: "linear-gradient(135deg, var(--accent), #6366f1)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 30, fontWeight: 900, color: "#fff",
-            }}>S</div>
-            <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: "var(--text)" }}>slime</div>
-            <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 14 }}>
-              {boot ? (boot.phase === "ready" && !uiReady ? "正在加载工作区与会话…" : (boot.message ?? "正在初始化…")) : "正在启动…"}
-            </div>
-            <div style={{
-              width: 180, height: 5, borderRadius: 3, background: "var(--border)", margin: "0 auto",
-              overflow: "hidden",
-            }}>
-              <div style={{
-                width: "40%", height: "100%", borderRadius: 3,
-                background: "var(--accent)",
-                animation: "slime-boot-slide 1.1s ease-in-out infinite",
-              }} />
-            </div>
-            <style>{`@keyframes slime-boot-slide { 0% { transform: translateX(-120%);} 100% { transform: translateX(320%);} }`}</style>
-          </div>
-        </div>
-      )}
+      {/* 启动加载面板（A-1039 重做）：首帧即显示（boot 未到达也遮住，杜绝闪现应用界面），
+          **首屏数据真正到齐前不隐藏**（此前只等会话列表 → 用户点开就是未就绪界面，遍地卡顿），
+          最短展示 700ms 保证动画可见。退场有淡出过渡，不再是硬切。 */}
+      <SplashScreen visible={splashVisible} status={splashStatus} steps={splashSteps} subtitle={`v${appVersion}`} />
 
       {/* A-1018：slime 主题确认/提示弹窗宿主（confirmAsync/alertAsync 的渲染层实现）。
           常驻挂载（自己按需渲染），全仓 38 处调用点无需改动。 */}
       <ThemeDialogHost />
+
+      {/* A-1044：图形操作可视化（呼吸灯边框 + 悬浮提示）。常驻挂载、除"隐藏"按钮外不吞点击；
+          它订阅的应用内来源由右栏浏览器桥（browserBridge）派发，系统级来源经 preload 转发。 */}
+      <OperationFocusOverlay />
 
       {/* 本地模型加载进度弹窗（slime 主题；llama-server 首次加载可能数十秒~两分钟） */}
       {modelLoading.loading && (

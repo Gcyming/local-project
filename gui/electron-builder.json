@@ -94,9 +94,7 @@
   "asar": true,
   "asarUnpack": [
     "out/main/chunks/*.node",
-    "../core-ts/src/**/*",
-    "node_modules/@lancedb/lancedb-win32-x64-msvc/**/*",
-    "node_modules/@lancedb/lancedb/node_modules/**/*"
+    "../core-ts/src/**/*"
   ],
   "compression": "maximum",
   "win": {

@@ -98,7 +98,7 @@ describe("A-1034 ② zip 解析与解压安全", () => {
     expect(() => listZip(fake)).toThrow(/ZIP 结构损坏/);
   });
 
-  it("Zip-Slip：逃逸条目被拒并计入 skipped，解压目录外不得落盘", () => {
+  it("Zip-Slip：逃逸条目被拒并计入 skipped，解压目录外不得落盘", async () => {
     const buf = readFileBuf(join(FIX, "evil.zip"));
     // ⚠️ 用自己的**父目录**当"解压目录之外"，不要用系统 temp 根：
     // 逃逸成功时文件会落在父目录里，用共享的 temp 根会污染机器上其它测试/进程，
@@ -107,7 +107,7 @@ describe("A-1034 ② zip 解析与解压安全", () => {
     const dest = join(parent, "dest");
     try {
       mkdirSync(dest, { recursive: true });
-      const r = extractZipTo(buf, dest);
+      const r = await extractZipTo(buf, dest);
       expect(r.skipped.length).toBe(3);
       for (const bad of ["escape.txt", "escape2.txt", "abs-escape.txt"]) {
         expect(existsSync(join(dest, bad)), `不应写入解压目录内: ${bad}`).toBe(false);
@@ -115,6 +115,38 @@ describe("A-1034 ② zip 解析与解压安全", () => {
       }
       expect(existsSync(join(dest, "ok", "inside.txt"))).toBe(true);
       expect(r.files).toBe(1);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * A-1038：解压进度回调（async 化 + 逐条目上报）。
+   *
+   * 这几条同时钉住三件容易回退的事：
+   *   ① 版本 A-1034 里 `extractZipTo` 是同步的 —— 若有人改回去，`await` 拿到的是函数而非结果，
+   *      下面的字段断言会立刻红（而不是"进度条不刷新"这种只能靠用户发现的静默失效）。
+   *   ② `total` 必须**含被拒条目**：否则含 Zip-Slip 的包进度永远到不了 100%（卡在 75%）。
+   *   ③ 最后一条回调必须 `current === ""`（收尾信号），调用方据此判定"真跑完了"。
+   */
+  it("解压进度：逐条目上报，末条为收尾信号，且被拒条目也计入 total", async () => {
+    const buf = readFileBuf(join(FIX, "evil.zip"));
+    const parent = mkdtempSync(join(tmpdir(), "slime-zipprog-"));
+    const dest = join(parent, "dest");
+    try {
+      const ticks: Array<{ processed: number; total: number; files: number; current: string }> = [];
+      const r = await extractZipTo(buf, dest, { onProgress: (p) => ticks.push({ ...p }) });
+      // 4 个非目录条目（3 个逃逸 + 1 个正常）→ total 必须是 4 而不是 1
+      expect(ticks.length).toBeGreaterThan(0);
+      expect(ticks[ticks.length - 1].total).toBe(4);
+      // processed 单调递增到 total（含被拒的 3 个）
+      expect(ticks[ticks.length - 1].processed).toBe(4);
+      expect(ticks.map((t) => t.processed)).toEqual([...ticks.map((t) => t.processed)].sort((a, b) => a - b));
+      // files 只数真正落盘的
+      expect(ticks[ticks.length - 1].files).toBe(1);
+      expect(ticks[ticks.length - 1].files).toBe(r.files);
+      // 末条为收尾信号
+      expect(ticks[ticks.length - 1].current).toBe("");
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

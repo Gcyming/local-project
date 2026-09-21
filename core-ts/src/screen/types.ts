@@ -215,6 +215,18 @@ export interface ScreenBackend {
    * 返回的 width/height = 窗口尺寸、originX/originY = 窗口左上角，坐标换算会带上这个原点。
    */
   captureWindow?(title: string, opts?: { marks?: boolean }): Promise<ScreenCaptureResult>;
+  /**
+   * A-1044（可选，桌面后端）：系统级「距上次用户键鼠输入」的毫秒数。
+   *
+   * 存在的唯一理由：本后端的输入注入（`SetCursorPos` + `mouse_event`）与用户**共用同一个物理指针、
+   * 同一个前台窗口** —— 用户正在操作时 Agent 硬点上去，用户的那一击就会被吞掉（要重按）。
+   * 有了这个探针，`ScreenController` 才能在动作前**让位**（人优先）。
+   *
+   * `null` = **探测不可用**（非 Windows / 宿主未就绪 / 调用失败），**不等于**"用户没在操作"：
+   * 仲裁层据此放行，但必须留痕（`decideUserYield` 的 note）。
+   * Android 后端不实现它 —— adb 的输入在设备侧执行，与 PC 的指针/焦点无关（这是真正隔离的那条路）。
+   */
+  userIdleMs?(): Promise<number | null>;
 }
 
 /** 屏幕坐标归一化基准（历史 0-1000 坐标系；新代码默认用 image 像素空间） */

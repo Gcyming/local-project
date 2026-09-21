@@ -18,6 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { INSTALL_ROOT } from "./boot.js";
+import type { SubAgentRunView } from "../shared/ipc.js";
 
 /** 落盘快照：字段与 core-ts `SubAgentRun` 对齐（structured 一并存，面板要显示自评置信度/产物数） */
 export interface PersistedSubAgentRun {
@@ -37,6 +38,19 @@ export interface PersistedSubAgentRun {
 
 /** 终态集合（与 core-ts isTerminal 同口径；本模块不 import 以免装配层反向依赖核心内部实现） */
 const TERMINAL = new Set(["done", "fail", "timeout", "cancelled"]);
+
+/**
+ * 落盘 `status` 是**自由字符串**（磁盘可能被手改 / 跨版本残留），而展示用的
+ * `SubAgentRunView.status` 是 6 态字面量联合 —— 直接透传会让类型在骗人，
+ * 渲染层就只能各自兜底（A-980-R31 的前科：「超时中断」被显示成原始英文 `timeout`）。
+ * 收敛规则：认得出的原样用；认不出的按 **fail** 处理（不是 pending —— 那会假装它还在跑）。
+ */
+const VIEW_STATUS = new Set(["pending", "running", "done", "fail", "timeout", "cancelled"]);
+function viewStatus(s: unknown): "pending" | "running" | "done" | "fail" | "timeout" | "cancelled" {
+  return typeof s === "string" && VIEW_STATUS.has(s)
+    ? (s as "pending" | "running" | "done" | "fail" | "timeout" | "cancelled")
+    : "fail";
+}
 
 /** 保留条数上限 */
 export const SUBAGENT_RUN_CAP = 100;
@@ -114,7 +128,7 @@ export function syncSubagentRuns(live: readonly PersistedSubAgentRun[]): number 
  * 合并「历史记录 + 当前内存运行态」为一份展示清单（按 startedAt 升序，未开始的排在最后）。
  * 同 id 以**内存态优先**——运行中的字段比落盘快照新（例如进行中的 pending→running）。
  */
-export function mergedSubagentRuns(live: readonly PersistedSubAgentRun[]): PersistedSubAgentRun[] {
+export function mergedSubagentRuns(live: readonly PersistedSubAgentRun[]): SubAgentRunView[] {
   const byId = new Map<string, PersistedSubAgentRun>();
   for (const p of loadSubagentRuns()) { byId.set(p.id, p); }
   for (const r of live) {
@@ -123,7 +137,8 @@ export function mergedSubagentRuns(live: readonly PersistedSubAgentRun[]): Persi
   }
   const all = [...byId.values()];
   all.sort((a, b) => (a.startedAt ?? Number.MAX_SAFE_INTEGER) - (b.startedAt ?? Number.MAX_SAFE_INTEGER));
-  return all.slice(-SUBAGENT_RUN_CAP);
+  // 出口处统一收敛：磁盘自由字符串 → 展示用 6 态联合（见 viewStatus 注释）
+  return all.slice(-SUBAGENT_RUN_CAP).map((r) => ({ ...r, status: viewStatus(r.status) }));
 }
 
 /** 清空历史记录（内存中运行中的不受影响），返回被清掉的条数 */

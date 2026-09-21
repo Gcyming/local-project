@@ -24,6 +24,9 @@ const PERMISSION_LEVELS: Record<string, number> = {
 const SANDBOX_REQUIRE = new Set([2, 3, 4]);
 const SANDBOX_DENY = new Set([5]);
 
+/** A-1048：已报过的缺失技能目录（同一路径只报一次，避免刷新时刷屏） */
+const MISSING_SKILL_DIR_REPORTED = new Set<string>();
+
 // ── 极简 YAML 子集解析（manifest.yaml / SKILL.md frontmatter 够用）─────
 
 /** 解析标量：内联列表 / 引号剥离 / null/true/false/数字 原样转 */
@@ -274,7 +277,12 @@ export class SkillRegistry {
       try {
         entries = await readdir(root);
       } catch {
-        console.info(`[skills] 技能目录不存在: ${root}`);
+        // A-1048：`loadSkills()` 会被多次调用（刷新 / 多 Agent），同一路径反复报
+        // "目录不存在"会把真正的问题淹没在噪音里 —— 而且"自动生成目录还没建"是**预期状态**。
+        if (!MISSING_SKILL_DIR_REPORTED.has(root)) {
+          MISSING_SKILL_DIR_REPORTED.add(root);
+          console.info(`[skills] 技能目录不存在（跳过，只报一次）: ${root}`);
+        }
         continue;
       }
       for (const name of entries.sort()) {

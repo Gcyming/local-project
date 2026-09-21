@@ -5,6 +5,8 @@ import type {
   DownloadProgressInfo, WorkspaceEntry, WorkspaceReadFileResult, CtxBuckets, GitDiffFile,
 } from "../../shared/ipc.js";
 import { isBrowserSchemeUrl } from "../../shared/ipc.js";
+/** A-1038：下载/解压阶段文案（唯一实现，UI 不得自造同义词） */
+import { phaseLabel } from "../../shared/downloadPhase.js";
 import {
   ChevronIcon, TaskIcon, GlobeIcon,
   GitIcon, PlusIcon, DashboardIcon,
@@ -3209,10 +3211,15 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
           {dlActive.map((d) => (
             <div key={d.target} style={{ marginBottom: 6 }}>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-secondary)" }}>
-                <span>{d.target === "llama" ? "llama.cpp" : "BGE-M3"}</span>
-                <span>{d.state === "paused" ? "已暂停" : `${Math.round(d.percent)}%`}</span>
+                {/* A-1038：显示**阶段**而不只是百分比 —— 解压期百分比属于另一个口径，
+                    只写数字会让用户以为"下载卡在 100% 不动了"。 */}
+                <span>{d.target === "llama" ? "llama.cpp" : "BGE-M3"}{" · "}{d.state === "paused" ? "已暂停" : phaseLabel(d.phase)}</span>
+                <span>{Math.round(d.percent)}%</span>
               </div>
               <div className="dl-bar"><div className="dl-bar-inner" style={{ width: `${Math.min(100, d.percent)}%` }} /></div>
+              {d.detail && (
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{d.detail}</div>
+              )}
             </div>
           ))}
         </div>
@@ -4059,15 +4066,24 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
         <input className="term-input browser-url" value={inputUrl} placeholder="输入网址，回车访问" onChange={(e) => setInputUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { go(); } }} />
         <button className="right-mini-btn" title="访问" onClick={go}><ArrowRightIcon2 size={12} /></button>
       </div>
-      <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        {!active && !navUrl && (
-          // A-976：空态提示层必须 pointerEvents:none，否则会吃掉 Agent 的点击事件
-          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "var(--text-muted, #8b949e)", gap: 12, pointerEvents: "none", zIndex: 5 }}>
-            <GlobeIcon size={36} />
-            <div style={{ fontSize: 14, opacity: 0.7 }}>在上方输入网址开始浏览</div>
+      <div className="browser-stage">
+        {loading && active && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--accent, #58a6ff)", zIndex: 10 }} />}
+        {/* A-1045：**主题色占位页**——guest 还没有真实文档时盖住 Chromium 的白色基底。
+            `active` 只由「真实 URL 的 did-navigate」置真（见下方 onNav），所以
+            `!active` 恰好等价于「这个浏览器页里目前没有任何真实网页」= 纯白晃眼的那一段时间；
+            真实文档落地后占位页自动撤掉，绝不影响正常浏览。
+            覆盖层 pointerEvents:none（A-976：任何吃点击的覆盖层都会让 Agent 点不动页面），
+            定位/配色走 `.browser-blank`（不在 JSX 写 inline position:absolute —— 静态守卫 ⑬）。
+            ⚠️ 本块必须排在上面那条进度条**之后**：进度条是 inline `position:absolute`，而 ⑬ 的
+            扫描窗口是「条件行起 8 行内」，排在它上面会被误判成「残留浮层」。
+            两者状态互斥（`loading && active` vs `!active`），换序无视觉影响（z-index 才是层级权威）。 */}
+        {!active && !failInfo && (
+          <div className="browser-blank">
+            <div className="browser-blank-mark"><GlobeIcon size={34} /></div>
+            <div className="browser-blank-title">在上方输入网址开始浏览</div>
+            <div className="browser-blank-hint">也可以直接在对话里让 slime 打开网页，它会在这个面板内操作；操作期间面板边框会呼吸提示。</div>
           </div>
         )}
-        {loading && active && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--accent, #58a6ff)", zIndex: 10 }} />}
         {/* A-1018：加载失败 → **整页错误页**（对标主流浏览器：原因 + 网址 + 错误标识 + 建议 + 重试）。
             此前只有一条细红条贴在工具栏下方，下面仍是一整片白 —— 用户原话"打不开的都只会显示白屏，
             不会像现在的浏览器一样弹出无法连接、连接失败等一系列的原因或者标识"。
@@ -4097,7 +4113,9 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
           src="about:blank"
           partition="persist:slime-browser"
           allowpopups
-          style={{ flex: 1, width: "100%", height: "100%", border: "none", background: "#fff" }}
+          /* A-1045：host 底色也是硬编码 #fff 的残留 —— 改为主题变量，与容器/占位页同色。
+             （guest 有真实文档后由站点自己绘制，宿主底色不再可见；它只在 guest 未绘制的那一帧露出来。） */
+          style={{ flex: 1, width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
         />
       </div>
     </div>

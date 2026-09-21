@@ -10,6 +10,8 @@
 import React, { type JSX } from "react";
 import type { MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot, DownloadProgressInfo } from "../../shared/ipc.js";
 import { CheckIcon, CloseIcon, PlusIcon } from "../components/Icon.js";
+/** A-1038：下载/解压阶段文案（唯一实现） */
+import { phaseLabel } from "../../shared/downloadPhase.js";
 import { confirmAsync, alertAsync } from "../dialog.js";
 
 const MOOD_CN: Record<string, string> = {
@@ -191,7 +193,14 @@ function DownloadControls({
   return (
     <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
       {bar(t.percent)}
-      <span style={{ fontSize: 10.5, color: "var(--text-muted)", minWidth: 46 }}>{t.percent}%</span>
+      {/* A-1038：显示阶段（下载中/解压中/配置中）+ 明细。只给百分比时，
+          解压期的用户看到的是"100% 却半天不动"，等于没有进度。 */}
+      <span style={{ fontSize: 10.5, color: "var(--text-muted)", minWidth: 46 }}>
+        {t.percent}%{" "}
+        <span style={{ color: "var(--text-dim)" }}>
+          {phaseLabel(t.phase)}{t.detail ? ` ${t.detail}` : ""}
+        </span>
+      </span>
       {t.state === "downloading"
         ? <button className="btn" style={{ fontSize: 11, padding: "2px 8px" }} onClick={() => ctl("pause")}>暂停</button>
         : <button className="btn" style={{ fontSize: 11, padding: "2px 8px" }} onClick={() => ctl("resume")}>继续</button>}
@@ -272,6 +281,17 @@ export default function MindHubPanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAgentId]);
+
+  /**
+   * 目标 Agent 变化 → 重新推导记忆 / 向量库的真实路径。
+   * 这两条路径是 per-Agent 的（`<根>/<agentId>/…`），跟「目标 Agent」联动才不会是陈旧值 ——
+   * 此前它们取自主进程返回的静态字符串模板，切 Agent 也不会变。
+   */
+  React.useEffect(() => {
+    if (!agentId) return;
+    void reloadConfig(agentId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
 
   // 无全局 dl（未从 App 注入）时兜底：本地快照
   const [dl0, setDl0] = React.useState<Record<string, DownloadProgressInfo>>({});
@@ -421,15 +441,38 @@ export default function MindHubPanel({
     }
   }
 
+  /**
+   * 拉取配置。**必须带 agentId** —— 记忆/向量库的展示路径是按目标 Agent 推导的真实绝对路径，
+   * 不带就只会得到 `memoryPaths: null`（界面据此提示先选 Agent，而不是显示 `data/<agentId>/…` 假路径）。
+   */
+  async function reloadConfig(id?: string): Promise<void> {
+    if (!api?.mind?.configGet) return;
+    const c = await api.mind.configGet(id || undefined).catch(console.error);
+    if (c) { setCfg(c as MindConfigInfo); }
+  }
+
+  /** 改记忆存储位置：一个根目录同时决定「记忆本体」与「向量库」两处（见 core-ts resolveMemoryPaths） */
   async function pickMemoryRoot(): Promise<void> {
     if (!api?.conversations?.pickFolder || !api?.mind?.configSet) return;
     const picked = await api.conversations.pickFolder();
     if (picked.ok && picked.path) {
       const res = await api.mind.configSet({ memoryRoot: picked.path });
       setCfg((prev) => (prev ? { ...prev, memoryRoot: res.memoryRoot } : prev));
-      setSaved("记忆存储位置已更新（重启应用后新建记忆写入新位置；现有记忆保留原位）");
-      window.setTimeout(() => setSaved(""), 6000);
+      // 两个地址都要跟着刷新（否则又回到"只有一个变了"的观感）
+      await reloadConfig(agentId);
+      setSaved("存储位置已更新：记忆本体与向量库都在新根目录下（重启后生效；已有数据在下次使用时迁入）");
+      window.setTimeout(() => setSaved(""), 8000);
     }
+  }
+
+  /** 恢复默认存储位置（`""` = 用内置默认根）。没有这个出口时，自定义根是"单向门"——改了就回不去 */
+  async function resetMemoryRoot(): Promise<void> {
+    if (!api?.mind?.configSet) return;
+    const res = await api.mind.configSet({ memoryRoot: "" });
+    setCfg((prev) => (prev ? { ...prev, memoryRoot: res.memoryRoot } : prev));
+    await reloadConfig(agentId);
+    setSaved("已恢复默认存储位置（重启后生效）");
+    window.setTimeout(() => setSaved(""), 6000);
   }
 
   async function setVectorTool(tool: VectorTool): Promise<void> {
@@ -525,6 +568,33 @@ export default function MindHubPanel({
             )}
           </div>
         ))}
+        {/* A-1041：LanceDB 是「内嵌组件」—— 297MB 原生库不再随默认安装包分发。
+            未就位必须**如实展示**（不静默）：否则用户只会看到"向量检索没结果"，
+            却不知道是组件没装。 */}
+        {cfg && (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12 }}>
+            <span style={{ color: cfg.lancedb.ok ? "var(--ok, #4ade80)" : "var(--warning)" }}>
+              {cfg.lancedb.ok ? <CheckIcon size={13} /> : <CloseIcon size={13} style={{ color: "var(--warning)" }} />}
+            </span>
+            <span style={{ width: 150, color: "var(--text-muted)", flexShrink: 0 }}>向量库运行时（LanceDB）</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 11 }}>
+              {cfg.lancedb.ok
+                ? <DispPath path={cfg.lancedb.dir ?? ""} />
+                : <span style={{ color: "var(--warning)" }}>未就位 —— 向量记忆已降级为 JSON 检索</span>}
+            </span>
+          </div>
+        )}
+        {cfg && !cfg.lancedb.ok && (
+          <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.7, padding: "2px 0 4px" }}>
+            该组件含 297MB 原生库，<b>不再随默认安装包分发</b>（这是旧版安装包 1GB 的元凶）。
+            把组件放到下列任一目录即可自动启用（重启后生效）：
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+              {cfg.lancedb.candidates.map((c) => <li key={c} style={{ wordBreak: "break-all" }}>{c}</li>)}
+            </ul>
+            期望布局：<code style={{ fontSize: 10.5 }}>&lt;目录&gt;/node_modules/@lancedb/lancedb/dist/index.js</code>
+            （可用 <code style={{ fontSize: 10.5 }}>node scripts/prepare-lancedb-component.mjs &lt;目录&gt;</code> 生成）
+          </div>
+        )}
         <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 6, lineHeight: 1.6 }}>
           版本说明：llama.cpp 下载官方「Windows x64 (CPU)」通用包（AVX2，约 17MB）——不依赖显卡驱动版本，
           兼容全部 GGUF 模型（含嵌入模型）；如需要 GPU 加速可自行另下 CUDA 版并在 slime.toml 更换 llama_bin。
@@ -677,20 +747,38 @@ export default function MindHubPanel({
 
       {/* 记忆 */}
       <SectionCard title="记忆（存储位置）">
+        {/*
+          两条路径都来自主进程按「目标 Agent」推导的**真实绝对路径**（唯一实现 core-ts resolveMemoryPaths）。
+          此前这里显示的是 `data/<agentId>/lancedb` 这种字面模板 —— 假信息，且永不变化，
+          于是用户改了存储位置只看到上面一行变，误以为"只能改一个"。
+          现在自定义根目录同时决定两处，两行都会跟着变。
+        */}
         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
           <div><span style={{ color: "var(--text-muted)" }}>记忆本体（memory.json）：</span>
-            <span style={{ fontSize: 11, wordBreak: "break-all" }}>{cfg?.memoryRoot || (cfg?.memoryPaths.knowledge ?? "读取中…")}</span>
+            <span style={{ fontSize: 11, wordBreak: "break-all" }}>
+              {cfg?.memoryPaths?.memoryJson ?? (agentId ? "读取中…" : "（先选择 Agent）")}
+            </span>
           </div>
           <div><span style={{ color: "var(--text-muted)" }}>向量库（LanceDB）：</span>
-            <span style={{ fontSize: 11, wordBreak: "break-all" }}>{cfg?.memoryPaths.lance ?? "读取中…"}</span>
+            <span style={{ fontSize: 11, wordBreak: "break-all" }}>
+              {cfg?.memoryPaths?.lanceDir ?? (agentId ? "读取中…" : "（先选择 Agent）")}
+            </span>
           </div>
         </div>
-        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <button className="btn" style={{ fontSize: 12.5 }} onClick={() => void pickMemoryRoot()}>
             更改存储位置…
           </button>
+          {cfg?.memoryRoot ? (
+            <button className="btn" style={{ fontSize: 12.5 }} onClick={() => void resetMemoryRoot()}>
+              恢复默认位置
+            </button>
+          ) : null}
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {cfg?.memoryRoot ? `当前自定义根目录：${cfg.memoryRoot}（重启后生效）` : "当前为默认位置（重启后生效变更）"}
+            {/* 一个根目录管两处存储；重启生效 */}
+            {cfg?.memoryRoot
+              ? `当前自定义根目录：${cfg.memoryRoot}（记忆本体与向量库都在此目录下；重启后生效）`
+              : "当前为默认位置（重启后生效变更）"}
           </span>
         </div>
       </SectionCard>

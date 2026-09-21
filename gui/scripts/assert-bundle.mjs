@@ -691,5 +691,54 @@ checkCount("main", main, '"_local_models"', 1, "清单键名在产物里只有 1
  *   键名字面量的产地计数（上方）+ 入口的委托调用（下方）。两条均已变异验红。 */
 check("main", main, "return localModelSpecs(loadTable())", "GUI 清单入口委托给共享实现（不就地过滤）");
 
+/* A-1040：记忆「存储位置」= 一个自定义根目录同时决定 memory.json 与向量库。
+ * 病根不是"两个地址显示得不好看"，而是**向量库被写死钉在默认 data/**（`// LanceDB 保持原位`）
+ * + 主进程**返回字符串模板** `resolve(PROJECT_ROOT, "data", "<agentId>", "lancedb")`
+ * —— 后者是字面 `<agentId>` 的假路径，用户拿到也没法用，且永不随设置变化。
+ * 这里只锁"产物层可观测"的事实：推导被真正引用（否则会被 tree-shake）、迁移留痕在、
+ * 旧假模板彻底不在。行为面（两者同根 / 迁移搬数据）由 tests/core-ts/a1040-guards.spec.ts
+ * 真跑 MemoryStore 锁定，变异 13 条全红。 */
+check("main", main, "resolveMemoryPaths", "记忆位置推导的唯一实现进了产物（configGet 真的引用它）");
+check("main", main, "向量库已迁移", "旧向量库迁移留痕进了产物（改根目录不会静默丢向量）");
+check("main", main, "向量库迁移失败", "迁移失败必须出声（不留静默失败）");
+checkAbsent("main", main, '"<agentId>"', "字面 <agentId> 的假路径模板未进产物（旧假信息已彻底移除）");
+check("renderer", renderer, "恢复默认位置", "「恢复默认位置」出口进了渲染产物（自定义根不是单向门）");
+check("renderer", renderer, "（先选择 Agent）", "没有目标 Agent 时如实提示进了渲染产物（不再编路径）");
+
+/* A-1041：安装包 1GB 的元凶 —— `out/main/chunks/lancedb.win32-x64-msvc-*.node`（297MB）。
+ * 病根是 store.ts 里 `/* @vite-ignore *\/` 让 vite 跳过 alias，把真包连同原生子包解析进 bundle；
+ * 而 electron-builder 的 `files` 里根本没有 node_modules —— 这份 297MB 只活在 bundle 里，
+ * 既不好管理也没法裁剪。现在改为「构建期桩 + 运行期按内嵌组件目录 require」。
+ *
+ * 产物层能真正区分的事实（缺一个就说明又打回去了）：
+ *   ① 产物里没有原生 .node —— 这是最直接的体积证据，改回去必然重新出现；
+ *   ② 整个 out/main 体积有上界 —— 光看 ① 抓不到"换了个名字的原生包"；
+ *   ③ 真包指纹（`lancedb-win32-x64-msvc`）不在主进程产物里；
+ *   ④ 桩的两端都在产物里：组件目录契约（找得到）+ 未就位报错（如实告知）。
+ * 行为面（注入分支先于回退、组件未就位不静默降级）由 tests/gui/a1041-guards.spec.ts
+ * 与 gui/scripts/mut-a1041-bundle.mjs（15 条变异全红）锁定。 */
+const mainJs = readAll("out/main", [".js"]);
+const mainBytes = mainJs.reduce((n, p) => n + statSync(p).size, 0);
+const mainMb = mainBytes / 1024 / 1024;
+const nativeAll = readAll("out", [".node"]);
+if (nativeAll.length > 0) {
+  fail++;
+  console.log(`MISS [main] 产物里不得有原生 .node（297MB 回来的信号）：${nativeAll.join(", ")}`);
+} else {
+  console.log("OK   [main] 产物里没有原生 .node（LanceDB 的 297MB 已移出默认安装包）");
+}
+// 上界取 10MB：合法产物 ≈ 2.9MB，留足增长空间，但离 288MB 差两个数量级。
+if (mainMb > 10) {
+  fail++;
+  console.log(`MISS [main] out/main 体积上界（实测 ${mainMb.toFixed(2)}MB，上限 10MB）`);
+} else {
+  console.log(`OK   [main] out/main 体积上界（实测 ${mainMb.toFixed(2)}MB，上限 10MB）`);
+}
+checkAbsent("main", main, "lancedb-win32-x64-msvc", "真实原生子包的名字未进产物（打进去就说明 alias 又失效）");
+check("main", main, "components/lancedb", "内嵌组件目录契约进了产物（运行时按此目录找真实包）");
+check("main", main, "LanceDB 运行时组件未就位", "组件未就位时的如实报错进了产物（不静默降级）");
+check("renderer", renderer, "向量记忆已降级为 JSON 检索", "降级说明进了渲染产物（用户不会只看到「没结果」）");
+check("renderer", renderer, "prepare-lancedb-component.mjs", "组件生成脚本提示进了渲染产物（用户知道怎么补）");
+
 console.log(fail === 0 ? "\nALL ASSERTIONS PASSED" : `\n${fail} ASSERTION(S) FAILED`);
 process.exit(fail === 0 ? 0 : 1);

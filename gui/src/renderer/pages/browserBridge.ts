@@ -16,6 +16,8 @@
  */
 import { SIDEBAR_OPEN_EVENT } from "./Markdown.js";
 import { isBrowserSchemeUrl } from "../../shared/ipc.js";
+// A-1044：把「正在操作右栏浏览器」上报给可视化浮层（呼吸灯边框 + 悬浮提示）
+import { publishOperationFocus, type OpFocusRect } from "./operationFocus.js";
 
 export interface BrowserTabInfo {
   id: string;
@@ -63,6 +65,60 @@ export function unregisterWebview(tabId: string): void {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/* ═══ A-1044：Agent 操作与用户操作「不互相吞掉」 ═══════════════════════════════
+ * 用户原话：「Agent 操作 slime 内的一些地方时，我点击 slime 内的一些地方会失效，要重新点击。」
+ *
+ * 两个具体成因（都在本文件里，改动时必须同时守住）：
+ *   ① `wv.focus()` 抢走**应用内焦点**：不聚焦的话 `sendInputEvent` 首次会被 Electron 丢弃
+ *      （A-980-R11 既有结论，必须保留），但聚焦会把用户正在打字的输入框顶掉 ——
+ *      用户接下来的按键全部落进网页。→ 操作结束后**把焦点还给用户**（人优先：只在焦点仍停在
+ *      webview 上、即用户没去别处时才还；用户若自己挪走了焦点，绝不抢回来）。
+ *   ② 聚焦还会让浏览器把目标元素 **scroll into view**（`focus()` 不带 `preventScroll`），
+ *      用户正要点的东西在光标下被移走 → 点击落空。→ 一律带 `preventScroll: true`。
+ * 另外把"正在操作哪一块"上报给可视化浮层（呼吸灯贴在被操作的 webview 上），让人优先看得见。 */
+
+/** 某个 webview 在**应用视口**里的矩形（呼吸灯贴它画）；拿不到就返回 null（退化为内容区边缘）。 */
+function webviewRectOf(wv: unknown): OpFocusRect | null {
+  try {
+    const r = (wv as HTMLElement).getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) { return null; }
+    return { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
+  } catch { return null; }
+}
+
+/** 把焦点还给用户原来聚焦的元素（人优先：只在焦点仍停在 webview 上时归还）。 */
+function restoreUserFocus(wv: unknown, prev: HTMLElement | null): void {
+  try {
+    if (!prev || prev === (wv as unknown as HTMLElement) || !prev.isConnected) { return; }
+    // 焦点已被用户挪到别处 → 说明用户另有意图，绝不抢回来
+    if (document.activeElement !== (wv as unknown as HTMLElement)) { return; }
+    prev.focus();
+  } catch { /* 忽略 */ }
+}
+
+/**
+ * 一次「会注入输入」的操作：聚焦 webview（必要时）→ 播 begin（带被操作矩形）→ 执行 →
+ * 播 end → 归还焦点。四件事绑在一起，就是为了没法只做一半（只聚焦不还焦点 = 用户报的那个 bug）。
+ */
+async function withWebviewFocus<T>(wv: unknown, label: string, fn: () => Promise<T>): Promise<T> {
+  const prev = (typeof document !== "undefined" ? document.activeElement : null) as HTMLElement | null;
+  try {
+    // preventScroll：聚焦会把元素滚进视口，用户正要点的东西会被挪走（点击落空的成因②）
+    (wv as Electron.WebviewTag).focus({ preventScroll: true });
+  } catch {
+    try { (wv as Electron.WebviewTag).focus(); } catch { /* 忽略：拿不到焦点不阻断操作 */ }
+  }
+  // begin 必须在**注入之前**发：用户先看见"Agent 要动了"，才有机会把手挪开（人优先的可见化）
+  publishOperationFocus({ phase: "begin", target: "browser", label, rect: webviewRectOf(wv), waitingUser: false });
+  try {
+    await sleep(30); // A-980-R11：焦点从宿主页移入 webview 的那一次点击可能被丢弃 → 短等
+    return await fn();
+  } finally {
+    publishOperationFocus({ phase: "end", target: "browser", label });
+    restoreUserFocus(wv, prev);
+  }
+}
 
 /** 等待 webview 可见（A-980-R11：非激活 tab 是 display:none → rect 全 0，坐标点击必失败；
  *  activateTab 切页后 React 重渲染到 flex 有延迟，必须等 rect 恢复正尺寸再操作，杜绝"点了没反应"） */
@@ -657,17 +713,17 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
           if (r) { pt = r; }
         }
         if (!pt) { return { ok: false, error: `未找到可点元素（selector=${selector || "-"} text=${text || "-"} index=${index ?? "-"}）——请先 browser_snapshot 查看可用元素` }; }
-        // A-980-R11：webview 失焦后首次 sendInputEvent 可能被丢弃（Electron 已知行为，
-        // 焦点从宿主页移入 webview 的那一次点击无效）——点击前显式聚焦 + 短等，保证必点中
-        try { wv.focus(); } catch { /* 忽略 */ }
-        await sleep(30);
-        wv.sendInputEvent({ type: "mouseMove", x: pt.x, y: pt.y });
-        wv.sendInputEvent({ type: "mouseDown", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-        await sleep(20);
-        wv.sendInputEvent({ type: "mouseUp", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-        // A-980：点击即观察——点击后直接回传主要元素，省掉模型再调 browser_snapshot 的一整轮
-        const observe = await observeAfter(wv, 600);
-        return { ok: true, data: { clicked: pt.what, x: pt.x, y: pt.y, observe, popupNotice: takePopupNotice() } };
+        // A-980-R11 + A-1044：聚焦 webview（否则失焦后首次 sendInputEvent 会被丢弃），
+        // 并在操作前后播"正在操作"事件、结束时把焦点还给用户（详见 withWebviewFocus）。
+        return await withWebviewFocus(wv, `点击网页元素${pt.what ? `：${pt.what}` : ""}`, async () => {
+          wv.sendInputEvent({ type: "mouseMove", x: pt.x, y: pt.y });
+          wv.sendInputEvent({ type: "mouseDown", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
+          await sleep(20);
+          wv.sendInputEvent({ type: "mouseUp", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
+          // A-980：点击即观察——点击后直接回传主要元素，省掉模型再调 browser_snapshot 的一整轮
+          const observe = await observeAfter(wv, 600);
+          return { ok: true, data: { clicked: pt.what, x: pt.x, y: pt.y, observe, popupNotice: takePopupNotice() } };
+        });
       }
 
       case "type": {
@@ -698,38 +754,44 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         })()`;
         const done = await wv.executeJavaScript(js);
         if (!done) { return { ok: false, error: "未找到可输入的输入框（可传 selector 指定）" }; }
-        if (cmd.submit) {
-          wv.sendInputEvent({ type: "keyDown", keyCode: "Return" });
-          wv.sendInputEvent({ type: "char", keyCode: "\r" });
-          wv.sendInputEvent({ type: "keyUp", keyCode: "Return" });
-          await sleep(600);
-        }
-        // A-980：输入即观察（回车提交后页面往往变化，直接回传新状态主要元素）
-        const observe = await observeAfter(wv, cmd.submit ? 900 : 400);
-        return { ok: true, data: { typed: text.slice(0, 40), submitted: Boolean(cmd.submit), observe } };
+        // A-1044：输入同样会抢焦点（页面内 `el.focus()`）→ 走统一的"播事件 + 还焦点"包装
+        return await withWebviewFocus(wv, `在网页中输入 ${text.length} 个字符`, async () => {
+          if (cmd.submit) {
+            wv.sendInputEvent({ type: "keyDown", keyCode: "Return" });
+            wv.sendInputEvent({ type: "char", keyCode: "\r" });
+            wv.sendInputEvent({ type: "keyUp", keyCode: "Return" });
+            await sleep(600);
+          }
+          // A-980：输入即观察（回车提交后页面往往变化，直接回传新状态主要元素）
+          const observe = await observeAfter(wv, cmd.submit ? 900 : 400);
+          return { ok: true, data: { typed: text.slice(0, 40), submitted: Boolean(cmd.submit), observe } };
+        });
       }
 
       case "press": {
         const wv = await curWv();
         const key = String(cmd.key ?? "");
         if (!key) { return { ok: false, error: "press 需要 key（如 Enter / Escape / Tab / ArrowDown）" }; }
-        // 键盘事件只会送到**聚焦**的元素/页面——先聚焦 webview，否则按键落空（静默失效）
-        try { wv.focus(); } catch { /* 忽略 */ }
-        await sleep(40);
-        wv.sendInputEvent({ type: "keyDown", keyCode: key });
-        wv.sendInputEvent({ type: "keyUp", keyCode: key });
-        // A-980：按键即观察（Enter 提交等场景页面会变，回传新状态避免模型再快照）
-        const observe = await observeAfter(wv, 600);
-        return { ok: true, data: { key, observe } };
+        // 键盘事件只会送到**聚焦**的元素/页面——聚焦 webview，否则按键落空（静默失效）
+        return await withWebviewFocus(wv, `向网页发送按键 ${key}`, async () => {
+          wv.sendInputEvent({ type: "keyDown", keyCode: key });
+          wv.sendInputEvent({ type: "keyUp", keyCode: key });
+          // A-980：按键即观察（Enter 提交等场景页面会变，回传新状态避免模型再快照）
+          const observe = await observeAfter(wv, 600);
+          return { ok: true, data: { key, observe } };
+        });
       }
 
       case "scroll": {
         const wv = await curWv();
         const dy = typeof cmd.delta === "number" ? cmd.delta : 600;
-        await runJs(wv, `(window.scrollBy(0, ${Math.round(dy)}), true)`);
-        // A-980：滚动即观察（懒加载页面滚动后常出新内容，直接回传）
-        const observe = await observeAfter(wv, 450);
-        return { ok: true, data: { scrolled: Math.round(dy), observe } };
+        // A-1044：滚动不注入鼠标事件，但会移动页面内容 —— 也播一次可视化（用户看得见"Agent 在翻页"）
+        return await withWebviewFocus(wv, `滚动网页 ${Math.round(dy)}px`, async () => {
+          await runJs(wv, `(window.scrollBy(0, ${Math.round(dy)}), true)`);
+          // A-980：滚动即观察（懒加载页面滚动后常出新内容，直接回传）
+          const observe = await observeAfter(wv, 450);
+          return { ok: true, data: { scrolled: Math.round(dy), observe } };
+        });
       }
 
       case "drag": {
@@ -741,28 +803,29 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         const duration = Math.max(100, Math.min(8000, typeof cmd.durationMs === "number" ? cmd.durationMs : 800));
         const steps = typeof cmd.steps === "number" ? cmd.steps : 20;
         const jitter = cmd.jitter !== false;
-        // A-980-R11：拖拽同样先聚焦 webview（失焦后首次 sendInputEvent 会被丢弃）
-        try { wv.focus(); } catch { /* 忽略 */ }
-        await sleep(30);
-        // ① 移动到起点 → 按下（真实鼠标事件，canvas/pointer 监听都能收到）
-        wv.sendInputEvent({ type: "mouseMove", x: from.x, y: from.y });
-        await sleep(60);
-        wv.sendInputEvent({ type: "mouseDown", x: from.x, y: from.y, button: "left", clickCount: 1 });
-        // ② 按住停顿（真实用户按下后不会立即拖动）
-        await sleep(150);
-        // ③ 多步插值移动（缓动 + 微抖），每步一小段真实 mousemove
-        const stepMs = Math.max(5, Math.round(duration / steps));
-        const path = buildDragPath(from, to, steps, jitter);
-        for (const p of path) {
-          wv.sendInputEvent({ type: "mouseMove", x: p.x, y: p.y });
-          await sleep(stepMs);
-        }
-        // ④ 终点松开
-        await sleep(80);
-        wv.sendInputEvent({ type: "mouseUp", x: to.x, y: to.y, button: "left", clickCount: 1 });
-        // A-980：拖拽即观察（滑块是否归位等直接回传）
-        const observe = await observeAfter(wv, 500);
-        return { ok: true, data: { dragged: `${from.what} → ${to.what}`, from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y }, durationMs: duration, steps: path.length, observe } };
+        // A-980-R11 + A-1044：拖拽同样先聚焦 webview（失焦后首次 sendInputEvent 会被丢弃），
+        // 并在结束时归还焦点（详见 withWebviewFocus）
+        return await withWebviewFocus(wv, `拖拽网页元素：${from.what} → ${to.what}`, async () => {
+          // ① 移动到起点 → 按下（真实鼠标事件，canvas/pointer 监听都能收到）
+          wv.sendInputEvent({ type: "mouseMove", x: from.x, y: from.y });
+          await sleep(60);
+          wv.sendInputEvent({ type: "mouseDown", x: from.x, y: from.y, button: "left", clickCount: 1 });
+          // ② 按住停顿（真实用户按下后不会立即拖动）
+          await sleep(150);
+          // ③ 多步插值移动（缓动 + 微抖），每步一小段真实 mousemove
+          const stepMs = Math.max(5, Math.round(duration / steps));
+          const path = buildDragPath(from, to, steps, jitter);
+          for (const p of path) {
+            wv.sendInputEvent({ type: "mouseMove", x: p.x, y: p.y });
+            await sleep(stepMs);
+          }
+          // ④ 终点松开
+          await sleep(80);
+          wv.sendInputEvent({ type: "mouseUp", x: to.x, y: to.y, button: "left", clickCount: 1 });
+          // A-980：拖拽即观察（滑块是否归位等直接回传）
+          const observe = await observeAfter(wv, 500);
+          return { ok: true, data: { dragged: `${from.what} → ${to.what}`, from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y }, durationMs: duration, steps: path.length, observe } };
+        });
       }
 
       case "wait": {

@@ -12,15 +12,46 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { PROJECT_ROOT } from "../paths.js";
 import { resolve, dirname, join } from "node:path";
-// A-966：LanceDB 原生 .node 无法进 electron-vite 的 rollup bundle（\0 解析错）；桌面端默认
-// [memory.lancedb] disabled，因此把运行时依赖改为【type-only + 惰性动态加载】——
-// main/renderer 构建不再打包该包；仅真正启用向量记忆时才会在运行时 require。
+// A-966 / A-1041：LanceDB 原生 .node 无法进 electron-vite 的 rollup bundle（`\0` 解析错），
+// 因此这里对真实包**只做类型引用 + 惰性动态加载**，真正用到向量层时才加载。
+//
+// ⚠️ **这里绝不能加 `@vite-ignore`**：`/* @vite-ignore */` 会让 vite **跳过 alias 解析**，
+// 直接把真实 `@lancedb/lancedb` 连同 297MB 原生子包解析进 bundle
+// （产物里就是 `out/main/chunks/lancedb.win32-x64-msvc-*.node`，安装包 1GB 的元凶）。
+//
+// ⚠️ 光靠 vite alias 也不够可靠（实测：顶层 `resolve.alias` 与 main target 的 `resolve.alias`
+// 都写了，产物里仍内联真实包）。所以桌面端走**注入式加载器**：`setLancedbModuleLoader()`
+// 由 GUI 主进程注入"按内嵌组件目录 require"（见 gui/src/main/__stubs/lancedb-stub.ts），
+// bundle 里因此不再出现 `@lancedb/lancedb` 这个裸 specifier，297MB 无从进入。
 type Table = import("@lancedb/lancedb").Table;
-async function defaultLanceConnect(uri: string) {
-  const mod = await import(/* @vite-ignore */ "@lancedb/lancedb");
+
+/** 真实 LanceDB 模块的最小契约（注入方按此实现） */
+export interface LancedbModuleLike {
+  connect: (uri: string) => Promise<unknown>;
+}
+
+/** 模块加载器注入点（桌面端注入；未注入时退回裸包动态 import，测试/CI 行为不变） */
+let lancedbModuleLoader: (() => Promise<LancedbModuleLike>) | null = null;
+
+export function setLancedbModuleLoader(fn: (() => Promise<LancedbModuleLike>) | null): void {
+  lancedbModuleLoader = fn;
+}
+
+async function defaultLanceConnect(uri: string): Promise<LanceDbLike> {
+  // 桌面端：走注入的加载器（按内嵌组件目录 require），不碰裸 specifier
+  if (lancedbModuleLoader) {
+    const mod = await lancedbModuleLoader();
+    return (await mod.connect(uri)) as unknown as LanceDbLike;
+  }
+  // 未注入时（单测 / CLI / sidecar）退回真实包。
+  // ⚠️ specifier 必须**装在变量里**并配 `@vite-ignore`：写成字面量 `import("@lancedb/lancedb")`
+  // 时 rollup 能静态分析到，照样把 297MB 内联成 chunk（A-1041 实测：即使运行时分支永不走它，
+  // 产物里 `out/main/chunks/lancedb.win32-x64-msvc-*.node` 依然生成 —— 打包器不看运行时分支）。
+  const spec = "@lancedb/lancedb";
+  const mod = (await import(/* @vite-ignore */ spec)) as unknown as LancedbModuleLike;
   return (await mod.connect(uri)) as unknown as LanceDbLike;
 }
 import { classifyLayer, migrationTarget, type MemoryLayer, type MemoryEntry, type MemoryInput } from "./three_layer.js";
@@ -30,6 +61,69 @@ import { embeddingCache, type EmbedCache } from "./embed_cache.js";
 export { PROJECT_ROOT };
 export const DATA_DIR = resolve(PROJECT_ROOT, "data");
 export const KNOWLEDGE_MEMORY_DIR = resolve(PROJECT_ROOT, "Knowledge", "Agent Memory");
+
+/**
+ * 记忆存储位置（**唯一实现**：MemoryStore 构造 + 心智中枢面板展示都读这里）。
+ *
+ * 语义：自定义根目录（`memoryRoot`，对应 `opts.dataDir`）是**一个**根，管**两个**存储 ——
+ *   · 默认（未设自定义根）：memory.json 落 `Knowledge/Agent Memory/<agentId>/`，
+ *     LanceDB 落 `data/<agentId>/lancedb`（两处默认位置本来就是分开的）。
+ *   · 设了自定义根：**两者都落在 `<根>/<agentId>/` 下**。
+ *
+ * ⚠️ 这里曾经是"只搬一半"：`memoryRoot` 只作用于 memory.json，LanceDB 被一行
+ * `// LanceDB 保持原位` 钉死在默认 `data/` 里 —— 用户改了"存储位置"，界面上两个地址
+ * 只有一个跟着变（用户原话：「自定义改地址只能改一个」）。向量库是记忆里体积最大的
+ * 那一半，跟着根目录走才符合"存储位置"这一个设置项的语义。
+ *
+ * 把两个路径的推导收在一个纯函数里，是为了让「界面显示的路径」与「真正写入的路径」
+ * 同源 —— 此前面板显示的是字符串模板 `data/<agentId>/lancedb`（字面 `<agentId>`），
+ * 既不是真实路径、也永不随设置变化（假信息）。
+ */
+export function resolveMemoryPaths(
+  agentId: string,
+  opts: { dataDir?: string; projectRoot?: string } = {},
+): { memoryJson: string; lanceDir: string } {
+  const root = opts.projectRoot ?? PROJECT_ROOT;
+  if (opts.dataDir) {
+    const base = resolve(root, opts.dataDir);          // 自定义根：两者同根
+    return {
+      memoryJson: resolve(base, agentId, "memory.json"),
+      lanceDir: resolve(base, agentId, "lancedb"),
+    };
+  }
+  return {
+    memoryJson: resolve(root, "Knowledge", "Agent Memory", agentId, "memory.json"),
+    lanceDir: resolve(root, "data", agentId, "lancedb"),
+  };
+}
+
+/**
+ * 目录搬家（向量库随自定义根目录迁移）。
+ *
+ * 触发条件很窄：新旧位置不同、旧位置存在、新位置还不存在。
+ * 顺序：同盘 `renameSync` 原子完成（最快、无副本）；跨盘 rename 抛 EXDEV →
+ * 退化为递归复制，并**保留原目录不删**（宁可留一份重复，也不静默删用户的向量库）。
+ * 任何失败都留痕（console.warn）后返回，让调用方照常在新位置建库 —— 搬家失败
+ * 不该让向量层整体瘫痪，但**必须出声**（静默失败是精度杀手）。
+ */
+function migrateDirIfNeeded(oldDir: string, newDir: string): void {
+  if (resolve(oldDir) === resolve(newDir)) return;
+  if (!existsSync(oldDir) || existsSync(newDir)) return;
+  try {
+    mkdirSync(dirname(newDir), { recursive: true });
+    try {
+      renameSync(oldDir, newDir);
+      console.log(`[memory] 向量库已迁移: ${oldDir} → ${newDir}`);
+      return;
+    } catch {
+      // 跨卷（rename 不可用）→ 复制兜底（下方）；原目录保持不动
+    }
+    cpSync(oldDir, newDir, { recursive: true });
+    console.log(`[memory] 向量库已复制到新位置: ${newDir}（原目录 ${oldDir} 保留，未删除）`);
+  } catch (e) {
+    console.warn(`[memory] 向量库迁移失败 ${oldDir} → ${newDir}: ${e}（改用新位置，旧数据留在原处）`);
+  }
+}
 
 // A-112: agent_id 仅允许安全字符（防御路径遍历；空串放行 = global 语义）
 const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -223,6 +317,8 @@ export class MemoryStore {
   private data: MemoryData = memoryTemplate();
   private lancedbEnabled: boolean;
   private lancedbUri: string;
+  /** 默认位置的向量库目录（自定义根目录生效时作为迁移来源） */
+  private defaultLanceUri: string;
   private lanceTable: Table | null = null;
   private embed: EmbedCaller | null;
   private embedCache: EmbedCache;
@@ -233,10 +329,14 @@ export class MemoryStore {
     validateAgentId(agentId);
     this.agentId = agentId;
     this.projectRoot = opts.projectRoot ?? PROJECT_ROOT;
-    const base = opts.dataDir ? resolve(this.projectRoot, opts.dataDir) : KNOWLEDGE_MEMORY_DIR;
-    this.jsonPath = resolve(base, agentId, "memory.json");
+    // 路径推导唯一实现（见 resolveMemoryPaths）：自定义根目录同时决定 memory.json 与 lancedb
+    const paths = resolveMemoryPaths(agentId, { dataDir: opts.dataDir, projectRoot: this.projectRoot });
+    this.jsonPath = paths.memoryJson;
     this.lancedbEnabled = opts.lancedbEnabled ?? false;
-    this.lancedbUri = opts.lancedbUri ?? resolve(DATA_DIR, agentId, "lancedb"); // LanceDB 保持原位
+    this.lancedbUri = opts.lancedbUri ?? paths.lanceDir;
+    // 默认位置的向量库（用于"自定义根目录后把旧库搬过来"）——同样从 projectRoot 推导，
+    // 保证「界面显示的路径 / 真正写入的路径 / 迁移看的旧路径」三者同源（可注入、可测）。
+    this.defaultLanceUri = resolveMemoryPaths(agentId, { projectRoot: this.projectRoot }).lanceDir;
     this.embed = opts.embed ?? null;
     this.embedCache = opts.embedCache ?? embeddingCache;
     this.lanceConnect = (opts.lance?.connect ?? defaultLanceConnect);
@@ -698,7 +798,10 @@ export class MemoryStore {
   async initLancedb(): Promise<void> {
     if (!this.lancedbEnabled) return;
     try {
-      const uri = this.lancedbUri || resolve(DATA_DIR, this.agentId, "lancedb");
+      const uri = this.lancedbUri || this.defaultLanceUri;
+      // 自定义根目录生效时，把旧默认位置的向量库搬过来（否则用户改了存储位置后
+      // 既看不到旧向量、也不知道它们还在原处）。只在首次真正用到向量层时发生。
+      migrateDirIfNeeded(this.defaultLanceUri, uri);
       const db = await this.lanceConnect(uri);
       const tableName = `memory_${this.agentId}`;
       try {
@@ -706,8 +809,11 @@ export class MemoryStore {
         // H3: 检查已有表的向量维度是否匹配当前嵌入维度（查首行探测；空表视为匹配）
         const rows = await this.lanceTable.query().limit(1).toArray();
         if (rows.length) {
-          const vec = (rows[0] as Record<string, unknown>).vec as number[] | Float32Array | undefined;
-          const dim = vec ? Array.from(vec).length : 0;
+          // ⚠️ 列名是 `vector`（见 LanceRow 与下方全部写入点），不是 `vec` —— 读错列名会得到
+          // undefined → dim=0 → 与 embedDim 永远不等 → **每次初始化都重建表**（向量记忆
+          // 每次重启即丢，且日志里只看到一句"维度不匹配"，看不出是读错了列）。
+          const raw = (rows[0] as Record<string, unknown>).vector;
+          const dim = raw ? Array.from(raw as ArrayLike<number>).length : 0;
           if (dim !== embedDim) {
             console.warn(`[memory] 向量维度不匹配（表: ${dim}, 当前: ${embedDim}），重建表（记忆可再生，丢失可接受）`);
             await db.dropTable?.(tableName);

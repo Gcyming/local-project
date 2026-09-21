@@ -231,10 +231,12 @@ app.whenReady().then(async () => {
        · SubagentAvatar `running && (`  —— 头像上的运行徽标（纯装饰圆点，无进出场语义）
        · AgentsPanel `q !== "" && (`    —— 输入框内的"清空"按钮（不是浮层，且必须即时出现）
        · RightSidebar `modal && (`      —— 模态遮罩弹层（有自己的交互约定，不属于"展开/收起"）
-       · RightSidebar `!active && !navUrl && (` —— 浏览器空态提示层（inset:0 铺满、pointerEvents:none、
-         纯"有没有页面"的状态提示，没有展开/收起语义；它和 `{loading && active && …}` 进度条是一类）
+     A-1045：原豁免项 `!active && !navUrl && (`（浏览器空态提示层）**已撤除**——该层更名为
+     `.browser-blank` 且定位/配色全部移入 CSS（覆盖层不写 inline absolute 就不该有豁免），
+     理由是「有豁免就会把后人加进同一块的 inline 浮层一起放过去」。现在它靠"排在进度条之后"
+     自然不落在扫描窗口内，属于**结构上**不被命中，而不是被豁免。
      任何新增命中都会让本项变红 —— 要么改成常驻 + .pop，要么把理由写进这张豁免表。 */
-  const ALLOW_COND = ["showAgents && (", "running && (", "q !== \"\" && (", "modal && (", "!active && !navUrl && ("];
+  const ALLOW_COND = ["showAgents && (", "running && (", "q !== \"\" && (", "modal && ("];
   const residuals = [];
   const walk = (dir) => {
     for (const f of fs.readdirSync(dir)) {

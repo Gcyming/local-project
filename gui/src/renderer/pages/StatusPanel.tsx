@@ -10,6 +10,7 @@ import type { StatsSnapshot } from "../../shared/ipc.js";
 import { alertAsync } from "../dialog.js";
 import PlanPanel from "./PlanPanel.js";
 import TraceViewer from "./TraceViewer.js";
+import ReleaseNotesView from "./ReleaseNotesView.js";
 
 interface UpdateStatus {
   status: string;
@@ -88,6 +89,8 @@ function Bars({ data, color }: { data: Array<{ label: string; value: number }>; 
 export default function StatusPanel(): JSX.Element {
   const [stats, setStats] = React.useState<StatsSnapshot | null>(null);
   const [updateStatus, setUpdateStatus] = React.useState<UpdateStatus | null>(null);
+  /** 更新说明展开态：默认展开（用户点「检查更新」就是想看这版改了什么） */
+  const [notesOpen, setNotesOpen] = React.useState(true);
   const [trend, setTrend] = React.useState<TrendPoint[]>([]);
   /** 各角色进入 loading 的时刻（展示「已等待 N 秒」，区分加载中与卡死） */
   const [loadingSince, setLoadingSince] = React.useState<Record<string, number>>({});
@@ -161,6 +164,8 @@ export default function StatusPanel(): JSX.Element {
   const updateStatusSafe = updateStatus ?? { status: "disabled" };
   const isAvailable = updateStatus?.status === "available";
   const isDownloaded = updateStatus?.status === "downloaded";
+  /** 有可展示的更新说明（归一化后非空；空串/纯空白不算） */
+  const notesAvailable = Boolean((updateStatusSafe.releaseNotes ?? "").trim());
 
   const lifecycleBars = Object.entries(agents.byLifecycle).map(([label, value]) => ({ label, value }));
   const trendAgents = trend.map((p) => p.agents);
@@ -363,15 +368,25 @@ export default function StatusPanel(): JSX.Element {
           {updateStatusSafe.status === "checking" && (
             <span style={{ color: "var(--text-muted)", fontSize: 13 }}>正在检查更新...</span>
           )}
-          {isAvailable && updateStatusSafe.releaseNotes && (
-            <span style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "pre-wrap" }}>
-              {updateStatusSafe.releaseNotes}
-            </span>
-          )}
           <button onClick={handleCheckUpdate} className="btn" style={{ fontSize: 12.5 }}>
             手动检查
           </button>
         </div>
+        {/* A-1037：Release 正文此前被当纯文本塞进 flex 行 → `<h3>`/`<table>` 源码裸露。
+            现在走结构化渲染（HTML/Markdown 双认），且**只按需展开**，不把面板顶爆。 */}
+        {(isAvailable || isDownloaded) && notesAvailable && (
+          <div style={{ marginTop: 8 }}>
+            <button
+              onClick={() => setNotesOpen((o) => !o)}
+              className="btn"
+              style={{ fontSize: 12.5 }}
+              aria-expanded={notesOpen}
+            >
+              {notesOpen ? "收起更新说明" : `查看更新说明（${updateStatusSafe.version}）`}
+            </button>
+            {notesOpen && <ReleaseNotesView notes={updateStatusSafe.releaseNotes ?? ""} />}
+          </div>
+        )}
       </section>
     </div>
   );

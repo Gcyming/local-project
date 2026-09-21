@@ -1520,12 +1520,24 @@ body.slime-resizing {
 
 /* 浏览器（内嵌 webview） */
 .browser-bar { padding-bottom: 4px; }
-.browser-url { flex: 1; }
+/* A-1045：地址栏原本继承 `.term-input` 的近黑底（#111）——在 slate 主题下与面板色（--bg  #0f172a）
+   明显脱节，看着像"面板上挖了个黑洞"。改为主题变量（唯一出处），随 alpha/beta 主题一起走。
+   注意 `.browser-url` 必须声明在 `.term-input` **之后**（同特异性 0,1,0，靠源序覆盖）。 */
+.browser-url {
+  flex: 1;
+  background: var(--bg-input);
+  border-color: var(--border);
+  color: var(--text);
+}
+.browser-url::placeholder { color: var(--text-muted); }
+.browser-url:focus { border-color: var(--accent); }
 .browser-wrap {
   flex: 1;
   min-height: 0;
   position: relative;
-  background: #fff;
+  /* A-1045：原为硬编码 #fff —— webview 未绘制/未挂载时宿主先透出纯白（晃眼根因之一）。
+     webview 的 **host 底色**必须等于主题底色，guest 未绘制的那一帧才不会闪白。 */
+  background: var(--bg);
   border-top: 1px solid var(--border);
 }
 .browser-loading {
@@ -1540,6 +1552,47 @@ body.slime-resizing {
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
   text-align: center;
+}
+
+/* ── A-1045：内嵌浏览器「主题化占位页」（消除进入即纯白晃眼）─────────────────────
+   根因：guest 文档（含 `about:blank` 占位）由 **Chromium 以白色基底**绘制，宿主 CSS 管不到
+   它内部；宿主容器虽然已改成 --bg，但 guest 一挂载就把白底盖上来 —— 于是「每次进去都是纯白」。
+   做法（与 A-1018 错误页同一范式）：在 guest **还没有真实文档**时，用一层**不透明**的主题色
+   占位页盖住它。`--bg` 与面板底色同源 → 视觉上无缝，不引入新色值；地址栏/工具栏仍是主题色。
+   ⚠️ 三个约束（都有前科，改动时勿破）：
+     ① `pointer-events:none` —— A-976 教训：任何覆盖层吃点击都会让 Agent 点不动页面；
+     ② 类名走本文件（**不在 JSX 写 inline position:absolute**）—— 静态守卫 ⑬ 只认 inline absolute，
+        会把「条件渲染 + inline absolute」误判成"收起即卸载"的残留浮层；
+     ③ z-index 必须低于 `.browser-error-page`(8)，失败页才盖得住占位页。 */
+.browser-stage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.browser-blank {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  background: var(--bg);
+  pointer-events: none; /* ① 绝不吞 Agent 的点击 */
+}
+.browser-blank-mark { color: var(--accent); opacity: 0.9; }
+.browser-blank-title { font-size: 13px; color: var(--text-secondary); }
+.browser-blank-hint {
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: var(--text-muted);
+  max-width: 300px;
 }
 
 /* ── Markdown 预览（右侧文件查看器 .md 渲染） ── */
@@ -2380,3 +2433,118 @@ body.slime-resizing {
   margin-top: 4px;
   flex-shrink: 0;
 }
+
+/* ══ A-1044：图形操作可视化（呼吸灯边框 + 可隐藏的悬浮提示） ══════════════════════
+   用户原话：「加一点操作效果，如在被操作的界面边界加上呼吸灯效果，并可主动选择隐藏的悬浮提示。」
+   背景：用户报「Agent 操作时我点击 slime 里的一些地方会失效，要重新点击」——根因是"共享物理指针 +
+   前台窗口/焦点竞争"（Windows 无合法隔离通道），正确解法是「人优先让位 + 串行 + **可见化**」。
+   本段负责最后一件：让「Agent 正在操作哪一块」看得见，用户才有机会把手挪开。
+   ⚠️ 三条硬约束（前科见 component 注释）：
+     ① 除"隐藏"按钮外全部 pointer-events:none —— 任何吃点击的浮层都会让 Agent/用户点不动；
+     ② 常驻挂载 + 切 `.is-on`（禁止条件渲染，否则结构上不可能有进出场）；
+     ③ 呼吸动效只动 box-shadow / border-color（不触发布局），且 `prefers-reduced-motion` 下降级为静态描边。 */
+.op-focus-frame {
+  position: fixed;              /* 应用视口坐标（webview 矩形来自 getBoundingClientRect，同基准） */
+  z-index: 900;                 /* 高于应用内容，低于本地模型加载面板(1000)/主题弹窗(1200) */
+  pointer-events: none;
+  border: 2px solid var(--border-hover);
+  border-radius: 10px;
+  opacity: 0;
+  transition: opacity 0.18s linear;
+}
+/* 宿主/设备目标：宿主坐标映射不进应用窗口 → 边框画在内容区边缘（提示文案负责说清是"屏幕"不是"窗口"） */
+.op-focus-frame.is-sys {
+  left: 6px;
+  right: 6px;
+  top: calc(var(--titlebar-h) + 6px);
+  bottom: 6px;
+}
+.op-focus-frame.is-on {
+  opacity: 1;
+  animation: op-focus-breathe 1.7s ease-in-out infinite;
+}
+@keyframes op-focus-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); border-color: var(--border-hover); }
+  50%      { box-shadow: 0 0 14px 3px var(--accent-soft); border-color: var(--accent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .op-focus-frame.is-on {
+    animation: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 10px 2px var(--accent-soft);
+  }
+  .op-focus-dot { animation: none; }
+}
+.op-focus-tag {
+  position: absolute;
+  left: 6px;
+  top: -10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  white-space: nowrap;
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.op-focus-hint {
+  position: fixed;
+  left: 50%;
+  top: calc(var(--titlebar-h) + 10px);
+  transform: translateX(-50%);
+  z-index: 901;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(560px, 72vw);
+  padding: 5px 6px 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;         /* ① 绝不吞点击 */
+  transition: opacity 0.18s linear, visibility 0.18s linear;
+}
+.op-focus-hint.is-on { opacity: 1; visibility: visible; }
+.op-focus-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-focus-text b { color: var(--text); font-weight: 600; }
+.op-focus-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: op-focus-blink 1.2s ease-in-out infinite;
+}
+@keyframes op-focus-blink {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+.op-focus-hide {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  pointer-events: auto;         /* 唯一可点元素 */
+}
+.op-focus-hide:hover { background: var(--bg-hover); color: var(--text); }

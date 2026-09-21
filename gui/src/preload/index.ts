@@ -13,7 +13,7 @@ import type {
   ProviderSummary, ModelSpec, ConfigOverview, LocalModelSpec, AgentDetail,
   SessionItem, ConversationMessage, SessionConfig, ApprovalMode,
   SuggestionItem, ExtrasList, MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot,
-  DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus,
+  DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus, AdbDownloadProgressInfo,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
   GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, WorkspaceReadFileResult,
@@ -23,6 +23,7 @@ import type {
   TraceSnapshot, PlanInfo, CompressResult,
   ToolProfileDTO,
   NotifyConfigDTO,
+  OperationFocusUI,
 } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
@@ -443,7 +444,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:llmgw:token:toggle", { key, active }) as Promise<LlmGatewayTokenOpResultDTO>,
   },
   mind: {
-    configGet: () => ipcRenderer.invoke("slime:mind:configGet") as Promise<MindConfigInfo>,
+    /** 读配置。传 agentId 才会返回该 Agent 的真实记忆/向量库绝对路径（不传则 memoryPaths=null） */
+    configGet: (agentId?: string) =>
+      ipcRenderer.invoke("slime:mind:configGet", agentId ? { agentId } : undefined) as Promise<MindConfigInfo>,
     configSet: (patch: { vectorTool?: VectorTool; memoryRoot?: string }) =>
       ipcRenderer.invoke("slime:mind:configSet", patch) as Promise<{ ok: boolean; vectorTool: VectorTool; memoryRoot: string }>,
     emotionGet: (agentId: string) =>
@@ -468,6 +471,8 @@ contextBridge.exposeInMainWorld("slimeAPI", {
   boot: {
     status: () => ipcRenderer.invoke("slime:boot:status") as Promise<BootStatus>,
     onEvent: (cb: (s: BootStatus) => void) => onMessage<BootStatus>("slime:boot:event", cb),
+    /** A-1039：应用版本号（启动面板副标题显示；git describe 同源的 package.json version） */
+    version: () => ipcRenderer.invoke("slime:app:version") as Promise<string>,
   },
   workspace: {
     /** 右侧栏「工作树」：列目录（root=工作根，rel=相对路径，主进程校验锚定） */
@@ -593,7 +598,7 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-918++：检测 adb 是否就绪（含版本/来源） */
     detect: () => ipcRenderer.invoke("slime:adb:detect") as Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>,
     /** A-918++：下载官方 platform-tools 便携包（进度经 onDownloadProgress 监听） */
-    download: () => ipcRenderer.invoke("slime:adb:download") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string } }>,
+    download: () => ipcRenderer.invoke("slime:adb:download") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: AdbDownloadProgressInfo }>,
     /** A-918++：列出已连接设备 */
     devices: () => ipcRenderer.invoke("slime:adb:devices") as Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>,
     /** A-918++：无线连接设备（host 形如 192.168.1.10:5555） */
@@ -618,7 +623,7 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     startServer: () => ipcRenderer.invoke("slime:adb:startServer") as Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>,
     killServer: () => ipcRenderer.invoke("slime:adb:killServer") as Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
     /** A-918++：下载进度监听（主进程 → 渲染层） */
-    onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => onMessage<{ state: string; percent: number; receivedMB: number; totalMB: number; error?: string }>("slime:adb:downloadProgress", cb),
+    onDownloadProgress: (cb: (p: AdbDownloadProgressInfo) => void) => onMessage<AdbDownloadProgressInfo>("slime:adb:downloadProgress", cb),
   },
   http: {
     /** A-918++：把本地目录作为静态服务启动（默认 127.0.0.1 仅本机；传 host:"0.0.0.0" 才局域网可访问） */
@@ -648,6 +653,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 图形控制：截图（GUI 预览用，返回已瘦身的 data URL） */
     capture: (p?: { backend?: string; target?: string }) =>
       ipcRenderer.invoke("slime:screen:capture", p ?? {}) as Promise<{ ok: boolean; dataUrl?: string; width?: number; height?: number; error?: string }>,
+    /** A-1044：图形动作可视化事件（呼吸灯边框 + 悬浮提示的数据源）。
+     *  主进程在**注入输入之前**发 begin、动作结束后发 end —— 用户先看见"Agent 要动了"，
+     *  才有机会把手从键鼠上挪开（人优先的可见化）。 */
+    onOperationFocus: (cb: (e: OperationFocusUI) => void) =>
+      onMessage<OperationFocusUI>("slime:screen:opFocus", cb),
   },
   /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
   onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string; from?: "site" | "user" }) => void) =>
@@ -837,7 +847,8 @@ declare global {
         tokenToggle: (key: string, active: boolean) => Promise<LlmGatewayTokenOpResultDTO>;
       };
       mind: {
-        configGet: () => Promise<MindConfigInfo>;
+        /** 读配置。传 agentId 才会返回该 Agent 的真实记忆/向量库绝对路径（不传则 memoryPaths=null） */
+        configGet: (agentId?: string) => Promise<MindConfigInfo>;
         configSet: (patch: { vectorTool?: VectorTool; memoryRoot?: string }) => Promise<{ ok: boolean; vectorTool: VectorTool; memoryRoot: string }>;
         emotionGet: (agentId: string) => Promise<EmotionSnapshot>;
         emotionSet: (input: { agentId: string; valence: number; arousal: number; dominance: number }) => Promise<{ ok: boolean; emotion?: EmotionSnapshot; error?: string }>;
@@ -846,11 +857,15 @@ declare global {
         download: (target: DownloadTarget) => Promise<{ ok: boolean; error?: string }>;
         downloadControl: (target: DownloadTarget, action: "pause" | "cancel" | "resume") => Promise<{ ok: boolean }>;
         downloadSnapshot: (target: DownloadTarget) => Promise<DownloadProgressInfo>;
+        /** ⚠️ 实现里早就有、声明里漏了 —— 补齐，否则用类型化 API 的调用点会 TS 报成员不存在，
+         *  只有写 `(window as any)` 的地方才能"通过"，等于把契约缺口藏起来。 */
+        locateDep: (mode: "auto" | "pick", key: "llama_bin" | "model_path" | "models_dir") => Promise<LocateDepResult>;
         onDownloadProgress: (cb: (p: DownloadProgressInfo) => void) => () => void;
       };
       boot: {
         status: () => Promise<BootStatus>;
         onEvent: (cb: (s: BootStatus) => void) => () => void;
+        version: () => Promise<string>;
       };
       workspace: {
         list: (root: string, rel: string) => Promise<WorkspaceListResult>;
@@ -911,7 +926,7 @@ declare global {
       };
       adb: {
         detect: () => Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>;
-        download: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string } }>;
+        download: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string; progress?: AdbDownloadProgressInfo }>;
         devices: () => Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>;
         connect: (host: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         disconnect: (host: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
@@ -924,7 +939,7 @@ declare global {
         reboot: (serial: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
         startServer: () => Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>;
         killServer: () => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
-        onDownloadProgress: (cb: (p: { state: string; percent: number; receivedMB: number; totalMB: number; error?: string }) => void) => () => void;
+        onDownloadProgress: (cb: (p: AdbDownloadProgressInfo) => void) => () => void;
       };
       http: {
         serve: (p: { dir: string; port?: number; host?: string; spa?: boolean }) => Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }>;
