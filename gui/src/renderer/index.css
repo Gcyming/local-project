@@ -590,8 +590,11 @@ code,
   font-weight: 700;
   color: var(--text-muted);
   padding: 8px 10px 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  /* A-1056①：**去掉 text-transform: uppercase**。
+     它把分组头（供应商 key，如 deepseek）整体大写，而下面的条目是小写 ——
+     同一个词在以两种"字体"出现在同一屏里，用户读到的就是"展开样式不对/花了"
+     （原话："现在的选择模型展开怎么成这样了？"）。中文项目名更不该被大写化。
+     字母间距同步收回默认：那是为大写短标签配的，现在只在中文/混合 key 上制造松散感。 */
   position: sticky;
   top: 0;
   /* 与下拉本体同源近实底（滚动时内容不透过分组头） */

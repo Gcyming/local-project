@@ -12,6 +12,10 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+/* `sub` = **行尾无关**的替换（共享模块，不要在本脚本另写一份）。
+   ⚠️ 本脚本 M11–M13 是**跨行锚点**：裸 `"...\n..."` 只在目标文件恰好是 LF 时能用，
+   行尾一翻就**静默失效**（"未命中"被误读成"守卫守住了"）。见 `_mut-eol.mjs` 顶部说明。 */
+import { sub, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
 
 // ⚠️ 不能用 `new URL(...).pathname` —— 项目根含空格（"...pilot project"），
 // pathname 会把空格编码成 %20，拼出来的路径直接 ENOENT。fileURLToPath 才正确解码。
@@ -19,9 +23,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SPEC = "tests/gui/a1039-guards.spec.ts";
 
 /** 待变异的文件（原样备份，最后逐个还原） */
-const TARGETS = ["gui/src/renderer/App.tsx", "gui/src/renderer/pages/SplashScreen.tsx"];
+const TARGETS = ["gui/src/renderer/App.tsx", "gui/src/renderer/pages/SplashScreen.tsx", "gui/src/renderer/pages/ChatPanel.tsx"];
 
-const MUTATIONS = [
+/* `from` / `to` 仍然是本脚本的书写形态（好读）；`mutate` 由它们**机械派生** ——
+   这样 `eolProblems()` 与执行循环共用同一套行为判据，不存在"自检走一条路、执行走另一条路"。 */
+const RAW_MUTATIONS = [
   {
     name: "M1 门判据退回 boot.phase（degraded 会当场放行 = 本次卡顿的直接成因）",
     file: "gui/src/renderer/App.tsx",
@@ -37,8 +43,8 @@ const MUTATIONS = [
   {
     name: "M3 FIRST_LOAD_KEYS 漏掉 providers（键少了，门就少等一项）",
     file: "gui/src/renderer/App.tsx",
-    from: 'const FIRST_LOAD_KEYS = ["agents", "sessions", "providers", "localModels"] as const;',
-    to: 'const FIRST_LOAD_KEYS = ["agents", "sessions"] as const;',
+    from: 'const FIRST_LOAD_KEYS = ["agents", "sessions", "providers", "localModels", "chatHistory"] as const;',
+    to: 'const FIRST_LOAD_KEYS = ["agents", "sessions", "chatHistory"] as const;',
   },
   {
     name: "M4 markFirstLoad 只 setState 到一半（登记表永远收不齐）→ 靠 8s 兜底才放行",
@@ -82,7 +88,28 @@ const MUTATIONS = [
     from: "api?.boot?.version?.()",
     to: "undefined",
   },
-];
+  // ── A-1058①：门要覆盖"中间那栏的会话内容"（M11–M13）─────────────────────────────
+  {
+    name: "M11 App 不再把 onHistoryLoaded 传给 ChatPanel（门永远收不齐 → 靠 8s 兜底）",
+    file: "gui/src/renderer/App.tsx",
+    from: "      onHistoryLoaded={markChatHistoryLoaded}\n",
+    to: "",
+  },
+  {
+    name: "M12 ChatPanel 的 catch 路径漏回执（历史加载失败 → 只能干等到 8s）",
+    file: "gui/src/renderer/pages/ChatPanel.tsx",
+    from: "      // A-1058①：**失败也必须回执** —— 否则门只能等 8s 总超时（A-1039 的\"失败也放行\"规矩）\n      onHistoryLoaded?.();\n",
+    to: "",
+  },
+  {
+    name: "M13 删掉「没有会话可开就自己登记」的兜底（欢迎页/无 agentId → 门空等 8s）",
+    file: "gui/src/renderer/App.tsx",
+    from: "    if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }\n",
+    to: "",
+  },
+];   // ← RAW_MUTATIONS 结束
+
+const MUTATIONS = RAW_MUTATIONS.map((m) => ({ ...m, mutate: (t) => sub(t, m.from, m.to) }));
 
 function hash(p) {
   return createHash("sha256").update(readFileSync(p)).digest("hex");
@@ -108,18 +135,29 @@ if (!runSpec()) {
 }
 console.log("基线绿灯 ✓\n");
 
+/* 行尾自检：先验**检测器自己**不空转（恒真的自检比没有自检更危险），再验锚点行尾无关。 */
+const probe = selfTestEolDetector(ROOT);
+if (probe.length) {
+  console.error("行尾检测器自检失败（检测能力本身坏了）：");
+  for (const b of probe) { console.error(`  - ${b}`); }
+  process.exit(1);
+}
+if (reportEolProblems(eolProblems(MUTATIONS, ROOT), "mut-a1039")) { process.exit(1); }
+console.log("行尾检测器自检 + 锚点自检均通过\n");
+
 let caught = 0;
 const missed = [];
 try {
   for (const m of MUTATIONS) {
     const path = join(ROOT, m.file);
     const src = originals.get(m.file);
-    if (!src.includes(m.from)) {
+    const next = m.mutate(src);
+    if (next === src) {
       console.error(`⚠️  ${m.name}\n    锚点未命中（源码已漂移，需同步变异脚本）: ${m.from.slice(0, 60)}…`);
       missed.push(m.name);
       continue;
     }
-    writeFileSync(path, src.replace(m.from, m.to));
+    writeFileSync(path, next);
     const green = runSpec();
     writeFileSync(path, src); // 立即还原，防后续变异叠加
     if (green) {

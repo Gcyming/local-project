@@ -42,6 +42,13 @@ import {
 } from "./chatProducts.js";
 // A-1051：「恢复中」收尾判定（纯函数）——切换会话后永久停在「（恢复中…）」的根因锁死在这里
 import { decideResumeOutcome, RESUME_MAX_ATTEMPTS, RESUME_QUERY_RETRY_MS } from "./resumeOutcome.js";
+// A-1056②：阶段久等的激励语（阈值/节拍/文案池）——纯逻辑独立成模块，可逐条回归
+import { CHEER_ROTATE_MS, pickCheer, shouldCheer } from "./cheerPhrases.js";
+/** A-1056③：待发指令卡片的三个操作图标（用户指定目录 gui/icon/icon_fpbc119q3rk）：
+ *  修改 / 直接插入 / 撤销删除 */
+import queueEditIcon from "../../../icon/icon_fpbc119q3rk/edit.svg";
+import queueInsertIcon from "../../../icon/icon_fpbc119q3rk/arrow-narrow-right.svg";
+import queueCancelIcon from "../../../icon/icon_fpbc119q3rk/close.svg";
 // A-1052：正文渲染前净化（折叠连续空行）——「巨型气泡」是 pre-wrap 把空行各撑成整行，见该模块文件头
 import { collapseBlankRuns } from "./messageText.js";
 // 本组件只**写**在途快照；取样方是右栏（readLiveMonitor 由 RightSidebar 直接引用）
@@ -53,15 +60,18 @@ import { inferModelCapabilities } from "../../../../shared/gen/model-capabilitie
 // A-1054①：思考面板懒挂载闸门（纯逻辑，住在 .ts 里可被单测/变异；见该模块文件头）
 import { advanceReasoningFrame, hasReasoningData, isOpenClass, shouldMountBody } from "./reasoningGate.js";
 // A-1054⑤：底部实时状态行的文案推导（纯逻辑；优先级顺序与"等用户时不播扫光"都在那里）
-import { deriveLiveStatus } from "./liveStatus.js";
-// A-1054⑥：待发指令队列（中途插入 / 即将插入）——纯逻辑，本文件只做接线
+import { deriveLiveStatus, type LiveStatus } from "./liveStatus.js";
+// A-1054⑥ / A-1056③：待发指令队列 —— 纯逻辑，本文件只做接线
+// ⚠️ A-1056③：`describeMode / modeHint / toggleMode` 不再被本文件使用 ——
+//    它们在纯逻辑模块里仍导出（供回归测试描述语义），但界面上**不许再出现**
+//    「即将插入 / 中途插入」这类实现词（用户原话："即将插入是什么鬼？"）。
+//    用户看到的只有三件事：这条是我的话（气泡卡片）、改/发/撤（三个图标）、
+//    「直接插入 = 立刻发，本轮就地收尾后接续」。
 import {
-  describeMode, enqueue, modeHint, nextQueueId, previewText, promote, removeAt, setMode,
-  summarize, takeNext, toggleMode,
-  type InsertMode, type QueuedInstruction,
+  enqueue, nextQueueId, promote, removeAt, setMode,
+  summarize, takeNext,
+  type QueuedInstruction,
 } from "./instructionQueue.js";
-// A-1054⑥：「发新指令默认怎么插」的唯一读写入口（禁在本文件复写 localStorage 口径）
-import { readInsertMode, writeInsertMode } from "../insertModeToggle.js";
 
 /**
  * 推理强度等级 → 中文名（仅作展示标签）。等级以当前模型「上游返回」为准，
@@ -619,6 +629,19 @@ interface ChatPanelProps {
   memberCount?: number;
   /** A-943：会话模式切换（App 层持久化 setType 并刷新侧栏） */
   onTypeChanged?: (type: "normal" | "brainstorm") => void;
+  /**
+   * A-1058①：**本会话内容（历史消息）加载完毕**的回执 —— 供 App 的启动门登记。
+   *
+   * 由来（用户原话："这个中间的界面加载要一段时间，我说话你是听不见吗？给我算在加载界面里面"）：
+   * 启动门 A-1039 此前只等 agents/sessions/providers/localModels 四项，**不含会话内容本身**。
+   * 于是门放行后 ChatPanel 才挂载、才去 `conversations.load`，中间那栏在这段时间里
+   * 显示的是 `messages.length === 0` 的**空态**（看着像"已经好了，只是这会话没消息"）——
+   * 用户对着一个还没接上数据的界面说话，自然"听不见"。
+   *
+   * 现在：加载 settle（成功/失败**都要**上报，失败不能把用户关在加载页）即回执，
+   * 由 App 记入 `firstLoad.chatHistory`，门因此覆盖到"中间界面真正有内容"为止。
+   */
+  onHistoryLoaded?: () => void;
 }
 
 /** GUI 指令表（CLI 语义迁移） */
@@ -723,6 +746,19 @@ interface GhostSelectOption {
   icon?: React.ReactNode;
   /** 不可选（如未启用的模型：灰显+点击不切换，仅展示） */
   disabled?: boolean;
+  /**
+   * A-1056①：**不渲染**，但仍参与 `value` 匹配。
+   *
+   * 由来（用户原话："还有一个多的，所谓的默认（这不就是之前的自动吗）？"）：
+   * 为了让"角色只选了供应商、没选具体模型"（value = `api:<key>`）能在按钮上正确显示，
+   * 我们曾在列表里额外插一条 `${p.key} · 默认（${first}）`——用户看到的是**同一个模型
+   * 出现两次**（一次叫"默认"，一次是真名），且那条"默认"与旧的"自动"语义重叠，读起来像噪音。
+   *
+   * 现在：那一行**不进下拉**（选具体模型与"用供应商默认"在下游等价），但保留在 options 里，
+   * 于是 `current = options.find(o => o.value === value)` 仍能命中——按钮照旧显示
+   * 「deepseek · 默认（deepseek-chat）」，只是列表干净了。
+   */
+  hidden?: boolean;
 }
 
 interface GhostSelectProps {
@@ -772,6 +808,9 @@ function GhostSelect({ value, options, onChange, title, style, maxWidth = 260, d
   const grouped = React.useMemo(() => {
     const map = new Map<string, GhostSelectOption[]>();
     for (const o of options) {
+      // A-1056①：hidden 项只服务 value 匹配（见 GhostSelectOption.hidden），不进列表 ——
+      // 也不建组，否则会留下一个只有标题、没有条目的空分组。
+      if (o.hidden) { continue; }
       const g = o.group ?? "";
       if (!map.has(g)) { map.set(g, []); }
       map.get(g)!.push(o);
@@ -888,9 +927,130 @@ function GhostSelect({ value, options, onChange, title, style, maxWidth = 260, d
   );
 }
 
+/**
+ * A-1056②：**Agent 输出最下方的实时状态行**（从底部监测栏搬来）。
+ *
+ * 用户原话："实时状态行位置：当前显示在监测栏，要改到'正在思考'位置（Agent 输出最下方）"。
+ * 位置本身就是信息：这一行讲的是"Agent 此刻在做什么"，那它就该长在 Agent 的发言下面 ——
+ * 贴在输入框上方的监测栏里，读者会把它当成"输入区的附属提示"，而不是"这轮任务的进度"。
+ *
+ * 两段内容：
+ *   · 主句 = `liveStatus.text`（事实：正在调用哪个工具 / 正在输出 / 已发出请求）；
+ *   · 副句 = `liveStatus.detail`（可核对的数字：已用时 / 工具次数 / 在途 token / 上下文占比）。
+ * 外加一条**只在同一阶段停留超阈值后**才出场的激励语（阈值 5s，见 cheerPhrases.ts）。
+ *
+ * ⚠️ 渲染成本（刻意设计，别改回去）：
+ *   · 计时器住在**本组件**里，`setNow` 只让这一行重渲染 ——
+ *     绝不把 5000 行的 ChatPanel 拖进每秒一次的重渲染（那正是"高渲染成本导致严重卡顿"的典型形态）；
+ *   · `React.memo` + 稳定的 props（status 对象由 useMemo 产出、stageKey 是字符串）→
+ *     父组件因流式正文变化而重渲染时，这一行基本不动；
+ *   · 激励语用 `pickCheer(seed)` 从「阶段已耗时」推导，**不用随机数** ——
+ *     同 seed 同结果，不会每帧闪一句不同的。
+ */
+const LiveStatusLine = React.memo(function LiveStatusLine({ status, stageKey }: { status: LiveStatus; stageKey: string }): JSX.Element {
+  /** 本阶段开始时刻（stageKey 一变就重置 —— "下一阶段"到来即重新计时，激励语随之收起） */
+  const stageStartRef = React.useRef(Date.now());
+  const [now, setNow] = React.useState(() => Date.now());
+
+  React.useEffect(() => {
+    stageStartRef.current = Date.now();
+    setNow(Date.now());
+  }, [stageKey]);
+
+  React.useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const stageMs = Math.max(0, now - stageStartRef.current);
+  // 阶段久了才给一句陪伴；cheer 的轮换节拍由 CHEER_ROTATE_MS 决定（4s 一换）
+  const cheer = shouldCheer(stageMs) ? pickCheer(Math.floor(stageMs / CHEER_ROTATE_MS)) : null;
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap",
+      // 与正文同栏但略微下沉：它是"叙述"，不是 Agent 说出来的话
+      padding: "6px 0 10px 42px", fontSize: 12.5, lineHeight: 1.5,
+      animation: "fadeIn 0.18s ease",
+    }}>
+      <span
+        className={status.animated ? "text-scan-light" : undefined}
+        title={`${status.text}${status.detail ? `（${status.detail}）` : ""}`}
+        style={{ fontWeight: 600, color: "var(--text)", minWidth: 0 }}
+      >
+        {status.text}
+      </span>
+      {status.detail && (
+        <span style={{ color: "var(--text-dim)", fontSize: 11.5 }}>· {status.detail}</span>
+      )}
+      {/* 激励语：带表情包的循环，直到下一阶段（stageKey 变化即重置）——
+          用 visibility 之外的独立 span，避免它一出现就把主句挤跑 */}
+      {cheer && (
+        <span style={{ color: "var(--text-muted)", fontSize: 11.5, fontStyle: "italic" }}>{cheer}</span>
+      )}
+    </div>
+  );
+});
+
+/** A-1056③：待发指令卡片右侧的**图标操作按钮**（修改 / 直接插入 / 撤销删除）。
+ *
+ * 为什么是图标不是文字徽标：用户看的是"这条待发的指令"，动作应该是**贴着它的一组小按钮**，
+ * 而不是四五个反复出现的文字标签。图标来自用户指定目录 `gui/icon/icon_fpbc119q3rk`，
+ * 深色主题下用 `filter: brightness(0) invert(...)` 统一染成浅色（与悬浮窗按钮同一手法）。
+ *
+ * `label` 同时用于 `aria-label` 与 `title` —— 图标没有文字时，读屏与悬停都必须说清它做什么。
+ */
+function QueueAction({ src, label, title, onClick, danger }: {
+  src: string; label: string; title: string; onClick: () => void; danger?: boolean;
+}): JSX.Element {
+  const [hover, setHover] = React.useState(false);
+  const tint = hover ? (danger ? "#f87171" : "var(--accent-hover)") : (danger ? "#9ca3af" : "#cbd5e1");
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={label}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
+        border: `1px solid ${hover ? (danger ? "var(--danger)" : "var(--accent)") : "var(--border)"}`,
+        background: hover ? (danger ? "var(--danger-soft)" : "var(--accent-soft)") : "var(--bg-secondary)",
+        cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center",
+        padding: 0, transition: "background 0.12s, border-color 0.12s",
+      }}
+    >
+      {/* 图标染色：源 SVG 是**深灰实心、透明底**的单色图（#232323 / #515151），
+          于是把它当 CSS mask 用、颜色由 `tint` 直接给 —— 比 filter 的 brightness/invert
+          链条精确，且能直接吃主题变量（深浅主题都不会"隐形"）。
+          必须带 `-webkit-` 前缀：Electron 26 = Chromium 116，标准 `mask-image` 要 Chrome 120+。
+
+          ⚠️ url() **必须加双引号**，这不是风格问题，是正确性问题：
+          vite 的 svgToDataURL 把 `import "*.svg"` 编译成 URL-encoded data URI，
+          且内部的双引号被换成**单引号**（`data:image/svg+xml,%3c?xml%20version='1.0'...`）。
+          CSS 规范里未加引号的 `<url-unquoted>` **禁止**出现单引号/括号/空白 ——
+          整条 `mask-image` 声明会被解析器**静默丢弃**（computed = `none`），
+          span 只剩 `background: tint` ⇒ 渲染成**实心方块**。
+          实测（Electron 35 探针）：未加引号 → computed `none`；加引号 → 回显该 url。
+          data URI 内只有单引号、无双引号，故双引号包裹安全。 */}
+      <span
+        aria-hidden
+        style={{
+          display: "block", width: 13, height: 13, background: tint,
+          WebkitMaskImage: `url("${src}")`, maskImage: `url("${src}")`,
+          WebkitMaskRepeat: "no-repeat", maskRepeat: "no-repeat",
+          WebkitMaskSize: "contain", maskSize: "contain",
+          WebkitMaskPosition: "center", maskPosition: "center",
+          transition: "background 0.12s",
+        }}
+      />
+    </button>
+  );
+}
+
 /** 用户消息（memo：流式输出时历史消息不重渲染） */
-const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Message; onRollback?: (id: number) => void }): JSX.Element {
-  const [copied, setCopied] = React.useState(false);
+const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Message; onRollback?: (id: number) => void }): JSX.Element {  const [copied, setCopied] = React.useState(false);
   const handleCopy = async (): Promise<void> => {
     try { await navigator.clipboard.writeText(m.content); } catch { /* ignore */ }
     setCopied(true);
@@ -1879,6 +2039,7 @@ export default function ChatPanel({
   sessionType,
   memberCount,
   memberNames = [],
+  onHistoryLoaded,
 }: ChatPanelProps): JSX.Element {
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [input, setInput] = React.useState("");
@@ -1889,25 +2050,16 @@ export default function ChatPanel({
   const [loading, setLoading] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
   const [partial, setPartial] = React.useState("");
-  // A-918++：输入框占位符动态激励语（每 6s 切换一句，激励/调侃/颜文字混搭；用户聚焦输入时暂停）
-  const PLACEHOLDER_PHRASES = [
-    "今天想折腾点什么？Σ(°△°|||)",
-    "问个问题，唤醒你的第二个大脑～ (●'◡'●)",
-    "把你想做的说出来，我帮你拆成可执行计划 ✨",
-    "代码读不懂？设计拿不准？丢过来我陪你过 🔍",
-    "工作累了？来调戏我两句 (ˉ▽ˉ) ﾉ",
-    "输入消息… Enter 发送，/ 展开指令，Shift+Enter 换行",
-    "想调研什么 / 写什么 / 改什么？说话就行 🚀",
-    "提示：可粘贴 / 拖拽图片识图，文件路径直接拖进来更省心",
-  ];
-  const [placeholderIndex, setPlaceholderIndex] = React.useState(0);
-  const [inputFocused, setInputFocused] = React.useState(false);
-  React.useEffect(() => {
-    // A-918++：加速 4s 切换 + 输入聚焦才暂停（loading/会话切不再锁死，让用户更快看到变化）
-    if (inputFocused) { return; }
-    const iv = window.setInterval(() => { setPlaceholderIndex((i) => (i + 1) % PLACEHOLDER_PHRASES.length); }, 4000);
-    return () => window.clearInterval(iv);
-  }, [inputFocused]);
+  /* A-1056②：这里原本挂着一份 `PLACEHOLDER_PHRASES`（8 句，其中两句是**用法说明**：
+     "输入消息… Enter 发送，/ 展开指令，Shift+Enter 换行"、"提示：可粘贴 / 拖拽图片识图…"），
+     由底部监测栏每 4s 轮播。用户把它的两个问题一起点了出来：
+       ① 它住在**监测栏**里，而监测栏的职责是"报数"（tokens / 耗时 / tokens·s⁻¹ / context），
+          塞一句闲话进去是串味 —— 用户原话："保留绿色运行点，把'激励语那一块'拿走（别动监测数值栏）"；
+       ② 里面混着产品说明书，读起来像系统在敷衍 —— "删掉使用说明类激励语"。
+     现在整块搬到 **Agent 输出最下方**的状态行（见 `LiveStatusLine`），且**只在同一阶段
+     停留超 5s 时**才出场（阈值/节拍/文案池在 `cheerPhrases.ts`，纯逻辑、有回归守卫）。
+     面板级 state 与 4s 定时器**一并删除**：它们每 4s 让整个 5000 行组件重渲染一次，
+     是白送的渲染成本（见用户提醒："别让高渲染成本搞得又严重卡顿"）。 */
   /** 流式正文渲染节流：数据实时累积到 ref，渲染按 rAF 逐字推进（28ms/字），避免整块蹦出 + 每 chunk 全量重解析 markdown 卡顿 */
   const partialRef = React.useRef("");
   const partialRafRef = React.useRef<number | null>(null);
@@ -2135,17 +2287,18 @@ export default function ChatPanel({
   const interruptQueueRef = React.useRef<QueuedInstruction[]>([]);
   /** 队列的渲染镜像（由 syncQueue 同步；不要在别处 setQueueView） */
   const [queueView, setQueueView] = React.useState<QueuedInstruction[]>([]);
-  /** A-1054⑥：默认插入方式（中途插入 / 即将插入）——持久化，未存过时取"即将插入"（不打断） */
-  const [insertMode, setInsertMode] = React.useState<InsertMode>(() => readInsertMode());
+  /* A-1056③：**「默认插入方式」这个全局开关被撤掉了。**
+     它此前是输入框右侧一个「中途插入 / 即将插入」的胶囊（持久化在 localStorage）。
+     用户对它的原话是"即将插入是什么鬼？" —— 这两个词是我方的实现词，描述的却是
+     **用户自己的话怎么发出去**；而且它是**全局默认**，与"这一条我想马上发"的真实意图
+     根本不匹配（同一条队列里，用户对不同指令的期望本来就不同）。
+     现在：Enter 入队 = 不打断（本轮自然结束后按序发出，默认永远是非破坏性的那一侧）；
+     要"立刻发"就在那条气泡卡片上点「直接插入」（arrow-narrow-right 图标）。
+     于是 `insertModeToggle.ts`（localStorage 读写入口）随之失去调用方，已一并删除。 */
   /** 队列的唯一写入口：同时更新权威 ref 与渲染镜像（见 interruptQueueRef 注释） */
   const syncQueue = React.useCallback((next: QueuedInstruction[]): void => {
     interruptQueueRef.current = next;
     setQueueView(next);
-  }, []);
-  /** 切默认插入方式并持久化（下次启动沿用） */
-  const changeInsertMode = React.useCallback((mode: InsertMode): void => {
-    setInsertMode(mode);
-    writeInsertMode(mode);
   }, []);
   /** 当前面板展示的会话（每渲染同步，供订阅回调闭包比较，避免闭包捕获旧 sessionId） */
   const sessionRef = React.useRef("");
@@ -2892,9 +3045,13 @@ export default function ChatPanel({
         setOlderInfo(null);
       }
       settleScrollToBottom();
+      // A-1058①：历史 settle → 向 App 回执（启动门据此收门；见 props 里的 onHistoryLoaded 注释）
+      onHistoryLoaded?.();
     }).catch(() => {
       // 历史加载失败 → 全凭 cache 镜像：结算气泡此时是"唯一真相源"，必须保留
       setMessages([...optimisticMsgs, ...(!streamConfirmedDead && liveMsg ? [liveMsg] : []), ...(settledMsg ? [settledMsg] : [])]);
+      // A-1058①：**失败也必须回执** —— 否则门只能等 8s 总超时（A-1039 的"失败也放行"规矩）
+      onHistoryLoaded?.();
     });
     // 会话级配置（"以文件夹为主"：按 sessionId 取 workspace；无则回退 Agent 级旧配置）
     void api.conversations.configGet({ agentId, sessionId }).then(setSessionConfig).catch(() => undefined);
@@ -3856,11 +4013,13 @@ export default function ChatPanel({
     const hasPending = pendingImages.length > 0;
     // 允许「只发图片、不带文字」（user content 空文本 + 图）
     if (!api || (!input.trim() && !hasPending)) { return; }
-    // A-162 / A-1054⑥：Agent 正在跑时的新指令 —— 不再无条件打断，按用户选的插入方式走：
-    //   · 中途插入（interrupt）：打断当前生成（已产出内容仍由 onDone(interrupted) 收尾落库），
-    //     本条立刻排到队首、旧流一收尾就发出去；
-    //   · 即将插入（queue）：**不打断**。本轮自然结束后由 onDone 的续发路径按序发出。
-    // 两条路都进同一个队列（不再有"静默丢弃"），界面在输入框上方把队列摊开给用户看/改。
+    // A-162 / A-1054⑥ / A-1056③：Agent 正在跑时的新指令一律**先排队，不打断**。
+    //
+    // 语义变迁（A-1056③）：此前的行为取决于一个全局的「插入方式」开关（中途插入 / 即将插入），
+    // 默认那一侧的措辞被用户直接点名"即将插入是什么鬼？"。现在只有一种默认行为：
+    // **入队等本轮自然结束**（非破坏性，绝不悄悄掐掉正在跑的活）；
+    // 想让它"现在就走"，用户在待发气泡卡片上点「直接插入」（→ insertQueueItemNow）。
+    // 两条路都进同一个队列（不会有"静默丢弃"），界面在输入框上方把队列摊开给用户看/改。
     if (loading || stopping) {
       const queuedText = input.trim();
       const queuedImages = pendingImages.map((i) => i.dataUrl);
@@ -3869,33 +4028,14 @@ export default function ChatPanel({
       const queued: QueuedInstruction = {
         id: nextQueueId(),
         text: queuedText,
-        mode: insertMode,
+        mode: "queue",
         images: queuedImages,
         sessionId,
         agentId,
         networkEnabled,
         createdAt: Date.now(),
       };
-      // 中途插入：先排到队首（否则它会排在"即将插入"的那几条后面，观感是"点了没反应"）
-      syncQueue(insertMode === "interrupt"
-        ? promote(enqueue(interruptQueueRef.current, queued), queued.id)
-        : enqueue(interruptQueueRef.current, queued));
-
-      if (insertMode === "interrupt") {
-        setLoading(true); // 保持 loading：如旧流仍在跑，先让其中断收尾
-        const wasStopping = stoppingRef.current || stopping;
-        stoppingRef.current = true; // 中断旧流：不再自动重连
-        // 中断旧流（abort → 后台自然结束当前工具/生成阶段 → onDone(interrupted) 收尾落库）
-        await api.chat.cancel(sessionId).catch(() => undefined);
-        setStopping(false);
-        stoppingRef.current = wasStopping;
-        // 若旧流已无活动（loading 是残留），立即发新流
-        if (!streamActiveRef.current) {
-          syncQueue(takeNext(interruptQueueRef.current, sessionId)?.rest ?? interruptQueueRef.current);
-          setLoading(false);
-          void doSend(queuedText, sessionId, { images: queuedImages });
-        }
-      }
+      syncQueue(enqueue(interruptQueueRef.current, queued));
       return;
     }
     // 检查当前模型是否支持图片输入（防止调用不支持 vision 的模型时触发 400）
@@ -4428,11 +4568,18 @@ export default function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelChoice, manualEfforts, curSupportsEffortLevels]);
 
-  /* ── A-1054⑤ 底部实时状态行：文案全部由纯逻辑推导（见 liveStatus.ts 文件头）──────
+  /* ── A-1054⑤ 实时状态行：文案全部由纯逻辑推导（见 liveStatus.ts 文件头）──────
      为什么要这一行：Agent 跑工具循环/等上游首包时**不输出正文**，对话区一片安静，
-     用户只能盯着右栏猜它是不是卡了。这行把「现在在做什么 + 进度」直接摆在输入框上方。
-     工具名走 resolveToolLabel（与右栏活动记录同一份映射），避免同一个工具两种说法。 */
-  const liveStatus = deriveLiveStatus({
+     用户只能盯着右栏猜它是不是卡了。这行把「现在在做什么 + 进度」直接摆出来。
+
+     A-1056②：**它现在长在 Agent 输出最下方**（用户原话："当前显示在监测栏，要改到
+     '正在思考'位置（Agent 输出最下方）"），由 `LiveStatusLine` 渲染。
+
+     ⚠️ 渲染成本：`deriveLiveStatus` 每次都产出**新对象**，直接丢给 `React.memo` 的子组件
+        等于每帧都判定"变了"→ 子组件跟着父组件的流式帧率重渲染。
+        这里按「语义键」memo：kind/text/detail/animated 四要素都没变 → 复用上一次的对象引用，
+        memo 才真正生效（见用户提醒："别让高渲染成本搞得又严重卡顿"）。 */
+  const liveStatusRaw = deriveLiveStatus({
     loading,
     stopping,
     awaitingApproval: !!pendingPerm,
@@ -4446,14 +4593,57 @@ export default function ChatPanel({
     ctxUsed: contextTokens,
     ctxCap,
   });
+  /** 语义键：内容真的变了才换引用（四要素全等 → 复用旧对象） */
+  const liveStatusKey = liveStatusRaw
+    ? `${liveStatusRaw.kind}|${liveStatusRaw.text}|${liveStatusRaw.detail}|${liveStatusRaw.animated ? 1 : 0}`
+    : "";
+  const liveStatus = React.useMemo(
+    () => liveStatusRaw,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [liveStatusKey],
+  );
+  /** 阶段键（**不含 detail**）：detail 里的已用时/工具次数每秒都在变，
+   *  若把它算进阶段键，激励语的 5s 计时会被自己不断重置 —— 永远等不到第 5 秒。 */
+  const liveStageKey = liveStatusRaw ? `${liveStatusRaw.kind}|${liveStatusRaw.text}` : "";
 
-  /* ── A-1054⑥ 队列操作：三处都把结果交回 syncQueue（唯一写入口）───────────── */
-  /** 改成「中途插入」= 我要它现在就走：提到队首 + 打断当前生成，旧流一收尾立刻发 */
-  async function promoteQueueItem(id: number): Promise<void> {
+  /* ── A-1056③ 队列操作（四个动作都只由用户显式点击触发，结果一律交回 syncQueue）──── */
+
+  /**
+   * 「修改」：把这条待发的内容**放回输入框**（文字 + 随附图片），并从待发里撤下。
+   *
+   * 为什么是"撤下 + 回填"而不是"就地编辑"：输入框才是用户已经熟悉的编辑面
+   * （有 @成员、/ 指令、图片粘贴/拖拽、字数提示、自动增高）。在气泡卡片里再塞一套
+   * 迷你编辑器，等于把输入框的复杂度复制一份，还必然漂移。
+   */
+  function editQueueItem(q: QueuedInstruction): void {
+    syncQueue(removeAt(interruptQueueRef.current, q.id));
+    setInput(q.text);
+    if (q.images.length > 0) {
+      setPendingImages(q.images.map((dataUrl, i) => ({ id: `${Date.now()}-${i}`, dataUrl, name: `待发图片 ${i + 1}` })));
+    }
+    // 焦点交给输入框：用户点「修改」的下一动作一定是打字
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  /**
+   * 「直接插入」：我要这一条**现在就走**。
+   *
+   * A-1056④（用户原话："中途插入直接中断：要连贯接续插入，不要粗暴中断"）——
+   * 这里的做法是**有序收尾 + 接续**，而不是"掐断重开"：
+   *   ① 先把该条提到队首并标 interrupt（这样它一定是下一个被发出的）；
+   *   ② 通知主进程结束**当前这一轮**：已产出的正文/思考走正常的 onDone(interrupted) 收尾
+   *      **照常落库**，所以上下文是连续的（下一轮模型看得到上一轮说到哪儿了），
+   *      画面上也不会出现"半句话被硬生生截掉、后面什么都没有"；
+   *   ③ 旧流一收尾，onDone 的续发路径按队首把这一条发出去 —— 用户感知是"接上了"，
+   *      而不是"被中断了"。
+   * 若此刻本来就没有活跃流（loading 是残留态），直接立刻发，跳过 ②。
+   */
+  async function insertQueueItemNow(id: number): Promise<void> {
+    // 先排队首 + 标 interrupt（气泡会立刻变成实心高亮，用户马上看得到"它要走了"）
     syncQueue(promote(setMode(interruptQueueRef.current, id, "interrupt"), id));
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api) { return; }
-    // 当前没有活跃流 → 它本来就会立刻发，不必（也无从）打断
+    // 没有活跃流 → 本来就该立刻发，不必（也无从）收尾
     if (!streamActiveRef.current) {
       const taken = takeNext(interruptQueueRef.current, sessionId);
       if (taken) {
@@ -4463,19 +4653,14 @@ export default function ChatPanel({
       return;
     }
     const wasStopping = stoppingRef.current;
-    stoppingRef.current = true;    // 中断旧流：不再自动重连（与 send() 的中途插入同一条路）
+    stoppingRef.current = true;    // 收尾旧流：不再自动重连
     setLoading(true);
     await api.chat.cancel(sessionId).catch(() => undefined);
     setStopping(false);
     stoppingRef.current = wasStopping;
   }
 
-  /** 改回「即将插入」= 不抢跑，留在队列里等本轮自然结束（顺序不变） */
-  function demoteQueueItem(id: number): void {
-    syncQueue(setMode(interruptQueueRef.current, id, "queue"));
-  }
-
-  /** 移出队列（指令直接丢弃 —— 只由用户显式点击触发，绝不自动丢） */
+  /** 「撤销删除」：移出队列（指令直接丢弃 —— 只由用户显式点击触发，绝不自动丢） */
   function removeQueueItem(id: number): void {
     syncQueue(removeAt(interruptQueueRef.current, id));
   }
@@ -4777,6 +4962,11 @@ export default function ChatPanel({
             </div>
           </div>
         )}
+        {/* A-1056②：**Agent 输出最下方**的实时状态行（从底部监测栏整块搬来）。
+            位置选在 messages 之后、滚动容器的最末 —— 它天然"跟在 Agent 发言下面"，
+            并随内容一起滚动，不需要任何绝对定位技巧。
+            `liveStatus === null`（空闲、且没有任何在途阶段）时**整行不渲染** —— 空闲就安静。 */}
+        {liveStatus && <LiveStatusLine status={liveStatus} stageKey={liveStageKey} />}
         </div>
         {/* A-980-R18：顶部/底部边缘渐变遮罩（pointer-events none，仅滚动未到边界时显示提示更多内容） */}
         <div className="scroll-fade-mask" aria-hidden="true" style={{
@@ -5040,6 +5230,74 @@ export default function ChatPanel({
             </div>
         </div>
 
+        {/* ── A-1056③ 待发指令：**用户气泡卡片**（输入框正上方）──────────────────────
+            A-1054⑥ 的版本把每条渲染成"徽标 + 一行纯文本"，用户读到的是一句黑话
+            （原话：「即将插入是什么鬼？」「中途插入怎么回事」）—— 因为「插入方式」是我方的
+            实现词，用户脑子里只有"这条话我发出去、它现在发还是等会儿发"。
+            A-1056③ 改成用户自己的语言与形态：
+              · 形态 = **用户气泡卡片**（和已发出的用户消息同款右对齐气泡）→ 一眼就知道
+                "这是我刚打的那句话，它还没走"；
+              · 操作 = 右侧三个图标（全部来自 gui/icon/icon_fpbc119q3rk）：
+                  修改（edit.svg）      → 把内容放回输入框重写，并从待发里撤下
+                  直接插入（arrow-narrow-right.svg）→ 立刻发出（本轮就地收尾后接续，不粗暴掐断）
+                  撤销删除（close.svg） → 从待发里移除，不再发送
+              · 不再出现「即将插入 / 中途插入」这类词。 */}
+        {queueOfMine.length > 0 && (
+          <div style={{
+            display: "flex", flexDirection: "column", gap: 6,
+            padding: "0 2px 8px",
+            animation: "fadeIn 0.18s ease",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)" }}>
+              <ClockIcon size={11} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
+              <span style={{ fontWeight: 600 }}>待发</span>
+              <span style={{ color: "var(--text-dim)" }}>· {summarize(queueOfMine)}</span>
+              <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                title="这些是我还没发出去的话。默认等本轮结束后自动按顺序发出；点「直接插入」可以立刻走。">
+                · 本轮结束后自动发出，或点右侧箭头直接插入
+              </span>
+            </div>
+            {queueOfMine.map((q) => (
+              <div key={q.id} style={{
+                display: "flex", alignItems: "flex-end", justifyContent: "flex-end", gap: 8,
+              }}>
+                {/* 用户气泡卡片：与已发出的用户消息同款，但加一圈虚线强调"尚未发出" */}
+                <div
+                  title={q.text || "（仅图片）"}
+                  style={{
+                    maxWidth: "78%", padding: "9px 13px",
+                    borderRadius: "16px 16px 4px 16px",
+                    background: "var(--accent)", color: "#fff",
+                    border: q.mode === "interrupt" ? "1px solid var(--success)" : "1px dashed rgba(255,255,255,0.55)",
+                    lineHeight: 1.5, fontSize: 13.5, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    opacity: q.mode === "interrupt" ? 1 : 0.92,
+                  }}>
+                  {q.text || "（仅图片）"}
+                  {q.images.length > 0 && (
+                    <div style={{ marginTop: q.text ? 6 : 0, fontSize: 11.5, opacity: 0.9 }}>
+                      🖼 附带 {q.images.length} 张图
+                    </div>
+                  )}
+                </div>
+                {/* 右侧三个图标操作（顺序即"改 → 发 → 撤"，与用户给的顺序一致） */}
+                <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0, paddingBottom: 2 }}>
+                  <QueueAction
+                    src={queueEditIcon} label="修改"
+                    title="修改这条：内容放回输入框（并可带图），同时从待发里撤下"
+                    onClick={() => editQueueItem(q)} />
+                  <QueueAction
+                    src={queueInsertIcon} label="直接插入"
+                    title="直接插入：立刻发出这条。当前这一轮会就地收尾（已产出的内容照常保留落库），随即接续你这条 —— 不是粗暴掐断"
+                    onClick={() => void insertQueueItemNow(q.id)} />
+                  <QueueAction
+                    src={queueCancelIcon} label="撤销删除"
+                    title="撤销删除：把这条从待发里移除，不再发送"
+                    onClick={() => removeQueueItem(q.id)} danger />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="glass-input" style={{
           borderRadius: 18, border: "1px solid var(--border-hover)",
           background: "var(--bg-input)", overflow: "hidden",
@@ -5291,7 +5549,11 @@ export default function ChatPanel({
             </div>
           ) : (
           <>
-          {/* ─ A-918++ 实时监测栏：流式显示 token/耗时/吞吐/context；空闲显示动态激励语（4s 切换）── */}
+          {/* ─ A-1056② 实时监测栏：**只报数**（tokens / 耗时 / tokens·s⁻¹ / context / 模型）──
+              用户原话："保留绿色运行点，把'激励语那一块'拿走（别动监测数值栏）"。
+              于是这里只剩三样东西：绿点（在线/就绪信号）+ 数值栏 + 子代理展开按钮。
+              原先挂在绿点旁边的那句状态/激励语，已整块搬到 Agent 输出最下方的状态行
+              （`LiveStatusLine`）—— 监测栏报数、状态行叙事，两块各司其职，不再互相串味。 */}
           <div style={{
               display: "flex", alignItems: "center", gap: 12,
               padding: "6px 14px",
@@ -5300,29 +5562,15 @@ export default function ChatPanel({
             fontSize: 11, color: "var(--text-muted)",
             flexShrink: 0,
           }}>
-            <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              {/* A-977：流式期间**不显示圆点**（用户明确要求删掉那个蓝色呼吸点）——
-                  它与右侧「💭 思考中…」文案 + 实时递增的 tokens/tokens·s⁻¹ 三重表达同一件事，
-                  属于噪音。空闲态保留绿色点（"在线/就绪"信号，用户要求保留）。 */}
-              {!loading && (
-                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "var(--success)", flexShrink: 0 }} />
-              )}
-              {/* A-1054⑤：状态文案改由 `liveStatus` 推导（在做什么 + 进度），并复用 .text-scan-light 扫光。
-                  此前只有两个死值「🔧 调用工具中… / 💭 思考中…」——用户看不出它到底在干什么。
-                  ⚠️ `animated` 为 false 时**不挂** text-scan-light：等用户审批/回答时模型是停着的，
-                     扫光会让人以为"它还在跑，我等着就好"（然后干等）。 */}
+            {/* A-977：流式期间**不显示圆点**（用户明确要求删掉那个蓝色呼吸点）——
+                它与右侧「💭 思考中…」文案 + 实时递增的 tokens/tokens·s⁻¹ 三重表达同一件事，
+                属于噪音。空闲态保留绿色点（"在线/就绪"信号，用户要求保留）。 */}
+            {!loading && (
               <span
-                className={liveStatus?.animated ? "text-scan-light thinking-hint-text" : "thinking-hint-text"}
-                title={liveStatus ? `${liveStatus.text}${liveStatus.detail ? `（${liveStatus.detail}）` : ""}` : undefined}
-                style={{ fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {liveStatus ? liveStatus.text : PLACEHOLDER_PHRASES[placeholderIndex]}
-              </span>
-              {liveStatus && liveStatus.detail && (
-                <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 1 }}>
-                  · {liveStatus.detail}
-                </span>
-              )}
-            </span>
+                title="Slime 空闲/就绪"
+                style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "var(--success)", flexShrink: 0 }}
+              />
+            )}
             {true && (<>
               <span style={{ color: "var(--text-dim)" }}>|</span>
               <span>
@@ -5401,69 +5649,6 @@ export default function ChatPanel({
               )}
             </div>
           )}
-          {/* ── A-1054⑥ 待发指令队列（输入框正上方）────────────────────────────────
-              位置刻意的：它属于"我马上要发出去的东西"，跟输入框是一伙的，所以贴在输入框上沿。
-              每条可单独切换插入方式（⏳ 即将插入 / ⚡ 中途插入）——「中途插入」会把该条提到队首
-              并打断当前生成；「即将插入」只是排队，本轮自然结束后按序发出。 */}
-          {queueOfMine.length > 0 && (
-            <div style={{
-              display: "flex", flexDirection: "column", gap: 4,
-              padding: "8px 12px 2px",
-              animation: "fadeIn 0.18s ease",
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)" }}>
-                <ClockIcon size={11} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-                <span style={{ fontWeight: 600 }}>待发指令</span>
-                <span style={{ color: "var(--text-dim)" }}>· {summarize(queueOfMine)}</span>
-                <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                  title="Agent 本轮结束后会自动按顺序发出；标「中途插入」的会立刻打断当前生成">
-                  · 默认：{describeMode(insertMode)}（点下方徽标可随时改变）
-                </span>
-              </div>
-              {queueOfMine.map((q) => (
-                <div key={q.id} style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  padding: "5px 9px", borderRadius: 9,
-                  border: "1px solid var(--border)",
-                  background: "var(--bg-input)",
-                }}>
-                  <button
-                    onClick={() => { void (q.mode === "interrupt" ? demoteQueueItem(q.id) : promoteQueueItem(q.id)); }}
-                    title={`${modeHint(q.mode)}（点击切换为「${describeMode(toggleMode(q.mode))}」）`}
-                    style={{
-                      flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3,
-                      padding: "2px 7px", borderRadius: 999, cursor: "pointer",
-                      border: `1px solid ${q.mode === "interrupt" ? "var(--danger)" : "var(--border-hover)"}`,
-                      background: q.mode === "interrupt" ? "var(--danger-soft)" : "var(--bg-hover)",
-                      color: q.mode === "interrupt" ? "var(--danger)" : "var(--text-muted)",
-                      fontSize: 10.5, fontWeight: 700,
-                    }}>
-                    <BoltIcon size={10} />
-                    {describeMode(q.mode)}
-                  </button>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                    title={q.text}>
-                    {previewText(q.text) || "（仅图片）"}
-                  </span>
-                  {q.images.length > 0 && (
-                    <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)" }}>🖼 {q.images.length}</span>
-                  )}
-                  <button
-                    onClick={() => removeQueueItem(q.id)}
-                    title="从待发队列移除（不再发送）"
-                    style={{
-                      flexShrink: 0, width: 18, height: 18, borderRadius: "50%", border: "none",
-                      cursor: "pointer", background: "transparent", color: "var(--text-dim)",
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}>
-                    <CloseIcon size={11} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
           {/* ── 识图：待发送图片附件行（缩略图 + 移除 + 数量提示）── */}
           {pendingImages.length > 0 && (
             <div style={{
@@ -5491,9 +5676,10 @@ export default function ChatPanel({
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{pendingImages.length}/4 张 · 模型将识别图中内容</span>
             </div>
           )}
+          {/* A-1056②：原来的 onFocus/onBlur → setInputFocused 只为"暂停底部激励语轮播"而存在；
+              轮播机制已整体移除（改由状态行在阶段超时后自持时钟播），这两个 handler 就成了纯负担 ——
+              输入框每聚焦/失焦一次都让整个面板重渲染一遍（白送的渲染成本）。一并删除。 */}
           <textarea ref={inputRef} value={input}
-            onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
             onPaste={handlePasteImages}
             onChange={(e) => {
               const next = e.target.value;
@@ -5620,7 +5806,7 @@ export default function ChatPanel({
               style={{ fontSize: 11.5, padding: "3px 6px", maxWidth: 150 }}
               maxWidth={420}
               options={[
-                { value: "silam", label: "silam", group: "默认", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" },
+                { value: "silam", label: "silam", group: "内置", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" },
                 ...(providerModels ?? []).flatMap((p) => {
                   const enabled = (p.models ?? []).filter((m) => m.selected !== false);
                   if (enabled.length === 0) {
@@ -5633,21 +5819,27 @@ export default function ChatPanel({
                   }
                   const first = prettyModelLabel(enabled[0].id, p.key) || enabled[0].id || "";
                   // A-968：保留 api:<key>「供应商默认」入口——角色创建时只选了供应商（无具体模型）
-                  // 也能在对话面板精确匹配显示，不再误落到「silam」，无需二次选择
+                  // 也能在对话面板精确匹配显示，不再误落到「silam」，无需二次选择。
+                  // A-1056①：**它不再进下拉列表**（hidden）——用户明确反馈"多出一个默认，这不就是
+                  // 之前的自动吗"。语义在下游与首个模型等价，所以只留一条：首个模型带「（默认）」后缀，
+                  // 而这条 hidden 记录仅用于把按钮上的 value 翻译成可读文案。
                   return [
                     {
                       value: `api:${p.key}`,
                       label: `${p.key} · 默认（${first}）`,
                       group: p.key,
-                      title: `${p.key} — 使用其默认模型「${first}」，点击可选择具体模型`,
+                      hidden: true,
+                      title: `${p.key} — 使用其默认模型「${first}」（下拉中选「${first}（默认）」即等价）`,
                     },
-                    ...enabled.map((m) => {
+                    ...enabled.map((m, i) => {
                       const label = prettyModelLabel(m.id, p.key);
                       return {
                         value: `api:${p.key}:${m.id}`,
-                        label: label || m.id || "（未命名）",
+                        label: i === 0 ? `${label || m.id || "（未命名）"}（默认）` : (label || m.id || "（未命名）"),
                         group: p.key,
-                        title: `${p.key} :: ${m.id}`,
+                        title: i === 0
+                          ? `${p.key} :: ${m.id}　— 该供应商默认模型（未显式选模型时用的就是它）`
+                          : `${p.key} :: ${m.id}`,
                       };
                     }),
                   ] as GhostSelectOption[];
@@ -5715,25 +5907,10 @@ export default function ChatPanel({
               <InternetIcon size={14} style={{ color: networkEnabled ? "#22c55e" : "var(--text-dim)" }} />
               联网搜索
             </button>
-            {/* A-1054⑥：插入方式开关 —— 只在 Agent 正在跑时出现（那时"下一条会怎么发"才是个问题）。
-                两种语义：中途插入=打断当前生成立刻发；即将插入=排队等本轮结束。持久化，下次沿用。 */}
-            {loading && (
-              <button
-                onClick={() => changeInsertMode(toggleMode(insertMode))}
-                title={`${modeHint(insertMode)}（点击切换为「${describeMode(toggleMode(insertMode))}」）`}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: 4,
-                  marginLeft: 6, padding: "5px 9px", borderRadius: 999, cursor: "pointer",
-                  border: `1px solid ${insertMode === "interrupt" ? "var(--danger)" : "var(--border-hover)"}`,
-                  background: insertMode === "interrupt" ? "var(--danger-soft)" : "var(--bg-hover)",
-                  color: insertMode === "interrupt" ? "var(--danger)" : "var(--text-muted)",
-                  fontSize: 11.5, fontWeight: 600, flexShrink: 0,
-                  transition: "background 0.15s, border-color 0.15s, color 0.15s",
-                }}>
-                <BoltIcon size={12} />
-                {describeMode(insertMode)}
-              </button>
-            )}
+            {/* A-1056③：这里原本是**「插入方式」胶囊**（中途插入 / 即将插入，全局默认且持久化）。
+                撤掉的理由见 send() 与 insertQueueItemNow 的注释：用户对它的原话是
+                "即将插入是什么鬼？"。现在唯一入口是待发气泡卡片上的「直接插入」图标 ——
+                **动作贴着它作用的那条指令**，而不是一个改全局默认的开关。 */}
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8, display: loading ? "none" : "block" }}>
               {input ? `${input.length} 字` : ""}
@@ -5741,11 +5918,11 @@ export default function ChatPanel({
             {loading ? (
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                 {/* A-1054⑥：**生成中也能点发送**（此前这一段只渲染停止按钮，鼠标用户根本无法插入指令，
-                    只能按回车 —— 而回车走的是同一个 send()，即"必须打断"的旧语义）。
-                    现在它是"按当前插入方式把输入入队"的入口，title 直接说清会发生什么。 */}
+                    只能按回车 —— 而回车走的是同一个 send()）。
+                    A-1056③：title 里不再出现「即将插入 / 中途插入」这类实现词 —— 直接说会发生什么。 */}
                 {(input.trim() || pendingImages.length > 0) && (
                   <button onClick={() => void send()}
-                    title={`${describeMode(insertMode)}：${modeHint(insertMode)}`}
+                    title="加入待发：本轮结束后自动按顺序发出。想立刻发就在下方待发卡片上点「直接插入」"
                     style={{
                       width: 38, height: 38, borderRadius: "50%", border: "none",
                       background: "#fff", color: "#1e293b", cursor: "pointer",

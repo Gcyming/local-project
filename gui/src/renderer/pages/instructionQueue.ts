@@ -98,35 +98,12 @@ export function clearAll(): QueuedInstruction[] {
   return [];
 }
 
-/** 队列里是否还有该会话的待发项（顶部提示用）。 */
-export function hasPendingFor(list: QueuedInstruction[], sessionId: string): boolean {
-  return list.some((q) => q.sessionId === sessionId);
-}
-
-/** 单条指令的一行预览：折叠空白（含换行）后截断，避免队列条被长指令撑高。 */
-export function previewText(text: string, max = 72): string {
-  const one = (text ?? "").replace(/\s+/g, " ").trim();
-  if (one.length <= max) { return one; }
-  return `${one.slice(0, max)}…`;
-}
-
-/** 徽标文案（唯一产地：UI 与 tooltip 都从这里取，防两处说法不一致）。 */
-export function describeMode(mode: InsertMode): string {
-  return mode === "interrupt" ? "中途插入" : "即将插入";
-}
-
-/** 徽标的悬停解释（说清"会发生什么"，而不是只说名字）。 */
-export function modeHint(mode: InsertMode): string {
-  return mode === "interrupt"
-    ? "中途插入：立刻打断当前生成，本条马上作为新一轮发出（已产出的内容会保留并落库）"
-    : "即将插入：不打断当前生成；本轮自然结束后，本条自动按序发出";
-}
-
-/** 切换后的下一个模式（点击徽标即可在两种之间来回切）。 */
-export function toggleMode(mode: InsertMode): InsertMode {
-  return mode === "interrupt" ? "queue" : "interrupt";
-}
-
+/* A-1056③：原先这里有 `describeMode` / `modeHint` / `toggleMode`（"即将插入 / 中途插入"那套
+   徽标黑话 + 全局来回切开关）、`previewText`（旧的一行预览）与 `hasPendingFor`（旧顶部提示），
+   已随界面改版一并删除 —— 用户原话"即将插入是什么鬼？"。
+   ⚠️ **别再往这里补文案函数**：待发指令的新形态是「用户气泡卡片 + 三个图标操作」
+   （见 ChatPanel 的 `QueueAction`），它直接复用已发出用户消息的样式与全文，
+   不再需要"模式徽标 → 人话"这一层翻译；`summarize` 是仅剩的文案产地。 */
 /** 队列摘要（"2 条待发"）：空队列 → ""，供 UI 决定是否整块隐藏。 */
 export function summarize(list: QueuedInstruction[]): string {
   return list.length > 0 ? `${list.length} 条待发` : "";

@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sub, subLines, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GUARDS = [
@@ -39,12 +40,17 @@ const CSS = "gui/src/renderer/index.css";
 const CAPS = "shared/gen/model-capabilities.ts";
 const LIVE = "gui/src/renderer/pages/liveStatus.ts";
 const QUEUE = "gui/src/renderer/pages/instructionQueue.ts";
-const INSERT = "gui/src/renderer/insertModeToggle.ts";
 
-const FILES = [GATE, CHAT, APP, CSS, CAPS, LIVE, QUEUE, INSERT];
+/* ⚠️ A-1056③：`gui/src/renderer/insertModeToggle.ts` 已随界面改版**删除**
+   （"即将插入 / 中途插入"那套徽标 + 全局开关被撤掉，用户原话"即将插入是什么鬼？"），
+   因此它不再出现在快照里；原来针对它的 Q5/Q6/Q7 三条变异也已移除。
+   队列/状态行的新契约由 `gui/scripts/mut-a1056.mjs` 接管。 */
+const FILES = [GATE, CHAT, APP, CSS, CAPS, LIVE, QUEUE];
 
-/** 单次替换：命中即返回，未命中返回原串（调用方会用"必须变过"把它挡下来）。 */
-const sub = (text, from, to) => (text.includes(from) ? text.replace(from, to) : text);
+/* `sub` / `subLines` / 行尾自检 全部来自**共享模块** `./_mut-eol.mjs` —— 不要在本脚本里
+   另写一份。这里原来那个本地 `sub` 只认字面量，导致 **10 条多行锚点在 CRLF 文件上会静默
+   失效**（当时"能用"只因目标文件恰好是 LF）；换成模块里行尾无关的 `sub` 后一并解决。
+   该模块文件头有行尾的逐文件实测清单与复判命令。 */
 
 /** 替换 `key: "<name>"` 之后出现的**第一个** `context: 512000`（避开同名值互相干扰）。 */
 function setFamilyContext(text, familyKey, value) {
@@ -62,8 +68,12 @@ function inSection(text, from, to) {
   const b = text.indexOf("const AssistantMessage = React.memo(", a + 1);
   if (a < 0 || b < 0) { return text; }
   const seg = text.slice(a, b);
-  if (!seg.includes(from)) { return text; }
-  return text.slice(0, a) + seg.replace(from, to) + text.slice(b);
+  /* ⚠️ 作用域内替换也必须走**行尾无关**的 `sub`：这里原来是
+     `seg.includes(from)` + `seg.replace(from, to)` 的字面量写法，
+     锚点跨行时在 CRLF 文件上会静默不命中（C1 / C2 / C4 实测被行尾自检抓出）。 */
+  const next = sub(seg, from, to);
+  if (next === seg) { return text; }   // 未命中 → 原样返回（与旧行为一致）
+  return text.slice(0, a) + next + text.slice(b);
 }
 
 const MUTATIONS = [
@@ -212,25 +222,30 @@ const MUTATIONS = [
     name: "L3 把「正在输出正文」提到「等用户」之前 → 等审批时若已有在途正文，界面显示「正在输出」（用户于是不去点确认）",
     file: LIVE,
     mutate: (t) => {
+      /* ⚠️ 连"存在性检查"都不能用字面量 `t.includes(...)` —— 锚点带换行时它同样对行尾敏感
+         （L3/L4 第一版被行尾自检抓出：`includes` 在 CRLF 下为 false → 直接 return t →
+          该变异静默变成"未命中"）。判据一律由 `sub` 的结果派生。 */
       const writing = '  if ((input.replyChars ?? 0) > 0) {\n'
         + '    return { kind: "writing", text: "正在输出回复", detail, animated: true };\n'
         + '  }\n';
-      if (!t.includes(writing)) { return t; }
       const anchor = "  const detail = buildDetail(input);\n";
-      if (!t.includes(anchor)) { return t; }
-      return t.replace(writing, "").replace(anchor, anchor + writing);
+      const removed = sub(t, writing, "");
+      if (removed === t) { return t; }
+      const moved = sub(removed, anchor, anchor + writing);
+      return moved === removed ? t : moved;
     },
   },
   {
     name: "L4 把「没有在跑的轮次就返回 null」提到最前 → 空闲时残留正文会让状态行一直显示「正在输出」",
     file: LIVE,
     mutate: (t) => {
+      /* 同上：存在性判据由 `sub` 派生，不用字面量 `includes`。 */
       const guard = "  if (!input.loading) { return null; }\n";
-      if (!t.includes(guard)) { return t; }
-      return t.replace(guard, "").replace(
-        "  const detail = buildDetail(input);\n",
-        "  const detail = buildDetail(input);\n" + guard,
-      );
+      const anchor = "  const detail = buildDetail(input);\n";
+      const removed = sub(t, guard, "");
+      if (removed === t) { return t; }
+      const moved = sub(removed, anchor, anchor + guard);
+      return moved === removed ? t : moved;
     },
   },
   {
@@ -260,25 +275,9 @@ const MUTATIONS = [
     file: QUEUE,
     mutate: (t) => sub(t, "  return list.filter((q) => q.id !== id);", "  return list;"),
   },
-  {
-    name: "Q5 预览不折叠空白 → 多行指令把队列条撑成一坨",
-    file: QUEUE,
-    mutate: (t) => sub(t, '(text ?? "").replace(/\\s+/g, " ").trim()', '(text ?? "").trim()'),
-  },
-  {
-    name: "Q6 两种插入方式的徽标文案写成同一个 → 用户分不清这条会打断还是会排队",
-    file: QUEUE,
-    mutate: (t) => sub(t,
-      'return mode === "interrupt" ? "中途插入" : "即将插入";',
-      'return "插入";'),
-  },
-  {
-    name: "Q7 默认插入方式改回「中途插入」→ 无声地把默认行为从「不打断」换成「打断」，旧 bug 原样复现",
-    file: INSERT,
-    mutate: (t) => sub(t,
-      'return localStorage.getItem(KEY) === "interrupt" ? "interrupt" : "queue";',
-      'return "interrupt";'),
-  },
+  /* A-1056③：原 Q5（一行预览折叠）/ Q6（徽标文案互斥）/ Q7（默认插入方式回落 queue）
+     三条已随对应实现一起删除 —— `previewText` / `describeMode` / `insertModeToggle.ts`
+     都不存在了。**"不打断是唯一默认"**这条不变式改由 mut-a1056 的入队路径变异接管。 */
 
   /* ── ⑤⑥ 的**接线**：纯逻辑对了不等于界面接上了 ────────────────── */
   {
@@ -292,23 +291,21 @@ const MUTATIONS = [
     mutate: (t) => sub(t, "{(input.trim() || pendingImages.length > 0) && (", "{false && ("),
   },
   {
-    name: "W3 状态行无条件挂扫光 → 等用户审批时也在扫（界面在骗人）",
+    name: "W3 状态行无条件挂扫光 → 等用户审批时也在扫（界面在骗人，仍按 A-1054④ 断言）",
     file: CHAT,
     mutate: (t) => sub(t,
-      'className={liveStatus?.animated ? "text-scan-light thinking-hint-text" : "thinking-hint-text"}',
-      'className="text-scan-light thinking-hint-text"'),
+      'className={status.animated ? "text-scan-light" : undefined}',
+      'className="text-scan-light"'),
   },
-  {
-    name: "W4 状态文案换回旧的死值三元式 → 用户又看不出它到底在干什么",
-    file: CHAT,
-    mutate: (t) => sub(t,
-      "{liveStatus ? liveStatus.text : PLACEHOLDER_PHRASES[placeholderIndex]}",
-      '{loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}'),
-  },
+  /* W4（状态行是否真的接上线）已**移交** `gui/scripts/mut-a1056.mjs`：
+     那条断言住在 `tests/core-ts/a1056-guards.spec.ts`，不在本脚本的 GUARDS 集合里 ——
+     留在这里只会因为"本集合内没有守卫覆盖它"而**假存活**（正是本轮实测抓到的假存活）。 */
   {
     name: "W5 绕过 syncQueue 直写队列 ref → 界面显示的队列与实际要发的队列漂移",
     file: CHAT,
-    mutate: (t) => sub(t, "      syncQueue([]);\n      setInput((prev) =>", "      interruptQueueRef.current = [];\n      setInput((prev) =>"),
+    mutate: (t) => subLines(t,
+      ["      syncQueue([]);", "      setInput((prev) =>"],
+      ["      interruptQueueRef.current = [];", "      setInput((prev) =>"]),
   },
   {
     name: "W6 出队改回裸 shift() → 又回到「把别人会话的指令发到本会话」的老 bug",
@@ -353,6 +350,18 @@ function main() {
     process.exit(1);
   }
   console.info(`[mut-a1054] 基线守卫通过（${FILES.length} 个源文件）\n`);
+
+  /* 行尾自检（跑变异之前）。先验**检测器自己**不空转 —— 第一版 eolProblems 的默认读函数
+     取错（`globalThis.readFileSync` 在 ESM 里是 undefined）+ `catch { continue; }`，
+     导致它对任何输入都返回空数组、"全部通过"。恒真的自检比没有自检更危险。 */
+  const probe = selfTestEolDetector(ROOT);
+  if (probe.length) {
+    console.error("[mut-a1054] 行尾检测器自检失败（检测能力本身坏了）：");
+    for (const b of probe) { console.error(`  - ${b}`); }
+    process.exit(1);
+  }
+  if (reportEolProblems(eolProblems(MUTATIONS, ROOT), "mut-a1054")) { process.exit(1); }
+  console.info("[mut-a1054] 行尾检测器自检 + 锚点自检均通过\n");
 
   const survivors = [];
   let red = 0;

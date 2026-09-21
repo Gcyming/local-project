@@ -12,8 +12,9 @@
  * ⚠️ 中文文案里嵌套引用一律用 `「」`：ASCII 双引号会当场把字符串截断（本文件踩过）。
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   advanceReasoningFrame,
   hasReasoningData,
@@ -268,7 +269,9 @@ describe("A-1054④ 接线：底部状态行必须真的接到界面上", () => 
   });
 
   it("状态行的扫光**受 animated 控制**（不许无条件挂 text-scan-light：等用户时会假装还在跑）", () => {
-    expect(chat).toContain('liveStatus?.animated ? "text-scan-light thinking-hint-text"');
+    // A-1056②：状态行从底部监测栏搬到 Agent 输出最下方，渲染者变成 `LiveStatusLine`
+    // （props 名由 liveStatus 变 status），但这条不变式原样保留：扫光只由 animated 决定。
+    expect(chat).toContain('status.animated ? "text-scan-light"');
     // 反空转：不许出现"直接给状态文案挂扫光"的写法
     expect(chat).not.toContain('className="text-scan-light thinking-hint-text"');
   });
@@ -284,11 +287,22 @@ describe("A-1054④ 接线：底部状态行必须真的接到界面上", () => 
 describe("A-1054④ 接线：待发指令队列必须真的接到界面上", () => {
   const chat = read("gui/src/renderer/pages/ChatPanel.tsx");
 
-  it("队列有渲染（面板块存在，且用 summarize/previewText/describeMode）", () => {
-    expect(chat).toContain("待发指令");
-    for (const fn of ["summarize(queueOfMine)", "previewText(q.text)", "describeMode(q.mode)", "modeHint(q.mode)"]) {
-      expect(chat, `队列 UI 未使用 ${fn}`).toContain(fn);
+  /* A-1056③：这一段（"队列有渲染"）的整体契约没变 —— 待发指令必须真的接到界面上；
+     但**呈现形态**换过了：不再是"徽标 + 一行纯文本 + describeMode/modeHint 的黑话"，
+     而是**用户气泡卡片 + 三个图标操作**（修改 / 直接插入 / 撤销删除）。
+     所以这里断言的对象随之更新（词表变了，功能没少）。 */
+  it("队列有渲染（面板块存在，且用 summarize + 用户气泡 + 三个操作入口）", () => {
+    expect(chat).toContain("待发");
+    expect(chat).toContain("summarize(queueOfMine)");
+    // 用户气泡卡片（与已发出的用户消息同款右对齐圆角）
+    expect(chat).toContain('borderRadius: "16px 16px 4px 16px"');
+    for (const fn of ["editQueueItem(q)", "insertQueueItemNow(q.id)", "removeQueueItem(q.id)"]) {
+      expect(chat, `队列 UI 未提供 ${fn}`).toContain(fn);
     }
+    // 黑话必须消失：界面上不许再出现这两个词（只在纯逻辑模块与其注释里保留）
+    const ui = chat.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    expect(ui).not.toContain("即将插入");
+    expect(ui).not.toContain("中途插入");
   });
 
   it("**渲染条件必须是「本会话有货」**，且面板内容真的落在这个条件里", () => {
@@ -299,7 +313,8 @@ describe("A-1054④ 接线：待发指令队列必须真的接到界面上", () 
     expect(panel).toContain("summarize(queueOfMine)");
     expect(panel).toContain("queueOfMine.map(");
     expect(panel).toContain("removeQueueItem(q.id)");
-    expect(panel).toContain("promoteQueueItem(q.id)");
+    expect(panel).toContain("insertQueueItemNow(q.id)");
+    expect(panel).toContain("editQueueItem(q)");
   });
 
   it("三处队列改动都走 syncQueue（唯一写入口），且**没有**绕过它直写 ref", () => {
@@ -320,40 +335,36 @@ describe("A-1054④ 接线：待发指令队列必须真的接到界面上", () 
     expect(chat).toContain("(input.trim() || pendingImages.length > 0) && (");
   });
 
-  it("默认插入方式走唯一读写入口（禁在本文件复写 localStorage 口径）", () => {
-    expect(chat).toContain("readInsertMode()");
-    expect(chat).toContain("writeInsertMode(mode)");
+  /* A-1056③：**「默认插入方式」这个全局开关已被撤掉**（连它的 localStorage 模块一起删）。
+     用户原话："即将插入是什么鬼？" —— 那句话是我方的实现词，描述的却是"用户自己的话怎么发出去"，
+     而且全局默认与"这一条我想马上发"的真实意图不匹配。
+     新契约（守卫见 a1056-guards.spec.ts）：
+       · Enter/发送按钮 → 一律**先排队不打断**（非破坏性的一侧是唯一默认）；
+       · 想立刻发 → 点该条待发气泡卡片上的「直接插入」图标。 */
+  it("旧的默认插入方式读写入口已彻底移除（模块 + 调用点都不许留）", () => {
+    expect(chat).not.toContain("readInsertMode()");
+    expect(chat).not.toContain("writeInsertMode(mode)");
     expect(chat).not.toContain("slime_insert_mode");
+    // 模块文件本身也必须消失：`.ts` 与其**可能残留的编译影子 .js** 都不许在
+    // （影子会让后续变异假绿 —— 见 mutation-harness §11⑦）。
+    expect(existsSync(join(ROOT, "gui/src/renderer/insertModeToggle.ts"))).toBe(false);
+    expect(existsSync(join(ROOT, "gui/src/renderer/insertModeToggle.js"))).toBe(false);
   });
 });
 
-describe("A-1054④ 默认插入方式：未存过时取「不打断」那一侧", () => {
-  /** 最小 localStorage 替身（node 环境没有；本模块只在函数内访问它） */
-  const store = new Map<string, string>();
-  (globalThis as unknown as { localStorage: unknown }).localStorage = {
-    getItem: (k: string): string | null => (store.has(k) ? store.get(k)! : null),
-    setItem: (k: string, v: string): void => { store.set(k, v); },
-    removeItem: (k: string): void => { store.delete(k); },
-  };
+describe("A-1054④ / A-1056③ 默认插入行为：不打断是唯一默认", () => {
+  const chat = read("gui/src/renderer/pages/ChatPanel.tsx");
 
-  it("未存过 → queue（不打断）。旧默认是「一发就打断」，但那不可逆，默认该取非破坏性的一侧", async () => {
-    const { readInsertMode, writeInsertMode, INSERT_MODE_KEY } = await import("../../gui/src/renderer/insertModeToggle.js");
-    store.clear();
-    expect(readInsertMode()).toBe("queue");
-
-    writeInsertMode("interrupt");
-    expect(readInsertMode()).toBe("interrupt");
-    expect(store.get(INSERT_MODE_KEY)).toBe("interrupt");
-
-    writeInsertMode("queue");
-    expect(readInsertMode()).toBe("queue");
-  });
-
-  it("脏值（被手改过）一律回落 queue，不会读出 undefined", async () => {
-    const { readInsertMode, INSERT_MODE_KEY } = await import("../../gui/src/renderer/insertModeToggle.js");
-    store.set(INSERT_MODE_KEY, "whatever");
-    expect(readInsertMode()).toBe("queue");
-    store.set(INSERT_MODE_KEY, "");
-    expect(readInsertMode()).toBe("queue");
+  /* A-1056③ 之前，这里测的是「默认插入方式」的 localStorage 读写（未存过 → queue）。
+     那个开关已被用户点名撤掉（"即将插入是什么鬼？"），模块随之删除；
+     但**它当初立下的那条不变式依然是本次的规格**，所以在这里以"行为"而不是"读配置"的方式守住：
+     没有配置项了，不打断就是唯一默认 —— 比原来更难被改坏。 */
+  it("入队路径不再读任何'插入方式'配置：loading/stopping 时一律 enqueue（不打断）", () => {
+    // 入队分支里必须出现 enqueue(...)，且**不得**出现 promote(...) 抢先 —— 抢先只允许来自
+    // 用户的显式「直接插入」动作（insertQueueItemNow）。
+    expect(chat).toContain("syncQueue(enqueue(interruptQueueRef.current, queued));");
+    // 入队那一段（if (loading || stopping) { ... }）里不许有 promote
+    const seg = chat.slice(chat.indexOf("if (loading || stopping) {"), chat.indexOf("if (loading || stopping) {") + 1600);
+    expect(seg).not.toContain("promote(");
   });
 });

@@ -266,7 +266,7 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
  * 每一项都对应一个**首屏就要用、且拉取不快**的数据源。它们此前不在启动门的判据里：
  * 门只等「会话列表」，而 provider / 本地模型还在冷态加载 → 用户点开界面就撞上未就绪的重活。
  */
-const FIRST_LOAD_KEYS = ["agents", "sessions", "providers", "localModels"] as const;
+const FIRST_LOAD_KEYS = ["agents", "sessions", "providers", "localModels", "chatHistory"] as const;
 
 /** 模型加载等待秒数时钟（A-129）：自持 1s 计时器只重渲染自身秒数区域，
     避免整棵 App 树随秒表每秒重渲染（含 ChatPanel / 侧栏等大子树） */
@@ -760,6 +760,14 @@ export default function App(): JSX.Element {
   const markFirstLoad = React.useCallback((key: string): void => {
     setFirstLoad((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
   }, []);
+  /**
+   * A-1058①：`chatHistory` 的**稳定**回执函数。
+   *
+   * 必须走 `useCallback`（而不是在 JSX 里写内联箭头）：ChatPanel 的会话恢复 effect 是
+   * 「挂载 + 切换 sessionId」触发的，一旦这个 prop 每次渲染都换新身份、又被人顺手写进
+   * effect 依赖表，就会变成**反复重拉历史**的自激循环。稳定引用=写进依赖表也安全。
+   */
+  const markChatHistoryLoaded = React.useCallback((): void => { markFirstLoad("chatHistory"); }, [markFirstLoad]);
   /** A-1039：门的总超时兜底（8s）——任何数据源挂掉都不得把用户关在加载页 */
   const [firstLoadGuard, setFirstLoadGuard] = React.useState(false);
   React.useEffect(() => {
@@ -1004,6 +1012,22 @@ export default function App(): JSX.Element {
   const selectedSession = sessions.find((s) => s.sessionId === selectedSessionId) ?? null;
   const selectedAgentId = selectedSession?.agentId ?? null;
   const hasNoSession = selectedSession === null;
+
+  /**
+   * A-1058①：**没有"会话内容"可等的情形要立刻登记**，否则门只能干等到 8s 总超时。
+   *
+   * 判据必须与 `chatPanelJsx` 的分支条件**逐字对应**：ChatPanel 只在
+   * `selectedSession && selectedAgentId` 时挂载，只有它会回调 `markChatHistoryLoaded`。
+   * 因此「欢迎页（无会话）」与「有会话但拿不到 agentId → 落到那句占位文案」两条路径
+   * 都必须在这里自己收尾，不能指望一个永远不会挂载的组件来登记。
+   *
+   * ⚠️ 先等 `firstLoad.sessions`：会话列表还没回来时 `hasNoSession` 恒真，
+   *    此刻登记等于把门提前放行（正是要修的那个洞）。
+   */
+  React.useEffect(() => {
+    if (!firstLoad.sessions) { return; }
+    if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }
+  }, [firstLoad.sessions, hasNoSession, selectedAgentId, markChatHistoryLoaded]);
 
   /** 欢迎区首条消息：自动建会话 + 立即发送首条消息。
    *  此前用 setTimeout 闭包依赖外部 selectedAgentId，但新建会话前 selectedAgentId 必为 null，
@@ -1253,6 +1277,7 @@ export default function App(): JSX.Element {
       }}
       onNavigateSettings={(tab) => { setSettingsTab(tab); setSettingsOpen(true); }}
       onToggleFloat={handleToggleFloat}
+      onHistoryLoaded={markChatHistoryLoaded}
     />
   ) : (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-dim)" }}>
@@ -1288,6 +1313,10 @@ export default function App(): JSX.Element {
     { label: "本地后端服务", done: boot?.backendReady === true || boot?.phase === "degraded" },
     { label: "Agent 与会话列表", done: Boolean(firstLoad.agents && firstLoad.sessions) },
     { label: "模型与供应商配置", done: Boolean(firstLoad.providers && firstLoad.localModels) },
+    // A-1058①：中间那栏的**会话内容**也在门内 —— 用户原话"这个中间的界面加载要一段时间，
+    // 我说话你是听不见吗？给我算在加载界面里面"。此前门只等到"列表"，中间栏仍会在
+    // 历史到达前显示空态，看着像已就绪实则没接上数据。
+    { label: "会话内容", done: Boolean(firstLoad.chatHistory) },
   ];
   /** 状态文案：优先用主进程上报的 message，再按门内进度推导 */
   const splashStatus = boot?.phase === "degraded"

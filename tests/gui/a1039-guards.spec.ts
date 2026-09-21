@@ -156,6 +156,61 @@ describe("A-1039 ② 加载面板：内容如实、可优雅退场、主题跟�
   });
 });
 
+/**
+ * A-1058① 守卫：「中间那栏的会话内容」也必须在启动门内。
+ *
+ * 用户实测（v0.0.7 dev 版）：「这个中间的界面加载要一段时间，我说话你是听不见吗？
+ * 给我算在加载界面里面」——与 A-1039 是同一条线的下一步：A-1039 把"列表类"数据源
+ * 收进门槛，但**中间那栏自己的内容**（`conversations.load` 的历史消息）还在门外。
+ * 门放行后 ChatPanel 才挂载，历史到达前中间显示的是空态 —— 看着已就绪，实则没接上。
+ *
+ * ⚠️ 这些结构改回去都**不报错**，只在真机上表现为"对着新界面说话没人应"。
+ */
+describe("A-1058① 启动门覆盖中间栏的会话内容", () => {
+  const CHAT = "gui/src/renderer/pages/ChatPanel.tsx";
+
+  it("门内登记表新增 chatHistory（少这一项 = 门又提前放行）", () => {
+    const src = code(APP);
+    expect(src).toMatch(/FIRST_LOAD_KEYS = \[[^\]]*"chatHistory"/);
+  });
+
+  it("阶段清单如实报出「会话内容」，而不是只说列表类数据", () => {
+    const src = code(APP);
+    expect(src).toContain("firstLoad.chatHistory");
+  });
+
+  it("ChatPanel 的会话恢复**成功与失败两条路径都回执**（失败不回执 = 只能靠 8s 兜底干等）", () => {
+    const src = code(CHAT);
+    expect(src).toContain("onHistoryLoaded?: () => void;");
+    const n = (src.match(/onHistoryLoaded\?\.\(\);/g) ?? []).length;
+    expect(n, `onHistoryLoaded 回调只出现 ${n} 次，success/catch 未都覆盖`).toBeGreaterThanOrEqual(2);
+  });
+
+  it("🐛 App 必须真的把它接到 ChatPanel 上（props 写了不传 = 门永远收不齐）", () => {
+    const src = code(APP);
+    expect(src).toContain("onHistoryLoaded={markChatHistoryLoaded}");
+  });
+
+  it("🐛 传给 ChatPanel 的回调必须是**稳定引用**（内联箭头 + 写进 effect 依赖 = 反复重拉历史）", () => {
+    const src = code(APP);
+    // 只能是 useCallback 产物；不许出现 `onHistoryLoaded={() => ...}` 这种每次渲染换身份的写法
+    expect(src).toMatch(/const markChatHistoryLoaded = React\.useCallback\(/);
+    expect(src).not.toMatch(/onHistoryLoaded=\{\(\)\s*=>/);
+  });
+
+  it("🐛 没有会话可开时必须**自己**登记（不能指望一个永远不会挂载的组件来回执）", () => {
+    const src = code(APP);
+    // 先等 sessions 到齐，再在"欢迎页 / 拿不到 agentId"两条路径上收尾
+    expect(src).toContain("if (!firstLoad.sessions) { return; }");
+    expect(src).toContain("if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }");
+  });
+
+  it("[反例] 上面几条正则/包含断言必须真的能抓到坏写法（守卫自检）", () => {
+    expect(/FIRST_LOAD_KEYS = \[[^\]]*"chatHistory"/.test('const FIRST_LOAD_KEYS = ["agents"] as const;')).toBe(false);
+    expect(/onHistoryLoaded=\{\(\)\s*=>/.test("onHistoryLoaded={() => markFirstLoad(\"chatHistory\")}")).toBe(true);
+  });
+});
+
 describe("A-1039 ③ 版本号通道（副标题数据来源）", () => {
   it("主进程提供 slime:app:version，用 app.getVersion() 作为权威值", () => {
     const src = code("gui/src/main/index.ts");

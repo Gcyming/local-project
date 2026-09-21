@@ -5,26 +5,22 @@
  *
  * 这一族锁的是**「用户的指令会不会被吞 / 会不会发错会话」**，所以断言的落点全是行为：
  * 顺序、不吞、跨会话隔离、幂等、以及"身份用 id 而不是下标"。
- * 文案（徽标/悬停）只断"两值互斥且可来回切"——它属于可改的产品措辞，不该被逐字锁死。
+ * 文案层只保留"摘要"这一条（UI 据此决定整块显隐与条数）；**不再**锁徽标/悬停措辞
+ * —— A-1056③ 起界面上已没有"模式徽标"这一层（用户原话"即将插入是什么鬼？"）。
  *
  * ⚠️ 验收标准是**变异测试**（见 `gui/scripts/mut-a1054.mjs`）：写完必须逐条改坏、确认变红。
  */
 import { describe, it, expect } from "vitest";
 import {
   clearAll,
-  describeMode,
   enqueue,
-  hasPendingFor,
-  modeHint,
   nextQueueId,
   peek,
-  previewText,
   promote,
   removeAt,
   setMode,
   summarize,
   takeNext,
-  toggleMode,
   type QueuedInstruction,
 } from "../../gui/src/renderer/pages/instructionQueue.js";
 
@@ -147,37 +143,12 @@ describe("A-1054 队列：改模式 / 提升 / 删除", () => {
     expect(clearAll()).toEqual([]);
     expect(summarize(clearAll())).toBe("");
   });
-
-  it("hasPendingFor 只认自己的会话", () => {
-    const list = [item({ sessionId: "s1" })];
-    expect(hasPendingFor(list, "s1")).toBe(true);
-    expect(hasPendingFor(list, "s2")).toBe(false);
-    expect(hasPendingFor([], "s1")).toBe(false);
-  });
 });
 
-describe("A-1054 队列：文案与预览", () => {
-  it("预览把换行/连续空白折叠成单空格（否则队列条会被长指令撑高）", () => {
-    expect(previewText("第一行\n\n第二行    带空格")).toBe("第一行 第二行 带空格");
-  });
-
-  it("预览超长才截断并加省略号；正好等于上限不截断", () => {
-    expect(previewText("abcdef", 6)).toBe("abcdef");
-    expect(previewText("abcdefg", 6)).toBe("abcdef…");
-  });
-
-  it("两种插入方式的徽标文案互不相同、可来回切（来回两次回原值）", () => {
-    expect(describeMode("interrupt")).not.toBe(describeMode("queue"));
-    expect(toggleMode(toggleMode("interrupt"))).toBe("interrupt");
-    expect(toggleMode("interrupt")).toBe("queue");
-    expect(toggleMode("queue")).toBe("interrupt");
-  });
-
-  it("悬停解释说清「会发生什么」（两条都要提到是否打断）", () => {
-    expect(modeHint("interrupt")).toContain("打断");
-    expect(modeHint("queue")).toContain("不打断");
-  });
-
+/* A-1056③：原先这里整块测「徽标文案 / 悬停解释 / 一行预览」——那些函数已随界面改版删除
+   （用户原话"即将插入是什么鬼？"）。待发指令不再有"模式徽标"这一层，故只剩摘要这一条
+   —— 它仍是 UI 决定"整块显不显示、显示几条"的依据。 */
+describe("A-1054 队列：摘要", () => {
   it("摘要：空队列给空串（UI 据此整块隐藏），非空给条数", () => {
     expect(summarize([])).toBe("");
     expect(summarize([item(), item()])).toBe("2 条待发");
