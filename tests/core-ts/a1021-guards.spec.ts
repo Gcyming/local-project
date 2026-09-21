@@ -26,7 +26,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_AUMID, APP_DISPLAY_NAME, aumidRegistryKey, aumidRegistryValues, buildNotificationPayload } from "../../gui/src/main/notifyIdentity.js";
+import { APP_AUMID, APP_DISPLAY_NAME, aumidRegistryKey, aumidRegistryValues, buildNotificationPayload, pngFileUri } from "../../gui/src/main/notifyIdentity.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const ICON_TSX = join(ROOT, "gui/src/renderer/components/Icon.tsx");
@@ -62,7 +62,7 @@ describe("A-1021 ①：通知头部那行应用名 = 程序名（靠 AUMID 注�
     expect(APP_DISPLAY_NAME).not.toContain("com.slime");
   });
 
-  it("注册位置与值：HKCU\\Software\\Classes\\AppUserModelId\\<AUMID> → DisplayName", () => {
+  it("注册位置与值：HKCU\\Software\\Classes\\AppUserModelId\\<AUMID> → DisplayName（有合法图标时追加 IconUri）", () => {
     // 未打包应用的正规路径（微软 DesktopNotificationManagerCompat::Register 同一位置）
     expect(aumidRegistryKey("com.example.app")).toBe("HKCU\\Software\\Classes\\AppUserModelId\\com.example.app");
     const vals = aumidRegistryValues("slime");
@@ -70,8 +70,41 @@ describe("A-1021 ①：通知头部那行应用名 = 程序名（靠 AUMID 注�
     // 默认实参也要对（调用点不传参时用的就是默认值）
     expect(aumidRegistryKey()).toContain(`AppUserModelId\\${APP_AUMID}`);
     expect(aumidRegistryValues()[0].value).toBe(APP_DISPLAY_NAME);
-    // ⚠️ 故意不写 IconUri：本轮只修"名字不对"，加图标会引入新失败面（见源码注释）
-    expect(aumidRegistryValues().map((v) => v.name)).not.toContain("IconUri");
+
+    /* ⚠️ A-1055 更正：本轮之前这里的注释写着「故意不写 IconUri」——它已经**与事实相反**了。
+       现状是：`DisplayName` 恒写；**只有**拿到合法位图路径时才追加 `IconUri`（A-1055 恢复了
+       IconUri 写入，否则 toast 头部（应用身份行）永远没有图标）。留在原地的旧注释比没有注释
+       更糟 —— 下一个人会据此以为"不写 IconUri 是既定设计"，从而把图标缺失当正常。
+       下面的断言锁的就是这条**新**口径本身（含"路径不合格 → 宁可不写"）。 */
+    expect(aumidRegistryValues().map((v) => v.name), "无 iconPath → 不写 IconUri（旧口径，仍须成立）")
+      .not.toContain("IconUri");
+    expect(aumidRegistryValues("slime", "D:\\tool\\AI\\slime\\build\\icon.png")).toEqual([
+      { name: "DisplayName", value: "slime" },
+      { name: "IconUri", value: "file:///D:/tool/AI/slime/build/icon.png" },
+    ]);
+    // 不合格的路径一律**不写**（宁可没有图标，也不塞一个坏 URI 进注册表）
+    for (const bad of ["build/icon.png", "C:\\a\\icon.ico", "C:\\a\\icon.svg", null, undefined, ""]) {
+      expect(aumidRegistryValues("slime", bad).map((v) => v.name), `不合格的图标路径却被写进了注册表：${bad}`)
+        .not.toContain("IconUri");
+    }
+  });
+
+  it("pngFileUri：反斜杠转正斜杠 + 逐段 percent-encode + 盘符冒号还原 + 只认位图扩展名", () => {
+    // ① 盘符段不能被编码：encodeURIComponent("C:") = "C%3A"，写进 reg 会被系统当非法 URI（图标位空白）
+    expect(pngFileUri("D:\\tool\\AI\\slime\\build\\icon.png")).toBe("file:///D:/tool/AI/slime/build/icon.png");
+    // ② 本项目**实机**路径就带空格（`D:\...\pilot project\...`）—— 空格在 URI 里非法，必须编码
+    expect(pngFileUri("D:\\pilot project\\build\\icon.png")).toBe("file:///D:/pilot%20project/build/icon.png");
+    // ③ 中文目录同理（逐段 encode）
+    expect(pngFileUri("D:\\中文 目录\\icon.png"))
+      .toBe("file:///D:/%E4%B8%AD%E6%96%87%20%E7%9B%AE%E5%BD%95/icon.png");
+    // ④ .jpg / .jpeg 也是 toast 支持的位图（大小写不敏感，且不擅自改写扩展名）
+    expect(pngFileUri("C:\\a\\b.jpg")).toBe("file:///C:/a/b.jpg");
+    expect(pngFileUri("C:\\a\\b.JPEG")).toBe("file:///C:/a/b.JPEG");
+    // ⑤ 返回 null 的四种情形：空值 / 相对路径 / 非位图扩展名 / 伪装成位图的其它文件
+    //    （.ico 是**最容易被想当然**的一个：Electron 的 Tray 收 ico，toast 的 IconUri 不收）
+    for (const bad of [null, undefined, "", "build/icon.png", "icon.png", "C:\\a\\icon.ico", "C:\\a\\icon.svg", "C:\\a\\icon.png.bak"]) {
+      expect(pngFileUri(bad), `这个路径不该被当成合法通知图标：${JSON.stringify(bad)}`).toBe(null);
+    }
   });
 
   it("标题是**事件文案**，不许被程序名顶掉（顶掉会让第二行与头部重复、白占 toast 空间）", () => {

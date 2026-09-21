@@ -23,6 +23,7 @@ import type {
   TraceSnapshot, PlanInfo, CompressResult,
   ToolProfileDTO,
   NotifyConfigDTO,
+  UpdateStatusDTO,
   OperationFocusUI,
 } from "../shared/ipc.js";
 
@@ -389,10 +390,12 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:config:write", { name, content }) as Promise<{ ok: boolean; error?: string }>,
   },
   update: {
-    check: () => ipcRenderer.invoke("slime:update:check") as Promise<{ status: string; version?: string; error?: string }>,
+    check: () => ipcRenderer.invoke("slime:update:check") as Promise<UpdateStatusDTO>,
+    // A-1055：下载必须由用户主动触发（主进程已关掉 autoDownload，见 updater.ts）
+    download: () => ipcRenderer.invoke("slime:update:download") as Promise<UpdateStatusDTO>,
     install: () => ipcRenderer.invoke("slime:update:install") as Promise<{ ok: boolean }>,
-    onStatus: (cb: (status: { status: string; version?: string; releaseNotes?: string; error?: string }) => void) =>
-      onMessage<{ status: string; version?: string; releaseNotes?: string; error?: string }>("slime:update:status", cb),
+    onStatus: (cb: (status: UpdateStatusDTO) => void) =>
+      onMessage<UpdateStatusDTO>("slime:update:status", cb),
   },
   settings: {
     /** 开机自启：读取当前状态 */
@@ -817,9 +820,10 @@ declare global {
         write: (name: string, content: string) => Promise<{ ok: boolean; error?: string }>;
       };
       update: {
-        check: () => Promise<{ status: string; version?: string; error?: string }>;
+        check: () => Promise<UpdateStatusDTO>;
+        download: () => Promise<UpdateStatusDTO>;
         install: () => Promise<{ ok: boolean }>;
-        onStatus: (cb: (status: { status: string; version?: string; releaseNotes?: string; error?: string }) => void) => () => void;
+        onStatus: (cb: (status: UpdateStatusDTO) => void) => () => void;
       };
       settings: {
         autostartGet: () => Promise<{ ok: boolean; enabled: boolean }>;

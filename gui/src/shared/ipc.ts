@@ -995,8 +995,25 @@ export interface NotifyConfigDTO {
   soundName: string | null;
 }
 
-/* ── 上下文自动压缩（A-969） ── */
+/**
+ * A-1055：自动更新状态（主进程 → 渲染层 `slime:update:status`）。
+ *
+ * ⚠️ 与主进程 `updater.ts` 的 `UpdateStatus` 是**同一份契约**（字段增删必须同步）。
+ * 之所以在这里再声明一次：preload/renderer 不能 import 主进程模块（会拖进 electron-updater）。
+ */
+export interface UpdateStatusDTO {
+  status: "checking" | "downloading" | "downloaded" | "error" | "available" | "up-to-date" | "skipped" | "disabled";
+  version?: string;
+  releaseNotes?: string;
+  error?: string;
+  /** 下载进度百分比（0–100；仅 status === "downloading" 有值） */
+  percent?: number;
+  transferred?: number;
+  total?: number;
+  bytesPerSecond?: number;
+}
 
+/* ── 上下文自动压缩（A-969） ── */
 /** 上下文自动压缩结果（GUI 发送前调用；动画展示后继续原消息发送） */
 export interface CompressResult {
   ok: boolean;

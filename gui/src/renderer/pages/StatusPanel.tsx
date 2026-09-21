@@ -6,17 +6,19 @@
  * - 3s 轮询 → slime:stats:update 推送；自动更新状态
  */
 import React, { type JSX } from "react";
-import type { StatsSnapshot } from "../../shared/ipc.js";
+import type { StatsSnapshot, UpdateStatusDTO } from "../../shared/ipc.js";
 import { alertAsync } from "../dialog.js";
 import PlanPanel from "./PlanPanel.js";
 import TraceViewer from "./TraceViewer.js";
 import ReleaseNotesView from "./ReleaseNotesView.js";
 
-interface UpdateStatus {
-  status: string;
-  version?: string;
-  releaseNotes?: string;
-  error?: string;
+/** 字节数 → 人类可读（下载进度行用；不足 1KB 直接给 B） */
+function fmtBytes(n: number | undefined): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) { return "—"; }
+  if (n < 1024) { return `${n} B`; }
+  if (n < 1024 * 1024) { return `${(n / 1024).toFixed(1)} KB`; }
+  if (n < 1024 * 1024 * 1024) { return `${(n / 1024 / 1024).toFixed(1)} MB`; }
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 interface TrendPoint {
@@ -88,7 +90,7 @@ function Bars({ data, color }: { data: Array<{ label: string; value: number }>; 
 
 export default function StatusPanel(): JSX.Element {
   const [stats, setStats] = React.useState<StatsSnapshot | null>(null);
-  const [updateStatus, setUpdateStatus] = React.useState<UpdateStatus | null>(null);
+  const [updateStatus, setUpdateStatus] = React.useState<UpdateStatusDTO | null>(null);
   /** 更新说明展开态：默认展开（用户点「检查更新」就是想看这版改了什么） */
   const [notesOpen, setNotesOpen] = React.useState(true);
   const [trend, setTrend] = React.useState<TrendPoint[]>([]);
@@ -103,7 +105,11 @@ export default function StatusPanel(): JSX.Element {
       return;
     }
     void api.current.stats.snapshot().then(setStats);
-    void api.current.update.check().then(setUpdateStatus);
+    /* A-1055：**不再在挂载时自动 check**。
+       用户原话："怎么一有新版本，进入设置的状态菜单内，翻过去就直接显示后台更新了？你改一下，
+       要用户主动选择啊。" —— 面板一挂载就去查 GitHub，查到了还会（因为 autoDownload 默认 true）
+       把 500MB 安装包拉下来。现在检查与下载都由用户点按钮触发；下面的 onStatus 订阅仍照常收
+       主进程（启动期）自检推送，所以"有新版本"不会被动消失 —— 只是不再由"翻到这一页"触发。 */
     const offPoll = api.current.stats.onPoll((snap: StatsSnapshot) => {
       setStats(snap);
       setLoadingSince((prev) => {
@@ -127,7 +133,7 @@ export default function StatusPanel(): JSX.Element {
         return next.slice(-30);
       });
     });
-    const offUpdate = api.current.update.onStatus((s: UpdateStatus) => setUpdateStatus(s));
+    const offUpdate = api.current.update.onStatus((s: UpdateStatusDTO) => setUpdateStatus(s));
     void api.current.stats.poll(true);
     return () => {
       offPoll();
@@ -140,6 +146,12 @@ export default function StatusPanel(): JSX.Element {
 
   async function handleCheckUpdate() {
     const res = await api.current?.update?.check();
+    if (res) setUpdateStatus(res);
+  }
+
+  /** A-1055：下载更新（用户主动）—— 主进程已关掉 autoDownload，不走这一步永远不会下载 */
+  async function handleDownloadUpdate() {
+    const res = await api.current?.update?.download();
     if (res) setUpdateStatus(res);
   }
 
@@ -163,6 +175,7 @@ export default function StatusPanel(): JSX.Element {
   // 更新状态兜底：渲染层未收到主进程推送时，默认"未启用"（避免只有一个按钮显异常感）
   const updateStatusSafe = updateStatus ?? { status: "disabled" };
   const isAvailable = updateStatus?.status === "available";
+  const isDownloading = updateStatus?.status === "downloading";
   const isDownloaded = updateStatus?.status === "downloaded";
   /** 有可展示的更新说明（归一化后非空；空串/纯空白不算） */
   const notesAvailable = Boolean((updateStatusSafe.releaseNotes ?? "").trim());
@@ -344,9 +357,21 @@ export default function StatusPanel(): JSX.Element {
           {updateStatusSafe.error && (
             <span style={{ color: DANGER, fontSize: 13 }}>检查失败: {updateStatusSafe.error}</span>
           )}
+          {/* A-1055：发现新版本 → 由**用户点「下载更新」**才开始下载（主进程已关闭自动下载）。
+              文案同步改掉"正在后台下载…"——那正是用户以为"它自己偷偷在下"的由来。 */}
           {isAvailable && (
-            <span style={{ color: "var(--success)", fontSize: 13 }}>
-              发现新版本: {updateStatusSafe.version}（正在后台下载…）
+            <>
+              <span style={{ color: "var(--success)", fontSize: 13 }}>
+                发现新版本: {updateStatusSafe.version}（尚未下载，点击右侧按钮开始）
+              </span>
+              <button onClick={handleDownloadUpdate} className="btn sky" style={{ fontSize: 12.5 }}>
+                下载更新
+              </button>
+            </>
+          )}
+          {isDownloading && (
+            <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
+              正在下载 {updateStatusSafe.version}…
             </span>
           )}
           {isDownloaded && (
@@ -368,10 +393,46 @@ export default function StatusPanel(): JSX.Element {
           {updateStatusSafe.status === "checking" && (
             <span style={{ color: "var(--text-muted)", fontSize: 13 }}>正在检查更新...</span>
           )}
+          {updateStatusSafe.status === "skipped" && (
+            <span style={{ color: "var(--text-muted)", fontSize: 13 }}>已跳过该版本</span>
+          )}
           <button onClick={handleCheckUpdate} className="btn" style={{ fontSize: 12.5 }}>
             手动检查
           </button>
         </div>
+
+        {/* ── A-1055：实时下载进度条 ──────────────────────────────────────────────
+            此前这里只有一句静态文案（"正在后台下载…"），因为主进程**压根没监听
+            download-progress**，界面拿不到任何数字。现在主进程逐事件上报
+            percent/transferred/total/bytesPerSecond，这里如实渲染：
+            进度条 + 「已下载/总量（百分比）」+ 速率，全部可核对（不是"转圈等它好"）。 */}
+        {isDownloading && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ height: 6, borderRadius: 3, background: "var(--bg-hover)", overflow: "hidden" }}>
+              <div style={{
+                height: "100%",
+                width: `${Math.max(0, Math.min(100, updateStatusSafe.percent ?? 0))}%`,
+                background: "var(--accent)",
+                borderRadius: 3,
+                transition: "width 0.25s ease",
+              }} />
+            </div>
+            <div style={{
+              marginTop: 6, fontSize: 11.5, color: "var(--text-muted)",
+              display: "flex", gap: 10, flexWrap: "wrap",
+            }}>
+              <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                {(updateStatusSafe.percent ?? 0).toFixed(1)}%
+              </span>
+              <span>
+                {fmtBytes(updateStatusSafe.transferred)} / {fmtBytes(updateStatusSafe.total)}
+              </span>
+              {typeof updateStatusSafe.bytesPerSecond === "number" && updateStatusSafe.bytesPerSecond > 0 && (
+                <span>{fmtBytes(updateStatusSafe.bytesPerSecond)}/s</span>
+              )}
+            </div>
+          </div>
+        )}
         {/* A-1037：Release 正文此前被当纯文本塞进 flex 行 → `<h3>`/`<table>` 源码裸露。
             现在走结构化渲染（HTML/Markdown 双认），且**只按需展开**，不把面板顶爆。 */}
         {(isAvailable || isDownloaded) && notesAvailable && (

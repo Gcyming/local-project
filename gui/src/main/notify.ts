@@ -28,6 +28,7 @@ import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
  * 本文件从此只当"Electron 适配层"：读配置、拷音频、注册身份、真的弹通知。
  */
 import { buildNotificationPayload, applyWindowsNotificationIdentity, APP_AUMID } from "./notifyIdentity.js";
+import { INSTALL_ROOT } from "./boot.js";
 
 // re-export：公开面不变（`APP_AUMID` / `APP_DISPLAY_NAME` 的唯一出处仍在 notifyIdentity.ts）
 export { APP_AUMID, APP_DISPLAY_NAME, buildNotificationPayload, type NotifyPayload } from "./notifyIdentity.js";
@@ -144,10 +145,22 @@ function ensureNotificationIdentity(): void {
   } catch (e) {
     console.warn(`[notify] 设置 AppUserModelId 失败（通知可能无法归属到本应用）：${(e as Error)?.message ?? String(e)}`);
   }
-  const r = applyWindowsNotificationIdentity();
+  const r = applyWindowsNotificationIdentity(notificationIconPath());
   if (!r.ok) {
-    console.warn(`[notify] 注册通知应用名失败（toast 头部会显示成包名 ${APP_AUMID}）：${r.detail}`);
+    console.warn(`[notify] 注册通知应用身份失败（toast 头部会显示成包名 ${APP_AUMID} / 无图标）：${r.detail}`);
   }
+}
+
+/** 通知图标文件（应用自身资源，见 boot.ts 的 INSTALL_ROOT 定义）。
+ *
+ * ⚠️ A-1055 修正：此前是 `join(PROJECT_ROOT, "build", "icon.png")` ——
+ * `PROJECT_ROOT` 是**数据根**（打包版 = `userData/slime-data`），那里**没有** build/icon.png；
+ * 于是 Electron 拿不到图标，弹出来的通知是 Electron 默认图标（用户实测"图标不是 slime 的"）。
+ * 正确口径是**安装根**：`electron-builder.json` extraFiles 里 `build/icon.png` 落到安装根。
+ * 文件不存在时返回 undefined —— 让 Electron 用应用图标兜底，而不是塞一个坏路径。 */
+export function notificationIconPath(): string | undefined {
+  const p = join(INSTALL_ROOT, "build", "icon.png");
+  return existsSync(p) ? p : undefined;
 }
 
 /** 让渲染层播放自定义提示音（系统默认音由 Notification.silent=false 负责，不走这里） */
@@ -200,7 +213,9 @@ export function notifyUser(ev: { kind: NotifyKind; title: string; body: string }
       title: payload.title,
       body: payload.body,
       silent: !cfg.soundEnabled || Boolean(custom),
-      icon: join(PROJECT_ROOT, "build", "icon.png"),
+      // A-1055：图标口径改为安装根（见 notificationIconPath 的说明）。
+      // `icon` 为 undefined 时 Electron 回落到应用图标，不再塞一个不存在的路径。
+      icon: notificationIconPath(),
     });
     n.on("click", () => {
       const win = getWindowRef?.() ?? null;

@@ -83,14 +83,43 @@ export function aumidRegistryKey(aumid: string = APP_AUMID): string {
 }
 
 /**
+ * 本地图片路径 → Windows 通知身份可用的 `file://` URI。
+ *
+ * 为什么要单独做这件事（而不是直接拼 `file://` + 路径）：
+ *   · 反斜杠必须转正斜杠（`reg` 里写 `file:///C:\a\b.png` 会被系统当非法 URI → 图标位空白）；
+ *   · 路径里可能有**空格/中文/括号**（本项目实机路径就是 `D:\...\pilot project\...`），
+ *     空格在 URI 里是非法字符，必须逐段 percent-encode（只编码段，保留 `/` 与盘符冒号）；
+ *   · 只接受位图扩展名：toast 的 IconUri 支持 .png/.jpg，**不接受 .ico/.svg**
+ *     （写错扩展名不会报错，只会静默显示不出图标 —— 又是一个"静默失败"）。
+ *
+ * 返回 null = 这个路径不能当通知图标用（调用方据此**不写** IconUri，而不是写一个坏 URI）。
+ */
+export function pngFileUri(p: string | null | undefined): string | null {
+  if (!p) { return null; }
+  const norm = p.replace(/\\/g, "/").trim();
+  if (!/^[a-zA-Z]:\//.test(norm) && !norm.startsWith("/")) { return null; }
+  if (!/\.(png|jpe?g)$/i.test(norm)) { return null; }
+  const encoded = norm.split("/").map((seg) => encodeURIComponent(seg)).join("/");
+  // 盘符段 `C:` 不该被编码（encodeURIComponent("C:") = "C%3A"），还原它
+  return `file:///${encoded.replace(/^([a-zA-Z])%3A\//, "$1:/")}`;
+}
+
+/**
  * 需要写入注册表的值（纯数据 → 可单测）。
  *
- * ⚠️ 只写 `DisplayName`，**故意不写 `IconUri`**：用户本轮只反馈了「名字不对」。
- *   加 IconUri 会引入新失败面（URI 格式不对 → 图标位变成破图/空白），而当前本来就没有图标，
- *   属于"顺手改坏"。要补图标时应作为独立一轮，并当场核对效果。
+ * A-1055：**恢复写入 `IconUri`**（此前刻意只写 DisplayName，见下方历史注）。
+ * 用户本轮反馈的是「通知弹窗的图标不是 slime 的应用图标」——
+ *   · `Notification({icon})` 只影响 toast **正文区**的小图，且本项目此前指向的
+ *     `PROJECT_ROOT/build/icon.png` 在打包版**根本不存在**（数据根 ≠ 安装根）→ 退化成 Electron 默认图标；
+ *   · toast **头部（应用身份行）**的图标由本 AUMID 的 `IconUri` 决定 —— 不写就永远没有。
+ * 两处都指向同一张安装根位图，才谈得上"图标是 slime 的"。URI 由 pngFileUri 严格校验，
+ * 不合格就**不写**（宁可没有图标，也不写一个坏 URI）。
  */
-export function aumidRegistryValues(displayName: string = APP_DISPLAY_NAME): AumidRegistryValue[] {
-  return [{ name: "DisplayName", value: displayName }];
+export function aumidRegistryValues(displayName: string = APP_DISPLAY_NAME, iconPath?: string | null): AumidRegistryValue[] {
+  const values: AumidRegistryValue[] = [{ name: "DisplayName", value: displayName }];
+  const uri = pngFileUri(iconPath);
+  if (uri) { values.push({ name: "IconUri", value: uri }); }
+  return values;
 }
 
 /** reg.exe 的绝对路径（不依赖 PATH） */
@@ -98,41 +127,56 @@ function regExe(): string {
   return join(process.env.SystemRoot ?? "C:\\Windows", "System32", "reg.exe");
 }
 
-/** 读取该 AUMID 当前的 DisplayName；不存在/读不到 → null */
-function currentDisplayName(key: string): string | null {
+/** 读取该 AUMID 当前的若干值（name → value）；键/值不存在时对应项为 null */
+function currentValues(key: string, names: string[]): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const n of names) { out[n] = null; }
   try {
-    const out = execFileSync(regExe(), ["query", key, "/v", "DisplayName"], {
+    const res = execFileSync(regExe(), ["query", key], {
       encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
     });
-    const m = /DisplayName\s+REG_SZ\s+(.+?)\s*$/m.exec(out);
-    return m ? m[1] : null;
+    for (const n of names) {
+      const m = new RegExp(`${n}\\s+REG_SZ\\s+(.+?)\\s*$`, "m").exec(res);
+      if (m) { out[n] = m[1]; }
+    }
   } catch {
-    // reg query 对"键或值不存在"返回非零 → 视为未注册
-    return null;
+    // reg query 对"键不存在"返回非零 → 全部视为未注册
   }
+  return out;
 }
 
 /**
- * 注册 Windows 通知的应用身份（**幂等**：值已是目标值就直接返回，不动注册表）。
+ * 注册 Windows 通知的应用身份（**幂等**：全部值已是目标值就直接返回，不动注册表）。
+ *
+ * ⚠️ 幂等判据必须覆盖**全部**要写的值（A-1055 修正）：此前只比对 DisplayName ——
+ *   v0.0.6 已把 DisplayName 写成 "slime"，于是补 IconUri 的那一版会被这条短路直接跳过，
+ *   图标永远补不上，而日志还报"已注册，跳过"（典型静默失效）。
  *
  * 非 Windows 平台返回 `{ok:true, detail:"skipped"}`（macOS/Linux 用 Bundle ID / .desktop 名，
  * 不适用这条路径）。任何失败都**如实返回原因**，由调用方决定打印 —— 静默失败是精度杀手。
+ *
+ * `iconPath`：通知图标位图（安装根 `build/icon.png`）。传入者负责保证它存在
+ * （本模块不 import electron，因此**不能**自己去推 INSTALL_ROOT）。
  */
-export function applyWindowsNotificationIdentity(): IdentityApplyResult {
+export function applyWindowsNotificationIdentity(iconPath?: string | null): IdentityApplyResult {
   if (process.platform !== "win32") { return { ok: true, detail: "非 Windows，跳过 AUMID 注册" }; }
   const key = aumidRegistryKey();
-  const values = aumidRegistryValues();
-  const want = values.find((v) => v.name === "DisplayName")?.value ?? "";
-  if (currentDisplayName(key) === want) { return { ok: true, detail: `已注册（DisplayName=${want}），跳过` }; }
+  const values = aumidRegistryValues(APP_DISPLAY_NAME, iconPath);
+  const cur = currentValues(key, values.map((v) => v.name));
+  const stale = values.filter((v) => cur[v.name] !== v.value);
+  if (stale.length === 0) {
+    return { ok: true, detail: `已注册（${values.map((v) => `${v.name}=${v.value}`).join(" / ")}），跳过` };
+  }
   try {
     // 一次性写入全部值（/f 覆盖；父键由 reg add 自动创建）
     const args: string[] = ["add", key, "/f"];
     for (const v of values) { args.push("/v", v.name, "/t", "REG_SZ", "/d", v.value); }
     execFileSync(regExe(), args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
-    const got = currentDisplayName(key);
-    return got === want
-      ? { ok: true, detail: `已写入 ${key} → DisplayName=${want}` }
-      : { ok: false, detail: `写入后回读不符：期望 ${want}，实际 ${got ?? "(读不到)"}` };
+    const got = currentValues(key, values.map((v) => v.name));
+    const bad = values.filter((v) => got[v.name] !== v.value);
+    return bad.length === 0
+      ? { ok: true, detail: `已写入 ${key} → ${values.map((v) => `${v.name}=${v.value}`).join(" / ")}` }
+      : { ok: false, detail: `写入后回读不符：${bad.map((v) => `${v.name} 期望 ${v.value} 实际 ${got[v.name] ?? "(读不到)"}`).join("；")}` };
   } catch (e) {
     return { ok: false, detail: `写注册表失败：${(e as Error)?.message ?? String(e)}` };
   }
