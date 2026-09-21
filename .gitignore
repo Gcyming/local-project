@@ -44,6 +44,14 @@ auth_token*
 # Knowledge/ 是个人知识库（上万文件）—— 两者都属于"用户自己的数据"，绝非项目代码。
 data/
 Knowledge/
+# ⚠️ 例外：**随包技能自带的 `data/`** 是资源正本，必须入库。
+#   上面的 `data/` 规则是为「项目运行时的根 data/」写的，但它没有锚定路径，
+#   于是把 `gui/template/skills/drawio-skill/data/` 一并吞掉 —— 该目录含
+#   `shape-index.json.gz`（436 KB，10446 项形状索引）等随包资源，
+#   丢失后「技能能装、能力却残缺」，且 A-1053 守卫（魔数 + 可解压）在干净克隆上会直接失败。
+#   git 规则：父目录被排除时，子文件无法单独重新纳入 → 必须先反排除目录本身，再反排除其内容。
+!gui/template/skills/**/data/
+!gui/template/skills/**/data/**
 # AI 工作记忆与本地工具状态（含内部复盘、会话摘录）
 .workbuddy/
 
