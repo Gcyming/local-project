@@ -108,14 +108,19 @@ export class ToolRegistry {
     if (!tool) {
       return `[错误] 工具 '${name}' 未注册`;
     }
-    // 类别闸门（设置·权限 的 读/写/终端 开关真正生效点）——关闭的类别直接拒绝，模型无法绕过
+    // 类别闸门 + 硬规则闸门（设置·权限 的 读/写/终端 开关真正生效点）——
+    // 关闭的类别直接拒绝；命中硬规则（黑名单/敏感文件/受保护目录/越权）在**任何**审批档位下都拒绝。
+    // 两者都在每次调用时实时判定，模型无法绕过。
     if (toolCategoryGate) {
       try {
-        const gate = toolCategoryGate(tool);
+        const gate = toolCategoryGate(tool, args);
         if (!gate.allowed) {
-          return `[权限已关闭] 工具 '${name}' 所属类别已被用户在「设置 → 权限」中禁用${gate.reason ? `（${gate.reason}）` : ""}。如需使用请先到设置中开启。`;
+          const why = gate.reason ? `（${gate.reason}）` : "";
+          return gate.kind === "safety"
+            ? `[安全拦截] 工具 '${name}' 被硬规则拒绝${why}。这是不可绕过安全边界，请改用不触碰该边界的做法。`
+            : `[权限已关闭] 工具 '${name}' 所属类别已被用户在「设置 → 权限」中禁用${why}。如需使用请先到设置中开启。`;
         }
-      } catch { /* 闸门异常不阻断调用（fail-open 仅在闸门自身故障时，分类器仍会兜底） */ }
+      } catch { /* 闸门异常不阻断调用（fail-open 仅在闸门自身故障时，调用方沙箱与工具内护栏仍会兜底） */ }
     }
     try {
       const result = await tool.executeFn(args);
@@ -128,8 +133,18 @@ export class ToolRegistry {
 }
 
 /** 工具类别闸门：由装配层（GUI 主进程）注入，读取设置·权限的实时开关。
- *  返回 allowed=false 时 callTool 拒绝执行并回传原因给模型。 */
-export type ToolCategoryGate = (tool: Tool) => { allowed: boolean; reason?: string };
+ *  返回 allowed=false 时 callTool 拒绝执行并回传原因给模型。
+ *  `kind` 让拒绝文案如实区分来源（类别开关否决 / 硬规则安全拦截），二者对模型的后续动作指引不同。 */
+export interface ToolGateDecision {
+  allowed: boolean;
+  reason?: string;
+  /** category=类别开关关闭（可提示用户去设置开启）；safety=硬规则命中（不可绕过，只能换做法） */
+  kind?: "category" | "safety";
+}
+
+/** `args` 让闸门能做**内容级**硬规则判定（写入路径 / 终端命令 / 目标 URL）；
+ *  未声明该参数的老实现（只读 tool）仍然类型兼容。 */
+export type ToolCategoryGate = (tool: Tool, args: Record<string, unknown>) => ToolGateDecision;
 
 let toolCategoryGate: ToolCategoryGate | null = null;
 

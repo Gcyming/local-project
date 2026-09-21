@@ -4,16 +4,18 @@
  * - 自定义审批白名单（custom 档生效）：预设目录/仓库命中免审批
  * - 工具权限类别开关 / 图形控制 / MCP / 技能 全局开关：统一持久化到 gui_permissions.json
  *
- * 【生效说明】工具类别开关由主进程注入的 ToolCategoryGate 在每次工具调用时实时读取，
- * 关闭的类别会被直接拒绝并把原因回传模型（模型无法绕过）。改动即时生效，无需重启。
+ * 【生效说明】工具类别开关由主进程注入的 ToolCategoryGate 在每次工具调用时实时读取：
+ * 开关即授权：开启的类别直接放行（免逐次审批），关闭的类别被直接拒绝并把原因回传模型（模型无法绕过）。
+ * 硬规则（越权路径 / 敏感文件 / 受保护源码目录 / 终端高危命令 / 内网地址）由 ToolCategoryGate 同批执行，
+ * **不随开关或审批档位降级**。改动即时生效，无需重启。
  */
 import React, { type JSX } from "react";
 import type { GuiPermissions, ApprovalMode } from "../../shared/ipc.js";
 
 const TOOL_ROWS: Array<{ key: "toolRead" | "toolWrite" | "toolTerminal"; label: string; desc: string; warn: boolean }> = [
-  { key: "toolRead", label: "读（read）", desc: "检索本地文件 / 内存 / 知识库 / 截屏预览", warn: false },
-  { key: "toolWrite", label: "写（write）", desc: "创建 / 修改本地文件与配置；图形控制（鼠标·键盘·触摸注入）", warn: true },
-  { key: "toolTerminal", label: "终端（terminal）", desc: "执行 shell / 命令，含 **ADB shell**（操作安卓设备命令行）", warn: true },
+  { key: "toolRead", label: "读（read）", desc: "检索本地文件 / 内存 / 知识库（只读取，不改动）", warn: false },
+  { key: "toolWrite", label: "写（write）", desc: "创建 / 修改本地文件与配置（图形控制见下方独立开关）", warn: true },
+  { key: "toolTerminal", label: "终端（terminal）", desc: "执行终端类操作（声明 terminal 权限的工具；当前为 ADB shell —— 操作安卓设备命令行）", warn: true },
 ];
 
 export default function PermissionsPanel(): JSX.Element {
@@ -67,8 +69,8 @@ export default function PermissionsPanel(): JSX.Element {
     <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>全局权限控制</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
-        面向所有 Agent 的全局权限默认值。会话/项目级的单独配置优先于这里的默认值；
-        MCP 与技能可在对应专栏单独启用/停用，此处开关统一起作用。
+        面向所有 Agent 的授权权威：<b>下面的开关决定各类能力是否放行，审批档位决定还需不需要问</b>。
+        改动立即对所有会话生效（正在运行的会话无需重启）。MCP 与技能可在对应专栏单独启用/停用，此处开关统一起作用。
       </div>
 
       {notice && (
@@ -154,7 +156,9 @@ export default function PermissionsPanel(): JSX.Element {
           <div className="card" style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>工具权限类别</div>
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 6 }}>
-              关闭的类别会被直接拒绝并把原因回传模型（模型无法绕过）。改动即时生效。
+              开关即授权：<b>开启 = 该类操作直接执行，不再逐次弹窗询问</b>；关闭 = 该类被直接拒绝并把原因回传模型（模型无法绕过）。改动即时生效。
+              <br />
+              安全边界不随开关放松：越权路径（含 <code>..</code>）、敏感文件、受保护源码目录、终端高危命令（<code>rm -rf /</code>、<code>curl | sh</code> 等）、内网/元数据地址在任何档位与任何开关下都会被拦。
             </div>
             {TOOL_ROWS.map((r) => (
               <label key={r.key} style={{
@@ -193,7 +197,7 @@ export default function PermissionsPanel(): JSX.Element {
             </label>
             {perms.screenEnabled ? (
               <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6, paddingLeft: 26 }}>
-                提示：每次图形动作仍会走上方审批档位；面板中的「紧急停止」可随时中断。
+                开启后图形动作直接执行（不再逐次询问）；硬规则（越权路径 / 敏感文件）仍会拦截。面板中的「紧急停止」可随时中断。
               </div>
             ) : null}
           </div>

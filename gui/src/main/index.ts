@@ -35,7 +35,23 @@ const exitModePath = () => join(app.getPath("userData"), "exit-mode.json");
  *      rm -rf / curl|sh 等 block 特征始终生效），再按工具是否声明 `autoApprovable` 决定：
  *        声明了 → 允许 auto；未声明 → 一律收敛为「需用户确认」。
  *   这样可以杜绝 adb_install / adb_connect / http_create_app 这类新工具因名字不匹配
- *   三档正则而被静默放行，也让「设置 → 权限」成为唯一权威。 */
+ *   三档正则而被静默放行，也让「设置 → 权限」成为唯一权威。
+ *
+ * 【A-1057 收敛】上述顺序与判据已抽到 `core-ts/src/tools/policy.ts`（纯函数、可单测、过变异），
+ *   本文件只剩「查注册表 + 组装开关」。同一批判据也由工具闸门在**每次调用**时执行，
+ *   因此不再存在"免审批档位把硬规则一起免掉"的路径。 */
+/** 设置面板的六个开关（结构对齐 GrantSwitches，供放行判据使用） */
+function permSwitches(p: GuiPermissions): GrantSwitches {
+  return {
+    toolRead: p.toolRead,
+    toolWrite: p.toolWrite,
+    toolTerminal: p.toolTerminal,
+    screenEnabled: p.screenEnabled,
+    mcpEnabled: p.mcpEnabled,
+    skillsEnabled: p.skillsEnabled,
+  };
+}
+
 function classifyPermissions(actions: Array<{ action: string; target: string }>): {
   hasBlocked: boolean;
   allAuto: boolean;
@@ -45,42 +61,31 @@ function classifyPermissions(actions: Array<{ action: string; target: string }>)
   let allAuto = true;
   const reasons: string[] = [];
   const registry = getRegistry();
+  const sw = permSwitches(getPermissions());
   for (const a of actions) {
     const name = (a.action ?? "").toLowerCase();
     const target = (a.target ?? "").trim();
     const tool = registry.get(name);
 
-    // ① 未注册工具：不猜、不放行，交给用户审批
+    // ① 未注册工具：不猜、不放行，交给用户审批（fail-closed）
     if (!tool) {
       allAuto = false;
       reasons.push(`${name}: 未注册工具，需用户确认（fail-closed）`);
       continue;
     }
 
-    const kind = tool.effectiveRiskKind();
-    let r: { level: "auto" | "confirm" | "block"; reason: string; matched: string };
-
-    if (kind === "read") {
-      r = { level: "auto", reason: `只读工具 ${name}`, matched: "read" };
-    } else if (kind === "terminal") {
-      const { command, commandArgs } = splitCommand(target);
-      r = assessAction({ kind: "terminal", command, commandArgs });
-    } else if (kind === "write") {
-      r = assessAction({ kind: "write", path: target });
-      // 引擎源码/契约/宿主目录写入一律 block（防 Agent 自我改写护栏），仅锚定 PROJECT_ROOT 内不误伤用户工作区
-      if (r.level !== "block" && isProtectedSourcePath(target, PROJECT_ROOT)) {
-        r = { level: "block", reason: `受保护源码目录禁止写入：${target.slice(0, 60)}`, matched: "protected-dir" };
-      }
-    } else {
-      r = assessAction({ kind: "network", url: target });
-    }
-
-    // ② 非只读工具未声明 autoApprovable 时，分类器的 auto 一律降级为「需确认」——
-    //    免审批权只有工具自己显式声明才能拿到（web_search / file_write 等无副作用动作）。
-    //    只读类（kind === "read"）不参与降级：纯读取无副作用，不需要每次审批。
-    if (kind !== "read" && r.level === "auto" && !tool.autoApprovable) {
-      r = { level: "confirm", reason: `${name}（${kind} 类）未声明可自动放行，需用户确认`, matched: "policy-confirm" };
-    }
+    // ② 判据全部住在 core-ts/src/tools/policy.ts（纯函数，可单测）——顺序在那里固定：
+    //    硬规则（越权路径/敏感文件/受保护源码目录/终端黑名单/内网地址，**开关与档位都不能解锁**）
+    //    → 开关放行（开启即免逐次审批）→ 内容分级 → 未声明无副作用则需确认。
+    //    同一批硬规则也在工具闸门里逐调用执行，免审批档位下同样不会漏。
+    const r = classifyToolCall({
+      name,
+      permissions: tool.permissions,
+      riskKind: tool.effectiveRiskKind(),
+      autoApprovable: tool.autoApprovable,
+      target,
+      switches: sw,
+    });
 
     if (r.level !== "auto") { allAuto = false; }
     if (r.level === "block") { hasBlocked = true; }
@@ -122,13 +127,46 @@ const saveSubagentSelection = (ids: string[]): void => {
   subagentSelectedAgentIds = ids;
   try { writeFileSync(subagentSelectionPath(), JSON.stringify({ selectedAgentIds: ids }), "utf8"); } catch { /* 落盘失败不阻断 */ }
 };
+/** 托盘图标提示语：随主窗口可见性变化（用户一眼能看出"它还在后台"）。 */
+const syncTrayTooltip = (): void => {
+  try {
+    const visible = !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized();
+    tray?.setToolTip(visible ? "Slime — 运行中" : "Slime — 已最小化到托盘（点击恢复）");
+  } catch { /* 托盘已销毁 → 无事可做 */ }
+};
+
+/** 托盘点击/菜单：显示↔隐藏主界面（窗口不可见时恢复并聚焦）。 */
+const toggleMainWindow = (): void => {
+  const w = mainWindow;
+  if (!w || w.isDestroyed()) { return; }
+  try {
+    if (w.isVisible() && !w.isMinimized() && w.isFocused()) { w.hide(); }
+    else {
+      if (w.isMinimized()) { w.restore(); }
+      w.show();
+      w.focus();
+    }
+  } catch { /* 窗口状态瞬变 → 忽略 */ }
+  syncTrayTooltip();
+};
+
+/**
+ * 建立托盘图标（幂等）。
+ *
+ * A-1055：**改为"应用一启动就有"**。
+ * 以前只有 `exitModeStore === "background"` 且用户关闭窗口时才建（见 close 处理）——
+ * 于是用户看到的是反过来的现象：「不要的时候一直显示着（退出后残留/后台模式才出现），
+ * 要的时候没了（窗口开着时托盘栏里根本没有 slime）」。托盘是**应用存在感**的载体，
+ * 应当在 `whenReady` 建完窗口后就常驻，而不是等到"要藏起来"才出现。
+ */
 const ensureTray = (): void => {
   if (tray) { return; }
   try {
-    tray = new Tray(nativeImage.createFromPath(join(INSTALL_ROOT, "build", "icon.png")));
-    tray.setToolTip("Slime — 后台运行中");
+    const iconPath = join(INSTALL_ROOT, "build", "icon.png");
+    tray = new Tray(nativeImage.createFromPath(iconPath));
+    tray.setToolTip("Slime — 运行中");
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "打开 Slime", click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+      { label: "显示 / 隐藏主界面", click: toggleMainWindow },
       { type: "separator" },
       {
         label: "退出",
@@ -139,8 +177,12 @@ const ensureTray = (): void => {
         },
       },
     ]));
-    tray.on("click", () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
-  } catch { tray = null; }
+    tray.on("click", toggleMainWindow);
+    syncTrayTooltip();
+  } catch (e) {
+    tray = null;
+    console.warn("[gui:main] 托盘图标创建失败（不影响主流程）:", e instanceof Error ? e.message : String(e));
+  }
 };
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, screen, session, shell, Tray, Menu, nativeImage } from "electron";
 import { join, resolve, sep, dirname, basename } from "node:path";
@@ -162,7 +204,6 @@ import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServe
 import { setBrowserAdapter } from "../../../core-ts/src/tools/browser.js";
 import { BrowserBridge } from "./browserBridge.js";
 import { StreamChunkBatcher } from "./streamBatch.js";
-import { assessAction, splitCommand, isProtectedSourcePath } from "../../../core-ts/src/tools/classifier.js";
 import { adbService, type AdbDetect, type AdbDevice, type AdbCmdResult, type AdbScreencapResult, type AdbDownloadProgress } from "./adb.js";
 import { annotateBitmap } from "../shared/imageAnnotate.js";
 // A-1012：群聊席位上限与参与名单判据的**唯一实现**（引擎与建群弹窗共用，杜绝"上限只有引擎知道"）
@@ -194,7 +235,7 @@ import {
 import { overview as configOverview, readConfigFile, writeConfigFile, setMcpEnabled, setSkillEnabled, deleteSkill, deleteMcp, skillDirPath } from "./config_files.js";
 // A-980-R26：系统通知 + 可定制提示音（设置 → 通用）
 import { initNotify, notifyUser, readNotifyConfig, writeNotifyConfig, importSound, clearSound, readSoundData, customSoundPath } from "./notify.js";
-import { getPermissions, setPermissions } from "./permissions.js";
+import { getPermissions, setPermissions, type GuiPermissions } from "./permissions.js";
 import { SlimeEngine } from "../../../core-ts/src/services/engine.js";
 import { SilamBrainClient, readSilamConfig, type SilamBrain, type SilamAffectState } from "../../../core-ts/src/services/silam_brain.js";
 import { decryptRaw } from "../../../core-ts/src/encryption.js";
@@ -202,6 +243,9 @@ import { removeAgentHistory, loadHistory, appendHistory, attachTimelineToRecord,
 import { SkillRegistry, loadAllSkills } from "../../../core-ts/src/skills.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate } from "../../../core-ts/src/tools/registry.js";
+import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
+import { targetFromArgs } from "../../../core-ts/src/tools/hard_rules.js";
+import { gateToolCall, classifyToolCall } from "../../../core-ts/src/tools/policy.js";
 import {
   getScreenController,
   DesktopScreenBackend,
@@ -1068,16 +1112,10 @@ const ensureServicesOnce = singleFlight<void>(async () => {
       }
     });
   });
-  // 从 agents.json sandbox_override 恢复会话级沙箱配置（workspace/审批档位）
-  for (const a of registry.loadedAgents) {
-    if (a.sandbox_override && typeof a.sandbox_override === "object") {
-      try {
-        sandbox.setAgentConfig(a.id, sandboxConfigFromOverride(a.sandbox_override));
-      } catch (e) {
-        console.warn(`[gui:main] 恢复沙箱配置失败 ${a.id}:`, e);
-      }
-    }
-  }
+  // 恢复每个 Agent 的沙箱配置：有 override 用 override，**没有 override 也要按全局默认下发**
+  // （此前无 override 的 Agent 被留空 → 拿 sandbox 内置默认 → 写/终端/网络全部逐次询问，
+  //   设置里的「全局默认审批模式」对绝大多数会话根本不起作用）。
+  applyGlobalSandboxDefaults();
   // A-121: SILAM 绝对大脑兑底——slime.toml [silam] enabled + as_brain 开启时
   // 拉起 python sidecar；起不来（缺 python/脚本/依赖）静默降级，不阻塞 GUI 主流程。
   try {
@@ -1726,7 +1764,11 @@ const LEGACY_APPROVAL_MAP: Record<string, ApprovalMode> = { strict: "manual", co
 
 function sandboxConfigFromOverride(ov: Record<string, unknown>): SandboxConfig {
   const cfg = defaultSandboxConfig();
-  const raw = (ov.approval as string) ?? "auto";
+  // 会话未单独配置审批档位时，回退**设置里的全局默认**（此前硬编码 "auto"，
+  // 于是「设置 → 权限 → 全局默认审批模式」对没有 override 的 Agent 形同虚设：
+  // 它们拿的是 sandbox 内置默认（write/terminal/network 全部逐次询问），
+  // 用户在设置里选「无需」也不会生效）。
+  const raw = (ov.approval as string) ?? getPermissions().globalApproval;
   const mode = LEGACY_APPROVAL_MAP[raw] ?? (APPROVAL_MODES.includes(raw as ApprovalMode) ? (raw as ApprovalMode) : "auto");
   if (mode === "manual") {
     cfg.auto_approve_levels = [];
@@ -1762,6 +1804,25 @@ function sandboxConfigFromOverride(ov: Record<string, unknown>): SandboxConfig {
   return cfg;
 }
 
+/** 把「设置 → 权限」的全局审批默认下发到**所有** Agent 的沙箱配置（启动时 + 设置变更时）。
+ *
+ *  此前只在 `a.sandbox_override` 存在时才下发，无 override 的 Agent 一直吃 sandbox 内置默认
+ *  （`auto_approve_levels=[0,1]`、`require_approval_levels=[2,3,4]`）——
+ *  结果「全局默认审批模式」只对少数会话生效，用户在设置里选「无需」也照样被问。 */
+function applyGlobalSandboxDefaults(): void {
+  if (!sandbox || !agentRegistry) { return; }
+  for (const a of agentRegistry.loadedAgents) {
+    try {
+      const ov = (a.sandbox_override && typeof a.sandbox_override === "object")
+        ? (a.sandbox_override as Record<string, unknown>)
+        : {};
+      sandbox.setAgentConfig(a.id, sandboxConfigFromOverride(ov));
+    } catch (e) {
+      console.warn(`[gui:main] 下发全局沙箱默认失败 ${a.id}:`, e);
+    }
+  }
+}
+
 /**
  * 权限请求 → 选择题选项（渲染层输入框 UI 列出「每个选项的结果」，参考 Claude Code /
  * Cursor / Cline 的授权交互：允许一次 / 会话内总是允许 / 拒绝 / 自定义）。
@@ -1794,7 +1855,7 @@ function buildPermOptions(req: {
     {
       id: "allow-once",
       label: "允许通过",
-      hint: `放行 ${actionLabel}（${riskHint}）。该 Agent 下次同类操作仍会再次询问。`,
+      hint: `放行 ${actionLabel}（${riskHint}）。下次同类操作仍会再次询问——把「设置 → 权限」里对应类别（读 / 写 / 终端）的开关打开即可免此询问。`,
     },
     {
       id: "allow-session",
@@ -2358,9 +2419,16 @@ function createWindow(): void {
       e.preventDefault();
       mainWindow?.hide();
       ensureTray();
+      syncTrayTooltip();
     }
   });
   mainWindow.on("closed", () => { mainWindow = null; });
+  // A-1055：托盘提示语跟随窗口可见性（show/hide/minimize 三条路都要能同步，否则托盘上写着
+  // "已最小化到托盘"而窗口其实开着 —— 又是一处会误导人的静默失配）
+  mainWindow.on("show", syncTrayTooltip);
+  mainWindow.on("hide", syncTrayTooltip);
+  mainWindow.on("minimize", syncTrayTooltip);
+  mainWindow.on("restore", syncTrayTooltip);
 }
 
 /**
@@ -3465,16 +3533,21 @@ function registerIpcHandlers(): void {
     if (!ok) { return { ok: false, permissions, error }; }
     if (patch.globalApproval !== undefined || patch.approvalAllowPaths !== undefined) {
       try {
+        // 设置即权威：全局审批档位写回每个 Agent 的 override（跨会话生效），
+        // 覆盖会话级遗留值 —— 否则用户改了设置却发现某些会话仍然按老档位问。
         const agents = agentRegistry!.loadedAgents;
         for (const a of agents) {
-          const ov = (a.sandbox_override as Record<string, unknown>) ?? {};
+          const ov = (a.sandbox_override && typeof a.sandbox_override === "object")
+            ? { ...(a.sandbox_override as Record<string, unknown>) }
+            : {};
           const next: Record<string, unknown> = { ...ov, approval: permissions.globalApproval };
           await agentRegistry!.updateAgent(a.id, { sandbox_override: next });
-          sandbox!.setAgentConfig(a.id, sandboxConfigFromOverride(next));
         }
       } catch (e) {
         console.error("[gui:main] sync global approval to agents failed:", e);
       }
+      // 沙箱配置统一下发（含没有 override 的 Agent）—— 单一实现，避免两套下发逻辑漂移
+      applyGlobalSandboxDefaults();
     }
     return { ok: true, permissions };
   });
@@ -3921,35 +3994,25 @@ function registerIpcHandlers(): void {
    *  与 screen_* 并列的"第三块操控面"：ADB/桌面是屏幕级，这里是应用内嵌浏览器级。 */
   setBrowserAdapter(new BrowserBridge(() => mainWindow));
 
-  /** ③ 工具类别闸门：让「设置 → 权限」的开关真正生效（此前只有 UI、无执行点）。
-   *      每次调用实时读取配置 → 改设置后无需重启引擎。 */
-  setToolCategoryGate((tool) => {
-    const perms = getPermissions();
-    // 图形控制总开关（高危能力，默认关闭）
-    if (!perms.screenEnabled && tool.name.startsWith("screen_")) {
-      return { allowed: false, reason: "图形控制已在「设置 → 权限」中关闭" };
-    }
-    // 断链 B 修复：MCP / 技能 全局开关（此前只有 UI 落盘、全仓无读取者 = 假开关）。
-    // 工具名前缀是唯一运行时可靠判据：mcp_*（core-ts/src/mcp.ts:1021）/ skill_*（core-ts/src/skills.ts:215/502/532）。
-    if (!perms.mcpEnabled && tool.name.startsWith("mcp_")) {
-      return { allowed: false, reason: "MCP 已在「设置 → 权限」中关闭" };
-    }
-    if (!perms.skillsEnabled && tool.name.startsWith("skill_")) {
-      return { allowed: false, reason: "技能已在「设置 → 权限」中关闭" };
-    }
-    const has = (p: string): boolean => tool.permissions.includes(p as never);
-    // 只读工具：仅当「读」类别被关闭时才拦（避免误伤纯检索）
-    if (!has("write") && !has("terminal") && !has("network")) {
-      return perms.toolRead ? { allowed: true } : { allowed: false, reason: "「读」类别已关闭" };
-    }
-    if (!perms.toolWrite && has("write")) {
-      return { allowed: false, reason: "「写」类别已关闭" };
-    }
-    if (!perms.toolTerminal && has("terminal")) {
-      return { allowed: false, reason: "「终端」类别已关闭（ADB shell / 命令执行需开启此项）" };
-    }
-    return { allowed: true };
-  });
+  /** ③ 工具类别闸门 + 硬规则闸门 —— 每次调用实时读取配置，改设置后无需重启引擎。
+   *
+   *  【两层职责，顺序不可换】
+   *  第 1 层「类别否决」：开关关闭 = 该类工具直接拒绝，模型无法绕过（原有语义，判据不变）。
+   *  第 2 层「硬规则拦截」：越权路径 / 敏感文件 / 受保护源码目录 / 终端黑名单 / 内网地址。
+   *      这一层以前**只住在审批回调里**，而回调仅在沙箱决定要问用户时才执行；
+   *      于是 `自动 / 无需` 档（sandbox 直接放行）会把安全边界一起免掉 ——
+   *      Agent 能写自己的护栏目录、能跑 `rm -rf /`，全程无人过问。
+   *      挂到闸门后：**任何审批档位下，硬规则都逐调用生效**。
+   *
+   *  注意两层都不做"放行"：放行（免逐次审批）由审批回调按开关判据 + 沙箱档位完成，
+   *  见 `classifyPermissions`。这样"该给就给"与"边界不松"是两件独立的事。 */
+  setToolCategoryGate((tool, args) => gateToolCall({
+    tool,
+    riskKind: tool.effectiveRiskKind(),
+    // 目标取值口径与沙箱/分类器共用同一实现（含终端类的 command/cmd 字段）
+    target: targetFromArgs(args),
+    switches: permSwitches(getPermissions()),
+  }));
 
   /** A-918++：HTTP —— 把本地目录作为静态服务启动（默认 0.0.0.0，端口自动选） */
   handleTrusted<{ dir: string; port?: number; host?: string; spa?: boolean }>("slime:http:serve", async (_event, p): Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }> => {
@@ -5814,6 +5877,9 @@ function main(): void {
         session.fromPartition("persist:slime-browser").protocol.handle("slime", () => new Response(null, { status: 204 }));
       } catch { /* 忽略 */ }
       createWindow();
+      // A-1055：托盘常驻 —— 应用一起来就出现在系统托盘栏（用户要求"只要 slime 打开就直接出现图标"）。
+      // 不再依赖"关闭窗口时是否后台模式"这个条件（那正是"要的时候没有"的根因）。
+      ensureTray();
       // A-984：主进程卡死看门狗（用户实测过一次"界面点按钮没反应"，当时只能从
       // audit.jsonl 停止写入反推主进程被独占 —— 没有日志就无法归因，故补这个探针）
       startMainWatchdog();

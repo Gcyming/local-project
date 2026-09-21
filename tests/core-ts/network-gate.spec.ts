@@ -174,15 +174,31 @@ describe("断链 A — networkEnabled 必须原样透传到引擎（普通聊天
 });
 
 describe("断链 B — 设置面板的 MCP / 技能 开关必须接到工具类别闸门（假开关不能再假）", () => {
-  it("源码守卫：gui/src/main/index.ts 的真闸门按工具名前缀 mcp_ / skill_ 拒绝，并带中文原因", () => {
-    // 这三条缺任意一条 → 红。锁的是「真闸门确实包含这两个判据」，而非随便哪里出现过 mcp_。
-    expect(INDEX_TS).toContain('tool.name.startsWith("mcp_")');
-    expect(INDEX_TS).toContain('tool.name.startsWith("skill_")');
-    expect(INDEX_TS).toContain("MCP 已在「设置 → 权限」中关闭");
-    expect(INDEX_TS).toContain("技能已在「设置 → 权限」中关闭");
+  // A-1057 重构：闸门判据（前缀管辖）从 index.ts 内联搬到 `core-ts/src/tools/policy.ts`，
+  // index.ts 只剩「查配置 + 组装开关」的接线。守卫随判据一起搬家，但**意图不变**：
+  //   ① 判据本体必须按工具名前缀 mcp_ / skill_ 拒绝，并给出用户看得懂的中文原因；
+  //   ② 真闸门必须委托这份判据，且**在每次调用时**读开关（不是启动时快照）。
+  // 断掉任意一条 → 「改设置没反应」的假开关就会回归。
+  it("源码守卫：判据本体住在 policy.ts，按工具名前缀 mcp_ / skill_ 拒绝并带中文原因", () => {
+    const POLICY_TS = readFileSync(
+      new URL("../../core-ts/src/tools/policy.ts", import.meta.url),
+      "utf8",
+    );
+    // 这四条缺任意一条 → 红。锁的是「判据本体确实包含这两个前缀分支与理由」，
+    // 而非随便哪里出现过 mcp_（前缀判据的类别归属另由 grant.ts 的 categoryOf 承担）。
+    expect(POLICY_TS).toContain('n.startsWith("mcp_")');
+    expect(POLICY_TS).toContain('n.startsWith("skill_")');
+    expect(POLICY_TS).toContain("MCP 已在「设置 → 权限」中关闭");
+    expect(POLICY_TS).toContain("技能已在「设置 → 权限」中关闭");
   });
 
-  // 行为对照：真闸门是 index.ts 内联装配、无法单独 import。这里复制同款前缀判据，
+  it("源码守卫：唯一真闸门委托这份判据，且实时读开关（判据不许搬回装配层）", () => {
+    // 与 a1057 spec ⑦ 组重叠是**有意**的：这两行正是「断链 B」的接线点本身。
+    expect(INDEX_TS).toContain("setToolCategoryGate((tool, args) => gateToolCall({");
+    expect(INDEX_TS).toContain("switches: permSwitches(getPermissions())");
+  });
+
+  // 行为对照：真闸门是 index.ts 装配期接线、无法单独 import。这里复制同款前缀判据，
   // 注入到真实的 registry.setToolCategoryGate 全局单例，断言 callTool 真的按前缀拒绝。
   // （这验证「前缀判据 + 闸门 plumbing」生效；具体接线点由上面的源码守卫锁定。）
   let registry: ToolRegistry;

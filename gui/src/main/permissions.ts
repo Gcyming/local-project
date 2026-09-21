@@ -7,8 +7,13 @@
  * - 工具权限与 MCP/技能开关：**已全部接入执行点**（不再是只落盘的假开关）——
  *   `toolRead/toolWrite/toolTerminal/screenEnabled/mcpEnabled/skillsEnabled` 六个开关由
  *   `gui/src/main/index.ts` 的 `setToolCategoryGate` 实时读取，每次工具调用都重新判定
- *   （改设置无需重启引擎）；`globalApproval` → 会话级审批兜底默认；`approvalAllowPaths` → 审批白名单。
- *   判据见 `tests/core-ts/network-gate.spec.ts`（前缀闸门 + 行为对照）。
+ *   （改设置无需重启引擎）；`globalApproval` → 会话级审批兜底默认，且**对所有 Agent 统一下发**
+ *   （无 sandbox_override 的 Agent 也按它下发，不再回落沙箱内置默认）；`approvalAllowPaths` → 审批白名单。
+ *
+ * - **开关的放行语义（唯一实现见 `core-ts/src/tools/grant.ts`）**：开启 = 该类别动作免逐次审批直接执行，
+ *   关闭 = 该类别被直接拒绝。硬规则（越权路径 / 敏感文件 / 受保护源码目录 / 终端高危命令 / 内网地址）
+ *   唯一实现见 `core-ts/src/tools/hard_rules.ts`，由工具闸门逐调用执行，**不随开关或审批档位降级**。
+ *   判据见 `tests/core-ts/network-gate.spec.ts`（前缀闸门 + 行为对照）与 `tests/core-ts/a1057-*.spec.ts`。
  */
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync } from "node:fs";

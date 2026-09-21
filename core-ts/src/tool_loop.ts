@@ -12,6 +12,7 @@
 import { ModelRouter } from "./router.js";
 import { ChatMessage, ChatRequest } from "shared/schemas";
 import { ToolRegistry } from "./tools/registry.js";
+import { targetFromArgs } from "./tools/hard_rules.js";
 import { SandboxManager } from "./sandbox.js";
 import { OutputFilter, StreamFilter } from "./filter.js";
 import { isAbsolute, join } from "node:path";
@@ -585,7 +586,9 @@ export class ToolLoop {
     }
 
     if (tool && this.sandbox) {
-      let target = String(args.url ?? args.path ?? args.file ?? args.target ?? "");
+      // 目标取值口径与闸门/分类器共用同一实现（含终端类的 command/cmd 字段）——
+      // 详见 core-ts/src/tools/hard_rules.ts:targetFromArgs 的说明。
+      let target = targetFromArgs(args);
       // 相对路径 + 配置工作目录 → 锚定工作目录转绝对，避免沙箱以进程 CWD 为基准误判超范围
       if (this.workspace && uiIsPathTool(tc.name) && target && !isAbsolute(target)) {
         target = join(this.workspace, target);
