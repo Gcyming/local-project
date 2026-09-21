@@ -705,6 +705,16 @@ checkAbsent("main", main, '"<agentId>"', "字面 <agentId> 的假路径模板未
 check("renderer", renderer, "恢复默认位置", "「恢复默认位置」出口进了渲染产物（自定义根不是单向门）");
 check("renderer", renderer, "（先选择 Agent）", "没有目标 Agent 时如实提示进了渲染产物（不再编路径）");
 
+/* A-1050：默认技能从不随包 —— `config/` 被 .gitignore 整目录忽略，于是全新安装的技能库是空的，
+ * 而 DEFAULT_TOOL_PROFILE 声明的 6 个默认技能在盘上不存在 → 工具白名单静默解析为空。
+ * 现在默认技能以 `gui/template/skills` 为正本，经 extraFiles 落到安装根 `template/skills`，
+ * 启动时播种进数据根。产物层能区分的事实：播种实现真被引用进 main（没被 tree-shake）、
+ * 台账文件名在、以及「缺目录必须出声」的警告语在 —— 后者是 extraFiles 漏配时唯一的诊断线索。
+ * 语义面（不覆盖 / 不复活 / 幂等）与契约面（默认技能集必须齐）由
+ * tests/core-ts/a1050-guards.spec.ts 锁定，变异 7 条全红。 */
+check("main", main, "seed-manifest.json", "首启播种台账进了 main 产物（播种实现没被 tree-shake）");
+check("main", main, "未找到随包默认技能目录", "种子目录缺失时必须出声（extraFiles 漏配的唯一诊断线索）");
+
 /* A-1041：安装包 1GB 的元凶 —— `out/main/chunks/lancedb.win32-x64-msvc-*.node`（297MB）。
  * 病根是 store.ts 里 `/* @vite-ignore *\/` 让 vite 跳过 alias，把真包连同原生子包解析进 bundle；
  * 而 electron-builder 的 `files` 里根本没有 node_modules —— 这份 297MB 只活在 bundle 里，

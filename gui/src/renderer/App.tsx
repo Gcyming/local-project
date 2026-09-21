@@ -23,6 +23,8 @@ import teamSvg from "./assets/team.svg";
 import currentSessionSvg from "./assets/current-session.svg";
 /** A-980-R17：悬浮窗最小化后的可拖动图标（用户选定 D:\pilot project\gui\dist-v9\.icon-ico\icon.ico） */
 import floatIconUrl from "./assets/icon.ico?url";
+/** A-1049：欢迎页中央使用应用真实图标，替代原来的字母 S */
+import appIconUrl from "../../build/icon.png";
 import { getTheme, applyTheme, type ThemeName } from "./theme.js";
 import { confirmAsync } from "./dialog.js";
 // A-1008：「联网搜索」开关的唯一读写入口（此前这里用 `=== "1"`、ChatPanel 用 `!== "0"`，
@@ -186,13 +188,8 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 0, gap: 18, overflow: "hidden", width: "100%", padding: "0 24px", boxSizing: "border-box" }}>
       {/* Logo */}
-      <div style={{
-        width: 64, height: 64, borderRadius: 18,
-        background: "linear-gradient(135deg, var(--accent), #6366f1)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 30, fontWeight: 900, color: "#fff",
-      }}>S</div>
-      <div style={{ fontSize: 17, fontWeight: 800, color: "var(--text)" }}>slime</div>
+      <img src={appIconUrl} alt="Slime" style={{ width: 64, height: 64, borderRadius: 18, objectFit: "cover" }} />
+      <div style={{ fontSize: 17, fontWeight: 800, color: "var(--text)" }}>Slime</div>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", textAlign: "center", maxWidth: 420, lineHeight: 1.6, wordBreak: "break-word", padding: "0 8px", boxSizing: "border-box" }}>
         直接在这里输入想做的事；无需手动选择 Agent——后端会自动为你的会话分配最合适的助手。
       </div>
@@ -1008,29 +1005,29 @@ export default function App(): JSX.Element {
   const selectedAgentId = selectedSession?.agentId ?? null;
   const hasNoSession = selectedSession === null;
 
-  /** 欢迎区首条消息：自动建会话 + 发送首条消息（修复：之前只建会话不发送） */
+  /** 欢迎区首条消息：自动建会话 + 立即发送首条消息。
+   *  此前用 setTimeout 闭包依赖外部 selectedAgentId，但新建会话前 selectedAgentId 必为 null，
+   *  导致只建会话不发送；现在直接用创建返回的 session.agentId。 */
   const handleWelcomeSend = React.useCallback(async (text: string): Promise<void> => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api || !text.trim()) { return; }
-    // 1. 创建会话
+    // 1. 创建会话（无 Agent 时主进程会兜底创建默认「助手」Agent）
     const res = await api.conversations.create().catch((e: unknown) => {
       console.error("[app] welcome create failed:", e);
       return null;
     });
     if (!res?.ok || !res.session) { return; }
     const sessionId = res.session.sessionId;
+    const agentId = res.session.agentId;
     setSelectedSessionId(sessionId);
     void loadSessions();
-    // 2. 发送首条消息（延迟一小段时间确保 session 已切换）
-    setTimeout(() => {
-      if (!res?.session || !selectedAgentId) { return; }
-      const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-      if (!api?.chat?.stream) { return; }
+    // 2. 立即发送首条消息
+    if (api?.chat?.stream && agentId) {
       const netOn = readNetworkEnabled();
-      void api.chat.stream({ agentId: selectedAgentId, message: text.trim(), sessionId, networkEnabled: netOn }).catch((e: unknown) => {
+      void api.chat.stream({ agentId, message: text.trim(), sessionId, networkEnabled: netOn }).catch((e: unknown) => {
         console.error("[app] welcome stream failed:", e);
       });
-    }, 100);
+    }
     // 3. 保存例句到历史（用于个性化）
     const histories: string[] = [];
     try {
@@ -1372,7 +1369,7 @@ export default function App(): JSX.Element {
           title={sidebarOpen ? "收起侧栏" : "展开侧栏"}>
           <MenuIcon size={16} />
         </button>
-        <span className="titlebar-title">slime — Agent 管理面板</span>
+        <span className="titlebar-title">Slime</span>
         <span style={{ flex: 1 }} />
         {/* 右侧栏展开/收起（工作树 / 任务 / 终端 / 浏览器）——收起走「内容先淡出→再收缩」动画 */}
         <button className={`titlebar-btn${rightOpen ? " titlebar-btn-active" : ""}`}
@@ -1394,7 +1391,12 @@ export default function App(): JSX.Element {
         >
           {sidebarOpen && <div className="sidebar-resizer" onPointerDown={handleSidebarResize} />}
           <div className="brand">
-            <div className="brand-icon">S</div>
+            {/* A-1054：此前这里是字面量 `S`（一个蓝色圆角方块里写个字母），用户反复要求换成
+                应用图标 —— 这正是 A-1049 在欢迎页修过的同一类残留（那次也只改了欢迎页，
+                侧栏这处漏了，所以"怎么还是 S"）。现在与欢迎页共用**同一个** `appIconUrl`，
+                图标只有一处产地，不会再出现"改了一处、另一处还是旧样子"。
+                `alt="slime"` + `draggable={false}`：图标是装饰性的名称标记，不该被拖走。 */}
+            <img className="brand-icon" src={appIconUrl} alt="slime" draggable={false} />
             <span className="brand-name">slime</span>
           </div>
           <div className="sidebar-sep" />

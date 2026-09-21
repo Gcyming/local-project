@@ -130,13 +130,19 @@ describe("MODEL_CAPABILITIES（数据表完整性）", () => {
  * A-975 回归：小红书/点点笔记（dots）家族**官方窗口 512K**。
  * 历史 bug：表里写成 131072，且 match 只写 "dots"（「dot4」这类写法不命中）→
  * 上游不回传窗口时被锁死显示 128K，用户反复刷新也改不动。
+ *
+ * A-1054：表内值 `524288` → `512000`（十进制口径）。断言不钉裸数字，而是钉
+ * **界面实际读出的 K**（`context / 1000`），锁行为而非字面量 —— 改回 2^19 会让
+ * 界面显示 "524K"，与本用例、与官方 512K、与用户设置三处互相矛盾。
  */
 describe("A-975 dots 家族窗口（上游不回传时的兜底真值）", () => {
-  it("dots / dots3 / dots.llm1 / dot4 / dot-4 均命中 note 家族且 context=512K", () => {
+  it("dots / dots3 / dots.llm1 / dot4 / dot-4 均命中 note 家族且界面读作 512K", () => {
     for (const id of ["dots", "dots3", "dots.llm1", "dot4", "dot-4", "dots4-preview", "xhs/dot4"]) {
       const cap = inferModelCapabilities(id);
       expect(cap.vendor, id).toBe("note");
-      expect(cap.context, id).toBe(524288);
+      // 行为锚点：显示层口径是十进制 K（÷1000）
+      expect(Math.round((cap.context ?? 0) / 1000), id).toBe(512);
+      expect(cap.context, id).toBe(512000);
     }
   });
 

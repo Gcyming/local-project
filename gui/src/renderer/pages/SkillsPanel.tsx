@@ -287,8 +287,8 @@ export default function SkillsPanel(): JSX.Element {
         </span>
       </div>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
-        技能位于 config/skills/ 目录（各技能含 manifest.yaml 与 SKILL.md）。停用会将技能目录移入
-        .disabled/ 子目录，引擎不再加载；恢复后重新载入。
+        技能位于 config/skills/ 目录（SKILL.md 为必需，manifest.yaml 可选；后者缺失时会从 SKILL.md frontmatter 自动推导）。
+        停用会将技能目录移入 .disabled/ 子目录，引擎不再加载；恢复后重新载入。
       </div>
 
       {/* A-918++：GUI 表单新建技能（生成 config/skills/<name>/SKILL.md，不再要求手动建目录） */}
@@ -492,8 +492,8 @@ export default function SkillsPanel(): JSX.Element {
                 </div>
               )}
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3 }}>
-                {s.hasManifest ? "manifest.yaml ✓" : "manifest 缺失"}
-                {s.hasSkillMd ? " · SKILL.md ✓" : " · SKILL.md 缺失"}
+                {s.hasSkillMd ? "SKILL.md ✓" : "SKILL.md 缺失"}
+                {s.hasManifest ? " · manifest.yaml ✓" : " · manifest 可选"}
               </div>
             </div>
             <button className={`btn${s.enabled ? "" : " primary"}`} style={{ padding: "4px 12px", fontSize: 12.5, flexShrink: 0 }}

@@ -1,0 +1,15 @@
+name: web-access
+version: '1.0'
+description: 所有联网操作必须通过此 skill 处理，包括：搜索、网页抓取、登录后操作、网络交互等。 触发场景：用户要求搜索信息、查看网页内容、访问需要登录的网站、操作网页界面、抓取社交媒体内容（小红书、微博、推特等）、读取动态渲染页面、以及任何需要真实浏览器环境的网络任务。
+# ⚠️ 溯源如实声明：scripts/ 会起本地 CDP 代理（仅绑 127.0.0.1）、spawn node 与 sqlite3、
+#    读取本机 Chrome/Edge 书签与历史、并为「找 URL」访问网络。当前 skill 引擎已禁用
+#    skill.py 执行（RCE 风险，见 skills.ts N11-P0-2），故这些权限**尚不被消费**；
+#    如实声明是为了将来若重启脚本执行，checkPermissions 能按 L3/L4 走审批、而不是静默放行。
+permissions:
+  read: true
+  write: true
+  terminal: true
+  network: true
+tags: []
+source: https://github.com/eze-is/web-access
+license: MIT (frontmatter 声明；上游仓库无 LICENSE 文件)

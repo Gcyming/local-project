@@ -1501,7 +1501,19 @@ function inferModelDefaults(modelId: string): Partial<ModelSpec> {
     else if (/intern[-_]/.test(id)) { context_window = 131072; }
     else if (/doubao|ep-/.test(id)) { context_window = 131072; } // 字节豆包
     else if (/step[-_]?l?2?[-_]/.test(id)) { context_window = 131072; } // 阶跃星辰
-    else if (/agnes[-_]/.test(id)) { context_window = 524288; } // Agnes: 512K
+    /* Agnes：官方口径「512K」。
+     *
+     * ⚠️ 单位口径必须与全项目显示层一致（十进制 K，÷1000）——`fmtK` / ProvidersPanel / 右栏
+     * 进度条**统一**按 ÷1000 渲染。此前这里写的是 `524288`（= 512×1024，二进制），于是同一份
+     * 配置在界面上读作 **"524K"**，与注释、与厂商口径、与用户设置三处全对不上（用户实测
+     * "配置 512K，首页显示 524K"）。
+     *
+     * 取 512000 而非 524288 的理由：本分支只是**能力表未命中时的兜底推断值**（不是探测到的真值），
+     * 而同表其余头条模型的上下文都写成十进制整数（gpt-4o 128000 / claude 200000 / deepseek 64000）。
+     * 让值与显示同口径，换来的是「配置、注释、界面」三处一致；代价是比 2^19 少报 2.3%（12288 token），
+     * 对一个推断值而言无关紧要。**不要改回 524288**——那会让界面重新变成 "524K"。
+     */
+    else if (/agnes[-_]/.test(id)) { context_window = 512000; }
     else if (/seedance|seed[-_]/.test(id)) { context_window = 131072; } // Seedance
     else if (/sonic[-_]|ep-.*sonic/.test(id)) { context_window = 131072; } // 字节 Sonic
     else if (/flux[-_]/.test(id)) { context_window = 4096; } // FLUX 图像生成

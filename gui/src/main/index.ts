@@ -1859,6 +1859,25 @@ async function createAgent(
   return a;
 }
 
+/** A-1049：首次启动时若没有 Agent，自动创建一个默认「助手」角色，避免欢迎页输入框/快捷按钮因无 Agent 而无法发送。 */
+async function ensureDefaultAgent(): Promise<void> {
+  try {
+    const reg = await ensureRegistry();
+    if (reg.loadedAgents.length > 0) { return; }
+    const a = buildAgentState(
+      "助手",
+      "通用 AI 助手，负责回答问题、编写代码、整理信息与日常协作",
+      null,
+      { mode: "default", skills: [], mcp: [] },
+    );
+    reg.loadedAgents.push(a);
+    await reg.save();
+    console.info(`[gui:main] 首次启动：已创建默认 Agent ${a.id}`);
+  } catch (e) {
+    console.warn("[gui:main] 创建默认 Agent 失败（不影响启动）:", e instanceof Error ? e.message : String(e));
+  }
+}
+
 async function forkAgent(parent: AgentState, name: string, role: string): Promise<AgentState> {
   assertAgentNameRole(name, role);
   if ((parent.fork_depth ?? 0) + 1 > 2) {
@@ -5817,6 +5836,8 @@ function main(): void {
          更多规则丢 `config/adblock/*.txt`（EasyList 派生的域名形态即可）。详见 adblock.ts 头注释。 */
       installAdBlocker(session.fromPartition("persist:slime-browser"), PROJECT_ROOT);
       registerIpcHandlers();
+      // A-1049：首启无 Agent 时预置默认「助手」，让欢迎页输入框、快捷按钮、Agent 选择器全部可用
+      void ensureDefaultAgent();
       registerUpdaterHandlers(); // 注册自动更新 IPC handler
       // 更新状态推送到渲染进程（StatusPanel 监听 slime:update:status）
       setStatusSink((s) => mainWindow?.webContents.send("slime:update:status", s));

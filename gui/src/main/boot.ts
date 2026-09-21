@@ -16,6 +16,7 @@
 import { app } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { seedDefaultSkills } from "./skill_seed.js";
 
 /**
  * 安装根 = **应用自身资源**的根（`build/icon.png`、`data/`、`config/`、`Knowledge/`）。
@@ -75,6 +76,7 @@ if (app.isPackaged) {
   process.env.SLIME_ROOT = slimeRoot;
   console.info(`[gui:boot] 打包模式：数据根 = ${slimeRoot}，安装根 = ${INSTALL_ROOT}，随包资源根 = ${BUNDLE_ROOT}`);
   bootstrapToml(slimeRoot);
+  bootstrapSkills(slimeRoot);
 } else {
   /*
    * 开发模式同样要跑一次路径矫正。原先只在打包模式跑，于是配置里**残留的上一台机器/
@@ -83,6 +85,11 @@ if (app.isPackaged) {
    * 报缺失，而本地推理真的也起不来（ModelServerManager 拿到的就是那个死路径）。
    * 模板 gui/template/slime.toml 的注释本来就写着"空路径在首启由 boot.ts 矫正"，
    * 那条契约不该因"是否打包"而失效。
+   *
+   * 同类地，**默认技能也不在开发模式播种** —— 开发模式的 PROJECT_ROOT 就是源码树，
+   * `config/skills` 里本来就有这批默认技能；若在这里也播种，「模板目录被误删 /
+   * extraFiles 漏配」这类会让**打包版技能库为空**的故障会被源码树悄悄补上，
+   * 直到发版才暴露（遮蔽）。播种只在打包模式做，见 bootstrapSkills。
    */
   console.info(`[gui:boot] 开发模式：随包资源根 = ${BUNDLE_ROOT}（安装根 = ${INSTALL_ROOT} 只放应用自身资源）`);
   bootstrapToml(BUNDLE_ROOT);
@@ -164,4 +171,35 @@ function bootstrapToml(slimeRoot: string): void {
 
 export function resolveSlimeRoot(): string | null {
   return process.env.SLIME_ROOT ? resolve(process.env.SLIME_ROOT) : null;
+}
+
+/**
+ * 首启播种随包默认技能 → `${slimeRoot}/config/skills`。
+ *
+ * 正本是**安装根**下的 `template/skills`（electron-builder `extraFiles` 从
+ * `gui/template/skills` 复制而来，与 `build/icon.png`、`core/`、`tools/` 同级）。
+ * 用 INSTALL_ROOT 而非 BUNDLE_ROOT：这是**应用自身资源**（第一句注释即如此定义），
+ * 打包模式两者相等，开发模式只有 INSTALL_ROOT 指向 `gui/`。
+ *
+ * 只在此处（打包模式）调用 —— 开发模式播种会遮蔽「模板缺失 → 打包版技能库为空」，
+ * 理由见上方 else 分支注释。
+ */
+function bootstrapSkills(slimeRoot: string): void {
+  try {
+    const seedDir = join(INSTALL_ROOT, "template", "skills");
+    if (!existsSync(seedDir)) {
+      // 不静默：这正是「extraFiles 漏配 / 模板目录丢失」的形态，必须留下可诊断的痕迹。
+      console.warn(`[gui:boot] 未找到随包默认技能目录 ${seedDir} —— 全新安装的技能库将为空（检查 extraFiles: template/skills）`);
+      return;
+    }
+    const target = join(slimeRoot, "config", "skills");
+    const seeded = seedDefaultSkills(seedDir, target);
+    if (seeded.length > 0) {
+      console.info(`[gui:boot] 已播种 ${seeded.length} 个默认技能 → ${target}：${seeded.join("、")}`);
+    } else {
+      console.info(`[gui:boot] 默认技能无需播种（台账已齐或用户已有同名技能）：${target}`);
+    }
+  } catch (e) {
+    console.warn(`[gui:boot] 默认技能播种失败（不影响启动）: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }

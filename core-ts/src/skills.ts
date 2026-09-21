@@ -9,10 +9,11 @@
 import { readdir, readFile, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { Tool, ToolRegistry, getRegistry } from "./tools/registry.js";
+import { PROJECT_ROOT } from "./paths.js";
 
 const SKILL_BODY_LIMIT = 12000;
 const MAX_SKILL_DESCRIPTION_LENGTH = 500;
-const DEFAULT_SKILL_DIR = join(process.cwd(), "config", "skills");
+const DEFAULT_SKILL_DIR = join(PROJECT_ROOT, "config", "skills");
 
 const PERMISSION_LEVELS: Record<string, number> = {
   read: 0,
@@ -52,6 +53,36 @@ function parseScalar(raw: string): unknown {
 /** 判断值是否以未闭合引号开头（YAML 折叠多行字符串） */
 function isOpenQuote(v: string): boolean {
   return (v.startsWith("'") && !v.endsWith("'")) || (v.startsWith('"') && !v.endsWith('"'));
+}
+
+/**
+ * 是否为 YAML **块标量头**（`>` 折叠 / `|` 字面），可带 chomping（`-` 剥尾换行 / `+` 保留）
+ * 与显式缩进数字（如 `|2`）。
+ *
+ * 为什么必须有：主流 Agent 的 SKILL.md frontmatter（Claude / Cursor / Codex 生态）几乎都用
+ * `description: >` 写法。此前 `parseMiniYaml` 只认单行/引号/续行三种形态，遇到 `>` 会把
+ * **字面量 ">"** 当成描述存进去 —— 技能库里描述的来源就此断掉（用户实测：技能名在列表里
+ * 一条描述都出不来）。这是「向上兼容外部技能」的关键缺口，不是格式洁癖。
+ */
+function parseBlockScalarHeader(rest: string): { style: ">" | "|"; chomp: "-" | "+" | null } | null {
+  const m = /^([|>])([+-]?)(\d*)$/.exec(rest.trim());
+  if (!m) { return null; }
+  return { style: m[1] as ">" | "|", chomp: (m[2] || null) as "-" | "+" | null };
+}
+
+/** 折叠块（`>`）：相邻非空行以空格连接；空行产出换行（YAML folded 语义的常用子集） */
+function foldBlockScalar(blockLines: string[]): string {
+  const out: string[] = [];
+  let buf: string[] = [];
+  const flush = (): void => {
+    if (buf.length > 0) { out.push(buf.join(" ")); buf = []; }
+  };
+  for (const l of blockLines) {
+    if (l.trim() === "") { flush(); out.push(""); } else { buf.push(l.trim()); }
+  }
+  flush();
+  while (out.length > 0 && out[out.length - 1] === "") { out.pop(); }
+  return out.join("\n");
 }
 
 /** YAML 子集：标量 / 嵌套 map / 列表（- item）/ 折叠续行（缩进对齐） */
@@ -115,6 +146,7 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
       const idx = stripped.indexOf(":");
       const key = stripped.slice(0, idx).trim();
       const rest = stripped.slice(idx + 1).trim();
+      const bsHead = parseBlockScalarHeader(rest);
       if (rest === "") {
         // 嵌套 map
         const child: Record<string, unknown> = {};
@@ -122,6 +154,30 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
         stack.push(child);
         stackIndent.push(indent);
         lastEmptyChildKey = key;
+      } else if (bsHead !== null) {
+        /* 块标量（`>` 折叠 / `|` 字面）：消费后续「比 key 行更缩进」的连续行。
+         * contentIndent 取首个非空内容行的缩进；遇到缩进回退即块结束（与 YAML 一致）。 */
+        const blockLines: string[] = [];
+        const pendingBlanks: string[] = [];
+        let contentIndent: number | null = null;
+        let j = i + 1;
+        for (; j < lines.length; j++) {
+          const l = lines[j];
+          const s = l.replace(/^\s+/, "");
+          if (s === "") { pendingBlanks.push(""); continue; }
+          const ind = l.length - s.length;
+          if (ind <= indent) { break; }
+          if (contentIndent === null) { contentIndent = ind; }
+          if (ind < contentIndent) { break; }
+          if (pendingBlanks.length > 0) { blockLines.push(...pendingBlanks); pendingBlanks.length = 0; }
+          blockLines.push(l.slice(contentIndent));
+        }
+        i = j - 1; // for 头部的 i++ 会补回来
+        let text = bsHead.style === ">" ? foldBlockScalar(blockLines) : blockLines.join("\n");
+        // clip（默认）与 strip（`-`）都剥掉尾换行；`+` 保留语义在此子集内不额外处理
+        while (text.endsWith("\n")) { text = text.slice(0, -1); }
+        target[key] = text;
+        lastEmptyChildKey = null;
       } else if (isOpenQuote(rest)) {
         // 引号折叠串：跨行累积到闭合
         pendingKey = key;
@@ -135,6 +191,29 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
   }
   flushPending();
   return out;
+}
+
+/**
+ * 从 SKILL.md 文本中提取 frontmatter 的 `description`。
+ *
+ * 为何独立导出：GUI 技能库列表（`config_files.ts`）与引擎（`loadSingleSkill`）都要这个值。
+ * 两处各写一份解析必然漂移 —— 事实上 GUI 侧此前是 `firstLineSafe()`（取 SKILL.md 物理首行），
+ * 对带 frontmatter 的技能返回的**就是分隔符 `---`**，于是技能库里所有第三方技能描述都是空的。
+ *
+ * 容错：允许 frontmatter 未闭合（GUI 只读文件头 4KB，可能正好截在描述中间）。
+ * 折叠/多行描述统一压成单行空格，便于列表展示。
+ */
+export function frontmatterDescription(text: string, limit = 200): string {
+  const m = /^\uFEFF?---\r?\n([\s\S]*?)(?:\r?\n---|\r?\n?$)/.exec(text);
+  if (!m) { return ""; }
+  let desc: unknown;
+  try {
+    desc = parseMiniYaml(m[1]).description;
+  } catch {
+    return "";
+  }
+  if (typeof desc !== "string") { return ""; }
+  return desc.replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
 // ── 模型 ─────────────────────────────────────────────────

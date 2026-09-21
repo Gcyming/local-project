@@ -5,6 +5,9 @@
  * - mode=custom：用户显式勾选的 skills（技能名）与 mcp（服务器名）白名单
  */
 
+import { join } from "node:path";
+import { PROJECT_ROOT } from "../paths.js";
+
 export type ToolProfileMode = "default" | "custom";
 
 export interface ToolProfile {
@@ -62,9 +65,32 @@ export function agentToolsOnly(profile: ToolProfile, listToolNames: () => string
 }
 
 /** 追加进系统提示的技能清单（让模型只把已启用技能当作可用能力） */
+/**
+ * 技能目录的**运行时绝对路径**（唯一出处：`PROJECT_ROOT/config/skills`）。
+ *
+ * 为什么要把它写进系统提示：打包后 `PROJECT_ROOT` = 用户数据目录
+ * （`%APPDATA%/slime-gui/slime-data`），而不是源码仓库 —— 但 Agent 从上下文里只能看到
+ * "config/skills" 这种**相对**写法，于是它自己推断出一个绝对路径去写（实测：写进了源码仓库的
+ * `E:\local project\slime\config\skills`）。结果是**文件确实写成功了、技能库却永远不显示**
+ * （读取侧看的是用户数据目录），用户体感是"明明加了却像缺东西"，而且任何一侧都不报错。
+ *
+ * 这是典型的静默失效：写成功 ≠ 写对地方。把真值直接告诉模型，比让它猜划算得多。
+ */
+export function skillsRootDir(): string {
+  return join(PROJECT_ROOT, "config", "skills");
+}
+
 export function agentSkillGuide(profile: ToolProfile): string {
+  const root = skillsRootDir();
+  // 安装技能的固定说法：Agent 想"帮我装个技能"时按此路径落盘，读取侧才看得到
+  const installHint = [
+    `技能目录（绝对路径）：${root}`,
+    `新增技能：在 ${root}\\<技能名>\\ 下写 SKILL.md（必须），frontmatter 至少含 name 与 description；manifest.yaml 可选。`,
+    "⚠️ 不要写到源码仓库或其它路径 —— 那只会有文件、技能库读不到（slime 读的是上面这个目录）。写入后用 skill_search 复核是否已能被检索到。",
+  ].join("\n");
   if (profile.skills.length === 0 && profile.mcp.length === 0) {
-    return "\n\n## 工具能力（白名单）\n当前未启用任何外部技能与 MCP，仅可使用内置核心工具。如需扩展能力，请在 Agent 管理中调整工具配置。";
+    return "\n\n## 工具能力（白名单）\n当前未启用任何外部技能与 MCP，仅可使用内置核心工具。如需扩展能力，请在 Agent 管理中调整工具配置。\n"
+      + installHint;
   }
   const skillLines = profile.skills.length > 0
     ? profile.skills.map((s) => `- ${s}`).join("\n")
@@ -80,5 +106,7 @@ export function agentSkillGuide(profile: ToolProfile): string {
     "你当前启用的 MCP：",
     mcpLines,
     "仅清单内的能力视为可用；如需清单外能力，向用户说明或请其在 Agent 管理中调整工具配置。",
+    "",
+    installHint,
   ].join("\n");
 }

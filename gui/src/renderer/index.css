@@ -347,17 +347,16 @@ code,
   padding: 16px 14px 12px;
   flex-shrink: 0;
 }
+/* A-1054：品牌图标由「字面量 S」改为应用真实图标（<img>）。
+   尺寸/圆角沿用原设计（30px / 8px），故布局零位移；`object-fit: cover` 让不同比例的
+   图标资产都能填满方块而不变形。原先给文字用的 color/font-size 已移除 —— 留着是误导
+   （下一个人会以为这里还在渲染文字）。 */
 .brand-icon {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 16px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  object-fit: cover;
+  display: block;
   flex-shrink: 0;
 }
 .brand-name {

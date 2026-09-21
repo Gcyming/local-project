@@ -89,9 +89,11 @@ function fnBody(src: string, header: string): string {
 }
 
 describe("① providerCtxWindow：本地端点不吃家族表兜底（A-1018 ③ 的喂入口）", () => {
-  /* dots（小红书点点笔记）在家族表里是 vendor 级 `context: 524288`（512K 训练窗口）。
-     这正是用户实测过的那条：界面按 512K 显示、llama-server 实际只给了 8192。 */
-  const DOTS_TRAINING_512K = 524288;
+  /* dots（小红书点点笔记）在家族表里是 vendor 级 `context: 512000`（官方公布 512K）。
+     这正是用户实测过的那条：界面按 512K 显示、llama-server 实际只给了 8192。
+     ⚠️ A-1054：表内值由 `524288` 改为 `512000`（十进制口径，显示层 ÷1000 → 界面读作 512K）；
+     此常量随之同步，否则守卫会钉住旧值、对真实行为假绿。 */
+  const DOTS_TRAINING_512K = 512000;
   /** qwen 家族兜底（同一类病的小号版本：131072 vs 实际 -c 8192） */
   const QWEN_FAMILY = 131072;
 
@@ -129,7 +131,7 @@ describe("① providerCtxWindow：本地端点不吃家族表兜底（A-1018 ③
   });
 
   it("★ 保存值对本地端点也要丢（否则旧代码写坏的 512K 会被永久继承 —— 「错值自杀锁」）", () => {
-    expect(providerCtxWindow({ baseUrl: "http://127.0.0.1:8800/v1", modelId: "dots3-note-prev", savedCtx: 524288 }))
+    expect(providerCtxWindow({ baseUrl: "http://127.0.0.1:8800/v1", modelId: "dots3-note-prev", savedCtx: 512000 }))
       .toBeUndefined();
     expect(providerCtxWindow({ baseUrl: "http://127.0.0.1:8800/v1", modelId: "qwen3-235b", savedCtx: 131072 }))
       .toBeUndefined();

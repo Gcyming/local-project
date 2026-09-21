@@ -7,7 +7,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, mkdir, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SkillRegistry, parseMiniYaml, loadAllSkills } from "../../core-ts/src/skills.js";
+import { SkillRegistry, parseMiniYaml, loadAllSkills, frontmatterDescription } from "../../core-ts/src/skills.js";
 import { ToolRegistry } from "../../core-ts/src/tools/registry.js";
 
 describe("parseMiniYaml", () => {
@@ -37,6 +37,57 @@ empty_key:
     expect(d.limit).toBe(50);
     expect(d.enabled).toBe(true);
     expect(d.ratio).toBe("16:9");
+  });
+
+  it("块标量 `>`（折叠）：跨行折成空格连接的单行，块在缩进回退处结束", () => {
+    const d = parseMiniYaml(`name: ponytail
+description: >
+  Forces the laziest solution that actually works, simplest, shortest, most
+  minimal. Channels a senior dev who has seen everything: question whether the
+  task needs to exist at all.
+license: MIT
+`);
+    expect(d.name).toBe("ponytail");
+    expect(d.description).toBe(
+      "Forces the laziest solution that actually works, simplest, shortest, most minimal. "
+      + "Channels a senior dev who has seen everything: question whether the task needs to exist at all.",
+    );
+    // 块后的同级键必须仍然是键，不能被吞进描述
+    expect(d.license).toBe("MIT");
+  });
+
+  it("块标量 `|`（字面）：保留换行；chomping `-` 剥尾换行", () => {
+    const lit = parseMiniYaml("body: |\n  line one\n  line two\nnext: 1\n");
+    expect(lit.body).toBe("line one\nline two");
+    expect(lit.next).toBe(1);
+    const strip = parseMiniYaml("body: |-\n  only\nnext: 2\n");
+    expect(strip.body).toBe("only");
+    expect(strip.next).toBe(2);
+  });
+
+  it("frontmatterDescription：读 `>` 块标量描述并压成单行（GUI 技能库描述来源）", () => {
+    const md = `---
+name: ponytail
+description: >
+  Lazy but careful. Question whether the task
+  needs to exist at all.
+license: MIT
+---
+
+# Ponytail
+`;
+    expect(frontmatterDescription(md)).toBe(
+      "Lazy but careful. Question whether the task needs to exist at all.",
+    );
+    // 首行分隔符 `---` 绝不能被当成描述（旧实现就是这样把描述读空的）
+    expect(frontmatterDescription(md)).not.toBe("---");
+  });
+
+  it("frontmatterDescription：无 frontmatter / 未闭合（GUI 只读 4KB 截断）都不崩且不返回分隔符", () => {
+    expect(frontmatterDescription("# Plain\n\n正文")).toBe("");
+    expect(frontmatterDescription(`---\nname: t\ndescription: >\n  truncated mid desc`))
+      .toBe("truncated mid desc");
+    expect(frontmatterDescription("")).toBe("");
   });
 });
 
@@ -97,6 +148,27 @@ tags: [alpha, beta]
     await reg.loadSkills();
     expect(reg.get("mix")?.description).toBe("manifest 描述");
     expect(reg.get("mix")?.manifest.version).toBe("2.0");
+  });
+
+  it("第三方风格技能（仅 SKILL.md + `>` 块标量描述）→ 描述可用且可被检索", async () => {
+    await writeSkill("ponytail", {
+      "SKILL.md": `---
+name: ponytail
+description: >
+  Forces the laziest solution that actually works.
+  Prefer the standard library over custom code.
+---
+
+# Ponytail
+`,
+    });
+    const reg = new SkillRegistry({ skillDir: dir });
+    expect(await reg.loadSkills()).toEqual(["ponytail"]);
+    const s = reg.get("ponytail");
+    // 旧实现会把字面量 ">" 当描述（parseMiniYaml 不认块标量）
+    expect(s?.description).not.toBe(">");
+    expect(s?.description).toContain("laziest solution");
+    expect(s?.description).toContain("standard library");
   });
 
   it("指导模式调用：返回 [技能名 指导] 正文（A-038 纯读不拦权限）", async () => {

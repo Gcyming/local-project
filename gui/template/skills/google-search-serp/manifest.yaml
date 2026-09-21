@@ -1,0 +1,15 @@
+name: google-search-serp
+version: '1.0'
+description: Extracts Google Search results page (SERP) data including organic results,
+  paid ads, related searches, People Also Ask questions, AI Overview text, and total
+  result count from google.com. Use when user mentions Google search results, SERP
+  scraping, google search data, search engine results page, organic rankings, keyword
+  SERP, Google SERP extraction, scrape Google search, Google search API alternative,
+  SEO ranking data, paid search ads, PPC ads on Google, Google search monitoring,
+  keyword resear
+permissions:
+  read: true
+  write: false
+  terminal: false
+  network: false
+tags: []

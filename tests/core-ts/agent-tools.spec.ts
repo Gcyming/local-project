@@ -3,11 +3,13 @@
  * （默认推荐集 / 自定义勾选 / mcp_ 工具前缀过滤 / 系统提示技能清单）
  */
 import { describe, it, expect } from "vitest";
+import { join } from "node:path";
 import {
   DEFAULT_TOOL_PROFILE,
   resolveAgentToolProfile,
   agentToolsOnly,
   agentSkillGuide,
+  skillsRootDir,
   type ToolProfile,
 } from "../../core-ts/src/services/agentTools.js";
 
@@ -70,5 +72,31 @@ describe("agentSkillGuide", () => {
     expect(g).toContain("- foo");
     expect(g).toContain("git（mcp_git_* 系列工具）");
     expect(g).toContain("仅清单内的能力视为可用");
+  });
+
+  it("必须下发技能目录的**绝对路径**（否则 Agent 自己猜路径 → 写成功但技能库读不到）", () => {
+    /*
+     * 事故形态：用户让 Agent「帮我装个技能」，Agent 把 SKILL.md 写进了**源码仓库**
+     * （E:\local project\slime\config\skills），而打包版读取的是用户数据目录
+     * （%APPDATA%/slime-gui/slime-data/config/skills）。
+     * 两侧都不报错 —— 文件真的写成功了，只是技能库永远看不到它。
+     * 根因：系统提示里只有相对写法 "config/skills"，没有绝对路径，模型只能自己推断。
+     */
+    const root = skillsRootDir();
+    expect(root.endsWith(join("config", "skills"))).toBe(true);
+    // 必须是绝对路径（模型据此落盘）
+    expect(root).toMatch(/^[A-Za-z]:[\\/]|^\//);
+
+    // 两种分支都要带上，否则「未启用任何技能」的 Agent 依旧会去瞎猜路径
+    for (const profile of [
+      { mode: "custom" as const, skills: [], mcp: [] },
+      { mode: "custom" as const, skills: ["foo"], mcp: [] },
+    ]) {
+      const g = agentSkillGuide(profile);
+      expect(g).toContain(root);
+      expect(g).toContain("SKILL.md");
+      // 必须明确劝阻写到别处
+      expect(g).toContain("不要写到源码仓库");
+    }
   });
 });

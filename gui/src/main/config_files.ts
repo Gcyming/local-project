@@ -7,6 +7,7 @@
  * - 写入：备份 + 原子写（tmp + rename），上限 512KB
  */
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
+import { frontmatterDescription } from "../../../core-ts/src/skills.js";
 import { encrypt, decrypt } from "../../../core-ts/src/encryption.js";
 import { existsSync, readFileSync, statSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, openSync, readSync, closeSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -133,7 +134,12 @@ function scanSkillRoot(base: string, enabled: boolean): SkillInfo[] {
       description = extractManifestDescription(readHeadSafe(manifestPath, 4096));
     }
     if (!description && hasSkillMd) {
-      description = firstLineSafe(skillPath);
+      /* 主流 Agent 的技能只有 SKILL.md（无 manifest.yaml），描述写在 frontmatter 里。
+       * 此前这里取 `firstLineSafe()` —— 即**物理首行**，而带 frontmatter 的文件首行就是
+       * 分隔符 `---`，于是技能库里所有第三方技能都显示不出描述（用户实测「明明加了却像缺东西」）。
+       * 改为先用共享解析器读 frontmatter.description，读不到再退回首个非分隔符标题行。 */
+      const head = readHeadSafe(skillPath, 4096);
+      description = frontmatterDescription(head) || firstLineSafe(skillPath);
     }
     out.push({ name: entry, description, hasManifest, hasSkillMd, enabled });
   }
@@ -496,7 +502,8 @@ export function addMcp(input: {
 
 /** 新增技能（生成 config/skills/<name>/SKILL.md，含 frontmatter；GUI 表单直达，小白无需手动建目录）。
  *  A-918++：此前技能只能手动放文件夹；现提供表单创建。 */
-export function addSkill(input: { name: string; description: string; content?: string }): { ok: boolean; error?: string; name?: string } {  const name = (input.name ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+export function addSkill(input: { name: string; description: string; content?: string }): { ok: boolean; error?: string; name?: string } {
+  const name = (input.name ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!name) { return { ok: false, error: "名称不能为空（将规范化为小写连字符形式）" }; }
   const desc = (input.description ?? "").trim();
   if (!desc) { return { ok: false, error: "描述必填（一句话说明该技能做什么）" }; }
@@ -505,9 +512,11 @@ export function addSkill(input: { name: string; description: string; content?: s
   if (existsSync(dir)) { return { ok: false, error: `已存在同名技能「${name}」` }; }
   const body = (input.content ?? "").trim() || `# ${name}\n\n${desc}\n`;
   const md = `---\nname: ${name}\ndescription: ${desc}\n---\n\n${body}\n`;
+  const manifest = `name: ${name}\nversion: "1.0"\ndescription: ${desc}\n`;
   try {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "SKILL.md"), md, "utf8");
+    writeFileSync(join(dir, "manifest.yaml"), manifest, "utf8");
     return { ok: true, name };
   } catch (e) {
     return { ok: false, error: `创建失败：${e instanceof Error ? e.message : String(e)}` };
@@ -612,7 +621,7 @@ export async function searchSkillMarket(query: string): Promise<{ ok: boolean; s
   }
 }
 
-/** 从官方仓库安装单个技能（下载 SKILL.md 写入 config/skills/<name>/） */
+/** 从官方仓库安装单个技能（下载 SKILL.md 写入 config/skills/<name>/，并生成 manifest.yaml 便于第三方工具识别） */
 export async function installSkillFromMarket(name: string): Promise<{ ok: boolean; error?: string; name?: string }> {
   const safeName = (name ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!safeName) { return { ok: false, error: "技能名无效" }; }
@@ -625,6 +634,8 @@ export async function installSkillFromMarket(name: string): Promise<{ ok: boolea
     const text = await rawRes.text();
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "SKILL.md"), text, "utf8");
+    const desc = extractFrontmatterDescription(text) || safeName;
+    writeFileSync(join(dir, "manifest.yaml"), `name: ${safeName}\nversion: "1.0"\ndescription: ${desc}\n`, "utf8");
     return { ok: true, name: safeName };
   } catch (e) {
     return { ok: false, error: `安装失败：${e instanceof Error ? e.message : String(e)}` };
@@ -676,10 +687,18 @@ function readHeadSafe(p: string, max: number): string {
   } catch { return ""; }
 }
 
+/** 兜底描述：跳过 frontmatter 块后取首个非空行的标题。
+ *  直接取物理首行会把分隔符 `---` 或 `name: xxx` 当描述（这是技能库描述为空的直接原因），
+ *  故这里先剥掉 frontmatter，再从正文里找第一行。 */
 function firstLineSafe(p: string): string {
   try {
-    const first = readFileSync(p, "utf8").split(/\r?\n/)[0] ?? "";
-    return first.replace(/^#+\s*/, "").slice(0, 200);
+    const src = readFileSync(p, "utf8").replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+    for (const line of src.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t) { continue; }
+      return t.replace(/^#+\s*/, "").slice(0, 200);
+    }
+    return "";
   } catch { return ""; }
 }
 

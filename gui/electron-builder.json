@@ -72,6 +72,10 @@
       "to": "slime_server.py"
     },
     {
+      "from": "template/skills",
+      "to": "template/skills"
+    },
+    {
       "from": "../slime_cli.py",
       "to": "slime_cli.py"
     },
@@ -120,7 +124,7 @@
     "language": 2052,
     "shortcutName": "Slime",
     "allowToChangeInstallationDirectory": true,
-    "createDesktopShortcut": true,
+    "createDesktopShortcut": false,
     "createStartMenuShortcut": true,
     "include": "installer.nsh"
   },

@@ -40,12 +40,28 @@ import {
   DIFF_FULL_MAX_RENDER,
   type ToolEvent, type ProductItem,
 } from "./chatProducts.js";
+// A-1051：「恢复中」收尾判定（纯函数）——切换会话后永久停在「（恢复中…）」的根因锁死在这里
+import { decideResumeOutcome, RESUME_MAX_ATTEMPTS, RESUME_QUERY_RETRY_MS } from "./resumeOutcome.js";
+// A-1052：正文渲染前净化（折叠连续空行）——「巨型气泡」是 pre-wrap 把空行各撑成整行，见该模块文件头
+import { collapseBlankRuns } from "./messageText.js";
 // 本组件只**写**在途快照；取样方是右栏（readLiveMonitor 由 RightSidebar 直接引用）
 import { publishLiveMonitor } from "./liveMonitor.js";
 // SubAgentBar 已移除（A-978：监测栏按钮是唯一子代理入口）
 import { confirmAsync, alertAsync } from "../dialog.js";
 import { useReasoningPreset, presetEffortsOf, presetLabelOf, useThinkingPreset, thinkingForcedOff } from "../reasoning.js";
 import { inferModelCapabilities } from "../../../../shared/gen/model-capabilities.js";
+// A-1054①：思考面板懒挂载闸门（纯逻辑，住在 .ts 里可被单测/变异；见该模块文件头）
+import { advanceReasoningFrame, hasReasoningData, isOpenClass, shouldMountBody } from "./reasoningGate.js";
+// A-1054⑤：底部实时状态行的文案推导（纯逻辑；优先级顺序与"等用户时不播扫光"都在那里）
+import { deriveLiveStatus } from "./liveStatus.js";
+// A-1054⑥：待发指令队列（中途插入 / 即将插入）——纯逻辑，本文件只做接线
+import {
+  describeMode, enqueue, modeHint, nextQueueId, previewText, promote, removeAt, setMode,
+  summarize, takeNext, toggleMode,
+  type InsertMode, type QueuedInstruction,
+} from "./instructionQueue.js";
+// A-1054⑥：「发新指令默认怎么插」的唯一读写入口（禁在本文件复写 localStorage 口径）
+import { readInsertMode, writeInsertMode } from "../insertModeToggle.js";
 
 /**
  * 推理强度等级 → 中文名（仅作展示标签）。等级以当前模型「上游返回」为准，
@@ -910,7 +926,10 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
             ))}
           </div>
         )}
-        {m.content}
+        {/* A-1052：渲染前折叠连续空行。pre-wrap 下每个空行占一整行（≈21.7px），
+            正文里一段连续空行会把气泡撑成"巨型色块"（实测 646px 里 630px 是空白）。
+            ⚠️ 只改渲染：复制/回滚仍用原始 `m.content`。 */}
+        {collapseBlankRuns(m.content)}
       </div>
       {/* 悬停元信息行：模式 · 模型 · 时间 + 回滚/复制（hover 时出现） */}
       <div className="msg-hover" style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, color: "var(--text-dim)", marginTop: 3 }}>
@@ -1481,8 +1500,13 @@ const ProductDiffLines = React.memo(function ProductDiffLines({ oldText, newText
       {lines.map((l, k) => (
         <div key={k} style={{
           whiteSpace: "pre-wrap", wordBreak: "break-all", padding: "0 8px",
-          background: l.type === "add" ? "rgba(52,211,153,0.10)" : l.type === "del" ? "rgba(248,113,113,0.12)" : "transparent",
-          color: l.type === "add" ? "#34d399" : l.type === "del" ? "#f87171" : "var(--text-muted)",
+          // A-1051：此前这里写死 Tailwind 色（#34d399/#f87171 + 0.10/0.12 底），
+          // 与同屏的「思考历程」diff 块（`.think-diff-row` 取主题变量）**同物不同色**：
+          // ①底色比主题变量淡（0.10 vs 0.16、0.12 vs 0.14）→ 用户观感"+/- 底色几乎看不见"；
+          // ②不随主题走，切 beta 主题时思考区变了、产物卡没变 → 用户实测"diff 卡片 +/- 配色不对"。
+          // 统一取主题变量并保留兜底值（变量缺失时仍是原来的绿/红）。
+          background: l.type === "add" ? "var(--diff-add-bg, rgba(46, 160, 67, 0.16))" : l.type === "del" ? "var(--diff-del-bg, rgba(248, 81, 73, 0.14))" : "transparent",
+          color: l.type === "add" ? "var(--diff-add, #3fb950)" : l.type === "del" ? "var(--diff-del, #f85149)" : "var(--text-muted)",
         }}>
           <span style={{ userSelect: "none", opacity: 0.65, marginRight: 6, display: "inline-block", width: 10 }}>{l.type === "add" ? "+" : l.type === "del" ? "-" : " "}</span>
           {l.text || " "}
@@ -1638,6 +1662,81 @@ const CompressNoteLine = React.memo(function CompressNoteLine({ note, live }: { 
   );
 });
 
+/**
+ * A-1054①：思考/参考面板的**懒挂载**容器 —— 修「打开会话要等很久才出现内容」。
+ *
+ * 判定逻辑（存在性守卫 / 是否挂载 / 是否切 `is-open` / 两帧推进）全部在
+ * `./reasoningGate.ts`，那是**纯逻辑**，可被单独测试与变异；本组件只负责把它接到 React 上。
+ * 病根、实测数字与「为什么必须两帧」见该模块文件头（不要在这里复述，防两处漂移）。
+ *
+ * ⚠️ 本组件的唯一职责边界：**在闸门放行之前，一个子节点都不许挂**
+ *    （`splitToolTrace` / `splitThinkingIntoSteps` / `sanitizeThinking` 的开销全在子节点里）。
+ *    接入顺序是契约的一部分，回归守卫见 `tests/core-ts/a1054-guards.spec.ts`。
+ */
+const ReasoningSection = React.memo(function ReasoningSection({ m, collapsed }: {
+  m: Message; collapsed: boolean;
+}): JSX.Element | null {
+  const open = !collapsed;
+  // 「正文已挂载过」与「可以把类名切成展开」是**两个**状态，见 reasoningGate 的两帧说明
+  const [everMounted, setEverMounted] = React.useState(open);
+  const [readyToOpen, setReadyToOpen] = React.useState(open);
+
+  React.useEffect(() => {
+    // 每帧只推进**一个**字段并立刻返回 → 强制 React 再提交一帧，过渡才有旧值（两帧提交）
+    const next = advanceReasoningFrame(open, everMounted, readyToOpen);
+    if (next.everMounted !== everMounted) { setEverMounted(next.everMounted); return; }
+    if (next.readyToOpen !== readyToOpen) { setReadyToOpen(next.readyToOpen); }
+  }, [open, everMounted, readyToOpen]);
+
+  // 数据存在性守卫：**只看长度**（不碰正则/不切分），否则「便宜的前置判断」本身就是开销
+  if (!hasReasoningData(m)) { return null; }
+
+  // 未展开过 → 一个子节点都不挂（这才是省下的那 88 ms + 1090 次挂载）
+  if (!shouldMountBody(open, everMounted)) { return null; }
+
+  const localFiles = m.stages?.reads ?? [];
+  const localUrls = m.stages?.urls ?? [];
+  const tools = m.stages?.tools ?? [];
+  // 交错时间线：优先使用流式记录的真实顺序；历史消息（无 timeline）回退为「完整思考 + 工具列表」
+  // A-1027：工具块**解析成 tool 节点**，不再整段丢弃。
+  const trace = splitToolTrace(m.reasoning ?? "");
+  const cleanReasoning = trace.text;
+  const tracedTools = traceEntriesToToolSteps(trace.traces, matchToolLabel, tools);
+  const timeline: TimelineStep[] = m.stages?.timeline?.length
+    ? m.stages.timeline
+    : [
+        ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: "think" as const, text: t })),
+        ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label.replace(/^⟳\s*/, ""), detail: t.detail })),
+        // A-1034：**必须带上 `result`**（否则重开会话后写入卡片展不开 diff）
+        ...tracedTools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label, result: t.result, diffTrimmed: t.diffTrimmed })),
+      ];
+  if (timeline.length === 0 && localFiles.length === 0 && localUrls.length === 0) { return null; }
+  return (
+    /* A-1015：常驻 + 高度插值。三层层级是**必需的**：
+       .collapse(grid 容器) > 纯 div(grid 行, 负责 overflow 裁切) > 原内容(带 margin)。
+       ⚠️ 带 margin 的元素**不能**直接当 grid 行：grid 行高 0fr 时 item 自身 margin
+       不会被 overflow:hidden 裁掉（overflow 只裁自己的内容盒），那 8+2px 会漏成空白。 */
+    <div className={`collapse${isOpenClass(open, readyToOpen) ? " is-open" : ""}`}>
+      <div>
+        <div style={{ margin: "8px 0 2px" }}>
+          {/* 面板零：访问来源（网页访问/搜索网址，A-918+ 补齐此前未渲染的 urls） */}
+          {localUrls.length > 0 && (
+            <UrlPanel urls={localUrls} />
+          )}
+          {/* 面板一：参考内容（只含工作目录文件；独立折叠，与思考过程互不影响） */}
+          {localFiles.length > 0 && (
+            <RefPanel files={localFiles} />
+          )}
+          {/* 面板二：思考过程（时间线：思考段落 ↔ 工具调用交错；独立折叠） */}
+          {timeline.length > 0 && (
+            <ThinkingPanel timeline={timeline} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
+
 const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, showThinking, collapsed, onToggle, isMember }: {
   m: Message; agentName: string; showThinking: boolean; collapsed: boolean; onToggle: (id: number) => void; isMember?: boolean;
 }): JSX.Element {
@@ -1704,61 +1803,12 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
         {/* A-1015：`showThinking` 是**数据存在性守卫**（无思考数据就不渲染空壳，保留）；
             `collapsed` 是**开合状态**，改由 .collapse 播高度插值——此前是 `!collapsed && …`
             条件渲染，收起瞬间卸载、没有第二帧可插值，所以只能生硬跳变（用户投诉的根因）。 */}
-        {showThinking && (() => {
-          const localFiles = m.stages?.reads ?? [];
-          const localUrls = m.stages?.urls ?? [];
-          const tools = m.stages?.tools ?? [];
-          // 交错时间线：优先使用流式记录的真实顺序；历史消息（无 timeline）回退为「完整思考 + 工具列表」
-          // A-1027：工具块**解析成 tool 节点**，不再整段丢弃。原先的 `/…[\s\S]*$/` 在 marker 落在
-          // 偏移 0（无思考模型把工具块写成整段 reasoning）时会把推理**砍空**，叠加历史记录里
-          // `stages` 整体缺失（实测 6 条命中记录全部如此）→ 时间线长度 0 → **整个思考面板不渲染**
-          // （按钮在、点了没反应）。留痕本来就是工具信息，丢掉它才是错的。
-          const trace = splitToolTrace(m.reasoning ?? "");
-          const cleanReasoning = trace.text;
-          // 结构化来源优先：条目已被 `stages.tools` 覆盖则不重复出节点（见 traceEntriesToToolSteps）
-          const tracedTools = traceEntriesToToolSteps(trace.traces, matchToolLabel, tools);
-          // A-1021b：兜底**也要是多节点**。此前这里整段推理只建一个 think 节点，叠加
-          // normalizeThinkingText 把段内单换行并成空格 → 整条思考历程塌成"一大坨可滚动的字"，
-          // 时间线形态（圆点 + 竖轨 + 一行摘要）全部消失。用户实测截图正是这条路径。
-          // 按模型自己的自然段落切、超上限再均衡合并（见 splitThinkingIntoSteps 的取舍说明）。
-          // ⚠️ 工具块解析出的节点排在末尾，跟随它在文本里的**记录位置**——这不是真实交错位置
-          //    （与 splitThinkingIntoSteps 同一条诚实边界），不得据此宣称调用发生的时刻。
-          const timeline: TimelineStep[] = m.stages?.timeline?.length
-            ? m.stages.timeline
-            : [
-                ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: "think" as const, text: t })),
-                ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label.replace(/^⟳\s*/, ""), detail: t.detail })),
-                // A-1034：**必须带上 `result`**。此前这里只映射 name/label，把从留痕还原的
-                // diff 标记整条丢掉 → 重新打开会话后思考历程里的写入卡片展不开改动对比
-                // （用户报「思考历程中的改动也无法查看」的直接成因）。
-                ...tracedTools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label, result: t.result, diffTrimmed: t.diffTrimmed })),
-              ];
-          if (timeline.length === 0 && localFiles.length === 0 && localUrls.length === 0) return null;
-          return (
-            /* A-1015：常驻 + 高度插值。注意三层层级是**必需的**：
-               .collapse(grid 容器) > 纯 div(grid 行, 负责 overflow 裁切) > 原内容(带 margin)。
-               ⚠️ 带 margin 的元素**不能**直接当 grid 行：grid 行高 0fr 时 item 自身 margin
-               不会被 overflow:hidden 裁掉（overflow 只裁自己的内容盒），那 8+2px 会漏成空白。 */
-            <div className={`collapse${collapsed ? "" : " is-open"}`}>
-              <div>
-                <div style={{ margin: "8px 0 2px" }}>
-                  {/* 面板零：访问来源（网页访问/搜索网址，A-918+ 补齐此前未渲染的 urls） */}
-                  {localUrls.length > 0 && (
-                    <UrlPanel urls={localUrls} />
-                  )}
-                  {/* 面板一：参考内容（只含工作目录文件；独立折叠，与思考过程互不影响） */}
-                  {localFiles.length > 0 && (
-                    <RefPanel files={localFiles} />
-                  )}
-                  {/* 面板二：思考过程（时间线：思考段落 ↔ 工具调用交错；独立折叠） */}
-                  {timeline.length > 0 && (
-                    <ThinkingPanel timeline={timeline} />
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })()}
+        {/* A-1054①：正文（正则切分 + 1090 个 TimelineNode）推迟到**首次展开**才计算并挂载。
+            此前 `.collapse` 常驻挂载 → 141 条消息在**默认收起态**下照样把整块时间线建出来，
+            实测最大会话 IPC 载荷 8.76MB（其中 reasoning 4.2MB / content 仅 150KB），
+            `splitThinkingIntoSteps` 单次 37.5ms、`sanitizeThinking` 66ms，全是看不见的白工。
+            展开动画（`--collapse-dur`）与两帧提交的实现说明见 `ReasoningSection` 定义处。 */}
+        {showThinking && <ReasoningSection m={m} collapsed={collapsed} />}
         {/* A-975：压缩报告分隔线（在正文之前，思考卡折叠也可见） */}
         {m.compressNote && <CompressNoteLine note={m.compressNote} />}
         <div className="msg-body-divider" />
@@ -1772,7 +1822,7 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word",
             color: "var(--text-secondary)",
           }}>
-            {m.content}
+            {collapseBlankRuns(m.content)}
           </div>
         ) : m.error ? (
           <div style={{
@@ -1782,7 +1832,7 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap", wordBreak: "break-word",
             color: "#f87171",
           }}>
-            {m.content}
+            {collapseBlankRuns(m.content)}
           </div>
         ) : (
           <div style={{ lineHeight: 1.7, fontSize: 14, color: "var(--text)", wordBreak: "break-word" }}>
@@ -2078,8 +2128,25 @@ export default function ChatPanel({
   const compressBusyRef = React.useRef(false);
   /** 每轮只压一次（发送前触发压缩后，本轮发送结束前不再重复触发；onDone 复位允许下一轮再体检） */
   const didCompressTurnRef = React.useRef(false);
-  /** A-162：插入指令待发队列 —— 中断旧流后，等旧流 done/error 收尾再续发的新消息 */
-  const interruptQueueRef = React.useRef<Array<{ agentId: string; message: string; sessionId?: string; networkEnabled?: boolean; images?: string[] }>>([]);
+  /** A-162 / A-1054⑥：待发指令队列 —— 本轮收尾后按序续发。
+   *  ⚠️ 本 ref 是队列的**唯一权威**（组件内的 `queueView` 只是它的渲染镜像）。
+   *     任何改动都必须走 `syncQueue()`，否则「界面显示的队列」与「实际要发的队列」会漂移
+   *     —— 那是最坏的一类不一致：用户看着队列改了顺序，发出去的却是另一个顺序。 */
+  const interruptQueueRef = React.useRef<QueuedInstruction[]>([]);
+  /** 队列的渲染镜像（由 syncQueue 同步；不要在别处 setQueueView） */
+  const [queueView, setQueueView] = React.useState<QueuedInstruction[]>([]);
+  /** A-1054⑥：默认插入方式（中途插入 / 即将插入）——持久化，未存过时取"即将插入"（不打断） */
+  const [insertMode, setInsertMode] = React.useState<InsertMode>(() => readInsertMode());
+  /** 队列的唯一写入口：同时更新权威 ref 与渲染镜像（见 interruptQueueRef 注释） */
+  const syncQueue = React.useCallback((next: QueuedInstruction[]): void => {
+    interruptQueueRef.current = next;
+    setQueueView(next);
+  }, []);
+  /** 切默认插入方式并持久化（下次启动沿用） */
+  const changeInsertMode = React.useCallback((mode: InsertMode): void => {
+    setInsertMode(mode);
+    writeInsertMode(mode);
+  }, []);
   /** 当前面板展示的会话（每渲染同步，供订阅回调闭包比较，避免闭包捕获旧 sessionId） */
   const sessionRef = React.useRef("");
   React.useEffect(() => { sessionRef.current = sessionId; });
@@ -2437,11 +2504,11 @@ export default function ChatPanel({
     // A-917：改为就地红字横幅（不再追加独立 assistant 消息）——用户反馈「另发一条/切会话才出现/切走即消失」全部由追加消息引起；
     // 横幅随当前会话立即显示、切走自然消失，不污染消息流与历史。
     setStreamErrorBanner(errBlock ? `${errContent}\n\n${errBlock}` : errContent);
-    // 失败/重连耗尽：interruptQueue 中未被续发的用户指令（中断插入路径）归还输入框，
+    // 失败/重连耗尽：队列中未被续发的用户指令归还输入框，
     // 避免旧流不再发 done 时『需求被吞、无法回滚』（输入框发送时已清空，必须归还）
     if (interruptQueueRef.current.length > 0) {
-      const pending = interruptQueueRef.current.map((q) => q.message).join("\n");
-      interruptQueueRef.current = [];
+      const pending = interruptQueueRef.current.map((q) => q.text).join("\n");
+      syncQueue([]);
       setInput((prev) => (prev && prev.trim() ? prev + "\n" + pending : pending));
     }
     toolTraceRef.current = [];
@@ -2652,37 +2719,73 @@ export default function ChatPanel({
         });
         snapshotMsgIdRef.current = liveMsg.id;
         setResumeMsgId(liveMsg.id);
-        // A-973：真相源校准——主进程 activeChats 才是"这条流死没死"的唯一权威（A-972 删掉本地
-        // 6s 猜测定时器后失去的判断依据）。恢复时乐观建了占位气泡，但若流其实已静默结束
-        // （done 在切走期间已派发、面板不在场未收尾），占位会永久冻结成"（恢复中…）"幽灵
-        // （用户实测回归）。查 isActive：流已死 → 立即把占位气泡转结算气泡（有正文）或移除
-        // （纯思考后断流、无正文），并清 loading/活跃标记；流还活着（查询不可用也保守保持）→ 占位等 chunk 续长。
+        // A-973/A-1051：真相源校准——主进程 activeChats 才是"这条流死没死"的唯一权威
+        // （A-972 删掉本地 6s 猜测定时器后失去的判断依据）。恢复时乐观建了占位气泡，
+        // 但若流其实已静默结束（done 在切走期间已派发、面板不在场未收尾），占位会永久冻结成
+        // "（恢复中…）"幽灵。判定本身抽到 `resumeOutcome.ts`（纯函数、可直测），这里只做 I/O
+        // 与副作用落地：查询失败会重试到上限，耗尽后结束 loading 但保留气泡（见该模块文件头）。
         void (async () => {
-          const r = await api.chat?.isActive?.(sessionId).catch(() => null);
-          if (!r || r.active) { return; }
-          streamConfirmedDead = true; // A-974-R4：供下方历史加载回调丢弃 stale 占位气泡
-          if (streamActiveRef.current && !stoppingRef.current) {
-            streamActiveRef.current = false;
-            setLoading(false);
-          }
-          const settled = cached.partial?.trim() ?? "";
-          if (settled && !cached.tailError) {
-            const sm = makeMessage("assistant", settled, {
-              reasoning: cached.reasoning?.trim() || undefined,
-              stages: (cached.toolEvents?.length ?? 0) > 0
-                ? { reads: [], urls: [], tools: cached.toolEvents ?? [], reasoning: cached.reasoning?.trim() || undefined, timeline: cached.timeline ?? [], products: extractProducts(cached.toolEvents ?? []) }
-                : undefined,
+          let attempts = 0;
+          for (;;) {
+            // ⚠️ 必须用 `Promise.resolve(...)` 包住：`api.chat?.isActive?.()` 在**方法缺失**时
+            // 求值为 `undefined`，而紧随的 `.catch` **不在可选链的保护范围内** → `undefined.catch`
+            // 抛 TypeError → async IIFE reject（此处无 catch）→ `setLoading(false)` 永不执行 =
+            // **另一条独立的永久卡死路径**（与"被吞成 null"机制不同）。包一层之后，
+            // "方法缺失"与"IPC reject"同样归入「查询失败」，交给下面的重试与放弃判据。
+            const r = await Promise.resolve(api.chat?.isActive?.(sessionId)).catch(() => null);
+            const outcome = decideResumeOutcome({
+              query: r,
+              attempts,
+              maxAttempts: RESUME_MAX_ATTEMPTS,
+              partial: cached.partial ?? "",
+              hasTailError: Boolean(cached.tailError),
             });
-            // A-974-R5：同时登记为结算气泡候选 —— 历史加载回调（可能晚于本判定返回）会用同一套
-            // 去重规则决定是否保留，避免"本判定刚装上回复、却被随后的历史 setMessages 整体覆盖"的
-            // 竞态（历史落盘在 main 的 finally，done 之后才完成，存在真空窗口）。
-            settledMsg = sm;
-            setMessages((prev) => prev.map((mm) => (mm.id === snapshotMsgIdRef.current ? sm : mm)));
-          } else {
-            setMessages((prev) => prev.filter((mm) => mm.id !== snapshotMsgIdRef.current));
+            // 支③：查询失败且还有重试机会 → 等一会儿再问，**不改任何 UI**（避免中途闪一下 loading 收尾）
+            if (outcome.retry) {
+              attempts += 1;
+              await new Promise((tick) => { window.setTimeout(tick, RESUME_QUERY_RETRY_MS); });
+              continue;
+            }
+            // 支①：流仍在跑 → 什么都不做，占位气泡等 chunk 续长（return 前不碰 loading）
+            if (!outcome.endLoading) { return; }
+            // 支②/支④：结束 loading。A-1051 关键修复 —— 此前这里写的是
+            //   `if (streamActiveRef.current && !stoppingRef.current) { …; setLoading(false); }`
+            // 把"结束 loading"绑在**粘性的 `stoppingRef`**（语义是"别自动重连"，见 onError）上：
+            // `onDone` 的切走早退分支漏复位它 → 残留 true → 此后每次切回都跳过 setLoading(false)
+            // → **永久「恢复中」**（用户实测）。现在判据里根本没有"用户是否点过停止"。
+            setLoading(false);
+            // ⚠️ `streamActiveRef` 只在**拿到"流已死"的证据**时才清（支②）。
+            // 支④（重试耗尽）没有证据，绝不能清：它同时是 rAF 渲染 / 心跳 / cache.hasActive
+            // 的守卫（见 ensureCtxPulse、卸载 flush），一旦清掉而流其实还活着，
+            // 后续 chunk 虽仍写入 partial 但界面不再续长 → 观感正是"回复被回滚/凭空消失"。
+            if (outcome.confirmedDead) {
+              streamActiveRef.current = false;
+              streamConfirmedDead = true; // A-974-R4：供下方历史加载回调丢弃 stale 占位气泡
+            }
+            if (outcome.bubble === "settle") {
+              const settled = (cached.partial ?? "").trim();
+              const sm = makeMessage("assistant", settled, {
+                reasoning: cached.reasoning?.trim() || undefined,
+                stages: (cached.toolEvents?.length ?? 0) > 0
+                  ? { reads: [], urls: [], tools: cached.toolEvents ?? [], reasoning: cached.reasoning?.trim() || undefined, timeline: cached.timeline ?? [], products: extractProducts(cached.toolEvents ?? []) }
+                  : undefined,
+              });
+              // A-974-R5：同时登记为结算气泡候选 —— 历史加载回调（可能晚于本判定返回）会用同一套
+              // 去重规则决定是否保留，避免"本判定刚装上回复、却被随后的历史 setMessages 整体覆盖"的
+              // 竞态（历史落盘在 main 的 finally，done 之后才完成，存在真空窗口）。
+              settledMsg = sm;
+              setMessages((prev) => prev.map((mm) => (mm.id === snapshotMsgIdRef.current ? sm : mm)));
+            } else if (outcome.bubble === "drop") {
+              setMessages((prev) => prev.filter((mm) => mm.id !== snapshotMsgIdRef.current));
+            }
+            // bubble === "keep"（支④）：**保留占位气泡原样** —— 也不清 snapshotMsgIdRef / resumeMsgId，
+            // 让占位气泡继续持有这两个锚点；万一 chunk 后续到达，续长目标仍在。
+            if (outcome.bubble !== "keep") {
+              snapshotMsgIdRef.current = null;
+              setResumeMsgId(null);
+            }
+            return;
           }
-          snapshotMsgIdRef.current = null;
-          setResumeMsgId(null);
         })();
       } else {
         // 流已真实终态（停止/失败/完成）→ 切回不带"生成中"，避免假活跃
@@ -3123,6 +3226,14 @@ export default function ChatPanel({
         // 这两个闸门是**流级**状态、不属于会话视图，所以必须放在会话守卫之前重置。
         didCompressTurnRef.current = false;
         compressBusyRef.current = false;
+        // A-1051：`stoppingRef` 同理必须在此复位 —— 它也是**流级**状态（语义"别再自动重连"），
+        // 而这里正是"流已在切走期间结束"的收尾路径。此前只有下面「流已完成」分支复位它，
+        // 于是「流式期间切走会话」会把它**永久留成 true**：①切回时老的 endLoading 判据被它挡住
+        // → 永久「恢复中」（用户实测，该判据已在 A-1051 移除，此处是根因残留的第二处）；
+        // ②更隐蔽的是它还会污染**之后**的 onError —— `if (stoppingRef.current) { resetStreamUI(); return; }`
+        // 会把新流的真实错误当成"用户主动停止"，静默跳过自动重连。
+        stoppingRef.current = false;
+        setStopping(false);
         return;
       }
       // 流已完成：清除重连状态（含可能遗留的重连定时器）
@@ -3233,11 +3344,17 @@ export default function ChatPanel({
       setLiveTimeline([]);
       setLoading(false);
       setStopping(false);
-      // A-162：插入指令续发 —— 旧流收尾（含中断）后，若有待发指令则立即作为新一轮发送
-      if (interruptQueueRef.current.length > 0 && sessionRef.current === m.sessionId) {
-        const next = interruptQueueRef.current.shift()!;
+      // A-162 / A-1054⑥：插入指令续发 —— 本轮收尾（含被中断）后，若有待发指令则立即作为新一轮发送。
+      // 出队走 `takeNext`（纯逻辑）：**只认队首且只认本会话**，跨会话的那条留在队列里等它自己那轮
+      // 收尾。此前是 `length > 0 && sessionRef === m.sessionId` 后无条件 `shift()` —— 队首属于别的
+      // 会话时会把别人的指令发到本会话里，而"取消勾选/切会话"这类操作恰好最容易造出这种队列。
+      const taken = takeNext(interruptQueueRef.current, m.sessionId ?? "");
+      if (taken) {
+        syncQueue(taken.rest);
         setLoading(false);
-        doSend(next.message, next.sessionId);
+        // 队列项自带图片：显式透传，不再依赖 `pendingImages` 这个**当时可能已被清空/换过**的共享态
+        // （此前中断插入带图只写在注释里，续发时其实取的是当时的 pendingImages —— 图会丢或串）。
+        void doSend(taken.item.text, taken.item.sessionId, { images: taken.item.images });
         return;
       }
       if (m.timings) setLastTimings(m.timings);
@@ -3739,28 +3856,45 @@ export default function ChatPanel({
     const hasPending = pendingImages.length > 0;
     // 允许「只发图片、不带文字」（user content 空文本 + 图）
     if (!api || (!input.trim() && !hasPending)) { return; }
-    // A-162：插入指令（interrupt-insert）。此前 loading/stopping 时的新消息被静默丢弃
-    // （用户只能先点停止再输入）—— 这是本轮要修的体验：Agent 思考/输出期间，用户输入
-    // 的新指令应立即中断当前生成（保留已产出内容交由 onDone/interrupted 收尾落库），
-    // 然后新消息作为新一轮立即发出。等价于 Claude Code/Cursor 的"打断插入"。
+    // A-162 / A-1054⑥：Agent 正在跑时的新指令 —— 不再无条件打断，按用户选的插入方式走：
+    //   · 中途插入（interrupt）：打断当前生成（已产出内容仍由 onDone(interrupted) 收尾落库），
+    //     本条立刻排到队首、旧流一收尾就发出去；
+    //   · 即将插入（queue）：**不打断**。本轮自然结束后由 onDone 的续发路径按序发出。
+    // 两条路都进同一个队列（不再有"静默丢弃"），界面在输入框上方把队列摊开给用户看/改。
     if (loading || stopping) {
-      const interruptText = input.trim();
-      // 打断插入同样携带本次待发图片（中断旧流后新一轮立即带图）
-      const interruptImages = pendingImages.map((i) => i.dataUrl);
+      const queuedText = input.trim();
+      const queuedImages = pendingImages.map((i) => i.dataUrl);
       setInput("");
-      setLoading(true); // 保持 loading：如旧流仍在跑，先让其中断收尾
-      const wasStopping = stoppingRef.current || stopping;
-      stoppingRef.current = true; // 中断旧流：不再自动重连
-      // 中断旧流（abort → 后台自然结束当前工具/生成阶段 → onDone(interrupted) 收尾落库）
-      await api.chat.cancel(sessionId).catch(() => undefined);
-      // 新指令注册为待发消息：待旧流 done/error 收尾后触发新流（见 onDone 尾部续发）
-      interruptQueueRef.current.push({ agentId, message: interruptText, sessionId, networkEnabled, images: interruptImages });
-      setStopping(false);
-      stoppingRef.current = wasStopping;
-      // 若旧流已无活动（loading 是残留），立即发新流
-      if (!streamActiveRef.current) {
-        setLoading(false);
-        doSend(interruptText);
+      if (queuedImages.length > 0) { setPendingImages([]); } // 图片已随本条入队，不再挂在待发区
+      const queued: QueuedInstruction = {
+        id: nextQueueId(),
+        text: queuedText,
+        mode: insertMode,
+        images: queuedImages,
+        sessionId,
+        agentId,
+        networkEnabled,
+        createdAt: Date.now(),
+      };
+      // 中途插入：先排到队首（否则它会排在"即将插入"的那几条后面，观感是"点了没反应"）
+      syncQueue(insertMode === "interrupt"
+        ? promote(enqueue(interruptQueueRef.current, queued), queued.id)
+        : enqueue(interruptQueueRef.current, queued));
+
+      if (insertMode === "interrupt") {
+        setLoading(true); // 保持 loading：如旧流仍在跑，先让其中断收尾
+        const wasStopping = stoppingRef.current || stopping;
+        stoppingRef.current = true; // 中断旧流：不再自动重连
+        // 中断旧流（abort → 后台自然结束当前工具/生成阶段 → onDone(interrupted) 收尾落库）
+        await api.chat.cancel(sessionId).catch(() => undefined);
+        setStopping(false);
+        stoppingRef.current = wasStopping;
+        // 若旧流已无活动（loading 是残留），立即发新流
+        if (!streamActiveRef.current) {
+          syncQueue(takeNext(interruptQueueRef.current, sessionId)?.rest ?? interruptQueueRef.current);
+          setLoading(false);
+          void doSend(queuedText, sessionId, { images: queuedImages });
+        }
       }
       return;
     }
@@ -3919,7 +4053,7 @@ export default function ChatPanel({
   /** A-162/A-164：真正执行发送（含输入框清空/历史追加/流式初始化/入参记录）。send() 与插入指令续发共用。
    *  注意：本函数总是清空输入框（调用方只管把内容传进来）——此前重构遗漏 setInput("")，
    *  导致「消息发出后文本仍留在输入框」的用户实测回归（A-164）。 */
-  async function doSend(text: string, targetSessionId?: string): Promise<void> {
+  async function doSend(text: string, targetSessionId?: string, opts?: { images?: string[] }): Promise<void> {
     // A-982：**空串必须当"没传"处理**。`targetSessionId ?? sessionId` 只在 null/undefined 时回落，
     // 而空串是"有值"——调用方（如中断续发队列）传 "" 时会得到 `sid = ""`，于是
     // ① streamSessionRef 变成空串 → 右栏 sessionId 守卫把所有实时事件丢掉（这就是"右栏不实时"
@@ -3931,7 +4065,9 @@ export default function ChatPanel({
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     // 识图：仅发送本轮用户主动选择的图片（上传一次只对当前轮生效——
     // 不自动携带会话历史图，否则上传一张后后续所有指令都会被强制附带旧图）
-    const imagesToSend = pendingImages.map((i) => i.dataUrl);
+    // A-1054⑥：队列续发时由调用方**显式透传**图片（`opts.images`）——那批图属于**入队那一刻**
+    // 的指令，不属于"现在"。继续读 `pendingImages` 会串到用户此刻新选的图上。
+    const imagesToSend = opts?.images ?? pendingImages.map((i) => i.dataUrl);
     // 允许「只发图片、不带文字」
     if (!api || (!text && imagesToSend.length === 0)) { return; }
     const sid = targetSid ?? sessionId;
@@ -3964,7 +4100,8 @@ export default function ChatPanel({
       perSessionStreamCache.current[sid] = snap;
     }
     // 发送后清空待发区（图片只对当前轮生效，不写入会话记忆供后续轮次自动携带）
-    setPendingImages([]);
+    // ⚠️ 仅当**取过** pendingImages 时才清（队列续发走 opts.images，用户此刻选的新图不属于它）
+    if (!opts?.images) { setPendingImages([]); }
     resetPartial();
     // A-975：新一轮开始 → 清上一轮的压缩报告行（若有）
     compressNoteRef.current = null;
@@ -4290,6 +4427,61 @@ export default function ChatPanel({
     onReasoningChange?.(fallback);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelChoice, manualEfforts, curSupportsEffortLevels]);
+
+  /* ── A-1054⑤ 底部实时状态行：文案全部由纯逻辑推导（见 liveStatus.ts 文件头）──────
+     为什么要这一行：Agent 跑工具循环/等上游首包时**不输出正文**，对话区一片安静，
+     用户只能盯着右栏猜它是不是卡了。这行把「现在在做什么 + 进度」直接摆在输入框上方。
+     工具名走 resolveToolLabel（与右栏活动记录同一份映射），避免同一个工具两种说法。 */
+  const liveStatus = deriveLiveStatus({
+    loading,
+    stopping,
+    awaitingApproval: !!pendingPerm,
+    awaitingAnswer: !!pendingAsk,
+    compressStage: compressUi?.stage ?? null,
+    lastToolLabel: toolEvents.length > 0 ? resolveToolLabel(toolEvents[toolEvents.length - 1]!.name).label : "",
+    toolCount: toolEvents.length,
+    replyChars: partial.length,
+    reasonChars: reasoningTmp.length,
+    elapsedMs: streamElapsed,
+    ctxUsed: contextTokens,
+    ctxCap,
+  });
+
+  /* ── A-1054⑥ 队列操作：三处都把结果交回 syncQueue（唯一写入口）───────────── */
+  /** 改成「中途插入」= 我要它现在就走：提到队首 + 打断当前生成，旧流一收尾立刻发 */
+  async function promoteQueueItem(id: number): Promise<void> {
+    syncQueue(promote(setMode(interruptQueueRef.current, id, "interrupt"), id));
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api) { return; }
+    // 当前没有活跃流 → 它本来就会立刻发，不必（也无从）打断
+    if (!streamActiveRef.current) {
+      const taken = takeNext(interruptQueueRef.current, sessionId);
+      if (taken) {
+        syncQueue(taken.rest);
+        void doSend(taken.item.text, taken.item.sessionId, { images: taken.item.images });
+      }
+      return;
+    }
+    const wasStopping = stoppingRef.current;
+    stoppingRef.current = true;    // 中断旧流：不再自动重连（与 send() 的中途插入同一条路）
+    setLoading(true);
+    await api.chat.cancel(sessionId).catch(() => undefined);
+    setStopping(false);
+    stoppingRef.current = wasStopping;
+  }
+
+  /** 改回「即将插入」= 不抢跑，留在队列里等本轮自然结束（顺序不变） */
+  function demoteQueueItem(id: number): void {
+    syncQueue(setMode(interruptQueueRef.current, id, "queue"));
+  }
+
+  /** 移出队列（指令直接丢弃 —— 只由用户显式点击触发，绝不自动丢） */
+  function removeQueueItem(id: number): void {
+    syncQueue(removeAt(interruptQueueRef.current, id));
+  }
+
+  /** 本会话此刻还有几条待发（面板只在有货时出现） */
+  const queueOfMine = queueView.filter((q) => q.sessionId === sessionId);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, position: "relative", overflow: "hidden" }}>
@@ -5115,9 +5307,21 @@ export default function ChatPanel({
               {!loading && (
                 <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "var(--success)", flexShrink: 0 }} />
               )}
-              <span className="thinking-hint-text" style={{ fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {loading ? (toolEvents.length > 0 ? "🔧 调用工具中…" : "💭 思考中…") : PLACEHOLDER_PHRASES[placeholderIndex]}
+              {/* A-1054⑤：状态文案改由 `liveStatus` 推导（在做什么 + 进度），并复用 .text-scan-light 扫光。
+                  此前只有两个死值「🔧 调用工具中… / 💭 思考中…」——用户看不出它到底在干什么。
+                  ⚠️ `animated` 为 false 时**不挂** text-scan-light：等用户审批/回答时模型是停着的，
+                     扫光会让人以为"它还在跑，我等着就好"（然后干等）。 */}
+              <span
+                className={liveStatus?.animated ? "text-scan-light thinking-hint-text" : "thinking-hint-text"}
+                title={liveStatus ? `${liveStatus.text}${liveStatus.detail ? `（${liveStatus.detail}）` : ""}` : undefined}
+                style={{ fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {liveStatus ? liveStatus.text : PLACEHOLDER_PHRASES[placeholderIndex]}
               </span>
+              {liveStatus && liveStatus.detail && (
+                <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 1 }}>
+                  · {liveStatus.detail}
+                </span>
+              )}
             </span>
             {true && (<>
               <span style={{ color: "var(--text-dim)" }}>|</span>
@@ -5195,6 +5399,69 @@ export default function ChatPanel({
                   <span style={{ color: "var(--text)" }}>摘要生成不可用，已保留最近 {compressUi.dropped ?? 0} 轮对话并继续发送</span>
                 </>
               )}
+            </div>
+          )}
+          {/* ── A-1054⑥ 待发指令队列（输入框正上方）────────────────────────────────
+              位置刻意的：它属于"我马上要发出去的东西"，跟输入框是一伙的，所以贴在输入框上沿。
+              每条可单独切换插入方式（⏳ 即将插入 / ⚡ 中途插入）——「中途插入」会把该条提到队首
+              并打断当前生成；「即将插入」只是排队，本轮自然结束后按序发出。 */}
+          {queueOfMine.length > 0 && (
+            <div style={{
+              display: "flex", flexDirection: "column", gap: 4,
+              padding: "8px 12px 2px",
+              animation: "fadeIn 0.18s ease",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)" }}>
+                <ClockIcon size={11} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
+                <span style={{ fontWeight: 600 }}>待发指令</span>
+                <span style={{ color: "var(--text-dim)" }}>· {summarize(queueOfMine)}</span>
+                <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  title="Agent 本轮结束后会自动按顺序发出；标「中途插入」的会立刻打断当前生成">
+                  · 默认：{describeMode(insertMode)}（点下方徽标可随时改变）
+                </span>
+              </div>
+              {queueOfMine.map((q) => (
+                <div key={q.id} style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "5px 9px", borderRadius: 9,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-input)",
+                }}>
+                  <button
+                    onClick={() => { void (q.mode === "interrupt" ? demoteQueueItem(q.id) : promoteQueueItem(q.id)); }}
+                    title={`${modeHint(q.mode)}（点击切换为「${describeMode(toggleMode(q.mode))}」）`}
+                    style={{
+                      flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3,
+                      padding: "2px 7px", borderRadius: 999, cursor: "pointer",
+                      border: `1px solid ${q.mode === "interrupt" ? "var(--danger)" : "var(--border-hover)"}`,
+                      background: q.mode === "interrupt" ? "var(--danger-soft)" : "var(--bg-hover)",
+                      color: q.mode === "interrupt" ? "var(--danger)" : "var(--text-muted)",
+                      fontSize: 10.5, fontWeight: 700,
+                    }}>
+                    <BoltIcon size={10} />
+                    {describeMode(q.mode)}
+                  </button>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={q.text}>
+                    {previewText(q.text) || "（仅图片）"}
+                  </span>
+                  {q.images.length > 0 && (
+                    <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)" }}>🖼 {q.images.length}</span>
+                  )}
+                  <button
+                    onClick={() => removeQueueItem(q.id)}
+                    title="从待发队列移除（不再发送）"
+                    style={{
+                      flexShrink: 0, width: 18, height: 18, borderRadius: "50%", border: "none",
+                      cursor: "pointer", background: "transparent", color: "var(--text-dim)",
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}>
+                    <CloseIcon size={11} />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
           {/* ── 识图：待发送图片附件行（缩略图 + 移除 + 数量提示）── */}
@@ -5356,22 +5623,21 @@ export default function ChatPanel({
                 { value: "silam", label: "silam", group: "默认", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" },
                 ...(providerModels ?? []).flatMap((p) => {
                   const enabled = (p.models ?? []).filter((m) => m.selected !== false);
-                  const disabled = (p.models ?? []).filter((m) => m.selected === false);
                   if (enabled.length === 0) {
                     return [{
                       value: `api:${p.key}`,
-                      label: `${p.key} · 自动`,
+                      label: p.key,
                       group: p.key,
                       title: `${p.key} — 无已启用模型，仍可按默认配置调用`,
                     } as GhostSelectOption];
                   }
                   const first = prettyModelLabel(enabled[0].id, p.key) || enabled[0].id || "";
-                  // A-968：保留 api:<key>「供应商自动/默认」入口——角色创建时只选了供应商（无具体模型）
+                  // A-968：保留 api:<key>「供应商默认」入口——角色创建时只选了供应商（无具体模型）
                   // 也能在对话面板精确匹配显示，不再误落到「silam」，无需二次选择
                   return [
                     {
                       value: `api:${p.key}`,
-                      label: `${p.key} · 自动（${first}）`,
+                      label: `${p.key} · 默认（${first}）`,
                       group: p.key,
                       title: `${p.key} — 使用其默认模型「${first}」，点击可选择具体模型`,
                     },
@@ -5384,22 +5650,11 @@ export default function ChatPanel({
                         title: `${p.key} :: ${m.id}`,
                       };
                     }),
-                    // A-918+：未启用模型灰显展示，提示去 Providers 面板开启，避免「探测到却用不了」误解
-                    ...disabled.map((m) => {
-                      const label = prettyModelLabel(m.id, p.key) || m.id || "（未命名）";
-                      return {
-                        value: `api:${p.key}:${m.id}`,
-                        label: `${label} · 未启用`,
-                        group: p.key,
-                        title: `「${m.id}」未启用——请到 Providers 面板打开后再选择`,
-                        disabled: true,
-                      };
-                    }),
                   ] as GhostSelectOption[];
                 }),
                 ...providerKeys
                   .filter((k) => !(providerModels ?? []).some((pm) => pm.key === k))
-                  .map((k) => ({ value: `api:${k}`, label: `${k}（无可用模型）`, group: "供应商", title: `供应商（无已启用模型）：${k}` })),
+                  .map((k) => ({ value: `api:${k}`, label: k, group: "供应商", title: `供应商（无已启用模型）：${k}` })),
                 ...localModels.map((m) => ({
                   value: `local:${m.id}`,
                   label: prettyModelLabel(m.label || m.id),
@@ -5459,12 +5714,53 @@ export default function ChatPanel({
               }}>
               <InternetIcon size={14} style={{ color: networkEnabled ? "#22c55e" : "var(--text-dim)" }} />
               联网搜索
-            </button>            <div style={{ flex: 1 }} />
+            </button>
+            {/* A-1054⑥：插入方式开关 —— 只在 Agent 正在跑时出现（那时"下一条会怎么发"才是个问题）。
+                两种语义：中途插入=打断当前生成立刻发；即将插入=排队等本轮结束。持久化，下次沿用。 */}
+            {loading && (
+              <button
+                onClick={() => changeInsertMode(toggleMode(insertMode))}
+                title={`${modeHint(insertMode)}（点击切换为「${describeMode(toggleMode(insertMode))}」）`}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  marginLeft: 6, padding: "5px 9px", borderRadius: 999, cursor: "pointer",
+                  border: `1px solid ${insertMode === "interrupt" ? "var(--danger)" : "var(--border-hover)"}`,
+                  background: insertMode === "interrupt" ? "var(--danger-soft)" : "var(--bg-hover)",
+                  color: insertMode === "interrupt" ? "var(--danger)" : "var(--text-muted)",
+                  fontSize: 11.5, fontWeight: 600, flexShrink: 0,
+                  transition: "background 0.15s, border-color 0.15s, color 0.15s",
+                }}>
+                <BoltIcon size={12} />
+                {describeMode(insertMode)}
+              </button>
+            )}
+            <div style={{ flex: 1 }} />
             <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8, display: loading ? "none" : "block" }}>
               {input ? `${input.length} 字` : ""}
             </span>
             {loading ? (
-              <button onClick={() => void stopGeneration()}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                {/* A-1054⑥：**生成中也能点发送**（此前这一段只渲染停止按钮，鼠标用户根本无法插入指令，
+                    只能按回车 —— 而回车走的是同一个 send()，即"必须打断"的旧语义）。
+                    现在它是"按当前插入方式把输入入队"的入口，title 直接说清会发生什么。 */}
+                {(input.trim() || pendingImages.length > 0) && (
+                  <button onClick={() => void send()}
+                    title={`${describeMode(insertMode)}：${modeHint(insertMode)}`}
+                    style={{
+                      width: 38, height: 38, borderRadius: "50%", border: "none",
+                      background: "#fff", color: "#1e293b", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      transition: "box-shadow 0.12s, transform 0.08s",
+                      boxShadow: "0 2px 10px rgba(140,246,251,0.35)",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.boxShadow = "0 4px 16px rgba(140,246,251,0.55)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.boxShadow = "0 2px 10px rgba(140,246,251,0.35)"; }}
+                    onMouseDown={(e) => { e.currentTarget.style.transform = "scale(0.9)"; }}
+                    onMouseUp={(e) => { e.currentTarget.style.transform = "scale(1)"; }}>
+                    <SendIcon size={20} />
+                  </button>
+                )}
+                <button onClick={() => void stopGeneration()}
                 disabled={stopping}
                 title="中断当前 Agent 输出（保留已生成内容）"
                 style={{
@@ -5488,6 +5784,7 @@ export default function ChatPanel({
                     回到"圆底 + 方块"的常规比例（36 时方块占 51%，用户："你这个也太大了，正常点，小一点点"）。 */}
                 {stopping ? <LoadingCircleIcon size={20} /> : <StopIcon size={STOP_ICON_SIZE} />}
               </button>
+              </div>
             ) : (
               <button disabled={loading || !input.trim()}
                 onClick={() => void send()}

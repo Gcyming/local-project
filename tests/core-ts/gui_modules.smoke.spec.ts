@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { resolveProjectRootFrom } from "../../core-ts/src/paths.js";
 import {
   overview, readConfigFile, writeConfigFile, setMcpEnabled, setRootOverrideForTest as setCfgRoot,
+  listSkills,
 } from "../../gui/src/main/config_files.js";
 import {
   listProviders, saveProvider, removeProvider, fetchModels, setRootOverrideForTest as setProvRoot,
@@ -69,6 +70,42 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(writeConfigFile("other.toml", "x").ok).toBe(false);
     // 不存在文件
     expect(readConfigFile("global_config.json").ok).toBe(false);
+  });
+
+  it("config_files：第三方风格技能（仅 SKILL.md，`>` 块标量 frontmatter）描述必须可读", async () => {
+    /*
+     * 事故形态：用户从 Claude/Cursor 生态拷来技能（只有 SKILL.md，没有 manifest.yaml），
+     * 技能库里**一条描述都没有**、只显示 `--`，看起来像"技能没装好/缺文件"。
+     * 根因是 scanSkillRoot 无 manifest 时退回 `firstLineSafe()` —— 取 SKILL.md 的**物理首行**，
+     * 而带 frontmatter 的文件首行就是分隔符 `---`。
+     */
+    const dir = await makeSandbox();
+    const sk = join(dir, "config", "skills", "ponytail");
+    await mkdir(sk, { recursive: true });
+    await writeFile(join(sk, "SKILL.md"), [
+      "---",
+      "name: ponytail",
+      "description: >",
+      "  Forces the laziest solution that actually works.",
+      "  Prefer the standard library over custom code.",
+      "license: MIT",
+      "---",
+      "",
+      "# Ponytail",
+      "",
+      "正文指导。",
+      "",
+    ].join("\n"), "utf8");
+
+    const info = listSkills().find((s) => s.name === "ponytail");
+    expect(info).toBeDefined();
+    expect(info?.hasSkillMd).toBe(true);
+    expect(info?.hasManifest).toBe(false);
+    // 描述必须来自 frontmatter，且**绝不能是 frontmatter 分隔符**
+    expect(info?.description).not.toBe("---");
+    expect(info?.description).not.toBe("");
+    expect(info?.description).toContain("laziest solution");
+    expect(info?.description).toContain("standard library");
   });
 
   it("config_files：启用/禁用 MCP 不吞块外注释、不留残留空格（A-980-R28 真事故回归）", async () => {

@@ -1,10 +1,15 @@
 ; installer.nsh — 自定义 NSIS 安装选项（electron-builder include）
-; 1) 安装向导追加「开机自启」复选框；勾选则写入 HKCU Run 注册表。
-;    页面放在「选择安装目录之后、开始安装之前」（customPageAfterChangeDir），
-;    而不是 customHeader（后者在 assistedInstaller.nsh 的完成页之后声明，
-;    表现为「点完成启动 Slime 后又弹自启询问」——用户反馈的糟糕体验）。
-;    装到哪里（allowToChangeInstallationDirectory）与快捷方式（createDesktop/StartMenuShortcut）
-;    由 electron-builder 原生向导提供，此处仅补充开机自启。
+; 1) 安装向导追加「安装选项」页（customPageAfterChangeDir）：**创建桌面快捷方式** + 开机自启。
+;    页面放在「选择安装目录之后、开始安装之前」，而不是 customHeader（后者在
+;    assistedInstaller.nsh 的完成页之后声明，表现为「点完成启动 Slime 后又弹自启询问」——
+;    用户反馈的糟糕体验）。
+;
+;    ⚠️ 桌面快捷方式**唯一产地在本文件**（下面的 nsslimeStartupLeave）。
+;       `electron-builder.json` 的 `nsis.createDesktopShortcut` **必须保持 false**：
+;       它是二值的（要么不建、要么装完无条件建 + 不提供取消），无法表达「让用户选」。
+;       若哪天有人"顺手"把它改成 true，就会出现**两个产地**争同一个 "$DESKTOP\Slime.lnk"
+;       （用户取消勾选后仍被装上，或建出来又删掉），而且不报错。
+;       Start Menu 快捷方式仍由 electron-builder 原生创建（createStartMenuShortcut: true）。
 ; 2) 卸载器：用「自定义卸载欢迎页（勾选框）」取代 electron-builder 默认卸载欢迎页，
 ;    让用户在同一页选择「是否删除用户数据」，替代原先卸载时弹 MessageBox 询问。
 ;    customUnWelcomePage 注册在 MUI_UNPAGE_WELCOME 处（卸载 INSTFILES=卸载段执行之前），
@@ -13,6 +18,7 @@
 !include "nsDialogs.nsh"
 
 Var slimeAutostartCheck
+Var slimeDesktopCheck
 !ifdef BUILD_UNINSTALLER
 Var slimeDeleteDataCheck
 Var slimeDeleteData
@@ -49,14 +55,22 @@ Function nsslimeStartupPage
   ${If} $0 == error
     Abort
   ${EndIf}
-  ${NSD_CreateLabel} 0 0 100% 20u "让 Slime 随系统启动时自动运行？"
-  ${NSD_CreateCheckbox} 0 30u 100% 30u "开机自动启动 Slime"
+  ${NSD_CreateLabel} 0 0 100% 20u "安装选项"
+  ${NSD_CreateCheckbox} 0 30u 100% 30u "创建桌面快捷方式"
+  Pop $slimeDesktopCheck
+  ${NSD_Check} $slimeDesktopCheck
+  ${NSD_CreateCheckbox} 0 70u 100% 30u "开机自动启动 Slime"
   Pop $slimeAutostartCheck
   ; 默认不勾选（保持克制）
   nsDialogs::Show
 FunctionEnd
 
 Function nsslimeStartupLeave
+  ${NSD_GetState} $slimeDesktopCheck $0
+  StrCmp $0 ${BST_CHECKED} 0 +3
+  CreateShortcut "$DESKTOP\Slime.lnk" "$INSTDIR\Slime.exe"
+  Goto +2
+  Delete "$DESKTOP\Slime.lnk"
   ${NSD_GetState} $slimeAutostartCheck $0
   StrCmp $0 ${BST_CHECKED} 0 +3
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Slime" '"$INSTDIR\Slime.exe"'

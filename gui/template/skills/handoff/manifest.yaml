@@ -1,0 +1,12 @@
+name: handoff
+version: '1.0'
+description: Compact the current conversation into a handoff document for another
+  agent to pick up.
+permissions:
+  read: true
+  write: false
+  terminal: false
+  network: false
+tags: []
+source: https://github.com/mattpocock/skills
+license: MIT

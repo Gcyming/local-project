@@ -914,19 +914,19 @@ export default function ProvidersPanel(): JSX.Element {
                               </td>
                               <td style={{ padding: "5px 6px" }}>
                                 <input type="number" min={0} placeholder="auto" title="上下文窗口 (K token，输入 32 = 32768 token)"
-                                  value={m.context_window ? String(Math.round(m.context_window / 1024)) : ""}
+                                  value={m.context_window ? String(Math.round(m.context_window / 1000)) : ""}
                                   onChange={(e) => {
                                     const v = e.target.value;
-                                    updateDraftModel(i, { context_window: v ? Number(v) * 1024 : undefined });
+                                    updateDraftModel(i, { context_window: v ? Number(v) * 1000 : undefined });
                                   }}
                                   style={cellInputStyle()} />
                               </td>
                               <td style={{ padding: "5px 6px" }}>
                                 <input type="number" min={0} placeholder="auto" title="最大输出 (K token，输入 8 = 8192 token)"
-                                  value={m.max_output ? String(Math.round(m.max_output / 1024)) : ""}
+                                  value={m.max_output ? String(Math.round(m.max_output / 1000)) : ""}
                                   onChange={(e) => {
                                     const v = e.target.value;
-                                    updateDraftModel(i, { max_output: v ? Number(v) * 1024 : undefined });
+                                    updateDraftModel(i, { max_output: v ? Number(v) * 1000 : undefined });
                                   }}
                                   style={cellInputStyle()} />
                               </td>
@@ -1063,8 +1063,8 @@ export default function ProvidersPanel(): JSX.Element {
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>上下文 ctx_len (K)</div>
                     <input className="input-field" type="number" min={0} placeholder="auto（默认 8192）"
-                      value={edit.ctx_len ? String(Math.round(Number(edit.ctx_len) / 1024)) : ""}
-                      onChange={(e) => setEdit({ ...edit, ctx_len: e.target.value ? String(Number(e.target.value) * 1024) : "" })} />
+                      value={edit.ctx_len ? String(Math.round(Number(edit.ctx_len) / 1000)) : ""}
+                      onChange={(e) => setEdit({ ...edit, ctx_len: e.target.value ? String(Number(e.target.value) * 1000) : "" })} />
                   </div>
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>GPU 层数</div>
@@ -1074,8 +1074,8 @@ export default function ProvidersPanel(): JSX.Element {
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>最大输出 (K)</div>
                     <input className="input-field" type="number" min={0} placeholder="auto"
-                      value={edit.max_output ? String(Math.round(Number(edit.max_output) / 1024)) : ""}
-                      onChange={(e) => setEdit({ ...edit, max_output: e.target.value ? String(Number(e.target.value) * 1024) : "" })} />
+                      value={edit.max_output ? String(Math.round(Number(edit.max_output) / 1000)) : ""}
+                      onChange={(e) => setEdit({ ...edit, max_output: e.target.value ? String(Number(e.target.value) * 1000) : "" })} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 18 }}>
                     <input type="checkbox" checked={edit.vision} onChange={(e) => setEdit({ ...edit, vision: e.target.checked })} />
