@@ -34,6 +34,20 @@ export type LiveStatusKind =
   | "writing"
   /** 正在调用工具 */
   | "tool"
+  /**
+   * A-1061⑦：**已接收中途引导，模型正在响应它**。
+   * 用户原话：「中途输入后，下面的状态行可以返回“模型响应中”之类的」——
+   * 投递后立刻给一句确认（带窗口自动退场，见 instructionQueue.STEER_ACK_MS），
+   * 不然用户只能看到原来的"思考中/正在输出"，感知上就是"点了没反应"。
+   */
+  | "steer-ack"
+  /**
+   * A-1061④：上游在重试 / 已切备用模型。
+   * ⚠️ 它的价值恰恰在"什么都没发生时"——此前这段最长百来秒的等待在界面上是一句
+   *    「已发出请求，等待上游返回…」，用户认定卡死（原话："自己加载半天才输出"）。
+   *    对齐 Claude Code 状态栏的 `API error · Retrying in Xs · attempt N/10`。
+   */
+  | "notice"
   /** 正在思考（有 reasoning 产出但还没有正文） */
   | "thinking"
   /** 请求已发出、上游还没吐第一个字 */
@@ -48,10 +62,17 @@ export interface LiveStatusInput {
   awaitingApproval?: boolean;
   /** 有未决的提问请求 */
   awaitingAnswer?: boolean;
-  /** 上下文压缩过渡态（`compressUi.stage`） */
-  compressStage?: "prep" | "summarize" | "done" | "trunc" | null;
+  /** 上下文压缩过渡态（`compressUi.stage`；skip/overflow 是压缩结束后的通知态，不产生在途文案） */
+  compressStage?: "prep" | "summarize" | "done" | "trunc" | "skip" | "overflow" | null;
   /** 最近一次工具调用的**人类可读名**（调用方用 resolveToolLabel 解析后传入） */
   lastToolLabel?: string;
+  /**
+   * 最近一次工具调用的**原始工具名**（如 `adb_shell` / `http_create_app`）。
+   *
+   * A-1061③：有它就能给出**阶段化**的标题（「正在执行命令」「正在生成脚本」…），
+   * 而不是一律「正在调用工具」。不传则退回旧文案（向后兼容，见 deriveLiveStatus）。
+   */
+  lastToolName?: string;
   /** 本轮已发生的工具调用次数 */
   toolCount?: number;
   /** 在途正文字符数（partial.length） */
@@ -60,6 +81,16 @@ export interface LiveStatusInput {
   reasonChars?: number;
   /** 本轮已用时（ms） */
   elapsedMs?: number;
+  /**
+   * A-1061⑦：本轮是否处于「引导已接收」的确认窗口内（调用方按 STEER_ACK_MS 判）。
+   * 命中 → 状态行显示「已接收引导 · 模型响应中」。
+   */
+  steerAck?: boolean;
+  /**
+   * A-1061④：上游瞬时状态（"被限流（429），30s 后重试（第 2/4 次）" / "已切换备用模型：A → B"）。
+   * 由主进程经 `notice` 事件下发；为空 → 不参与判定（旧行为完全不变）。
+   */
+  upstreamNotice?: string;
   /** 上下文占用（token）与上限，用于显示百分比进度 */
   ctxUsed?: number;
   ctxCap?: number;
@@ -79,8 +110,90 @@ export interface LiveStatus {
   animated: boolean;
 }
 
-/** 已用时格式化：<60s 显示 "12s"；否则 "3m04s"。0/负值 → ""（没开始计时就不显示）。 */
-export function formatElapsed(ms: number | undefined): string {
+/* ─────────────────────────────────────────────────────────────────────────────
+ * A-1061③ 工具**阶段**：让状态行说的是"在做什么类型的事"而不是干巴巴的「调用工具」。
+ *
+ * 用户原话：「优化最下方的阶段监测返回，增加阶段描述，涵盖生成脚本中、执行命令中、调取工具中，
+ * 等等等等，总之……记得**同步命好每个阶段的标题名字**，为现在这个做好铺垫」。
+ *
+ * 设计要点（也是"铺垫"的落点）：
+ *   · `ToolStage` 是**机器可读的稳定键** —— 将来要做阶段级耗时统计 / 阶段卡片 / 分阶段进度，
+ *     都按这个键聚合，不必再去正则匹配中文文案（文案会改，键不会）。
+ *   · `TOOL_STAGE_TITLES` 是**阶段标题的唯一出处**。组件、统计、日志一律从这里取，
+ *     不许再有第二处硬编码（本项目反复吃过"同一件事两个产地"的亏）。
+ *   · 分类是**纯函数**、按前缀/精确名匹配，全部基于仓内真实工具名（见 core-ts/src/tools/*.ts）。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 工具阶段键（稳定标识；⚠️ 新增阶段要同时补 TOOL_STAGE_TITLES，否则取不到标题） */
+export type ToolStage =
+  /** 生成脚本 / 可运行的小应用 */
+  | "generate-script"
+  /** 执行命令（终端类：adb_shell、起停本地服务…） */
+  | "run-command"
+  /** 读取文件 / 列出目录 / 代码检查 */
+  | "read-file"
+  /** 写入文件 */
+  | "write-file"
+  /** 检索信息（联网搜索 / 抓网页 / 记忆检索） */
+  | "search-web"
+  /** 操作屏幕（屏幕捕获、UI dump、窗口枚举、adb 设备） */
+  | "screen-control"
+  /** 操作浏览器（嵌入式浏览器宿主） */
+  | "browser"
+  /** 整理任务计划（plan_* / todo_write） */
+  | "plan"
+  /** 整理长期记忆（memory_*） */
+  | "memory"
+  /** 分派子代理 */
+  | "delegate"
+  /** 其余（MCP / 技能 / 生成类工具等）—— 兜底阶段 */
+  | "tool";
+
+/** 阶段标题的**唯一出处**。文案改动只改这里。 */
+export const TOOL_STAGE_TITLES: Record<ToolStage, string> = {
+  "generate-script": "正在生成脚本",
+  "run-command": "正在执行命令",
+  "read-file": "正在读取文件",
+  "write-file": "正在写入文件",
+  "search-web": "正在检索信息",
+  "screen-control": "正在操作屏幕",
+  "browser": "正在操作浏览器",
+  "plan": "正在整理任务计划",
+  "memory": "正在整理记忆",
+  "delegate": "正在分派子代理",
+  "tool": "正在调用工具",
+};
+
+/**
+ * 工具名 → 阶段键。**顺序即优先级**（前缀规则在前，精确名在后）。
+ *
+ * ⚠️ 只按名字判定，不看参数：参数解析失败/为空时仍要给出正确阶段
+ *    （状态行的价值恰恰在"还看不到任何输出"的时候）。
+ * ⚠️ 未登记的 `mcp_*` / `skill_*` / 第三方工具一律落 `tool`（兜底，不是错误）。
+ */
+export function classifyToolStage(toolName: string): ToolStage {
+  const n = (toolName ?? "").trim().toLowerCase();
+  if (!n) { return "tool"; }
+  if (n.startsWith("delegate:") || n === "subagent_result" || n.startsWith("delegate_")) { return "delegate"; }
+  if (n.startsWith("screen_") || n === "adb_screencap" || n === "adb_devices" || n === "adb_connect") { return "screen-control"; }
+  if (n.startsWith("browser_")) { return "browser"; }
+  if (n.startsWith("adb_")) { return "run-command"; }
+  if (n === "http_serve" || n === "http_stop") { return "run-command"; }
+  if (n === "http_create_app") { return "generate-script"; }
+  if (n === "file_read" || n === "file_list" || n === "code_check") { return "read-file"; }
+  if (n === "file_write") { return "write-file"; }
+  if (n.startsWith("web_") || n === "memory_search") { return "search-web"; }
+  if (n.startsWith("plan_") || n === "todo_write") { return "plan"; }
+  if (n.startsWith("memory_")) { return "memory"; }
+  return "tool";
+}
+
+/** 阶段标题（分类 + 取标题一步到位；界面只该调这个）。 */
+export function toolStageTitle(toolName: string): string {
+  return TOOL_STAGE_TITLES[classifyToolStage(toolName)];
+}
+
+/** 已用时格式化：<60s 显示 "12s"；否则 "3m04s"。0/负值 → ""（没开始计时就不显示）。 */export function formatElapsed(ms: number | undefined): string {
   if (!ms || ms <= 0) { return ""; }
   const total = Math.floor(ms / 1000);
   if (total < 60) { return `${total}s`; }
@@ -150,13 +263,30 @@ export function deriveLiveStatus(input: LiveStatusInput): LiveStatus | null {
     return { kind: "stopping", text: "正在停止生成…", detail, animated: true };
   }
 
+  /* A-1061⑦：引导确认。排在"正文/工具"之前是刻意的 —— 投递后的头几秒用户最需要
+     一句"收到了、模型会响应它"；窗口过了就自动退场，不永久盖住阶段信息。 */
+  if (input.steerAck) {
+    return { kind: "steer-ack", text: "已接收引导 · 模型响应中", detail, animated: true };
+  }
+
+  /* A-1061④：上游重试 / 切模型的如实上报。
+     排在"正文/工具"之前是刻意的：这条通知只在"上游还没吐第一个字"时产生 ——
+     此时说"正在输出"是假的，而它正是用户最需要解释的那几秒到上百秒。
+     排在"停止"之后也一样刻意：用户已经点了停止就不该再看见"在重试"。 */
+  if (input.upstreamNotice) {
+    return { kind: "notice", text: input.upstreamNotice, detail, animated: true };
+  }
+
   if (!input.loading) { return null; }
 
   if ((input.replyChars ?? 0) > 0) {
     return { kind: "writing", text: "正在输出回复", detail, animated: true };
   }
   if (input.lastToolLabel) {
-    return { kind: "tool", text: `正在调用「${input.lastToolLabel}」`, detail, animated: true };
+    /* A-1061③：有原始工具名 → 用**阶段化标题**（正在执行命令 / 正在生成脚本 …）；
+       只有人类可读名（旧调用方）→ 退回原来的「正在调用」文案，不改既有行为。 */
+    const title = input.lastToolName ? toolStageTitle(input.lastToolName) : "正在调用";
+    return { kind: "tool", text: `${title}「${input.lastToolLabel}」`, detail, animated: true };
   }
   if ((input.reasonChars ?? 0) > 0) {
     return { kind: "thinking", text: "思考中", detail, animated: true };

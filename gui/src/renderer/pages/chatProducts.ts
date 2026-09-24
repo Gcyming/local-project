@@ -34,6 +34,32 @@ export interface ToolEvent {
   detail?: string;
   /** A-172：工具执行结果（上游已截断 200 字符；成功=返回内容，失败=失败原因表述） */
   result?: string;
+  /**
+   * A-1061②：上游工具调用 id —— 与 `tool-start` 事件同值。
+   * 界面靠它把「执行中…」那一行翻成「✓ 成功 / ✗ 失败」；
+   * 历史回退路径解析出的节点没有它（那时只有已完成的调用），故为可选。
+   */
+  toolId?: string;
+}
+
+/**
+ * A-1061②：工具结果文本 → 是否失败。**唯一出处**。
+ *
+ * 为什么必须是唯一出处：这条判据现在有**两个**读者 ——
+ * ① 已完成的工具卡（思考历程里的 `ToolRow`）；
+ * ② 流式期新增的**实时工具行**（`tool-start` → 「执行中…」→ 完成翻状态）。
+ * 两处各写一份正则，必然出现"同一条命令在执行中显示成功、在卡片里显示失败"的漂移
+ * （本项目反复吃过"同一件事两个产地"的亏，见 ref-engineering §8-1）。
+ *
+ * 入参是**已剥离 diff 标记并 trim 过**的文本（`stripDiffTag(...).trim()`）——
+ * 与原有内联实现口径逐字一致，故这是纯搬迁，不是行为变更。
+ */
+export function isToolFailResult(text: string | undefined): boolean {
+  const r = (text ?? "").trim();
+  if (r.length === 0) { return false; }
+  // 子代理委派 / 提示类前缀是成功或中性消息，绝不判失败
+  if (/^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存)\]/i.test(r)) { return false; }
+  return /^(\[错误\]|\[失败\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
 }
 
 /** A-1007：产物卡条目。kind 为写/读（暂无删除类工具，删除体现为 diff 的红色 - 行）。 */

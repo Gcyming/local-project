@@ -15,10 +15,10 @@
  *   ② 推进播报（kind=todo）：与上一份全景对比，新完成/新开始的项各补一行 → 带时间序的推进日志。
  */
 
-/** 时间线节点（思考段落 / 工具调用 / 任务规划卡 / 推进播报行，按执行顺序交错） */
+/** 时间线节点（思考段落 / 工具调用 / 任务规划卡 / 推进播报行 / 用户中途插入的引导，按执行顺序交错） */
 export interface TimelineStep {
-  kind: "think" | "tool" | "plan" | "todo";
-  /** kind=think：该阶段思考内容（Markdown） */
+  kind: "think" | "tool" | "plan" | "todo" | "steer";
+  /** kind=think：该阶段思考内容（Markdown）；kind=steer：用户插入的引导原文 */
   text?: string;
   /** kind=tool：工具名 */
   name?: string;
@@ -28,6 +28,12 @@ export interface TimelineStep {
   detail?: string;
   /** kind=tool：执行结果（成功=内容 / 失败=失败原因） */
   result?: string;
+  /**
+   * A-1061②′：kind=tool —— 这一调用**正在执行**（tool-start 已到、结果还没到）。
+   * 思考历程的工具卡要显示「执行中」实时态，成功/失败到了再原地翻状态。
+   * 持久化时它必然已翻成完成态（或缺省），不影响历史回看。
+   */
+  running?: boolean;
   /**
    * A-1034：该次调用**有过改动、但详情没随记录保存**（超过落盘上限被摘掉）。
    * 由 `### 工具调用记录` 里的 `[__slime_diff_trimmed__]` 占位还原而来 ——
@@ -98,9 +104,10 @@ export function appendTimelineStep(
   steps: TimelineStep[],
   ev:
     | { kind: "think"; text: string }
-    | { kind: "tool"; name?: string; label?: string; detail?: string; result?: string }
+    | { kind: "tool"; name?: string; label?: string; detail?: string; result?: string; running?: boolean }
     | { kind: "plan"; items: TodoPanoramaItem[] }
-    | { kind: "todo"; text: string; state: "start" | "done" },
+    | { kind: "todo"; text: string; state: "start" | "done" }
+    | { kind: "steer"; text: string },
 ): TimelineStep[] {
   if (ev.kind === "think") {
     if (!ev.text) { return steps; }
@@ -111,9 +118,24 @@ export function appendTimelineStep(
     }
     return [...steps, { kind: "think", text: ev.text }];
   }
+  /* A-1064：用户中途插入的「引导」是**独立节点**，绝不折进 think 段。
+     此前它被塞成 `{kind:"think", text:"引导：…"}`，两个后果都是用户实测报上来的：
+       ① 因为 kind=think 会**合并进相邻思考段**（见上面那支）→ 引导文字跟模型思考糊成一坨，
+          用户要的"能看见我插入的卡片"根本无从谈起；
+       ② 更要命的是它污染了「这段历程里有没有 think 节点」这个判据 ——
+          `ChatPanel.onDone` 用 `!finalTimeline.some(s => s.kind === "think")` 决定要不要用
+          `m.reasoning` 兜底补思考节点（A-918++ / A-1028）。只有引导、没有真思考段时，
+          这个 some 为 true → **兜底的思考节点不再补** → 思考历程缺一段。
+          这正是用户说的"由于我这个引导，思考历程也出现了一点问题——完整性"。
+      ⇒ 新增一等 kind（而不是复用 think）是**语义正确性**要求，不是美化。 */
+  if (ev.kind === "steer") {
+    if (!ev.text) { return steps; }
+    return [...steps, { kind: "steer", text: ev.text }];
+  }
   if (ev.kind === "plan") { return [...steps, { kind: "plan", items: ev.items }]; }
   if (ev.kind === "todo") { return [...steps, { kind: "todo", text: ev.text, state: ev.state }]; }
-  return [...steps, { kind: "tool", name: ev.name, label: ev.label, detail: ev.detail, result: ev.result }];
+  // A-1061②′：`running` 透传 —— 思考历程的工具卡要有「执行中」实时态（结果到了再翻成成功/失败）
+  return [...steps, { kind: "tool", name: ev.name, label: ev.label, detail: ev.detail, result: ev.result, running: ev.running }];
 }
 
 /**

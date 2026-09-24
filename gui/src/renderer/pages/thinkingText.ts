@@ -265,9 +265,14 @@ export function traceEntriesToToolSteps(
  *
  * @param result 该工具事件的 result；`undefined` = 未记录（≠ 空结果）
  * @param isFail 由调用方按结果文本判定的失败标志（未记录结果时无意义）
+ * @param running A-1061②：这一条**当前正在执行**（`tool-start` 已到、结果还没到）。
+ *   它必须**优先于**"未记录"判定 —— 否则正在跑的调用会落到"不给状态断言"那一支，
+ *   界面上就是一行**没有状态词**的哑行（用户看不到"在跑"，这正是本次要修的）。
+ *   与"未记录"的区别是本质的：前者是**此刻确实在跑**，后者是**结果没被保存下来**。
  * @returns 状态词；空串 = 不渲染状态（调用方据此省略该列）
  */
-export function toolStatusLabel(result: unknown, isFail: boolean): string {
+export function toolStatusLabel(result: unknown, isFail: boolean, running?: boolean): string {
+  if (running === true) { return "执行中"; }
   if (typeof result !== "string") { return ""; }
   return isFail ? "失败" : "成功";
 }

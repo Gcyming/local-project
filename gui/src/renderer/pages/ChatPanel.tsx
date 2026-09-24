@@ -9,7 +9,7 @@
  */
 import React, { type CSSProperties, type JSX } from "react";
 import { createPortal } from "react-dom";
-import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets } from "../../shared/ipc.js";
+import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets, AgentProcView, AgentProcsListResult, AgentProcsStopResult, CompressResult } from "../../shared/ipc.js";
 import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
 import {
   REQUEST_DROP_MARKER,
@@ -36,12 +36,13 @@ import { productIconUrl, fileInfoIcon } from "./productIcons.js";
 // A-990：纯逻辑分家 —— 工具留痕/产物解析与在途快照都不该住在组件里（见两个模块的文件头注释）
 import {
   stripDiffTag, parseDiffFull, parseDiffStat, diffLines, extractProducts, slimProductsForPersist,
-  diffNoticeKind,
+  diffNoticeKind, isToolFailResult,
   DIFF_FULL_MAX_RENDER,
   type ToolEvent, type ProductItem,
 } from "./chatProducts.js";
 // A-1051：「恢复中」收尾判定（纯函数）——切换会话后永久停在「（恢复中…）」的根因锁死在这里
 import { decideResumeOutcome, RESUME_MAX_ATTEMPTS, RESUME_QUERY_RETRY_MS } from "./resumeOutcome.js";
+import { HISTORY_SETTLE_FRAMES, settleAfterFrames } from "./startupGate.js";
 // A-1056②：阶段久等的激励语（阈值/节拍/文案池）——纯逻辑独立成模块，可逐条回归
 import { CHEER_ROTATE_MS, pickCheer, shouldCheer } from "./cheerPhrases.js";
 /** A-1056③：待发指令卡片的三个操作图标（用户指定目录 gui/icon/icon_fpbc119q3rk）：
@@ -51,6 +52,8 @@ import queueInsertIcon from "../../../icon/icon_fpbc119q3rk/arrow-narrow-right.s
 import queueCancelIcon from "../../../icon/icon_fpbc119q3rk/close.svg";
 // A-1052：正文渲染前净化（折叠连续空行）——「巨型气泡」是 pre-wrap 把空行各撑成整行，见该模块文件头
 import { collapseBlankRuns } from "./messageText.js";
+// A-1061⑬：流式尾巴的逐单元渐入切分（纯逻辑，见该文件头部对三条翻车边界的说明）
+import { splitStreamFade, fadeUnitText } from "./streamFade.js";
 // 本组件只**写**在途快照；取样方是右栏（readLiveMonitor 由 RightSidebar 直接引用）
 import { publishLiveMonitor } from "./liveMonitor.js";
 // SubAgentBar 已移除（A-978：监测栏按钮是唯一子代理入口）
@@ -68,10 +71,17 @@ import { deriveLiveStatus, type LiveStatus } from "./liveStatus.js";
 //    用户看到的只有三件事：这条是我的话（气泡卡片）、改/发/撤（三个图标）、
 //    「直接插入 = 立刻发，本轮就地收尾后接续」。
 import {
-  enqueue, nextQueueId, promote, removeAt, setMode,
-  summarize, takeNext,
+  enqueue, nextQueueId, removeAt, setMode, shouldDeferToSteer,
+  STEER_ACK_MS, summarize, takeNext,
   type QueuedInstruction,
 } from "./instructionQueue.js";
+/* 中途插入的**文案与闸门**唯一出处（三态语义的权威在 instructionQueue.ts）。
+   A-1062 的 ◉/○ 方向选择器已撤销 —— 用户原话「这个选项也没必要，原本的就够了，
+   排队不直接发送，不排队直接发送，你还专门划分一下，很多余」：
+   排队 / 直接发送本来就由**两个不同的动作**表达（回车 vs 卡片上的「现在插入」），
+   再叠一个只作用于回车的方向单选，等于给同一个选择造第二产地。
+   文案与判据同源可防"说反话"（见 insertCopy 头注释）；守卫 tests/gui/insert-copy.spec.ts。 */
+import { canSubmitSteer, insertNowTitle, isCompressWindow, steerPlaceholder, steerSubmitTitle } from "./insertCopy.js";
 
 /**
  * 推理强度等级 → 中文名（仅作展示标签）。等级以当前模型「上游返回」为准，
@@ -299,11 +309,13 @@ import {
  *  历史落库只存 reasoning 文本（无交错顺序/无 token 统计），重启后思考历程退化为文本平铺、上下文清零；
  *  此处把 timelineSteps（按 assistant 消息序数）与最近一次窗口占用快照随会话存下来，
  *  加载会话时按序数回填交错时间线、恢复环与右栏占用值。 */
-import { readSessionCtxMeta, clearSessionCtxMeta, updateSessionCtxMeta, attachTimelineToHistory, restoreUsed, type TimelineStepLite } from "./sessionCtxMeta.js";
+import { readSessionCtxMeta, clearSessionCtxMeta, updateSessionCtxMeta, attachTimelineToHistory, restoreUsed, capForModel, type TimelineStepLite } from "./sessionCtxMeta.js";
 import { normalizeForCompare, decideRestoreKeep } from "./restoreDedup.js";
 import { createMonitor, bumpMonitor, monitorElapsed, type StreamMonitor } from "./streamMonitor.js";
-import { contextRatio, contextPct, ringLevel } from "./contextMath.js";
+import { contextRatio, contextPct, ringLevel, fmtTokens } from "./contextMath.js";
 import SubAgentExpandButton from "./SubAgentExpandButton.js";
+/* A-1074（#230）：输入框上方「悬浮按钮坞」的互斥判据（纯模块，唯一出处） */
+import { type DockId, type DockState, toggleDock, closeDock, dockSlotState, dockSlotClassOf } from "./floatDock.js";
 import { selfHealState } from "../ErrorBoundary.js";
 
 /** A-935：上下文占用**单一事件源**——发送时估算 / done 收到真实 usage 校准都经此广播，
@@ -419,90 +431,27 @@ type ChatStreamReq = {
   images?: string[];
 };
 
-/** 不可恢复错误：403 区域限制 / 401 认证失败 / 404 模型不存在 / 400 模型不可用 /
- *  免费模型限流（FreeUsageLimitError）等短期不可自动恢复的错误。
- *  对这些错误自动重连（连续 9 次、≤16s）多半无效，直接终止重连并给出可操作提示。 */
-function isPermanentStreamError(msg: string): boolean {
-  const m = msg.toLowerCase();
-  // 403 区域/权限：RegionError、This model is not available in your country 等
-  if (/403|regionerror|forbidden|not available in your (country|region)/i.test(m)) {
-    return true;
-  }
-  // 401 认证失败：key 无效/过期（模型供应商侧配置问题，重连无效）
-  if (/401|unauthorized|认证失败|invalid.*(api.?key|key)|api.?key.*invalid|authentication/i.test(m)) {
-    return true;
-  }
-  // 404 模型不存在/已被下架/大小写不匹配（换路重发同一模型同样失败）
-  if (/404|model.*(not found|no such)|no such model/i.test(m)) {
-    return true;
-  }
-  // 400 上游明确报告模型不可用（如 opencode zen 的 Model is unavailable）
-  if (/model (is )?unavailable/i.test(m)) {
-    return true;
-  }
-  // 免费模型限流（FreeUsageLimitError）：免费池有独立速率/并发限制，与个人累计用量无关；
-  // 短时间自动重连不会恢复，提示用户稍后手动重发
-  if (/freeusagelimit|free usage|免费额度|免费模型限流/i.test(m)) {
-    return true;
-  }
-  return false;
-}
+/* 流式失败的两件纯逻辑（该不该跳过重连 / 给用户什么诱因）已按项目铁律
+   "纯逻辑不许住 .tsx" 搬到 ./streamErrors.ts —— 搬出去才能直接喂错误串断言。
+   搬动同时修掉一个真实缺陷：原 `isPermanentStreamError` 用裸 /401|403|404/ 在整条
+   错误串上做子串匹配，而上游 400 的**响应体里**出现这三个数字很常见 →
+   被误判成"不可恢复" → `failReconnect(msg, 0)` 把自动重连整段跳过
+   （用户原话："我以前定下的十次请求失败的重连阈值呢？"）。详见该模块头注释。 */
+import { explainStreamError, isPermanentStreamError, isContextOverflowError, contextOverflowHint, rescueSwitchLabel, RESCUE_SWITCH_TITLE } from "./streamErrors.js";
 
-/** 重连均失败后 / 不可恢复错误：按错误内容归纳「可能诱因」，供红字强调展示
- *  attemptCount 有值时标题注明重连 N 次仍失败；留空（0）表示错误不可自动恢复 */
-function explainStreamError(msg: string, attemptCount?: number): string {
-  const causes: string[] = [];
-  const m = msg.toLowerCase();
-  if (/401|unauthorized|invalid.*key|api.?key|authentication|auth/i.test(m)) {
-    causes.push("API Key 无效或已过期 → 请到「模型供应商」重新填写密钥并保存");
-  }
-  if (/403|forbidden|permission/i.test(m)) {
-    // RegionError（区域限制）优先给出精准提示，避免笼统误报为"检查权限"
-    if (/regionerror|not available in your (country|region)/i.test(m)) {
-      causes.push("上游区域限制（RegionError）→ 该模型在你所在地区不可用，请切换其他地区可用的模型 / 供应商");
-    } else {
-      causes.push("上游拒绝访问（403）→ 检查密钥权限 / 账号额度是否耗尽");
-    }
-  }
-  if (/404|no such|not found|model.*not|invalid.*model/i.test(m)) {
-    causes.push("模型 ID 不存在 / 已被下架 / 大小写不匹配 → 请切换到其他已启用模型");
-  }
-  // 400 上游明确报告模型不可用（放在 404 判断后、429 判断前，命中优先展示精准诱因）
-  if (/model (is )?unavailable/i.test(m)) {
-    causes.push("上游报告该模型当前不可用（Model is unavailable）→ 请切换到其他已启用模型，或稍后重试");
-  }
-  // 免费模型限流：FreeUsageLimitError 含 "Rate limit exceeded" 字样，
-  // 必须在通用 429 分支之前判断，避免误报成"普通限流稍等片刻"或"额度用完"
-  if (/freeusagelimit|free usage|免费额度|免费模型限流/i.test(m)) {
-    causes.push("免费模型触发上游限流（FreeUsageLimit，免费池独立的速率/并发限制，与你今天用没用过无关）→ 请稍等片刻后手动重新发送，或切换到其他模型");
-  }
-  if (/429|rate.?limit|quota|insufficient|too many/i.test(m)) {
-    causes.push("触发上游限流（429）或额度不足 → 稍等片刻再发，或降低推理强度 / 输出长度");
-  }
-  if (/timeout|timed ?out|etimedout|econnreset|socket|network|fetch failed|unexpected token|eof|aborted|reset/i.test(m)) {
-    causes.push("网络波动或上游连接中断 → 检查网络 / 代理 / VPN 后重试");
-  }
-  if (/overloaded|busy|maintenance|503|502|500|5\d\d/i.test(m)) {
-    causes.push("上游服务暂时不可用（5xx）→ 服务恢复后重试");
-  }
-  if (/context|token.*(limit|length|max)|too (long|large)/i.test(m)) {
-    causes.push("请求超出模型上下文上限 → 点击「新对话」清理上下文后重试");
-  }
-  if (/local|model.?server|llama|19100|load/i.test(m)) {
-    causes.push("本地模型服务未就绪或已崩溃 → 到「状态面板」确认模型服务状态后重试启动");
-  }
-  if (causes.length === 0) {
-    causes.push("未知错误 → 参考上方完整错误信息；检查模型是否已启用、网络是否正常");
-  }
-  return [
-    `❌ 模型调用失败${attemptCount ? `（已自动重连 ${attemptCount} 次仍无法恢复）` : "（错误无法自动恢复，请按下方提示处理）"}`,
-    ``,
-    `错误信息：${msg || "连接意外中断"}`,
-    ``,
-    `可能诱因：`,
-    ...causes.map((c) => `· ${c}`),
-  ].join("\n");
-}
+/** A-1090：可救模型的类型**取自跨进程契约**（`ipc.ts` 的 `CompressResult.rescueModel`），
+ *  不再手抄一份形状 —— 主进程加字段（例如 `choice`）而这里没跟上时，
+ *  症状是"按钮点了切不过去"（静默失败），tsc 也发现不了。 */
+type RescueModel = NonNullable<CompressResult["rescueModel"]>;
+
+/** A-1082 / A-1090：一次压缩编排的结论（反应式调用方据此决定"还发不发"、给不给一键切换按钮）。
+ *  抽成别名是为了不再把同一串字面量抄三处 —— 加字段时漏抄一处就是静默丢数据。 */
+type CompressOutcome = {
+  stillOverflow: boolean;
+  compressed: boolean;
+  rescueHint?: string;
+  rescueModel?: RescueModel;
+};
 
 /*
  * A-990：`ToolEvent` / `ProductKind` / `ProductItem` 已移到 `chatProducts.ts`
@@ -593,7 +542,14 @@ interface ChatPanelProps {
   /** 供应商 → 已启用模型明细（聊天模型下拉列出所有启用的模型：api:<key>:<model>） */
   providerModels?: Array<{ key: string; models: Array<{ id: string; selected?: boolean; thinking?: boolean; thinking_efforts?: string[]; max_output?: number; context_window?: number; vision?: boolean }> }>;
   localModels?: Array<{ id: string; label: string }>;
-  onModelChange?: (val: string) => void;
+  /**
+   * 模型选择器回写（composer 的模型下拉、以及「一键切换」按钮共用）。
+   *
+   * A-1090：返回值可能是 **Promise**（`App.updateAgentConfig` 内部 `await api.agents.update`
+   * 写盘，返回的就是它）。「一键切换」按钮**必须** `await` 它 —— 见 `handleRescueSwitch`
+   * 里的时序陷阱：不 await 就重发，主进程读到的仍是**磁盘上的旧模型**，必然同样超限。
+   */
+  onModelChange?: (val: string) => void | Promise<void>;
   onModeChange?: (val: string) => void;
   onReasoningChange?: (val: string) => void;
   onThinkingChange?: (val: boolean) => void;
@@ -970,7 +926,7 @@ const LiveStatusLine = React.memo(function LiveStatusLine({ status, stageKey }: 
     <div style={{
       display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap",
       // 与正文同栏但略微下沉：它是"叙述"，不是 Agent 说出来的话
-      padding: "6px 0 10px 42px", fontSize: 12.5, lineHeight: 1.5,
+      padding: "6px 0 10px 42px", fontSize: 13, lineHeight: 1.55,
       animation: "fadeIn 0.18s ease",
     }}>
       <span
@@ -984,9 +940,12 @@ const LiveStatusLine = React.memo(function LiveStatusLine({ status, stageKey }: 
         <span style={{ color: "var(--text-dim)", fontSize: 11.5 }}>· {status.detail}</span>
       )}
       {/* 激励语：带表情包的循环，直到下一阶段（stageKey 变化即重置）——
-          用 visibility 之外的独立 span，避免它一出现就把主句挤跑 */}
+          用 visibility 之外的独立 span，避免它一出现就把主句挤跑。
+          A-1061⑧：用户原话「激励语，又细又小，看都看不清楚」——
+          此前 11.5px + text-muted（最暗的一档）+ 斜体，三个因素叠一起就是"看不清"。
+          现在 13px + 正常体（去斜体）+ 提亮一档 + 500 字重，仍与主句保持层级差。 */}
       {cheer && (
-        <span style={{ color: "var(--text-muted)", fontSize: 11.5, fontStyle: "italic" }}>{cheer}</span>
+        <span style={{ color: "var(--text-secondary)", fontSize: 13, fontWeight: 500 }}>{cheer}</span>
       )}
     </div>
   );
@@ -1059,11 +1018,11 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
   const cap = m.mode ? m.mode.charAt(0).toUpperCase() + m.mode.slice(1) : "";
   return (
     <div className="msg-row" style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", marginBottom: 14 }}>
-      <div style={{
+      <div className="msg-user-bubble" style={{
         maxWidth: "78%", padding: "10px 14px",
         borderRadius: "16px 16px 4px 16px",
         background: "var(--accent)", color: "#fff",
-        lineHeight: 1.55, fontSize: 14, whiteSpace: "pre-wrap", wordBreak: "break-word",
+        lineHeight: 1.6, fontSize: 15, whiteSpace: "pre-wrap", wordBreak: "break-word",
         userSelect: "text",
       }}>
         {/* 随消息回显的图片缩略图（data URL；点击可新窗口查看大图） */}
@@ -1310,6 +1269,37 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
       </div>
     );
   }
+  /* A-1064：用户中途插入的「引导」—— 独立卡片。
+     ⚠️ 这一支必须排在**工具卡兜底之前**：下面的 `const tool = step as …{kind:"tool"}` 是
+     if 链的收尾兜底，任何没被前面列举的 kind 都会掉进去被渲染成一张工具卡
+     —— 引导会长成"一个叫 undefined 的工具"，比不显示更难懂。 */
+  if (step.kind === "steer") {
+    const text = step.text ?? "";
+    if (!text) { return <span style={{ display: "none" }} />; }
+    return (
+      <div className="think-step">
+        <span className="think-step-mark steer-step-mark" />
+        <div className="steer-card">
+          <button
+            className="steer-card-head"
+            onClick={() => setExpanded((v) => !v)}
+            title={expanded ? "收起这条引导" : "展开这条引导（全文）"}
+          >
+            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+            <SendIcon size={12} style={{ flexShrink: 0, color: "var(--accent-hover)" }} />
+            <span className="steer-card-title">引导</span>
+            {!expanded && <span className="steer-card-preview" title={text}>{stripMarkdown(text).slice(0, 80)}</span>}
+          </button>
+          {/* A-1015：常驻挂载 + 只切 is-open（与思考段/规划卡同一套展开节奏，不新增第二种动画） */}
+          <div className={`collapse${expanded ? " is-open" : ""}`}>
+            <div>
+              <div className="steer-card-text">{text}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   // 工具调用：小型行 + 折叠详情（含结果：成功显示访问/编辑内容，失败显示失败原因）
   const tool = step as TimelineStep & { kind: "tool" };
   const { Icon } = resolveToolLabel(tool.name ?? "");
@@ -1336,15 +1326,22 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
   const displayResult = stripDiffTag(rawResult);
   const r = displayResult.trim();
   // A-976：子代理委派 / 提示类前缀是成功/中性消息，绝不判失败
-  const isSuccessPrefix = /^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存)\]/i.test(r);
-  const isFail = !isSuccessPrefix && r.length > 0 && /^(\[错误\]|\[失败\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
+  // A-1061②：判据搬进纯模块 `isToolFailResult`（唯一出处）—— 实时工具行与这张卡片共用它，
+  // 否则同一条命令会出现"执行中显示成功、卡片里显示失败"的漂移。
+  const isFail = isToolFailResult(r);
   const hasBody = !!tool.detail || !!r;
   // A-1028：状态词走纯模块 `toolStatusLabel`（**结果未记录 ≠ 结果为空**）。
   // 之前这里是 `!r ? (isWrite ? "已执行" : "调用中") : …` —— 历史回退路径解析出的 tool 节点
   // 只有名字没有结果，于是**已经结束的回复**里每张卡都标着"调用中/已执行"（用户实测截图）。
   const hasResult = typeof tool.result === "string";
-  const statusLabel = toolStatusLabel(tool.result, isFail);
-  const statusTitle = !hasResult ? "本次调用的结果未随记录保存（仅留痕）" : isFail ? "执行失败" : "执行成功";
+  /* A-1061②′：思考历程的工具卡也要有**实时状态** —— 用户原话：
+     「我希望是直接在思考历程的卡片中显示……在运行期间就显示“执行中”“运行中”之类的，
+     成功了就实时反馈出来」。running 优先于"未记录"判定（否则正在跑的卡片没有状态词）。 */
+  const isRunning = tool.running === true;
+  const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);
+  const statusTitle = isRunning
+    ? "正在执行 —— 展开可看具体内容（命令 / 路径 / 网址）"
+    : !hasResult ? "本次调用的结果未随记录保存（仅留痕）" : isFail ? "执行失败" : "执行成功";
   // A-174：detail 是可点击抓手——file_* 为文件路径（点击→右侧建文件页），http(s) 为网址（点击→右侧建浏览器页）；
   // 查询词（web_search 的“查询: xxx”）不是文件也不是网址，仅作展示不可点击
   const isQueryDetail = /^查询[:：]/.test(tool.detail ?? "");
@@ -1382,7 +1379,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
           那展开有什么意义？…点击卡片最好是只能展开"）。
           现在卡片点击**只做展开**；要跳转必须点具体的文件/网址链接（detail 上的 <a>/<span>，
           onClickDetail 自带 stopPropagation，不会误触发行展开）。 */}
-      <div className="think-tool-btn" data-status={isFail ? "fail" : "ok"}
+      <div className="think-tool-btn" data-status={isRunning ? "running" : isFail ? "fail" : "ok"}
         onClick={() => { if (hasBody) { setExpanded(!expanded); } }}
         role={hasBody ? "button" : undefined}
         title={hasBody ? (expanded ? "点击收起详情" : "点击展开详情") : statusTitle}
@@ -1418,8 +1415,13 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
         {/* A-1028：状态列为空（结果未记录）→ 整列省略，不留一条空白的对齐位 */}
         {statusLabel && (
         <span
-          className="think-tool-status"
-          style={{ color: isFail ? "#f87171" : statusColor, flexShrink: 0 }}
+          className={isRunning ? "think-tool-status text-scan-light" : "think-tool-status"}
+          style={{
+            color: isRunning ? "var(--accent)" : isFail ? "#f87171" : statusColor,
+            flexShrink: 0,
+            // A-1061②′：执行中的那一条要"看得见在动"——扫光 + 更醒目的字重
+            fontWeight: isRunning ? 600 : undefined,
+          }}
           title={statusTitle}
         >{statusLabel}</span>
         )}
@@ -1995,7 +1997,7 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             {collapseBlankRuns(m.content)}
           </div>
         ) : (
-          <div style={{ lineHeight: 1.7, fontSize: 14, color: "var(--text)", wordBreak: "break-word" }}>
+          <div className="msg-body-text" style={{ lineHeight: 1.75, fontSize: 15, color: "var(--text)", wordBreak: "break-word" }}>
             {m.content ? (() => {
               // 剥离 ### 工具调用记录 段（旧格式残留，已由独立卡片展示）
               // A-1027：与思考区共用唯一解析实现（旧内联正则的停止条件与它不完全一致）
@@ -2041,6 +2043,17 @@ export default function ChatPanel({
   memberNames = [],
   onHistoryLoaded,
 }: ChatPanelProps): JSX.Element {
+  /**
+   * A-1059②：历史「落定」回执 —— **等 DOM 提交之后再发**。
+   *
+   * `setMessages()` 只是排了一次渲染：消息要等 React 提交进 DOM、再等一帧布局稳定
+   * 才真的出现在屏幕上。启动门若在提交前就打开，用户看到的仍然是
+   * "加载界面消失了、中间那栏还空一会儿"（用户原话，A-1058① 修完仍在）。
+   * 帧数与判据都在纯模块 `startupGate.ts` 里（可单测、过变异）。
+   */
+  const reportHistoryLoaded = React.useCallback((): void => {
+    settleAfterFrames(HISTORY_SETTLE_FRAMES, () => onHistoryLoaded?.());
+  }, [onHistoryLoaded]);
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [input, setInput] = React.useState("");
   /** A-971：input 值实时镜像——卸载清理（unmount flush）需读到「切走那一刻」的最新草稿，
@@ -2102,11 +2115,20 @@ export default function ChatPanel({
       setPartial(displayPartialRef.current);
       // 随 rAF 一并刷新 token 计数，避免每 chunk 独立 setState 触发重渲染
       setStreamTokens(streamTokensRef.current);
-      // A-918++：实时 context tokens 估算（历史消息 + 当前 partial 总字符 / 4），rAF 驱动 → 流式输出/压缩都实时反映
-      let ctxChars = 0;
-      for (const mm of messagesRef.current) { ctxChars += mm.content?.length ?? 0; }
-      ctxChars += partialRef.current.length;
-      setContextTokens(Math.max(0, Math.round(ctxChars / 4)));
+      /* ⚠️ 这里曾有一个「上下文占用」的**第二个产地**（已删除，勿复活）：
+       *     let ctxChars = 0;
+       *     for (const mm of messagesRef.current) { ctxChars += mm.content?.length ?? 0; }
+       *     setContextTokens(Math.round(ctxChars / 4));
+       * 它同时错三处：
+       *   ① 进制错 —— CJK 一个汉字 ≈ 1 token，`÷4` 是英文口径 ⇒ 中文会话**低估约 4 倍**；
+       *   ② 口径错 —— 统计**全部** messagesRef，而发送只用最近 500 条、压缩只用全量，
+       *      于是底部芯片报的是"库里有多少字"，不是"这次请求装了多少"；
+       *   ③ 产地错 —— 与右栏/圆环的锚定值（`ctxBaseRef + 流式产出`，done 时被上游
+       *      真实 `prompt_tokens` 校准）并存 ⇒ 同一屏两个数：底部 43K、右栏 64K
+       *      （用户实测原话"右边的上下文监测也出问题了"；43K = 172840 字符 ÷ 4，
+       *       而那次请求的真实 prompt_tokens 是 66,726）。
+       * 现在「上下文占用」**只有** `ctxUsed`（锚定值）一个产地，由它驱动圆环、右栏、
+       * 底部芯片与状态行 —— 与 `ctxCap` 一起经 dispatchCtxUpdate 单路广播。 */
       // 上下文环 + 右栏进度条：**流式期间实时推进**（输入基线 + 已产出正文/思考，≈4 字符/token）。
       // 此前只在「发送时估算」和「done 时校准」两处更新 → 圆环/进度条全程不动、结束后才跳变（用户反馈的根因）。
       // setCtxUsed 每帧跟随（同值 setState 不触发渲染），跨组件的 dispatchCtxUpdate 压到 500ms 一次。
@@ -2195,6 +2217,55 @@ export default function ChatPanel({
   const deferredPartial = React.useDeferredValue(partial);
   const [toolEvents, setToolEvents] = React.useState<ToolEvent[]>([]);
   /**
+   * A-1061②：此刻**正在执行**的那个工具（`tool-start` 到了、结果还没到）。
+   *
+   * 用户原话（配 WorkBuddy 的「运行命令」块截图）：「中间运行脚本的过程也加上……
+   * 要可以跟你一样，实时监测进程，成功了要返回成功提示」。
+   * 此前主进程只在工具**执行完**才发 tool 事件（带 result），界面只能事后显示"成功/失败" ——
+   * 跑一条几十秒的命令时中间是一片空白，用户不知道它在跑什么。
+   * 现在：开始播 → 这里显示「执行中…」+ 具体抓手（命令 / 路径 / 网址）；完成事件按 toolId 配
+   * 对清掉它，那一行随即由已完成的工具卡接手（显示 成功/失败）。
+   */
+  const [runningTool, setRunningTool] = React.useState<{ id: string; label: string; detail: string } | null>(null);
+  /**
+   * A-1061④：上游瞬时状态（"被限流（429），30s 后重试（第 2/4 次）" / "已切换备用模型：A → B"）。
+   *
+   * 用户原话：「经常出现 agent 什么都没有，自己加载半天才输出」—— 取证结论是本项目在
+   * **上游失败时静默重试**（429 退避累计最长 ≈110s，另有静默换模型），这段时间界面
+   * 只有一句"等待上游返回…"。现在把它如实显示出来（对齐 Claude Code 状态栏的
+   * `API error · Retrying in Xs · attempt N/10`）。
+   * 一旦有真实产出（正文/思考/工具/引导）就收掉 —— 否则那句"正在重试"会与已开始的输出自相矛盾。
+   */
+  const [upstreamNotice, setUpstreamNotice] = React.useState<string | null>(null);
+  /**
+   * A-1061⑤：最近一次「本会话的流有活动」的时刻（ms）。
+   *
+   * 它是"流是否真的还在动"的**证据**（每个 chunk / 工具事件 / 心跳都会刷新，心跳 15s 一次）。
+   * 为什么不能用 `streamActiveRef` 单独判定：那是**意图**，可能出现粘性残留
+   * （in-progress 状态被提前清掉、或切走/切回后残留），从而误吞合法的发送。
+   * 用时间戳：残留只会让它变旧 → 自动失效，最坏情况是"多放行一次新发送"，
+   * 而绝不会把用户的话吞掉。
+   */
+  const streamActivityAtRef = React.useRef(0);
+  /**
+   * A-1061⑦：最近一次「引导被接收」的时刻（ms；0 = 无）。
+   * 投递（回车即投 / 点箭头 / 消费事件）时刷新；状态行在 `STEER_ACK_MS` 窗口内显示
+   * 「已接收引导 · 模型响应中」—— 给用户一句**立刻的确认**，然后自动退场不盖住阶段信息。
+   */
+  const steerAckAtRef = React.useRef(0);
+  /**
+   * A-1061②′：toolId → 该调用在**思考历程时间线**里的下标。
+   * `tool-start` 建卡时记下，结果到了就**原地**翻状态（不追加第二张卡）。
+   * 只在本轮有效，流结束随现场一起重置。
+   */
+  const toolStepIndexRef = React.useRef<Map<string, number>>(new Map());
+  /**
+   * A-1061⑩：压缩窗口内投不出去的引导（**可取消的预输入**）。
+   * 压缩结束（stage 回到 done/null）时自动补投；用户在此之前点「撤销删除」即是取消 ——
+   * 补投时按 id 在队列里找不到就跳过，不会把已撤的话再发出去。
+   */
+  const preSteerIdsRef = React.useRef<number[]>([]);
+  /**
    * A-xxx：增量有序时间线（业界标准做法，参考 LangChain/AI SDK `parts` 数组）——
    * 不再把思考文本拼成字符串后用「字符锚点」回溯切分（锚点对中文/换行/剪贴偏移极为脆弱，
    * 是工具调用记录错位、段落粘连换行错乱的根因）。
@@ -2204,6 +2275,27 @@ export default function ChatPanel({
   const timelineStepsRef = React.useRef<TimelineStep[]>([]);
   /** 渲染快照（50ms 节流内批量刷新；由 schedulePartialRender 同步） */
   const [liveTimeline, setLiveTimeline] = React.useState<TimelineStep[]>([]);
+  /* ── A-1069（#226）：Agent 启动的后台资源面板（输入栏上方的按钮 + 可展开列表）──
+   *
+   * 用户原话：「请把 Agent 停下时的后台进程做一个……在输入栏上方的按钮，点击后可以展开」，
+   * 范围是「仅 Agent 启动的进程」。
+   *
+   * ⚠️ 渲染层**一个判据都不写**：类别归属、排序、状态词、能否停止、时长格式——全部由主进程
+   *   调 `core-ts/src/services/agentProcs.ts` 的纯函数算好，这里只画。于是
+   *   "面板显示的"与"主进程认为的"不可能漂移（组件里不出现 `kind === "..."` 这类判断）。
+   * ⚠️ `any=false` 时**整个按钮不渲染**（不留空壳、不写常驻说明）—— 用户明确嫌输入框上方
+   *   叠常驻说明（见 textarea 上方那条注释），这里是**有条件的状态+控件**，不是说明文字。 */
+  const [agentProcs, setAgentProcs] = React.useState<AgentProcView | null>(null);
+  /* A-1074（#230）：坞的展开态是**单值**（"后台进程" / "子代理" / 都收起）——
+     两个按钮各自持一个布尔时，"两个同时展开"只是没人管的非法状态（界面上两块面板互盖），
+     而 tsc / 构建 / 全部逻辑测试都不会响。单值 → 非法状态在类型上不存在（见 floatDock.ts）。 */
+  const [dock, setDock] = React.useState<DockState>(null);
+  const procsSlot = dockSlotState(dock, "procs");
+  const subsSlot = dockSlotState(dock, "subs");
+  const procsOpen = procsSlot.open;
+  const toggleDockSlot = React.useCallback((id: DockId): void => { setDock((v) => toggleDock(v, id)); }, []);
+  const [procsBusy, setProcsBusy] = React.useState<string | null>(null);
+  const [procsError, setProcsError] = React.useState<string | null>(null);
   /** 工具事件镜像 ref：onChunk 累积、onDone 收尾时读取（订阅回调闭包拿不到最新 state，必须走 ref） */
   const toolEventsRef = React.useRef<ToolEvent[]>([]);
   /**
@@ -2220,7 +2312,9 @@ export default function ChatPanel({
   /* ── 流式实时监测：token 计数 + 耗时 + 吞吐速率 ── */
   const [streamElapsed, setStreamElapsed] = React.useState(0);
   const [streamTokens, setStreamTokens] = React.useState(0);
-  const [contextTokens, setContextTokens] = React.useState(0); // A-918++：当前会话完整上下文（历史消息 + 当前流式 partial）/ 4 估算
+  /* ⚠️ 这里曾有 `contextTokens`（`消息总字符 ÷ 4` 的独立估算）—— 已随"上下文占用单一产地"
+     一并删除，见 rAF 回调里那段说明。**不要再引入任何"上下文占用"的第二个来源**：
+     底部芯片、圆环、右栏、状态行全部读 `ctxUsed`（锚定值）。 */
   const [streamModel, setStreamModel] = React.useState("");
   const streamStartRef = React.useRef(0);
   const streamCharCountRef = React.useRef(0);
@@ -2249,6 +2343,10 @@ export default function ChatPanel({
   const streamActiveRef = React.useRef(false);      // 本面板活跃流标记（避免其它面板/旧流的错误误触发重连）
   const stoppingRef = React.useRef(false);          // 用户点「停止」后不再重连
   const retryCountRef = React.useRef(0);            // 已重连次数
+  /* A-1081：本轮的「上下文超限 → 压缩 + 重试一次」是否已用过。
+     用**独立 ref** 而不是复用 didCompressTurnRef：后者在 maybeAutoCompress 的早退分支
+     （用户关了自动压缩 / 无历史可裁）里**不会**被置位 → 复用它会让反应式重试无限循环。 */
+  const ctxOverflowRetriedRef = React.useRef(false);
   const streamReqRef = React.useRef<ChatStreamReq | null>(null); // 最近一次流式入参（重连时原样重发）
   const reconnectTimerRef = React.useRef<number | null>(null);
   /** A-916：断流自动重连基间隔（ms，配置可调 config/requests.json；默认 3000）；指数+抖动，避免频繁重发触发上游节流 */
@@ -2267,7 +2365,7 @@ export default function ChatPanel({
   /** A-968：切回恢复的占位气泡 id（state 版）——供渲染层抑制底部独立 partial 区，避免"恢复中…"气泡 + partial 双份输出 */
   const [resumeMsgId, setResumeMsgId] = React.useState<number | null>(null);
   /** A-969：上下文自动压缩过渡动画（发送前触发；prep=整理 / summarize=生成摘要 / done=完成 / trunc=降级裁剪） */
-  const [compressUi, setCompressUi] = React.useState<null | { stage: "prep" | "summarize" | "done" | "trunc"; dropped?: number; summary?: string }>(null);
+  const [compressUi, setCompressUi] = React.useState<null | { stage: "prep" | "summarize" | "done" | "trunc" | "skip" | "overflow"; dropped?: number; summary?: string; comprehend?: string; reason?: string }>(null);
   /** A-975：本轮「已压缩上下文」报告行——渲染为正文之上的分隔线（思考卡折叠也可见），
    *  并在 done 时随消息落库，历史回看仍能看到"这轮发生过压缩"。 */
   const [compressNote, setCompressNote] = React.useState<string | null>(null);
@@ -2287,6 +2385,11 @@ export default function ChatPanel({
   const interruptQueueRef = React.useRef<QueuedInstruction[]>([]);
   /** 队列的渲染镜像（由 syncQueue 同步；不要在别处 setQueueView） */
   const [queueView, setQueueView] = React.useState<QueuedInstruction[]>([]);
+  /* A-1062 的「送达方向」状态（`steerIntent`）已**撤销** —— 见 insertCopy.ts 头注释：
+     排队 / 直接发送由**两个动作**表达（回车 = 排队；卡片「现在插入」= 直接发送），
+     不需要一个只作用于回车的方向单选。此前它还有一处自相矛盾：选「排队」后再点卡片箭头
+     仍然会插入 —— 选项管不住另一个动作。
+     ⚠️ 也别把 A-1056③ 撤掉的「全局默认插入方式」胶囊搬回来（用户原话"即将插入是什么鬼？"）。 */
   /* A-1056③：**「默认插入方式」这个全局开关被撤掉了。**
      它此前是输入框右侧一个「中途插入 / 即将插入」的胶囊（持久化在 localStorage）。
      用户对它的原话是"即将插入是什么鬼？" —— 这两个词是我方的实现词，描述的却是
@@ -2314,8 +2417,30 @@ export default function ChatPanel({
   const [reconnectInfo, setReconnectInfo] = React.useState<{ attempt: number; total: number } | null>(null);
   /** A-917：流失败/重连耗尽的就地错误横幅（不追加独立消息，避免"另发一条/切会话才见/切走即消失"） */
   const [streamErrorBanner, setStreamErrorBanner] = React.useState<string | null>(null);
-  /** 复位流式 UI（重连耗尽/主动停止/切换会话共用；连带清理定时器与重连状态） */
-  const resetStreamUI = React.useCallback(() => {
+  /**
+   * A-1090：「压无可压」时的一键出路（= 横幅下方那个按钮）。
+   *
+   * 只在这个处境才有值：主进程**确实**挑到了一个窗口更大的模型（`CompressResult.rescueModel`）。
+   * `req` 是**留底的入参** —— `failReconnect` 内部的 `resetStreamUI()` 会清空 `streamReqRef`，
+   * 所以必须在调它**之前**把入参取出来，否则按钮点了没有 payload 可续（静默失败：点了没反应）。
+   */
+  const [rescueAction, setRescueAction] = React.useState<{ model: RescueModel; req: ChatStreamReq | null } | null>(null);
+  /** A-1090：本轮**算出过**的出路（文案 + 结构化模型）。供「第二次超限」那条分支使用 ——
+   *  它此前调 `contextOverflowHint()` **不带参**，横幅于是退回泛泛的「换成窗口更大的模型」，
+   *  用户在最需要具体模型名的时候恰好拿不到它（那是第一轮刚算出来的东西）。 */
+  const rescuedRef = React.useRef<{ hint?: string; model?: RescueModel } | null>(null);
+  /** A-1090：一键切换的**重入锁**。`rescueAction` 是 state，同一批里连点两次读到的是同一个值
+   *  ⇒ 单靠"把按钮置空"拦不住双击（置空要等下一次渲染），会开出两条流。 */
+  const rescueSwitchingRef = React.useRef(false);
+  /** 复位流式 UI（重连耗尽/主动停止/切换会话共用；连带清理定时器与重连状态）
+   *
+   *  ⚠️ A-1090（本轮发现并修掉的**静默失效**）：`failReconnect` 先 `setStreamErrorBanner(文案)`
+   *  再调本函数，而本函数末尾 `setStreamErrorBanner(null)` —— 同一批 setState **后者胜**，
+   *  于是就地红字横幅在**本次会话里永远不显示**，只有「切走再切回」时由快照
+   *  （`pendingTailErrorRef` → 2964 行）重新贴出来。这正好对上用户反馈里的「切会话才出现」。
+   *  ⇒ 新增 `keepBanner`：只有 `failReconnect` 需要"复位一切但保留刚设好的横幅"，
+   *    其余调用点（切会话/停止）保持原样清除，不引入残留。 */
+  const resetStreamUI = React.useCallback((opts?: { keepBanner?: boolean }) => {
     setLoading(false);
     setStopping(false);
     resetPartial();
@@ -2324,7 +2449,13 @@ export default function ChatPanel({
     setToolEvents([]);
     toolEventsRef.current = [];
     setReconnectInfo(null);
-    setStreamErrorBanner(null); // A-917：复位时一并清就地错误横幅
+    // A-917：复位时一并清就地错误横幅（A-1090：`failReconnect` 例外 —— 它刚设好横幅，
+    // 这里清掉会让横幅永远看不见，见本函数注释）
+    if (!opts?.keepBanner) { setStreamErrorBanner(null); }
+    /* A-1090：一并收走「一键切换」按钮与它的留底 —— 复位=切会话/停止/结束，
+       它们都属于**本轮**，跨会话存活会让用户在会话 B 里看到一个点了会切模型+续会话 A 的按钮。 */
+    setRescueAction(null);
+    rescuedRef.current = null;
     setStreamModel("");
     setResumeMsgId(null); // A-968：复位（切走/停止/失败）时清占位气泡标记，保证下一次恢复重建
     setCompressUi(null); // A-969：复位时收起压缩过渡浮层（残留浮层会挡住 input）
@@ -2347,6 +2478,7 @@ export default function ChatPanel({
     streamActiveRef.current = false;
     streamReqRef.current = null;
     retryCountRef.current = 0;
+    ctxOverflowRetriedRef.current = false;
     stoppingRef.current = false;
   }, [resetPartial]);
   /** 上下文消耗圆环：已用（done 的 promptTokens）/ 上限（Agent max_context） */
@@ -2464,6 +2596,53 @@ export default function ChatPanel({
   const [loadingOlder, setLoadingOlder] = React.useState(false);
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
   const eventIdRef = React.useRef(0);
+  /* ── A-1069（#226）：后台资源面板的取数与订阅 ──────────────────────────────
+     取数时机：① 挂载；② 会话切换（换会话后按钮该显示的是新上下文里的资源）；③ 主进程广播
+     「集合变了」（起/停/回合结束）。**不轮询** —— 轮询会让"实时"变成"最多晚 N 秒"，
+     而这类信息的价值恰恰在于"我现在看到的就是真的"。 */
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.agentProcs?.list) { return; }
+    let alive = true;
+    const load = (): void => {
+      void api.agentProcs.list().then((r: AgentProcsListResult) => {
+        if (!alive) { return; }
+        /* 失败与"空"必须分开：把查询失败画成空列表，用户会以为没东西在跑（静默失败）。
+           这里失败就把按钮收起 + 记下原因（展开时才显示，不打扰）。 */
+        if (!r?.ok) { setAgentProcs(null); setProcsError(r?.error ?? "查询后台资源失败"); return; }
+        setProcsError(null);
+        setAgentProcs(r.view);
+        // 列表空了 → 顺手收起展开态，避免下次又有东西时"凭空是展开的"
+        if (!r.view.any) { setDock((v) => closeDock(v, "procs")); }
+      }).catch((e: unknown) => {
+        if (!alive) { return; }
+        setAgentProcs(null);
+        setProcsError(e instanceof Error ? e.message : String(e));
+      });
+    };
+    load();
+    const off = typeof api.agentProcs.onChanged === "function" ? api.agentProcs.onChanged(load) : undefined;
+    return () => { alive = false; if (typeof off === "function") { off(); } };
+  }, [sessionId]);
+  /** 停一项：成功后**用主进程回的视图重画**（不乐观地自己划掉 —— 那会让面板与真实状态分家）。
+   *  失败如实显示原因（否则用户会反复点一个永远无效的按钮）。 */
+  const stopAgentProc = React.useCallback((kind: string, id?: string): void => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.agentProcs?.stop) { return; }
+    const key = `${kind}:${id ?? ""}`;
+    setProcsBusy(key);
+    setProcsError(null);
+    void api.agentProcs.stop(kind, id).then((r: AgentProcsStopResult) => {
+      setProcsBusy(null);
+      if (!r?.ok) { setProcsError(r?.error ?? "停止失败（原因未知）"); return; }
+      return api.agentProcs.list().then((l: AgentProcsListResult) => {
+        if (l?.ok) { setAgentProcs(l.view); if (!l.view.any) { setDock((v) => closeDock(v, "procs")); } }
+      });
+    }).catch((e: unknown) => {
+      setProcsBusy(null);
+      setProcsError(e instanceof Error ? e.message : String(e));
+    });
+  }, []);
   /** 消息自增 id（稳定键 + 折叠态索引） */
   const msgIdRef = React.useRef(0);
   /** 已完成消息的推理块折叠态：true=折叠（默认） */
@@ -2667,7 +2846,9 @@ export default function ChatPanel({
     toolTraceRef.current = [];
     timelineStepsRef.current = [];
     setLiveTimeline([]);
-    resetStreamUI();
+    // ⚠️ A-1090：必须 `keepBanner` —— 上面刚设好的红字横幅不能被这次复位清掉
+    //（同一批 setState 后者胜，清掉就等于"错误提示永远看不见"，见 resetStreamUI 注释）
+    resetStreamUI({ keepBanner: true });
     // A-974-R9：**清零监测计数器**——防切到无活跃流的会话时残留上一会话的 tokens/耗时；
     // 若本会话有活跃流，下方 `cached.monitor` 还原块会把真实值重新写回。
     streamStartRef.current = 0;
@@ -2805,6 +2986,13 @@ export default function ChatPanel({
     reasoningTmpRef.current = "";
     setToolEvents([]);
     toolEventsRef.current = [];
+    // A-1061②：复位时清掉「执行中」行 —— 否则上一轮残留的命令会在新一轮开始、
+    // 首个结果回来之前的窗口里显示成"有东西在跑"（实时区只该说当下的事）。
+    setRunningTool(null);
+    // A-1061④：上游通知是"等上游期间"的瞬时状态，复位时必须一起清
+    setUpstreamNotice(null);
+    steerAckAtRef.current = 0; // A-1061⑦：确认窗口一并清（新的一轮不该继承上一轮的确认）
+    toolStepIndexRef.current.clear(); // A-1061②′：思考历程的「执行中」索引随现场一起重置
     toolTraceRef.current = [];
     const optimisticMsgs: Message[] = cached?.messages ?? [];
     let liveMsg: Message | null = null;
@@ -2990,7 +3178,9 @@ export default function ChatPanel({
     ctxBaseRef.current = usedMeta;
     // A-974-R2：真值锚同步——恢复后发送估算不得把已恢复的真实占用拉低
     ctxAnchorRef.current = usedMeta;
-    if (ctxMeta?.cap && ctxMeta.cap > 0) { setCtxCap(ctxMeta.cap); }
+    // A-1089：恢复上限同样**只在模型没换时**才认（否则切了模型再切回会话，环还按旧模型的上限）
+    const restoredCap = capForModel(ctxMeta, modelChoice);
+    if (restoredCap > 0) { setCtxCap(restoredCap); }
     void api.conversations.load(sessionId).then((msgs: ConversationMessage[]) => {
       // A-934：按 assistant 序数回填持久化的交错时间线（历史落库只有 reasoning 文本，
       // 无工具↔思考穿插顺序——重启后思考历程重归「交错时间线」设计而非整段平铺）
@@ -3045,13 +3235,13 @@ export default function ChatPanel({
         setOlderInfo(null);
       }
       settleScrollToBottom();
-      // A-1058①：历史 settle → 向 App 回执（启动门据此收门；见 props 里的 onHistoryLoaded 注释）
-      onHistoryLoaded?.();
+      // A-1058①/A-1059②：历史 settle → 向 App 回执（启动门据此收门；见 props 里的 onHistoryLoaded 注释）
+      reportHistoryLoaded();
     }).catch(() => {
       // 历史加载失败 → 全凭 cache 镜像：结算气泡此时是"唯一真相源"，必须保留
       setMessages([...optimisticMsgs, ...(!streamConfirmedDead && liveMsg ? [liveMsg] : []), ...(settledMsg ? [settledMsg] : [])]);
       // A-1058①：**失败也必须回执** —— 否则门只能等 8s 总超时（A-1039 的"失败也放行"规矩）
-      onHistoryLoaded?.();
+      reportHistoryLoaded();
     });
     // 会话级配置（"以文件夹为主"：按 sessionId 取 workspace；无则回退 Agent 级旧配置）
     void api.conversations.configGet({ agentId, sessionId }).then(setSessionConfig).catch(() => undefined);
@@ -3112,8 +3302,11 @@ export default function ChatPanel({
   React.useEffect(() => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     const upstreamCtx = curProviderModel?.context_window ?? 0;
-    // A-934：持久化的会话权威上限优先（done 下发的 windowCap 落盘值），避免重启后兜底覆盖
-    const persistedCap = readSessionCtxMeta(agentId, sessionId)?.cap ?? 0;
+    /* A-1089：持久化上限**只在模型没换时**才认。
+       旧实现 `readSessionCtxMeta(...)?.cap ?? 0` 无条件沿用 ⇒ 一旦本会话有过一次 done
+       （cap 已落盘），这里就**永远早退**，用户切模型后上限纹丝不动
+       （实测：切了模型，环还显示上一个模型的 65K）。 */
+    const persistedCap = capForModel(readSessionCtxMeta(agentId, sessionId), modelChoice);
     if (persistedCap > 0) { setCtxCap(persistedCap); return; }
     if (!api?.agents?.detail) { setCtxCap(upstreamCtx); return; }
     let cancelled = false;
@@ -3125,6 +3318,27 @@ export default function ChatPanel({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, modelChoice, providerModels]);
+
+  /* A-1061⑩ / A-1062：压缩结束 → 自动补投压缩窗口里攒下的预输入（可取消：被撤掉的 id 找不到就跳过）。
+     窗口判据走**唯一出处** `isCompressWindow` —— 此前这里与 send() 里各写一份三段 `||`，
+     两份口径必然漂移（本项目反复踩过"同一语义两个产地"）。 */
+  React.useEffect(() => {
+    const stage = compressUi?.stage ?? null;
+    if (isCompressWindow(stage)) { return; }
+    const ids = preSteerIdsRef.current;
+    if (ids.length === 0) { return; }
+    preSteerIdsRef.current = [];
+    const apiForSteer = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!apiForSteer) { return; }
+    for (const id of ids) {
+      const item = interruptQueueRef.current.find((q) => q.id === id);
+      if (!item || !item.text) { continue; }
+      syncQueue(setMode(interruptQueueRef.current, id, "steer"));
+      void apiForSteer.chat?.steer?.(item.sessionId, item.id, item.text).catch(() => undefined);
+      steerAckAtRef.current = Date.now();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compressUi?.stage]);
 
   /** P0: 随 agentId 重新订阅（切会话时切换事件源） */
   React.useEffect(() => {
@@ -3138,6 +3352,51 @@ export default function ChatPanel({
       // 此前：切走期间旧流的 chunk/reasoning/tool 全被丢弃 → 该会话快照停在 doSend 时的空壳
       // （partial:""）→ 切回时占位气泡空白、要「切出去再切回」拿到新快照才看得到输出（用户实测症状）。
       const otherSid: string | null = cSid != null && cSid !== sessionRef.current ? cSid : null;
+      /* A-1061⑤：任何属于**本会话**的流事件都是"流还在动"的证据（含心跳，15s 一次）。
+         它给 `doSend` 的"该不该让位给引导"提供判据 —— 见 instructionQueue.shouldDeferToSteer。 */
+      if (otherSid == null) { streamActivityAtRef.current = Date.now(); }
+      /* A-1061④：上游重试 / 切模型的通知 —— 主进程在"等上游"期间下发，界面据此把
+         一句"等待上游返回…"换成有信息量的状态（见 upstreamNotice 状态的注释）。
+         只对当前会话生效：别的会话的上游状态不该出现在这一栏。 */
+      if (c.type === "notice") {
+        if (otherSid == null) { setUpstreamNotice(c.data?.content ?? null); }
+        // A-1061⑦：引导**真的被注入本轮上下文**了 → 再给一次确认（比投递时更确切）
+        if (otherSid == null) { steerAckAtRef.current = Date.now(); }
+        return;
+      }
+      /* 有真实产出（正文/思考/工具/引导）→ 收掉上游通知。
+         同值 setState（null → null）会被 React 直接 bail out，不会造成额外渲染。 */
+      if (c.type !== "heartbeat") { setUpstreamNotice(null); }
+      /* A-1060：中途「引导」已被注入本轮上下文（主进程在工具循环的轮次边界发这个事件）。
+         两件事必须同时做，缺一个都会让用户觉得"这句话没了"：
+           ① 撤掉那张待发卡片 —— 它已经生效了，留着会在 onDone 时被再发一遍（重复发送）；
+           ② 把这条引导落进**思考历程**。
+         ⚠️ **不进正文记录**（用户明确：插入的对话作为引导，不该出现在正文里，
+           "最多也只能存在于思考历程内"）。所以这里既不追加用户气泡、也不落库成一轮对话，
+           只往思考历程的时间线里折一步；时间线本身是持久化的
+           （`sessionCtxMeta.timelineByAssistantIdx`），故重启后仍能在思考历程里看到这条引导。
+         ⚠️ `kind: "think"` 复用而非新增 kind：思考历程的渲染与持久化都已支持它，
+           新增 kind 要求渲染层同步加分支（漏一处就是"看着有数据却什么都不显示"）。 */
+      if (c.type === "steer") {
+        const rawId = c.data?.steerId;
+        const steerId = typeof rawId === "string" ? Number(rawId) : NaN;
+        if (Number.isFinite(steerId)) {
+          syncQueue(removeAt(interruptQueueRef.current, steerId));
+        }
+        const steerText = c.data?.content ?? "";
+        if (otherSid == null && steerText) {
+          /* A-1064：折进思考历程的是一枚**独立节点**（kind="steer"），不是 think。
+             用户原话："思考历程看不到我插入的引导的卡片" —— 折进 think 会被合并进相邻思考段
+             （见 todoPanorama.appendTimelineStep 的 think 支），既不是卡片，也会污染
+             onDone 里"需不需要用 reasoning 兜底补 think 节点"的判据（历程完整性）。 */
+          timelineStepsRef.current = appendTimelineStep(
+            timelineStepsRef.current,
+            { kind: "steer", text: steerText },
+          );
+          setLiveTimeline(timelineStepsRef.current);
+        }
+        return;
+      }
       if (otherSid != null) {
         const snap = perSessionStreamCache.current[otherSid];
         if (snap) {
@@ -3264,6 +3523,34 @@ export default function ChatPanel({
         });
         return;
       }
+      /* A-1061②：工具**开始执行** → 立刻让界面说出"在跑什么"。
+         这条事件不带结果（结果还没产生），只带 工具名 + 参数原文；
+         抓手串复用与完成事件同一套 `extractToolDetail`（两处若各写一套，同一条命令会
+         在"执行中"和"成功"两种行里显示成两种样子）。 */
+      if (c.type === "tool-start" && c.data?.name) {
+        const rawName = c.data.name;
+        const { label } = resolveToolLabel(rawName);
+        const toolId = typeof c.data.toolId === "string" ? c.data.toolId : "";
+        setRunningTool({
+          id: toolId,
+          label: rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`,
+          detail: extractToolDetail(c.data.args, undefined),
+        });
+        /* A-1061②′：思考历程里**立刻**出现这张卡（running 态）——
+           用户原话：「我希望是直接在思考历程的卡片中显示……在运行期间就显示“执行中”。
+           展开后可以看到具体跑的脚本」。这正是用户盯着的区域，只在下面的"工具调用摘要"
+           小行里显示是不够的。索引记进 ref，结果到了就**原地**翻状态（不重排、不重复）。 */
+        const steps = appendTimelineStep(timelineStepsRef.current, {
+          kind: "tool", name: rawName,
+          label: rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`,
+          detail: extractToolDetail(c.data.args, undefined),
+          running: true,
+        });
+        timelineStepsRef.current = steps;
+        if (toolId) { toolStepIndexRef.current.set(toolId, steps.length - 1); }
+        setLiveTimeline(steps);
+        return;
+      }
       if (c.type === "tool" && c.data?.name) {
         const rawName = c.data.name;
         const { label } = resolveToolLabel(rawName);
@@ -3277,14 +3564,30 @@ export default function ChatPanel({
         // 注意：refs 必须在 setState 的 updater 之外同步累积——
         // React 的 updater 是延迟到 render 阶段执行的。
         // 事件回调内同步累积，保证留痕与 reasoning 实际输出进度一一对应。
-        const next = [...toolEventsRef.current, { id: ++eventIdRef.current, name: rawName, label: displayLabel, detail, result: typeof c.data.result === "string" ? c.data.result : undefined }];
+        const next = [...toolEventsRef.current, {
+          id: ++eventIdRef.current, name: rawName, label: displayLabel, detail,
+          result: typeof c.data.result === "string" ? c.data.result : undefined,
+          // A-1061②：留住调用 id —— 实时列表靠它把「执行中」翻成「成功/失败」
+          toolId: typeof c.data.toolId === "string" ? c.data.toolId : undefined,
+        }];
         toolEventsRef.current = next;
         const ev = next[next.length - 1];
         toolTraceRef.current = [...toolTraceRef.current, ev];
-        // A-xxx：增量 append tool 段到交错时间线（按真实到达顺序，紧贴其前 thinking 段）
-        timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, {
-          kind: "tool", name: rawName, label: displayLabel.replace(/^⟳\s*/, ""), detail, result: ev.result,
-        });
+        /* A-1061②′：结果到了 → **原地**把 tool-start 建的那张卡翻成「成功/失败」；
+           没有配对索引（历史回退路径 / toolId 缺失）才追加 —— 否则会出两张卡。 */
+        const toolIdHere = typeof c.data.toolId === "string" ? c.data.toolId : "";
+        const stepIdx = toolIdHere ? toolStepIndexRef.current.get(toolIdHere) : undefined;
+        const pendingStep = stepIdx != null ? timelineStepsRef.current[stepIdx] : undefined;
+        if (pendingStep && pendingStep.kind === "tool" && pendingStep.running === true) {
+          const patched = timelineStepsRef.current.slice();
+          patched[stepIdx!] = { ...pendingStep, result: ev.result, running: false };
+          timelineStepsRef.current = patched;
+          toolStepIndexRef.current.delete(toolIdHere);
+        } else {
+          timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, {
+            kind: "tool", name: rawName, label: displayLabel.replace(/^⟳\s*/, ""), detail, result: ev.result,
+          });
+        }
         // A-980-R32：`todo_write` 额外把待办全景折进思考历程——
         // ① 首份规划 → 时间线里出现一张「任务规划」卡（列出全部条目，未完成项标注状态）；
         // ② 同一份计划的后续写回 → 原地刷新那张卡（显示当前进度），并把**新完成/新开始**的项
@@ -3300,6 +3603,17 @@ export default function ChatPanel({
           setLiveTimeline(steps);
         }
         setToolEvents(next);
+        /* A-1061②：这一次调用的结果到了 → 收掉「执行中」那一行（按 toolId 配对）。
+           配对放宽成"有 id 就按 id、没 id 就一律收掉"：宁可提前收起，也不留一行永远
+           停在"执行中"的假状态（那比没显示更糟 —— 用户会以为它卡住了）。
+           同轮并发时只跟踪最近开始的那一个，这是刻意的取舍（并发工具的细粒度状态
+           需要 per-id 集合，收益不抵复杂度）。 */
+        setRunningTool((cur) => {
+          if (!cur) { return null; }
+          const doneId = typeof c.data.toolId === "string" ? c.data.toolId : "";
+          if (!cur.id || !doneId || cur.id === doneId) { return null; }
+          return cur;
+        });
         return;
       }
       if (c.type === "reasoning") {
@@ -3396,6 +3710,8 @@ export default function ChatPanel({
       // 流已完成：清除重连状态（含可能遗留的重连定时器）
       streamActiveRef.current = false;
       retryCountRef.current = 0;
+      ctxOverflowRetriedRef.current = false;
+    ctxOverflowRetriedRef.current = false;
       stoppingRef.current = false;
       didCompressTurnRef.current = false; // A-969：本轮发送结束，允许下一轮再压缩体检
       setReconnectInfo(null);
@@ -3511,7 +3827,7 @@ export default function ChatPanel({
         setLoading(false);
         // 队列项自带图片：显式透传，不再依赖 `pendingImages` 这个**当时可能已被清空/换过**的共享态
         // （此前中断插入带图只写在注释里，续发时其实取的是当时的 pendingImages —— 图会丢或串）。
-        void doSend(taken.item.text, taken.item.sessionId, { images: taken.item.images });
+        void doSend(taken.item.text, taken.item.sessionId, { images: taken.item.images, forceNewTurn: true });
         return;
       }
       if (m.timings) setLastTimings(m.timings);
@@ -3571,6 +3887,8 @@ export default function ChatPanel({
         updateSessionCtxMeta(agentId, sessionRef.current, assistantOrdinalRef.current, {
           used: inputSide > 0 ? inputSide : undefined,
           cap: wc > 0 ? wc : (ctxCap > 0 ? ctxCap : undefined),
+          // A-1089：把「这次测出来的上限属于哪个模型」一并落盘（缺了它，下次读回来无从判断适用性）
+          capModel: modelChoice,
           timeline: stages?.timeline ?? undefined,
         });
         // A-1007：产物随会话持久化（localStorage 按 assistant 序数）——重载/重启后按序数回填产物卡
@@ -3623,6 +3941,50 @@ export default function ChatPanel({
       const MAX_RETRY = 9;
       // 不可恢复错误（403 区域限制 / 401 认证失败 / 404 模型不存在等）：
       // 重连与换路都不会成功，直接终止并提示用户按诱因处理，避免 9 次无效重连耗时长等待
+      /* A-1081：**上下文超限是第三类**（终态·但**可压缩救回**）——
+         原样重发必然同样失败 ⇒ 绝不能进下面那 9 次重连（用户实测：「连接半天还是重连」）；
+         但它能被压缩救回来 ⇒ 压缩一次 + 重试一次。这就是压缩闭环里此前**缺的那一环**：
+         上游说太长 → 我们压缩 → 再试一次（而不是原地空转）。 */
+      if (isContextOverflowError(msg)) {
+        if (ctxOverflowRetriedRef.current) {
+          /* A-1090：这一趟也要带上第一轮算出的**具体出路**（此前 `contextOverflowHint()` 不带参
+             ⇒ 横幅退回泛泛的「换成窗口更大的模型」，用户在最需要模型名的时候恰好拿不到它）。
+             ⚠️ `req` 必须在 `failReconnect` **之前**取出 —— 它内部的 `resetStreamUI()` 会清空
+             `streamReqRef`，之后再取就是 null（按钮点了没有 payload 可续）。 */
+          const kept = rescuedRef.current;
+          const keptReq = streamReqRef.current;
+          failReconnect(contextOverflowHint(kept?.hint), 0);
+          setRescueAction(kept?.model ? { model: kept.model, req: keptReq } : null);
+          return;
+        }
+        ctxOverflowRetriedRef.current = true;
+        void (async () => {
+          let stillOverflow = false;
+          let rescueHint: string | undefined;
+          let rescueModel: RescueModel | undefined;
+          try {
+            const r = await maybeAutoCompress(sessionRef.current, undefined, true);
+            stillOverflow = r.stillOverflow;
+            rescueHint = r.rescueHint;
+            rescueModel = r.rescueModel;
+          } catch { /* 压缩失败也要继续重试一次：失败原因由下一轮错误如实呈现 */ }
+          /* A-1082：压缩后**仍然**超限 ⇒ 别再发一次注定失败的请求（那正是「连接半天还是重连 /
+             直接超时报错」的形态）。如实报因 + 给可操作项，把控制权还给用户。
+             A-1086：把主进程算出的**出路**（切到哪个模型）一并带上 —— 只说"请换大窗口模型"等于没说。
+             A-1090：有结构化候选时**再给一个按钮**（"切到 X 并继续本轮"）—— 只给建议不给出路，
+             用户仍要自己在模型选择器里翻一遍（而此刻他什么都发不出去）。 */
+          if (stillOverflow) {
+            rescuedRef.current = { hint: rescueHint, model: rescueModel };
+            const keptReq = streamReqRef.current; // 先留底：failReconnect → resetStreamUI 会清空它
+            failReconnect(contextOverflowHint(rescueHint), 0);
+            setRescueAction(rescueModel ? { model: rescueModel, req: keptReq } : null);
+            return;
+          }
+          streamActiveRef.current = true;
+          void api.chat.stream({ ...(streamReqRef.current ?? {}), resumeHint: buildResumeHint() });
+        })();
+        return;
+      }
       if (isPermanentStreamError(msg)) {
         failReconnect(msg, 0);
         return;
@@ -3989,6 +4351,13 @@ export default function ChatPanel({
     reasoningTmpRef.current = "";
     setToolEvents([]);
     toolEventsRef.current = [];
+    // A-1061②：复位时清掉「执行中」行 —— 否则上一轮残留的命令会在新一轮开始、
+    // 首个结果回来之前的窗口里显示成"有东西在跑"（实时区只该说当下的事）。
+    setRunningTool(null);
+    // A-1061④：上游通知是"等上游期间"的瞬时状态，复位时必须一起清
+    setUpstreamNotice(null);
+    steerAckAtRef.current = 0; // A-1061⑦：确认窗口一并清（新的一轮不该继承上一轮的确认）
+    toolStepIndexRef.current.clear(); // A-1061②′：思考历程的「执行中」索引随现场一起重置
     toolTraceRef.current = [];
     timelineStepsRef.current = [];
     setLiveTimeline([]);
@@ -4013,19 +4382,34 @@ export default function ChatPanel({
     const hasPending = pendingImages.length > 0;
     // 允许「只发图片、不带文字」（user content 空文本 + 图）
     if (!api || (!input.trim() && !hasPending)) { return; }
-    // A-162 / A-1054⑥ / A-1056③：Agent 正在跑时的新指令一律**先排队，不打断**。
+    // A-162 / A-1054⑥ / A-1056③ / A-1061⑦：Agent 正在跑时的新指令 → **立即按引导投递，不打断**。
     //
-    // 语义变迁（A-1056③）：此前的行为取决于一个全局的「插入方式」开关（中途插入 / 即将插入），
-    // 默认那一侧的措辞被用户直接点名"即将插入是什么鬼？"。现在只有一种默认行为：
-    // **入队等本轮自然结束**（非破坏性，绝不悄悄掐掉正在跑的活）；
-    // 想让它"现在就走"，用户在待发气泡卡片上点「直接插入」（→ insertQueueItemNow）。
-    // 两条路都进同一个队列（不会有"静默丢弃"），界面在输入框上方把队列摊开给用户看/改。
+    // 语义变迁（A-1061⑦，用户实测第三次反馈后才想明白的一步）：A-1060 只把「投递」放在
+    // 待发卡片的箭头上 —— 用户中途打字回车后，那句话只是**躺在队列里**，必须再点一下箭头
+    // 才会真正投给正在跑的这轮。用户原话：「我点击了但是发不过去」「中途输入后，下面的状态行
+    // 可以返回“模型响应中”之类的」。知名 Agent（Claude Code / Cursor）的形态就是：
+    // **回车即投递**，状态行立刻给出"已接收、模型会响应它"的确认 —— 不需要第二下点击。
+    //
+    // 所以现在：回车 → 入队（仍可改/撤）→ **马上**投给主进程的引导缓冲。
+    // 能不能立刻生效取决于模型这一轮在干什么：
+    //   · 本轮还有工具调用 → 在下个工具调用之后的轮次边界注入；
+    //   · 本轮是纯正文（A-1061⑥ 的续轮）→ 本轮写完即注入同一轮运行；
+    //   · 都没有（极短回答已收尾）→ 由 done 的续发路径按普通排队发出。
+    // 三种情况都**绝不打断**正在跑的输出。
     if (loading || stopping) {
       const queuedText = input.trim();
       const queuedImages = pendingImages.map((i) => i.dataUrl);
       setInput("");
       if (queuedImages.length > 0) { setPendingImages([]); } // 图片已随本条入队，不再挂在待发区
-      const queued: QueuedInstruction = {
+      /* 回车 = **排队**（`queue`）—— 不直接发送，等本轮自然收尾后按序发出。
+         这是 A-1056③ 定下、A-1062 撤销方向单选后**回归的原语义**；"直接发送"是**另一个动作**：
+         待发卡片上的「现在插入」（`insertQueueItemNow`）才调 `api.chat.steer` 把它注进正在跑的这轮。
+         ⚠️ 这里**不许**再顺手 `api.chat.steer(...)`（A-1061⑦ 曾这么做、A-1062 又叠了个方向单选）：
+            那会把"回车"与"现在插入"两条路并成同一件事，用户就再也表达不出
+            "我只是想等它说完"（原话：「排队不直接发送，不排队直接发送」）。
+         ⚠️ `compressUi` 窗口**不再影响这里** —— 入队本来就不投递，不存在"投了没人消费"。
+            压缩窗口要拦的是**箭头那条路**（见 insertQueueItemNow 的 isCompressWindow 分支）。 */
+      syncQueue(enqueue(interruptQueueRef.current, {
         id: nextQueueId(),
         text: queuedText,
         mode: "queue",
@@ -4034,8 +4418,7 @@ export default function ChatPanel({
         agentId,
         networkEnabled,
         createdAt: Date.now(),
-      };
-      syncQueue(enqueue(interruptQueueRef.current, queued));
+      }));
       return;
     }
     // 检查当前模型是否支持图片输入（防止调用不支持 vision 的模型时触发 400）
@@ -4122,16 +4505,26 @@ export default function ChatPanel({
    *  导致「只有发送前才体检」：一轮长输出把上下文顶过阈值时完全无反应，用户以为"达到阈值不压缩"。
    *  现改为：`liveUsed` 可显式传入（流式实时值，避免读 state 陈旧），且不再因 loading 跳过。
    *  `didCompressTurnRef` 仍保证每轮只压一次，防压缩→回落→再涨→再压的抖动。 */
-  async function maybeAutoCompress(sid: string, liveUsed?: number): Promise<void> {
-    if (compressBusyRef.current || didCompressTurnRef.current || stopping) { return; }
+  /** @param force A-1081：反应式触发（上游已报上下文超限）——越过**阈值**判定直接压。
+   *  ⚠️ 只越过阈值，**不越过**用户的 `cfg.enabled` 开关（设置即权威）——用户关掉自动压缩时
+     我们就如实报「请换大窗口模型 / 开新会话」，不偷偷压。
+   *  A-1082：`force` 现在会**透传到主进程**（此前只越过渲染层这条判据，主进程仍会再判一次
+      `needsCompress` ⇒ 判假 ⇒ 压缩一次也没发生 ⇒ 重试发的还是同一个超限请求）。
+   *  @returns `stillOverflow` = 压缩后**仍然**超限（反应式调用方据此放弃重试并如实报因，
+   *  不再白白再发一次注定失败的请求）；`compressed` = 本次确实发生了压缩；
+   *  A-1086 `rescueHint` = 主进程算好的出路（"切到哪个模型"；压无可压时**唯一**有意义的动作）。 */
+  async function maybeAutoCompress(sid: string, liveUsed?: number, force = false): Promise<CompressOutcome> {
+    const NOOP: CompressOutcome = { stillOverflow: false, compressed: false };
+    if (compressBusyRef.current || didCompressTurnRef.current || stopping) { return NOOP; }
     const used = typeof liveUsed === "number" ? liveUsed : ctxUsed;
     const cap = ctxCapRef.current > 0 ? ctxCapRef.current : ctxCap; // 读 ref 防陈旧闭包
-    if (used <= 0 || cap <= 0) { return; }
+    if (used <= 0 || cap <= 0) { return NOOP; }
     const cfg = readAutoCompressCfg();
-    if (!cfg.enabled) { return; }
-    if (used < cap * cfg.ratio) { return; } // 未达触发占比，不压缩
+    if (!cfg.enabled) { return NOOP; }
+    if (!force && used < cap * cfg.ratio) { return NOOP; } // 未达触发占比，不压缩（force = 反应式触发）
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api?.chat?.compress) { return; }
+    if (!api?.chat?.compress) { return NOOP; }
+    let outcome: CompressOutcome = { stillOverflow: false, compressed: false };
     const animated = cfg.mode !== "silent";
     compressBusyRef.current = true;
     didCompressTurnRef.current = true;
@@ -4145,60 +4538,238 @@ export default function ChatPanel({
       // 透传给主进程做阈值判定。此前主进程只用 estimateHistoryTokens(history)（仅可见轮次 ≈30K）
       // 自行复核 → 与 GUI 的判据（≈629K）不一致 → 永远返回 skipped → 用户看到「逼近硬阈值」却毫无动作
       // （"压缩失效"的根因）。传 hint 后主进程取两者较大值判定，压缩才会真正执行。
-      const res = await api.chat.compress(sid, cfg.ratio, used);
+      const res = await api.chat.compress(sid, cfg.ratio, used, force);
+      // A-1082：把「压完还超限」与「确实压了」回带给调用方（反应式调用方据此不再发注定失败的请求）
+      // A-1086：`rescueHint` 一并回带 —— 反应式路径也要能把"切到哪个模型"说给用户
+      // A-1090：`rescueModel` 是同一件事的**结构化**形态（带着可写入 `model_choice` 的 `choice`），
+      //         渲染层据此渲染「一键切换」按钮；没有候选时**不回带**（没有可点的东西）。
+      outcome = {
+        stillOverflow: res?.stillOverflow === true,
+        ...(res?.rescueModel ? { rescueModel: res.rescueModel } : {}),
+        compressed: !!(res?.ok && (res.summary || res.truncated)),
+        ...(typeof res?.rescueHint === "string" && res.rescueHint ? { rescueHint: res.rescueHint } : {}),
+      };
       if (animated && res) {
         if (res.skipped) {
+          /* A-1082：跳过必须**如实说明原因**。
+             旧实现 `setCompressUi(null)` 静默收场 —— 用户原话「逼近硬阈值却毫无动作」就是这个：
+             压缩每轮都在判 skipped，界面什么都不说，用户以为功能坏了。 */
+          if (res.reason) {
+            setCompressUi({ stage: "skip", reason: res.reason });
+            await new Promise((r) => setTimeout(r, 2400));
+          }
           setCompressUi(null);
         } else if (res.truncated) {
-          setCompressUi({ stage: "trunc", dropped: res.dropped ?? 0 });
+          setCompressUi({ stage: "trunc", dropped: res.dropped ?? 0, reason: res.reason });
           await new Promise((r) => setTimeout(r, 1500));
           setCompressUi(null);
         } else if (res.ok && res.summary) {
-          setCompressUi({ stage: "done", dropped: res.dropped ?? 0, summary: res.summary });
+          setCompressUi({ stage: "done", dropped: res.dropped ?? 0, summary: res.summary, comprehend: res.comprehend });
           await new Promise((r) => setTimeout(r, 1400));
           setCompressUi(null);
         } else {
           setCompressUi(null);
         }
       }
-      // 压缩生效 → 本地占用镜像回落（真实值由本轮 done 的 promptTokens 校准；此处仅即时反馈）
-      // ⚠️ 同时派发 ctx 更新 → 圆环与右栏进度条在压缩动画结束时**立刻**回落（不再等 done）
-      if (res?.ok && (res.summary || res.truncated) && res.cap && res.cap > 0) {
-        const next = Math.max(1, Math.round(res.cap * 0.5));
+      // A-1082：压缩生效 → 用主进程**实测回填**的 tokensAfter 更新占用镜像。
+      // ⚠️ 旧实现这里写的是 `Math.round(res.cap * 0.5)` —— 一个与真实体积**无关的构造值**：
+      //    它既是「假报」（界面显示已降到上限 50%），又污染后续判定（ctxAnchorRef 单调不回退，
+      //    假值会被一直带着走，导致真正需要压缩时判据失真）。
+      //    tokensAfter 与传入的 used 同口径（历史 + 固定开销），可直接替换。
+      const measuredAfter = typeof res?.tokensAfter === "number" && res.tokensAfter > 0 ? Math.round(res.tokensAfter) : 0;
+      if (res?.ok && (res.summary || res.truncated) && res.cap && res.cap > 0 && measuredAfter > 0) {
+        const next = Math.max(1, measuredAfter);
         ctxBaseRef.current = next; // 压缩后输入基线同步回落，避免流式 watcher 拿旧基线又触发一次
-        // A-974-R2：真值锚同步回落到压缩后的估算（这是唯一允许"下调锚"的真实来源之一）
+        // A-974-R2：真值锚同步回落到压缩后的**实测**估算（唯一允许"下调锚"的真实来源之一）。
+        // 这是估算值；下一次 done 会用上游 prompt_tokens 校准。
         ctxAnchorRef.current = next;
         setCtxUsed(next);
         dispatchCtxUpdate({ sessionId: sid, used: next, cap: cap > 0 ? cap : res.cap });
-        // A-974：压缩事件写入思考时间线——展开「思考过程」即可看到「— 已压缩上下文 —」标记
+        // A-975：压缩事件写入思考时间线——展开「思考过程」即可看到「— 已压缩上下文 —」标记
         // （对齐市面主流 Agent 的输出惯例）；流式中途压缩时 thinking 卡实时可见，done 后随
         // stages.timeline 持久化（重启恢复时间线仍可见）。timeline 与 compressUi 动画解耦，
         // 即使动画被收起（silent 模式）也保留记录。
+        const shrink = res.realShrink === false ? "（注意：体积降幅不足，压缩收益有限）" : "";
         const compressNote = `— 已压缩上下文（${res.truncated
-          ? `摘要不可用，保留最近 ${res.dropped ?? 0} 轮对话`
-          : `压缩 ${res.dropped ?? 0} 轮对话`}）${res.summary ? `摘要：${String(res.summary).slice(0, 90)}` : ""} —`;
+          ? `摘要不可用，保留最近 ${res.dropped ?? 0} 条对话`
+          : `压缩 ${res.dropped ?? 0} 条对话`}，${res.used ?? "?"} → ${next} tokens${shrink}）${res.summary ? `摘要：${String(res.summary).slice(0, 90)}` : ""} —`;
         timelineStepsRef.current = [...timelineStepsRef.current, { kind: "think", text: compressNote }];
         setLiveTimeline(timelineStepsRef.current);
         // A-975：同时挂到「正文之上的分隔线」——思考卡默认折叠，只写时间线等于看不见
         compressNoteRef.current = compressNote;
         setCompressNote(compressNote);
+        /* A-1082 / 设计定稿 §8.8：把「没裁下来」作为**一等状态**如实说出。
+           现场实测最常见的失败是「裁完还是超限」（压缩前 82k → 压缩后 63k → 仍超 32k 窗口）。
+           旧实现永远报「已压缩 N 轮」⇒ 用户以为救回来了，实际下一轮照样超限。
+           ⚠️ `force`（反应式）时不弹这条横幅：那条路径紧接着就会走 failReconnect 红字提示，
+              重复提示没有意义，且会把「立刻终止」拖延 3.2 秒。 */
+        if (res.stillOverflow && !force) {
+          setCompressUi({
+            stage: "overflow",
+            dropped: res.dropped ?? 0,
+            /* A-1086：出路由主进程算好（唯一产地 `formatRescueHint`），这里**只负责展示** ——
+               不再自己拼"请换窗口更大的模型"这种**原则**（原则 = 没说，用户要的是"换哪个"）。
+               `rescueHint` 缺失时保留原兜底文案，防"什么都不说"。 */
+            reason: `压缩后仍约 ${next} tokens ≥ 窗口上限 ${res.cap}：固定开销（系统提示/记忆/技能/工具定义/工作区注入）本身就接近上限，裁历史降不下来。`
+              + (res.rescueHint ? `\n${res.rescueHint}` : "请换窗口更大的模型，或开一个新会话。"),
+          });
+          await new Promise((r) => setTimeout(r, 3200));
+          setCompressUi(null);
+        }
       }
     } catch {
       setCompressUi(null); // 压缩失败不阻塞发送
     } finally {
       compressBusyRef.current = false;
     }
+    return outcome;
+  }
+
+  /**
+   * A-1090：「压无可压」时的一键出路 —— 切到更大的窗口模型，并**接着本轮继续**。
+   *
+   * ## ⚠️ 为什么必须 `await onModelChange`
+   *
+   * 切模型是**异步写盘**（`App.updateAgentConfig` 里 `await api.agents.update`），而重发时
+   * 主进程按**磁盘上的**会话模型解析窗口（`resolveSessionWindowCap(agentId, model_choice)`）。
+   * 不 await 就重发 ⇒ 仍按**旧模型**算 ⇒ **必然同样超限** ⇒ 用户看到「点了按钮还是同一个错」，
+   * 比不提供按钮更伤（本仓最忌的静默失败：动作做了、结果没变、也没人说出为什么）。
+   *
+   * ## ⚠️ 为什么续的是"本轮"，而不是"重发用户那条消息"
+   *
+   * 用户消息在 `doSend` 时**已落库** ⇒ 再发一次会**重复**一条。被打断的是 assistant 的这一轮，
+   * 所以用与 3954 行自动重试**同一个原语**（`api.chat.stream({...req, resumeHint})`）续上。
+   * 这正是 `formatRescueHint` 承诺的「切到它即可**继续本次会话**」——
+   * 按钮文案（`rescueSwitchLabel`）与这里的动作必须逐字对齐，不许一方说"重发"。
+   *
+   * ## ⚠️ 绝不触碰输入框
+   *
+   * 不往输入框回填任何东西：用户此刻可能正在写下一句，任何写入都是「覆盖用户正在写的内容」。
+   * （早期设计里的"回填 + 让用户自己按发送"已否决：① 会重复用户消息；② 会覆盖草稿。）
+   */
+  async function handleRescueSwitch(): Promise<void> {
+    const act = rescueAction;
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    /* A-1019 ④：`api` 的 null 守卫必须**单独一行、紧跟取值点**。
+       写成 `if (!act || !choice || !api?.chat?.stream …)` 时，守卫判定只认三个形态
+       （`if (!api…)` / `if (api…)` / `api &&|??|…`），`!api?.` 一个都不算 ⇒
+       守卫形同不存在，后面任何 `api.xxx` 裸访问都会让 preload 未就绪时整页白屏。
+       `!api?.chat?.stream` 这一层**能力**检查仍要保留（老 preload 可能没有 chat.stream）。 */
+    if (!api) { return; }
+    const choice = act?.model.choice;
+    /* `choice` 缺失 = 主进程没回带可写入的选择串 ⇒ 根本切不过去，
+       绝不假装"点了有效"（宁可按钮不出现，也不给一个点了没反应的按钮）。
+       `rescueSwitchingRef` = 重入锁：`rescueAction` 是 state，同一批里连点两次读到的是同一个值。 */
+    if (!act || !choice || !api.chat?.stream || rescueSwitchingRef.current) { return; }
+    rescueSwitchingRef.current = true;
+    setRescueAction(null);
+    setStreamErrorBanner(null);
+    let switched = true;
+    try {
+      await onModelChange?.(choice);
+    } catch (e) {
+      // 切模型失败 ⇒ 必须**出声**（否则用户以为切好了，其实还是旧模型，下一轮照样超限）
+      switched = false;
+      console.error("[chat] 一键切换模型失败:", e);
+      setStreamErrorBanner(`切换模型失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+    rescueSwitchingRef.current = false;
+    if (!switched) { return; }
+    // 用户已经自己发了新消息 ⇒ 只切模型，不抢发（A-1061⑤「不打断」不变式）
+    if (streamActiveRef.current) { return; }
+    const req = act.req ?? streamReqRef.current;
+    if (!req) {
+      // 入参没留到（例如期间切过会话）⇒ 如实说，而不是静默什么都不做
+      setRescueAction(null);
+      setStreamErrorBanner("已切到该模型，但本轮入参已失效 —— 请重新发送你的需求。");
+      return;
+    }
+    /* 新一轮开流 ⇒ 把"本轮已经试过"的护栏全部复位。
+       `ctxOverflowRetriedRef` 不复位的话，新一轮首次超限会**直接** failReconnect，
+       连压缩都不会尝试一次（等于把刚修好的闭环自己关掉）。 */
+    ctxOverflowRetriedRef.current = false;
+    didCompressTurnRef.current = false;
+    retryCountRef.current = 0;
+    stoppingRef.current = false;
+    // 流式现场复位：failReconnect 已清过一次，这里显式重建（不依赖调用顺序）
+    resetPartial();
+    setReasoningTmp("");
+    reasoningTmpRef.current = "";
+    setToolEvents([]);
+    toolEventsRef.current = [];
+    setReconnectInfo(null);
+    setLoading(true);
+    setStopping(false);
+    streamReqRef.current = { ...req };
+    streamActiveRef.current = true;
+    streamActivityAtRef.current = Date.now(); // A-1061⑤：开流即记一次活动，防被判成"流没在动"
+    // A-974：发流即启心跳（实测占用的 1s 强制派发；done/error/reset 时清理）
+    ensureCtxPulse();
+    void api.chat.stream({ ...req, resumeHint: buildResumeHint() });
   }
 
   /** A-162/A-164：真正执行发送（含输入框清空/历史追加/流式初始化/入参记录）。send() 与插入指令续发共用。
    *  注意：本函数总是清空输入框（调用方只管把内容传进来）——此前重构遗漏 setInput("")，
    *  导致「消息发出后文本仍留在输入框」的用户实测回归（A-164）。 */
-  async function doSend(text: string, targetSessionId?: string, opts?: { images?: string[] }): Promise<void> {
+  async function doSend(text: string, targetSessionId?: string, opts?: { images?: string[]; forceNewTurn?: boolean }): Promise<void> {
     // A-982：**空串必须当"没传"处理**。`targetSessionId ?? sessionId` 只在 null/undefined 时回落，
     // 而空串是"有值"——调用方（如中断续发队列）传 "" 时会得到 `sid = ""`，于是
     // ① streamSessionRef 变成空串 → 右栏 sessionId 守卫把所有实时事件丢掉（这就是"右栏不实时"
     //    的一条真实触发路径）；② maybeAutoCompress("") 会去压缩一个不存在的会话。
     const targetSid = typeof targetSessionId === "string" && targetSessionId.trim() ? targetSessionId : undefined;
+    const sendSid = targetSid ?? sessionId;
+    /**
+     * A-1061⑤：**同一会话已在生成时，绝不允许再开第二条流。**
+     *
+     * 用户原话：「现在某些时候中途插入输入时，程序某些时候还是会被中断重新输入正文。
+     * 你检查检查……这个插入**无论什么时候**都不该打断 agent 输入的」。
+     *
+     * 机制：`doSend` 一进来就会重置流式现场（partial / toolEvents / 计时器…）并 `setLoading(true)`
+     * → 界面上就是"正文从头开始"＝用户看到的"被打断、重新输入正文"。
+     * 而打断的**唯一**来源就是这里开了第二条流（全仓只有「停止」按钮会 `chat.cancel`，
+     * 插入路径已经不调它了）。所以把"不开第二条流"做成**在入口就强制的不变量**，
+     * 而不是指望每一个调用点都记得先判 loading。
+     *
+     * 判据**不看 `loading`**：A-1051 的「支④」（恢复查询重试耗尽）会在**流仍然活着**时
+     * `setLoading(false)`（刻意取舍：宁可收 loading，也别让用户无限看"恢复中"）——
+     * 那一刻 `send()` 的 loading 守卫失效，正是"某些时候被打断"的入口。
+     * 现在以"流**最近是否真的在动**"为准（`shouldDeferToSteer` 的注释解释了为什么用活动时间戳
+     * 而不是粘性 ref：残留只会让时间戳变旧 → 自动失效，不会误吞合法的新发送）。
+     *
+     * ⚠️ 判定按**目标会话**：在会话 B 发消息时，会话 A 的流不该受影响。
+     * ⚠️ 内部调用（done 后的续发、引导的兜底发送）必须带 `forceNewTurn`：它们**就是要开新轮**。
+     */
+    const deferToSteer = shouldDeferToSteer({
+      forceNewTurn: opts?.forceNewTurn,
+      streamActive: streamActiveRef.current,
+      streamSession: streamSessionRef.current ?? "",
+      targetSession: sendSid,
+      lastActivityAt: streamActivityAtRef.current,
+      now: Date.now(),
+    });
+    if (deferToSteer) {
+      const replayText = (text ?? "").trim();
+      if (replayText) {
+        /* 流仍在动（且是本会话）→ 本条转为**待发**（排队），**不直接发送**、也**不开第二条流**
+           —— 开第二条流就是用户说的"正文从头开始"（A-1061⑤ 的入口不变量）。
+           「直接发送」是另一个动作：用户点待发卡片上的「现在插入」。
+           ⚠️ 这里**不许**顺手 `api.chat.steer(...)`：A-1061⑦ 曾在这条兜底路径也投递，
+              于是"排队"这条语义在整个界面里再没有出口。 */
+        console.warn("[chat] 该会话仍在生成中 —— 本条转为待发（不直接发送，也不开第二条流）");
+        // ⚠️ 卡片 id 只生成一次：消费事件靠它配对撤卡片，两次 nextQueueId() 会配不上 → 该条被再发一遍。
+        syncQueue(enqueue(interruptQueueRef.current, {
+          id: nextQueueId(),
+          text: replayText,
+          mode: "queue",
+          images: opts?.images ?? [],
+          sessionId: sendSid,
+          agentId,
+          networkEnabled,
+          createdAt: Date.now(),
+        }));
+      }
+      return;
+    }
     // A-969：发送前上下文压缩体检（对齐 Claude Code「每次 query 前 context 检查」）——
     // 输入侧占用 ≥ cap×ratio 且本轮未压过 → 先跑摘要轮并展示过渡动画，再继续正常发送
     await maybeAutoCompress(targetSid ?? sessionId);
@@ -4252,6 +4823,13 @@ export default function ChatPanel({
     reasoningManuallyToggledRef.current = false;
     setToolEvents([]);
     toolEventsRef.current = [];
+    // A-1061②：复位时清掉「执行中」行 —— 否则上一轮残留的命令会在新一轮开始、
+    // 首个结果回来之前的窗口里显示成"有东西在跑"（实时区只该说当下的事）。
+    setRunningTool(null);
+    // A-1061④：上游通知是"等上游期间"的瞬时状态，复位时必须一起清
+    setUpstreamNotice(null);
+    steerAckAtRef.current = 0; // A-1061⑦：确认窗口一并清（新的一轮不该继承上一轮的确认）
+    toolStepIndexRef.current.clear(); // A-1061②′：思考历程的「执行中」索引随现场一起重置
     toolTraceRef.current = [];
     timelineStepsRef.current = [];
     setLiveTimeline([]);
@@ -4287,10 +4865,17 @@ export default function ChatPanel({
       : undefined;
     // 自动重连状态初始化：记录本次流式入参，重置计数（中断旧的重连定时器）
     streamActiveRef.current = true;
+    // A-1061⑤：开流即记一次活动 —— 否则"刚发出、首个 chunk 还没到"的那段里，
+    // 活动时间戳还是上一次运行的旧值，可能被判成"流没在动"而放行第二条流。
+    streamActivityAtRef.current = Date.now();
     streamSessionRef.current = sid; // 本流归属当前会话（chunk/done/error 过滤依据）
     streamReqRef.current = { agentId, message: text, sessionId: sid, networkEnabled, maxTokens, images: imagesToSend.length > 0 ? imagesToSend : undefined };
     retryCountRef.current = 0;
+    ctxOverflowRetriedRef.current = false;
     stoppingRef.current = false;
+    // A-1090：新一轮开始 ⇒ 上一轮算出的"出路"作废（按钮与留底一起收走，避免点了续上一轮）
+    setRescueAction(null);
+    rescuedRef.current = null;
     setReconnectInfo(null);
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
@@ -4586,11 +5171,17 @@ export default function ChatPanel({
     awaitingAnswer: !!pendingAsk,
     compressStage: compressUi?.stage ?? null,
     lastToolLabel: toolEvents.length > 0 ? resolveToolLabel(toolEvents[toolEvents.length - 1]!.name).label : "",
+    // A-1061③：原始工具名一并传入 → 状态行给出阶段化标题（正在执行命令 / 正在生成脚本 …）
+    lastToolName: toolEvents.length > 0 ? toolEvents[toolEvents.length - 1]!.name : "",
     toolCount: toolEvents.length,
     replyChars: partial.length,
     reasonChars: reasoningTmp.length,
     elapsedMs: streamElapsed,
-    ctxUsed: contextTokens,
+    // A-1061⑦：投递后的确认窗口（"已接收引导 · 模型响应中"），过窗自动退场
+    steerAck: loading && steerAckAtRef.current > 0 && Date.now() - steerAckAtRef.current < STEER_ACK_MS,
+    // A-1061④：上游重试 / 切模型的如实上报（空 → 不参与判定，旧行为不变）
+    upstreamNotice: upstreamNotice ?? undefined,
+    ctxUsed,
     ctxCap,
   });
   /** 语义键：内容真的变了才换引用（四要素全等 → 复用旧对象） */
@@ -4626,38 +5217,88 @@ export default function ChatPanel({
   }
 
   /**
-   * 「直接插入」：我要这一条**现在就走**。
+   * 待发卡片上的「引导」= **直接发送 / 现在插入**：把这一条注进正在跑的这轮，**不打断它**。
    *
-   * A-1056④（用户原话："中途插入直接中断：要连贯接续插入，不要粗暴中断"）——
-   * 这里的做法是**有序收尾 + 接续**，而不是"掐断重开"：
-   *   ① 先把该条提到队首并标 interrupt（这样它一定是下一个被发出的）；
-   *   ② 通知主进程结束**当前这一轮**：已产出的正文/思考走正常的 onDone(interrupted) 收尾
-   *      **照常落库**，所以上下文是连续的（下一轮模型看得到上一轮说到哪儿了），
-   *      画面上也不会出现"半句话被硬生生截掉、后面什么都没有"；
-   *   ③ 旧流一收尾，onDone 的续发路径按队首把这一条发出去 —— 用户感知是"接上了"，
-   *      而不是"被中断了"。
-   * 若此刻本来就没有活跃流（loading 是残留态），直接立刻发，跳过 ②。
+   * ⚠️ 这是全界面**唯一**的"不排队直接发送"入口 —— `send()`（回车）只负责**排队**。
+   *    两条路各自一个动作，不需要方向开关（A-1062 的方向单选已撤销，见 insertCopy 头注释）。
+   *
+   * ── 为什么改语义（A-1060）──
+   * 用户原话：「中间插入输出**还是会直接中断** …… 现在很多 agent 都不是直接中断了，
+   * 而是在 agent 输出中插入『引导』」。
+   * 调研一手来源：**Cursor changelog 2026-08-19** 的 steering 改进写明
+   * 「follow-ups **wait for the next tool call** instead of cutting the agent off mid-action」；
+   * **Claude Code** 亦是把 Enter 的消息排队到"下一轮边界"，只有 Esc 才中断。
+   *
+   * ── 现在的行为 ──
+   *   ① **先判流是否真的在跑**（`shouldDeferToSteer`，与 doSend 同产地 —— 见函数内注释）；
+   *   ② 在跑：本条标成 `steer`（卡片高亮态和"排队等下一轮"区分开），文本投给主进程的
+   *      steer 缓冲（`slime:chat:steer`）—— **不调 `chat.cancel`**；投递失败**退回 queue 态**；
+   *   ③ 工具循环在**下一个工具调用之后的轮次边界**把它注入本轮上下文（消费点见
+   *      `core-ts/src/tool_loop.ts` 的 `injectSteers`）；
+   *   ④ 被消费时主进程回一个 `steer` 事件 → 界面撤掉这张卡片（不重复发）。
+   *
+   * ⚠️ **卡片必须留在队列里，直到消费事件到达**：若这一轮压根没有工具调用
+   *    （纯文本回答，永远到不了轮次边界），主进程会在流结束时清掉缓冲，
+   *    卡片仍在队列 → onDone 的续发路径按普通排队把它发出去。**既不丢也不重复。**
+   *    （这正是 Claude Code「Enter 排队」的语义：能插则插，插不进去就下一轮。）
+   *
+   * ⚠️ 想**立刻停掉**当前生成是另一件事，走「停止」按钮 / `stopStream()` —— 那是 Esc 语义，
+   *    与本函数不再混在一起（此前正是把"停止"和"插入"揉在一个动作里，才叫"直接中断"）。
    */
   async function insertQueueItemNow(id: number): Promise<void> {
-    // 先排队首 + 标 interrupt（气泡会立刻变成实心高亮，用户马上看得到"它要走了"）
-    syncQueue(promote(setMode(interruptQueueRef.current, id, "interrupt"), id));
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api) { return; }
-    // 没有活跃流 → 本来就该立刻发，不必（也无从）收尾
-    if (!streamActiveRef.current) {
+    const item = interruptQueueRef.current.find((q) => q.id === id);
+    if (!api || !item) { return; }
+    /* ── 这一步是「中途插入」的总闸门，判据必须与 `doSend` **同一个产地** ──
+       A-1062 之前这里判的是 `streamActiveRef.current`（**意图标记**），而 A-1061⑤ 早已把
+       "流是否真的在跑"统一到**活动证据**（`shouldDeferToSteer` = 同一会话 + 最近有活动）。
+       两个判据会打架，而打架的代价正是用户反复报的那样：
+         · 意图标记为 false、流其实还活着（A-1051 支④ 会提前收 loading）→ 走下面"没有活跃流"
+           分支 → `doSend(forceNewTurn)` 开**第二条流** → 界面表现为"正文从头开始"；
+         · 意图标记为 true、流其实已结束 → 投进没人消费的 steer 缓冲 → 卡片永远停在
+           「已作为引导注入当前这轮」，而模型永远收不到。
+       ⇒ 现在只认 `shouldDeferToSteer`（`forceNewTurn` 不传 = 外部动作，按真实活跃度判）。 */
+    const streamAliveHere = shouldDeferToSteer({
+      streamActive: streamActiveRef.current,
+      streamSession: streamSessionRef.current ?? "",
+      /* ⚠️ 用**卡片自己的会话号**（不是当前视图的 sessionId）：steer 缓冲按会话键控，
+         投错会话会让这句话跑到别人的运行里去。 */
+      targetSession: item.sessionId,
+      lastActivityAt: streamActivityAtRef.current,
+      now: Date.now(),
+    });
+    if (!streamAliveHere) {
+      /* 没有活跃流 → 没有"中途"可言：按**普通排队立刻发出**（不开"第二条流"这件事本身；
+         此时本会话确实没有流在跑，`forceNewTurn` 告诉 doSend 不必再让位给引导）。
+         ⚠️ 只发**队首且属于本会话**的那条（takeNext 的契约）：用户在别处点箭头时，
+            不得把别人的会话、或排在后面的指令顺手发出去。 */
       const taken = takeNext(interruptQueueRef.current, sessionId);
       if (taken) {
         syncQueue(taken.rest);
-        void doSend(taken.item.text, taken.item.sessionId, { images: taken.item.images });
+        void doSend(taken.item.text, taken.item.sessionId, { images: taken.item.images, forceNewTurn: true });
       }
       return;
     }
-    const wasStopping = stoppingRef.current;
-    stoppingRef.current = true;    // 收尾旧流：不再自动重连
-    setLoading(true);
-    await api.chat.cancel(sessionId).catch(() => undefined);
-    setStopping(false);
-    stoppingRef.current = wasStopping;
+    /* 压缩窗口（prep/summarize/trunc）：工具循环正被压缩体检占用，**此刻投了没人消费**
+       —— 投了就是空头支票（卡片会显示"已注入"，模型其实收不到，A-1061⑪ 的教训）。
+       改为登记进**可取消的预输入**：压缩一结束由那个 effect 自动补投（见 preSteerIdsRef），
+       期间用户点「撤销删除」即取消（补投时按 id 找不到就跳过）。 */
+    if (isCompressWindow(compressUi?.stage)) {
+      if (!preSteerIdsRef.current.includes(id)) { preSteerIdsRef.current.push(id); }
+      return;
+    }
+    // 标 steer：卡片状态立刻可见（不是 promote —— 它不需要"排到队首"，它进的是当前这轮）
+    syncQueue(setMode(interruptQueueRef.current, id, "steer"));
+    try {
+      await api.chat?.steer?.(item.sessionId, item.id, item.text);
+    } catch {
+      /* A-1061⑪：投递失败要**退回 queue 态** —— 否则卡片一直显示"已引导"，而主进程缓冲里
+         根本没有这条：用户以为说过了，模型永远收不到。退回后卡片右侧的「引导」箭头重新出现。 */
+      syncQueue(setMode(interruptQueueRef.current, id, "queue"));
+      return;
+    }
+    // 投递成功才给状态行确认（失败已退回，下面那句"模型响应中"就无从谈起）
+    steerAckAtRef.current = Date.now();
   }
 
   /** 「撤销删除」：移出队列（指令直接丢弃 —— 只由用户显式点击触发，绝不自动丢） */
@@ -4910,8 +5551,17 @@ export default function ChatPanel({
               )}
 
               {/* 工具调用摘要：流式时按类型分组显示（独立于思考过程，无论是否有思考都显示） */}
-              {loading && toolEvents.length > 0 && (() => {
+              {loading && (toolEvents.length > 0 || runningTool) && (() => {
                 const groups = computeToolGroups(toolEvents);
+                /* A-1061②：逐条**实时行** —— 「执行中…」→「✓ 成功 / ✗ 失败」。
+                   为什么要它：分组摘要只说"调了几次什么类别的工具"，跑一条几十秒的命令时
+                   用户看不到在跑什么（用户原话：「中间运行脚本的过程也加上……要可以跟你一样，
+                   实时监测进程，成功了要返回成功提示」）。形态对齐 Claude Code 的
+                   `• ToolName(params) 2.3s` + 结果摘要。
+                   只渲染最近 5 条：实时区是"当下在做什么"，不是完整日志（完整留痕在思考历程里）。 */
+                const recent = toolEvents.slice(-5);
+                const pendingRow = runningTool && !recent.some((t) => !!t.toolId && t.toolId === runningTool.id)
+                  ? runningTool : null;
                 return (
                   <div style={{ marginBottom: 6 }}>
                     <div style={{
@@ -4933,6 +5583,35 @@ export default function ChatPanel({
                           <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: "auto" }}>×{g.count}</span>
                         </div>
                       ))}
+                      {/* 正在跑的那一条：结果还没回来，状态列必须显式说「执行中…」 */}
+                      {pendingRow && (
+                        <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                          <span className="text-scan-light" style={{ flexShrink: 0 }}>{pendingRow.label}</span>
+                          {pendingRow.detail && (
+                            <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{pendingRow.detail}</span>
+                          )}
+                          <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, color: "var(--accent)" }}>执行中…</span>
+                        </div>
+                      )}
+                      {recent.map((t) => {
+                        const running = !!runningTool && !!t.toolId && t.toolId === runningTool.id;
+                        const isFail = isToolFailResult(stripDiffTag(t.result ?? "").trim());
+                        const status = toolStatusLabel(t.result, isFail, running);
+                        return (
+                          <div key={t.id} style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                            <span style={{ flexShrink: 0, color: running ? "var(--accent)" : undefined }}>{t.label}</span>
+                            {t.detail && (
+                              <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{t.detail}</span>
+                            )}
+                            {status && (
+                              <span style={{
+                                marginLeft: "auto", flexShrink: 0, fontSize: 11,
+                                color: running ? "var(--accent)" : isFail ? "#f87171" : "var(--success, #4ade80)",
+                              }}>{status}</span>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -4944,17 +5623,46 @@ export default function ChatPanel({
               {/* 部分输出：流式 Markdown 渲染（补全未闭合语法，避免暴露原始符号）。
                   A-968：切回恢复的流由占位气泡内实时续长，此处抑制独立 partial 区（否则"恢复中…"气泡+底部输出双份） */}
               {resumeMsgId === null && (
-                <div className="stream-partial" style={{ lineHeight: 1.7, fontSize: 14, wordBreak: "break-word" }}>
-                  {deferredPartial ? <Markdown text={deferredPartial} streaming /> : partial ? (<Markdown text={partial} streaming />) : (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 14, fontWeight: 500 }}>
-                      <span className="text-scan-light">正在思考</span>
-                      <span className="stream-dot-row">
-                        <span className="stream-dot" />
-                        <span className="stream-dot" style={{ animationDelay: "0.2s" }} />
-                        <span className="stream-dot" style={{ animationDelay: "0.4s" }} />
-                      </span>
-                    </span>
-                  )}
+                <div className="stream-partial" style={{ lineHeight: 1.75, fontSize: 15, wordBreak: "break-word" }}>
+                  {/* A-1061⑬ / A-1065：尾巴逐单元渐入（**由右到左** + 由浅到深）。
+                      已定型前缀照旧走 Markdown；尾巴切成带稳定 key 的 span，
+                      每个 span **首次挂载**时播一次动画 —— 于是刚吐出来的字各自渐入，
+                      老字不重播。未闭合代码块/行内 code 时整段落回 Markdown（见 streamFade.ts）。
+                      A-1065：尾巴是纯文本渲染，若不抹掉控制符号，用户会看到裸露的 `**`/`#`
+                      （原话：「出现了很多 markdown 渲染不全的 *、# 等符号」）→ 显示文本走
+                      `fadeUnitText`（抹符号但保留空白）；空白单元之外的成果落进前缀后由
+                      Markdown 正式渲染，所以不会"少看到内容"。 */}
+                  {(() => {
+                    const shown = deferredPartial || partial;
+                    if (!shown) {
+                      return (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 14, fontWeight: 500 }}>
+                          <span className="text-scan-light">正在思考</span>
+                          <span className="stream-dot-row">
+                            <span className="stream-dot" />
+                            <span className="stream-dot" style={{ animationDelay: "0.2s" }} />
+                            <span className="stream-dot" style={{ animationDelay: "0.4s" }} />
+                          </span>
+                        </span>
+                      );
+                    }
+                    const fade = splitStreamFade(shown);
+                    return (
+                      <>
+                        {fade.settled ? <Markdown text={fade.settled} streaming /> : null}
+                        {/* A-1080：**最后一行的前半段**（不参与渐入的纯文本）。
+                            它必须紧贴在上面的 settled 之后、尾巴之前 —— 三段同处一个**行内流**，
+                            中间不插任何块级边界。这样接缝落在**真实换行**上：
+                            settled 不再以"半行"结尾，尾巴也就不会另起一行（那正是
+                            「倒数第二行尾端留空白 + 整段往上挤着重排」的根因）。 */}
+                        {fade.linePrefix}
+                        {fade.units.map((u) => {
+                          const t = fadeUnitText(u.text);
+                          return t ? <span key={u.at} className="stream-fade-unit">{t}</span> : null;
+                        })}
+                      </>
+                    );
+                  })()}
                   {/* A-918++：流式打字机末字光标（partial 末尾始终闪烁 8×16 矩形，1s step-start 步进；partial 增长时光标跟着走） */}
                   <span className="stream-cursor" aria-hidden="true" style={{ display: "inline-block", width: 2, height: 16, background: "var(--accent)", marginLeft: 3, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite", willChange: "opacity" }} />
                 </div>
@@ -5009,6 +5717,32 @@ export default function ChatPanel({
           whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 140, overflowY: "auto",
         }}>
           {streamErrorBanner}
+        </div>
+      )}
+
+      {/* A-1090：「压无可压」时的一键出路。只给建议不给出路 = 没说 ——
+          用户此刻什么都发不出去，需要的是"切到哪个模型"，而不是自己在模型选择器里翻一遍。
+          仅当主进程**确实**挑到了更大窗口的候选时才出现（`rescueAction` 有值）；
+          没候选时上面的 `rescueHint` 已经如实说了"没有"，这里不该给一个点了没用的按钮。
+          文案唯一产地 `rescueSwitchLabel` / `RESCUE_SWITCH_TITLE`（见 streamErrors.ts）。 */}
+      {rescueAction && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "8px 16px", borderTop: "1px solid var(--border)",
+          fontSize: 12, background: "var(--bg)",
+        }}>
+          <button
+            type="button"
+            onClick={() => { void handleRescueSwitch(); }}
+            title={RESCUE_SWITCH_TITLE}
+            style={{
+              padding: "4px 12px", fontSize: 12, cursor: "pointer", borderRadius: 6,
+              border: "1px solid var(--accent)", color: "var(--accent)",
+              background: "var(--bg-hover)",
+            }}
+          >
+            {rescueSwitchLabel(rescueAction.model)}
+          </button>
         </div>
       )}
 
@@ -5253,50 +5987,175 @@ export default function ChatPanel({
               <span style={{ fontWeight: 600 }}>待发</span>
               <span style={{ color: "var(--text-dim)" }}>· {summarize(queueOfMine)}</span>
               <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                title="这些是我还没发出去的话。默认等本轮结束后自动按顺序发出；点「直接插入」可以立刻走。">
-                · 本轮结束后自动发出，或点右侧箭头直接插入
+                title="这些是你在 Agent 运行期间说的话。回车即作为「引导」注入当前这一轮（不打断它）；若这一轮已收尾，就等本轮结束后自动发出。">
+                · 回车即注入**当前这一轮**（不打断）；已收尾则本轮结束后自动发出
               </span>
             </div>
-            {queueOfMine.map((q) => (
+            {queueOfMine.map((q) => {
+              /* A-1061⑪：**已投递（steer）与待发（queue）是两种不同的东西**，形态必须分开：
+                 · steer = "这句话已经进去了" → 中性指令行 + 左侧强调条 + 「已注入」徽标；
+                 · queue = "它还在这儿等" → 虚线左条 + 「待发」徽标，并保留箭头重投入口。
+                 用户原话：「这个里面就不用气泡了，又不是发出去的消息」+「三个按钮就剩下箭头
+                 那个按钮用不了了」→ 去掉气泡外观；箭头只在**真的还没投出去**时才出现
+                 （投递失败已退回 queue 态，或压缩窗口里的可取消预输入）。 */
+              const delivered = q.mode === "steer";
+              return (
               <div key={q.id} style={{
-                display: "flex", alignItems: "flex-end", justifyContent: "flex-end", gap: 8,
+                display: "flex", alignItems: "flex-start", gap: 8,
+                padding: "7px 8px 7px 11px", borderRadius: 8,
+                background: "var(--bg-secondary)",
+                borderLeft: delivered ? "2px solid var(--accent)" : "2px dashed var(--border-hover)",
               }}>
-                {/* 用户气泡卡片：与已发出的用户消息同款，但加一圈虚线强调"尚未发出" */}
-                <div
-                  title={q.text || "（仅图片）"}
-                  style={{
-                    maxWidth: "78%", padding: "9px 13px",
-                    borderRadius: "16px 16px 4px 16px",
-                    background: "var(--accent)", color: "#fff",
-                    border: q.mode === "interrupt" ? "1px solid var(--success)" : "1px dashed rgba(255,255,255,0.55)",
-                    lineHeight: 1.5, fontSize: 13.5, whiteSpace: "pre-wrap", wordBreak: "break-word",
-                    opacity: q.mode === "interrupt" ? 1 : 0.92,
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 5, marginBottom: 2,
+                    fontSize: 11, fontWeight: 600,
+                    color: delivered ? "var(--accent-hover)" : "var(--text-muted)",
                   }}>
-                  {q.text || "（仅图片）"}
+                    {delivered ? <BoltIcon size={11} /> : <ClockIcon size={11} />}
+                    <span>{delivered ? "已作为引导注入当前这轮 · 模型响应中" : "待发 · 本轮结束后自动发出"}</span>
+                  </div>
+                  <div
+                    title={q.text || "（仅图片）"}
+                    className="steer-line-text"
+                    style={{
+                      fontSize: 13, color: delivered ? "var(--text)" : "var(--text-muted)",
+                      lineHeight: 1.55, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    }}>
+                    {q.text || "（仅图片）"}
+                  </div>
                   {q.images.length > 0 && (
-                    <div style={{ marginTop: q.text ? 6 : 0, fontSize: 11.5, opacity: 0.9 }}>
-                      🖼 附带 {q.images.length} 张图
+                    <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-dim)" }}>
+                      🖼 附带 {q.images.length} 张图（图不经引导通道，随下一轮正文发出）
                     </div>
                   )}
                 </div>
-                {/* 右侧三个图标操作（顺序即"改 → 发 → 撤"，与用户给的顺序一致） */}
-                <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0, paddingBottom: 2 }}>
+                {/* 右侧操作：改 → （仅未投递时）引导 → 撤 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0, paddingTop: 1 }}>
                   <QueueAction
                     src={queueEditIcon} label="修改"
                     title="修改这条：内容放回输入框（并可带图），同时从待发里撤下"
                     onClick={() => editQueueItem(q)} />
-                  <QueueAction
-                    src={queueInsertIcon} label="直接插入"
-                    title="直接插入：立刻发出这条。当前这一轮会就地收尾（已产出的内容照常保留落库），随即接续你这条 —— 不是粗暴掐断"
-                    onClick={() => void insertQueueItemNow(q.id)} />
+                  {!delivered && (
+                    <QueueAction
+                      src={queueInsertIcon} label="引导"
+                      title={insertNowTitle()}
+                      onClick={() => void insertQueueItemNow(q.id)} />
+                  )}
                   <QueueAction
                     src={queueCancelIcon} label="撤销删除"
                     title="撤销删除：把这条从待发里移除，不再发送"
                     onClick={() => removeQueueItem(q.id)} danger />
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
+        )}
+        {/* A-1078：坞**移出 `.glass-input` 那个圆角框**（用户原话：「我要的是**悬浮窗，不用框起来**」）
+            —— 它是浮在输入区**外面**的一层，所以必须与那个框**平级**（排在它**之前**），
+            而不是嵌在框里（嵌进去就成了"被框起来"的一块）。
+            下面 CSS 的 8px 间距就是用户要的「不要跟下面的窗口碰着，要有几个像素的距离」。
+            ⚠️ 依赖 `pendingAsk`：问答题界面占满输入框时坞不显示（与移动前的可见性一致）。 */}
+        {!pendingAsk && (
+          <>
+              {/* ══ A-1074（#230）：输入框上方的「悬浮按钮坞」——必须排在**监测栏上面** ═════════
+                  用户原话：「改成输入框正上方的最右边悬浮按钮，点击后横向延伸再向上展开，动画与
+                  产物卡片同族」「子代理从右侧监测栏移出，做成同款悬浮按钮」「一个展开时另一个渐出」。
+                  ⚠️ A-1077 位置更正：用户看了实物后指出「我说的位置也不是这里，还要在监测栏上面」
+                  —— 坞必须排在 tokens / 耗时 / context 那条监测栏**之上**（此前它排在监测栏**下面**）。
+                  所以它是本组 footer 的**第一个**孩子。
+
+                  三件事各有**结构保证**，都不靠「小心」：
+                    ① 位置 = 在监测栏那条含 `context-tokens-num` 的 <div> **之前**，靠
+                       `justify-content: flex-end` 贴**最右边**；
+                    ② 向上展开 = 面板 `position:absolute; bottom:100%` —— 高度涨、底边钉住 ⇒ 向上长，
+                       输入框**零位移**（A-1069 那版在文档流里往下撑，会把输入框整个顶下去）；
+                    ③ 互斥 = 展开态是**单值** `dock`（见 floatDock.ts）。「两个同时展开」没有对应状态，
+                       「另一个渐出」也从同一个单值派生 ⇒ 两处不可能说法不一致。
+                  「与产物卡同族」是**结构保证**的：面板内部**直接用** `.collapse` 这个类（不是仿一个，
+                  也不是另写一套时长），于是节拍永远同源（--collapse-dur / --collapse-ease）。
+                  「横向延伸」= 胶囊里的摘要 `max-width: 0 → 420px`（+ opacity）：收起时那一段宽度为 0，
+                  所以胶囊是紧凑的（⚠️ 试过 `grid-template-columns: 0fr` —— 列轨在**非定宽**容器里
+                  按内容算，收起态根本收不拢，胶囊会被摘要撑成通栏）；展开时才吃出宽度。 */}
+              <div className="float-dock">
+                {agentProcs?.any && (
+                  <>
+                    <div className="dock-panel">
+                      <div className={`collapse${procsOpen ? " is-open" : ""}`}>
+                        <div className="dock-panel-card">
+                          <div style={{
+                            padding: "8px 11px", borderBottom: "1px solid var(--border)",
+                            fontSize: 12, fontWeight: 700, color: "var(--text)",
+                          }}>Agent 启动的后台资源</div>
+                          <div style={{ maxHeight: 340, overflow: "auto" }}>
+                            {agentProcs.entries.map((e, i) => (
+                              <div key={`${e.kind}:${e.id}:${i}`} style={{
+                                display: "flex", alignItems: "center", gap: 7,
+                                padding: "6px 9px", borderTop: i === 0 ? undefined : "1px solid var(--border)",
+                              }}>
+                                <span style={{
+                                  flexShrink: 0, fontSize: 10, padding: "1px 5px", borderRadius: 6,
+                                  background: "var(--bg-hover)", border: "1px solid var(--border)", color: "var(--text-dim)",
+                                }}>{e.kindLabel}</span>
+                                <span style={{
+                                  color: "var(--text)", fontSize: 12, flexShrink: 0,
+                                  maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                }} title={e.label}>{e.label}</span>
+                                <span style={{
+                                  color: "var(--text-dim)", fontSize: 11, flex: 1, minWidth: 0,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                }} title={e.detail}>{e.detail}</span>
+                                {e.elapsed && (
+                                  <span style={{ color: "var(--text-dim)", fontSize: 10.5, flexShrink: 0 }}>{e.elapsed}</span>
+                              )}
+                              <span style={{ color: "var(--accent)", fontSize: 10.5, flexShrink: 0 }}>{e.status}</span>
+                              <button
+                                onClick={() => stopAgentProc(e.kind, e.id || undefined)}
+                                disabled={procsBusy === `${e.kind}:${e.id ?? ""}`}
+                                title={`停止这一项（${e.kindLabel}）`}
+                                style={{
+                                  flexShrink: 0, fontSize: 10.5, padding: "1px 7px", borderRadius: 6,
+                                  cursor: procsBusy === `${e.kind}:${e.id ?? ""}` ? "default" : "pointer",
+                                  background: "transparent", border: "1px solid var(--border)",
+                                  color: procsBusy === `${e.kind}:${e.id ?? ""}` ? "var(--text-dim)" : "var(--danger)",
+                                }}
+                              >{procsBusy === `${e.kind}:${e.id ?? ""}` ? "停止中…" : "停止"}</button>
+                            </div>
+                          ))}
+                        </div>
+                        {procsError && (
+                          <div style={{ padding: "0 11px 8px", fontSize: 11, color: "var(--danger)" }}>{procsError}</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <span className={dockSlotClassOf(procsSlot.open, procsSlot.faded)}>
+                    <button
+                      className="dock-pill"
+                      onClick={() => toggleDockSlot("procs")}
+                      title={procsOpen ? "收起后台资源" : "展开后台资源（Agent 启动的，可单独停止）"}
+                    >
+                      {/* A-1079：箭头**朝上**（收起态）—— 面板是从按钮**上沿向上**浮出来的，
+                        箭头要指"内容将往哪出现"；展开后翻成朝下（点一下收回去）。
+                        全仓约定 ChevronIcon 基准朝右 ⇒ 收起 270°=朝上、展开 90°=朝下。
+                        ⚠️ 别退回 `open ? 90 : 0`（那样收起态朝右，看不出是往上展开）。 */}
+                    <ChevronIcon size={11} rotate={procsOpen ? 90 : 270} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                      <span style={{ flexShrink: 0 }}>后台进程</span>
+                      <span style={{
+                        flexShrink: 0, padding: "0 6px", borderRadius: 8, lineHeight: "15px",
+                        background: "var(--accent)", color: "#fff", fontSize: 10.5, fontWeight: 600,
+                    }}>{agentProcs.count}</span>
+                    {/* A-1079：**不再有"横向延伸"的摘要段** —— 用户原话：「你这样设计直接向上展开
+                        窗口的话，那个按钮就不用像第二张图那样扩展了」。胶囊任何状态下都紧凑。 */}
+                  </button>
+                  </span>
+                </>
+              )}
+              {/* 子代理：同一个坞、同一套类名（A-1074 —— 已从底部监测栏移出） */}
+              <SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot("subs")} />
+            </div>
+          </>
         )}
         <div className="glass-input" style={{
           borderRadius: 18, border: "1px solid var(--border-hover)",
@@ -5590,9 +6449,9 @@ export default function ChatPanel({
                 <span style={{ color: "var(--text-dim)", marginLeft: 2 }}>tokens/s</span>
               </span>
               <span style={{ color: "var(--text-dim)" }}>|</span>
-              <span title="当前会话完整上下文（历史消息 + 流式输出）实时估算" style={{ display: "inline-flex", alignItems: "baseline", gap: 4 }}>
+              <span title="当前会话输入侧上下文占用（与右侧栏、上下文环同源：done 时被上游真实 prompt_tokens 校准）" style={{ display: "inline-flex", alignItems: "baseline", gap: 4 }}>
                 <span className="context-tokens-num" style={{ color: "var(--text)", fontWeight: 600, transition: "color 0.3s ease, transform 0.25s ease", display: "inline-block" }}>
-                  {contextTokens < 1000 ? contextTokens : contextTokens < 10000 ? `${(contextTokens / 1000).toFixed(1)}K` : `${Math.round(contextTokens / 1000)}K`}
+                  {fmtTokens(ctxUsed, ctxCap)}
                 </span>
                 <span style={{ color: "var(--text-dim)" }}>context</span>
               </span>
@@ -5604,8 +6463,9 @@ export default function ChatPanel({
                   </span>
                 </>
               )}
-              {/* A-976：子代理展开按钮 */}
-              <SubAgentExpandButton />
+              {/* A-1074（#230）：子代理入口**已移出本监测栏** —— 用户原话「子代理从右侧监测栏移出，
+                  做成同款悬浮按钮」。本行从此**只报数**（tokens / 耗时 / tokens·s⁻¹ / context / 模型），
+                  两个控件（后台进程 / 子代理）都在输入框正上方的坞里（见 float-dock 那段）。 */}
             </>)}
           </div>
           {/* A-969：上下文自动压缩过渡动画（发送前触发；prep→summarize→done/trunc，完成后自动收起并继续发送） */}
@@ -5644,7 +6504,23 @@ export default function ChatPanel({
               {compressUi.stage === "trunc" && (
                 <>
                   <WarningIcon size={13} style={{ color: "var(--warning)", flexShrink: 0 }} />
-                  <span style={{ color: "var(--text)" }}>摘要生成不可用，已保留最近 {compressUi.dropped ?? 0} 轮对话并继续发送</span>
+                  <span style={{ color: "var(--text)" }}>摘要生成不可用，已保留最近 {compressUi.dropped ?? 0} 条对话并继续发送</span>
+                </>
+              )}
+              {/* A-1082：未压缩也要**如实说明原因**（旧实现静默 —— 用户看到「逼近阈值却毫无动作」） */}
+              {compressUi.stage === "skip" && (
+                <>
+                  <WarningIcon size={13} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                  <span style={{ color: "var(--text)" }}>未执行压缩：{compressUi.reason ?? "未达触发条件"}</span>
+                </>
+              )}
+              {/* A-1082 / §8.8：压完仍超限是一等状态，必须明说「换模型或开新会话」，不许静默 */}
+              {compressUi.stage === "overflow" && (
+                <>
+                  <WarningIcon size={13} style={{ color: "var(--danger)", flexShrink: 0 }} />
+                  <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 620 }} title={compressUi.reason}>
+                    {compressUi.reason ?? "压缩后仍超限"}
+                  </span>
                 </>
               )}
             </div>
@@ -5676,6 +6552,12 @@ export default function ChatPanel({
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{pendingImages.length}/4 张 · 模型将识别图中内容</span>
             </div>
           )}
+          {/* A-1062 的 ◉引导 / ○排队 方向行 + 后果行已**整体撤销**（用户原话：「这个选项也没必要，
+              原本的就够了，排队不直接发送，不排队直接发送，你还专门划分一下，很多余」）。
+              撤销后两条路各自有**自己的动作**，不再需要一个方向开关：
+                · 回车 = 加入待发（排队，不直接发送）→ 文案由 steerPlaceholder/steerSubmitTitle 说清；
+                · 待发卡片上的「现在插入」= 直接发送（注进正在跑的这轮）→ 文案由 insertNowTitle 说清。
+              ⚠️ 别为了"更清楚"再往输入框上方叠常驻说明 —— 用户明确嫌它多余。 */}
           {/* A-1056②：原来的 onFocus/onBlur → setInputFocused 只为"暂停底部激励语轮播"而存在；
               轮播机制已整体移除（改由状态行在阶段超时后自持时钟播），这两个 handler 就成了纯负担 ——
               输入框每聚焦/失焦一次都让整个面板重渲染一遍（白送的渲染成本）。一并删除。 */}
@@ -5737,9 +6619,14 @@ export default function ChatPanel({
                 setAtOpen(false);
               }
             }}
-            placeholder={sessionType === "brainstorm"
-              ? "发消息即议题：@成员名 点名回复；@全体/不 @ 全员抢答（先想好先发言）；全程实时流式…"
-              : "输入消息（Enter 发送，/ 展开指令，Shift+Enter 换行；可粘贴 / 拖拽图片识图）"}
+            placeholder={(loading || stopping)
+              /* 运行中必须说**这句话会去哪**（回车 = 加入待发/排队），不能再沿用"输入消息
+                 （Enter 发送）"那种**新消息**口径 —— 那正是"插入会打断/会重来"误判的来源。
+                 文案唯一出处 insertCopy.steerPlaceholder，与发送按钮 title 同源。 */
+              ? steerPlaceholder()
+              : sessionType === "brainstorm"
+                ? "发消息即议题：@成员名 点名回复；@全体/不 @ 全员抢答（先想好先发言）；全程实时流式…"
+                : "输入消息（Enter 发送，/ 展开指令，Shift+Enter 换行；可粘贴 / 拖拽图片识图）"}
             rows={1}
             // A-164：不再 disabled={loading} —— loading 时输入框必须可编辑，
             // 否则「停止后输入框出现已发信息且无法更改」（用户实测）；loading 时发送走插入
@@ -5920,9 +6807,9 @@ export default function ChatPanel({
                 {/* A-1054⑥：**生成中也能点发送**（此前这一段只渲染停止按钮，鼠标用户根本无法插入指令，
                     只能按回车 —— 而回车走的是同一个 send()）。
                     A-1056③：title 里不再出现「即将插入 / 中途插入」这类实现词 —— 直接说会发生什么。 */}
-                {(input.trim() || pendingImages.length > 0) && (
+                {canSubmitSteer(input, pendingImages.length) && (
                   <button onClick={() => void send()}
-                    title="加入待发：本轮结束后自动按顺序发出。想立刻发就在下方待发卡片上点「直接插入」"
+                    title={steerSubmitTitle()}
                     style={{
                       width: 38, height: 38, borderRadius: "50%", border: "none",
                       background: "#fff", color: "#1e293b", cursor: "pointer",
