@@ -53,8 +53,12 @@ function truncateWithDiffTag(raw: string, limit: number): string {
  *
  * A-1034：**导出**供 `services/chat.ts` 把标记一并写进思考记录 —— 历史回看时
  * 只能从思考记录重建工具节点，若这里各写一份正则，改一处必漂。
+ *
+ * ⚠️ A-1093：正则本体已上移到 `core-ts/src/diff_marker.ts`（与产地同源）。
+ *    这里保留同名导出是为了不动既有消费者与守卫；**新代码请直接 import `diff_marker`**。
  */
-export const DIFF_TAG_RE = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/;
+export { DIFF_MARKER_RE as DIFF_TAG_RE } from "./diff_marker.js";
+import { DIFF_MARKER_RE as DIFF_TAG_RE } from "./diff_marker.js";
 
 /** 回传给界面展示的工具结果字符上限（默认值） */
 const DISPLAY_LIMIT_DEFAULT = 1200;

@@ -51,15 +51,58 @@ export interface ToolEvent {
  * 两处各写一份正则，必然出现"同一条命令在执行中显示成功、在卡片里显示失败"的漂移
  * （本项目反复吃过"同一件事两个产地"的亏，见 ref-engineering §8-1）。
  *
- * 入参是**已剥离 diff 标记并 trim 过**的文本（`stripDiffTag(...).trim()`）——
- * 与原有内联实现口径逐字一致，故这是纯搬迁，不是行为变更。
+ * 入参是**已剥离 diff 标记并 trim 过**的文本（`stripDiffTag(...).trim()`）。
+ *
+ * ── A-1094：补两类**漏网**（用户截图原话：「怎么有时候内容报错了都给我在卡片右侧
+ *    标一个成功？这箭头标号都出来了」）────────────────────────────────────────
+ * 旧判据只认**行首**的失败前缀，于是以下两种真实存在的形态被判成"成功"（已用真实
+ * `config/history.jsonl` 取证，两族各有多条）：
+ *
+ *   ① **子代理中断族**：`[子代理结果] 调研员 · 状态：超时中断 · 耗时 323.3s …`
+ *      —— 行首是 `[子代理结果]`（中性前缀），失败语义在**句中**（「超时中断」）。
+ *      旧判据：`^\[(...)\]` 只列了 8 个中性前缀，`[子代理结果]` 不在其中，
+ *      而行首匹配又要求"错误/失败"打头 ⇒ 落进"成功"。这是**任务没跑完却报成功**。
+ *   ② **安全拦截族**：`[安全拦截] 工具 'terminal_run' 被硬规则拒绝（…）`
+ *      —— 行首是 `[安全拦截]`，同样是中性前缀，而这是**调用压根没执行**。
+ *
+ * ⚠️ 修法刻意**不是**再往中性前缀表里加两个词（那只是把同一类漏网往后推一次），
+ *    而是分成两臂：
+ *      · **中性臂**（白名单）：明确的中性/完成前缀 ⇒ 直接判成功，不再往下看。
+ *        白名单必须**保持窄**：多一个词就会把真失败吞掉。
+ *      · **失败臂**（黑名单）：行首失败前缀 **或** 句中**无歧义**的失败标记。
+ *        句中臂只收"出现了就不可能成功"的形态（`超时中断` / `被硬规则拒绝` / `Traceback`…），
+ *        绝不收 `error` 这种会被正常输出里的单词误伤的宽词（如日志回显里就带 INFO/ERROR 字样）。
+ *
+ * ⚠️ 判据的**保守方向**是"宁可漏判失败，也不要把成功说成失败"——但"任务中断"不属于这一档：
+ *    那是**确定性**的未完成，必须报出来。
  */
+const NEUTRAL_PREFIX_RE = /^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存|已记忆|已记录)\]/i;
+
+/** 行首即失败（原有口径，不动） */
+const FAIL_PREFIX_RE = /^(\[错误\]|\[失败\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i;
+
+/**
+ * 句中失败标记（A-1094 新增）：**仅收无歧义**的形态。
+ *
+ * 每一条都对应一次真实的误报成功：
+ *   · `超时中断` / `已中断` / `中断超时` —— 子代理结果里"任务没跑完"的措辞
+ *     （`services/subagent.ts` 的 `TIMEOUT_MARK`；同时覆盖"执行超时"的表述）
+ *   · `被硬规则拒绝` / `安全拦截` —— 工具网关 `hard_rules.ts` / `classifier.ts` 的拒绝回执
+ *   · `Traceback (most recent call last)` —— Python 脚本崩溃的标准首行
+ *   · `执行失败` / `调用失败` / `请求失败` —— 中文失败措辞（行首版不覆盖句中）
+ *
+ * ⚠️ **不要**在这里加 `error` / `failed` / `错误`：工具回显的日志正文里、
+ *    "0 errors"这类计数里都可能有，加了就会把成功判成失败（反向静默失效）。
+ */
+const FAIL_INLINE_RE = /(超时中断|已中断|执行超时|调用超时|被硬规则拒绝|安全拦截|Traceback \(most recent call last\)|执行失败|调用失败|请求失败|任务失败)/;
+
 export function isToolFailResult(text: string | undefined): boolean {
   const r = (text ?? "").trim();
   if (r.length === 0) { return false; }
-  // 子代理委派 / 提示类前缀是成功或中性消息，绝不判失败
-  if (/^\[(已委派|提示|成功|完成|已发送|已创建|已更新|已删除|已保存)\]/i.test(r)) { return false; }
-  return /^(\[错误\]|\[失败\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);
+  // 中性臂：明确的中性/完成前缀 ⇒ 成功（**先判**，避免"提示：xxx 超时中断"这类被句中臂误伤）
+  if (NEUTRAL_PREFIX_RE.test(r)) { return false; }
+  if (FAIL_PREFIX_RE.test(r)) { return true; }
+  return FAIL_INLINE_RE.test(r.slice(0, 400));
 }
 
 /** A-1007：产物卡条目。kind 为写/读（暂无删除类工具，删除体现为 diff 的红色 - 行）。 */
@@ -123,12 +166,30 @@ export function stripDiffTag(raw: string | undefined): string {
     .trim();
 }
 
-/** 产物卡工具集——diff 变更统计解析：解析 file_write result 内嵌的
+/**
+ * 产物卡工具集——diff 变更统计解析：解析 file_write result 内嵌的
  *  [__slime_diff__]base64(old)|base64(new)[/__slime_diff__] 变更统计（A-172 同款标记）：
- *  行级近似（new 相对 old 净增/净删行数）；无标记/base64 损坏 → null（不显示 +n -m）。 */
+ *  行级近似（new 相对 old 净增/净删行数）；无标记/base64 损坏 → null（不显示 +n -m）。
+ *
+ * ⚠️ A-1093：**显示判据是 `add > 0 || del > 0`，不是 `&&`**。用户原话：
+ *   「要同时有增有删才显示？**不行，都给我显示**。」
+ *
+ *   旧实现写的是 `add > 0 && del > 0`，而 `add`/`del` 是**行集合差**：
+ *     · 新建文件（old 为空）→ 只有 add、没有 del → `del === 0` → **徽标不显示**；
+ *     · 纯追加 / 纯删除 → 同理 → **不显示**。
+ *   于是"新建一个文件"——最常见的那种写入——恰恰是唯一看不到改动数字的场景。
+ * ⚠️ 口径与 core 侧 `diff_marker.ts` 的 `diffStatOf`/`hasVisibleDiff` **必须同规**
+ *   （渲染层不能用 Buffer，故这里是 `atob` 版本；一致性由跨实现用例钉死）。
+ *
+ * ⚠️ 位置重排（同样的行、不同顺序）会算出 `add=0, del=0` → 不显示。这是**已知且接受**的
+ *   近似：内容确实一行没多一行没少，报 0 比报"删 N 增 N"更贴近用户的直觉。
+ */
 export function parseDiffStat(result: string | undefined): { add: number; del: number } | null {
   if (!result) { return null; }
-  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
+  // ⚠️ A-1093：两侧量词是 `*` 而非 `+` —— 新建文件时 base64(old) 是空串，
+  //   用 `+` 会让"新建文件"这条最该显示改动的路径匹配不上（标记在、解析给 null）。
+  //   此处与 core 侧 `diff_marker.ts` 的 `DIFF_MARKER_RE` **必须逐字符同源**。
+  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]*)\|([A-Za-z0-9+/=]*)\[\/__slime_diff__\]/.exec(result);
   if (!m) { return null; }
   const oldTxt = b64ToText(m[1]);
   const newTxt = b64ToText(m[2]);
@@ -138,6 +199,7 @@ export function parseDiffStat(result: string | undefined): { add: number; del: n
   let add = 0, del = 0;
   for (const l of newLines) { if (l && !oldLines.has(l)) { add += 1; } }
   for (const l of oldLines) { if (l && !newLines.has(l)) { del += 1; } }
+  // A-1093：`||` —— **有任何改动就显示**（旧写法是 `&&`，见上方注释）
   return add > 0 || del > 0 ? { add, del } : null;
 }
 
@@ -219,7 +281,9 @@ export function diffNoticeKind(
  *  （两者取舍不同：一个怕卡渲染，一个怕撑爆 localStorage）。 */
 export function parseDiffFull(result: string | undefined, maxChars = DIFF_FULL_MAX_RENDER): { old: string; new: string } | null {
   if (!result) { return null; }
-  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]+)\|([A-Za-z0-9+/=]+)\[\/__slime_diff__\]/.exec(result);
+  // ⚠️ A-1093：与 parseDiffStat / core 侧 DIFF_MARKER_RE 同源 —— 用 `*` 允许空的一侧，
+  //   否则新建文件（old 为空）展开后永远看不到红绿 diff 块。
+  const m = /\[__slime_diff__\]([A-Za-z0-9+/=]*)\|([A-Za-z0-9+/=]*)\[\/__slime_diff__\]/.exec(result);
   if (!m) { return null; }
   const oldTxt = b64ToText(m[1]);
   const newTxt = b64ToText(m[2]);

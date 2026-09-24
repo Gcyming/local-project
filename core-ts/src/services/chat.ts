@@ -39,6 +39,8 @@ import { AlarmBus, getAlarmBus, AlarmSeverity } from "./stats.js";
 import { getSession } from "./sessions.js";
 // A-1034：diff 标记正则的唯一出处（tool_loop 负责截断时保护它，这里负责把它写进思考记录）
 import { DIFF_TAG_RE } from "../tool_loop.js";
+// A-1093：标记字面量的唯一出处（`diff_marker.ts`）—— 正则、占位符、构造器、统计口径同源。
+import { DIFF_TRIMMED_MARKER as DIFF_TRIMMED_TAG } from "../diff_marker.js";
 
 // ── 常量（对齐 slime_server.py）────────────────────────────
 
@@ -108,8 +110,7 @@ export function toolDisplayName(name: string): string {
  */
 const TRACE_DIFF_MAX = 60_000;
 
-/** 超限时写进思考记录的位置占位：告知"曾有改动、但详情没存" */
-const DIFF_TRIMMED_TAG = "[__slime_diff_trimmed__]";
+/** 超限时写进思考记录的位置占位：告知"曾有改动、但详情没存"（标记字面量的唯一出处见 `diff_marker.ts`） */
 
 /** 从工具结果里取出可直接写进思考记录的 diff 片段（无标记/超限各有对应形态）。
  *  导出供守卫直测阈值边界 —— 只测"函数能跑"等于没测。 */

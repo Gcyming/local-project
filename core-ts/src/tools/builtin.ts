@@ -37,6 +37,9 @@ import { toOptimizedDataUrl } from "../screen/optimize.js";
 import { registerBrowserTools } from "./browser.js";
 // A-983：子代理执行预算的**唯一真源**（等待上限由它推导，避免两处手写字面量漂移）
 import { DEFAULT_EXEC_BUDGET_MS } from "../services/subagent.js";
+// A-1093：改动标记的**唯一产地**（`[__slime_diff__]old|new[/__slime_diff__]`）。
+// 此前是下面 fileWrite 里一行内联模板串，与三处解析各写各的 —— 格式漂一次就全线失灵。
+import { buildDiffMarker } from "../diff_marker.js";
 
 const execFileP = promisify(execFile);
 const execP = promisify(execCb);
@@ -418,9 +421,16 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
     await writeFile(tmp, data);
     await rename(tmp, abs);
     // A-918++：嵌入 diff 标记（旧 vs 新 base64 编码，renderer 端解析并渲染红绿行块；未变更不嵌）
-    const changed = oldContent !== content;
-    const b64 = (s: string) => Buffer.from(s, "utf-8").toString("base64");
-    const diffTag = changed ? `\n[__slime_diff__]${b64(oldContent)}|${b64(content)}[/__slime_diff__]` : "";
+    //
+    // ⚠️ A-1093：**这一段是"写死"的，没有开关**。用户原话：「都给我显示……把这个会显示修改对比的
+    //    设定写死在 slime，反正以后也不会删掉。顶多改一下前端的 UI 表现样式。」
+    //    ⇒ 只要 `oldContent !== content` 就必须产出标记；标记会不会被显示、显示成什么样，
+    //      是**渲染层**的事（见 `gui/src/renderer/pages/chatProducts.ts` 的 `hasVisibleDiff`）。
+    //    ⇒ 任何"要不要带 diff""只在大改动时带"的所谓优化，都是把这行判据重新变成可选开关 = 回归。
+    //
+    // ⚠️ 标记构造走 `buildDiffMarker`（`core-ts/src/diff_marker.ts`，唯一产地）：
+    //    格式字符串散在产地与三个消费者里时，"改了一处"就等于"三处静默失效"。
+    const diffTag = buildDiffMarker(oldContent, content);
     return `已保存 ${data.length} 字节到 ${abs}${diffTag}`;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
