@@ -189,13 +189,31 @@ export interface ChatRequest {
   images?: string[];
   /** 故障自愈续接提示：自动重连/换模型继续时告知模型『你被中断了，从断点继续』，防幻觉已完成 */
   resumeHint?: string;
+  /**
+   * A-1084：本次请求**实际要用的模型**窗口上限（由主进程 `resolveSessionWindowCap` 解析后透传）。
+   *
+   * 为什么要它：引擎里那道**保险门**（`planEngineSend`）必须知道"这个模型到底能装多少"，
+   * 否则只能在窗口未知时放行 —— 而"绕过主进程预检的入口"（群聊/子代理/强制工具轮）
+   * 恰恰就在这里失去了保护。缺省 undefined = 未知 ⇒ 不拦（不猜，零回归）。
+   */
+  windowCap?: number;
 }
 
 /** 引擎事件块（对齐 Python call_llm_stream chunk 协议） */
 export interface EngineChunk {
-  type: "chunk" | "tool" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member";
+  type: "chunk" | "tool" | "tool-start" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member" | "steer" | "notice";
   content?: string;
   name?: string;
+  /**
+   * A-1061②：工具调用 id（`tool-start` 与 `tool` 同值，界面靠它把「执行中」翻成「成功/失败」）。
+   */
+  toolId?: string;
+  /**
+   * A-1060：中途「引导」已被注入本轮上下文（type="steer"）。
+   * 值是渲染层待发卡片的自增 id —— 界面据此撤掉那张卡片，避免它走"排队等下一轮"再发一遍。
+   * `content` 同时携带原文，供界面就地补上用户气泡。
+   */
+  steerId?: string;
   /** 团队会话：成员发言事件（type="member"）的发声 Agent ID */
   agentId?: string;
   args?: string;
@@ -297,6 +315,11 @@ export interface ChatEngineCall {
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
+  /**
+   * A-1084：本条请求的模型窗口上限（主进程解析后透传；见 `ChatRequest.windowCap`）。
+   * 引擎在**发上游之前**用它跑 `planEngineSend` —— 装不下就**不出网**（发了只会被拒/挂住）。
+   */
+  windowCap?: number;
 }
 
 export interface ChatEngine {
@@ -2004,6 +2027,9 @@ export class ChatService {
         workspace,
         sessionId: req.sessionId,
         images: req.images,
+        // A-1084：把"这个模型能装多少"透传到引擎 —— 引擎侧的保险门（planEngineSend）靠它
+        // 判定"发不发"。缺省 undefined 时引擎不拦（窗口未知不猜）。
+        windowCap: req.windowCap,
         // 断链 A 修复：联网开关必须原样透传到引擎 → 工具循环（此前漏传 → tool_loop 缺省 true → 闸门永死）。
         // ChatRequest.networkEnabled 已声明，这里只是接线；不传时保持 undefined（保住 A-918+「缺省即开」语义）。
         networkEnabled: req.networkEnabled,
@@ -2046,6 +2072,34 @@ export class ChatService {
           errorMsg = chunk.message ?? "";
           fullReply = errorMsg;
           this.alarm("chat.stream", `${agent.name}: ${errorMsg.slice(0, 200)}`, "warning");
+          yield emitChunk(chunk);
+        } else {
+          /* A-1064：**未列举的类型一律原样透传** —— 绝不静默吞事件。
+           *
+           * 这一条 else 是一个真实的、用户可见的缺陷的修复（bug 形状：**链路中间少一环**）。
+           * `EngineChunk["type"]` 声明了 11 种事件，本循环的 if 链只列举了 6 种，且**没有兜底**
+           * → 剩下的 `tool-start` / `steer` / `notice` 走到这里被**静默丢弃**。
+           *
+           * 为什么长期没被发现：三个必要环节**各自都有守卫**，唯独缺中间这一环 ——
+           *   · `tool_loop.ts` 确实在工具执行前广播了 `tool-start`（有测试）；
+           *   · `engine.ts` 确实把它抬进 liveQueue（有测试）；
+           *   · 类型联合与主进程白名单确实认它（有测试）；
+           *   · 界面 `onChunk` 确实有 `tool-start` 分支（有测试）；
+           * 而"引擎 → 界面"之间的**这一跳没有任何测试**，于是四段各自绿、整条链路断。
+           *
+           * 用户侧症状（全部同一个根因）：
+           *   ① 中途「引导」已被注入本轮，但 `steer` 事件到不了界面 → 那张待发卡片**不被撤掉**
+           *      → 本轮结束 `onDone` 的续发路径把它当普通排队**再发一遍**（用户原话：
+           *      "引导内容仍然在排队队列？而且会在这轮输出完毕后再次输出"）；
+           *   ② 同一条 `steer` 事件还负责把引导折进**思考历程** → 历程里看不到自己插入的引导；
+           *   ③ `tool-start` 到不了界面 → 脚本/命令**没有"执行中"态**，只有事后成败；
+           *   ④ `notice` 到不了界面 → 上游重试期仍是静默的"加载半天没动静"。
+           *
+           * 用**兜底 else** 而不是补三个 `else if`：根因不是"漏了三个名字"，而是"这个循环允许静默
+           * 丢弃"。补名字只治这一次，下一次往联合里加事件类型会**再犯一遍同样的错**（本项目
+           * 已在"同一语义多个产地"上反复踩坑）。兜底之后，新类型默认安全；真需要变形
+           * （如 `chunk` 剥思考、`done` 挂起）的**显式**在前面的分支里处理。
+           * ⚠️ 因此**不要**把这个 else 挪到前面，也不要在它之后再加 `else if`（永远不生效）。 */
           yield emitChunk(chunk);
         }
       }
