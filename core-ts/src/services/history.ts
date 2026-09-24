@@ -270,6 +270,25 @@ export async function removeAgentHistory(agentId: string): Promise<number> {
   });
 }
 
+/**
+ * 取尾部 `limit` 条；**`limit <= 0` = 不限**（返回全部）。
+ *
+ * ⚠️ 为什么必须把这个判断显式写出来，而不是靠 `records.slice(-limit)`：
+ *    `-0 === 0` 是 JS 的隐式细节 ⇒ `slice(-0)` 恰好等于 `slice(0)`（= 全部）。
+ *    语义**碰巧**对，但任何一次"顺手加固"（`Math.abs(limit)`、`limit || 默认值`）
+ *    都会**静默**把它变成"一条都不返回"或"回落到默认上限" ——
+ *    而压缩摘要轮依赖"不限"来覆盖全部历史（见 `loadSessionHistory` 的 `full` 选项），
+ *    这种漂移在界面上完全看不出来（只会表现为"摘要似乎漏了早期内容"）。
+ *
+ *  ⚠️ 刻意 **export**：它是纯函数、且是 A-1085 的核心判据 ——
+ *     导出后守卫能直接喂 `limit = 0 / -1 / NaN` 断言行为，而不是去读源码字面量
+ *     （读源码的守卫过不了变异："改坏了但断言仍然匹配"）。
+ */
+export function tailLimit<T>(records: T[], limit: number): T[] {
+  const n = Number.isFinite(limit) ? Math.floor(limit) : 0;
+  return n > 0 ? records.slice(-n) : records;
+}
+
 export async function loadHistory(
   agentId: string | null = null,
   limit = 200,
@@ -289,10 +308,15 @@ export async function loadHistory(
       // 损坏行跳过
     }
   }
-  return records.slice(-limit);
+  return tailLimit(records, limit);
 }
 
-/** 按会话加载（旧记录无 session_id → 归入该 Agent 的首个会话） */
+/** 按会话加载（旧记录无 session_id → 归入该 Agent 的首个会话）。
+ *
+ *  A-1085：`limit <= 0` = **不限**（返回该会话全部记录）。
+ *  ⚠️ 摘要轮（上下文压缩）**必须**用不限：否则摘要只覆盖"最后 limit 条"，
+ *     更早的对话**从未进入摘要** —— 界面报"已压缩"，而早期内容既不在摘要里、
+ *     也不在保留尾巴里，等于**静默丢失**（"压缩并非真压缩"的又一副面孔）。 */
 export async function loadHistoryForSession(
   agentId: string,
   sessionId: string,
@@ -314,7 +338,7 @@ export async function loadHistoryForSession(
       // 损坏行跳过
     }
   }
-  return records.slice(-limit);
+  return tailLimit(records, limit);
 }
 
 /** A-980-R18：分页加载更早历史——返回 beforeTs（ISO，字典序可比）之前的最近 limit 条 + 是否还有更早。

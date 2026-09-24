@@ -7,12 +7,17 @@
  * 环境：vitest node（无 localStorage）——测试内注入内存存储桩。
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   sessionCtxStorageKey,
   readSessionCtxMeta,
   updateSessionCtxMeta,
   attachTimelineToHistory,
   restoreUsed,
+  capForModel,
+  normalizeCapModel,
   type SessionCtxMeta,
   type TimelineStepLite,
 } from "../../gui/src/renderer/pages/sessionCtxMeta.js";
@@ -32,6 +37,7 @@ beforeEach(() => {
 
 const AG = "a1";
 const SID = "s1";
+const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const mkMeta = (used = 0, cap = 0, tl: Record<number, unknown> = {}): SessionCtxMeta =>
   ({ used, cap, timelineByAssistantIdx: tl as SessionCtxMeta["timelineByAssistantIdx"] });
 
@@ -128,6 +134,83 @@ describe("restoreUsed（切会话防残留）", () => {
   it("无 meta / used<=0 → 显式归 0（否则残留上一会话）", () => {
     expect(restoreUsed(null)).toBe(0);
     expect(restoreUsed(mkMeta(0, 32000))).toBe(0);
+  });
+});
+
+describe("A-1089 · capForModel：上限是**模型属性**，不是会话属性", () => {
+  const withCap = (cap: number, capModel?: string): SessionCtxMeta =>
+    ({ used: 0, cap, capModel, timelineByAssistantIdx: {} });
+
+  it("🐛 模型对不上 ⇒ 返回 0（调用方据此按**当前模型**重算，而不是沿用旧上限）", () => {
+    // 这正是用户实测的症状：切了模型，环还显示上一个模型的 65K
+    expect(capForModel(withCap(65_536, "api:AGNES:agnes-3.0-flash"), "api:deepseek:deepseek-flash")).toBe(0);
+  });
+
+  it("模型一致 ⇒ 沿用（A-934「重启后权威上限可恢复」的收益不许被抹掉）", () => {
+    expect(capForModel(withCap(65_536, "api:AGNES:agnes-3.0-flash"), "api:AGNES:agnes-3.0-flash")).toBe(65_536);
+  });
+
+  it("归一：空/缺省/纯空白一律按 inherit（否则 undefined 与 inherit 会被判成「换了模型」）", () => {
+    expect(normalizeCapModel(undefined)).toBe("inherit");
+    expect(normalizeCapModel("")).toBe("inherit");
+    expect(normalizeCapModel("   ")).toBe("inherit");
+    expect(normalizeCapModel(" api:x:y ")).toBe("api:x:y");
+    expect(capForModel(withCap(1000), "inherit"), "旧数据（无 capModel）+ 当前 inherit ⇒ 视为同一个").toBe(1000);
+    expect(capForModel(withCap(1000, "inherit"), undefined)).toBe(1000);
+  });
+
+  it("cap<=0 / meta 缺失 → 0，不抛", () => {
+    expect(capForModel(withCap(0, "api:x:y"), "api:x:y")).toBe(0);
+    expect(capForModel(null, "api:x:y")).toBe(0);
+    expect(capForModel(undefined, undefined)).toBe(0);
+  });
+});
+
+describe("A-1089 · updateSessionCtxMeta 必须把 capModel 与 cap 一起落盘", () => {
+  it("写 cap 时同时记下是哪个模型测出来的，且可读回", () => {
+    updateSessionCtxMeta(AG, SID, 1, { cap: 65_536, capModel: "api:AGNES:agnes-3.0-flash" });
+    const back = readSessionCtxMeta(AG, SID);
+    expect(back?.cap).toBe(65_536);
+    expect(back?.capModel, "只写 cap 不写 capModel ⇒ 下次读回来无从判断适用性").toBe("api:AGNES:agnes-3.0-flash");
+  });
+
+  it("后续轮次换模型再写 → capModel 跟着更新（否则会一直认旧模型）", () => {
+    updateSessionCtxMeta(AG, SID, 1, { cap: 65_536, capModel: "api:AGNES:agnes-3.0-flash" });
+    updateSessionCtxMeta(AG, SID, 2, { cap: 131_072, capModel: "api:deepseek:deepseek-flash" });
+    const back = readSessionCtxMeta(AG, SID);
+    expect(back?.cap).toBe(131_072);
+    expect(back?.capModel).toBe("api:deepseek:deepseek-flash");
+  });
+
+  it("cap 缺省（不覆盖）时 capModel **不许**被顺手改掉（否则会错认成当前模型）", () => {
+    updateSessionCtxMeta(AG, SID, 1, { cap: 65_536, capModel: "api:AGNES:agnes-3.0-flash" });
+    updateSessionCtxMeta(AG, SID, 2, { used: 900, capModel: "api:deepseek:deepseek-flash" });
+    const back = readSessionCtxMeta(AG, SID);
+    expect(back?.cap, "cap 没被覆盖").toBe(65_536);
+    expect(back?.capModel, "capModel 跟着换了 ⇒ 会把「agnes 测的 65K」错认成「deepseek 的 65K」").toBe("api:AGNES:agnes-3.0-flash");
+  });
+});
+
+describe("A-1089 · 接线：两处读 cap 都必须过 capForModel，写 cap 必须带 capModel", () => {
+  const PANEL = readFileSync(join(ROOT, "gui/src/renderer/pages/ChatPanel.tsx"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const has = (needle: string, why: string): void =>
+    expect(PANEL.includes(needle), `${why}｜缺少：${needle}`).toBe(true);
+
+  it("🐛 渲染层**不许**再无条件沿用持久化 cap（那正是「上限不跟随模型」的根因）", () => {
+    expect(
+      PANEL.includes("readSessionCtxMeta(agentId, sessionId)?.cap"),
+      "又变回无条件沿用 ⇒ 只要本会话有过一次 done，切模型后上限就永远不动了",
+    ).toBe(false);
+  });
+
+  it("两个读取点（切模型 effect / 会话恢复）都走 capForModel", () => {
+    has("capForModel(readSessionCtxMeta(agentId, sessionId), modelChoice)", "切模型 effect 没走唯一判据");
+    has("capForModel(ctxMeta, modelChoice)", "会话恢复路径没走唯一判据");
+  });
+
+  it("写 cap 时必须同时写 capModel", () => {
+    has("capModel: modelChoice,", "落盘没带模型 ⇒ 下次读回来无从判断适用性");
   });
 });
 

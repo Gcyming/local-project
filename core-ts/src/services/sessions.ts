@@ -98,8 +98,15 @@ export interface SessionMeta {
   updatedAt: string;
   /** A-969 上下文自动压缩：早期对话的压缩摘要（写入后 loadSessionHistory 将旧轮替换为摘要头 + 最近 K 轮） */
   contextSummary?: string;
-  /** 压缩后保留的尾部轮数（K；伴随 contextSummary 写入） */
+  /** 压缩后保留的尾部**轮数**（K；A-1082 起单位为「轮」而非「消息条数」）。
+   *  ⚠️ 与 `contextSummary` **互相独立**：摘要不可用时（trim 档）仍会写 summaryCount，
+   *  此时 loadSessionHistory 走「只裁不摘要」——这是 A-1082 修掉「假压缩」的关键：
+   *  旧实现把两者绑死（summary=null ⇒ 连带删掉 summaryCount），导致降级路径**什么都没裁**。 */
   summaryCount?: number;
+  /** A-1082 压缩后「理解总结」环产出的续接认知（5 字段自述；随摘要一并注入） */
+  contextComprehend?: string;
+  /** A-1082 压缩代次（单调 +1）。压缩是异步的，写入侧用它做 skip-stale（防止过期压缩覆盖新结果） */
+  summaryGeneration?: number;
 }
 
 const DEFAULT_TITLE = "新对话";
@@ -286,8 +293,24 @@ export async function setSessionMemberEffort(sessionId: string, memberId: string
   return updated;
 }
 
-/** A-969 上下文自动压缩：写入会话压缩摘要（summary=null 时清空旧摘要——会话已压缩但摘要不可用时避免陈旧摘要误导模型） */
-export async function setSessionSummary(sessionId: string, summary: string | null, keep = 12): Promise<SessionMeta | null> {
+/**
+ * A-969/A-1082 上下文自动压缩：写入会话压缩产物。
+ *
+ * ⚠️ **语义修正（A-1082）**：`summary` 为 null 时**不再连带删除 `summaryCount`**。
+ * 旧实现把两者绑死，而 `loadSessionHistory` 的注入条件是 `if (meta.contextSummary && …)` ⇒
+ * 摘要不可用的「降级硬裁剪」路径被判为假 ⇒ **返回完整未裁剪历史**：界面报「已压缩 N 轮」，
+ * 实际一个字符都没少 ⇒ 原样重发再次超限（用户症状「压缩并非真压缩」的根因）。
+ *
+ * @param keep         保留的尾部轮数（K，单位=轮）；任何一次压缩都必须写，无论摘要是否成功
+ * @param comprehend   「理解总结」环产出的续接认知（无则清空）
+ * @param bumpGeneration 是否推进 `summaryGeneration`（每次真实压缩落地时 +1）
+ */
+export async function setSessionSummary(
+  sessionId: string,
+  summary: string | null,
+  keep = 6,
+  opts?: { comprehend?: string | null; bumpGeneration?: boolean },
+): Promise<SessionMeta | null> {
   let updated: SessionMeta | null = null;
   await withWriteLock(async () => {
     const all = await readAll();
@@ -295,10 +318,19 @@ export async function setSessionSummary(sessionId: string, summary: string | nul
     if (!meta) { return; }
     if (summary && summary.trim()) {
       meta.contextSummary = summary.trim();
-      meta.summaryCount = Math.max(2, keep);
     } else {
+      // 只清摘要文本：summaryCount 必须保留，否则 trim 档失效（见函数头说明）
       delete meta.contextSummary;
-      delete meta.summaryCount;
+    }
+    meta.summaryCount = Math.max(1, Math.floor(keep));
+    const comprehend = opts?.comprehend;
+    if (comprehend && comprehend.trim()) {
+      meta.contextComprehend = comprehend.trim();
+    } else {
+      delete meta.contextComprehend;
+    }
+    if (opts?.bumpGeneration !== false) {
+      meta.summaryGeneration = (meta.summaryGeneration ?? 0) + 1;
     }
     meta.updatedAt = new Date().toISOString();
     await atomicWrite(all);

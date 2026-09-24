@@ -102,6 +102,14 @@ export const IPC_CHANNELS = {
   /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等右侧栏无力渲染的格式） */
   shell_open_path: "slime:shell:openPath",
   term_exec: "slime:term:exec",
+  /* ── A-1069（#226）：Agent 启动的后台资源面板 ─────────────────────────────
+     范围由用户划定：**仅 Agent 启动的**（屏幕控制常驻宿主 / http_serve 的本地服务 /
+     后台子代理）。应用自身服务（Python 后端、llama-server、MCP、情感脑 sidecar）
+     一概不进这个面板 —— 关掉它等于把应用打瘸，那不是用户想在这里做的事。 */
+  agentprocs_list: "slime:agentprocs:list",
+  agentprocs_stop: "slime:agentprocs:stop",
+  /** 主进程 → 渲染层：后台资源集合发生变化（起/停），让面板立刻刷新而不是靠轮询 */
+  agentprocs_changed: "slime:agentprocs:changed",
 } as const;
 
 /**
@@ -127,10 +135,21 @@ export function isBrowserSchemeUrl(url: string): boolean {
 
 export interface StreamChunk {
   seq: number;
-  type: "chunk" | "tool" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member";
+  type: "chunk" | "tool" | "tool-start" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member" | "steer" | "notice";
   data: {
     content?: string;
     name?: string;
+    /**
+     * A-1061②：工具调用 id —— `tool-start` 与 `tool` 同值，界面据此把那一行
+     * 从「执行中…」翻成「✓ 成功 / ✗ 失败」（与 Claude Code 的 tool_start→tool_end 同一形态）。
+     */
+    toolId?: string;
+    /**
+     * A-1060：中途「引导」已进本轮上下文（type="steer"）。
+     * 值是渲染层待发卡片的 id —— 界面据此撤掉那张卡（它已生效，不该再排队发一遍），
+     * 并用同一事件的 `content` 就地补上用户气泡。
+     */
+    steerId?: string;
     /** A-162: 工具调用的参数原文（tool 事件；前端提取网址/文件路径展示细节行） */
     args?: string;
     /** 工具执行结果（tool 事件；供阶段卡展示/留痕） */
@@ -844,6 +863,44 @@ export interface TermResult {
   error?: string;
 }
 
+/* ── A-1069（#226）：Agent 启动的后台资源 ────────────────────────────────────
+   ① **只借类型**（`import type`）：渲染层刻意不引入 core-ts（见 ChatPanel 的注释
+      「renderer 不引入 core-ts 依赖，避免浏览器构建打包主进程图谱」），而 `import type`
+      在编译后被完全擦除 → 既拿到**唯一出处**的视图类型（不会与主进程漂移），
+      又不把主进程图谱带进浏览器包。本文件第 7 行对 `model-capabilities` 就是同一手法。
+   ② **判据全在主进程侧**：渲染层只负责"把收到的视图画出来 + 把点击转成 {kind,id}"。
+      类别归属、排序、状态词、可否停止 —— 一律由 `core-ts/src/services/agentProcs.ts`
+      的纯函数决定。组件里**不许**出现 `kind === "..."` 这类判断（否则判据就分家了）。 */
+import type { AgentProcEntry, AgentProcView } from "../../../core-ts/src/services/agentProcs.js";
+export type { AgentProcEntry, AgentProcView } from "../../../core-ts/src/services/agentProcs.js";
+
+/* ── A-1090：可救模型（压无可压时的唯一出路）────────────────────────────────
+   同样**只借类型**：`CompressResult.rescueModel` 必须与 `core-ts/services/context_loop`
+   的 `RescuableModel` 逐字段一致 —— 若在这里手抄一份形状，主进程加一个字段（例如 `choice`）
+   而投影没跟上时，***渲染层会静默地少用一个字段***（切模型按钮点了没反应），tsc 也发现不了。
+   用 `import type` 就没有"两份形状"这回事。 */
+import type { RescuableModel } from "../../../core-ts/src/services/context_loop.js";
+
+/** 列表返回：视图**或**失败原因（失败必须能说出来，不许静默给个空列表 ——
+ *  空列表的含义是"没有后台资源"，与"查询失败"完全不同，混在一起会让用户以为没东西在跑）。 */
+export type AgentProcsListResult =
+  | { ok: true; view: AgentProcView }
+  | { ok: false; error: string };
+
+/** 停止请求：`id` 对 `http-server` / `subagent` 必填（`screen-host` 全局唯一，不带）。 */
+export interface AgentProcsStopRequest { kind: string; id?: string }
+
+/** 停止结果：失败要带原因（界面据此如实报，而不是乐观地把它划掉）。 */
+export interface AgentProcsStopResult {
+  ok: boolean;
+  /** 成功时的收尾说明（如「已停止 127.0.0.1:8080」） */
+  detail?: string;
+  error?: string;
+}
+
+/** 面板里单条条目的渲染模型（= 主进程派生的视图条目；此处仅为可读性重导出别名） */
+export type AgentProcRow = AgentProcEntry;
+
 /** 右键菜单项 */
 export interface ContextMenuItem {
   /** 显示文字 */
@@ -1013,22 +1070,69 @@ export interface UpdateStatusDTO {
   bytesPerSecond?: number;
 }
 
-/* ── 上下文自动压缩（A-969） ── */
+/* ── 上下文自动压缩（A-969 / A-1082） ── */
 /** 上下文自动压缩结果（GUI 发送前调用；动画展示后继续原消息发送） */
 export interface CompressResult {
   ok: boolean;
-  /** skipped：未达触发阈值 / 历史过短，未执行压缩 */
+  /** skipped：未达触发阈值 / 历史过短 / 熔断中 / 结果过期，未执行压缩 */
   skipped?: boolean;
-  /** truncated：摘要轮失败 / 无模型可用，降级硬裁剪（保留最近 K 轮） */
+  /**
+   * A-1082：跳过 / 熔断 / 过期的**如实原因**（设计定稿 §3.2「任何 none 都必须带 reason」）。
+   * ⚠️ 必须显示给用户——旧实现 `skipped` 是静默的，用户看到「逼近硬阈值却毫无动作」。
+   */
+  reason?: string;
+  /**
+   * A-1083：**压无可压且真的装不下** ⇒ 这一轮**拒发**（不发注定失败/会挂住的请求）。
+   * 这是「连接半天」的根治：旧实现把这种请求发出去，靠 300s 超时 ×N 次重连来『发现』它超限。
+   * `reason` 此时必须给出可操作项（换更大窗口的模型 / 开新会话）。
+   */
+  cannotFit?: boolean;
+  /** truncated：摘要轮失败 / 无模型可用，降级为**只裁不摘要**（turn 对齐，保留最近 K 整轮） */
   truncated?: boolean;
   /** 模型生成的摘要文本（truncated/skipped 时无） */
   summary?: string;
-  /** 本次压缩剔除的历史轮次数 */
+  /** A-1082「理解总结」环产出的续接认知（5 字段自述；失败则为空） */
+  comprehend?: string;
+  /** 本次压缩剔除的历史消息条数 */
   dropped?: number;
   /** 压缩前输入侧估算 tokens */
   used?: number;
   /** 当前窗口上限 tokens */
   cap?: number;
+  /**
+   * A-1082：压缩后**实测估算**的输入侧 tokens，与 `used` **同口径**（历史 + 固定开销）。
+   * 取代旧实现那个与真实体积无关的构造值 `cap × 0.5`（「假报」的直接形态）。
+   */
+  tokensAfter?: number;
+  /** A-1082：压缩后**仍然**超限 ⇒ 界面必须明说「需换大窗口模型或开新会话」，不许静默 */
+  stillOverflow?: boolean;
+  /** A-1082：体积是否真的下降（不变量 I4；假压缩会被判 false） */
+  realShrink?: boolean;
+  /** A-1082：摘要轮因预算所限摘录掉的中间消息条数（0 = 全量喂给摘要轮） */
+  elided?: number;
+  /** A-1082：本次结果因期间已有更新压缩落地而丢弃（skip-stale） */
+  stale?: boolean;
+  /** A-1082：同一段历史连续失败 ≥3 次已熔断 */
+  breakerOpen?: boolean;
+  /**
+   * A-1086：**压无可压**时给出的出路（"切到哪个模型"），唯一产地
+   * `context_loop.formatRescueHint`。
+   *
+   * 有候选 → 具体模型名 + 窗口数（用户不用自己一个个试）；
+   * 没候选 → 如实说"没有窗口更大的候选，请开新会话"（**不许沉默**：沉默会让用户
+   * 以为工具根本没查过，于是继续在同一个死局里点重试）。
+   */
+  rescueHint?: string;
+  /**
+   * A-1090：`rescueHint` 的**结构化**形态（只在真的挑到候选时回带；没候选/没查成都不带）。
+   *
+   * 渲染层据此渲染「一键切换」按钮 —— `choice` 是**可直接写入 `model_choice`** 的选择串
+   * （`api:<供应商key>:<模型id>` / `local:<模型id>`，唯一产地 `suggestWiderChatModel`）。
+   * ⚠️ 渲染层**不许**拿 `id` 自己拼：同一个 model id 可能挂在多个供应商下，只有主进程
+   * 知道这条候选的来历 —— 拼错 = 切到一个不存在的模型（静默失败：切完照旧发不出去）。
+   * 类型与 `core-ts` 的 `RescuableModel` **同源**（`import type`，编译期擦除，见第 866 条注）。
+   */
+  rescueModel?: RescuableModel;
   error?: string;
 }
 

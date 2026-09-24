@@ -1,9 +1,10 @@
 /*
  * 变异测试：计划 S5「上下文窗口上限：家族能力表退出 + 跨进程契约」守卫的**取证**。
  *
- * 两条主线各有"改回去不报错、跑起来也不崩、只是行为悄悄退化"的写法，逐一验红：
+ * 三条主线各有"改回去不报错、跑起来也不崩、只是行为悄悄退化"的写法，逐一验红：
  *   ① 家族表又给本地端点兜底窗口（A-1018 ③ 的喂入口）
  *   ② done 载荷漏掉 windowCap / 渲染层不消费（A-933 的回归路径）
+ *   ③ 引擎请求漏掉 windowCap（A-1084 的保险门载体）
  *
  * ⚠️ 为什么必须有这一步（项目铁律）：守卫写完只是**声明**了意图，变异测试才证明它**真的**在拦。
  *    本脚本专门覆盖三类"守卫也可能瞎"的情形：
@@ -11,6 +12,8 @@
  *      ⑥⑦ 只删**一条** done 路径的 windowCap（当时 A-933 正是漏了 stream 那条；
  *          只断言"存在 windowCap"的守卫会全绿）
  *      ⑨ 渲染层"读了但不用"（写了 setCtxCap 之外的分支 → 字段成了摆设）
+ *      ⑪⑫ A-1084 新增的载体：**引擎请求**里的 windowCap（保险门靠它判"发不发"；
+ *          缺一处 ⇒ 那条路径永远放行，而界面完全看不出来）
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -22,9 +25,28 @@ const PROVIDERS = path.join(ROOT, "gui", "src", "main", "providers.ts");
 const GUI_INDEX = path.join(ROOT, "gui", "src", "main", "index.ts");
 const CHAT_PANEL = path.join(ROOT, "gui", "src", "renderer", "pages", "ChatPanel.tsx");
 
-/** done 载荷里那条 windowCap。两处缩进不同（stream 14 空格 / retry 12 空格）—— 用它区分路径。 */
+/** done 载荷里那条 windowCap。stream 那条 14 空格，**唯一**。
+ *  ⚠️ retry 那条**不能只用它自己那一行**做锚点：它 12 空格，而 14 空格那行的**后缀**正好
+ *     就是「12 空格 + 同一句话」⇒ 单行锚点在 index.ts 里命中 **2 次**，而
+ *     `String.replace` 只改**第一处**（= stream 那条）——于是"retry 缺 windowCap"
+ *     这条变异实际打的是 stream，**retry 那条路径从来没被保护过**。
+ *     这正是 `check-mut-anchors.mjs` 报「不唯一（可能改错对象）」要拦的形态。
+ *     （本仓老注释写的"两处缩进不同，用它区分路径"是**错的**：缩进小的一方是缩进大的一方的后缀。）
+ *  ⇒ retry 的锚点必须带**上一行**做上下文（下面三条一起构成唯一定位）。 */
 const CAP_STREAM = "              windowCap: await resolveSessionWindowCap(agentId, session.model).catch(() => undefined),\n";
-const CAP_RETRY = "            windowCap: await resolveSessionWindowCap(agentId, session.model).catch(() => undefined),\n";
+const CAP_RETRY_HEAD =
+  "            sessionId: payload.sessionId,\n" +
+  "            // A-933：权威窗口上限（Agent.max_context 或本次模型 context_window），右栏与环同源\n";
+const CAP_RETRY = CAP_RETRY_HEAD + "            windowCap: await resolveSessionWindowCap(agentId, session.model).catch(() => undefined),\n";
+/* A-1084：windowCap 多了第二个载体 —— **引擎请求**（保险门 `planEngineSend` 靠它判"发不发"）。
+   两条请求路径各一处：stream 用 `agent.model_choice`（本轮要用的模型），retry 查注册表拿同一个。
+   缺任一处 ⇒ 那条路径的保险门永远放行（=做了等于没做）。 */
+const REQ_CAP_STREAM = "      windowCap: await resolveSessionWindowCap(agentId, loadingAgent?.model_choice ?? \"\").catch(() => undefined),\n";
+const REQ_CAP_RETRY =
+  "      windowCap: await resolveSessionWindowCap(\n" +
+  "        agentId,\n" +
+  "        (await agentRegistry!.findAgent(agentId).catch(() => null))?.model_choice ?? \"\",\n" +
+  "      ).catch(() => undefined),\n";
 const LOCAL_GUARD = "  if (isLocalEndpoint(input.baseUrl)) { return undefined; }\n";
 
 const variants = [
@@ -81,13 +103,13 @@ const variants = [
     name: "⑦ ★ retry 路径的 done 漏掉 windowCap（另一条路径也不能漏）",
     file: GUI_INDEX,
     from: CAP_RETRY,
-    to: "",
+    to: CAP_RETRY_HEAD,
   },
   {
     name: "⑧ ★ windowCap 不再来自唯一决策函数（就地编一个数字 → 环/压缩阈值/徽标再次各说各话）",
     file: GUI_INDEX,
     from: CAP_RETRY,
-    to: "            windowCap: session.model ? 128000 : undefined,\n",
+    to: CAP_RETRY_HEAD + "            windowCap: session.model ? 128000 : undefined,\n",
   },
   {
     name: "⑨ ★ 渲染层读了 windowCap 却不用（字段成了摆设，环仍按本地预设显示）",
@@ -102,6 +124,20 @@ const variants = [
     to:
       "      if (typeof m.windowCap === \"number\" && m.windowCap > 0) { setCtxCap(m.windowCap); }\n" +
       "      else { setCtxCap(inferModelCapabilities(m.model ?? \"\").context ?? 0); }",
+  },
+
+  // ── ③ 引擎请求的 windowCap（A-1084 新增的载体）──────────────
+  {
+    name: "⑪ ★ stream 引擎请求漏掉 windowCap（保险门永远放行 → 退回「发出去才知道超」）",
+    file: GUI_INDEX,
+    from: REQ_CAP_STREAM,
+    to: "",
+  },
+  {
+    name: "⑫ ★ retry 引擎请求漏掉 windowCap（重试入口成了绕过保险门的后门）",
+    file: GUI_INDEX,
+    from: REQ_CAP_RETRY,
+    to: "",
   },
 ];
 

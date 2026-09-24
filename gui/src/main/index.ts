@@ -151,6 +151,33 @@ const toggleMainWindow = (): void => {
 };
 
 /**
+ * A-1075（Issue 5）：应用图标的**唯一出处** —— 托盘 / 任务栏窗口 / 任何需要图标的地方都调它。
+ *
+ * 为什么不各处各写一个 `join(INSTALL_ROOT, "build", "icon.png")`：写错一处就是"某个地方图标不对"，
+ * 而这类**静默失效**过 tsc、过构建、过全部逻辑测试 —— 只在用户桌面上看得见（本仓 §21 同类）。
+ *
+ * 【为什么 Windows 用 `.ico` 而不是那张 1024×1024 的 PNG】
+ * 用户报告的是「任务栏/托盘图标异常」。实测资产：`build/icon.png` = **1024×1024 / 951.7 KB**。
+ * 而这两处的**实际渲染尺寸**是：托盘 16 px（200% DPI 下 32 px）、任务栏 24/32/48 px。
+ * ⇒ 等于每次都让系统把一张 1024² 位图**现场缩**到十几像素：观感糊，而且每处都要读近 1 MB。
+ * `build/icon.ico`（由 `gui/scripts/make-notify-icon.mjs` 生成）里**逐尺寸预置**了
+ * 16/24/32/48/64/128/256 七张位图（16×16 那张只有 0.75 KB），系统按需取用 ⇒ **全程零缩放**。
+ * 这与 #228「通知图标」是同一类问题的同一个解法（渲染处需要多大就给它多大）。
+ *
+ * ⚠️ 非 Windows **必须**回落 PNG：Electron 在 Linux / macOS 上读不了 `.ico`。
+ * ⚠️ 但"换了个格式"本身也可能失败（资产缺失 / 解码不出）—— 所以这里**先探一下**：
+ *   读不出来就回落 PNG **并出声**，绝不把托盘图标变成静默空白。 */
+const resolveAppIcon = (): string => {
+  const preferred = join(INSTALL_ROOT, "build", process.platform === "win32" ? "icon.ico" : "icon.png");
+  try {
+    if (!nativeImage.createFromPath(preferred).isEmpty()) { return preferred; }
+  } catch { /* 解码抛错 → 走回落 */ }
+  const fallback = join(INSTALL_ROOT, "build", "icon.png");
+  console.warn(`[gui:main] 应用图标 ${preferred} 读不出来，回落 ${fallback}`);
+  return fallback;
+};
+
+/**
  * 建立托盘图标（幂等）。
  *
  * A-1055：**改为"应用一启动就有"**。
@@ -162,7 +189,7 @@ const toggleMainWindow = (): void => {
 const ensureTray = (): void => {
   if (tray) { return; }
   try {
-    const iconPath = join(INSTALL_ROOT, "build", "icon.png");
+    const iconPath = resolveAppIcon();
     tray = new Tray(nativeImage.createFromPath(iconPath));
     tray.setToolTip("Slime — 运行中");
     tray.setContextMenu(Menu.buildFromTemplate([
@@ -200,7 +227,7 @@ import { resolveWindowCap } from "../../../core-ts/src/model_introspect.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setSidebarOpener, setScreenController } from "../../../core-ts/src/tools/builtin.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setSidebarOpener, setScreenController, setTrashService } from "../../../core-ts/src/tools/builtin.js";
 import { setBrowserAdapter } from "../../../core-ts/src/tools/browser.js";
 import { BrowserBridge } from "./browserBridge.js";
 import { StreamChunkBatcher } from "./streamBatch.js";
@@ -214,6 +241,18 @@ import { ServerA2ABus } from "../../../core-ts/src/a2a.js";
 import { StatsService } from "../../../core-ts/src/services/stats.js";
 // A-980-R29：待办存储唯一真源（工具与主进程共用；别再各自手搓路径/解析）
 import { readTodos, removeTodos, writeTodos, todosToPlanStatus, demoteStaleInProgress } from "../../../core-ts/src/services/todoStore.js";
+// A-1066：本轮跑完 → 清空待办的**判据**（纯模块；口径与竞态防护都在里面，别在 finally 里另写一份）
+import { shouldClearTodosOnTurnEnd } from "../../../core-ts/src/services/todoLifecycle.js";
+/* A-1069（#226）：Agent 启动的后台资源面板 —— 判据全在纯模块（`buildAgentProcView` /
+   `planAgentProcStop`），主进程只做两件事：从活真源**取数**、按动作**执行**。 */
+import {
+  buildAgentProcView,
+  planAgentProcStop,
+  type AgentProcSources,
+} from "../../../core-ts/src/services/agentProcs.js";
+// A-1060：中途「引导」（steer）缓冲 —— 装配层只负责推进去 / 流结束时清干净，
+// **消费点**在 core-ts 的工具循环轮次边界（见 core-ts/src/tool_loop.ts 的 injectSteers）。
+import { pushSteer, clearSteers } from "../../../core-ts/src/services/steerBus.js";
 import { loadUsage, clearUsage, rewriteUsageCosts } from "../../../core-ts/src/services/usage.js";
 import { getLlmGatewayManager, readLlmGatewayConfig, type LlmGatewayConfig } from "./llmGateway.js";
 import { AgentRegistry, type AgentState } from "../../../core-ts/src/services/agents.js";
@@ -222,7 +261,7 @@ import { ChatClient, AnthropicClient } from "../../../core-ts/src/llm/client.js"
 import { inferApiFormat, type RouteEntry } from "../../../core-ts/src/router.js";
 import { chromiumFetch } from "./providers.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
-import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult, ResidentState } from "../shared/ipc.js";
+import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult, ResidentState, AgentProcsListResult, AgentProcsStopRequest, AgentProcsStopResult } from "../shared/ipc.js";
 import { isBrowserSchemeUrl } from "../shared/ipc.js";
 import { parseUnifiedDiff } from "./git_diff.js";
 import { initUpdater, registerUpdaterHandlers, setStatusSink } from "./updater.js";
@@ -524,6 +563,30 @@ function scheduleTodoAutoClear(sessionId: string, todos: Array<{ status?: string
 }
 
 /**
+ * A-1066：**本轮跑完 → 清空该会话的全部待办**（用户明确要求）。
+ *
+ * 与上面的 `scheduleTodoAutoClear` 分工：
+ *   · `scheduleTodoAutoClear` —— 「**全部完成**且**等 1.5s 让划过动画播完**」的收尾；
+ *   · 本函数 —— 「**本轮已经跑完**」就清，**不看完成度**。
+ * 用户上一轮反馈的正是后者没做：没做完就被放弃的清单（模型改道 / 需求变了）
+ * 会在面板上无限期挂着 —— 原话「当会话结束，待办任务直接自动清除」。
+ *
+ * ⚠️ 三件必须做对的事：
+ *   ① **键用 sessionId**，不是 cancelKey。待办文件名是 `data/todos_<sessionId>.json`；
+ *      cancelKey 只是 `sessionId ?? agentId` 的兜底，拿它去删会删错文件 / 删不掉。
+ *   ② 本来就空 → **不广播**。否则每一轮结束都推一次空列表，白白重置渲染层的完成基线。
+ *   ③ 判据（含"已被新一轮接管"这条竞态防护、以及"出错/中断不清"的口径）走
+ *      `shouldClearTodosOnTurnEnd`，调用方只负责把 `reason` / `stillActive` 如实报上来。
+ */
+function clearTodosOnTurnEnd(sessionId: string | undefined): void {
+  if (!sessionId) { return; }
+  if (readTodos(sessionId).length === 0) { return; }
+  removeTodos(sessionId);
+  // 清空后必须广播（空列表）——否则界面留着旧项，用户看到的是"没清掉"（同一个静默失败）
+  broadcastTodos(sessionId);
+}
+
+/**
  * 工具轮拦截：Plan 类工具结果 → planStore 更新 + 广播渲染层。
  *
  * A-980-R29：两条规划链路（`plan_create` 真 Plan / `todo_write` 派生 Plan）共用同一个 sessionId key，
@@ -805,7 +868,8 @@ import {
 } from "../../../core-ts/src/services/sessions.js";
 import { loadHistoryForSession, loadHistoryForSessionBefore, clearSessionHistory, clearLegacySessionHistory } from "../../../core-ts/src/services/history.js";
 import { formatSpeakerBlob, isSpeechFailure, expandHistoryRecord, type ExpandedMessage } from "../../../core-ts/src/services/grouptalkTranscript.js";
-import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO } from "../../../core-ts/src/services/context_compress.js";
+import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO, SUMMARIZE_INPUT_CAP, HISTORY_LOAD_LIMIT, buildCompactedHistory, truncateTurnAligned } from "../../../core-ts/src/services/context_compress.js";
+import { acceptSummary, formatCannotFit, formatRescueHint, pickRescueModel, INITIAL_BREAKER, isRealShrink, nextBreakerState, planSend, validateHistory, type BreakerState, type CapCandidate, type LoopMessage, type RescuableModel } from "../../../core-ts/src/services/context_loop.js";
 import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
 // A-980-R32：点击路径的多基准候选解析（纯逻辑，vitest 直测）
 import { buildTargetCandidates, normalizeTargetPath } from "./targetPath.js";
@@ -2087,6 +2151,91 @@ async function resolveSessionWindowCap(agentId: string, modelId: string): Promis
   return undefined;
 }
 
+/**
+ * A-1086：把「压无可压」时**唯一的出路**落到具体模型名上。
+ *
+ * ## 为什么必须有这个函数
+ *
+ * 「固定开销（系统提示/记忆/技能/工具定义/工作区注入）本身就逼近窗口」这类超限，
+ * **压缩救不回来**（压无可压）。此时我们只能对用户说"换窗口更大的模型"——
+ * 而**换哪个**，此前全靠用户自己一个个试（本仓已有 `resolveSessionWindowCap` 与
+ * A-158 降级链，却从未把两者接起来）。用户在"什么都发不出去"的处境里需要的是**出路**，
+ * 不是原则。这里就把出路算出来（判据是纯函数 `pickRescueModel`）。
+ *
+ * ## ⚠️ 性能约束：这函数跑在"用户刚点发送"的路径上
+ *
+ * 候选可能上百个（供应商模型清单上限 200），逐个 `resolveSessionWindowCap` 会**问服务器**，
+ * 每次几十~上百 ms ⇒ 用户会觉得"点发送卡住了"。所以：
+ *   · **供应商模型只读静态规格**（`models[].context_window`）—— 零 I/O；
+ *   · 只有本地模型（数量少）在 spec 缺 `ctx_len` 时才去问一次（有缓存）；
+ *   · 拿不到窗口的一律**跳过**（不猜 —— 猜出来的建议会把用户带到另一个坑里）。
+ *
+ * 拿不到任何候选时返回 null，调用方据此**如实说"没有"**（`formatRescueHint`）。
+ *
+ * ## A-1090：返回值**三态**，且候选自带「可直接写入的选择串」
+ *
+ *   · `undefined` —— **没查成**（入参本身不知道要多大 / 解析过程抛了异常）。
+ *     语义是"我们不知道"，与"查过确实没有"**必须分开**：把"没查"说成"查过没有"
+ *     是**假陈述** —— 用户会因此放弃一条本可能走得通的出路（`formatRescueHint` 三态）。
+ *   · `null` —— 查过一轮，确实没有能装下的更大窗口模型。
+ *   · 对象 —— 查到了，且带 `choice`：**可直接写入 `model_choice` 的选择串**
+ *     （`api:<供应商key>:<模型id>` / `local:<模型id>`，与渲染层模型选择器同源）。
+ *     ⚠️ 只有本函数知道这条候选来自哪个供应商 —— 裸 model id **拼不出**可用选择串
+ *     （同一个 id 可能同时挂在多个供应商下），所以由这里算好回带，渲染层只管原样写入。
+ */
+async function suggestWiderChatModel(requiredTokens: number, currentCap: number): Promise<RescuableModel | null | undefined> {
+  // 需求量本身就是未知/非正 ⇒ 我们**没有资格**说"没有候选"：`pickRescueModel` 也会给 null，
+  // 但那个 null 的语义是"不知道要多大、不换"，不是"查过没有" ⇒ 如实归入「没查成」。
+  if (!Number.isFinite(requiredTokens) || requiredTokens <= 0) { return undefined; }
+  try {
+    /* ⚠️ 去重键 = `choice`（A-1090），**不是裸 id**：同一个 model id 可能同时挂在多个供应商下，
+       按 id 去重会把后面那个供应商的候选整个吞掉（少给一条出路）；
+       而"能不能切过去"由 `choice` 决定，按它去重才与语义一致。
+       本仓同族教训：去重键要与排序键同源（见 `pickRescueModel` 的平手判据）。 */
+    const seen = new Set<string>();
+    const candidates: CapCandidate[] = [];
+    const add = (id: unknown, label: string, cap: unknown, choice: string): void => {
+      const mid = typeof id === "string" ? id.trim() : "";
+      const c = typeof cap === "number" && Number.isFinite(cap) && cap > 0 ? cap : 0;
+      const ch = choice.trim();
+      if (!mid || !ch || c <= 0 || seen.has(ch)) { return; }
+      seen.add(ch);
+      candidates.push({ id: mid, label: label && label.trim() ? label.trim() : mid, cap: c, choice: ch });
+    };
+    // ① 本地模型：spec 有 ctx_len 直接用；缺了才问一次服务（数量少、有缓存）
+    for (const m of listLocalModels()) {
+      const label = String(m.label ?? "").trim() || m.id;
+      const choice = `local:${m.id}`; // 与渲染层模型选择器同源（`ChatPanel` 用的就是 local:<id>）
+      if (typeof m.ctx_len === "number" && m.ctx_len > 0) {
+        add(m.id, label, m.ctx_len, choice);
+      } else {
+        add(m.id, label, await resolveSessionWindowCap("", m.id).catch(() => undefined), choice);
+      }
+    }
+    // ② 供应商模型：**只读静态规格**（见上面的性能约束）
+    for (const p of listProviders()) {
+      const key = String(p.key ?? "").trim();
+      for (const m of p.models ?? []) {
+        const id = typeof m.id === "string" ? m.id : "";
+        // 没有供应商 key 就拼不出 api:<key>:<id> ⇒ 传空串让 `add` 剔除（宁可少一条候选，
+        // 也不给一条"点了切不过去"的假出路 —— 那正是本仓最忌讳的静默失败）。
+        add(id, key ? `${key} · ${id}` : id, (m as { context_window?: number }).context_window, key ? `api:${key}:${id}` : "");
+      }
+    }
+    const picked = pickRescueModel(requiredTokens, currentCap, candidates);
+    if (picked) {
+      console.info(`[gui:main] 上下文救回建议：${picked.label ?? picked.id}（${picked.cap} tokens，本次需 ≈${Math.round(requiredTokens)}）→ ${picked.choice ?? picked.id}`);
+    } else {
+      console.info(`[gui:main] 上下文救回：已查 ${candidates.length} 个候选，没有能装下 ≈${Math.round(requiredTokens)} 的更大窗口模型`);
+    }
+    return picked;
+  } catch (e) {
+    // A-1090：解析失败 ⇒ **没查成**（返回 undefined），不许说成「查过没有候选」。
+    console.warn("[gui:main] 可救模型解析失败 —— 按「没查成」如实告知（不说成「查过没有」）:", e);
+    return undefined;
+  }
+}
+
 /** 本地服务"问不到窗口"时的状态迁移日志（**去重**：只在状态变化时打一次）。
  *
  *  它是"就绪但拿不到 n_ctx"这个**回归信号**的唯一读取者 —— 没有它，llama.cpp 改字段名后
@@ -2210,6 +2359,12 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
     data: {
       content: typeof d.content === "string" ? d.content : undefined,
       name: typeof d.name === "string" ? d.name : undefined,
+      // A-1061②：工具调用 id 必须显式透传 —— 白名单构造漏一行就会被静默丢掉，
+      // 界面于是无法把「执行中…」翻成「成功/失败」（那一行会永远停在执行中）。
+      toolId: typeof d.toolId === "string" ? d.toolId : undefined,
+      // A-1060：steer 事件的卡片 id 必须**显式透传** —— 这个 data 是白名单构造，
+      // 漏一行就会被静默丢掉：界面于是不知道那张待发卡片已经生效，会再排队发一遍（重复发送）。
+      steerId: typeof d.steerId === "string" ? d.steerId : undefined,
       /** A-957：member 事件归属 Agent id 必须透传——此前被白名单滤掉 → 群聊成员消息 agentId=undefined → 多人发言全被并进第一条（名字全显第一个成员） */
       agentId: typeof d.agentId === "string" ? d.agentId : undefined,
       // A-162: 工具参数与结果透传（tool 事件前端提取网址/文件路径展示细节行）
@@ -2358,7 +2513,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: st.width, height: st.height, x: pos.x, y: pos.y,
     minWidth: WIN_MIN.width, minHeight: WIN_MIN.height, show: false,
-    icon: join(INSTALL_ROOT, "build", "icon.png"),
+    icon: resolveAppIcon(),
     // Campanula 式自绘标题栏：隐藏系统标题栏，Windows overlay 渲染窗口按钮
     titleBarStyle: "hidden",
     // A-1018/A-1019：初值必须等于**当前持久化主题**的标题栏合成色，否则启动瞬间那三个
@@ -2483,31 +2638,55 @@ function registerIpcHandlers(): void {
   }
 
   /** 会话上下文加载（注入聊天请求；会话隔离，旧记录归首个会话）。
-   *  A-969：会话存在压缩摘要时，旧轮替换为「摘要头 + 最近 K 轮」——早期内容不再全量重发，真正降低发送量 */
-  async function loadSessionHistory(sessionId: string | undefined): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+   *
+   *  A-969 首次落地压缩注入；**A-1082 重写**（把内联拼装收回纯模块，修掉「假压缩」）：
+   *
+   *  旧实现在这里内联写 `if (meta.contextSummary && …) { 摘要头 + 垫脚 + lines.slice(-K) }`，
+   *  于是产生两个真实缺陷：
+   *   ① **条件绑死在 `contextSummary` 上** —— 摘要不可用时（trim 档）`setSessionSummary(sid, null, K)`
+   *      把 `contextSummary` 一并删掉 ⇒ 这里判假 ⇒ **返回完整未裁剪历史**：界面报「已压缩 N 轮」，
+   *      实际一个字符都没少，原样重发再次超限（用户症状「压缩并非真压缩」的直接来源）。
+   *   ② 切口用 `lines.slice(-K)` 按**条数**硬切，可能落在半轮上 ⇒ `user, user` 连续同角色（I3 违反）。
+   *
+   *  现在：只要 `summaryCount` 存在（**与摘要是否成功无关**）就真的裁；切口一律走 turn 对齐纯函数。 */
+  /** 持久化历史的一行（`HistoryRecord` 只有 user/ai 两个字符串字段 ⇒ 恒为 user/assistant 成对） */
+  type SessionHistoryLine = { role: "user" | "assistant"; content: string };
+
+  /**
+   * 加载会话历史（已按压缩状态裁剪为「摘要头 + 垫脚 + 最近 K 整轮」）。
+   *
+   * A-1085：`opts.full` —— **摘要轮必须传 true**。
+   * 常规发送只读最近 `HISTORY_LOAD_LIMIT` 条（保护发送体积），但那条上限对**摘要**是灾难：
+   * 摘要只覆盖最后 ~25 轮，更早的对话**从未进入摘要**，而它们同时也不在保留尾巴里 ⇒
+   * **静默丢失**（界面报"已压缩 N 轮"，早期上下文却蒸发了）。摘要轮的职责恰恰是
+   * "把早期内容收进摘要"，所以它必须看**全部**历史（`limit <= 0` = 不限）。
+   * ⚠️ `readLines` 本来就是全量读盘 + 逐行 parse，`limit` 只在最后 slice 一次 ⇒
+   *    `full` **不增加任何 I/O 成本**。
+   */
+  async function loadSessionHistory(sessionId: string | undefined, opts?: { full?: boolean }): Promise<SessionHistoryLine[]> {
     if (!sessionId) { return []; }
     try {
       const meta = await getSession(sessionId);
       if (!meta) { return []; }
       const agentSessions = (await listSessions()).filter((m) => m.agentId === meta.agentId);
       const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
-      const records = await loadHistoryForSession(meta.agentId, meta.id, 50, firstSession);
-      const lines = records.flatMap((r) => [
+      // `0` = 不限（见 core-ts 的 loadHistoryForSession / tailLimit）
+      const records = await loadHistoryForSession(meta.agentId, meta.id, opts?.full ? 0 : HISTORY_LOAD_LIMIT, firstSession);
+      const lines: SessionHistoryLine[] = records.flatMap((r) => [
         { role: "user" as const, content: r.user },
         { role: "assistant" as const, content: r.ai },
       ]);
-      if (meta.contextSummary && lines.length > 4) {
-        const tail = lines.slice(-(meta.summaryCount ?? 12));
-        const dropped = lines.length - tail.length;
-        if (dropped > 0) {
-          // A-969：摘要头紧随一条 assistant 垫脚——保证绝对 user→assistant 交替
-          // （Anthropic 系 API 拒绝连续同角色消息；历史上最早轮次也是 user，两者必须隔开）
-          return [
-            { role: "user" as const, content: `【历史上下文压缩摘要】（早期 ${dropped} 轮对话已压缩为要点，仅作延续上下文）\n${meta.contextSummary}` },
-            { role: "assistant" as const, content: "（已收录以上摘要，在此进展基础上继续当前任务）" },
-            ...tail,
-          ];
+      const keep = meta.summaryCount ?? DEFAULT_TAIL_KEEP;
+      // 至少两轮以上才值得裁（裁到不足一轮会把当前话题一起丢掉）
+      if (meta.summaryCount !== undefined && lines.length > keep * 2) {
+        if (meta.contextSummary) {
+          // 摘要档：摘要头 + 垫脚 + 最近 K 整轮（含「理解总结」环的续接认知）。
+          // buildCompactedHistory 是 LoopMessage 泛化签名，生产数据恒为 user/assistant + string，
+          // 此处按契约收窄（ChatMessage 的 role 是 enum、content 是 string|null，不许放宽契约）。
+          return buildCompactedHistory(meta.contextSummary, lines, keep, { comprehend: meta.contextComprehend }) as SessionHistoryLine[];
         }
+        // trim 档：摘要不可用 ⇒ **只裁不摘要**（诚实降级，但请求必须真的变小）
+        return truncateTurnAligned(lines, keep);
       }
       return lines;
     } catch (e) {
@@ -2587,6 +2766,11 @@ function registerIpcHandlers(): void {
       // A-966 修复：此前 images 未透传——粘贴/拖拽图片在 GUI 端可见、但引擎从未收到（模型回"没看到图片"）
       images: input.images,
       resumeHint: (input as { resumeHint?: string }).resumeHint,
+      /* A-1084：本条请求的模型窗口上限 —— 引擎侧保险门（`planEngineSend`）靠它判定"发不发"。
+         ⚠️ 必须用**本次要用的模型**（`agent.model_choice`），不能用 `session.model` ——
+            后者是上一轮 done 时才报上来的：首轮为空，且用户中途换模型后会**滞后一轮**，
+            那样保险门就会拿旧窗口判新请求（要么误拦，要么拦不住）。 */
+      windowCap: await resolveSessionWindowCap(agentId, loadingAgent?.model_choice ?? "").catch(() => undefined),
     };
     const session = createStreamSession();
     // A-980-R24：chunk 下发合批（见 createChunkSender 注释）
@@ -2594,6 +2778,9 @@ function registerIpcHandlers(): void {
     // 干净正文：优先取 chatService done 事件里全量 extractThinkingFromReply 清洗后的 reply
     // （流式逐 chunk 剥离对细粒度 chunk 可能漏掉裸思考，累积的 fullReply 不代表最终正文）
     let cleanReply: string | undefined;
+    /* A-1066：本轮是否**出错收场** —— 供流结束时的待办清除判据如实报因（done / error）。
+       用独立标志而不是"看有没有 errorMsg"：错误信息在多条路径上写法不同，容易漏判。 */
+    let hadError = false;
     // A-939 上下文分桶（随 done 事件透传给渲染层分桶托盘）
     let ctxBuckets: CtxBuckets | undefined;
     // D: 本次请求链路 trace 记录（事件点 → spans；收尾广播 TraceViewer）
@@ -2709,6 +2896,7 @@ function registerIpcHandlers(): void {
         } catch { /* ignore */ }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
+        hadError = true; // A-1066：本轮以出错收场（判据在流结束处如实报因）
         console.error("[gui:main] chat stream error:", msg);
         // A-980-R24：错误前把已生成的待发文本放出去（用户应看到中断前已产出的内容）
         chunkSender.flush();
@@ -2733,6 +2921,19 @@ function registerIpcHandlers(): void {
       } finally {
         // A-980-R24：合批器收尾（flush 幂等；此后新帧一律丢弃，避免流结束后仍向渲染层发僵尸帧）
         chunkSender.dispose();
+        /* A-1060：**流一结束就清掉未消费的引导**（成功 / 出错 / 用户取消三条路径都走这里）。
+           为什么必须清：没被消费的残留若留到下一次运行，会在那一轮的轮次边界被注入
+           → 同一条引导发两遍。渲染层那份待发卡片不受影响（仍在队列里），
+           它会在 onDone 之后按普通排队发出 —— 所以既不丢也不重复。 */
+        clearSteers(cancelKey);
+        /* A-1066：**本轮跑完 → 清空该会话待办**（用户明确要求：「当会话结束，待办任务直接自动清除」）。
+           放在 finally 的收尾处 = 正常完成 / 出错 / 用户中断**三条路径共用同一个出口**，
+           口径统一（判据见 `shouldClearTodosOnTurnEnd`，含"已被新一轮接管就不清"的竞态防护）。
+
+           ⚠️ `superseded` 必须在 `activeChats.delete(cancelKey)` **之前**算：
+              新一轮若已把这条 key 下的 controller 顶掉，旧流的这份清单就不属于自己了 ——
+              此时清空会把用户刚规划好的新一轮清单抹掉（"刚规划好就没了"）。 */
+        const superseded = activeChats.get(cancelKey) !== controller;
         activeChats.delete(cancelKey);
         // 会话标签竞态防护（A-151）：仅当映射中的值仍是本流注册的 cancelKey 时才删除——
         // 同 Agent 多会话并发时，本流 finally 可能晚于「新会话流已 set」执行，
@@ -2744,6 +2945,18 @@ function registerIpcHandlers(): void {
         // A-1017：面板显隐由管理器状态广播驱动，这里是**兜底**——取消发生在 ensure 之前时
         // 不会产生任何状态迁移，广播也就不来，必须在流结束时无条件收口（渲染层置 false 是幂等的）。
         mainWindow?.webContents.send("slime:model:loading", { loading: false });
+        /* A-1066：本轮已结束 → 清空该会话待办（判据唯一出处 `shouldClearTodosOnTurnEnd`）。
+           键用 `input.sessionId`（待办文件名按 sessionId 命名），不是 cancelKey。 */
+        if (shouldClearTodosOnTurnEnd({
+          reason: controller.signal.aborted ? "cancelled" : hadError ? "error" : "done",
+          stillActive: superseded,
+        })) {
+          clearTodosOnTurnEnd(input.sessionId);
+        }
+        /* A-1069（#226）：回合结束（含被用户停下）→ 刷新「后台进程」面板。
+           这正是用户说的「Agent 停下时」：此刻他要看的是"还有哪些它起的东西活着"。
+           放在 finally 里而不是 done 分支：被停/出错同样要刷新（那些恰恰是最常见的场景）。 */
+        broadcastAgentProcs();
       }
     })();
     return { ok: true };
@@ -2780,6 +2993,28 @@ function registerIpcHandlers(): void {
     return { ok: true, active: activeChats.size };
   });
 
+  /**
+   * A-1060：投入一条中途「引导」（steer）—— **不取消当前流**。
+   *
+   * 这是「直接插入」的第三种语义（对齐 Cursor 2026-08-19 的 steering 改进与 Claude Code 的排队消息）：
+   * 消息不掐断正在跑的活，而是排队等到**下一个工具调用之后的轮次边界**被注入本轮上下文
+   * （消费点见 `core-ts/src/tool_loop.ts` 的 `injectSteers`）。
+   *
+   * 调用方（渲染层）仍保留那张待发卡片：
+   * - 若本轮的引导被消费 → 工具循环发 `steer` 事件 → 界面撤掉卡片（不重复发）；
+   * - 若本轮压根没有工具调用（纯文本回答，永远到不了轮次边界）→ 流结束时主进程清掉缓冲，
+   *   卡片留在队列里，由界面按**普通排队**在下一轮发出。**既不丢也不重复。**
+   */
+  handleTrusted<{ sessionId?: string; id?: string; text?: string }>("slime:chat:steer", async (_event, payload) => {
+    const sid = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+    const pending = pushSteer(sid, { id: String(payload?.id ?? ""), text: String(payload?.text ?? "") });
+    if (pending === 0) {
+      // 空文本 / 无会话 → 如实拒绝，别让界面以为"已经插进去了"
+      return { ok: false, error: "引导内容为空或会话无效" };
+    }
+    return { ok: true, pending };
+  });
+
   /** A-973：查询指定会话是否仍有进行中的流（渲染层恢复会话时判定"进行中/已结算"的唯一真相源）。
    *  activeChats 的 key 与流归属同口径（sessionId ?? agentId）：先按传入 key 精确查，未命中再
    *  遍历值匹配 agentStreamSessionMap 兜底——主进程 activeChats 才有资格回答"这条流死没死"，
@@ -2798,19 +3033,52 @@ function registerIpcHandlers(): void {
     return { active: false };
   });
 
+  /** A-1082：压缩熔断器（I7 / 设计定稿 §8.6）。进程级单例——连续失败 ≥3 次即停，
+   *  不再无脑调用摘要模型（否则「压缩→失败→再压缩」死循环）。
+   *  计数维度是「**同一段历史**是否已被处理过」：历史指纹一变（用户发了新消息）就重新给满额机会。 */
+  let compressBreaker: BreakerState = INITIAL_BREAKER;
+
+  /** 历史指纹（熔断计数维度）：条数 + 总字符数。变化即代表「换了一段历史」。 */
+  function historyFingerprint(messages: LoopMessage[]): string {
+    let chars = 0;
+    for (const m of messages) { chars += typeof m.content === "string" ? m.content.length : 0; }
+    return `${messages.length}:${chars}`;
+  }
+
   /** A-969 上下文自动压缩：把指定会话历史压缩为摘要并写回会话 meta（后续 loadSessionHistory 自动注入摘要头 +
-   *  最近 K 轮，不再全量重发）。摘要轮失败/无模型时降级硬裁剪——绝不阻塞对话。GUI 发送前触发并展示过渡动画。 */
-  handleTrusted<{ sessionId?: string; ratio?: number; used?: number }>("slime:chat:compress", async (_event, p): Promise<CompressResult> => {
+   *  最近 K 轮，不再全量重发）。
+   *
+   *  ── A-1082 重写要点（对应「压缩并非真压缩」的四条根因）────────────────────────────
+   *
+   *  ① `force`（反应式触发）：上游已报「上下文超限」时**越过阈值判定**直接压。
+   *     旧实现只有渲染层 `force` 越过**渲染层**那条 `used < cap*ratio`，主进程这里仍会
+   *     用同一个 `used` 再判一次 `needsCompress` ⇒ 判假 ⇒ `skipped` ⇒ **压缩一次也没发生**，
+   *     重试发的还是同一个超限请求 ⇒ 用户看到「压缩了还是不行」。这才是 P0「少的那一环」没接上的地方。
+   *  ② **降级路径必须真的裁**：摘要不可用时写 `summaryCount`（只裁不摘要），不再出现
+   *     「界面报已压缩、请求一字未减」的空操作。
+   *  ③ **实测回填**：返回 `tokensAfter`（重新加载后**实测估算**）与 `stillOverflow`，
+   *     彻底取代渲染层那个 `cap × 0.5` 构造值。
+   *  ④ **理解总结环**（用户点名）：摘要成功后再跑**一次**只读回读，产出续接认知一并注入。 */
+  handleTrusted<{ sessionId?: string; ratio?: number; used?: number; force?: boolean }>("slime:chat:compress", async (_event, p): Promise<CompressResult> => {
     try {
       const sessionId = (p?.sessionId ?? "").trim();
       if (!sessionId) { return { ok: false, error: "缺少会话 ID" }; }
       const meta = await getSession(sessionId);
       if (!meta) { return { ok: false, error: "会话不存在" }; }
+      const force = p?.force === true;
       const agent = await agentRegistry!.findAgent(meta.agentId).catch(() => null);
       const capRaw = await resolveSessionWindowCap(meta.agentId, agent?.model_choice ?? "").catch(() => undefined);
       const cap = capRaw ?? (agent?.max_context ?? 0);
-      const history = await loadSessionHistory(sessionId);
-      if (history.length < 6) { return { ok: true, skipped: true, used: 0, cap }; }
+      // A-1085：摘要轮读**全部**历史（`full: true`）—— 摘要的职责就是把早期内容收进摘要，
+      // 受常规上限（50 条）截断会让更早的对话从未进入摘要、也不在保留尾巴里 ⇒ 静默丢失。
+      const history = await loadSessionHistory(sessionId, { full: true });
+      /* ⚠️ 下面两条 `skipped` 在 `force`（上游已报超限）下必须**如实回带 `stillOverflow: true`**：
+         它们意味着「我们一点也没压下去」⇒ 反应式调用方据此**放弃那次注定失败的重复请求**，
+         而不是白等一轮再报错（这正是「连接半天还是重连」的残留形态）。
+         `stale` 那条**不**回带 —— 期间已有别的压缩落地，重试是有意义的。 */
+      if (history.length < 6) {
+        return { ok: true, skipped: true, reason: "历史过短（不足 6 条），压缩无意义", used: 0, cap, ...(force ? { stillOverflow: true } : {}) };
+      }
       // A-974-R3：占用口径取「历史轮次估算」与「渲染层实测输入侧占用」的**较大值**。
       // 实测值 = 上游 prompt_tokens + cache_read（含系统提示/记忆/技能/工具定义/工作区注入），
       // 比只看可见轮次的估算更贴近真实窗口压力；此前只用估算 → 实测已超阈值却判 skipped，
@@ -2818,34 +3086,122 @@ function registerIpcHandlers(): void {
       const histUsed = estimateHistoryTokens(history);
       const hint = typeof p?.used === "number" && Number.isFinite(p.used) && p.used > 0 ? Math.round(p.used) : 0;
       const used = Math.max(histUsed, hint);
+      const ratio = typeof p?.ratio === "number" && p.ratio > 0 ? p.ratio : DEFAULT_COMPRESS_RATIO;
       // A-974-R3 护栏：由「实测占用（hint）抬高」触发的场景，必须确有**多余轮次可裁**才动手——
-      // 压缩后 loadSessionHistory 只剩「摘要头 + 最近 K 轮」（长度回落到 ~K+2），若固定开销
+      // 压缩后 loadSessionHistory 只剩「摘要头 + 最近 K 整轮」（长度回落到 ~K*2+2），若固定开销
       // （系统提示/记忆/技能/工具定义/工作区注入）本身就逼近上限，裁历史降不下来 →
       // 每轮都会空跑一次摘要模型调用并刷一条「已压缩上下文」。此处显式拦掉这种空转。
-      // 注意：histUsed 自身超阈值的既有路径不受影响（保持原语义，无回归）。
-      if (used > histUsed && history.length <= DEFAULT_TAIL_KEEP + 2) {
-        return { ok: true, skipped: true, used, cap };
+      // ⚠️ `force`（上游已报超限）时**必须越过**这条：否则就是「上游说太长 → 我们什么都不做 → 原样重发」。
+      const noRoomToCut = history.length <= DEFAULT_TAIL_KEEP * 2 + 2;
+      /* ══ A-1083：判据收口到**唯一出处** `planSend`（发送前预算门） ══
+         旧实现把三档散成两条 `!force &&` 判断（阈值档 + 空转护栏），于是：
+           ① 「发出去才知道超」—— 输入本身已超窗口时也照发，然后靠 300s 超时 + N 次重连来"发现"
+              （用户原话：「连接半天还是重连」）；
+           ② `force` 必须记得在**每一处**都越过 —— A-1082 就是漏了这条，让反应式压缩一次都没发生。
+         ⇒ 现在只有一个函数说了算：上游报超限 / 预算不足 / 用户阈值 三档触发 → compact；
+             压无可压**且真的装不下**（`used > cap`）→ cannot-fit（**拒发**）；
+             压无可压但预算仍够（只是用户阈值调低了）→ 照常发（不许误伤）。
+         `reason` 由 planSend 给出，两条 skipped 都**如实显示**（对齐 A-1082 §3.2）。 */
+      const plan = planSend({
+        estimatedInput: used,
+        cap,
+        afterOverflow: force,
+        ratioTriggered: needsCompress(used, cap, ratio, history.length),
+        canShrink: !noRoomToCut,
+      });
+      if (plan.action === "cannot-fit") {
+        // A-1086：把**唯一的出路**算出来 —— 用户此刻什么都发不出去，需要的是"切哪个模型"，
+        // 而不是"请换窗口更大的模型"这句原则（详见 suggestWiderChatModel 的注释）。
+        const rescue = await suggestWiderChatModel(used, cap);
+        console.warn(`[gui:main] 上下文预算门拦截（拒发）：${plan.reason}`);
+        return {
+          ok: true, skipped: true, used, cap, stillOverflow: true, cannotFit: true,
+          rescueHint: formatRescueHint(rescue),
+          // A-1090：有候选时**额外**回带结构化记录（渲染层据此渲染"一键切换"按钮）。
+          // `undefined`/`null` 都不回带 —— 没有可点的东西，回带空对象只会让渲染层多一堆判空。
+          ...(rescue ? { rescueModel: rescue } : {}),
+          reason: formatCannotFit(plan, rescue),
+        };
       }
-      const ratio = typeof p?.ratio === "number" && p.ratio > 0 ? p.ratio : DEFAULT_COMPRESS_RATIO;
-      if (!needsCompress(used, cap, ratio, history.length)) {
-        return { ok: true, skipped: true, used, cap };
+      if (plan.action === "ok") {
+        return { ok: true, skipped: true, used, cap, reason: plan.reason };
       }
-      const dropped = Math.max(0, history.length - DEFAULT_TAIL_KEEP);
-      if (!agent || !engine) {
-        // 无模型可做摘要 → 硬裁剪保底（保留最近 K 轮），摘要置空避免陈旧内容误导
-        await setSessionSummary(sessionId, null, DEFAULT_TAIL_KEEP);
-        return { ok: true, truncated: true, dropped, used, cap };
+      // 熔断：同一段历史连续失败 ≥3 次 ⇒ 不再调用摘要模型（如实告知 + 给可操作项）
+      const key = historyFingerprint(history);
+      if (compressBreaker.open && compressBreaker.lastKey === key) {
+        return {
+          ok: true, skipped: true, used, cap, breakerOpen: true,
+          ...(force ? { stillOverflow: true } : {}),
+          reason: `压缩已熔断（同一段历史连续 ${compressBreaker.failures} 次压缩失败）：本段历史无法靠压缩救回，请换窗口更大的模型，或开一个新会话`,
+        };
       }
-      const summary = await engine.summarizeContext(agent, history, {});
-      if (summary) {
-        await setSessionSummary(sessionId, summary.summary, DEFAULT_TAIL_KEEP);
-        return { ok: true, summary: summary.summary, dropped, used, cap };
+      const startGen = meta.summaryGeneration ?? 0;
+      const keep = DEFAULT_TAIL_KEEP;
+      // 摘要轮预算按**该模型窗口**解析（旧实现是写死的 9000，CJK 下只够 ~9k 汉字 ⇒ 真实会话必然放弃摘要）。
+      // 窗口未知（cap=0）时取保守值：`buildSummaryInput` 只会**摘录**、永不放弃，所以保守值不会让摘要缺失。
+      const budget = cap > 0 ? Math.max(2048, Math.min(SUMMARIZE_INPUT_CAP, Math.floor(cap * 0.5))) : 8000;
+      let summaryText: string | null = null;
+      let comprehend: string | null = null;
+      let summaryElided = 0;
+      if (agent && engine) {
+        const s = await engine.summarizeContext(agent, history, { maxInputTokens: budget, priorSummary: meta.contextSummary });
+        if (s) {
+          summaryText = s.summary;
+          summaryElided = s.elided;
+          // ⑤「理解总结」环：压缩后**恰好一次**只读回读（有界）。失败重试 1 次，再失败 ⇒ 非阻塞降级。
+          let c = await engine.comprehendContext(agent, s.summary);
+          if (!c) { c = await engine.comprehendContext(agent, s.summary); }
+          comprehend = c?.comprehend ?? null;
+        }
       }
-      // 摘要轮失败 → 降级硬裁剪
-      await setSessionSummary(sessionId, null, DEFAULT_TAIL_KEEP);
-      return { ok: true, truncated: true, dropped, used, cap };
+      // §8.4 skip-stale：压缩是异步的，期间可能已有别的压缩落地 ⇒ 过期结果直接丢弃，不覆盖更新的摘要
+      const fresh = await getSession(sessionId);
+      if (fresh && !acceptSummary(startGen, fresh.summaryGeneration ?? 0)) {
+        return { ok: true, skipped: true, used, cap, stale: true, reason: "本次压缩结果已过期（期间已有更新的压缩落地），已丢弃以避免覆盖" };
+      }
+      await setSessionSummary(sessionId, summaryText, keep, { comprehend });
+      // ③ 实测回填：重新加载并估算**真实**压缩后体积（不许再出现 cap×0.5 这类构造值）
+      // A-1085：与压缩前**同口径**（都用 full）—— 否则 tokensAfter 是"50 条以内"的估算、
+      // 而 used 是"全量"的估算，`isRealShrink` 的降幅判定会失真（假报"降幅不足"）。
+      const after = await loadSessionHistory(sessionId, { full: true });
+      // ⑥ 校验环（设计定稿不变量 I1/I3）：压缩产物必须仍是**合法可发**的序列。
+      // 纯函数构造已保证（turn 对齐切口 + 摘要头/垫脚），此处是**防线** ——
+      // 一旦哪天构造逻辑回归（如切口改回按条数硬切），这里会立刻留下可查的证据。
+      const validation = validateHistory(after);
+      if (!validation.ok) {
+        console.error("[gui:main] 压缩产物未过硬不变量校验（I1/I3）:", validation.violations);
+      }
+      compressBreaker = nextBreakerState(compressBreaker, { ok: summaryText !== null && validation.ok, historyKey: key });
+      // 固定开销 = 实测输入侧占用 − 历史估算（系统提示/记忆/技能/工具定义/工作区注入）。
+      // tokensAfter 与 `used` **同口径**（历史 + 固定开销），渲染层可直接用它替换占用镜像。
+      const fixedOverhead = Math.max(0, hint - histUsed);
+      const tokensAfter = estimateHistoryTokens(after) + fixedOverhead;
+      const stillOverflow = cap > 0 && tokensAfter >= cap;
+      /* A-1086：压完仍超限 ⇒ 换更大窗口的模型是**唯一**出路，顺手把"换哪个"算出来。
+         ⚠️ 只在**真超限**时才查（罕见路径）；正常压缩不该为一次候选扫描买单。
+         ⚠️ `stillOverflow` 为真时**无条件**回带 rescueHint（包括"没有候选"那条）——
+            沉默会让用户以为工具没查过，于是继续在同一个死局里点重试。 */
+      const rescue = stillOverflow ? await suggestWiderChatModel(tokensAfter, cap) : null;
+      const dropped = Math.max(0, history.length - after.length);
+      return {
+        ok: true,
+        summary: summaryText ?? undefined,
+        truncated: summaryText === null,
+        comprehend: comprehend ?? undefined,
+        dropped,
+        used,
+        cap,
+        tokensAfter,
+        stillOverflow,
+        ...(stillOverflow ? { rescueHint: formatRescueHint(rescue) } : {}),
+        // A-1090：同上 —— 有候选才回带结构化记录（渲染层据此给「一键切换」按钮）
+        ...(stillOverflow && rescue ? { rescueModel: rescue } : {}),
+        realShrink: isRealShrink(used, tokensAfter),
+        elided: summaryElided,
+      };
     } catch (e) {
       console.error("[gui:main] chat:compress crashed:", e);
+      compressBreaker = nextBreakerState(compressBreaker, { ok: false });
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
@@ -2886,6 +3242,12 @@ function registerIpcHandlers(): void {
       history: await loadSessionHistory(payload.sessionId),
       retry: true,
       sessionId: payload.sessionId,
+      /* A-1084：重试路径同样透传窗口上限 —— 否则「重试」这条入口就成了绕过保险门的后门
+         （A-1082 的教训：判据漏接一处 = 那条路径完全没有保护）。 */
+      windowCap: await resolveSessionWindowCap(
+        agentId,
+        (await agentRegistry!.findAgent(agentId).catch(() => null))?.model_choice ?? "",
+      ).catch(() => undefined),
     };
     const session = createStreamSession();
     // A-980-R24：重试流同样走 chunk 合批（此前与正常发送路径一样是每 token 一条 IPC）
@@ -3917,6 +4279,21 @@ function registerIpcHandlers(): void {
   /** 注入 AdbService 给 core-ts 工具层（对齐 setSubagentManager 注入模式） */
   setAdbService(adbService);
 
+  /* ═══════════════ 删除进回收站（A-1072 / #231 收口） ═══════════════ */
+  /** core-ts 不许 import electron，所以 `file_delete` 的回收站能力由主进程注入（同 setAdbService 模式）。
+   *  ⚠️ 不注入的后果是**静默退化**：`trashServiceRef` 恒 null → `file_delete` 每次都走「永久删除 + 回执
+   *     如实标注未进回收站」。工具"能用"、测试全绿、用户却在不可还原地丢文件 —— 所以这条注入必须落地。 */
+  setTrashService({
+    trash: async (absPath: string) => {
+      try {
+        await shell.trashItem(absPath);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  });
+
   /* ═══════════════ HTTP 静态服务搭建（A-918++） ═══════════════ */
   /** 注入 HttpStaticServer 给 core-ts 工具层（对齐 setAdbService 注入模式） */
   setHttpServer(httpServer);
@@ -3977,7 +4354,11 @@ function registerIpcHandlers(): void {
   /** ② 注册图形控制后端：桌面（Windows PowerShell+user32.dll 常驻宿主）与 Android（adb shell input）。
    *     两后端共用同一套动作语义与归一化坐标 → 这就是「属于 slime 整个程序的图形控制能力」，不限 ADB。 */
   const screenCtl = getScreenController();
-  screenCtl.register(new DesktopScreenBackend());
+  /* A-1069（#226）：**留住桌面后端的引用** —— 它的常驻 PowerShell 宿主是「Agent 启动的后台进程」
+     面板里的第一类条目，而停止按钮要调它的 `dispose()`。此前是 `register(new DesktopScreenBackend())`
+     的匿名写法，外面拿不到实例（于是"能看到、停不掉"）。 */
+  const desktopBackend = new DesktopScreenBackend();
+  screenCtl.register(desktopBackend);
   screenCtl.register(new AndroidScreenBackend(adbService));
   setScreenController(screenCtl);
 
@@ -4016,22 +4397,106 @@ function registerIpcHandlers(): void {
 
   /** A-918++：HTTP —— 把本地目录作为静态服务启动（默认 0.0.0.0，端口自动选） */
   handleTrusted<{ dir: string; port?: number; host?: string; spa?: boolean }>("slime:http:serve", async (_event, p): Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }> => {
-    return httpServer.serve({ dir: p?.dir ?? "", port: p?.port, host: p?.host, spa: p?.spa });
+    const r = await httpServer.serve({ dir: p?.dir ?? "", port: p?.port, host: p?.host, spa: p?.spa });
+    // A-1069：新起的服务要立刻出现在「后台进程」面板里（不等下一次开面板）
+    if (r?.ok) { broadcastAgentProcs(); }
+    return r;
   });
 
   /** A-918++：HTTP —— 停止指定服务 */
   handleTrusted<{ id: string }>("slime:http:stop", async (_event, p): Promise<{ ok: boolean; error?: string }> => {
-    return httpServer.stop(p?.id ?? "");
+    const r = await httpServer.stop(p?.id ?? "");
+    if (r?.ok) { broadcastAgentProcs(); }
+    return r;
   });
 
   /** A-918++：HTTP —— 停止全部服务 */
   handleTrusted<void>("slime:http:stopAll", async (): Promise<{ ok: boolean; stopped: number }> => {
-    return httpServer.stopAll();
+    const r = await httpServer.stopAll();
+    broadcastAgentProcs();
+    return r;
   });
 
   /** A-918++：HTTP —— 列出运行中的服务 */
   handleTrusted<void>("slime:http:list", async (): Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>> => {
     return httpServer.list();
+  });
+
+  /* ══════════════ A-1069（#226）：Agent 启动的后台资源面板 ══════════════
+   *
+   * 用户原话：「请把 Agent 停下时的后台进程做一个……在输入栏上方的按钮，点击后可以展开」，
+   * 且明确划定范围 **仅 Agent 启动的进程**。
+   *
+   * ⚠️ 这一组是**取数 + 执行**，不含任何判据：
+   *   · 取什么？三类真源（图形控制常驻宿主 / http_serve 的服务 / 后台子代理）。
+   *     **应用自身服务不取** —— Python 后端、llama-server、MCP、情感脑 sidecar 都由应用
+   *     生命周期管理，不是 Agent 的工具起的；把它们摆进这个面板，用户会以为"关掉只是停个任务"，
+   *     实际是把应用拆了。这条范围决策在 `isAgentStartedKind()` 里落成可被守卫锁住的事实。
+   *   · 怎么显示？`buildAgentProcView()` —— 纯函数，**每次现算**而不是维护注册表：
+   *     注册表有一整类"某出口忘了注销 → 阴魂条目永驻"的结构性风险（本仓已为此付过代价），
+   *     现算从结构上消除它（真源里没有了，面板里就没有了）。
+   *   · 能不能停？`planAgentProcStop()` —— 未知类别/缺 id 一律**拒绝并给原因**，
+   *     不许静默什么都不做（界面若乐观划掉，就与真实状态分家了）。 */
+
+  /** 从活真源取当前的后台资源快照 */
+  async function collectAgentProcSources(): Promise<AgentProcSources> {
+    const [servers, runs] = await Promise.all([
+      httpServer.list().catch(() => []),
+      /* ⚠️ 用 `subagentsRef`（模块级引用）而不是 `subagents` —— 后者是别处的局部变量，
+         在本函数的词法作用域里不存在。空引用 = 子代理那一类暂不列出（不假装有）。 */
+      Promise.resolve(subagentsRef?.list() ?? []),
+    ]);
+    return {
+      screenHost: desktopBackend.residentHost?.() ?? null,
+      httpServers: servers.map((s) => ({
+        id: s.id, port: s.port, host: s.host, dir: s.dir, startedAt: s.startedAt, requests: s.requests,
+        /* #230：把"谁起的"如实带上去 —— 纯视图据此把「启动时重建的」排除在面板之外
+           （用户要求只显示 Agent 运行途中打开的端口）。 */
+        origin: s.origin,
+      })),
+      subagents: runs.map((r) => ({
+        id: r.id, name: r.name, task: r.task, startedAt: r.startedAt, status: r.status,
+      })),
+    };
+  }
+
+  /** 广播：后台资源集合变了 → 渲染层立刻刷新（不靠轮询） */
+  function broadcastAgentProcs(): void {
+    try { mainWindow?.webContents.send("slime:agentprocs:changed", {}); } catch { /* 无窗口 → 忽略 */ }
+  }
+
+  handleTrusted<void>("slime:agentprocs:list", async (): Promise<AgentProcsListResult> => {
+    try {
+      const view = buildAgentProcView(await collectAgentProcSources(), Date.now());
+      return { ok: true, view };
+    } catch (e) {
+      /* ⚠️ 失败必须与"空"分开：空列表的含义是"没有后台资源"，
+         查询失败却给空列表会让用户以为没东西在跑（这是本仓反复强调的静默失败）。 */
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  handleTrusted<AgentProcsStopRequest>("slime:agentprocs:stop", async (_event, p): Promise<AgentProcsStopResult> => {
+    const plan = planAgentProcStop({ kind: p?.kind ?? "", id: p?.id });
+    if (!plan.ok) { return { ok: false, error: plan.reason }; }
+    try {
+      if (plan.action === "dispose-screen-host") {
+        desktopBackend.dispose?.();
+      } else if (plan.action === "stop-http-server") {
+        const r = await httpServer.stop(plan.id);
+        if (!r?.ok) { return { ok: false, error: r?.error ?? `停止服务 ${plan.id} 失败（未知原因）` }; }
+      } else {
+        const c = subagentsRef?.cancel(plan.id) ?? false;
+        if (!c) { return { ok: false, error: `取消子代理 ${plan.id} 失败（可能已经结束）` }; }
+      }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    /* 停完**立刻**把新视图回给调用方：界面据此重画，而不是自己猜哪条没了。
+       再广播一次给其它窗口。 */
+    const view = buildAgentProcView(await collectAgentProcSources(), Date.now()).entries;
+    broadcastAgentProcs();
+    return { ok: true, detail: `已停止（余 ${view.length} 项）` };
   });
 
   /* ═══════════════ 图形控制能力（screen_*）：GUI 面板与紧急停止 ═══════════════ */
