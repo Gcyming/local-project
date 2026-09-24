@@ -19,6 +19,12 @@ import { ToolLoop, sandboxGateFrom, type AskUserHook } from "../tool_loop.js";
 import { ToolRegistry, getRegistry } from "../tools/registry.js";
 import { registerBuiltinTools } from "../tools/builtin.js";
 import { SandboxManager } from "../sandbox.js";
+// A-1061①：把未完成的计划在每轮开头复述回上下文（见 buildMessages 的注释）
+import { readTodos, planReminderText } from "./todoStore.js";
+// A-1061①：复述必须折进**最后一条 user 消息**（不许新增非首位 system —— 见该模块头注释）
+import { foldUserReminder } from "../llm/userReminder.js";
+// A-1061④：上游重试 / 切模型的瞬时通知（见 upstreamNotice.ts）
+import { takeUpstreamNotice } from "../llm/upstreamNotice.js";
 import { AgentRegistry, AgentState } from "./agents.js";
 import {
   ChatEngine,
@@ -39,7 +45,10 @@ import { loadSlimeMemories, type SilamAffectState, type SilamBrain, type SilamRe
 // 键改名时这两处会静默失效，症状是"UI 里明明有这个模型，一发消息就报『未注册』"。
 import { LOCAL_MODELS_KEY, findLocalModelSpec, type LocalModelSpec } from "../local_models.js";
 import { appendUsage, computeRecordCost, defaultCacheReadInPrompt } from "./usage.js";
-import { buildCompressSummaryPrompt, messagesToPlainText, SUMMARIZE_INPUT_CAP } from "./context_compress.js";
+import { buildCompressSummaryPrompt, buildSummaryInput, estimateHistoryTokens, estimateTokensLocal, SUMMARIZE_INPUT_CAP } from "./context_compress.js";
+// A-1084：引擎侧**保险门**（发送前判"装不装得下"）。它与主进程压缩编排共用同一函数
+// （planEngineSend = planSend(canShrink:false) 的薄包装）⇒ 两处口径不可能漂移。
+import { buildResumeBlock, parseComprehend, planEngineSend, LOCAL_PREFLIGHT_MARKER, type EngineSendGuard } from "./context_loop.js";
 
 export interface ProviderConfig {
   api_base: string;
@@ -882,25 +891,59 @@ export class SlimeEngine implements ChatEngine {
 
   private buildMessages(call: ChatEngineCall, system: string): ChatMessage[] {
     const images = sanitizeImages(call.images);
+    /* A-1061①：每轮开头复述**未完成的计划**（Manus「目标复述 / recitation」，与 Claude Code 的
+       system-reminder 注入同意图）。这是"中断后不接续"的结构性修法 —— 详见
+       `todoStore.planReminderText` 的注释。无待办 / 全部完成 → 返回 null → **零行为变化**。 */
+    const reminder = planReminderText(call.sessionId ? readTodos(call.sessionId) : []);
+    let out: ChatMessage[];
     if (images.length === 0) {
       // 无图：保持纯字符串（全部旧路径行为不变，零回归）
-      return [
+      out = [
         { role: "system", content: system },
         ...call.history,
         { role: "user", content: call.message },
       ];
+    } else {
+      // 有图：OpenAI 兼容 content-blocks 数组（心性注入已并入 call.message）
+      const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+        { type: "text", text: call.message },
+        ...images.map((url) => ({ type: "image_url", image_url: { url } })),
+      ];
+      const userMsg = { role: "user", content: blocks } as unknown as ChatMessage;
+      out = [
+        { role: "system", content: system },
+        ...call.history,
+        userMsg,
+      ];
     }
-    // 有图：OpenAI 兼容 content-blocks 数组（心性注入已并入 call.message）
-    const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-      { type: "text", text: call.message },
-      ...images.map((url) => ({ type: "image_url", image_url: { url } })),
-    ];
-    const userMsg = { role: "user", content: blocks } as unknown as ChatMessage;
-    return [
-      { role: "system", content: system },
-      ...call.history,
-      userMsg,
-    ];
+    // 放在**最后**：靠 recency 让目标回到高注意力区（放最前等于沉进中段，复述就白做了）。
+    // ⚠️ 但**不能**用 `out.push({ role: "system", ... })` —— 那会产生"非首位的 system"：
+    //    OpenAI 兼容上游（agnes）多半直接 400；Anthropic 路径会把它静默改写成 assistant
+    //    （提醒变成"模型自己说过的话"）。折进**最后一条 user 消息**（Claude Code 的
+    //    system-reminder 形态）既保住 recency 又保持角色合法 —— 详见 userReminder.ts。
+    if (reminder) { out = foldUserReminder(out, reminder); }
+    return out;
+  }
+
+  /* ══════════ A-1084：engine 侧保险门（发送前的最后一道闸） ══════════
+     为什么闸门要长在这里：主进程的 `planSend` 只跑在 `slime:chat:compress` 那条编排里，
+     而群聊头脑风暴 / 子代理 / 强制工具轮 / 未来的非 GUI 调用**都绕过它**。
+     「只有一条路径记得安检」正是 A-1082 的教训（`force` 漏接一处 ⇒ 反应式压缩一次没发生）。
+     ⇒ 判据挂到**必经之路**（engine 的发送前），由 `planEngineSend` 唯一说了算。 */
+
+  /**
+   * 算本次**实需输入**（tokens）并交给判据。
+   *
+   * ⚠️ 口径必须与主进程压缩判据**同源**（`estimateHistoryTokens`，CJK 1 字 = 1 token）：
+   *    估算偏高 ⇒ 误拦本可发出的请求（用户看到"莫名其妙发不出去"）；
+   *    估算偏低 ⇒ 拦不住 ⇒ 下一轮照样撞墙。两处不同口径就会漂移出这两种症状。
+   * `messages` 首条即 system（见 buildMessages），故 system 已计入；工具定义单独加。
+   */
+  private guardSend(opts: ChatEngineCall, messages: ChatMessage[], tools?: unknown): EngineSendGuard {
+    const estimated =
+      estimateHistoryTokens(messages as Array<{ role: string; content: unknown }>) +
+      estimateTokensLocal(tools ? JSON.stringify(tools) : "");
+    return planEngineSend({ estimatedInput: estimated, windowCap: opts.windowCap });
   }
 
   /** Agent 工作目录（sandbox_override.workspace 归一化；无 → ""） */
@@ -1025,6 +1068,25 @@ export class SlimeEngine implements ChatEngine {
     const messages = this.buildMessages(opts, system);
     const tools = this.toolSchemas(opts.toolsOnly);
 
+    // A-1084 保险门：装不下的请求**不出网** —— 发了只会被上游拒（400）或长时间挂住
+    // （客户端再把它当"可重试"熬 9 次 ⇒ 用户看到的「连接半天还是重连」）。
+    const guard = this.guardSend(opts, messages, tools);
+    if (!guard.allow) {
+      this.logger.warn(`[engine] 上下文保险门拦截（未发送）: ${guard.reason}`);
+      // ⚠️ 前缀必须带 LOCAL_PREFLIGHT_MARKER：这是**我们**判定的，上游没说过话 ——
+      //   渲染层靠它把本地判定与上游超限归到**同一条**处置（压缩一次 + 重试一次），
+      //   否则会落进 9 次重连，而每一次都被这道门原样拦回（比不做还糟）。
+      const blocked = `${LOCAL_PREFLIGHT_MARKER}\n⚠️ 本次请求**未发送** —— 上下文装不下该模型的窗口。\n\n${guard.reason}`;
+      return {
+        reply: blocked,
+        replyRaw: blocked,
+        model: "none",
+        promptTokens: 0,
+        completionTokens: 0,
+        elapsedMs: Date.now() - started,
+      };
+    }
+
     if (tools && tools.length > 0) {
       // 工具场景：chat() 是非流式单结果接口，用非流式工具循环（流式走下方 stream() 的 runStream）
       const route = router.select("chat");
@@ -1101,27 +1163,28 @@ export class SlimeEngine implements ChatEngine {
   }
 
   /** A-969 上下文自动压缩·摘要轮：用 Agent 的路由模型把长历史浓缩为结构化摘要。
-   *  摘要轮本身设输入硬上限（历史已超过 → 返回 null，调用方降级硬裁剪，绝不阻塞）。
-   *  返回 { summary, inputTokens }（模型摘要失败/无路由时 null）。 */
+   *
+   *  A-1082 修正：旧实现「输入超硬上限 → `return null`」是「压缩并非真压缩」的根因之一 ——
+   *  调用方拿到 null 就降级硬裁剪，而那条降级路径当时**什么都没裁**（界面却报「已压缩」）。
+   *  现改为 `buildSummaryInput` 在**预算内取头 30% + 尾 70% 摘录** ⇒ 摘要轮**永不放弃**。
+   *
+   *  @param opts.maxInputTokens 摘要轮输入预算（调用方按该模型窗口解析，缺省 `SUMMARIZE_INPUT_CAP`）
+   *  @param opts.priorSummary   既有摘要 ⇒ 走**递进式**（不倒退，I5）
+   *  返回 { summary, inputTokens, elided }（无路由/模型失败时 null）。 */
   async summarizeContext(
     agent: AgentState,
     messages: Array<{ role: string; content: unknown }>,
-    opts?: { maxInputTokens?: number },
-  ): Promise<{ summary: string; inputTokens: number } | null> {
+    opts?: { maxInputTokens?: number; priorSummary?: string },
+  ): Promise<{ summary: string; inputTokens: number; elided: number } | null> {
     try {
       const { router, error } = await this.resolveRouteInternal(agent);
       if (!router) {
         this.logger.warn(`[engine] 摘要轮无可路由模型（${agent.model_choice}）：${error ?? "无可用路由"}`);
         return null;
       }
-      const text = messagesToPlainText(messages);
-      const inputTokens = estimateTokens(text);
-      const cap = opts?.maxInputTokens ?? SUMMARIZE_INPUT_CAP;
-      if (inputTokens >= cap) {
-        // 摘要轮也会爆窗口 → 放弃模型摘要（调用方硬裁剪），绝不火上浇油
-        this.logger.warn(`[engine] 摘要轮输入超限（${inputTokens} ≥ ${cap}），降级硬裁剪`);
-        return null;
-      }
+      const budget = opts?.maxInputTokens ?? SUMMARIZE_INPUT_CAP;
+      const { text, elided } = buildSummaryInput(messages, budget);
+      const inputTokens = estimateTokensLocal(text);
       const sys = (
         "你是一个专业的会话上下文压缩器。只做一件事：把用户提供的对话历史压缩成结构化中文摘要，保留接续任务所需的关键信息。" +
         "不要回答摘要之外的内容、不要自我介绍。"
@@ -1129,7 +1192,7 @@ export class SlimeEngine implements ChatEngine {
       const payload: ChatRequest = {
         messages: [
           { role: "system", content: sys },
-          { role: "user", content: buildCompressSummaryPrompt(text) },
+          { role: "user", content: buildCompressSummaryPrompt(text, opts?.priorSummary) },
         ],
         max_tokens: 1024,
       };
@@ -1139,15 +1202,67 @@ export class SlimeEngine implements ChatEngine {
       const raw = response.choices[0]?.message?.content ?? "";
       const trimmed = raw.trim();
       if (!trimmed) { return null; }
-      return { summary: trimmed, inputTokens };
+      return { summary: trimmed, inputTokens, elided };
     } catch (e) {
-      this.logger.warn(`[engine] 摘要轮失败（降级硬裁剪）：${e instanceof Error ? e.message : String(e)}`);
+      this.logger.warn(`[engine] 摘要轮失败：${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /** A-1082「理解总结」环（设计定稿 ⑤ AWAIT_COMPREHEND）—— 压缩后**恰好一次**的只读回读。
+   *
+   *  让模型回读摘要并**自述当前状态**（固定 5 字段），产出「续接认知」作为下一轮的锚。
+   *  **有界**（§8.7 ReSum 教训）：单次调用、固定 schema、`max_tokens` 收紧、无工具、无历史。
+   *  任何失败都返回 null，由调用方**非阻塞降级**（继续对话并留痕），绝不卡住用户。 */
+  async comprehendContext(
+    agent: AgentState,
+    summary: string,
+    opts?: { archivePath?: string },
+  ): Promise<{ comprehend: string; raw: string } | null> {
+    try {
+      const { router, error } = await this.resolveRouteInternal(agent);
+      if (!router) {
+        this.logger.warn(`[engine] 理解环无可路由模型（${agent.model_choice}）：${error ?? "无可用路由"}`);
+        return null;
+      }
+      const payload: ChatRequest = {
+        messages: [
+          {
+            role: "system",
+            content: "你只做一件事：回读给定的工作摘要，用被动陈述语气自述当前状态。不要执行任何动作、不要调用工具、不要给出指令。",
+          },
+          { role: "user", content: buildResumeBlock(summary, opts?.archivePath) },
+        ],
+        max_tokens: 800,
+      };
+      const route = router.select("chat");
+      Object.assign(payload, this.reasoningParams(agent, route));
+      const { response } = await router.chat(withModel(payload, route!));
+      const raw = (response.choices[0]?.message?.content ?? "").trim();
+      if (!raw) { return null; }
+      const parsed = parseComprehend(raw);
+      if (!parsed.ok) {
+        // 5 字段不齐 / 夹带指令式语句 ⇒ 视为**理解失败**（不是压缩成功）
+        this.logger.warn(
+          `[engine] 理解环输出不合格：missing=[${parsed.missing.join(",")}] injected=${parsed.injected}${parsed.injectionSample ? ` sample=${parsed.injectionSample}` : ""}`,
+        );
+        return null;
+      }
+      return { comprehend: raw, raw };
+    } catch (e) {
+      this.logger.warn(`[engine] 理解环失败（非阻塞降级）：${e instanceof Error ? e.message : String(e)}`);
       return null;
     }
   }
 
   async *stream(opts: ChatEngineCall): AsyncGenerator<EngineChunk> {
     const started = Date.now();
+    /* A-1061④：**开流先清掉上游通知槽**。
+       槽是进程级单例（瞬时状态，见 upstreamNotice.ts）。若不在这里清，上一次请求
+       （尤其是失败重试过的、或非流式 chat() 路径留下的）那条通知会在本次流的第一个
+       轮询 tick 被当成"本次的上游状态"吐给界面 —— 用户会看到一句与当前请求无关的
+       "正在重试"。（实测：engine.spec 的"无工具流式"用例就因此被打成 ['notice','chunk','done']。） */
+    takeUpstreamNotice();
     // 局部累积展示文本：中断后立刻发新消息时，两个并发流互不污染（此前类级字段会串文本）
     let displayText = "";
     // A-121: 显式 silam 模型选择 → 直接走离线大脑（流式场景一次性 done）
@@ -1210,6 +1325,16 @@ export class SlimeEngine implements ChatEngine {
       history: JSON.stringify(opts.history),
       message: opts.message,
     });
+    // A-1084 保险门（同上文 chat()）：装不下就**不出网**。
+    // ⚠️ 必须**先于** tool_loop / 路由发起 —— 这道门的意义就是"不发"，晚一步就等于没做。
+    // 出声走 `error` 事件（渲染层已有 `isContextOverflowError` 分支，会走压缩一次 + 重试一次）。
+    const guard = this.guardSend(opts, messages, tools);
+    if (!guard.allow) {
+      this.logger.warn(`[engine] 上下文保险门拦截（未发送）: ${guard.reason}`);
+      // 标记的用途见 chat() 处同名注释（本地判定必须自报身份，才能走同一条处置路径）
+      yield { type: "error", message: `${LOCAL_PREFLIGHT_MARKER}\n⚠️ 本次请求**未发送** —— 上下文装不下该模型的窗口。\n\n${guard.reason}` };
+      return;
+    }
 
     if (tools && tools.length > 0) {
       // 工具场景：真流式工具循环（5B.3）——每轮 chatStream，思考/正文边到边实时可见。
@@ -1242,8 +1367,16 @@ export class SlimeEngine implements ChatEngine {
               liveQueue.push({ type: "reasoning", content: ev.content });
             } else if (ev.type === "chunk") {
               liveQueue.push({ type: "chunk", content: ev.content });
+            } else if (ev.type === "steer") {
+              // A-1060：引导已进本轮上下文 → 透传给渲染层（撤掉待发卡片 + 折进思考历程）。
+              // ⚠️ 必须显式成一支：下面的 else 是「tool 兜底」，把 steer 落进去会变成一条
+              //    name/args 全空的假工具事件（界面会多出一张空工具卡，且用户看不懂）。
+              liveQueue.push({ type: "steer", content: ev.text, steerId: ev.id });
+            } else if (ev.type === "tool-start") {
+              // A-1061②：工具开始执行 → 界面立刻显示「执行中…」（toolId 用于与完成事件配对）
+              liveQueue.push({ type: "tool-start", name: ev.name, args: ev.args, toolId: ev.id });
             } else {
-              liveQueue.push({ type: "tool", name: ev.name, args: ev.args, result: ev.result });
+              liveQueue.push({ type: "tool", name: ev.name, args: ev.args, result: ev.result, toolId: ev.id });
             }
           },
         })
@@ -1269,6 +1402,10 @@ export class SlimeEngine implements ChatEngine {
 
       // 轮询队列：边到边 yield（30ms 粒度，思考/正文实时跟进模型输出）
       while (!loopDone) {
+        // A-1061④：上游重试 / 切换备用模型的瞬时通知也要吐出去 —— 这段等待期界面本来
+        // 只有一句"等待上游返回…"，用户以为卡死（原话："加载半天才输出"）。
+        const notice = takeUpstreamNotice();
+        if (notice) { liveQueue.push({ type: "notice", content: notice.text }); }
         while (liveQueue.length > 0) {
           yield liveQueue.shift()!;
         }
@@ -1383,6 +1520,9 @@ export class SlimeEngine implements ChatEngine {
 
     // 轮询队列：边到边 yield（30ms 粒度，兼顾实时性与 CPU 占用）
     while (!streamDone) {
+      // A-1061④：同上 —— 纯流式（无工具）路径的首包等待期也要能报出"在上游重试"
+      const notice = takeUpstreamNotice();
+      if (notice) { liveQueue.push({ type: "notice", content: notice.text }); }
       while (liveQueue.length > 0) {
         yield liveQueue.shift()!;
       }

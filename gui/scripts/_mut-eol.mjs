@@ -19,7 +19,7 @@
  *   规范化，不是工作区的当前字节。）
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 /** 正则转义（供把字面量拼进 RegExp 用） */
 export const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -71,6 +71,32 @@ export const sub = (text, from, to) => {
 export const subLines = (text, fromLines, toLines) => {
   const re = new RegExp(fromLines.map(escRe).join("\\r?\\n"));
   const body = toLines.join(nlOf(text));
+  return re.test(text) ? text.replace(re, () => body) : text;
+};
+
+/**
+ * **整组**替换：把 `from` 的**每一处**都换成 `to`（行尾无关，语义与 `sub` 一致）。
+ *
+ * 什么时候需要它：**闸门本身是计数闸门**时。典型是 A-1061 的「复位现场必须清掉『执行中』行」——
+ * 守卫数的是 `setRunningTool(null);` 的出现次数（≥3），于是要忠实复现"复位时不再清"，
+ * 就必须把**三处复位点一起**去掉。只去掉一处虽然也会让计数降到 2、守卫照样红，
+ * 但那**不是变异名字说的那个缺陷**（弱化变异体：红了，却不是因为你要证明的那件事）。
+ *
+ * ⚠️ 这类锚点天然命中多次，`check-mut-anchors.mjs` 会判成
+ *   「不唯一（无法确定改的是哪一处）」—— 所以用它时必须在变异条目里显式写 `all: true`
+ *   声明"这是整组替换"，否则核验会持续报红（而"报警没人看"就等于没报警）。
+ *
+ * ⚠️ 与 `sub` 一样避免把替换体当模式解释：单行分支走 `split/join`（纯字面量拼接，
+ *   不经 `String.replace` 的模式语义），多行分支走**替换函数**（`$&` / `$1` 不被解释）。
+ */
+export const subAll = (text, from, to) => {
+  if (!from.includes("\n")) {
+    if (!text.includes(from)) { return text; }
+    const body = to.includes("\n") ? to.split("\n").join(nlOf(text)) : to;
+    return text.split(from).join(body);
+  }
+  const re = new RegExp(from.split("\n").map(escRe).join("\\r?\\n"), "g");
+  const body = to.split("\n").join(nlOf(text));
   return re.test(text) ? text.replace(re, () => body) : text;
 };
 
@@ -184,6 +210,35 @@ export function selfTestEolDetector(root, readUtf8 = (p) => readFileSync(p, "utf
   }], root, readUtf8);
   if (d.length !== 0) { bad.push("对『没有实际改动』的变异误报了"); }
   return bad;
+}
+
+/** 把 eolProblems 的结果打印成人类可读的报错；有问题时返回 true（调用方据此 exit 1） */
+/**
+ * **中断即还原**：给「已写入变异、尚未还原」的那个窗口加一道保险。
+ *
+ * 为什么必需（2026-09-23 实测踩到）：脚本末尾的 `finally { 还原 }` **只在异常展开时**跑。
+ * Ctrl+C（SIGINT）默认**直接终止进程、不展开调用栈** —— 若此刻循环正卡在
+ * `writeFileSync(变异)` 与 `writeFileSync(还原)` 之间，**变异就留在源码里**。
+ * 实测后果：`client.ts` 留着变异形态；下一次跑脚本会把「变异后的源码」当成基线读进去
+ * → 该条锚点报「未命中」、甚至整批变异**静默失效**（假绿）。这比漏测更坏：
+ * 它让人以为这道门守住了。
+ *
+ * 用法（在读完 originals 之后、进循环之前调一次）：
+ *
+ *     installRestoreOnSignal(TARGETS, ROOT);
+ *
+ * @param targets  相对 root 的文件列表（与脚本里的 TARGETS 同源）
+ * @param root     仓库根
+ * @param signals  要接管的信号（默认 SIGINT / SIGTERM / SIGHUP）
+ * @returns 还原函数（也供脚本自己的 finally 复用，避免两处还原逻辑漂移）
+ */
+export function installRestoreOnSignal(targets, root, signals = ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  const snapshot = new Map(targets.map((t) => [t, readFileSync(`${root}/${t}`, "utf8")]));
+  const restore = () => { for (const [t, src] of snapshot) { writeFileSync(`${root}/${t}`, src); } };
+  for (const sig of signals) {
+    process.on(sig, () => { restore(); process.exit(130); });
+  }
+  return restore;
 }
 
 /** 把 eolProblems 的结果打印成人类可读的报错；有问题时返回 true（调用方据此 exit 1） */

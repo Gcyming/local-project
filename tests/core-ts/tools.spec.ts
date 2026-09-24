@@ -11,6 +11,8 @@ import { registerBuiltinTools, PROJECT_ROOT } from "../../core-ts/src/tools/buil
 import { ToolLoop, TOOL_MAX_ROUNDS, type SandboxGate } from "../../core-ts/src/tool_loop.js";
 import { ChatClient } from "../../core-ts/src/llm/client.js";
 import { ModelRouter } from "../../core-ts/src/router.js";
+// A-1061⑥：验证「引导」在**本轮无工具调用**时也能注入同一轮运行（行为级，非搜源码）
+import { pushSteer, drainSteers, resetSteerBusForTest } from "../../core-ts/src/services/steerBus.js";
 
 describe("ToolRegistry（统一工具注册表）", () => {
   it("注册 + 同名拒绝覆盖（force 才覆盖）", () => {
@@ -431,8 +433,258 @@ describe("ToolLoop.runStream（真流式工具循环：思考/正文边到边实
     expect(r.text).toBe("完成了");
     expect(r.rounds).toBe(2);
     expect(r.reasonings).toEqual(["先分析", "再总结"]);
-    // 顺序：第 1 轮思考 → 工具 → 第 2 轮思考 → 正文
-    expect(events).toEqual(["reasoning:先分析", "tool:echo", "reasoning:再总结", "chunk:完成了"]);
+    /* A-1061② 迁移：序列里多了 `tool-start`（工具开始执行、结果还没到）。
+       意图不变（验证 reasoning → tool → reasoning → chunk 的真实到达顺序），
+       只是把新增的"开始"这一段如实纳入 —— 界面靠它显示「执行中…」。 */
+    expect(events).toEqual(["reasoning:先分析", "tool-start:echo", "tool:echo", "reasoning:再总结", "chunk:完成了"]);
+  });
+
+  /* A-1061⑥：这是**行为级**验证（不是搜源码）——用户实测的正是这条路径。
+     原话：「我点击了但是发不过去，只能等这个的 agent 回复完才能发送啊」：
+     agent 在长段输出（本轮没有工具调用）时点「引导」，而引导原本只在
+     「工具执行完 → 下一次模型请求之前」这个边界被消费 ⇒ 本轮没有工具调用就**没有落点**。 */
+  it("A-1061⑥：本轮无工具调用时，有引导在等 → 续一轮注入**同一轮运行**；且**不会重跑上一批工具**", async () => {
+    const exec = vi.fn(async (a: unknown) => `E:${String((a as { v?: string })?.v ?? "")}`);
+    const reg = new ToolRegistry();
+    reg.register(new Tool({ name: "echo", description: "", parameters: {}, executeFn: exec }));
+    const bodies: string[] = [];
+    let round = 0;
+    const sse = (delta: unknown): string => `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta }] })}`;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      round += 1;
+      const lines: string[] = [];
+      if (round === 1) {
+        // 第 1 轮：要一个工具（这样后面 `pending` 非空 —— 用来验"不许重跑"）
+        lines.push(sse({ tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "echo", arguments: '{"v":"hi"}' } }] }));
+      } else if (round === 2) {
+        /* 第 2 轮：**只输出正文**（无工具调用）——用户正是在这一刻点的「引导」。
+           旧实现在这里直接收尾，引导只能等整轮结束（用户实测的正是这条路径）。 */
+        pushSteer("s1", { id: "q1", text: "顺便说一下，用中文术语" });
+        lines.push(sse({ content: "第一段" }));
+      } else {
+        lines.push(sse({ content: "收到引导" }));
+      }
+      lines.push("data: [DONE]");
+      return new Response(`${lines.join("\n")}\n`, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    const router = new ModelRouter(
+      [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+      () => new ChatClient({ baseUrl: "http://x", fetchImpl }),
+    );
+    resetSteerBusForTest();
+
+    const loop = new ToolLoop({ router, registry: reg });
+    const events: string[] = [];
+    const r = await loop.runStream({
+      agentId: "a1",
+      sessionId: "s1",
+      messages: [],
+      initialToolCalls: [],
+      onEvent: (ev) => events.push(ev.type),
+    });
+
+    // ① 必须真的**续了一轮**（1 工具轮 + 1 正文轮 + 1 引导轮）
+    expect(r.rounds, "没有续轮 → 引导又只能等整轮结束").toBe(3);
+    expect(bodies.length, "请求数不对 = 引导没被注入").toBe(3);
+    // ② 引导必须作为 user 消息进了**续轮那次**请求的上下文
+    expect(bodies[2]).toContain("顺便说一下，用中文术语");
+    /* ②′ 上一轮说过的正文也要在上下文里（否则模型不知道自己刚说了什么就收到新要求）；
+       这条**只可能**来自"把本轮正文 push 成 assistant 消息"那一步 ——
+       循环本来不把纯正文轮写进 messages。 */
+    expect(bodies[2], "续轮时没把上一段正文留在上下文里").toContain("第一段");
+    // ③ 两段正文都在（第一段没被丢掉）
+    expect(r.text).toBe("第一段\n\n收到引导");
+    // ④ 界面要收到 steer 事件（撤卡片 + 折进思考历程）
+    expect(events).toContain("steer");
+    /* ⑤ 🐛 关键：上一批工具**绝不能被重跑**。
+       续轮前若忘了清 `pending`，下一轮会拿它再执行一次 —— 这条断言就是为它写的
+       （只锁源码里的 `pending = [];` 是不够的：那行删掉后行为才暴露）。 */
+    expect(exec, "上一批工具被重跑了（pending 没清）").toHaveBeenCalledTimes(1);
+    /* ⑤′ 🐛 更细的一条：即使 dedup 挡住了"真执行"，重跑仍然会**多报一条 tool 事件**
+       （思考历程里会出现同一个工具两遍）。这条用来锁住 `pending = []` ——
+       只断言 `exec` 次数是锁不住的（同参数被 dedup 短路了）。 */
+    expect(events.filter((e) => e === "tool").length, "上一批工具被重报（pending 没清）").toBe(1);
+    // ⑥ 引导取走即清空 —— 不会在下一轮重复注入
+    expect(drainSteers("s1")).toEqual([]);
+  });
+
+  it("A-1061⑥（非流式 run）：无工具调用的那轮若有引导在等 → 同样续一轮注入", async () => {
+    // run() 与 runStream() 是两条独立实现（都不是转调），续轮逻辑必须**两边都在**，
+    // 否则"用非流式的路径"（部分内部调用）会退回"引导只能等整轮结束"。
+    const exec = vi.fn(async (a: unknown) => `E:${String((a as { v?: string })?.v ?? "")}`);
+    const reg = new ToolRegistry();
+    reg.register(new Tool({ name: "echo", description: "", parameters: {}, executeFn: exec }));
+    let round = 0;
+    const fetchImpl = (async (_url: string, _init?: RequestInit) => {
+      round += 1;
+      let content: string | null = null;
+      let toolCalls: unknown;
+      if (round === 1) {
+        toolCalls = [{ id: "t1", type: "function", function: { name: "echo", arguments: '{"v":"hi"}' } }];
+      } else if (round === 2) {
+        pushSteer("s1", { id: "q1", text: "非流式引导" });
+        content = "第一段";
+      } else {
+        content = "收到引导";
+      }
+      return new Response(JSON.stringify({
+        id: "x", object: "chat.completion", created: 1, model: "m",
+        choices: [{ index: 0, message: { role: "assistant", content, tool_calls: toolCalls }, finish_reason: "stop" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const router = new ModelRouter(
+      [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+      () => new ChatClient({ baseUrl: "http://x", fetchImpl }),
+    );
+    resetSteerBusForTest();
+    const loop = new ToolLoop({ router, registry: reg });
+    const r = await loop.run({ agentId: "a1", sessionId: "s1", messages: [], initialToolCalls: [] });
+    expect(r.rounds, "非流式路径没续轮 → 引导只能等整轮结束").toBe(3);
+    expect(r.text).toContain("收到引导");
+    expect(exec, "上一批工具被重跑了").toHaveBeenCalledTimes(1);
+  });
+
+  it("A-1061⑥：没有引导时，本轮无工具调用照旧**直接收尾**（不许无故多跑一轮）", async () => {
+    const reg = new ToolRegistry();
+    const bodies: string[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      const line = `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: { content: "就一段" } }] })}`;
+      return new Response(`${line}\ndata: [DONE]\n`, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    const router = new ModelRouter(
+      [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+      () => new ChatClient({ baseUrl: "http://x", fetchImpl }),
+    );
+    resetSteerBusForTest();
+    const loop = new ToolLoop({ router, registry: reg });
+    const r = await loop.runStream({ agentId: "a1", sessionId: "s1", messages: [], initialToolCalls: [] });
+    expect(r.rounds).toBe(1);
+    expect(bodies.length).toBe(1);
+    expect(r.text).toBe("就一段");
+  });
+
+  /* A-1061⑫：**计划收尾核对**（行为级）。
+     用户实测原话：「每次一项大任务做完，都有一些任务列表的任务没有划掉，
+     没有实时监测进度并返回结果」——待办面板是用户盯进度的唯一地方，模型忘了最后一次
+     todo_write 就停在半途。提示词是"建议"，这里验的是**循环层面的硬核对**：
+     本轮不再要工具、准备收尾时，若本次任务自己写过的计划还有未完成项 → 续一轮要它交代。 */
+  const sseLine = (delta: unknown): string =>
+    `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta }] })}\n`;
+
+  it("A-1061⑫：本次任务写过计划但没收尾 → 收尾前续一轮核对（并点名剩余项）", async () => {
+    const sid = `__spec_reconcile_${Date.now().toString(36)}`;
+    const { writeTodos } = await import("../../core-ts/src/services/todoStore.js");
+    try {
+      const reg = new ToolRegistry();
+      // 用真实 todoStore 落盘：核对文案是由它读盘生成的（不是桩），这样测的是真链路
+      reg.register(new Tool({
+        name: "todo_write", description: "", parameters: {},
+        executeFn: async () => { writeTodos(sid, [{ id: "1", content: "补测试", status: "in_progress" }]); return "ok"; },
+      }));
+      const bodies: string[] = [];
+      let round = 0;
+      const fetchImpl = (async (_url: string, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ""));
+        round += 1;
+        const lines: string[] = [];
+        if (round === 1) {
+          lines.push(sseLine({ tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "todo_write", arguments: "{}" } }] }));
+        } else if (round === 2) {
+          // 典型故障形态：直接给结论，忘了把最后一项划掉
+          lines.push(sseLine({ content: "任务完成了" }));
+        } else {
+          lines.push(sseLine({ content: "已把「补测试」标记完成" }));
+        }
+        lines.push("data: [DONE]\n");
+        return new Response(lines.join(""), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }) as unknown as typeof fetch;
+      const router = new ModelRouter(
+        [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+        () => new ChatClient({ baseUrl: "http://x", fetchImpl }),
+      );
+      resetSteerBusForTest();
+      const loop = new ToolLoop({ router, registry: reg });
+      const r = await loop.runStream({ agentId: "a1", sessionId: sid, messages: [], initialToolCalls: [] });
+
+      // ① 必须真的续了一轮（工具轮 + 结论轮 + 核对轮）
+      expect(r.rounds, "没续轮 = 清单会停在半途").toBe(3);
+      expect(bodies.length).toBe(3);
+      // ② 核对要求必须进第 3 次请求，且**点名**剩余项与它的状态
+      expect(bodies[2]).toContain("计划收尾核对");
+      expect(bodies[2]).toContain("补测试");
+      expect(bodies[2]).toContain("in_progress");
+      // ③ 上一轮正文要留在上下文里（否则模型不知道自己刚宣布过"完成"）
+      expect(bodies[2], "核对轮没把上一段正文留在上下文里").toContain("任务完成了");
+      // ④ 两段正文都在（结论没被吞掉）
+      expect(r.text).toContain("任务完成了");
+      expect(r.text).toContain("已把「补测试」标记完成");
+    } finally {
+      const { removeTodos: rm2 } = await import("../../core-ts/src/services/todoStore.js");
+      rm2(sid);
+    }
+  });
+
+  it("A-1061⑫ 准入：「本次没碰过计划」→ 即使盘上有历史未完成项也**不追问**（否则每轮问答都被骚扰）", async () => {
+    const sid = `__spec_reconcile_no_${Date.now().toString(36)}`;
+    const { writeTodos, removeTodos } = await import("../../core-ts/src/services/todoStore.js");
+    writeTodos(sid, [{ id: "old", content: "上个任务遗留", status: "pending" }]);
+    try {
+      const reg = new ToolRegistry();
+      const bodies: string[] = [];
+      const fetchImpl = (async (_url: string, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ""));
+        return new Response(`${sseLine({ content: "你好，有什么可以帮你" })}data: [DONE]\n`, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }) as unknown as typeof fetch;
+      const router = new ModelRouter(
+        [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+        () => new ChatClient({ baseUrl: "http://x", fetchImpl }),
+      );
+      resetSteerBusForTest();
+      const loop = new ToolLoop({ router, registry: reg });
+      const r = await loop.runStream({ agentId: "a1", sessionId: sid, messages: [], initialToolCalls: [] });
+      expect(r.rounds, "一次简单问答被历史计划拖出了额外一轮").toBe(1);
+      expect(bodies.length).toBe(1);
+    } finally {
+      removeTodos(sid);
+    }
+  });
+
+  it("A-1061⑫ 反例：本次写过计划且**已全部完成** → 不追问（收完了就该安静收尾）", async () => {
+    const sid = `__spec_reconcile_done_${Date.now().toString(36)}`;
+    const { writeTodos, removeTodos } = await import("../../core-ts/src/services/todoStore.js");
+    try {
+      const reg = new ToolRegistry();
+      reg.register(new Tool({
+        name: "todo_write", description: "", parameters: {},
+        executeFn: async () => { writeTodos(sid, [{ id: "1", content: "补测试", status: "completed" }]); return "ok"; },
+      }));
+      let round = 0;
+      const fetchImpl = (async (_url: string, init?: RequestInit) => {
+        round += 1;
+        const lines: string[] = [];
+        if (round === 1) {
+          lines.push(sseLine({ tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "todo_write", arguments: "{}" } }] }));
+        } else {
+          lines.push(sseLine({ content: "都做完了" }));
+        }
+        lines.push("data: [DONE]\n");
+        void init;
+        return new Response(lines.join(""), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }) as unknown as typeof fetch;
+      const router = new ModelRouter(
+        [{ name: "s", baseUrl: "http://x", kind: "local", priority: 1, roles: ["chat"] }],
+        () => new ChatClient({ baseUrl: "http://x", fetchImpl }),
+      );
+      resetSteerBusForTest();
+      const loop = new ToolLoop({ router, registry: reg });
+      const r = await loop.runStream({ agentId: "a1", sessionId: sid, messages: [], initialToolCalls: [] });
+      expect(r.rounds).toBe(2);
+      expect(r.text).toBe("都做完了");
+    } finally {
+      removeTodos(sid);
+    }
   });
 
   it("流式 tool_calls 按 index 分片累积 → 完整参数执行工具", async () => {

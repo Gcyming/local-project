@@ -15,6 +15,10 @@ import { ToolRegistry } from "./tools/registry.js";
 import { targetFromArgs } from "./tools/hard_rules.js";
 import { SandboxManager } from "./sandbox.js";
 import { OutputFilter, StreamFilter } from "./filter.js";
+// A-1060：中途「引导」（steer）的会话级缓冲 —— 在**轮次边界**被消费，见 injectSteers
+import { drainSteers } from "./services/steerBus.js";
+// A-1061⑫：计划收尾核对 —— 本轮不再要工具时问一次"计划收完了吗"，见 planReconcileText
+import { planReconcileText } from "./services/todoStore.js";
 import { isAbsolute, join } from "node:path";
 
 /** 文件/路径类工具（沙箱需按路径 + 工作目录校验）；URL 走 SSRF 不在此列 */
@@ -302,7 +306,27 @@ export type AskUserHook = (req: AskUserRequest) => Promise<AskUserResponse>;
 export type ToolLoopEvent =
   | { type: "chunk"; content: string }
   | { type: "reasoning"; content: string }
-  | { type: "tool"; name: string; args: string; result: string; /** 图形控制截图（data URL），供 GUI 缩略图预览；不回灌到模型文本 */ image?: string };
+  /* A-1061②：工具**开始执行**（在结果回来之前就播）。
+     为什么要它：此前只有下面那条 `tool`（带 result）—— 界面只能**事后**显示"成功/失败"，
+     用户看不到"正在跑"。对齐 Claude Agent SDK 的 content_block_start(tool_use) → 状态指示
+     `[Using Read…]` → content_block_stop 打 `done`；以及 Claude Code 的
+     `• ToolName(params) 2.3s` 形态。`id` 与完成事件的 `id` 配对（同一次调用）。 */
+  | { type: "tool-start"; id: string; name: string; args: string }
+  | {
+      type: "tool";
+      /** A-1061②：与 tool-start 配对的调用 id（旧调用方没有它 → 界面退回"直接追加"行为） */
+      id?: string;
+      name: string;
+      args: string;
+      result: string;
+      /** 图形控制截图（data URL），供 GUI 缩略图预览；不回灌到模型文本 */
+      image?: string;
+    }
+  /* A-1060：中途「引导」已被注入本轮上下文。`id` 是渲染层待发卡片的自增 id ——
+     界面据此把那一张卡片撤掉（它已经进运行了，不该再走"排队等下一轮"那条路）。
+     ⚠️ 事件里带 `text` 是为了让界面能把用户气泡**就地补上**（注入发生在主进程，
+     渲染层原本不知道这句话已经进了上下文）。 */
+  | { type: "steer"; id: string; text: string };
 
 /* ── 图形控制：截图标记抽取 ──
  * screen_* 工具在结果里附一行 `@@IMG@@data:image/...;base64,...`；
@@ -446,6 +470,14 @@ export class ToolLoop {
     // A-968：同轮多工具并发执行（Promise.all）——file_read/web_search/code_check 等纯读检索
     // 工具彼此无依赖（对齐 Claude Code streaming concurrent execution，多工具场景 2-5× 加速）。
     // abort 在每个工具执行前检查；去重 dedup 为并发共享集，命中重复的工具返回提示串不重复执行。
+    /* A-1061②：**执行前**先逐个播「开始」事件 —— 界面据此立刻显示「执行中…」。
+       同轮并发，所以一起播（它们本来就几乎同时开始）；不与结果事件共用一条通道，
+       否则"还没有结果"与"结果为空"会被混成一件事。 */
+    if (onEvent) {
+      for (const tc of pending) {
+        onEvent({ type: "tool-start", id: tc.id, name: tc.name, args: tc.arguments ?? "" });
+      }
+    }
     const results = await Promise.all(
       pending.map(async (tc) => {
         if (signal?.aborted) {
@@ -470,7 +502,8 @@ export class ToolLoop {
       const displayLimit = displayLimitFor(tc.name);
       details.push({ name: tc.name, args: (() => { try { return JSON.stringify(JSON.parse(tc.arguments || "{}")); } catch { return tc.arguments ?? ""; } })(), result: truncateWithDiffTag(clean, displayLimit) });
       if (onEvent) {
-        onEvent({ type: "tool", name: tc.name, args: tc.arguments ?? "", result: truncateWithDiffTag(clean, displayLimit), ...(own.length > 0 ? { image: own[own.length - 1] } : {}) });
+        // A-1061②：带上 id —— 界面靠它与 tool-start 配对，把那一行从「执行中」翻成「成功/失败」
+        onEvent({ type: "tool", id: tc.id, name: tc.name, args: tc.arguments ?? "", result: truncateWithDiffTag(clean, displayLimit), ...(own.length > 0 ? { image: own[own.length - 1] } : {}) });
       }
     }
     // 截图回灌：作为下一条 user 消息的 content-blocks（模型因此能看见屏幕画面）。
@@ -484,6 +517,95 @@ export class ToolLoop {
       messages.push({ role: "user", content: blocks as unknown as string });
     }
     return details;
+  }
+
+  /**
+   * A-1060：在**轮次边界**消费中途「引导」（steer）—— 一轮工具执行完、下一次模型请求之前。
+   *
+   * 为什么正好落在这个位置：Cursor 的 changelog 写的是「follow-ups wait for the **next tool call**
+   * instead of cutting the agent off mid-action」，Claude Code 的排队消息也落在"轮次边界"。
+   * 放这里既保住"不打断当前步"，又让引导**在本轮内**被模型看到（不必等整个任务收尾）。
+   *
+   * ⚠️ 缓冲为空时（没有任何调用方 push 过）本函数是**纯空转**：不 push 消息、不发事件
+   *    → 对既有全部调用路径**零行为变化**（这是本次改动的安全边界）。
+   * ⚠️ 无 sessionId（部分调用方确实不传）→ 直接返回：没有会话就没有"中途"可言。
+   */
+  private injectSteers(
+    sessionId: string | undefined,
+    messages: ChatMessage[],
+    onEvent?: (ev: ToolLoopEvent) => void,
+  ): number {
+    const items = drainSteers(sessionId);
+    if (items.length === 0) { return 0; }
+    for (const it of items) {
+      /* A-1061⑩：**不能只塞原文** —— 用户原话：「要把内容直接输入，插进 Agent-Loop 循环，
+         让 Agent 先响应一下、了解用户需求，Agent-Loop 内部重新编排一下流程，
+         将用户插入的请求列入任务，在这轮会话解决」。
+         只塞原文时模型多半顺着原计划跑，插进来的请求就"看不见"了。
+         所以这里给一段**编排指令**，明确三步：先响应 → 调 todo_write 列入任务清单 → 再继续原任务。
+         ⚠️ 事件里带的仍是**原文**（界面折进思考历程的是用户说的话，不是这段元指令）。 */
+      messages.push({
+        role: "user",
+        content: [
+          "[用户中途插入 · Agent-Loop 编排指令]",
+          "",
+          "用户在你运行期间插入了下面的请求。按这个顺序处理，**不要丢掉原有任务**：",
+          "1. 先用一两句话向用户确认你理解了这条请求要什么（这是本环节的「模型响应」）；",
+          /* A-1064：用户原话「我的中间引导不要影响待办任务的执行啊，可以重组、加入我插入的引导请求」。
+             ⚠️ 这里**必须钉死 action="add"**。`todo_write` 的 add 是**按 id 合并**（未提及的项自动保留），
+             而 replace 是**整表重写**（只保留本次 items）—— 模型在"把它列入任务清单"这句话下
+             顺手用 replace 只带上新请求，就会把用户已有的整张计划**整体抹掉**。
+             用户实测症状正是"插了引导之后待办就乱了/没了"。允许重组（合法需求），
+             但重组必须带上完整清单 —— 把这条代价写在指令里，比事后补救有效。 */
+          "2. 调用 todo_write 把它列入当前任务清单：**默认用 action=\"add\"**（按 id 合并，未提及的项自动保留，"
+            + "已完成项保持 completed）。只有你确实要**整体重组**计划时才用 action=\"replace\"，"
+            + "且那时**必须把完整清单（含所有已完成项）一并带上** —— 只带新增项就 replace 等于把用户的计划抹掉。",
+          "3. 按新顺序继续执行 —— 原任务与这条插入请求都要在这轮会话里落地。",
+          "",
+          "—— 用户插入的原文 ——",
+          it.text,
+        ].join("\n"),
+      });
+      onEvent?.({ type: "steer", id: it.id, text: it.text });
+    }
+    return items.length;
+  }
+
+  /**
+   * A-1061⑫：**计划收尾核对**（本轮运行最多一次）。
+   *
+   * 用户实测：「每次一项大任务做完，都有一些任务列表的任务没有划掉，没有实时监测进度并返回结果」。
+   * 只靠提示词反复要求"收尾前回写 todo_write"是不够的 —— 那是建议，模型在长任务末尾会忘。
+   * 所以在**循环层面**补一次硬核对：本轮已经不再要工具、准备返回最终答复时，若该会话的计划里
+   * 还有未完成项，就把当前正文留成 assistant 消息、再注一条核对要求，**续一轮**让模型二选一
+   * （收尾回写 / 明确交代为何留待下一轮）。
+   *
+   * ⚠️ 四条纪律（前三条与续轮注入引导同源，少一条就出错）：
+   *   ① `pending` 已在本分支清空，这里不重复动它 —— 否则会把上一批工具再跑一遍；
+   *   ② 本轮正文必须先作为 assistant 消息落进上下文（否则模型不知道"自己刚说了什么"）；
+   *   ③ **一次运行只核对一次**（调用方传 `!reconciled`）—— 否则模型选择"留待下一轮"时会被无限追问；
+   *   ④ **只在本次运行碰过计划时核对**（调用方传 `usedTodoWrite`）—— 否则会话里一条历史
+   *      未完成项会让之后每一轮简单问答都被追问一次。
+   *   轮次上限 `TOOL_MAX_ROUNDS` 仍是最终兜底。
+   *
+   * @param mayReconcile 准入条件（由调用方计算：`!reconciled && usedTodoWrite`）。
+   *   注意**是正向语义** —— 传 false 才是"不核对"，别写成反向（⑫ 的实现里曾把它命名成
+   *   `alreadyDone`，读起来是反的，属于"判据写反"的高危形状，已改名）。
+   * @returns true = 已续轮（调用方 `continue`），false = 按原样收尾（零行为变化）。
+   */
+  private reconcilePlan(
+    sessionId: string | undefined,
+    messages: ChatMessage[],
+    roundText: string,
+    mayReconcile: boolean,
+  ): boolean {
+    if (!mayReconcile) { return false; }                             // ③④ 不打扰
+    if (!sessionId) { return false; }                                // 无会话 → 没有待办可言
+    const ask = planReconcileText(sessionId);
+    if (!ask) { return false; }                                      // ② 收完了 / 读不到 → 正常收尾
+    if (roundText) { messages.push({ role: "assistant", content: roundText }); } // ②
+    messages.push({ role: "user", content: ask });
+    return true;
   }
 
   /** 单个工具执行（并发安全）：解析参数 → 去重 → 工作目录锚定 → 联网开关 → ask_user/沙箱 → callTool。
@@ -637,6 +759,13 @@ export class ToolLoop {
   async run(opts: ToolLoopOptions): Promise<ToolLoopResult> {
     const dedup = new Set<string>();
     let pending = opts.initialToolCalls;
+    /** A-1061⑫：计划收尾核对是否已做过（一次运行最多一次，杜绝无限追问） */
+    let reconciled = false;
+    /** A-1061⑫：本轮运行是否真的碰过计划（调过 todo_write）—— 收尾核对的准入条件。
+     *  不加这条的话，一次会话里只要盘上留着历史未完成项，**之后每一轮简单问答**
+     *  （"你好"也算）都会在收尾时被强行续一轮追问"计划收完了吗"：噪声、浪费 token、
+     *  还会把不相关的旧计划重新拉回上下文。只在"这份计划是本次任务建的"时才核对。 */
+    let usedTodoWrite = false;
     const roundLog: Array<{ round: number; details: ToolRoundDetail[] }> = [];
     const reasonings: string[] = [];
     const reasoningParams = this.reasoningParams();
@@ -657,6 +786,7 @@ export class ToolLoop {
     let lastUsage: LoopUsage | undefined;
 
     for (let round = 1; round <= TOOL_MAX_ROUNDS; round++) {
+      if (pending.some((tc) => tc.name === "todo_write")) { usedTodoWrite = true; }
       const details = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId);
       roundLog.push({ round, details });
       budget.toolCalls += details.length;
@@ -679,6 +809,10 @@ export class ToolLoop {
           content: `[系统提示] 本请求工具调用轮次即将耗尽（当前第 ${round} 轮，上限 ${TOOL_MAX_ROUNDS} 轮）。请根据已收集的信息给出最终结论或下一步建议；无需再发起新的工具调用。`,
         });
       }
+
+      // A-1060：非流式路径同样在轮次边界消费「引导」（语义与 runStream 一致：
+      // 工具执行完 → 下一次模型请求前注入）。此处没有 onEvent，故只注入消息、不广播事件。
+      this.injectSteers(opts.sessionId, opts.messages);
 
       const payload: ChatRequest = {
         messages: opts.messages,
@@ -703,6 +837,21 @@ export class ToolLoop {
       if (raw) { allText = allText ? `${allText}\n\n${raw}` : raw; }
       const nextCalls = toFlat((msg?.tool_calls ?? []) as unknown as Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>);
       if (nextCalls.length === 0) {
+        // A-1061⑥：与 runStream 同一语义 —— 本轮没要工具，但若有中途引导在等，
+        // 就续一轮把它注入**同一轮运行**（不能要求"必须有工具调用"才算边界）。
+        pending = [];
+        const steered = this.injectSteers(opts.sessionId, opts.messages);
+        if (steered > 0) {
+          if (raw) { opts.messages.push({ role: "assistant", content: raw }); }
+          continue;
+        }
+        /* A-1061⑫：引导之后再做**计划收尾核对**（顺序刻意的 —— 用户刚插进来的请求
+           优先于"清单有没有划掉"；且引导本身可能又添了新待办，核对必须在它之后）。
+           准入条件 = 本轮运行真的碰过计划 且 还没核对过（见 usedTodoWrite 的注释）。 */
+        if (this.reconcilePlan(opts.sessionId, opts.messages, raw, !reconciled && usedTodoWrite)) {
+          reconciled = true;
+          continue;
+        }
         return {
           text: raw,
           raw,
@@ -735,6 +884,10 @@ export class ToolLoop {
   async runStream(opts: ToolLoopStreamOptions): Promise<ToolLoopResult> {
     const dedup = new Set<string>();
     let pending = opts.initialToolCalls;
+    /** A-1061⑫：计划收尾核对是否已做过（一次运行最多一次，杜绝无限追问） */
+    let reconciled = false;
+    /** A-1061⑫：本轮运行是否真的碰过计划（准入条件，理由同 run() 里的同名字段） */
+    let usedTodoWrite = false;
     const roundLog: Array<{ round: number; details: ToolRoundDetail[] }> = [];
     const reasonings: string[] = [];
     /** 跨轮累积的模型正文（每轮 roundText 只含当轮内容；最终 reply 必须包含全部轮次）。 */
@@ -756,6 +909,7 @@ export class ToolLoop {
     let lastUsage: LoopUsage | undefined;
 
     for (let round = 1; round <= TOOL_MAX_ROUNDS; round++) {
+      if (pending.some((tc) => tc.name === "todo_write")) { usedTodoWrite = true; }
       const roundDetails = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId, opts.signal, opts.onEvent);
       roundLog.push({ round, details: roundDetails });
       budget.toolCalls += roundDetails.length;
@@ -803,6 +957,10 @@ export class ToolLoop {
           content: `[系统提示] 本请求工具调用轮次即将耗尽（当前第 ${round} 轮，上限 ${TOOL_MAX_ROUNDS} 轮）。请根据已收集的信息给出最终结论或下一步建议；无需再发起新的工具调用。`,
         });
       }
+
+      // A-1060：轮次边界消费「引导」—— 工具已执行完、下一次模型请求之前。
+      // 放在最后一条：让引导成为模型读到的**最新**一句（不需要打断当前步，又能在本轮内生效）。
+      this.injectSteers(opts.sessionId, opts.messages, opts.onEvent);
 
       const payload: ChatRequest = {
         messages: opts.messages,
@@ -863,6 +1021,35 @@ export class ToolLoop {
         .filter((a) => a.name)
         .map((a) => ({ id: a.id || `t_${a.index}`, type: "function" as const, name: a.name, arguments: a.args || "{}" }));
       if (nextCalls.length === 0) {
+        /* A-1061⑥：本轮模型没再要工具 —— 但**此刻有中途引导在等，就不能就这么收尾**。
+         *
+         * 用户实测（原话：「我点击了但是发不过去，只能等这个的 agent 回复完才能发送啊」）：
+         * agent 正在长段输出（无工具调用）时点「引导」，而引导原本只在
+         * 「工具执行完 → 下一次模型请求之前」那个边界被消费 —— 本轮压根没有工具调用，
+         * 于是这句话**一直等不到落点**，只能等整轮结束才作为**新的一轮**发出。
+         * 那等于没做 steer。
+         *
+         * 权威语义（Cursor 2026-08-19 / Claude Code）是「等到**下一个轮次边界**」——
+         * 边界 ≠ 必须有工具调用：本轮回答写完就是边界。所以这里**续一轮**把引导注入同一轮运行。
+         *
+         * ⚠️ 三条必须同时做，少一条就出错：
+         *   ① `pending = []` —— 否则下一轮会把**上一批工具再执行一遍**；
+         *   ② 把本轮正文作为 assistant 消息留进上下文（否则模型不知道"自己刚说了什么"就收到新要求）；
+         *   ③ 只在**真的取到了引导**时才续（`injectSteers` 取走即清空，取不到就正常收尾）。
+         * 轮次上限 `TOOL_MAX_ROUNDS` 仍然兜底，不会无限续。 */
+        pending = [];
+        const steered = this.injectSteers(opts.sessionId, opts.messages, opts.onEvent);
+        if (steered > 0) {
+          if (roundText) { opts.messages.push({ role: "assistant", content: roundText }); }
+          continue;
+        }
+        /* A-1061⑫：引导之后再做**计划收尾核对**（顺序刻意的 —— 用户刚插进来的请求
+           优先于"清单有没有划掉"；且引导本身可能又添了新待办，核对必须在它之后）。
+           准入条件 = 本轮运行真的碰过计划 且 还没核对过（见 usedTodoWrite 的注释）。 */
+        if (this.reconcilePlan(opts.sessionId, opts.messages, roundText, !reconciled && usedTodoWrite)) {
+          reconciled = true;
+          continue;
+        }
         return {
           text: allText,
           raw: allText,

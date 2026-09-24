@@ -295,3 +295,77 @@ export function todosToPlanStatus(items: StoredTodo[]): "planning" | "active" | 
   if (done === items.length) { return "done"; }
   return items.some((t) => t.status !== "pending") ? "active" : "planning";
 }
+
+/**
+ * A-1061①：把**未完成的计划**渲染成一条「计划复述」提醒 —— 每轮开头注入上下文。
+ *
+ * 纯函数（不读盘、不写盘）：输入待办表，输出提醒文本或 `null`。
+ *
+ * ## 为什么必须复述（这是"中断后不接续"的结构性修法）
+ *
+ * 现状缺口：`renderTodos` 目前**只**在模型自己调 `todo_write` 时作为工具回执出现一次。
+ * 于是中断（用户插话 / 停止）之后再开一轮，模型面对的是"历史里有一张计划表，
+ * 但没有任何信号告诉它这仍是当前目标" —— 表现就是**不接续**：从头再来，或干脆当没这回事。
+ * 这与 Claude Code 用 system-reminder 反复注入当前 todo 状态是同一意图；
+ * 也是本模块 `renderTodos` 注释里早已写明的 Manus「目标复述 / recitation」：
+ * 长任务早期写下的计划会沉到上下文中段（lost-in-the-middle），必须靠 recency 顶回高注意力区。
+ *
+ * ## 判据（顺序即优先级）
+ *
+ * 1. 空表 → `null`（没有计划就别往上下文里塞一句空话）
+ * 2. **全部已完成** → `null`（此刻主进程那边正在走自动清空，复述一句"都做完了"纯属噪声）
+ * 3. 其余 → 生成提醒（含进度、当前进行中项、逐项勾选状态）
+ *
+ * ⚠️ 与自动清空的分工：本函数只负责"说清楚还剩什么"，**不负责清空** —— 清空是主进程
+ *    `scheduleTodoAutoClear` 的职责（它还要等划过动画）。把它写在这里会让两处语义打架。
+ */
+export function planReminderText(items: StoredTodo[]): string | null {
+  if (items.length === 0) { return null; }
+  const { done, total } = todoProgress(items);
+  if (done >= total && total > 0) { return null; }
+  return [
+    "[当前任务计划 · 请接着未完成的项继续]",
+    renderTodos(items),
+    "要求：接着上面未完成的项继续推进；已完成的**不要重做**；" +
+    "如果计划本身需要调整，调用 todo_write 更新它（不要只在正文里口头改）。",
+    /* A-1061⑪：用户原话：「每次一项大任务做完，都有一些任务列表的任务没有划掉，
+       没有实时监测进度并返回结果」。右侧的待办清单是用户盯进度的唯一面板，
+       模型做完却不回写 → 清单停在半途。这里把"收尾前必须回写"提为**显式要求**，
+       与"不要重做"同级 —— 它每次轮次边界都会被复述，等价于每轮提醒一次。 */
+    "收尾要求：在宣布本阶段完成**之前**，必须调用 todo_write 把确实做完的项改成 completed、" +
+    "仍在做的保持 in_progress —— 用户正看着这张清单，别让它停在半途。",
+  ].join("\n\n");
+}
+
+/**
+ * A-1061⑫：**计划收尾核对** —— 本轮已经不再要工具、准备给出最终答复时，由工具循环问一次
+ * 「计划收完了吗」，没收回就续一轮强制它交代。
+ *
+ * 为什么不能只靠提示词：`planReminderText` 每次轮次边界都会复述"收尾前必须回写"，但那是
+ * **建议**；模型在长任务末尾经常直接给结论、忘了最后那次 todo_write。用户实测到的现象是
+ * 「每次一项大任务做完，都有一些任务列表的任务没有划掉」—— 清单停在半途，右侧面板的进度
+ * 是假的。循环层面做一次**硬核对**（仅一次）比反复加感叹号有效。
+ *
+ * ⚠️ 判据落在纯函数 `planReconcileFromTodos` 上（可直接喂 items 测三支）。
+ *    这里刻意**不**加 try/catch：`readTodos` 的契约是"文件缺失/损坏/空 sessionId 一律
+ *    返回空表，绝不抛"（见其注释），读不出来就等价于"没有计划"→ 不核对。
+ *    这比"读不到就当没做完"安全得多 —— 后者会把一次磁盘故障放大成每轮都强制续轮。
+ */
+export function planReconcileText(sessionId: string): string | null {
+  if (!sessionId) { return null; }
+  return planReconcileFromTodos(readTodos(sessionId));
+}
+
+/** `planReconcileText` 的纯判据（两分支互斥、可直接单测）：无未完成项 → null；否则给核对要求。 */
+export function planReconcileFromTodos(items: StoredTodo[]): string | null {
+  const open = items.filter((t) => t.status !== "completed");
+  if (open.length === 0) { return null; }
+  return [
+    "[计划收尾核对 · 本轮运行即将结束]",
+    renderTodos(items),
+    `还有 ${open.length} 项没标完成：${open.map((t) => `「${t.content}」(${t.status})`).join("、")}。`,
+    "现在二选一，**不要沉默地跳过**：",
+    "· 已经真正做完的 → 立刻调 todo_write 把它改成 completed；",
+    "· 确实没做完 / 确实不打算做的 → 保持或调整状态，并用一句话说清为什么留到下一轮。",
+  ].join("\n\n");
+}

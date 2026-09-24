@@ -18,6 +18,8 @@ import {
   todoPath, readTodos, writeTodos, removeTodos, hasTodos,
   normalizeTodos, renderTodos, todoProgress, todosToPlanStatus,
   demoteStaleInProgress,
+  planReconcileFromTodos,
+  planReconcileText,
   type StoredTodo,
 } from "../../core-ts/src/services/todoStore.js";
 import { PROJECT_ROOT } from "../../core-ts/src/paths.js";
@@ -306,5 +308,74 @@ describe("todoStore — 僵尸 in_progress 收敛（A-985）", () => {
     const body = loadTodos.slice(0, loadTodos.indexOf("});"));
     expect(body).toContain("removeTodos(sid)");
     expect(body).not.toContain("scheduleTodoAutoClear(sid, todos)");
+  });
+});
+
+describe("todoStore — 计划收尾核对（A-1061⑫：用户实测「大任务做完还有项没划掉」）", () => {
+  /* 现象：右侧待办面板是用户盯进度的唯一地方，模型在长任务末尾常常直接给结论、
+     忘了最后一次 todo_write → 清单停在半途，进度是假的。
+     只靠提示词（planReminderText）是**建议**；这里在循环层面补一次硬核对。
+     判据落在纯函数上，三支互斥。 */
+
+  it("空表 → null（没有计划就别多跑一轮）", () => {
+    expect(planReconcileFromTodos([])).toBeNull();
+  });
+
+  it("**全部已完成** → null（收完了，零行为变化）", () => {
+    expect(planReconcileFromTodos([
+      todo("1", "改接口", "completed"),
+      todo("2", "补测试", "completed"),
+    ])).toBeNull();
+  });
+
+  it("有未完成项 → 返回核对要求，且**点名**还剩哪几项、当前状态是什么", () => {
+    const text = planReconcileFromTodos([
+      todo("1", "改接口", "completed"),
+      todo("2", "补测试", "in_progress"),
+      todo("3", "写文档", "pending"),
+    ]);
+    expect(text).not.toBeNull();
+    expect(text).toContain("还有 2 项没标完成");
+    expect(text).toContain("「补测试」(in_progress)");
+    expect(text).toContain("「写文档」(pending)");
+    // 已完成的那项**不算**未完成（否则模型会被要求去"收尾"一个已经完成的项）
+    expect(text).not.toContain("「改接口」(");
+    // 二选一是硬要求，且必须给出"留待下一轮"这条合法出口（否则模型会假完成）
+    expect(text).toContain("调 todo_write");
+    expect(text).toContain("为什么留到下一轮");
+  });
+
+  it("planReconcileText：空 sessionId → null（读不到会话就没有计划可言）", () => {
+    expect(planReconcileText("")).toBeNull();
+  });
+
+  it("planReconcileText：真会话走 readTodos —— 未完成要给出核对，全完成给 null", () => {
+    writeTodos(sid, [todo("1", "甲", "in_progress")]);
+    expect(planReconcileText(sid)).toContain("还有 1 项没标完成");
+    writeTodos(sid, [todo("1", "甲", "completed")]);
+    expect(planReconcileText(sid)).toBeNull();
+  });
+
+  it("工具循环真的会在**本轮不再要工具**时续一轮去做核对（源码接线）", () => {
+    const src = readFileSync(join(PROJECT_ROOT, "core-ts/src/tool_loop.ts"), "utf8");
+    // 两条路径（非流式 run / 流式 runStream）都要接上
+    expect((src.match(/this\.reconcilePlan\(/g) ?? []).length).toBe(2);
+    const fn = src.slice(src.indexOf("private reconcilePlan("));
+    const body = fn.slice(0, fn.indexOf("\n  }\n"));
+    // 续轮必须带"本轮正文先落成 assistant"（否则模型不知道刚说了什么）
+    expect(body).toContain('messages.push({ role: "assistant", content: roundText });');
+    expect(body).toContain('messages.push({ role: "user", content: ask });');
+    // 只核对一次：入口必须被 mayReconcile 拦住（否则"留待下一轮"会被无限追问）
+    // ⚠️ 参数是**正向**语义（true = 可以核对）。写成 `if (alreadyDone) return false` 那种
+    //    反向命名属于"判据写反"的高危形状，故这里连名字一起锁住。
+    expect(body).toContain("if (!mayReconcile) { return false; }");
+    expect(body).not.toContain("alreadyDone");
+    // 两个调用点都必须把「只一次」与「本次真的碰过计划」一起传进去。
+    // ⚠️ 必须锚**调用点整句**（`opts.sessionId, …`），不能用裸的 `!reconciled && usedTodoWrite` ——
+    //    函数文档里也写着这串，裸串会数出 3 处（注释计数陷阱，mutation-harness §8）。
+    expect((src.match(/this\.reconcilePlan\(opts\.sessionId, opts\.messages, (?:raw|roundText), !reconciled && usedTodoWrite\)/g) ?? []).length)
+      .toBe(2);
+    // 准入条件的置位点：两条循环各一处，判据必须是 todo_write（不是别的工具）
+    expect((src.match(/pending\.some\(\(tc\) => tc\.name === "todo_write"\)/g) ?? []).length).toBe(2);
   });
 });

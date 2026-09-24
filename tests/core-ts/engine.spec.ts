@@ -619,7 +619,10 @@ describe("SlimeEngine 流式 stream", () => {
     });
     const evs = await collect(engine.stream({ agent: reg.loadedAgents[0], message: "查一下", history: [], systemPrompt: "" }));
     const types = evs.map((e) => e.type);
-    expect(types[0]).toBe("tool");
+    // A-1061② 迁移：工具**开始**事件先行（界面据此立刻显示「执行中…」），随后才是完成事件。
+    // 原断言锁的是 `types[0] === "tool"` —— 契约为"开始 → 完成"两段后，它必然要跟着搬到新位置。
+    expect(types[0]).toBe("tool-start");
+    expect(types).toContain("tool");
     expect(types[types.length - 1]).toBe("done");
     expect(types.filter((t) => t === "chunk").length).toBeGreaterThan(0);
     const done = evs[evs.length - 1] as { reply: string; reply_raw: string };

@@ -10,6 +10,10 @@
  */
 
 import { ChatClient, AnthropicClient, ResponsesClient, GoogleClient, ChatStreamResult, UpstreamError, REASONING_PAYLOAD_KEYS } from "./llm/client.js";
+// A-1061④：上游重试 / 切模型必须如实上报给界面（见 upstreamNotice.ts 的说明）
+import { noteUpstream, formatFallbackNotice } from "./llm/upstreamNotice.js";
+// A-1071（#229）：max_tokens 与思考参数同类——必须按「本条路由实际模型」封顶（见 withModel 注释）
+import { applyMaxTokensCap } from "./llm/maxTokens.js";
 import { ChatRequest, ChatResponse, ChatToolCallDelta } from "shared/schemas";
 
 export type RouteKind = "local" | "cloud";
@@ -290,11 +294,17 @@ export class ModelRouter {
    *
    *  同时按「本条路由实际使用的模型」重算思考参数（见 reasoningParamsFor 注释）：
    *  先清除 payload 上可能残留的思考键，再合并该模型专属的参数——保证降级换模型后
-   *  思考开关仍然与模型协议一致。 */
+   *  思考开关仍然与模型协议一致。
+   *
+   *  A-1071（#229）再补一处同族收口：`max_tokens` 同样**随模型而变**——用户选中的模型
+   *  可能给得起 12.8 万输出，但降级池落到只给 64K 的模型上时，照旧按前者的额度要
+   *  → 上游直接 400（agnes 实测：>65536 报 `max_tokens 不能超过 65536`，不降级不截断）。
+   *  与思考参数同源的原则：**凡是"随模型而变的请求字段"，都在这个唯一收口处按实际模型重算**。 */
   private withModel(payload: ChatRequest, route: RouteEntry): ChatRequest {
     const modelId = route.model ?? route.name ?? "";
     const base: ChatRequest = route.model ? { ...payload, model: route.model } : payload;
-    return ModelRouter.applyReasoningParams(base, modelId, route.kind, route.baseUrl, this.reasoningParamsFor);
+    const withReasoning = ModelRouter.applyReasoningParams(base, modelId, route.kind, route.baseUrl, this.reasoningParamsFor);
+    return applyMaxTokensCap(withReasoning, modelId);
   }
 
   /** 会被「思考参数解析」覆写的键：换模型时必须先剔除，避免把 A 模型的协议参数发给 B 模型。
@@ -337,6 +347,10 @@ export class ModelRouter {
     if (this.fallbacks.length > ModelRouter.FALLBACK_KEEP) {
       this.fallbacks.splice(0, this.fallbacks.length - ModelRouter.FALLBACK_KEEP);
     }
+    /* A-1061④：**换模型也必须让用户看见**。此前它是静默的 —— 一次 429 之后用户看到模型
+       换了（或结果风格变了）却没有任何说明，配合上面那段静默退避，整体观感就是
+       "agent 什么都没有、自己加载半天才输出"。 */
+    noteUpstream("fallback", formatFallbackNotice(from, to ?? ""));
   }
 
   /** A-158：按错误类型决定冷却时长（ms）——429/503/网络瞬时 → 短冷（避免连试同池）；
