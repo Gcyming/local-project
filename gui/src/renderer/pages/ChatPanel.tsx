@@ -20,7 +20,7 @@ import {
 } from "./requestOwner.js";
 /** A-1008：「联网搜索」开关的唯一读写实现（与 App.tsx 共用，禁在本文件复写 localStorage 口径） */
 import { readNetworkEnabled, writeNetworkEnabled } from "../networkToggle.js";
-import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel, stripToolTraceMark } from "./thinkingText.js";
+import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel, toolStatusPhase, stripToolTraceMark } from "./thinkingText.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
 import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, TerminalIcon, DownloadIcon, CloudUploadIcon, NotesIcon, HistoryIcon, StageListIcon, type IconProps } from "../components/Icon.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
@@ -955,7 +955,7 @@ const LiveStatusLine = React.memo(function LiveStatusLine({ status, stageKey }: 
       animation: "fadeIn 0.18s ease",
     }}>
       <span
-        className={status.animated ? "text-scan-light" : undefined}
+        className={status.animated ? "text-breathe" : undefined}
         title={`${status.text}${status.detail ? `（${status.detail}）` : ""}`}
         style={{ fontWeight: 600, color: "var(--text)", minWidth: 0 }}
       >
@@ -1364,6 +1364,9 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
      成功了就实时反馈出来」。running 优先于"未记录"判定（否则正在跑的卡片没有状态词）。 */
   const isRunning = tool.running === true;
   const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);
+  // A-1094：状态**阶段**（none / running / settled）—— 唯一判据住纯模块，
+  // 这里只把它映射成 data-* 属性；"运行中却显示空白框格"正是内联三元漏掉的形态。
+  const statusPhase = toolStatusPhase(tool.result, isRunning);
   const statusTitle = isRunning
     ? "正在执行 —— 展开可看具体内容（命令 / 路径 / 网址）"
     : !hasResult ? "本次调用的结果未随记录保存（仅留痕）" : isFail ? "执行失败" : "执行成功";
@@ -1438,14 +1441,20 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
             每一行的 +N/-N 与状态词都对齐在同一条竖线上。 */}
         {diffStat && <DiffStatBadge add={diffStat.add} del={diffStat.del} />}
         {/* A-1028：状态列为空（结果未记录）→ 整列省略，不留一条空白的对齐位 */}
-        {statusLabel && (
+        {statusPhase !== "none" && (
         <span
-          className={isRunning ? "think-tool-status text-scan-light" : "think-tool-status"}
+          /* A-1094：运行态**不再复用 `.text-scan-light`** —— 那个类的口径是"整段长文本的高光扫过"
+             （`background-clip: text` + `-webkit-text-fill-color: transparent`），
+             套在只有 2–3 个字、还带 min-width 胶囊的状态词上时，光带会整段移出文字区，
+             结果是**文字全透明 = 一个空白框格**（用户截图里"运行中右侧框格是空白"的真正原因）。
+             现在用专用的两个 data 属性驱动 CSS：`data-running` 负责呼吸、`data-settled`
+             负责「执行中 → 成功/失败」那一下的落位弹动。 */
+          className="think-tool-status"
+          data-running={statusPhase === "running" ? "1" : undefined}
+          data-settled={statusPhase === "settled" ? "1" : undefined}
           style={{
             color: isRunning ? "var(--accent)" : isFail ? "#f87171" : statusColor,
             flexShrink: 0,
-            // A-1061②′：执行中的那一条要"看得见在动"——扫光 + 更醒目的字重
-            fontWeight: isRunning ? 600 : undefined,
           }}
           title={statusTitle}
         >{statusLabel}</span>
@@ -5557,7 +5566,7 @@ export default function ChatPanel({
                     title={reasoningOpen ? "收起思考过程" : "展开思考过程"}
                   >
                     <ThinkingIcon size={12} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-                    <span className="text-scan-light" style={{ fontWeight: 600, letterSpacing: 0.3 }}>思考过程</span>
+                    <span className="text-breathe" style={{ fontWeight: 600, letterSpacing: 0.3 }}>思考过程</span>
                     {!reasoningOpen && (
                       <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                         · {toolEvents.length > 0 ? formatToolSummary(toolEvents) : (reasoningTmp.slice(0, 60) + (reasoningTmp.length > 60 ? "…" : ""))}
@@ -5575,7 +5584,7 @@ export default function ChatPanel({
                           <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
                         ))}
                         {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
-                          <span className="text-scan-light" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
+                          <span className="text-breathe" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
                         )}
                       </div>
                     </div>
@@ -5619,7 +5628,9 @@ export default function ChatPanel({
                       {/* 正在跑的那一条：结果还没回来，状态列必须显式说「执行中…」 */}
                       {pendingRow && (
                         <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                          <span className="text-scan-light" style={{ flexShrink: 0 }}>{stripToolTraceMark(pendingRow.label)}</span>
+                          {/* A-1094：标签用**呼吸**而不是 `.text-scan-light` —— 后者在窄元素上会让
+                              文字整体透明（同卡片状态区那个"空白框格"的根因），"正在跑什么"必须看得见。 */}
+                          <span className="text-breathe" style={{ flexShrink: 0 }}>{stripToolTraceMark(pendingRow.label)}</span>
                           {pendingRow.detail && (
                             <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{pendingRow.detail}</span>
                           )}
@@ -5630,6 +5641,7 @@ export default function ChatPanel({
                         const running = !!runningTool && !!t.toolId && t.toolId === runningTool.id;
                         const isFail = isToolFailResult(stripDiffTag(t.result ?? "").trim());
                         const status = toolStatusLabel(t.result, isFail, running);
+                        const phase = toolStatusPhase(t.result, running);
                         return (
                           <div key={t.id} style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                             <span style={{ flexShrink: 0, color: running ? "var(--accent)" : undefined }}>{t.label}</span>
@@ -5637,10 +5649,17 @@ export default function ChatPanel({
                               <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{t.detail}</span>
                             )}
                             {status && (
-                              <span style={{
-                                marginLeft: "auto", flexShrink: 0, fontSize: 11,
-                                color: running ? "var(--accent)" : isFail ? "#f87171" : "var(--success, #4ade80)",
-                              }}>{status}</span>
+                              <span
+                                /* A-1094：这一行与思考历程的卡片**共用同一份阶段判据 + 同一套动画** ——
+                                   两处各写一份必然漂移（"卡片里在动、摘要行里是死的"就是这么来的）。 */
+                                className="think-tool-status"
+                                data-running={phase === "running" ? "1" : undefined}
+                                data-settled={phase === "settled" ? "1" : undefined}
+                                style={{
+                                  marginLeft: "auto", flexShrink: 0, fontSize: 11,
+                                  color: running ? "var(--accent)" : isFail ? "#f87171" : "var(--success, #4ade80)",
+                                }}
+                              >{status}</span>
                             )}
                           </div>
                         );
@@ -5670,7 +5689,7 @@ export default function ChatPanel({
                     if (!shown) {
                       return (
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 14, fontWeight: 500 }}>
-                          <span className="text-scan-light">正在思考</span>
+                          <span className="text-breathe">正在思考</span>
                           <span className="stream-dot-row">
                             <span className="stream-dot" />
                             <span className="stream-dot" style={{ animationDelay: "0.2s" }} />

@@ -131,9 +131,20 @@ describe("A-1061②-B 接线：开始事件 → 配对 → 清行", () => {
     const src = code(PANEL);
     const at = src.indexOf("const pendingRow = runningTool &&");
     expect(at, "实时区没有 pendingRow（在跑的那条不会显示）").toBeGreaterThan(-1);
-    const body = src.slice(at, at + 2600);
+    /*
+     * A-1092 迁移：窗口从 2600 → 4000。
+     * 判据本身（"逐条状态由 toolStatusLabel(t.result, isFail, running) 产出"）不变，
+     * 但 A-1094 给这一段加了较长的解释性注释（说明为何弃用 `.text-scan-light`），
+     * 把 `toolStatusLabel(...)` 推到了原来的 2600 字窗口之外 —— 于是守卫**因为注释变长而红**，
+     * 与它要保护的行为无关。窗口只用于"限定在同一段代码内找"，放宽不影响判据强度。
+     * ⚠️ 若将来这段注释继续膨胀，请继续调宽窗口，**不要**改成全文 `toContain`
+     * （那会让"别的地方也调了 toolStatusLabel"冒充成实时区调了它）。
+     */
+    const body = src.slice(at, at + 4000);
     expect(body).toContain("执行中…");
     expect(body).toContain("toolStatusLabel(t.result, isFail, running)");
+    /* A-1094：实时区与卡片共用同一份阶段判据（两处各写一份必然漂移）。 */
+    expect(body).toContain("toolStatusPhase(t.result, running)");
     // 只渲染最近若干条（实时区是"当下在做什么"，不是完整日志）
     expect(src).toContain("const recent = toolEvents.slice(-5);");
   });

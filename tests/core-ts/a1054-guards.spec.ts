@@ -306,11 +306,17 @@ describe("A-1054④ 接线：底部状态行必须真的接到界面上", () => 
     expect(chat).toContain("deriveLiveStatus({");
   });
 
-  it("状态行的扫光**受 animated 控制**（不许无条件挂 text-scan-light：等用户时会假装还在跑）", () => {
+  it("状态行的扫光**受 animated 控制**（不许无条件挂动画类：等用户时会假装还在跑）", () => {
     // A-1056②：状态行从底部监测栏搬到 Agent 输出最下方，渲染者变成 `LiveStatusLine`
-    // （props 名由 liveStatus 变 status），但这条不变式原样保留：扫光只由 animated 决定。
-    expect(chat).toContain('status.animated ? "text-scan-light"');
-    // 反空转：不许出现"直接给状态文案挂扫光"的写法
+    // （props 名由 liveStatus 变 status），但这条不变式原样保留：动画只由 animated 决定。
+    //
+    // A-1092 迁移：承载动画的类从 `text-scan-light` 换成 `text-breathe` ——
+    //   `text-scan-light` 是 `background-clip:text + -webkit-text-fill-color:transparent`
+    //   （光带定位靠 background-position），在窄元素上光带会整段移出文字区 ⇒ 文字全透明。
+    //   `text-breathe` 走 opacity 呼吸，文字**恒为实体**。守卫意图（条件门控、不许无条件挂）
+    //   不变，只是不再绑死具体类名 —— 否则每次换动画实现都要来改这条守卫。
+    expect(chat).toMatch(/status\.animated \? "text-(scan-light|breathe)"/);
+    // 反空转：不许出现"直接给状态文案挂扫描动画"的写法
     expect(chat).not.toContain('className="text-scan-light thinking-hint-text"');
   });
 

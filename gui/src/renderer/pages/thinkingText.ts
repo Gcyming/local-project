@@ -152,8 +152,10 @@ export interface TracedToolStep {
 /** 留痕行尾的"改动详情未保存"占位（与 core-ts `chat.ts` 的 `DIFF_TRIMMED_TAG` 同字面量） */
 export const TRACE_DIFF_TRIMMED_MARKER = "[__slime_diff_trimmed__]";
 
-/** 行尾机器标记：完整 diff 标记 或「详情未保存」占位 */
-const TRACE_MARKER_RE = /\[__slime_diff__\][A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+\[\/__slime_diff__\]|\[__slime_diff_trimmed__\]/;
+/** 行尾机器标记：完整 diff 标记 或「详情未保存」占位
+ *  ⚠️ A-1093：diff 标记两侧用 `*`（允许空 base64）—— 新建文件时左半边是空的，
+ *  用 `+` 会漏剥 ⇒ 整段 base64 原样漏进界面（用户看到一屏乱码）。与 `chatProducts.ts` 同源。 */
+const TRACE_MARKER_RE = /\[__slime_diff__\][A-Za-z0-9+/=]*\|[A-Za-z0-9+/=]*\[\/__slime_diff__\]|\[__slime_diff_trimmed__\]/;
 
 /**
  * 把留痕行拆成「人读的部分」与「机器标记」。
@@ -275,6 +277,32 @@ export function toolStatusLabel(result: unknown, isFail: boolean, running?: bool
   if (running === true) { return "执行中"; }
   if (typeof result !== "string") { return ""; }
   return isFail ? "失败" : "成功";
+}
+
+/** 工具卡状态区的**阶段**（A-1094）：驱动 CSS 动画，也是"该不该显示状态列"的唯一判据。 */
+export type ToolStatusPhase =
+  /** 结果未记录（`result === undefined`，且不在进行中）→ **不渲染状态列**（诚实：无从断言） */
+  | "none"
+  /** 此刻正在执行（`tool-start` 已到、结果未到）→ 呼吸动画 + 「执行中」 */
+  | "running"
+  /** 已有结果 → 终态（成功/失败），播一次「落位」衔接动画 */
+  | "settled";
+
+/**
+ * A-1094：状态阶段判定。**唯一出处** —— `.tsx` 只管把返回值映射成 `data-*` 与文案。
+ *
+ * 为什么把它从 JSX 里抽出来：这段判据此前是 `className={isRunning ? "… text-scan-light" : "…"}`
+ * 这种内联三元，**两个**信息（要不要渲染、用哪套动画）都藏在 JSX 表达式里，
+ * 于是"运行中的状态词被扫光类吞成空白"这个缺陷没有任何守卫抓得住
+ * （结构断言只看得到那串类名，看不出它把字变透明了）。
+ *
+ * ⚠️ 优先级：`running` > "未记录" —— 正在跑的调用必须报「执行中」，
+ *    绝不能因为"结果还没来"而落进 `none`（那就是用户说的"框格是空白的"）。
+ */
+export function toolStatusPhase(result: unknown, running?: boolean): ToolStatusPhase {
+  if (running === true) { return "running"; }
+  if (typeof result !== "string") { return "none"; }
+  return "settled";
 }
 
 /**

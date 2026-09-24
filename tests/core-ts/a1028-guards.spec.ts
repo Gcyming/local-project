@@ -77,10 +77,16 @@ describe("A-1028 ②：ChatPanel 不得再自己拼状态词", () => {
   });
 
   it("状态列为空时整列省略（不留一条空白对齐位）", () => {
-    expect(src).toContain("{statusLabel && (");
-    /* A-1061②′ 迁移：className 改为按 running 切换（执行中带扫光），字面量随之变条件式 ——
-       但两个分支都必须保留 `think-tool-status` 这个类（否则对齐样式丢了）。 */
-    expect(src).toContain('className={isRunning ? "think-tool-status text-scan-light" : "think-tool-status"}');
+    /* A-1092 迁移：判据从 `statusLabel &&`（文案空）换成 `statusPhase !== "none"`（相位为 none）。
+       为什么要换：A-1094 起，运行态的状态词**必须有**（用户报「运行中右侧框格是空白」），
+       所以判据不能再挂在"文案是否为空"上，而要挂在**相位**上（running / settled / none）。
+       两个分支都必须保留 `think-tool-status` 这个类（否则对齐样式丢了）。 */
+    expect(src).toContain('{statusPhase !== "none" && (');
+    expect(src).toContain('className="think-tool-status"');
+    /* A-1094：运行态不再复用 `.text-scan-light`（`background-clip:text` + 透明填充，
+       在窄元素上会让文字整体不可见），改为 data 属性驱动专用动画。 */
+    expect(src).toContain('data-running={statusPhase === "running" ? "1" : undefined}');
+    expect(src).toContain('data-settled={statusPhase === "settled" ? "1" : undefined}');
   });
 
   it("结果未记录时 title 要讲清「为什么没有状态」（不然像坏掉了）", () => {
