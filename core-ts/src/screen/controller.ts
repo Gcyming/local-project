@@ -209,11 +209,16 @@ export class ScreenController {
     }
   }
 
-  /** A-977：枚举可见窗口（仅桌面后端支持；不支持时返回空数组） */
+  /** A-977：枚举可见窗口（仅桌面后端支持；不支持时返回空数组）
+   *  A-1088：**不再把异常吞成空数组** —— 旧实现 `catch { return []; }` 让
+   *  「枚举故障」与「本机真的没有窗口」在上层**完全同态**（工具只能回一句
+   *  「未枚举到可见窗口」，模型据此去修一个并不存在的故障）。
+   *  现在：不支持的后端仍返回空（语义是"这个后端没有窗口概念"）；
+   *  真故障**原样上抛**，由 `screen_windows` 工具转成 `[错误] …`。 */
   async listWindows(id: ScreenBackendId): Promise<Array<{ title: string; pid: number; x: number; y: number; width: number; height: number }>> {
     const b = this.backends.get(id);
     if (!b?.listWindows) { return []; }
-    try { return await b.listWindows(); } catch { return []; }
+    return await b.listWindows();
   }
 
   /** A-977：按标题聚焦窗口并返回其矩形（仅桌面后端支持） */

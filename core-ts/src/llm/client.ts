@@ -9,13 +9,18 @@ import { ChatCompletionChunk, ChatRequest, ChatResponse, ChatToolCallDelta } fro
 // client.ts / probe-live.ts 的 modelScope / isModelDeadError / nextAuthOnFailure 都改调它，避免再漂移）。
 import { modelScopeFromUpstreamText } from "../upstreamErrorScope.js";
 
+import { noteUpstream, formatRetryNotice, formatPrefillNotice } from "./upstreamNotice.js";
+
+/** A-1061④：429 退避表（累计最长 ≈110s）—— 每次重试都会经 upstreamNotice 如实上报给界面，
+ *  否则这段时间用户只看到"什么都没有"（用户原话："自己加载半天才输出"）。 */
 export const RETRY_429_BACKOFF = [5.0, 15.0, 30.0, 60.0];
 
 /** A-157：SSE 流式空闲看门狗上限（ms）。距上次「有数据」超过该值判定上游僵死
  *  （连上但不出字 / 半路断流不报错 / 网关只发头不发体），抛 timeout 交给上层重连/切模型。
- * 行业调研共识：正常 chunk 间隔毫秒级，60s 无任何字节基本可断定连接已死。
- * 支持 SLIME_STREAM_IDLE_MS 环境变量覆盖（测试/极端场景调小；与项目
- * SLIME_TOOL_MAX_ROUNDS 覆盖惯例一致）。 */
+ *  ⚠️ 生效值是 **300s（5 分钟），不是 60s** —— 见下方返回值处的完整理由；
+ *  历史上此处注释长期写「60s 无字节基本可断定连接已死」，与判据不符，容易被当成规格读错。
+ *  支持 SLIME_STREAM_IDLE_MS 环境变量覆盖（测试/极端场景调小；与项目
+ *  SLIME_TOOL_MAX_ROUNDS 覆盖惯例一致）。 */
 export const IDLE_STREAM_MS = (() => {
   const env = typeof process !== "undefined" ? process.env.SLIME_STREAM_IDLE_MS : undefined;
   if (env) {
@@ -45,6 +50,83 @@ export const DEFAULT_LLM_TIMEOUT_MS = (() => {
   }
   return 300_000;
 })();
+
+/* ─────────── A-1088：首包预算（与空闲看门狗**分离**，且按 prompt 体积自适应） ───────────
+ *
+ * ## 为什么必须分离（用户取证：29 条失败**全是 user-aborted**、无一上游错误）
+ *
+ * 首字节之前有两种完全不同的静默，此前共用同一个平的 300s：
+ *   · **冷缓存大 prompt 的 prefill**（用户实测 glm-5.3-flash：prompt≈73.7K + `cache_read=0`）
+ *     —— 服务端在**纯算**，一个字节都不走网络，耗时**随 prompt 体积线性增长**；
+ *   · **真死**（连接断了 / 网关只发头不发体）—— 等多久都不会有数据。
+ * 平的阈值不可能同时照顾这两件事：调小 ⇒ 误杀慢 prefill；调大 ⇒ 真死要等很久。
+ *
+ * 更糟的是它的**自反性**：被误杀后重发的是**同一个冷 prompt** ⇒ 缓存永远不热
+ * ⇒ 下一次 prefill 还是那么慢 ⇒ 「越重连越慢」（用户症状「连接半天还是重连」的残留根因）。
+ *
+ * ## 判据：`base + ceil(tokens / 1000) × perK`，再夹到 `[base, max]`
+ *
+ * 默认 base=120s、perK=4000ms、max=900s ⇒ 相当于给 prefill 留出
+ * **≈250 tokens/秒的吞吐下限**：74K → 120+296 = 416s；200K → 920 → 夹到 900s（15 分钟）。
+ * ⚠️ 这三个数是**初版标定**（不是实测拟合），三个环境变量都能覆盖；
+ *    它们只影响「等多久才判死」，不影响任何正确性判据。
+ *
+ * ⚠️ **只在「首包」这一档用它**。字节一旦开始流动，间隔异常就真的是异常 ——
+ *    那时继续用 `IDLE_STREAM_MS`（见该常量注释：300s 是为「上游把思考缓存在服务端一次推送」
+ *    而放宽的，本轮**不动它**，避免把当初修好的中途截断打回去）。
+ */
+export const FIRST_BYTE_BASE_MS = envMs("SLIME_FIRST_BYTE_BASE_MS", 120_000);
+export const FIRST_BYTE_PER_K_MS = envMs("SLIME_FIRST_BYTE_PER_K_MS", 4_000);
+export const FIRST_BYTE_MAX_MS = envMs("SLIME_FIRST_BYTE_MAX_MS", 900_000);
+
+/** 读一个「毫秒数」环境变量（非法/非正 → 用默认值）。抽出来只为三处同源，避免各写一份 Number 校验。 */
+function envMs(name: string, fallback: number): number {
+  const raw = typeof process !== "undefined" ? process.env[name] : undefined;
+  if (!raw) { return fallback; }
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/**
+ * 首包预算（ms）：**请求发起 → 首个正文/思考字节**允许等多久。
+ *
+ * ⚠️ **永不低于 `IDLE_STREAM_MS`** —— 这是本轮改动「**纯增量、不收紧既有行为**」的保证：
+ * 小 prompt（自适应值可能只有 160s）不会被缩到比今天更短，否则会把当初为
+ * 「上游把思考缓存在服务端一次推送」而放宽到 300s 的修复**打回去**（症状：中途莫名截断）。
+ * 所以本函数只做一件事：**为大 prompt 把首包这一档放宽**。
+ *
+ * 纯函数（可穷举、可变异）。`inputTokens` 非法/非正 ⇒ 退回 `IDLE_STREAM_MS`（不猜体积）。
+ */
+export function firstByteBudgetMs(inputTokens: number): number {
+  const floor = IDLE_STREAM_MS;
+  const max = Math.max(floor, FIRST_BYTE_MAX_MS);
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0) { return floor; }
+  const perK = Math.max(0, FIRST_BYTE_PER_K_MS);
+  const scaled = FIRST_BYTE_BASE_MS + Math.ceil(inputTokens / 1000) * perK;
+  return Math.min(max, Math.max(floor, scaled));
+}
+
+/**
+ * 请求体的**粗略**输入 token 估算 —— **只服务于首包预算的量级**，不参与窗口/计费判定。
+ *
+ * ⚠️ 刻意在这里自带一份而不是 import `services/context_compress.estimateTokensLocal`：
+ * `llm/` 是底层传输层，反向依赖 `services/` 会形成循环（services → llm → services）。
+ * 两处口径一致（CJK 1 字≈1 token、其余 4 字符≈1 token），且**用途不同**
+ * （那边是"能不能装下"的判据，这边只是"给多久"的预算）——
+ * 即便将来其中一处微调，影响面也只是超时长短，不会让判据互相打架。
+ */
+export function roughInputTokens(payload: unknown): number {
+  if (payload === null || payload === undefined) { return 0; }
+  let text: string;
+  try {
+    text = typeof payload === "string" ? payload : JSON.stringify(payload);
+  } catch {
+    return 0;
+  }
+  if (!text) { return 0; }
+  const cjk = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef]/g) ?? []).length;
+  return Math.round(cjk + (text.length - cjk) / 4);
+}
 
 /**
  * A-1008：base URL 的尾部 API 版本段。
@@ -219,7 +301,11 @@ async function fetchWithRetry(opts: {
         return resp;
       }
       lastResp = resp;
-      await sleep(retryDelayMs(resp, attempt));
+      // A-1061④：**先上报再睡** —— 退避最长 60s（429 表累计 ≈110s），这段时间界面必须说清
+      // "在上游重试、还要等多久"，否则用户看到的是一整段"什么都没有"。
+      const waitMs = retryDelayMs(resp, attempt);
+      noteUpstream("retry", formatRetryNotice({ attempt, maxAttempts, waitMs, status: resp.status }));
+      await sleep(waitMs);
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") {
         if (externalSignal?.aborted) {
@@ -236,7 +322,10 @@ async function fetchWithRetry(opts: {
       // A-175：网络级瞬时错误（fetch failed / ECONNRESET / 连接重置）走 1/3/7s 秒级退避
       // （此前误用 429 表 5/15/30/60——一次 WiFi 抖动要干等 15-30s，观感等同卡死/直接判死），
       // 同样加全抖动避免多路重试同时发起形成惊群。
-      await sleep(jitteredDelay((RETRY_TRANSIENT_BACKOFF[attempt] ?? 7) * 1000));
+      const netWaitMs = jitteredDelay((RETRY_TRANSIENT_BACKOFF[attempt] ?? 7) * 1000);
+      // A-1061④：网络级重试同样如实上报（否则一次 WiFi 抖动看起来就像"卡死了"）
+      noteUpstream("retry", formatRetryNotice({ attempt, maxAttempts, waitMs: netWaitMs }));
+      await sleep(netWaitMs);
     } finally {
       cleanup();
     }
@@ -482,15 +571,27 @@ export function stripReasoningKeys<T>(payload: T): T {
 
 /**
  * 判断 400 错误是否因「思考参数不被识别」——只有这类错误剥参重试才有意义。
- * 其它 400（模型不可用 / 区域限制 / 内容审查等）剥参重试也还是 400，纯浪费一次请求。
- * 判定：错误信息含「否定/无效」措辞，且同时含「参数/思考」相关词。
+ * 其它 400（模型不可用 / 区域限制 / 内容审查 / 参数越界等）剥参重试也还是 400，纯浪费一次请求。
+ * 判定：错误信息含「否定/无效」措辞，且**同时**出现「思考参数」的词汇。
+ *
+ * ⚠️ A-1071 收窄（原判定会误触发，白花一次请求）：第二段原先只要求出现
+ * `param|argument|field|key` 这类**通用**词。但很多上游的错误体里 `param` / `key` 是
+ * **结构字段名**而不是"出错的参数名"——agnes 参数越界的错误体就是
+ * `{"error":{"message":"max_tokens 不能超过 65536","param":"","code":"invalid_request"}}`，
+ * 一个 `"param":""` 空字段 + 一个 `"invalid"` 就把它判成"思考参数不被识别" →
+ * 剥掉思考参数重发一次（照旧 400，因为病根是 max_tokens）→ 用户多等一轮、日志还写着
+ * "已自动剥除思考参数"，把真正的病因（max_tokens 越界）埋掉。
+ * ⇒ 现在必须**点名**思考参数：出现 `reasoning` / `thinking` / `effort` / `chat_template`
+ *   / `template` / `enable_thinking`（或中文「思考 / 推理」）才算命中。
+ *   各家族参数的官方名都含这些词根（`reasoning_effort` / `chat_template_kwargs` /
+ *   `enable_thinking` / `return_reasoning` / `thinking`），所以真实场景不会被误漏。
  */
 export function isUnrecognizedParamError(bodyText: string): boolean {
   const t = (bodyText ?? "").toLowerCase();
   if (!t) { return false; }
   const reject = /(unrecogni[sz]ed|unknown|unexpected|extra|invalid|unsupported|not supported|does not support|doesn't support|无法识别|不支持|无效|未知|不识别)/;
   if (!reject.test(t)) { return false; }
-  return /(param|argument|field|key|reasoning|thinking|effort|template|enable|参数)/.test(t);
+  return /(reasoning|thinking|effort|template|enable_thinking|思考|推理)/.test(t);
 }
 
 /** reasoning_effort → Anthropic `thinking.budget_tokens`（Anthropic 要求 ≥1024） */
@@ -582,6 +683,10 @@ export class ChatClient {
     init: RequestInit,
     maxAttempts: number,
     externalSignal?: AbortSignal,
+    /** A-1088：流式请求的**请求级超时**覆盖值（见 chatStream：大 prompt 的首包预算要同时覆盖
+     *  「请求发起 → 响应头」—— 部分网关在 prefill 完成前**连响应头都不 flush**，
+     *  那时若仍用平的 300s，首包预算再宽也救不回来）。非流式路径不传，保持原语义。 */
+    timeoutMsOverride?: number,
   ): Promise<Response> {
     // A-156：瞬态状态码重试 + Retry-After 头 + 网络级重试统一在 fetchWithRetry（模块级）实现，
     // ChatClient 与 AnthropicClient 共用同一策略，避免两套重试逻辑漂移。
@@ -590,17 +695,27 @@ export class ChatClient {
       url,
       init,
       maxAttempts,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: Number.isFinite(timeoutMsOverride) && (timeoutMsOverride as number) > 0
+        ? Math.max(this.timeoutMs, timeoutMsOverride as number)
+        : this.timeoutMs,
       externalSignal,
     });
   }
 
-  private async post(url: string, payload: unknown, maxAttempts: number, externalSignal?: AbortSignal): Promise<Response> {
+  private async post(
+    url: string,
+    payload: unknown,
+    maxAttempts: number,
+    externalSignal?: AbortSignal,
+    /** A-1088：请求级超时覆盖（流式大 prompt 用，见 requestWithRetry） */
+    timeoutMsOverride?: number,
+  ): Promise<Response> {
     const send = (body: unknown): Promise<Response> => this.requestWithRetry(
       url,
       { method: "POST", headers: this.headers(), body: JSON.stringify(body) },
       maxAttempts,
       externalSignal,
+      timeoutMsOverride,
     );
     const resp = await send(payload);
     // 400 且请求体带思考参数：上游可能不认该参数（各家族开关协议不同：reasoning_effort /
@@ -664,6 +779,13 @@ export class ChatClient {
     onReasoning?: (reasoning: string) => void,
     onToolDelta?: (toolCalls: ChatToolCallDelta[]) => void,
   ): Promise<ChatStreamResult> {
+    /* A-1088：首包预算算在**发请求之前** —— 它同时用于请求级超时与首包看门狗，
+       并在这里先如实上报"在预填充 / 多大 / 最多等多久"（见 formatPrefillNotice 的注释：
+       用户取证的失败全是"人等不下去自己按停"，只放宽超时而不说明在等什么等于没修）。 */
+    const firstBudgetMs = firstByteBudgetMs(roughInputTokens(payload));
+    if (firstBudgetMs > IDLE_STREAM_MS) {
+      noteUpstream("prefill", formatPrefillNotice(roughInputTokens(payload), firstBudgetMs));
+    }
     const resp = await this.post(
       this.endpoint("chat"),
       // include_usage：让 OpenAI 兼容上游在流末尾回传 usage（含 prompt_tokens_details.cached_tokens），
@@ -671,6 +793,8 @@ export class ChatClient {
       { ...payload, stream: true, stream_options: { include_usage: true } },
       RETRY_429_BACKOFF.length,
       externalSignal,
+      // A-1088：请求级超时也要吃首包预算 —— 部分网关在 prefill 完成前连响应头都不 flush
+      firstBudgetMs,
     );
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -716,6 +840,12 @@ export class ChatClient {
       externalSignal!.addEventListener("abort", onExternalAbort, { once: true });
     }
 
+    /* A-1088：首包那一档用**体积自适应**预算，之后各档仍用 IDLE_STREAM_MS。
+       冷缓存大 prompt 的 prefill 是纯服务端计算（零字节、耗时随体积线性增长），
+       与"真死"不可区分 —— 只有把首包这一档单独放宽，才能既救回慢 prefill、
+       又不把"字节已在流动后 2 分钟不动"这种真异常一起放过。
+       预算已在函数开头算好（firstBudgetMs），此处只维护"是不是第一次读"。 */
+    let firstRead = true;
     try {
       while (!done) {
         if (externalSignal?.aborted) {
@@ -729,9 +859,13 @@ export class ChatClient {
         if (externalSignal) { cancelRead = () => { reject(new UpstreamError("流式已取消", 0, "protocol")); }; }
         let outcome: ReadResult;
         try {
-          // A-157：空闲看门狗——每次 read() 全程无数据超过 IDLE_STREAM_MS 判定上游僵死，
-          // 抛 timeout（上层重连/切模型）。正常 chunk 间隔毫秒级，60s 无字节基本可断定连接已死。
-          outcome = await raceIdleTimeout(p, IDLE_STREAM_MS);
+          // A-157：空闲看门狗——每次 read() 全程无数据超过阈值判定上游僵死，
+          // 抛 timeout（上层重连/切模型）。正常 chunk 间隔毫秒级；但**冷缓存的大 prompt**
+          // （实测 66K~70K 提示词、上游 cache_read=0）在首 token 前可以安静几十秒
+          // （prefill 不走网络），所以阈值是 300s 而非 60s，见 IDLE_STREAM_MS 定义。
+          // A-1088：**首包**改用 firstBudget（≥ IDLE_STREAM_MS，大 prompt 更宽）。
+          outcome = await raceIdleTimeout(p, firstRead ? firstBudgetMs : IDLE_STREAM_MS);
+          firstRead = false;
           cancelRead = null;
         } catch (e) {
           if (externalSignal?.aborted || (e instanceof Error && e.name === "AbortError")) {
@@ -1033,6 +1167,11 @@ export class AnthropicClient {
     signal?: AbortSignal,
     _onReasoning?: (reasoning: string) => void,
   ): Promise<ChatStreamResult> {
+    // A-1088：大 prompt 先如实上报"在预填充 / 多大 / 最多等多久"（见 formatPrefillNotice）
+    const prefillBudget = firstByteBudgetMs(roughInputTokens(payload));
+    if (prefillBudget > IDLE_STREAM_MS) {
+      noteUpstream("prefill", formatPrefillNotice(roughInputTokens(payload), prefillBudget));
+    }
     const resp = await this.post(this.endpoint(), { ...this.toAnthropicPayload(payload), stream: true }, signal);
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1065,6 +1204,9 @@ export class AnthropicClient {
       signal!.addEventListener("abort", onExternalAbort, { once: true });
     }
 
+    // A-1088：首包那一档体积自适应（见 ChatClient.chatStream 同处注释）
+    const firstBudgetMs = firstByteBudgetMs(roughInputTokens(payload));
+    let firstRead = true;
     try {
       while (!done) {
         if (signal?.aborted) {
@@ -1079,7 +1221,9 @@ export class AnthropicClient {
         let outcome: ReadResult;
         try {
           // A-157：空闲看门狗（与 ChatClient 对齐）——每次 read() 无数据超过上限 → timeout 上抛
-          outcome = await raceIdleTimeout(p, IDLE_STREAM_MS);
+          // A-1088：**首包**改用 firstBudget（≥ IDLE_STREAM_MS，大 prompt 更宽）
+          outcome = await raceIdleTimeout(p, firstRead ? firstBudgetMs : IDLE_STREAM_MS);
+          firstRead = false;
           cancelRead = null;
         } catch (e) {
           if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) {
@@ -1267,6 +1411,10 @@ interface AnthropicStreamEvent {
 async function readSSEStream(
   resp: Response,
   externalSignal: AbortSignal | undefined,
+  /** A-1088：**首包**预算（≥ IDLE_STREAM_MS）。传 0/NaN/undefined = 退回 IDLE_STREAM_MS（旧行为）。
+   *  ⚠️ 刻意放在回调**之前**：两个调用点的回调体都很长，参数放末尾就得在两处回调收尾各改一行
+   *  （本仓「同一改动要改 N 处」正是漏改的来源）；放前面后两个调用点是**同一行**，可一次改净。 */
+  firstBudgetMsRaw: number | undefined,
   onData: (data: unknown) => void,
 ): Promise<{ receivedData: boolean; nonData: string }> {
   if (!resp.body) { throw new UpstreamError("上游无响应体", resp.status, "protocol"); }
@@ -1277,6 +1425,8 @@ async function readSSEStream(
   let receivedData = false;
   let done = false;
   let cancelRead: (() => void) | null = null;
+  const firstBudgetMs = Number.isFinite(firstBudgetMsRaw) && (firstBudgetMsRaw as number) > 0 ? (firstBudgetMsRaw as number) : IDLE_STREAM_MS;
+  let firstRead = true;
   const onExternalAbort = () => { cancelRead?.(); void reader.cancel("aborted").catch(() => {}); };
   const attachAbort = !!externalSignal && !externalSignal.aborted;
   if (attachAbort) { externalSignal!.addEventListener("abort", onExternalAbort, { once: true }); }
@@ -1291,7 +1441,9 @@ async function readSSEStream(
       if (externalSignal) { cancelRead = () => { reject(new UpstreamError("流式已取消", 0, "protocol")); }; }
       let outcome: ReadResult;
       try {
-        outcome = await raceIdleTimeout(p, IDLE_STREAM_MS);
+        // A-1088：首包那一档体积自适应（冷缓存大 prompt 的 prefill 与"真死"必须分开对待）
+        outcome = await raceIdleTimeout(p, firstRead ? firstBudgetMs : IDLE_STREAM_MS);
+        firstRead = false;
         cancelRead = null;
       } catch (e) {
         if (externalSignal?.aborted || (e instanceof Error && e.name === "AbortError")) {
@@ -1491,7 +1643,7 @@ export class ResponsesClient {
     // item_id → 函数名映射：output_item.added 先发 name，arguments delta 只带 item_id
     const itemNames = new Map<string, string>();
 
-    const { receivedData, nonData } = await readSSEStream(resp, externalSignal, (data) => {
+    const { receivedData, nonData } = await readSSEStream(resp, externalSignal, firstByteBudgetMs(roughInputTokens(payload)), (data) => {
       const ev = data as { type?: string; delta?: string; item?: Record<string, unknown>; item_id?: string; output_index?: number; response?: Record<string, unknown> };
       const t = ev.type;
       // 新输出项：function_call 的 name 先于 arguments delta 到达，记录 item_id → name
@@ -1724,7 +1876,7 @@ export class GoogleClient {
     let streamUsage: NonNullable<ChatStreamResult["usage"]> | undefined;
     let toolIndex = 0;
 
-    const { receivedData, nonData } = await readSSEStream(resp, externalSignal, (data) => {
+    const { receivedData, nonData } = await readSSEStream(resp, externalSignal, firstByteBudgetMs(roughInputTokens(payload)), (data) => {
       const ev = data as { candidates?: Array<Record<string, unknown>>; usageMetadata?: Record<string, unknown> };
       const cand = ev.candidates?.[0];
       const parts = Array.isArray((cand?.content as { parts?: Array<Record<string, unknown>> })?.parts)

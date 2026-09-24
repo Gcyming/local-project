@@ -7,7 +7,7 @@
  * - web_fetch / web_search（network；Node 侧用内置 fetch 直连）
  */
 
-import { readdir, readFile, stat, writeFile, rename, mkdir, realpath, lstat, open } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile, rename, mkdir, realpath, lstat, open, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, basename, extname, resolve, sep } from "node:path";
 import { PROJECT_ROOT } from "../paths.js";
 // A-980-R29：待办存储（路径/容错读取/归一化/复述渲染）是**唯一真源**，
@@ -18,7 +18,7 @@ import {
   type StoredTodo, type TodoStatus,
 } from "../services/todoStore.js";
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 import { createPlan, updateStage, advanceByLabel, planProgress, planToJSON, parsePlan, type PlanStageStatus } from "../planning/plan.js";
@@ -39,12 +39,18 @@ import { registerBrowserTools } from "./browser.js";
 import { DEFAULT_EXEC_BUDGET_MS } from "../services/subagent.js";
 
 const execFileP = promisify(execFile);
+const execP = promisify(execCb);
 
 /** 相对路径锚定项目根（core-ts/src/tools/ 与 dist/tools/ 上溯三层均指向项目根） */
 export { PROJECT_ROOT };
 
 const MAX_READ_BYTES = 262_144;
 const MAX_WRITE_BYTES = 5 * 1024 * 1024;
+/** 本地命令执行的输出上限（超出即截断并如实说明截断了多少） */
+const MAX_CMD_OUTPUT = 32 * 1024;
+/** 本地命令默认/最长超时 */
+const CMD_TIMEOUT_DEFAULT = 120_000;
+const CMD_TIMEOUT_MAX = 600_000;
 // 安全清单与 Python 侧 tools/builtin.py、同目录 classifier.ts 共用同一份来源：
 // shared/security-policy.yaml（scripts/gen_security_policy.py 生成）。
 const SENSITIVE_NAMES = new Set([".slime_pass", "providers.enc.json", "auth_token.enc", "auth_token.json"]);
@@ -423,6 +429,177 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
     }
     return `[错误] 写入失败: ${path}: ${msg}`;
   }
+}
+
+/** 递归统计目录下的条目数（用于删除回执里如实报"删了多少"）。失败按 0 计，不阻断删除。 */
+async function countEntries(dir: string): Promise<number> {
+  let n = 0;
+  try {
+    const list = await readdir(dir, { withFileTypes: true });
+    for (const e of list) {
+      n += 1;
+      if (e.isDirectory()) { n += await countEntries(join(dir, e.name)); }
+    }
+  } catch { /* 读不了就不报数 */ }
+  return n;
+}
+
+/**
+ * file_delete —— 删除文件 / 目录（用户报「Agent 说没有删除文件的能力」的**结构性根因**）。
+ *
+ * 【为什么必须新增】此前工具注册表里有 file_read/file_list/file_write，**独独没有删除**：
+ * 于是模型面对"删掉那个文件"只能回答"我做不到"，或（更糟）把任务委派给子代理
+ * ——子代理共用同一份注册表，同样做不到，最后整条任务失败。用户的怀疑（"是不是
+ * Agent-Loop 让我去让子代理删、然后子代理删不掉"）在结果上完全正确：工具面缺能力时，
+ * 任何编排都救不回来。补上能力，而不是去改 Agent-Loop 的委派策略。
+ *
+ * 【安全边界（多层，缺一不可）】
+ *  ① 路径必须落在**工作目录 / 项目根**内（`resolveInProject`，含 realpath 复核 + 拒绝符号链接）；
+ *  ② 敏感文件 / 受保护源码目录**一律拒删**（复用写入侧同一份清单，避免两套口径漂移）；
+ *  ③ **拒绝删除根目录本身**（`.` / 工作目录 / 项目根）—— 那是"把整个工作区删了"，不是删文件；
+ *  ④ 目录非空时必须显式 `recursive=true`（不给"顺手递归"的默认值）；
+ *  ⑤ 首选**回收站**（装配层注入的 `shell.trashItem`）：可还原。未注入时才永久删除，
+ *     并在回执里**明说**"已永久删除（未进回收站）"，绝不静默换语义。
+ */
+async function fileDelete(args: Record<string, unknown>): Promise<string> {
+  const path = String(args.path ?? "").trim();
+  if (!path) { return "[错误] 缺少 path 参数"; }
+  const recursive = args.recursive === true;
+  const ws = String(args._workspace ?? "");
+  const sandboxAllowed = args._sandbox_allowed === true;
+  try {
+    const abs = await resolveInProject(path, ws, sandboxAllowed);
+    if (isBlockedWritePath(abs, ws)) {
+      return `[错误] 敏感文件/目录禁止删除: ${path}`;
+    }
+    // ③ 根目录本身不允许删（否则一次误判就抹掉整个工作区）
+    const root = resolve(ws || PROJECT_ROOT);
+    if (resolve(abs).toLowerCase() === root.toLowerCase()) {
+      return `[错误] 拒绝删除工作区根目录本身: ${path}（请指定根目录下的具体文件或子目录）`;
+    }
+    let st;
+    try {
+      st = await lstat(abs);
+    } catch {
+      return `[错误] 文件不存在: ${path}`;
+    }
+    let entryCount = 0;
+    if (st.isDirectory()) {
+      entryCount = await countEntries(abs);
+      if (!recursive && entryCount > 0) {
+        return `[错误] 目录非空（${entryCount} 个条目）：${path}。确认要连同内容一起删除时，请显式传 recursive=true。`;
+      }
+    }
+    // ⑤ 首选回收站（可还原）；未注入回收站能力时退化为永久删除，并如实标注
+    const trash = trashServiceRef;
+    let viaTrash = false;
+    if (trash) {
+      try {
+        const r = await trash.trash(abs);
+        viaTrash = r?.ok === true;
+        if (!viaTrash && r?.error) {
+          // 回收站失败 → 不静默改永久删除，把选择权交回模型/用户
+          return `[错误] 移入回收站失败（未执行永久删除）: ${path}: ${r.error}`;
+        }
+      } catch (e) {
+        return `[错误] 移入回收站失败（未执行永久删除）: ${path}: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    } else {
+      await rm(abs, { recursive, force: false });
+    }
+    const what = st.isDirectory() ? `目录（含 ${entryCount} 个条目）` : "文件";
+    return viaTrash
+      ? `已把${what}移入回收站：${abs}（可从系统回收站还原）`
+      : `已永久删除${what}：${abs}（未进回收站：当前环境未装配回收站能力，此操作不可还原）`;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "路径超出项目范围" || msg === "禁止跟随符号链接") {
+      return `[错误] ${msg}: ${path}`;
+    }
+    return `[错误] 删除失败: ${path}: ${msg}`;
+  }
+}
+
+/** 取命令执行的工作目录（默认工作区 → 项目根；越界一律拒绝） */
+function resolveCmdCwd(raw: string, ws: string, sandboxAllowed: boolean): string {
+  const base = ws || PROJECT_ROOT;
+  if (!raw) { return resolve(base); }
+  const abs = resolve(projectRootPath(raw, ws));
+  const allowed = [resolve(PROJECT_ROOT), resolve(base)];
+  if (!sandboxAllowed) {
+    const ok = allowed.some((r) => abs === r || abs.startsWith(r + sep));
+    if (!ok) { throw new RangeError("工作目录超出项目范围"); }
+  }
+  return abs;
+}
+
+/**
+ * terminal_run —— 在本机执行一条**终端命令**（用户报「脚本任务无法执行」的结构性根因）。
+ *
+ * 【为什么必须新增】`adb_shell` 只能在**安卓设备**上跑命令；本机没有任何命令执行工具，
+ * 于是"写个脚本并运行它"这类任务在工具面上就是不可能的。而判据层其实**早就为它建好了**：
+ *  · `classifier.ts` 有只读白名单（ls/cat/grep… → auto）、高危黑名单（`rm -rf /`、
+ *    `curl | sh`、`dd/mkfs`、内网地址… → block）与变更类确认表（rm/mv/npm/pip… → confirm）；
+ *  · `hard_rules.ts` 对 riskKind=terminal 走同一份 `assessAction`；
+ *  · 设置里的「终端（terminal）」开关与 `policy.gateToolCall` 的双层闸门都按类别放行/拦截。
+ *  缺的只有"最后那一脚"——把它们接到一个真的会执行命令的工具上。
+ *
+ * 【与开关的关系】本工具声明 `permissions: ["terminal"]`：
+ *  · 开关**关** → 闸门直接拒绝并回传原因（模型无法绕过）；
+ *  · 开关**开** → 免逐次审批，但**硬规则照旧生效**（高危命令仍 block，见 hard_rules）。
+ *
+ * 【执行口径】必须用 shell（`&&`、管道、重定向是用户脚本的常态），因此走
+ *  `exec(cmd, {shell})`：POSIX 用 /bin/sh，Windows 用 cmd.exe。超时与输出上限都有硬值，
+ *  超时**杀掉整个进程树**（否则子进程会挂着继续跑）。
+ */
+async function terminalRun(args: Record<string, unknown>): Promise<string> {
+  const command = String(args.command ?? "").trim();
+  if (!command) { return "[错误] 缺少 command 参数"; }
+  const ws = String(args._workspace ?? "");
+  const sandboxAllowed = args._sandbox_allowed === true;
+  let cwd: string;
+  try {
+    cwd = resolveCmdCwd(String(args.cwd ?? ""), ws, sandboxAllowed);
+  } catch (e) {
+    return `[错误] ${e instanceof Error ? e.message : String(e)}`;
+  }
+  const rawTimeout = Number(args.timeoutMs);
+  const timeout = Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? Math.min(Math.max(1000, Math.floor(rawTimeout)), CMD_TIMEOUT_MAX)
+    : CMD_TIMEOUT_DEFAULT;
+  try {
+    const r = await execP(command, {
+      cwd,
+      timeout,
+      maxBuffer: MAX_CMD_OUTPUT * 4,
+      windowsHide: true,
+      killSignal: "SIGKILL",
+      shell: process.platform === "win32" ? "cmd.exe" : "/bin/sh",
+    });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    return formatCmdOutput(out, 0, timeout, false);
+  } catch (e) {
+    // exec 在非零退出码时也走 catch（e.code 是退出码）；超时 e.killed=true
+    const err = e as { code?: number | string; killed?: boolean; signal?: string; stdout?: string; stderr?: string; message?: string };
+    const killed = err.killed === true || err.signal === "SIGKILL";
+    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    if (out || typeof err.code === "number") {
+      return formatCmdOutput(out, typeof err.code === "number" ? err.code : 1, timeout, killed);
+    }
+    return `[错误] 命令启动失败: ${err.message ?? String(e)}`;
+  }
+}
+
+/** 命令输出格式化（截断 + 退出码如实上报；超时单独说清是"超时被杀"） */
+function formatCmdOutput(raw: string, code: number, timeout: number, killed: boolean): string {
+  const text = raw.replace(/\r\n/g, "\n");
+  const truncated = text.length > MAX_CMD_OUTPUT;
+  const body = truncated ? text.slice(0, MAX_CMD_OUTPUT) : text;
+  const head = killed
+    ? `[超时] 命令超过 ${Math.round(timeout / 1000)}s 未结束，已强制终止（进程树）`
+    : code === 0 ? "命令执行成功（退出码 0）" : `命令退出码 ${code}`;
+  const tail = truncated ? `\n…[输出被截断：共 ${text.length} 字符，仅显示前 ${MAX_CMD_OUTPUT}]` : "";
+  return `${head}\n${body}${tail}`;
 }
 
 async function codeCheck(args: Record<string, unknown>): Promise<string> {
@@ -1063,6 +1240,19 @@ export function setHttpServer(s: HttpServerLike | null): void { httpServerRef = 
 let sidebarOpenerRef: ((url: string, name?: string) => void) | null = null;
 export function setSidebarOpener(fn: ((url: string, name?: string) => void) | null): void { sidebarOpenerRef = fn; }
 
+/** 删除动作的「进回收站」能力（由装配层注入；core-ts 不 import electron）。
+ *
+ *  ⚠️ 为什么必须注入而不是直接 `rm`：Agent 误删用户文件是**不可逆**事故。
+ *  Electron 主进程有 `shell.trashItem()`（Win/macOS/Linux 都进系统回收站，用户可还原），
+ *  但 core-ts 层不许 import electron（它在 CLI/服务器侧也要能跑）。
+ *  ⇒ 与 setAdbService/setHttpServer 同一模式：装配层注入，未注入时退化为永久删除，
+ *    并在**工具返回里如实写明"未进回收站"**（静默换语义是本项目的头号缺陷来源）。 */
+export interface TrashServiceLike {
+  trash(absPath: string): Promise<{ ok: boolean; error?: string }>;
+}
+let trashServiceRef: TrashServiceLike | null = null;
+export function setTrashService(s: TrashServiceLike | null): void { trashServiceRef = s; }
+
 /** 解析工具入参中的当前 Agent id（由 tool_loop 注入，模型不可伪造） */
 function toolAgentId(args: Record<string, unknown>): string {
   return typeof args._agent_id === "string" ? args._agent_id : "";
@@ -1216,6 +1406,55 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     riskKind: "write",
     // 工作区内普通写入免审批（受保护源码目录 / 敏感文件 / 越权路径仍由分类器 block）
     autoApprovable: true,
+  }));
+  // 用户原话：「为什么还是无法执行删除？」—— 此前工具面里**根本没有删除能力**，
+  // 于是模型只能回"没有删除文件的能力"，或把任务委派给共用同一份注册表的子代理（同样做不到）。
+  registry.register(new Tool({
+    name: "file_delete",
+    description:
+      "删除工作区内的文件或目录。默认**移入系统回收站**（可还原）；若当前环境未装配回收站能力，"
+      + "则永久删除并在回执里明说，**此操作不可还原**。\n"
+      + "目录非空时必须显式传 recursive=true（不提供「顺手递归」的默认值）。\n"
+      + "敏感文件（密钥/加密配置）、受保护源码目录、工作区根目录本身、越权路径一律拒绝。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "要删除的文件或目录路径（工作区内相对路径或绝对路径）" },
+        recursive: { type: "boolean", description: "目录非空时是否连同内容一起删除（默认 false，非空目录会被拒绝）" },
+      },
+      required: ["path"],
+    },
+    executeFn: fileDelete,
+    permissions: ["write"],
+    riskKind: "write",
+    // 删除是破坏性动作：**不**声明 autoApprovable —— 用户开了「写」开关才免逐次审批
+    autoApprovable: false,
+  }));
+  // 用户原话：「为什么还是无法执行删除、脚本任务？」—— 本机命令执行此前只有 adb_shell
+  // （那是**安卓设备**的 shell）。补上本机终端；判据层（分类器白/黑名单 + 硬规则 + 终端开关）
+  // 早已存在，这里只是把它们接到一个真的会执行命令的工具上。
+  registry.register(new Tool({
+    name: "terminal_run",
+    description:
+      "在本机执行一条终端命令（POSIX 用 /bin/sh，Windows 用 cmd.exe；支持 &&、管道、重定向）。\n"
+      + "用于运行脚本、构建、安装依赖、查看环境等。cwd 默认当前工作目录。\n"
+      + "⚠ 属「终端」权限类别：若被拒绝并提示类别已关闭，请告知用户到「设置 → 权限 → 工具权限类别」"
+      + "开启「终端（terminal）」，**不要改用手动让用户跑命令的方式绕开**。\n"
+      + "⚠ 高危命令（rm -rf /、curl|sh、dd/mkfs、内网地址等）会被硬规则直接拦截，任何开关都不可绕过。",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "要执行的命令行（含参数）" },
+        cwd: { type: "string", description: "工作目录（工作区内；省略则用当前工作目录）" },
+        timeoutMs: { type: "number", description: `超时毫秒（默认 ${CMD_TIMEOUT_DEFAULT}，上限 ${CMD_TIMEOUT_MAX}）；超时强制终止进程树` },
+      },
+      required: ["command"],
+    },
+    executeFn: terminalRun,
+    permissions: ["terminal"],
+    riskKind: "terminal",
+    // 终端命令不自动放行：用户开了「终端」开关才免逐次审批（高危命令仍由硬规则 block）
+    autoApprovable: false,
   }));
   registry.register(new Tool({
     name: "code_check",
@@ -2531,10 +2770,16 @@ ${body}
     if (!backend) { return "[错误] backend 需为 desktop 或 android"; }
     try {
       const list = await screenControllerRef.listWindows(backend);
+      /* A-1088：空结果**不再与故障同态**。
+         走到这里（没抛）说明**枚举本身成功了**，只是本机确实没有带标题的顶层窗口
+         （都已最小化 / 无标题）。必须把这一点说清 —— 否则模型会把"没有窗口"
+         当成"工具坏了"，去反复重试或改代码修一个并不存在的故障。
+         真故障由 `listWindows` 抛出 → 走下面的 catch → `[错误] …`（两条路径措辞刻意不同）。 */
       if (list.length === 0) {
         return backend === "android"
           ? "[提示] 窗口枚举仅支持桌面（desktop）后端。"
-          : "[提示] 未枚举到可见窗口（或当前非 Windows 桌面）。";
+          : "[提示] 枚举成功：当前**没有**可见的顶层窗口（可能都已最小化或无标题）。这不是故障。"
+            + "若你确信某程序已打开，请先手动把它的窗口还原出来，再调用本工具或 screen_capture。";
       }
       const lines = [`[桌面窗口] 共 ${list.length} 个（标题｜矩形 x,y,w,h｜pid）`];
       for (const w of list.slice(0, 40)) {
