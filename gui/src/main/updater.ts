@@ -2,21 +2,27 @@
  * gui/src/main/updater.ts — electron-updater 自动更新管理。
  *
  * 职责：
- *   - 应用启动时检查更新（可选延迟，避免阻塞首屏）
- *   - 发现新版本 → 静默下载 + 提示用户重启
- *   - 更新失败 → 降级重试（最多 3 次，间隔递增）
- *   - 用户可跳过当前版本（session 级别）
+ *   - 应用启动时**检查**更新（可延迟，避免阻塞首屏）—— 只读元数据，廉价
+ *   - 发现新版本 → **由用户点「下载更新」**才开始下载（绝不自动下载）
+ *   - 下载完成 → **由用户点「安装并重启」**才生效
+ *   - 更新失败 → 如实上报错误原文（不吞）
  *
- * 配置依赖：slime.toml [update] 段（enabled + feed_url）。
- *   - enabled=false（默认）：不发起任何网络请求，状态为 "disabled"，避免无发布源时反复报"检查失败"
- *   - enabled=true + feed_url：使用自定义 feed（支持 https 直链 / GitHub release）
- *   - enabled=true + 空 feed_url：回退 electron-builder publish 字段（github provider）
+ * 配置依赖：slime.toml [update] 段（auto_check + enabled + feed_url）。
+ *
+ *   ⚠️ A-1059③：三件事**分开**，判据在纯模块 `core-ts/src/services/updatePolicy.ts`：
+ *   - `auto_check`（新键，默认 **true**）：是否在启动时自动检查（只读，不下载）
+ *   - `enabled`（旧键）：历史上混用；**我们自己的模板曾写死 false**，所以它给 false 时
+ *     不当作"用户想关"（详见 updatePolicy.ts 的 reason 表）—— 这正是用户说的"你怎能直接关了"
+ *   - `feed_url` 非空 → 自定义 generic 源；留空 → 回退 electron-builder 的 github provider
+ *
+ *   **下载与安装没有任何开关可以让它自动发生** —— 这是代码层不变量（见 disableAutoDownload）。
  *
  * 注意：此模块仅在 production 构建下有效（dev 模式 updater 不可用）。
  */
 import { autoUpdater } from "electron-updater";
 import { app, ipcMain } from "electron";
 import { readUpdateConfig } from "./mind_config.js";
+import { decideUpdatePolicy, describeUpdatePolicy } from "../../../core-ts/src/services/updatePolicy.js";
 import { normalizeReleaseNotes } from "../shared/releaseNotes.js";
 
 /** 简单 semver 比较（数字点分段；不支持的字符按 0 处理）。a > b → 正数 */
@@ -110,10 +116,14 @@ export function initUpdater(): void {
   }
 
   const cfg = readUpdateConfig();
-  if (!cfg.enabled) {
+  // A-1059③：**"检查 / 下载 / 安装"三件事彻底分开**，判据在纯模块里（可单测、过变异）：
+  //   · 检查（只读一次 release 元数据）→ 由 auto_check 决定，**默认开**（否则用户根本不知道有新版本）
+  //   · 下载（几百 MB）→ 只有点「下载更新」；· 安装 → 只有点「安装并重启」（代码层不变量，无开关）
+  const policy = decideUpdatePolicy({ autoCheck: cfg.autoCheck, enabled: cfg.enabled });
+  console.info(`[updater] 启动时自动检查 = ${policy.autoCheck}（${policy.reason}）· ${describeUpdatePolicy(policy)}`);
+  if (!policy.autoCheck) {
     currentStatus = { status: "disabled" };
     broadcastStatus();
-    console.info("[updater] 自动更新未启用（slime.toml [update].enabled=false），跳过检查");
     return;
   }
 

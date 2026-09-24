@@ -382,9 +382,14 @@ export default function StatusPanel(): JSX.Element {
               </button>
             </span>
           )}
+          {/* A-1059③：措辞必须分清"检查"与"下载/安装"。
+              此前这里写"自动检查未开启"，很容易被读成"更新功能被关掉了"
+              —— 用户的原话正是「我叫你换成手动点击更新，你怎能直接关了？」。
+              事实是：**下载与安装永远只能由你点**，只有"启动时是否自动检查"是可配的。 */}
           {updateStatusSafe.status === "disabled" && !updateStatusSafe.error && (
             <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              自动检查未开启（可点「手动检查」随时对比 GitHub Release；如需启动时自动检查，在 slime.toml [update] 段配置 enabled = true）
+              未开启启动时自动检查（可在 slime.toml 的 [update] 段设 auto_check = true）。
+              点「手动检查」随时可查 —— 下载与安装都必须由你点击，不会自动发生。
             </span>
           )}
           {updateStatusSafe.status === "up-to-date" && (

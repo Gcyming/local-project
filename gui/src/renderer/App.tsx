@@ -8,6 +8,7 @@
 import React, { type JSX } from "react";
 import ChatPanel from "./pages/ChatPanel.js";
 import SplashScreen, { type SplashStep } from "./pages/SplashScreen.js";
+import { decideHistoryGate, decideUiReady } from "./pages/startupGate.js";
 import NewProjectDialog from "./pages/NewProjectDialog.js";
 import SettingsDialog, { type SettingsTab } from "./pages/SettingsDialog.js";
 import RightSidebar from "./pages/RightSidebar.js";
@@ -267,6 +268,32 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
  * 门只等「会话列表」，而 provider / 本地模型还在冷态加载 → 用户点开界面就撞上未就绪的重活。
  */
 const FIRST_LOAD_KEYS = ["agents", "sessions", "providers", "localModels", "chatHistory"] as const;
+
+/**
+ * A-1061 修正：把登记表**分成两组**，因为它们的兜底策略必须不同（见 startupGate.decideUiReady）。
+ *
+ * - **元数据组**：慢/失败的代价是"界面能用但某些面板不全" → 8s 兜底放行可接受。
+ * - **内容组**（chatHistory）：用户一进来就要看的东西 → 独立且更长的兜底，
+ *   且**不许被元数据组的兜底顺带绕过**（这正是"加载界面在会话内容没就绪时就结束"的成因）。
+ */
+const METADATA_LOAD_KEYS = ["agents", "sessions", "providers", "localModels"] as const;
+const CONTENT_LOAD_KEY = "chatHistory";
+/** 内容组的兜底上限（用户原话："加载时间稍微长一点也没什么"） */
+const CONTENT_GUARD_MS = 20000;
+
+/**
+ * 契约自检：登记表全集必须**恰好**由「元数据组 + 内容组」构成。
+ *
+ * 漏一个键不会有任何报错 —— 只是门少等一项（而"少等一项"正是本次事故的形态），
+ * 所以在这里显式做一次一致性检查，让"分组漂移"至少留下一条警告。
+ */
+const GATE_KEYS_CONSISTENT =
+  FIRST_LOAD_KEYS.length === METADATA_LOAD_KEYS.length + 1
+  && METADATA_LOAD_KEYS.every((k) => (FIRST_LOAD_KEYS as readonly string[]).includes(k))
+  && (FIRST_LOAD_KEYS as readonly string[]).includes(CONTENT_LOAD_KEY);
+if (!GATE_KEYS_CONSISTENT) {
+  console.warn("[startup] 启动门的分组与登记表不一致 —— 门会少等或多等一项（检查 METADATA_LOAD_KEYS / CONTENT_LOAD_KEY）");
+}
 
 /** 模型加载等待秒数时钟（A-129）：自持 1s 计时器只重渲染自身秒数区域，
     避免整棵 App 树随秒表每秒重渲染（含 ChatPanel / 侧栏等大子树） */
@@ -635,6 +662,11 @@ export default function App(): JSX.Element {
    *  此前只在切会话时才重读 → 改完目录右栏还挂着旧文件夹） */
   const [workspaceTick, setWorkspaceTick] = React.useState(0);
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
+  /**
+   * A-1059②：「默认选中哪个会话」的决定是否已落定。
+   * 语义是"**已经决定过了**"，不是"已经选中了" —— 详见 startupGate.ts 的文件头。
+   */
+  const [selectionSettled, setSelectionSettled] = React.useState(false);
   // A-921：右侧边栏与会话一体——开合/宽度按会话记忆（对齐 VS Code Copilot「side pane 尺寸/可见性随会话保持」
   // 与 OpenClaw「widths/collapsed 按 canonical session 持久化」）；配合 RightSidebar 内部 tabs/任务按会话隔离，
   // 切回任意会话其右侧栏（宽度、折叠、打开的页、任务、事件流）原样还原，多会话互不干扰
@@ -774,8 +806,43 @@ export default function App(): JSX.Element {
     const t = window.setTimeout(() => setFirstLoadGuard(true), 8000);
     return () => window.clearTimeout(t);
   }, []);
-  /** 首屏就绪 = 全部必须品到齐，或总超时兜底已触发 */
-  const uiReady = firstLoadGuard || FIRST_LOAD_KEYS.every((k) => firstLoad[k]);
+  /**
+   * A-1061：**内容组的独立兜底**（20s）。
+   *
+   * 为什么必须与元数据组的 8s 分开：原先 `uiReady = firstLoadGuard || 全部到齐` 里的那个 `||`
+   * 会让 8s 兜底**直接绕过"会话内容"这一步** —— 会话内容一个字都没到，门照样开，
+   * 用户看到的就是"加载界面结束了、中间那栏还在加载"（用户原话）。
+   * 内容组是用户一进来就要看的东西，给它自己更长的窗口（用户也说"加载时间稍微长一点也没什么"）。
+   */
+  const [contentGuard, setContentGuard] = React.useState(false);
+  React.useEffect(() => {
+    const t = window.setTimeout(() => setContentGuard(true), CONTENT_GUARD_MS);
+    return () => window.clearTimeout(t);
+  }, []);
+  /**
+   * 首屏就绪判据（细则与"为什么拆两组"见 `startupGate.decideUiReady`）。
+   * ⚠️ `forcedBy` / `missing` 必须**打日志**：门被兜底"强行放行"时不许静默 ——
+   * 否则事后又只能靠猜"当时到底在等什么"（本次排查就是被这一点拖住的）。
+   */
+  const uiReadyDecision = decideUiReady({
+    firstLoad,
+    metadataGuard: firstLoadGuard,
+    contentGuard,
+    metadataKeys: METADATA_LOAD_KEYS,
+    contentKey: CONTENT_LOAD_KEY,
+  });
+  const uiReady = uiReadyDecision.ready;
+  React.useEffect(() => {
+    if (!uiReady) { return; }
+    if (uiReadyDecision.forcedBy === "none") {
+      console.info("[startup] 首屏数据全部到齐，收门");
+      return;
+    }
+    console.warn(
+      `[startup] 启动门被超时兜底放行（${uiReadyDecision.forcedBy}）—— 仍未到齐：` +
+      `${uiReadyDecision.missing.join(", ") || "（无）"}`,
+    );
+  }, [uiReady, uiReadyDecision.forcedBy, uiReadyDecision.missing]);
   /** A-980-R18：启动面板最小时长标记（避免加载太快时一闪而过；用户反馈"好久没看到加载动画"） */
   const [splashMinDone, setSplashMinDone] = React.useState(false);
   React.useEffect(() => {
@@ -858,19 +925,27 @@ export default function App(): JSX.Element {
     }
   }, [applyAgentDetail, markFirstLoad]);
 
-  const loadSessions = React.useCallback(async (): Promise<void> => {
+  /**
+   * A-1059②：返回值改为**刚拉到的列表**。
+   *
+   * 此前调用方（初始化 effect）为了拿列表又单独走了一趟 `conversations.list()` ——
+   * 首屏为此多一次 IPC 往返，而且"默认选中"因此**晚于** `markFirstLoad("sessions")` 发生，
+   * 正是启动门被提前放行的成因（见 startupGate.ts 文件头）。
+   */
+  const loadSessions = React.useCallback(async (): Promise<SessionItem[]> => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api) { return; }
+    if (!api) { return []; }
     const items: SessionItem[] = await api.conversations.list().catch((e: unknown) => {
       console.error("[app] sessions list failed:", e);
       return [] as SessionItem[];
     });
     // A-918+：无变化则跳过 setState，避免 15s 轮询整棵侧栏树无谓重渲（启动/事件驱动的关键调用不受影响）
     const key = JSON.stringify(items.map((s) => [s.sessionId, s.title, s.count, s.lastTime]));
-    if (key === sessionsKeyRef.current) { return; }
+    if (key === sessionsKeyRef.current) { return items; }
     sessionsKeyRef.current = key;
     setSessions(items);
     markFirstLoad("sessions"); // A-1039：首拉完成 → 记入启动门
+    return items;
   }, [markFirstLoad]);
 
   // 初始化：Agent 列表 + 会话列表 + 默认选中第一个会话
@@ -878,11 +953,16 @@ export default function App(): JSX.Element {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api) { return; }
     // A-918+：loadAgents 与 loadSessions 并行拉取（此前串行，启动首屏等待翻倍）
-    void Promise.all([loadAgents(), loadSessions()]).then(async () => {
-      const items = await api.conversations.list().catch(() => []);
+    void Promise.all([loadAgents(), loadSessions()]).then(([, items]) => {
+      // A-1059②：直接用手上这份列表定选中，**不再多走一趟 `conversations.list()`**。
+      // 那一趟既让首屏多一次 IPC 往返，又让"默认选中"晚于 `markFirstLoad("sessions")` 发生
+      // → 启动门在"还没决定选哪个会话"时就放行（用户报"加载完了中间还要空一会儿"）。
       if (items.length > 0) {
-        setSelectedSessionId(items[0].sessionId);
+        // 保留仍然有效的当前选中（切回来时不要抢），否则回落第一个
+        setSelectedSessionId((cur) => (cur && items.some((s) => s.sessionId === cur) ? cur : items[0].sessionId));
       }
+      // 无论有没有选中：**决定已经做过了**，门可以据此判「有内容要等」还是「确实没有」。
+      setSelectionSettled(true);
     });
     /** 创建/分裂后主进程推送 → 刷新列表并切换 */
     const off = api.agents.onAgentSelected(() => {
@@ -1014,20 +1094,27 @@ export default function App(): JSX.Element {
   const hasNoSession = selectedSession === null;
 
   /**
-   * A-1058①：**没有"会话内容"可等的情形要立刻登记**，否则门只能干等到 8s 总超时。
+   * A-1058① / A-1059②：**没有"会话内容"可等的情形要立刻登记**，否则门只能干等到 8s 总超时。
    *
-   * 判据必须与 `chatPanelJsx` 的分支条件**逐字对应**：ChatPanel 只在
-   * `selectedSession && selectedAgentId` 时挂载，只有它会回调 `markChatHistoryLoaded`。
-   * 因此「欢迎页（无会话）」与「有会话但拿不到 agentId → 落到那句占位文案」两条路径
-   * 都必须在这里自己收尾，不能指望一个永远不会挂载的组件来登记。
-   *
-   * ⚠️ 先等 `firstLoad.sessions`：会话列表还没回来时 `hasNoSession` 恒真，
-   *    此刻登记等于把门提前放行（正是要修的那个洞）。
+   * 判据本身搬到了纯模块 `startupGate.ts`（可单测、过变异）—— 这里只做装配。
+   * 之所以要搬：此前它是"`hasNoSession || !selectedAgentId` → 登记"一条内联判断，
+   * 把「**还没决定**选哪个会话」与「**已决定**但拿不到 agentId」并成了一支，
+   * 于是 `selectedSessionId` 仍是 null 的那一刻就把门放行了（用户报"加载完了中间还要空一会儿"）。
+   * 现在的五条顺序见模块头注释；`selectionSettled` 是关键的新输入。
    */
   React.useEffect(() => {
-    if (!firstLoad.sessions) { return; }
-    if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }
-  }, [firstLoad.sessions, hasNoSession, selectedAgentId, markChatHistoryLoaded]);
+    const decision = decideHistoryGate({
+      sessionsReady: Boolean(firstLoad.sessions),
+      sessionCount: sessions.length,
+      selectionSettled,
+      hasSelectedSession: selectedSession !== null,
+      hasAgentId: Boolean(selectedAgentId),
+    });
+    if (decision === "self-finish") { markChatHistoryLoaded(); }
+  }, [
+    firstLoad.sessions, sessions.length, selectionSettled,
+    selectedSession, selectedAgentId, markChatHistoryLoaded,
+  ]);
 
   /** 欢迎区首条消息：自动建会话 + 立即发送首条消息。
    *  此前用 setTimeout 闭包依赖外部 selectedAgentId，但新建会话前 selectedAgentId 必为 null，

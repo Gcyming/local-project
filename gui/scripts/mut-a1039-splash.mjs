@@ -20,10 +20,12 @@ import { sub, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut
 // ⚠️ 不能用 `new URL(...).pathname` —— 项目根含空格（"...pilot project"），
 // pathname 会把空格编码成 %20，拼出来的路径直接 ENOENT。fileURLToPath 才正确解码。
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const SPEC = "tests/gui/a1039-guards.spec.ts";
+/* A-1059/A-1061 起，启动门判据本体搬进了 startupGate.ts —— 判据的真值表住在 a1059-guards，
+   所以本脚本必须**同时**跑两个 spec，否则针对判据本体的变异会假绿（只看 a1039 看不到它）。 */
+const SPECS = ["tests/gui/a1039-guards.spec.ts", "tests/gui/a1059-guards.spec.ts"];
 
 /** 待变异的文件（原样备份，最后逐个还原） */
-const TARGETS = ["gui/src/renderer/App.tsx", "gui/src/renderer/pages/SplashScreen.tsx", "gui/src/renderer/pages/ChatPanel.tsx"];
+const TARGETS = ["gui/src/renderer/App.tsx", "gui/src/renderer/pages/SplashScreen.tsx", "gui/src/renderer/pages/ChatPanel.tsx", "gui/src/renderer/pages/startupGate.ts"];
 
 /* `from` / `to` 仍然是本脚本的书写形态（好读）；`mutate` 由它们**机械派生** ——
    这样 `eolProblems()` 与执行循环共用同一套行为判据，不存在"自检走一条路、执行走另一条路"。 */
@@ -36,9 +38,11 @@ const RAW_MUTATIONS = [
   },
   {
     name: "M2 uiReady 退回「只看会话列表」（丢掉 providers / localModels）",
+    // A-1061④′ 迁移：判据搬进纯模块 startupGate.decideUiReady，装配层只剩取值 ——
+    // 意图不变（"缺一项就不能收门"），锚点跟着搬到新家。
     file: "gui/src/renderer/App.tsx",
-    from: "const uiReady = firstLoadGuard || FIRST_LOAD_KEYS.every((k) => firstLoad[k]);",
-    to: "const uiReady = firstLoadGuard || Boolean(firstLoad.sessions);",
+    from: "const uiReady = uiReadyDecision.ready;",
+    to: "const uiReady = Boolean(firstLoad.sessions);",
   },
   {
     name: "M3 FIRST_LOAD_KEYS 漏掉 providers（键少了，门就少等一项）",
@@ -98,14 +102,17 @@ const RAW_MUTATIONS = [
   {
     name: "M12 ChatPanel 的 catch 路径漏回执（历史加载失败 → 只能干等到 8s）",
     file: "gui/src/renderer/pages/ChatPanel.tsx",
-    from: "      // A-1058①：**失败也必须回执** —— 否则门只能等 8s 总超时（A-1039 的\"失败也放行\"规矩）\n      onHistoryLoaded?.();\n",
+    // A-1059② 迁移：裸回执改成了 reportHistoryLoaded()（保证 DOM 提交后再放行），锚点跟着搬。
+    from: "      // A-1058①：**失败也必须回执** —— 否则门只能等 8s 总超时（A-1039 的\"失败也放行\"规矩）\n      reportHistoryLoaded();\n",
     to: "",
   },
   {
-    name: "M13 删掉「没有会话可开就自己登记」的兜底（欢迎页/无 agentId → 门空等 8s）",
-    file: "gui/src/renderer/App.tsx",
-    from: "    if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }\n",
-    to: "",
+    name: "M13 删掉「确实没有会话就自己登记」的兜底（欢迎页 → 门空等到超时）",
+    // A-1059②/A-1061④′ 迁移：内联判据已搬进 startupGate.decideHistoryGate。
+    // 这里重定向到**判据本体的那条分支**，意图与原来完全一致（少了它，欢迎页就要枯等兜底）。
+    file: "gui/src/renderer/pages/startupGate.ts",
+    from: '  if (input.sessionCount === 0) { return "self-finish"; }',
+    to: '  if (input.sessionCount === 0) { return "wait"; }',
   },
 ];   // ← RAW_MUTATIONS 结束
 
@@ -116,12 +123,15 @@ function hash(p) {
 }
 
 function runSpec() {
-  const r = spawnSync(
-    process.execPath,
-    [join(ROOT, "node_modules/vitest/vitest.mjs"), "run", SPEC, "--reporter=dot"],
-    { cwd: ROOT, encoding: "utf8" },
-  );
-  return r.status === 0;
+  for (const spec of SPECS) {
+    const r = spawnSync(
+      process.execPath,
+      [join(ROOT, "node_modules/vitest/vitest.mjs"), "run", spec, "--reporter=dot"],
+      { cwd: ROOT, encoding: "utf8" },
+    );
+    if (r.status !== 0) { return false; }
+  }
+  return true;
 }
 
 const originals = new Map();

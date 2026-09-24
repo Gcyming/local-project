@@ -173,17 +173,25 @@ tool_signal = true         # 环2 工具成败 → 情绪（默认开，可单�
 behavior_levers = true     # 三杠杆 + promote（默认开，可单独关）
 
 # ── 自动更新 ──────────────────────────────────────────────
-# 本发行模板**显式关闭**：不发起任何网络请求，状态面板显示"自动更新未启用"，
-#   避免未配置发布源时反复报"检查失败: net::ERR_CONNECTION_CLOSED"。
-# ⚠️ 注意「模板值」与「代码缺省」是两回事，且这里是**有意不同**：
-#   配置里**没有** [update] 段时，readUpdateConfig() 的缺省是 enabled = **true**
-#   （发布源已就绪，见 gui/src/main/updater.ts）。删掉本段 = 打开自动更新。
-# 启用方式：enabled = true，并填写 feed_url（electron-updater 的 generic feed，
-#   指向发布 latest.yml 的目录，如 https://example.com/slime/releases/）。
-# 留空 feed_url 时回退 electron-builder publish 字段（github provider）。
+# A-1059③：语义拆开成三件事 —— **检查**默认开、**下载/安装**永远只能由用户点击触发。
+#
+#   auto_check = true   → 启动后自动**检查**一次是否有新版本（只读一次 release 元数据，不下载）
+#   auto_check = false  → 不自动检查；界面上的「手动检查」按钮仍然随时可用
+#
+# ⚠️ 这里**曾经写死 `enabled = false`**，用户的实际观感是"更新功能被整个关掉了"
+#   （原话："我叫你换成手动点击更新，你怎能直接关了？"）—— 那不是用户的意图，
+#   而是我们模板自己的值。现已改为默认开启「检查」。
+#
+# ⚠️ **下载（几百 MB）与安装没有任何配置项能让它自动发生**：
+#   electron-updater 的 autoDownload 被代码强制关掉（见 gui/src/main/updater.ts），
+#   必须由用户在状态面板点「下载更新」→「安装并重启」。
+#
+# feed_url：留空时回退 electron-builder 的 github provider（本仓库已接入 Release）；
+#   填了就改用自定义 generic 源（指向放有 latest.yml 的目录）。
 
 [update]
-enabled = false
+auto_check = true
+enabled = true
 feed_url = ""
 
 # ── SILAM 自研离线大脑（A-962：随包 sidecar/ + models/ 资产；exe 同级定位）──

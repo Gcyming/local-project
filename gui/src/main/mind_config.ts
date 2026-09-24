@@ -212,17 +212,23 @@ export function readModelServerConfig(): ModelServerToml {
 
 export type TomlKey = "llama_bin" | "model_path" | "models_dir";
 
-/** 自动更新配置（slime.toml [update] 段；默认**开启**——GitHub Release 发布源已就绪，见 updater.ts。
- *  不想自动检查时显式配 enabled = false；feed_url 可覆盖为自定义源）。 */
+/** 自动更新配置（slime.toml [update] 段）。
+ *
+ *  A-1059③：这里**只负责如实读出键值**，"该不该自动检查"的判据搬到了纯模块
+ *  `core-ts/src/services/updatePolicy.ts`（可单测、过变异）。
+ *  之所以要把 `enabled` 改成可选：**"没给这个键"和"给了 false"是两件事** ——
+ *  后者可能是我们自己的模板发出去的默认值，不是用户意图（详见 updatePolicy.ts 文件头）。 */
 export interface UpdateConfig {
-  enabled: boolean;
+  /** 新键：启动时自动检查更新（权威）。未给 = undefined */
+  autoCheck?: boolean;
+  /** 旧键（历史语义混用）。未给 = undefined */
+  enabled?: boolean;
   feedUrl: string;
 }
 
 export function readUpdateConfig(): UpdateConfig {
-  // A-980-R30：默认 true（此前默认 false 是因为"无发布源时反复报检查失败"——现已接入 GitHub release，
-  // 见 updater.ts configureFeed）；读不到 enabled 键或值非法时保持默认。
-  let enabled = true;
+  let enabled: boolean | undefined;
+  let autoCheck: boolean | undefined;
   let feedUrl = "";
   try {
     const tomlPath = resolve(PROJECT_ROOT, "slime.toml");
@@ -235,7 +241,9 @@ export function readUpdateConfig(): UpdateConfig {
         if (line === "[update]") { inUpdate = true; continue; }
         if (line.startsWith("[") && line.endsWith("]")) { inUpdate = false; continue; }
         if (!inUpdate) continue;
-        if (line.startsWith("enabled")) {
+        if (line.startsWith("auto_check")) {
+          autoCheck = line.split("=", 2)[1]?.trim() === "true";
+        } else if (line.startsWith("enabled")) {
           enabled = line.split("=", 2)[1]?.trim() === "true";
         } else if (line.startsWith("feed_url")) {
           feedUrl = (line.split("=", 2)[1] ?? "").trim().replace(/^"|"$/g, "").replace(/\\\\/g, "\\");
@@ -245,7 +253,11 @@ export function readUpdateConfig(): UpdateConfig {
   } catch (e) {
     console.warn(`[gui:mind] slime.toml 更新段读取失败: ${e}`);
   }
-  return { enabled, feedUrl };
+  return {
+    ...(autoCheck !== undefined ? { autoCheck } : {}),
+    ...(enabled !== undefined ? { enabled } : {}),
+    feedUrl,
+  };
 }
 
 /** 改写 slime.toml 单个键值（仅当键已存在；路径转义 TOML 反斜杠） */

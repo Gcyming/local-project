@@ -221,6 +221,51 @@ describe("A-1042 发布说明源文件格式", () => {
     }
   });
 
+  /**
+   * ⚠️ 数量守恒只写 `length >= 3` 是**不够**的：把 `docs/releases/v0.0.2.md` 改名成任意非 `.md`
+   * 文件，剩下的 5 个仍然 ≥ 3 → 守卫静默漏扫那一个版本，却照旧全绿（这正是 M7 抓出的空转形态）。
+   * 所以必须补**完整性**判据：谁"应该"有正本，就必须真的有。
+   *
+   * 两个方向：
+   *   ① 当前版本（`gui/package.json`）必须有正本 —— 干净克隆上就能验，且正是发版前最危险的时刻；
+   *   ② 本机打过包的每个版本（`gui/release-v<semver>/`）必须有正本 —— 反向不成立（副本只在本机存在）。
+   */
+  const currentVersion = (): string =>
+    JSON.parse(readFileSync(resolve(REPO, "gui", "package.json"), "utf8")).version as string;
+
+  /** 本机打包目录对应的版本号（只认 `release-v<semver>`；`release-final` / `-pub` 等一律不参与） */
+  function packagedVersions(): string[] {
+    const guiDir = resolve(REPO, "gui");
+    if (!existsSync(guiDir)) { return []; }
+    return readdirSync(guiDir)
+      .map((d) => /^release-v(\d+\.\d+\.\d+)$/.exec(d)?.[1])
+      .filter((v): v is string => typeof v === "string")
+      .sort();
+  }
+
+  it("当前版本（gui/package.json）必须有发布说明正本", () => {
+    const ver = currentVersion();
+    expect(
+      existsSync(resolve(RELEASES, `v${ver}.md`)),
+      `当前版本 ${ver} 缺 docs/releases/v${ver}.md —— 发版时不会带上任何说明`,
+    ).toBe(true);
+  });
+
+  it.skipIf(packagedVersions().length === 0)(
+    "本机打过包的每个版本，其正本都必须还在库里（防改名/删除后守卫静默漏扫）",
+    () => {
+      const vers = packagedVersions();
+      expect(vers.length).toBeGreaterThanOrEqual(1);
+      const have = new Set(notesFiles().map((f) => f.ver.replace(/^v/, "")));
+      for (const v of vers) {
+        expect(
+          have.has(v),
+          `gui/release-v${v}/ 里有打包副本，但缺 docs/releases/v${v}.md（被改名或删掉了？守卫会静默漏扫）`,
+        ).toBe(true);
+      }
+    },
+  );
+
   it("v0.0.4 正文的「修复前 → 修复后」管道表被解析成真表格", () => {
     const f = notesFiles().find((x) => x.ver.includes("0.0.4"));
     expect(f, "缺 docs/releases/v0.0.4.md").toBeDefined();

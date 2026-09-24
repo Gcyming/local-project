@@ -48,12 +48,22 @@ describe("A-1039 ① 启动门判据：首屏数据到齐才算就绪", () => {
 
   it("uiReady 由登记表 + 总超时兜底共同决定（缺一项就不能收门）", () => {
     const src = code(APP);
-    expect(src).toContain("const uiReady = firstLoadGuard || FIRST_LOAD_KEYS.every((k) => firstLoad[k]);");
+    /* A-1061 迁移：判据从内联的 `firstLoadGuard || 全部到齐` 搬进纯模块
+       `startupGate.decideUiReady`（因为那个 `||` 会让元数据组的 8s 兜底**绕过内容组**，
+       导致"加载界面在会话内容没就绪时就结束"）。意图不变 —— 仍是"缺一项不收门"，
+       只是现在**分组**：元数据 8s 兜底、内容 20s 兜底，且谁被兜底放行会打日志。
+       判据本体的真值表见 a1059-guards.spec.ts。 */
+    expect(src).toContain("const uiReadyDecision = decideUiReady({");
+    expect(src).toContain("const uiReady = uiReadyDecision.ready;");
+    expect(src).not.toContain("const uiReady = firstLoadGuard || FIRST_LOAD_KEYS.every((k) => firstLoad[k]);");
     // 登记表必须覆盖"首屏就要用、且拉取不快"的四个数据源
     expect(src).toMatch(/FIRST_LOAD_KEYS = \[[^\]]*"agents"/);
     expect(src).toMatch(/FIRST_LOAD_KEYS = \[[^\]]*"sessions"/);
     expect(src).toMatch(/FIRST_LOAD_KEYS = \[[^\]]*"providers"/);
     expect(src).toMatch(/FIRST_LOAD_KEYS = \[[^\]]*"localModels"/);
+    // 分组常量与内容组兜底必须存在（否则内容组又会被元数据组的兜底顺带绕过）
+    expect(src).toContain("const METADATA_LOAD_KEYS = [\"agents\", \"sessions\", \"providers\", \"localModels\"] as const;");
+    expect(src).toContain('const CONTENT_LOAD_KEY = "chatHistory";');
   });
 
   it("四个数据源的**加载点**都真的调了 markFirstLoad（函数写了不调用 = 白写）", () => {
@@ -182,8 +192,12 @@ describe("A-1058① 启动门覆盖中间栏的会话内容", () => {
   it("ChatPanel 的会话恢复**成功与失败两条路径都回执**（失败不回执 = 只能靠 8s 兜底干等）", () => {
     const src = code(CHAT);
     expect(src).toContain("onHistoryLoaded?: () => void;");
-    const n = (src.match(/onHistoryLoaded\?\.\(\);/g) ?? []).length;
-    expect(n, `onHistoryLoaded 回调只出现 ${n} 次，success/catch 未都覆盖`).toBeGreaterThanOrEqual(2);
+    // A-1059② 迁移：回执不再是裸 `onHistoryLoaded?.()`，改为经 reportHistoryLoaded()
+    //（它保证"DOM 提交后再发"，见 startupGate.ts）——判据跟着搬到新家，意图不变。
+    const n = (src.match(/reportHistoryLoaded\(\);/g) ?? []).length;
+    expect(n, `reportHistoryLoaded 只出现 ${n} 次，success/catch 未都覆盖`).toBeGreaterThanOrEqual(2);
+    // 且它必须真的通过 settleAfterFrames 包一层（裸调用 = 又回到"门比内容先到"）
+    expect(src).toMatch(/settleAfterFrames\(HISTORY_SETTLE_FRAMES,\s*\(\)\s*=>\s*onHistoryLoaded\?\.\(\)\)/);
   });
 
   it("🐛 App 必须真的把它接到 ChatPanel 上（props 写了不传 = 门永远收不齐）", () => {
@@ -198,11 +212,23 @@ describe("A-1058① 启动门覆盖中间栏的会话内容", () => {
     expect(src).not.toMatch(/onHistoryLoaded=\{\(\)\s*=>/);
   });
 
-  it("🐛 没有会话可开时必须**自己**登记（不能指望一个永远不会挂载的组件来回执）", () => {
-    const src = code(APP);
-    // 先等 sessions 到齐，再在"欢迎页 / 拿不到 agentId"两条路径上收尾
-    expect(src).toContain("if (!firstLoad.sessions) { return; }");
-    expect(src).toContain("if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }");
+  /**
+   * A-1059② 迁移：这条原先锁的是 App.tsx 里**内联**的两句自我收尾判断。
+   * 判据已搬到纯模块 `startupGate.ts`（因为内联写法把「还没决定选哪个会话」与
+   * 「已决定但拿不到 agentId」并成了一支，导致门提前放行）——
+   * 按项目铁律：**迁移**（意图搬到判据新家 + 补接线守卫），不是删掉。
+   */
+  it("🐛 没有会话内容可等时由 startupGate 判据收尾，且装配层真的在用它", () => {
+    const app = code(APP);
+    // ① 接线：App 必须调用纯模块判据，而不是自己重新内联一套
+    expect(app).toContain("decideHistoryGate({");
+    expect(app).toMatch(/if \(decision === "self-finish"\) \{ markChatHistoryLoaded\(\); \}/);
+    // ② 旧的内联写法必须绝迹（它正是"提前放行"的成因）
+    expect(app).not.toContain("if (hasNoSession || !selectedAgentId) { markChatHistoryLoaded(); }");
+    // ③ 判据本体在纯模块里（可单测/过变异）；五条顺序见 a1059-guards.spec.ts
+    const gate = code("gui/src/renderer/pages/startupGate.ts");
+    expect(gate).toContain("export function decideHistoryGate");
+    expect(gate).toContain("if (!input.selectionSettled) { return \"wait\"; }");
   });
 
   it("[反例] 上面几条正则/包含断言必须真的能抓到坏写法（守卫自检）", () => {

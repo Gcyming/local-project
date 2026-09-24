@@ -41,12 +41,23 @@ export default function SplashScreen({
   // 淡出：visible 由 true→false 时先把透明度降到 0，再等过渡结束才真正卸载。
   // 直接跟 visible 走会让面板"啪"地消失（正是旧实现的观感问题）。
   const [mounted, setMounted] = React.useState(visible);
-  const [opaque, setOpaque] = React.useState(false);
+  /**
+   * A-1059①：**首帧必须不透明**，不能做淡入。
+   *
+   * 用户原话：「重启进入 slime 时，会先闪一下 slime 主界面，然后再出现加载界面」。
+   * 根因就是这个初值曾为 `false`：首帧 `opacity: 0` 且面板已 `position: fixed` 铺满，
+   * 于是**主界面完整地透出来**（哪怕只有一两帧，人眼也看得见"闪一下"），
+   * 等下一帧 rAF 把 opacity 置 1 才开始盖住 —— 这正是"先闪主界面"。
+   *
+   * 启动面板没有任何需要"从某处淡入"的旧状态（它盖的是同一块屏幕），
+   * 所以正确行为是**第一帧就直接铺上**；只有"曾淡出过、又要重新出现"才需要淡入。
+   */
+  const [opaque, setOpaque] = React.useState(visible);
 
   React.useEffect(() => {
     if (visible) {
       setMounted(true);
-      // 下一帧再置不透明，保证初始 opacity:0 → 1 的过渡真的跑起来（首帧同时设值会被合并）
+      // 已是首帧不透明的场合这里是幂等的；仅"淡出后重新出现"时走 0 → 1 的过渡
       const raf = window.requestAnimationFrame(() => setOpaque(true));
       return () => window.cancelAnimationFrame(raf);
     }
