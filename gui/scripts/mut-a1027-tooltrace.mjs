@@ -24,10 +24,13 @@ const ROOT = "D:/pilot project";
 const THINK = path.join(ROOT, "gui", "src", "renderer", "pages", "thinkingText.ts");
 const PANEL = path.join(ROOT, "gui", "src", "renderer", "pages", "ChatPanel.tsx");
 
-/** 兜底路径的两条关键语句（缩进是现场形态，用它保证打在真代码上） */
-const TRACE_CALL = "          const trace = splitToolTrace(m.reasoning ?? \"\");\n";
+/* 兜底路径的两条关键语句（缩进是现场形态，用它保证打在真代码上）。
+ * ⚠️ A-1034 之后这两处形态变了：`trace` 的所在层级左移（10 空格 → 2 空格），
+ *    `tracedTools` 的接线又补了 `result` / `diffTrimmed`（写入卡片展 diff 用）。
+ *    锚点必须跟着现场走，否则脚本只报"锚点未命中"、守卫却照旧全绿（= 假绿）。 */
+const TRACE_CALL = "  const trace = splitToolTrace(m.reasoning ?? \"\");\n";
 const TRACED_WIRE =
-  "                ...tracedTools.map((t) => ({ kind: \"tool\" as const, name: t.name, label: t.label })),\n";
+  "        ...tracedTools.map((t) => ({ kind: \"tool\" as const, name: t.name, label: t.label, result: t.result, diffTrimmed: t.diffTrimmed })),\n";
 
 const variants = [
   // ── ① 消费端：解析结果的接线 ─────────────────────────────
@@ -35,7 +38,7 @@ const variants = [
     name: "① ★ 兜底路径退回『砍到文末』的内联正则（marker@0 时整段推理被砍空 = 原病灶）",
     file: PANEL,
     from: TRACE_CALL,
-    to: "          const trace = { text: (m.reasoning ?? \"\").replace(/### 工具调用记录[\\s\\S]*$/g, \"\"), traces: [] };\n",
+    to: "  const trace = { text: (m.reasoning ?? \"\").replace(/### 工具调用记录[\\s\\S]*$/g, \"\"), traces: [] };\n",
   },
   {
     name: "② ★ 解析出来了但不接入 timeline（解析正确、界面依旧空白 = 假修）",

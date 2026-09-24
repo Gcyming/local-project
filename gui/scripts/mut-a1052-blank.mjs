@@ -95,14 +95,21 @@ const MUTATIONS = [
   {
     name: "C1 用户气泡渲染点退化成裸 {m.content} → 巨型色块回归（本次事故正身）",
     file: F_PANEL,
-    from: "        {collapseBlankRuns(m.content)}",
-    to: "        {m.content}",
+    /* ⚠️ 锚点必须带下一行 `      </div>`：只取表达式时，8 空格版是 12 空格版的**子串**
+       （后者含前者的后 8 格）⇒ 同一句话命中 3 处（1030 / 1966 / 1976）。
+       `sub` 只替换第一处，所以"看起来能用"，但那是**隐式的**：一旦行序/缩进被人调整，
+       变异就改到别处而没有任何人知道（假绿）。带上下文后唯一，**替换位置与原来完全相同**。 */
+    from: "        {collapseBlankRuns(m.content)}\n      </div>",
+    to: "        {m.content}\n      </div>",
   },
   {
     name: "C2 发言失败气泡漏净化 → 同一片空白在失败态继续撑高",
     file: F_PANEL,
-    from: "            {collapseBlankRuns(m.content)}",
-    to: "            {m.content}",
+    /* 与 C3 同款做法（那是"错误气泡"，用 `#f87171` 区分）：这里的目标是 `m.failed` 分支
+       （发言失败），配色是 `--text-secondary`。只取表达式会同时命中 failed / error 两处，
+       见 C1 的说明。 */
+    from: '            color: "var(--text-secondary)",\n          }}>\n            {collapseBlankRuns(m.content)}',
+    to: '            color: "var(--text-secondary)",\n          }}>\n            {m.content}',
   },
   {
     name: "C3 错误气泡漏净化 → 报错串里的连续空行照样撑高",
@@ -113,8 +120,11 @@ const MUTATIONS = [
   {
     name: "C4 净化污染剪贴板 → 用户复制到的是被折叠过的文本（原文丢失）",
     file: F_PANEL,
-    from: "navigator.clipboard.writeText(m.content)",
-    to: "navigator.clipboard.writeText(collapseBlankRuns(m.content))",
+    /* 锚点从 991 行的 `function UserMessage(` 起 = **唯一**能区分两处 `handleCopy` 的地方
+       （UserMessage 的复制 / 助手消息的复制逐字相同，只看 `handleCopy` 两行分不开）。
+       替换位置与原来一致（第一处 = UserMessage 的复制 —— 正是"用户复制"这条缺陷）。 */
+    from: "function UserMessage({ m, onRollback }: { m: Message; onRollback?: (id: number) => void }): JSX.Element {  const [copied, setCopied] = React.useState(false);\n  const handleCopy = async (): Promise<void> => {\n    try { await navigator.clipboard.writeText(m.content); }",
+    to: "function UserMessage({ m, onRollback }: { m: Message; onRollback?: (id: number) => void }): JSX.Element {  const [copied, setCopied] = React.useState(false);\n  const handleCopy = async (): Promise<void> => {\n    try { await navigator.clipboard.writeText(collapseBlankRuns(m.content)); }",
   },
   {
     name: "C5 净化污染回滚 → 输入框里被塞进改写过的文本，再发出去就变味",
@@ -125,8 +135,12 @@ const MUTATIONS = [
   {
     name: "C6 净化污染发送/落库路径 → 存下去、发出去的都是被改写过的正文",
     file: F_PANEL,
-    from: "message: text, sessionId: sid",
-    to: "message: collapseBlankRuns(text), sessionId: sid",
+    /* 锚点带 `streamReqRef.current = { agentId, ` 前缀 = **唯一**定位到 4703（记录本次请求参数、
+       供重试路径复用）。⚠️ 已知边界：首次发送在 4730 的 `api.chat.stream({ … })`，两处参数片段
+       逐字相同、都属"发送路径"，本变异只覆盖前者（`sub` 只改第一处）。将来若把守卫收紧到
+       只断言 4730，需要为它另立一条变异。 */
+    from: "streamReqRef.current = { agentId, message: text, sessionId: sid",
+    to: "streamReqRef.current = { agentId, message: collapseBlankRuns(text), sessionId: sid",
   },
   {
     name: "C7 净化模块没被 import → 「调用计数」假通过：名字还在、实现没了",

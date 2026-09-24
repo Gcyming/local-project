@@ -49,9 +49,12 @@ describe("A-1034 ① 系统可执行文件用绝对路径（不再是裸命令�
 
   it("屏幕宿主模板用 @() 强制数组（否则单窗口会被折叠成对象 → 静默变空列表）", () => {
     const src = readFileText(join(ROOT, "core-ts/src/screen/backends/desktop.ts"));
-    // 结构断言：这是 PowerShell 模板里的字面量，没有更纯的测法；故配变异脚本钉死
-    expect(src.includes("windows = @(Get-SlimeWindows)")).toBe(true);
-    expect(src.includes("windows = (Get-SlimeWindows)")).toBe(false);
+    /* A-1061⑨ 迁移：windows 分支现在**内联枚举并带诊断**（空列表要说清为什么），
+       但「数组不被折叠」这条不变量必须仍然成立 —— 两个集合初始化都必须是 @()：
+       $procs（候选）与 $list（输出）。 */
+    expect(src.includes("$procs = @(Get-Process")).toBe(true);
+    expect(src.includes("$list = @()")).toBe(true);
+    expect(src.includes("windows = $list;")).toBe(true);
   });
 
   it("屏幕宿主**调用点**必须用解析结果（函数写对了但调用点硬编码裸名 = 白写）", () => {

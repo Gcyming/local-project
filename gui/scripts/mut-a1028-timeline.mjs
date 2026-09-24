@@ -29,7 +29,9 @@ const PANEL = path.join(ROOT, "gui", "src", "renderer", "pages", "ChatPanel.tsx"
 const SIDEBAR = path.join(ROOT, "gui", "src", "renderer", "pages", "RightSidebar.tsx");
 const ICON = path.join(ROOT, "gui", "src", "renderer", "components", "Icon.tsx");
 
-const STATUS_CALL = "  const statusLabel = toolStatusLabel(tool.result, isFail);\n";
+/* A-1061②′ 迁移：状态词多了第三参 `running`（思考历程工具卡的「执行中」实时态）——
+   锚点跟着契约搬，否则变异未命中 → 假绿（本条在本次重跑里就是这么失效的）。 */
+const STATUS_CALL = "  const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);\n";
 const STATUS_RENDER = "        {statusLabel && (\n";
 const STAGES_GATE = "      const stages = finalReasoning || doneTools.length > 0 || finalTimeline.length > 0\n";
 const ATTACH_GUARD = "        if (finalTimeline.length > 0) {\n";

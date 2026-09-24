@@ -68,7 +68,9 @@ describe("A-1028 ②：ChatPanel 不得再自己拼状态词", () => {
   const src = read(CHAT_PANEL);
 
   it("状态词取自纯模块 toolStatusLabel(…)", () => {
-    expect(src).toContain("const statusLabel = toolStatusLabel(tool.result, isFail);");
+    /* A-1061②′ 迁移：状态词多了第三参 `running` —— 思考历程的工具卡要有「执行中」实时态
+       （tool-start 建卡、结果到了原地翻状态）。意图不变：状态词仍**只**出自纯模块。 */
+    expect(src).toContain("const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);");
     // 旧写法只可能作为**代码**出现成这个形状（注释里那份带反引号，不匹配）
     expect(src).not.toContain("const statusLabel = !r ?");
     expect(src).not.toContain('const statusLabel = !r ? (isWrite ? "已执行"');
@@ -76,11 +78,16 @@ describe("A-1028 ②：ChatPanel 不得再自己拼状态词", () => {
 
   it("状态列为空时整列省略（不留一条空白对齐位）", () => {
     expect(src).toContain("{statusLabel && (");
-    expect(src).toContain('className="think-tool-status"');
+    /* A-1061②′ 迁移：className 改为按 running 切换（执行中带扫光），字面量随之变条件式 ——
+       但两个分支都必须保留 `think-tool-status` 这个类（否则对齐样式丢了）。 */
+    expect(src).toContain('className={isRunning ? "think-tool-status text-scan-light" : "think-tool-status"}');
   });
 
   it("结果未记录时 title 要讲清「为什么没有状态」（不然像坏掉了）", () => {
-    expect(src).toMatch(/const statusTitle = !hasResult \? [^;]*未随记录保存[^;]*;/);
+    /* A-1061②′ 迁移：title 现在三分支 —— 执行中 / 未记录 / 成败。
+       「未随记录保存」的解释必须仍在（否则历史回看时像坏掉了）。 */
+    expect(src).toContain("const statusTitle = isRunning");
+    expect(src).toContain("未随记录保存");
   });
 });
 

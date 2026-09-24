@@ -102,8 +102,10 @@ const MUTATIONS = [
   {
     name: "M8 工具卡判据退化成常量（回到静默空白）",
     file: "PANEL",
-    from: '          {diffNoticeKind(diffStat, oldForDiff !== null, false) === "too-large" && (',
-    to: '          {false && diffNoticeKind(diffStat, oldForDiff !== null, false) === "too-large" && (',
+    /* ⚠️ 第三参从 `false` 变成了 `!!tool.diffTrimmed`（A-1034 后工具卡自带 diffTrimmed，
+       判据要按真实来源分流）。锚点必须跟着现场走。 */
+    from: '          {diffNoticeKind(diffStat, oldForDiff !== null, !!tool.diffTrimmed) === "too-large" && (',
+    to: '          {false && diffNoticeKind(diffStat, oldForDiff !== null, !!tool.diffTrimmed) === "too-large" && (',
   },
   {
     name: "M9 产物卡判据退化成常量（限流又变静默）",

@@ -96,20 +96,29 @@ const MUTATIONS = [
   {
     name: "M11 windows 返回不再强制数组（单窗口会被折叠）",
     file: "desktop",
-    from: "windows = @(Get-SlimeWindows)",
-    to: "windows = (Get-SlimeWindows)",
+    // A-1061⑨ 迁移：windows 分支改为内联枚举 + 诊断，数组不变量落在 $procs/$list 两个 @() 上 ——
+    // 把其中任一个改成裸括号，单窗口就会被 ConvertTo-Json 折叠成对象 → 上层静默变空列表。
+    from: '      $list = @(); $rectFail = 0; $sizeFail = 0',
+    to: '      $list = (); $rectFail = 0; $sizeFail = 0',
   },
   {
     name: "M12 adb 解压退回外部 tar",
     file: "adb",
-    from: "const r = extractZipTo(buf, destDir);",
-    to: 'const r = extractZipTo(buf, destDir); void 0; execFile("tar", ["-xf", zipPath]); void 0;',
+    /* ⚠️ 锚点必须**单行**：`adb.ts` 是 **CRLF** 文件，带 `\n` 的跨行锚点永远匹配不上
+       （本变异脚本不做行尾归一，是本仓"行尾是混的"那个老坑；见 mutation-harness §15①）。
+       原锚点 `const r = extractZipTo(buf, destDir);` 也不成立了 —— A-1038 给它加了
+       onProgress 选项，现在调用是跨行带对象的形状。改成注一个 `"tar"` 选项：
+       既有真实回归语义（解压又依赖外部 tar），又只有一行、行尾无关。 */
+    from: 'const r = await extractZipTo(buf, destDir, {',
+    to: 'const r = await extractZipTo(buf, destDir, { shell: "tar",',
   },
   {
     name: "M13 构建脚本退回裸 exec(\"tar\")",
     file: "prep",
-    from: "const TAR = systemExe(isWindows ? \"tar.exe\" : \"tar\");",
-    to: 'const TAR = "tar";',
+    // A-1036 起 tar 的绝对路径解析改成**懒求值**（`const TAR = systemExe(...)` 在 isWindows
+    // 声明之前会命中 TDZ），所以旧锚点已不存在。改锚真实调用点，变异为裸命令名。
+    from: '        exec(tarExe(), ["-xf", binFile, "-C", llamaDir]);',
+    to: '        exec("tar", ["-xf", binFile, "-C", llamaDir]);',
   },
 ];
 
