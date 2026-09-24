@@ -46,8 +46,8 @@ const variants = [
   {
     name: "④ 历史兜底退回单节点（用户截图里的「时间线设计没了」）",
     file: CHAT,
-    from: "                ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: \"think\" as const, text: t })),",
-    to: "                { kind: \"think\" as const, text: cleanReasoning },",
+    from: "        ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: \"think\" as const, text: t })),",
+    to: "        { kind: \"think\" as const, text: cleanReasoning },",
   },
   {
     name: "⑤ onDone 兜底退回单节点",
@@ -64,7 +64,9 @@ const variants = [
   {
     name: "⑦ 加载侧不再读记录自带的 timeline（缺陷 B 原病灶：只写不读）",
     file: CTX,
-    from: "      timeline: fromMeta ?? adoptRecordTimeline(m.timeline),",
+    /* A-1068 迁移：外面包了一层 `settleRunning(...)`（清掉落盘时粘住的 running），
+       锚点跟着搬到**带外壳的整句**。判据（localStorage 缺项时回退到记录自带的 timeline）没变。 */
+    from: "      timeline: settleRunning(fromMeta ?? adoptRecordTimeline(m.timeline)),",
     to: "      timeline: fromMeta,",
   },
   {

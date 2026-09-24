@@ -174,14 +174,21 @@ describe("A-1055② 下载进度真的被上报（此前主进程完全没有 do
 
 describe("A-1055③ 通知图标口径 = 安装根（不是数据根），且真的接进身份注册", () => {
   it("notificationIconPath 走 INSTALL_ROOT；旧口径（数据根）只许留在追述性注释里", () => {
-    expect(NOTIFY).toContain('join(INSTALL_ROOT, "build", "icon.png")');
+    /* A-1067 迁移（#228）：文件名不再写死 `icon.png`，改成唯一出处 `notifyIconFileName()`。
+       原因：`build/icon.png` 951.7 KB **超过 Windows toast 的 200 KB 上限** → 图标静默不显示。
+       判据（走安装根 · 不是数据根）不变，只是文件名那一节搬进了纯模块。 */
+    expect(NOTIFY, "图标不再从安装根取（数据根在打包版里没有 build/ → 通知静默退回默认图标）")
+      .toContain('join(INSTALL_ROOT, "build", notifyIconFileName())');
     // ⚠️ 必须先剥注释：本函数的注释会合法地提到旧写法（「此前是 join(PROJECT_ROOT, …)」）
     expect(strip(NOTIFY), "PROJECT_ROOT 是数据根，打包版那里没有 build/icon.png → 通知静默退回 Electron 默认图标")
       .not.toContain('join(PROJECT_ROOT, "build", "icon.png")');
     const b = bodyOf(NOTIFY, "export function notificationIconPath(): string | undefined {");
     expect(b.length, "取不到 notificationIconPath → 守卫失效").toBeGreaterThan(0);
-    expect(b, "文件不存在时必须返回 undefined（让 Electron 用应用图标兜底），不许塞坏路径")
-      .toContain("existsSync(p) ? p : undefined");
+    /* A-1067 迁移：原判据是三元式 `existsSync(p) ? p : undefined`；现在改成"缺文件 / 不合规"
+       两支各自早返 —— 意图同一条：**拿不到合规文件时必须返回 undefined**（让 Electron 用应用图标
+       兜底），绝不塞一个坏路径给系统（坏路径的下场是整条通知被丢弃，比没有图标更糟）。 */
+    expect(b, "缺文件时必须返回 undefined（不许塞坏路径）").toMatch(/if \(!existsSync\(p\)\)[\s\S]{0,200}?return undefined;/);
+    expect(b, "尺寸/体积不合规时也必须返回 undefined").toMatch(/if \(!v\.ok\)[\s\S]{0,200}?return undefined;/);
   });
 
   it("图标路径**真的被传进**身份注册，并且 toast 正文图标同源（只算出来不用 = 没接线）", () => {

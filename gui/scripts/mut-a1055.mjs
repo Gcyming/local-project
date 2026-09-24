@@ -161,7 +161,7 @@ const MUTATIONS = [
   {
     name: "A-1055③ 图标口径退回数据根（打包版那里没有 build/icon.png → 静默用 Electron 默认图标）",
     file: NOTIFY,
-    mutate: (t) => sub(t, 'join(INSTALL_ROOT, "build", "icon.png")', 'join(PROJECT_ROOT, "build", "icon.png")'),
+    mutate: (t) => sub(t, 'join(INSTALL_ROOT, "build", notifyIconFileName())', 'join(PROJECT_ROOT, "build", notifyIconFileName())'),
   },
   {
     name: "A-1055③ 图标路径算出来不传下去（只算不用 = 没接线）",
@@ -174,9 +174,11 @@ const MUTATIONS = [
     mutate: (t) => sub(t, "      icon: notificationIconPath(),", "      icon: undefined,"),
   },
   {
-    name: "A-1055③ 文件不存在时塞一个坏路径（而不是返回 undefined 让 Electron 兜底）",
+    name: "A-1055③ 文件不存在时不再早返（不返回 undefined 让 Electron 兜底，而是继续拿坏路径去用）",
     file: NOTIFY,
-    mutate: (t) => sub(t, "return existsSync(p) ? p : undefined;", "return p;"),
+    /* A-1067 迁移：原来是三元式 `existsSync(p) ? p : undefined`，现在拆成"缺文件 / 不合规"两支早返。
+       判据（拿不到合规文件必须 undefined）没变，所以变异锚点跟着搬到**第一支的判据行**上。 */
+    mutate: (t) => sub(t, "  if (!existsSync(p)) {", "  if (false) {"),
   },
   {
     name: "A-1055③ 幂等判据退回只比对 DisplayName（IconUri 永远补不上，日志还报「已注册，跳过」）",

@@ -111,7 +111,11 @@ describe("A-1021b ③：A-966 的 history.jsonl 时间线必须**可读**（此�
   it("localStorage 缺该序数时回退到记录自带的时间线", () => {
     expect(ctxSrc).toContain("adoptRecordTimeline(m.timeline)");
     // 兜底顺序必须是 `fromMeta ?? 记录`（localStorage 优先，不改变已工作路径的行为）
-    expect(ctxSrc).toMatch(/timeline:\s*fromMeta\s*\?\?\s*adoptRecordTimeline\(m\.timeline\)/);
+    /* A-1068 迁移：外面又包了一层 `settleRunning(...)`（清掉落盘时粘住的 `running: true`，
+       否则中途崩过的工具卡回看时永久显示「执行中」）。**兜底顺序本身没变**，
+       所以锚点必须容忍这层外壳 —— 否则"给同一处加一层修复"会被误判成回归，
+       下一个人就会去删那层修复。settleRunning 自己有没有被接线，由 a1068-B 独立锁住。 */
+    expect(ctxSrc).toMatch(/timeline:\s*(?:settleRunning\()?fromMeta\s*\?\?\s*adoptRecordTimeline\(m\.timeline\)\)?/);
   });
 
   it("磁盘 kind 是 string → 边界只收窄一次（不许把断言散到每个调用点）", () => {

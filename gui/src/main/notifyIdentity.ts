@@ -71,6 +71,55 @@ export function buildNotificationPayload(ev: { title?: string; body?: string }):
   return { title: title || APP_DISPLAY_NAME, body: dedupedBody };
 }
 
+/**
+ * Windows 通知图片的**硬约束**（一手来源：MS Learn「磁贴、Toast 和锁屏提醒通知疑难解答」
+ * `dn457490` / `dn457491` 与「Tile and toast visual assets」`hh781198`）：
+ *
+ *   Images for all notifications must be smaller than 1024 x 1024 pixels and less than
+ *   200 KB in size. **If any image in a notification exceeds any of these dimensions,
+ *   the notification will be discarded.**
+ *
+ * ⇒ 超限的后果**不是"图标糊一点"**，而是图标静默不显示（HEAD 那格空白）甚至整条通知被丢弃。
+ *   本项目的通知图标资产必须按这两条验收，见 `checkNotifyImage()` + `notifyIconFileName()`。
+ */
+export const NOTIFY_IMAGE_MAX_BYTES = 200 * 1024;
+export const NOTIFY_IMAGE_MAX_DIM = 1024;
+
+/** 验收结果（`ok=false` 时 `reason` 说明差在哪 —— 调用方照实报，不许静默） */
+export interface NotifyImageVerdict { ok: boolean; reason: string }
+
+/**
+ * 按 Windows 通知约束验收一张位图。**纯函数**（尺寸/体积由调用方量好传进来）。
+ *
+ * 为什么要有它：`gui/build/icon.png` 是**安装器用的大图**（实测 1024×1024 / 951.7 KB），
+ * 直接拿去当 toast 图标会触发上面那条"整条丢弃"。这张图此前被 `notificationIconPath()`
+ * 当成通知图标用（A-1055 把口径从数据根改成安装根，方向对了、但**选错了那张图**）——
+ * 于是头部那格仍然什么都没有，而代码、类型检查、日志全绿。
+ */
+export function checkNotifyImage(meta: { bytes: number; width?: number; height?: number }): NotifyImageVerdict {
+  if (meta.bytes > NOTIFY_IMAGE_MAX_BYTES) {
+    return { ok: false, reason: `体积 ${(meta.bytes / 1024).toFixed(1)} KB 超过上限 ${NOTIFY_IMAGE_MAX_BYTES / 1024} KB` };
+  }
+  if (meta.width !== undefined && meta.width > NOTIFY_IMAGE_MAX_DIM) {
+    return { ok: false, reason: `宽 ${meta.width}px 超过上限 ${NOTIFY_IMAGE_MAX_DIM}px` };
+  }
+  if (meta.height !== undefined && meta.height > NOTIFY_IMAGE_MAX_DIM) {
+    return { ok: false, reason: `高 ${meta.height}px 超过上限 ${NOTIFY_IMAGE_MAX_DIM}px` };
+  }
+  return { ok: true, reason: "符合 Windows 通知图片约束" };
+}
+
+/**
+ * 通知图标的**文件名**（唯一出处）。
+ *
+ * ⚠️ 刻意**不是** `icon.png`：那张是安装器/窗口用的大图（951.7 KB），当 toast 图标会被系统丢弃。
+ *   通知用图由 `gui/scripts/make-notify-icon.mjs` 由大图降采样生成（256×256 / ~59 KB），
+ *   两条路径不许混用 —— 换成 `icon.png` 就等于把 #228 原样复活。
+ */
+export function notifyIconFileName(): string {
+  return "notify-icon.png";
+}
+
 /** 一个待写入的注册表值 */
 export interface AumidRegistryValue { name: string; value: string }
 

@@ -27,7 +27,7 @@ import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
  * （本文件顶层 import electron，测试里导不进来）。
  * 本文件从此只当"Electron 适配层"：读配置、拷音频、注册身份、真的弹通知。
  */
-import { buildNotificationPayload, applyWindowsNotificationIdentity, APP_AUMID } from "./notifyIdentity.js";
+import { buildNotificationPayload, applyWindowsNotificationIdentity, APP_AUMID, notifyIconFileName, checkNotifyImage } from "./notifyIdentity.js";
 import { INSTALL_ROOT } from "./boot.js";
 
 // re-export：公开面不变（`APP_AUMID` / `APP_DISPLAY_NAME` 的唯一出处仍在 notifyIdentity.ts）
@@ -151,16 +151,35 @@ function ensureNotificationIdentity(): void {
   }
 }
 
-/** 通知图标文件（应用自身资源，见 boot.ts 的 INSTALL_ROOT 定义）。
+/** 通知图标文件（**应用自身资源**，见 boot.ts 的 INSTALL_ROOT 定义）。
  *
  * ⚠️ A-1055 修正：此前是 `join(PROJECT_ROOT, "build", "icon.png")` ——
  * `PROJECT_ROOT` 是**数据根**（打包版 = `userData/slime-data`），那里**没有** build/icon.png；
  * 于是 Electron 拿不到图标，弹出来的通知是 Electron 默认图标（用户实测"图标不是 slime 的"）。
  * 正确口径是**安装根**：`electron-builder.json` extraFiles 里 `build/icon.png` 落到安装根。
- * 文件不存在时返回 undefined —— 让 Electron 用应用图标兜底，而不是塞一个坏路径。 */
+ * 文件不存在时返回 undefined —— 让 Electron 用应用图标兜底，而不是塞一个坏路径。
+ *
+ * ⚠️ A-1067 再修正（#228 真实根因）：A-1055 只改对了**目录**，却仍然指着 `icon.png` ——
+ * 那是**安装器用的大图**（实测 1024×1024 / 951.7 KB）。Windows 通知图片有硬约束
+ * （见 `notifyIdentity.ts` 的 `NOTIFY_IMAGE_MAX_BYTES`）：超限时图标静默不显示、
+ * 严重时**整条通知被丢弃**。容器对、内容物错，症状一模一样地"什么都没显示"。
+ * ⇒ 通知图标改用**专用小图** `notify-icon.png`（由 `gui/scripts/make-notify-icon.mjs`
+ *   从大图降采样而来，256×256 / ~59 KB）。名字的唯一出处是 `notifyIconFileName()`。
+ * ⇒ 并且**当场量一次**体积：超限就如实警告并**不传**（宁可用系统默认图标，
+ *   也不传一张会让整条通知消失的图）。静默失败是精度杀手。 */
 export function notificationIconPath(): string | undefined {
-  const p = join(INSTALL_ROOT, "build", "icon.png");
-  return existsSync(p) ? p : undefined;
+  const p = join(INSTALL_ROOT, "build", notifyIconFileName());
+  if (!existsSync(p)) {
+    // 打包版漏配 extraFiles 时就是这个形态：文件不在 → 头部没有图标，且不会有任何报错。
+    console.warn(`[notify] 通知图标缺失：${p}（打包版请核对 electron-builder.json 的 extraFiles）`);
+    return undefined;
+  }
+  const v = checkNotifyImage({ bytes: statSync(p).size });
+  if (!v.ok) {
+    console.warn(`[notify] 通知图标不合规（${v.reason}）→ 不传给系统（否则图标不显示/整条通知被丢弃）：${p}`);
+    return undefined;
+  }
+  return p;
 }
 
 /** 让渲染层播放自定义提示音（系统默认音由 Notification.silent=false 负责，不走这里） */
