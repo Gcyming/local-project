@@ -85,6 +85,8 @@
     },
     { "from": "template/slime.toml", "to": "slime.toml" },
     { "from": "build/icon.png", "to": "build/icon.png" },
+    { "from": "build/icon.ico", "to": "build/icon.ico" },
+    { "from": "build/notify-icon.png", "to": "build/notify-icon.png" },
     { "from": "../core", "to": "core", "filter": ["**/*"] },
     { "from": "../tools", "to": "tools", "filter": ["**/*"] },
     { "from": "../social", "to": "social", "filter": ["**/*"] },
@@ -106,7 +108,7 @@
       { "target": "nsis", "arch": ["x64"] },
       { "target": "portable", "arch": ["x64"] }
     ],
-    "icon": "build/icon.png"
+    "icon": "build/icon.ico"
   },
   "linux": {
     "target": [
