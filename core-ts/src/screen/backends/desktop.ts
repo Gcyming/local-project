@@ -240,7 +240,24 @@ function Invoke-SlimeAction($req) {
     # A-1034：用 @( ... ) 强制数组。PowerShell 会把**单元素**数组自动展开成标量，
     # ConvertTo-Json 于是产出对象而非数组 —— 恰好只有一个可见窗口时，上层 Array.isArray 判定为假，
     # 枚举结果静默变成空列表，用户看到的是「未枚举到可见窗口」。
-    'windows' { return @{ windows = @(Get-SlimeWindows) } }
+    # A-1061⑨：空列表**必须带诊断**。用户实测 screen_windows 返回空，但没人知道
+    # 是"宿主没起来 / RectOf 全挂 / 进程枚举异常 / 真没窗口" —— 这四种的修法完全不同。
+    # 于是这里把中间量一并带回：候选数（有标题的进程）、RectOf 失败数、尺寸异常数、进程总数。
+    'windows' {
+      $procs = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle })
+      $list = @(); $rectFail = 0; $sizeFail = 0
+      foreach ($p in $procs) {
+        $r = New-Object SLIME_RECT
+        $ok = [SlimeInput]::RectOf($p.MainWindowHandle, [ref]$r)
+        if (-not $ok) { $rectFail++; continue }
+        $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+        if ($w -le 0 -or $h -le 0) { $sizeFail++; continue }
+        $list += @{ title = $p.MainWindowTitle; pid = $p.Id; x = $r.Left; y = $r.Top; width = $w; height = $h }
+      }
+      $total = 0
+      try { $total = @(Get-Process).Count } catch {}
+      return @{ windows = $list; diag = @{ candidates = $procs.Count; rectFail = $rectFail; sizeFail = $sizeFail; total = $total } }
+    }
     'focus' {
       $needle = ''; if ($null -ne $req.title) { $needle = [string]$req.title }
       if (-not $needle) { throw 'focus 需要 title' }
@@ -449,6 +466,9 @@ export class DesktopScreenBackend implements ScreenBackend {
   private stdoutBuf = "";
   private stderrBuf = "";
   private cachedSize: { width: number; height: number; originX: number; originY: number } | null = null;
+  /** A-1069：宿主启动时刻（`residentHost()` 报给「后台进程」面板的时长基准）。
+   *  一处赋值（spawn 之后）、一处清空（dispose / 宿主退出）—— 与 `proc` 同生共死。 */
+  private hostStartedAt: number | null = null;
 
   /** 平台能力：目前完整实现 Windows；其它平台如实报错（不假装支持） */
   private unsupportedReason(): string | null {
@@ -471,6 +491,7 @@ export class DesktopScreenBackend implements ScreenBackend {
         { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
       );
       this.proc = proc;
+      this.hostStartedAt = Date.now();
       this.stdoutBuf = "";
       this.stderrBuf = "";
 
@@ -535,6 +556,7 @@ export class DesktopScreenBackend implements ScreenBackend {
         const tail = this.stderrBuf.trim().slice(-400);
         const msg = `PowerShell 宿主已退出（code=${code}）${tail ? `：${tail}` : ""}`;
         this.proc = null;
+        this.hostStartedAt = null;
         this.booting = null;
         this.cachedSize = null;
         this.failAll(msg);
@@ -673,6 +695,33 @@ export class DesktopScreenBackend implements ScreenBackend {
     } else {
       throw new Error(`枚举窗口失败：宿主返回的 windows 字段形状异常（${typeof raw}）`);
     }
+    /* A-1061⑨：**空列表必须说清为什么**。此前一句「未枚举到可见窗口」把四种完全不同的
+       故障（宿主没起来 / RectOf 全挂 / 进程枚举异常 / 真没窗口）压成同一句，
+       用户无从下手、我们也无从定位。宿主现在会带 diag 回来，这里如实转述。
+       A-1088：**并且把「真没窗口」与「枚举故障」分成两种结果** ——
+       此前两种情形都抛 Error，上层只能把"本机确实没有窗口"也当成故障报给模型
+       （模型于是去修一个并不存在的故障）。判据用 diag 里的 `candidates`：
+         · `candidates > 0` 却一条都没产出 ⇒ RectOf/尺寸**全挂** ⇒ 真故障（抛）；
+         · `candidates === 0` 且枚举正常返回 ⇒ 本机确实没有带标题的顶层窗口 ⇒ **空数组**（不是错误）；
+         · `diag` 缺失 ⇒ 宿主协议对不上 ⇒ 真故障（抛，绝不静默当成"没有窗口"）。 */
+    if (list.length === 0) {
+      const diag = (r.result as { diag?: { candidates?: number; rectFail?: number; sizeFail?: number; total?: number } } | undefined)?.diag;
+      if (!diag) {
+        throw new Error(
+          "枚举窗口失败：宿主没有回传诊断信息（协议不匹配）—— 这不是「没有窗口」，而是枚举本身没跑通",
+        );
+      }
+      const candidates = Number(diag.candidates ?? 0);
+      if (candidates > 0) {
+        throw new Error(
+          `枚举窗口失败 —— 宿主诊断：有标题的候选窗口 ${candidates} 个` +
+          `（RectOf 失败 ${diag.rectFail ?? 0}，尺寸异常 ${diag.sizeFail ?? 0}），本机进程总数 ${diag.total ?? 0}。` +
+          "候选非 0 但一条都没产出通常是 Add-Type/P-Invoke 编译问题。",
+        );
+      }
+      // 枚举成功、确实没有带标题的顶层窗口 ⇒ **空结果不是故障**
+      return [];
+    }
     return list.map((w) => ({
       title: String(w.title ?? ""),
       pid: Number(w.pid ?? 0),
@@ -794,10 +843,26 @@ export class DesktopScreenBackend implements ScreenBackend {
     }
   }
 
+  /**
+   * A-1069：报告**常驻宿主进程**的存活状态，供「Agent 启动的后台进程」面板展示（#226）。
+   *
+   * 为什么这个探针必须在后端自己身上：宿主是**懒启动**的 —— 第一次 `screen_*` 工具调用时
+   * `ensureHost()` 才 spawn，调用方（主进程）无从知道它什么时候起来、什么时候死掉。
+   * 让后端自己报，就不需要在外面维护一份"它还在不在"的镜像状态（那种镜像必然与真实漂移）。
+   *
+   * 返回 null = 当前没有常驻宿主（从未启动 / 已退出 / 已 dispose）。
+   */
+  residentHost(): { pid?: number; startedAt: number } | null {
+    const proc = this.proc;
+    if (!proc || proc.killed) { return null; }
+    return { pid: proc.pid, startedAt: this.hostStartedAt ?? Date.now() };
+  }
+
   /** 应用退出时释放宿主进程 */
   dispose(): void {
     const proc = this.proc;
     this.proc = null;
+    this.hostStartedAt = null;
     this.booting = null;
     this.cachedSize = null;
     if (proc && !proc.killed) {

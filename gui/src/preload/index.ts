@@ -16,6 +16,7 @@ import type {
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus, AdbDownloadProgressInfo,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
+  AgentProcsListResult, AgentProcsStopResult,
   GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, WorkspaceReadFileResult,
   ContextMenuItem, WorkspaceContextMenuParams, WorkspaceCreateResult,
   ResidentState, SubAgentRunView,
@@ -52,13 +53,24 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 主动中断当前 Agent 输出（key=sessionId ?? agentId） */
     cancel: (key: string) =>
       ipcRenderer.invoke("slime:chat:cancel", { key }) as Promise<{ ok: boolean; error?: string; active?: number }>,
+    /**
+     * A-1060：投入一条中途「引导」—— **不打断当前生成**。
+     *
+     * 与 `cancel` 是两件事：`cancel` 掐掉当前流（Esc 语义），`steer` 只是把这句话排队，
+     * 等下一个**工具调用之后的轮次边界**注入本轮上下文（Cursor / Claude Code 的 steering 语义）。
+     * `id` 是渲染层待发卡片的自增 id —— 消费时会带回来，界面据此撤掉那张卡片。
+     */
+    steer: (sessionId: string, id: number | string, text: string) =>
+      ipcRenderer.invoke("slime:chat:steer", { sessionId, id: String(id), text }) as Promise<{ ok: boolean; pending?: number; error?: string }>,
     /** A-973：查询指定会话是否仍有进行中的流（渲染层恢复时判定"进行中/已结算"的真相源） */
     isActive: (key: string) =>
       ipcRenderer.invoke("slime:chat:isActive", { key }) as Promise<{ active: boolean }>,
     /** A-969：上下文自动压缩（GUI 发送前触发；摘要写回会话 meta，后续发送自动用摘要头+最近 N 轮）
-     *  A-974-R3：used 为渲染层实测的输入侧占用（含系统提示/工具定义），供主进程与历史估算取大值判阈值 */
-    compress: (sessionId: string, ratio: number, used?: number) =>
-      ipcRenderer.invoke("slime:chat:compress", { sessionId, ratio, used }) as Promise<CompressResult>,
+     *  A-974-R3：used 为渲染层实测的输入侧占用（含系统提示/工具定义），供主进程与历史估算取大值判阈值
+     *  A-1082：force = 反应式触发（上游已报上下文超限）——主进程据此**越过阈值判定**直接压；
+     *  旧实现只越过渲染层那条判据，主进程仍会再判一次 `needsCompress` ⇒ 判假 ⇒ 压缩一次也没发生 */
+    compress: (sessionId: string, ratio: number, used?: number, force?: boolean) =>
+      ipcRenderer.invoke("slime:chat:compress", { sessionId, ratio, used, force }) as Promise<CompressResult>,
     onChunk: (cb: (chunk: StreamChunk) => void) => onMessage<StreamChunk>("slime:chat:chunk", cb),
     onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }) => void) =>
       onMessage<{ reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number; ctxBuckets?: CtxBuckets }>(
@@ -512,6 +524,17 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     exec: (cmd: string, cwd?: string) =>
       ipcRenderer.invoke("slime:term:exec", { cmd, cwd }) as Promise<TermResult>,
   },
+  /* A-1069（#226）：Agent 启动的后台资源（图形控制常驻宿主 / 本地服务 / 后台子代理）。
+     ⚠️ 渲染层**不做判据**：类别归属、排序、状态词、可否停止全在主进程调的纯模块里
+     （`core-ts/src/services/agentProcs.ts`）。这里只是把视图取回来、把点击转成 {kind,id}。 */
+  agentProcs: {
+    list: () =>
+      ipcRenderer.invoke("slime:agentprocs:list", {}) as Promise<AgentProcsListResult>,
+    stop: (kind: string, id?: string) =>
+      ipcRenderer.invoke("slime:agentprocs:stop", { kind, id }) as Promise<AgentProcsStopResult>,
+    /** 主进程广播"集合变了"（起/停/回合结束）→ 面板立刻刷新，不靠轮询 */
+    onChanged: (cb: () => void) => onMessage<Record<string, never>>("slime:agentprocs:changed", cb),
+  },
   git: {
     /** 检测路径是否为 Git 仓库（自动关联工作目录用） */
     detect: (path: string) =>
@@ -676,8 +699,10 @@ declare global {
         newConversation: (agentId: string) => Promise<{ ok: boolean }>;
         retryLast: (agentId: string, sessionId?: string) => Promise<{ ok: boolean; error?: string }>;
         cancel: (key: string) => Promise<{ ok: boolean; error?: string; active?: number }>;
+        /** A-1060：投入中途「引导」（不打断当前生成；在下一个工具调用后的轮次边界注入） */
+        steer: (sessionId: string, id: number | string, text: string) => Promise<{ ok: boolean; pending?: number; error?: string }>;
         isActive: (key: string) => Promise<{ active: boolean }>;
-        compress: (sessionId: string, ratio: number, used?: number) => Promise<CompressResult>;
+        compress: (sessionId: string, ratio: number, used?: number, force?: boolean) => Promise<CompressResult>;
         onChunk: (cb: (chunk: StreamChunk) => void) => () => void;
         onDone: (cb: (m: { reply: string; model: string; elapsedMs: number; timings?: Record<string, number>; interrupted?: boolean; sessionId?: string; windowCap?: number }) => void) => () => void;
         onError: (cb: (err: { message: string; sessionId?: string }) => void) => () => void;
@@ -890,6 +915,12 @@ declare global {
       };
       term: {
         exec: (cmd: string, cwd?: string) => Promise<TermResult>;
+      };
+      /** A-1069（#226）：Agent 启动的后台资源面板 */
+      agentProcs: {
+        list: () => Promise<AgentProcsListResult>;
+        stop: (kind: string, id?: string) => Promise<AgentProcsStopResult>;
+        onChanged: (cb: () => void) => () => void;
       };
       git: {
         detect: (path: string) => Promise<GitDetect>;
