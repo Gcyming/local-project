@@ -20,9 +20,9 @@ import {
 } from "./requestOwner.js";
 /** A-1008：「联网搜索」开关的唯一读写实现（与 App.tsx 共用，禁在本文件复写 localStorage 口径） */
 import { readNetworkEnabled, writeNetworkEnabled } from "../networkToggle.js";
-import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel } from "./thinkingText.js";
+import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel, stripToolTraceMark } from "./thinkingText.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
-import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, type IconProps } from "../components/Icon.js";
+import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, TerminalIcon, DownloadIcon, CloudUploadIcon, NotesIcon, HistoryIcon, StageListIcon, type IconProps } from "../components/Icon.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
 /** A-980-R19/R21：悬浮窗唤出按钮图标（用户指定目录 message-circle.svg——聊天悬浮窗=对话气泡） */
 import floatToggleIcon from "../../../icon/icon_fpbc119q3rk/message-circle.svg";
@@ -54,6 +54,8 @@ import queueCancelIcon from "../../../icon/icon_fpbc119q3rk/close.svg";
 import { collapseBlankRuns } from "./messageText.js";
 // A-1061⑬：流式尾巴的逐单元渐入切分（纯逻辑，见该文件头部对三条翻车边界的说明）
 import { splitStreamFade, fadeUnitText } from "./streamFade.js";
+// A-1091：吐字光标的显示判据（唯一出处）
+import { shouldShowStreamCursor } from "./streamCursor.js";
 // 本组件只**写**在途快照；取样方是右栏（readLiveMonitor 由 RightSidebar 直接引用）
 import { publishLiveMonitor } from "./liveMonitor.js";
 // SubAgentBar 已移除（A-978：监测栏按钮是唯一子代理入口）
@@ -150,6 +152,11 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   // A-980-R30：键名必须是**真实工具名**。此前写的是 `delegate`（并不存在这个工具），
   // 而真正的工具叫 `delegate_subagent` → 命不中映射，工具卡只能退化成裸名字显示。
   delegate_subagent: { label: "委派子代理", Icon: SitemapIcon },
+  /* A-1091：`delegate:<Agent名>` 的**裸前缀键**。`computeToolGroups` 把 `delegate:foo`
+     归并成 key `"delegate"` 再反查本表 —— 而表里只有 `delegate_subagent` ⇒ 反查落空、
+     摘要行显示成英文 `delegate`（A-980-R30「键名必须是真实工具名」那一族的另一面：
+     这次键名是真的，但**被归并后的键**没人登记）。 */
+  delegate: { label: "委派子代理", Icon: SitemapIcon },
   subagent_result: { label: "收取子代理结果", Icon: SitemapIcon },
   ask_user: { label: "询问用户", Icon: MessageCircleIcon },
   todo_write: { label: "记录待办", Icon: TodoListIcon },
@@ -191,6 +198,24 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   browser_scroll: { label: "网页滚动", Icon: ChevronIcon },
   browser_screenshot: { label: "网页截图", Icon: StarIcon },
   browser_wait: { label: "等待页面", Icon: ClockIcon },
+  /* ── A-1091：补全**缺失**的工具映射 ────────────────────────────────────────────
+     根因：`resolveToolLabel` 未命中时会走兜底 `{ label: name, Icon: BoltIcon }` ——
+     于是这些工具在思考历程里显示成「⚡ terminal_run」这种**英文名 + 闪电图标**。
+     用户原话：「终端的图标有问题，你去 gui/icon 本地图标库找一下，我记得我是下载过
+     终端相关的图标的」—— TerminalIcon（正是那个 terminal.svg）**早就存在**，
+     问题只是这张表里没有 terminal_run 这一条。
+     ⚠️ 一次只补一个工具 = 下次换个工具又是一样的问题。这里**一次性对齐全部注册工具**；
+     守卫（tool-label 契约 spec）会扫全仓工具名，漏一个就红。 */
+  terminal_run: { label: "执行命令", Icon: TerminalIcon },
+  adb_pull: { label: "拉取设备文件", Icon: DownloadIcon },
+  adb_push: { label: "推送到设备", Icon: CloudUploadIcon },
+  file_delete: { label: "删除文件", Icon: CloseIcon },
+  memory_insert: { label: "记住", Icon: NotesIcon },
+  memory_search: { label: "回忆", Icon: HistoryIcon },
+  memory_forget: { label: "忘记", Icon: CloseIcon },
+  plan_create: { label: "制定计划", Icon: TodoListIcon },
+  plan_update: { label: "更新计划", Icon: StageListIcon },
+  browser_drag: { label: "拖拽网页元素", Icon: ManualIcon },
 };
 
 export function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
@@ -1387,7 +1412,7 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
         <span style={{ display: "inline-flex", alignItems: "center", flexShrink: 0 }}>
           <Icon size={12} style={{ color: isFail ? "#f87171" : "var(--accent-hover)" }} />
         </span>
-        <span className="think-tool-name" style={{ flexShrink: 0 }}>{tool.label}</span>
+        <span className="think-tool-name" style={{ flexShrink: 0 }}>{stripToolTraceMark(tool.label)}</span>
         {toolCat && (
           <span className="think-tool-cat" style={{
             fontSize: 10, flexShrink: 0, padding: "1px 5px", borderRadius: 7, lineHeight: 1.4,
@@ -1868,7 +1893,7 @@ const ReasoningSection = React.memo(function ReasoningSection({ m, collapsed }: 
     ? m.stages.timeline
     : [
         ...splitThinkingIntoSteps(cleanReasoning).map((t) => ({ kind: "think" as const, text: t })),
-        ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label.replace(/^⟳\s*/, ""), detail: t.detail })),
+        ...tools.map((t) => ({ kind: "tool" as const, name: t.name, label: stripToolTraceMark(t.label), detail: t.detail })),
         // A-1034：**必须带上 `result`**（否则重开会话后写入卡片展不开 diff）
         ...tracedTools.map((t) => ({ kind: "tool" as const, name: t.name, label: t.label, result: t.result, diffTrimmed: t.diffTrimmed })),
       ];
@@ -2080,6 +2105,10 @@ export default function ChatPanel({
   // 正文"逐字渐入"（ChatGPT/Claude 式），不再"整个块蹦出"；onDone/reset 时清空
   const displayPartialRef = React.useRef("");
   const lastTypingAtRef = React.useRef(0);
+  /** A-1091：最近一次**显示层真的吐出了字符**的时刻（ms）。吐字光标的唯一证据。
+   *  刻意与 `lastTypingAtRef`（打字机节流门限）分开：那个是"下次可推进的时间门限"，
+   *  这个是"上一次真推进的墙钟"，语义不同，合并会一改就牵连两处行为。 */
+  const lastEmitAtRef = React.useRef(0);
 
   /** A-980-R24：打字机限速的「追平阈值」（字符）。
    *  显示落后超过这个量就切换到按比例追赶——否则高速率模型下 buffer 会无限堆积，
@@ -2111,6 +2140,9 @@ export default function ChatPanel({
           displayPartialRef.current = full.slice(0, shown.length + 1);
           lastTypingAtRef.current = now;
         }
+        // A-1091：**显示层真的推进了**才刷新"最近吐字"时间戳（吐字光标的唯一证据）。
+        // 用"前后长度比较"而不是在两个分支里各写一次 —— 将来加第三条推进分支不会漏掉这里。
+        if (displayPartialRef.current.length > shown.length) { lastEmitAtRef.current = now; }
       }
       setPartial(displayPartialRef.current);
       // 随 rAF 一并刷新 token 计数，避免每 chunk 独立 setState 触发重渲染
@@ -2199,6 +2231,7 @@ export default function ChatPanel({
     partialRef.current = "";
     displayPartialRef.current = ""; // A-918++：清空逐字缓冲
     lastTypingAtRef.current = 0;
+    lastEmitAtRef.current = 0; // A-1091：复位"最近吐字"——否则新一轮开头会残留上一轮的时间戳
     setPartial("");
   }, []);
   /** f6：推理/思考过程内容（独立于正文字，输出中实时流式、完成后可主动展开查看） */
@@ -3533,7 +3566,7 @@ export default function ChatPanel({
         const toolId = typeof c.data.toolId === "string" ? c.data.toolId : "";
         setRunningTool({
           id: toolId,
-          label: rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`,
+          label: stripToolTraceMark(rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`),
           detail: extractToolDetail(c.data.args, undefined),
         });
         /* A-1061②′：思考历程里**立刻**出现这张卡（running 态）——
@@ -3542,7 +3575,7 @@ export default function ChatPanel({
            小行里显示是不够的。索引记进 ref，结果到了就**原地**翻状态（不重排、不重复）。 */
         const steps = appendTimelineStep(timelineStepsRef.current, {
           kind: "tool", name: rawName,
-          label: rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`,
+          label: stripToolTraceMark(rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`),
           detail: extractToolDetail(c.data.args, undefined),
           running: true,
         });
@@ -3585,7 +3618,7 @@ export default function ChatPanel({
           toolStepIndexRef.current.delete(toolIdHere);
         } else {
           timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, {
-            kind: "tool", name: rawName, label: displayLabel.replace(/^⟳\s*/, ""), detail, result: ev.result,
+            kind: "tool", name: rawName, label: stripToolTraceMark(displayLabel), detail, result: ev.result,
           });
         }
         // A-980-R32：`todo_write` 额外把待办全景折进思考历程——
@@ -5586,7 +5619,7 @@ export default function ChatPanel({
                       {/* 正在跑的那一条：结果还没回来，状态列必须显式说「执行中…」 */}
                       {pendingRow && (
                         <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                          <span className="text-scan-light" style={{ flexShrink: 0 }}>{pendingRow.label}</span>
+                          <span className="text-scan-light" style={{ flexShrink: 0 }}>{stripToolTraceMark(pendingRow.label)}</span>
                           {pendingRow.detail && (
                             <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{pendingRow.detail}</span>
                           )}
@@ -5663,8 +5696,15 @@ export default function ChatPanel({
                       </>
                     );
                   })()}
-                  {/* A-918++：流式打字机末字光标（partial 末尾始终闪烁 8×16 矩形，1s step-start 步进；partial 增长时光标跟着走） */}
-                  <span className="stream-cursor" aria-hidden="true" style={{ display: "inline-block", width: 2, height: 16, background: "var(--accent)", marginLeft: 3, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite", willChange: "opacity" }} />
+                  {/* A-1091：吐字光标 —— **只在真正吐字时显示**（判据见 `streamCursor.ts`）。
+                      改前是「只要这一轮没结束就一直闪」：真机上状态行走到「已 6m49s」、
+                      整整 6 分多钟没有新字符，光标仍一刻不停地闪，看起来像在打字。
+                      现在靠 `lastEmitAtRef`（显示层真的推进过字符的墙钟）判定，
+                      停滞超过 STREAM_CURSOR_IDLE_MS 即自动消失。
+                      复评时机不需要新定时器：流式期间本来就有 500ms 耗时心跳 + rAF 推进在重渲染。 */}
+                  {shouldShowStreamCursor(Date.now(), lastEmitAtRef.current) && (
+                    <span className="stream-cursor" aria-hidden="true" style={{ display: "inline-block", width: 2, height: 16, background: "var(--accent)", marginLeft: 3, verticalAlign: "text-bottom", animation: "blink 1s step-start infinite", willChange: "opacity" }} />
+                  )}
                 </div>
               )}
             </div>

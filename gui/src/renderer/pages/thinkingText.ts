@@ -278,6 +278,22 @@ export function toolStatusLabel(result: unknown, isFail: boolean, running?: bool
 }
 
 /**
+ * A-1091：剥掉工具标签里的 **`⟳ ` 落盘标记**（唯一实现）。
+ *
+ * `⟳` **不是 UI 元素**，是**推理留痕文本的格式标记**：写进 `reasoning` 时工具行形如
+ * `- ⟳ screen_capture`（见 `composeToolTrace`）。它只应该出现在那段文本里。
+ *
+ * ⚠️ 用户实测：「卡片的左侧怎么还有个圆圈箭头？有什么用，有点丑啊」——
+ *    三个产地里的两个剥了、一个没剥，于是**跑过的卡片**（先收到 `tool-start`、
+ *    后在原地翻状态）带着 `⟳ `，而**直接完成的卡片**没有。同一屏两种形态。
+ *    ⇒ 判据：**渲染边界必须剥**（不只依赖产地剥）。理由是历史数据已经存进去了，
+ *      只修产地只能让"以后新产生的"干净，旧会话照样带标记。
+ */
+export function stripToolTraceMark(label: string | undefined): string {
+  return (label ?? "").replace(/^⟳\s*/, "");
+}
+
+/**
  * A-1021b：把一整段推理文本切回**多个**时间线节点。
  *
  * 为什么需要它：思考历程的正常形态是「思考段 ↔ 工具卡」按真实到达顺序交错的**多节点时间线**。
