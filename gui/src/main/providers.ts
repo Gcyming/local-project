@@ -99,6 +99,20 @@ export interface ModelSpec {
    * （如 claude→anthropic/messages、gpt→openai/chat、其余→openai）。缺省 = 跟随供应商级 api_format。
    */
   api_format?: ApiFormat;
+  /**
+   * A-1092：**用户手填的上游 RPM（每分钟请求数）** —— 限流的最后兜底。
+   *
+   * 为什么需要它：上游 RPM 有三个来源，前两个都可能拿不到 ——
+   *   ① 探针实测（上游响应头 `x-ratelimit-*`）：**冷启动时没有**，且很多厂商根本不发这个头；
+   *   ② 能力表声明（我们内置的官方档位）：只在官方公开公布过、且我们核实时才存在；
+   *   ⇒ 两者皆空时，用户仍然知道自己的档位（合同/控制台/官方文档），唯有让他**手填**才能兜底。
+   *
+   * 取值链（唯一实现 `resolveRpm`）：**实测 > 手填 > 能力表声明 > 未知（放行）**。
+   * ⚠️ 手填排在声明**之前**：用户比我们内置的通用猜测更懂自己的档位（付费档常高于免费档声明值）。
+   * ⚠️ 但手填**不能压过实测** —— 实测是上游亲口说的，任何人工输入都不该盖过它。
+   * ⚠️ 留空 = 没有手填（不是"无限"，链条继续落到声明值 / 未知）。
+   */
+  rpm?: number;
 }
 
 export interface ProviderRecord {
@@ -110,6 +124,11 @@ export interface ProviderRecord {
   api_format?: ApiFormat;
   /** 模型明细（扩展字段，engine 不读，供 UI 调试/展示） */
   models?: ModelSpec[];
+  /**
+   * A-1092：供应商级**手填 RPM** 兜底（模型条目未单独填 `rpm` 时使用；语义见 `ModelSpec.rpm`）。
+   * ⚠️ 模型级优先于供应商级 —— 同一个中转站里不同模型常有不同档位。
+   */
+  rpm?: number;
   [key: string]: unknown;
 }
 
@@ -124,6 +143,8 @@ export interface ProviderSummary {
   model: string | null;
   api_format: ApiFormat;
   models: ModelSpec[];
+  /** A-1092：供应商级**手填 RPM** 兜底（模型未单独填时生效；语义见 `ProviderRecord.rpm`） */
+  rpm?: number;
 }
 
 /* S3：清单键名与条目类型已上移到 core-ts/src/local_models.ts（见文件顶部 import）。 */
@@ -269,6 +290,16 @@ function sanitizeModels(raw: unknown): ModelSpec[] | undefined {
         // 端点格式透传（per-model 覆盖，聚合网关多端点用）
         api_format: (rawM as any).api_format === "anthropic" || (rawM as any).api_format === "openai" || (rawM as any).api_format === "auto"
           ? (rawM as any).api_format : undefined,
+        /*
+         * A-1092：用户手填的 RPM（限流最后兜底）。
+         *
+         * ⚠️ 本函数是**白名单重建**，漏一个字段就会在**每次读盘**时被静默抹掉 ——
+         *    表现是"我填了 RPM，刷新/重启后又没了，还是被限流"，且**没有任何报错**。
+         *    （`price_currency` / `price_tiers` 两处注释已把这个坑写死了，这里同样适用。）
+         * 只接受**正整数**：0 / 负数 / NaN 一律当"没填"（降级方向必须是"能用"，不是"锁死"）。
+         */
+        rpm: typeof (rawM as any).rpm === "number" && Number.isFinite((rawM as any).rpm) && (rawM as any).rpm >= 1
+          ? Math.floor((rawM as any).rpm) : undefined,
         // 旧记录没有 selected 字段 → 视为启用（历史行为：保存的都是启用模型）
         selected: (rawM as any).selected !== false,
       };
@@ -287,6 +318,10 @@ export function listProviders(): ProviderSummary[] {
       model: rec.model ?? null,
       api_format: rec.api_format ?? "auto",
       models: sanitizeModels(rec.models) ?? [],
+      // A-1092：把供应商级手填 RPM 透出给渲染层（面板据此显示"当前兜底值"）。
+      // ⚠️ 与 sanitizeModels 里模型级 rpm 同一校验（正整数；其余当"没填"）。
+      rpm: typeof rec.rpm === "number" && Number.isFinite(rec.rpm as number) && (rec.rpm as number) >= 1
+        ? Math.floor(rec.rpm as number) : undefined,
     }));
 }
 
@@ -2072,6 +2107,11 @@ export interface SaveProviderInput {
   api_format?: ApiFormat;
   /** 未经校验的原始模型列表（内部 sanitize） */
   models?: unknown[];
+  /**
+   * A-1092：供应商级**手填 RPM**。传 `undefined` = 保留旧值；传 `null` = 清除；
+   * 传正整数 = 设置（其余值当"没填"处理，见 saveProvider 里的校验）。
+   */
+  rpm?: number | null;
 }
 
 export interface SaveProviderResult {
@@ -2115,7 +2155,7 @@ export async function saveProvider(input: SaveProviderInput): Promise<SaveProvid
       const prevModels = sanitizeModels(prev.models) ?? [];
       models = enriched.models.map((m) => {
         const prev = prevModels.find((p) => p.id === m.id);
-        return prev
+            return prev
           ? {
               ...m,
               // ⚠️ 只在本次 enrich **没给出值**时回填旧值。旧写法 `prev.context_window ?? m.context_window`
@@ -2123,6 +2163,9 @@ export async function saveProvider(input: SaveProviderInput): Promise<SaveProvid
               context_window: m.context_window && m.context_window > 0 ? m.context_window : prev.context_window,
               max_output: m.max_output && m.max_output > 0 ? m.max_output : prev.max_output,
               selected: prev.selected, vision: prev.vision,
+              // A-1092：手填 RPM 是**用户资产**，enrich 永远不产出它 ⇒ 必须显式回填，
+              // 否则每次保存/刷新都把它抹掉（症状="填了没用"，且不报错）。
+              rpm: prev.rpm,
               // 价格合并：手填价永不被覆盖（详见 mergeModelPrice）
               ...mergeModelPrice(prev, m),
             }
@@ -2130,12 +2173,25 @@ export async function saveProvider(input: SaveProviderInput): Promise<SaveProvid
       });
     }
   }
+  // A-1092：`rpm` 走**独立字段**保存（不塞进 models）。⚠️ 这里必须显式保留 `prev.rpm` ——
+  // 本对象是**整条重写**（不是 merge），漏掉哪个字段就是静默丢弃（providers 表里所有
+  // 非标准字段都靠"显式带上"活着；`sanitizeModels` 的注释已经把这个纪律写死）。
+  // 三态：`null` = 清除；`undefined` = 保留旧值；正整数 = 设置（其余数值当"没填"，即清除）。
+  let nextRpm: number | undefined;
+  if (input.rpm === undefined) {
+    nextRpm = typeof prev.rpm === "number" && Number.isFinite(prev.rpm) && prev.rpm >= 1 ? Math.floor(prev.rpm) : undefined;
+  } else if (input.rpm === null) {
+    nextRpm = undefined;
+  } else {
+    nextRpm = typeof input.rpm === "number" && Number.isFinite(input.rpm) && input.rpm >= 1 ? Math.floor(input.rpm) : undefined;
+  }
   table[key] = {
     api_base: base,
     api_key: input.api_key !== undefined ? input.api_key.trim() : (prev.api_key ?? ""),
     model: input.model !== undefined && input.model !== null ? input.model : (prev.model ?? undefined),
     api_format: input.api_format !== undefined ? input.api_format : (detectedFormat ?? prev.api_format ?? "auto"),
     models,
+    ...(nextRpm !== undefined ? { rpm: nextRpm } : {}),
   };
   try {
     const encoded = encrypt(table, "config/providers.enc.json", rootOverride ? { projectRoot: rootOverride } : {});
@@ -2186,7 +2242,9 @@ export async function refreshProviderModels(key: string): Promise<RefreshProvide
     //    于是「一键刷新」会**静默抹掉用户手填的单价**（而 mergeModelPrice 的注释一直声称
     //    saveProvider / refreshProviderModels 两处都用了它 —— 后者其实没有，是真的漏了）。
     //    影响面：议价/合同价被官方刊例价替换，且不报错、不可察觉。
-    return { ...m, selected: prevSelected.has(m.id), ...(prev ? mergeModelPrice(prev, m) : {}) };
+    // A-1092：手填 RPM 同理 —— enrich 只产出上游元数据，用户填的 rpm 必须显式回填，
+    //    否则「一键刷新」把它抹掉（症状="填了没用"，正是本函数上面那条注释警告的同一类坑）。
+    return { ...m, selected: prevSelected.has(m.id), rpm: prev?.rpm, ...(prev ? mergeModelPrice(prev, m) : {}) };
   });
   const added = nextModels.filter((m) => !prevModels.some((p) => p.id === m.id)).length;
   const removed = prevModels.filter((p) => !seen.has(p.id)).length;

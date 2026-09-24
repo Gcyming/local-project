@@ -178,6 +178,29 @@ const resolveAppIcon = (): string => {
 };
 
 /**
+ * A-1092：窗口图标要交给**已解码的 `nativeImage`**，而不是路径字符串。
+ *
+ * 为什么：`BrowserWindow({ icon: "xxx.ico" })` 传字符串时，Electron 在 Windows 上把路径交给
+ * 系统按默认方式加载 —— **多尺寸 ICO 里挑哪一张由系统决定**，且不同 DPI 下可能重新采样，
+ * 小尺寸（16/24/32）偶发糊成白块。传 `nativeImage` 时 Electron 直接把**所有内嵌尺寸**
+ * 一起交给系统（`GetIconSizes` 能拿到 16/24/32/48/64/128/256 全套），任务栏按当前 DPI
+ * 精确取用，**不做二次缩放**。
+ *
+ * ⚠️ 解码失败必须**回落**且出声，不能把窗口图标变成静默空白（与 `resolveAppIcon` 同一纪律）。
+ *   这里**不缓存**：本函数只在建窗口时调用一次，缓存一个 nativeImage 反而会让
+ *   "换台机器资产不同"这类场景读到旧对象。
+ */
+const resolveAppIconImage = (): Electron.NativeImage | undefined => {
+  const p = resolveAppIcon();
+  try {
+    const img = nativeImage.createFromPath(p);
+    if (!img.isEmpty()) { return img; }
+  } catch { /* 解码抛错 → 回落 undefined（Electron 用 exe 内嵌图标兜底） */ }
+  console.warn(`[gui:main] 窗口图标 nativeImage 解码失败（${p}），交由 Electron 兜底`);
+  return undefined;
+};
+
+/**
  * 建立托盘图标（幂等）。
  *
  * A-1055：**改为"应用一启动就有"**。
@@ -274,6 +297,9 @@ import {
 import { overview as configOverview, readConfigFile, writeConfigFile, setMcpEnabled, setSkillEnabled, deleteSkill, deleteMcp, skillDirPath } from "./config_files.js";
 // A-980-R26：系统通知 + 可定制提示音（设置 → 通用）
 import { initNotify, notifyUser, readNotifyConfig, writeNotifyConfig, importSound, clearSound, readSoundData, customSoundPath } from "./notify.js";
+// A-1092：任务栏图标归属 —— AUMID 是**进程级**身份，必须在 `whenReady` 之前、且早于任何
+// 窗口/托盘创建就设好（`initNotify` 里那次是窗口创建前调用，仍晚于 Electron 的初始身份绑定）。
+import { APP_AUMID } from "./notifyIdentity.js";
 import { getPermissions, setPermissions, type GuiPermissions } from "./permissions.js";
 import { SlimeEngine } from "../../../core-ts/src/services/engine.js";
 import { SilamBrainClient, readSilamConfig, type SilamBrain, type SilamAffectState } from "../../../core-ts/src/services/silam_brain.js";
@@ -2518,7 +2544,8 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: st.width, height: st.height, x: pos.x, y: pos.y,
     minWidth: WIN_MIN.width, minHeight: WIN_MIN.height, show: false,
-    icon: resolveAppIcon(),
+    // A-1092：传 nativeImage（多尺寸一次交给系统）而非路径字符串，任务栏按 DPI 精确取尺寸。
+    icon: resolveAppIconImage(),
     // Campanula 式自绘标题栏：隐藏系统标题栏，Windows overlay 渲染窗口按钮
     titleBarStyle: "hidden",
     // A-1018/A-1019：初值必须等于**当前持久化主题**的标题栏合成色，否则启动瞬间那三个
@@ -6310,6 +6337,28 @@ function main(): void {
   // 注意：boot.ts 已在模块加载时用 app.getPath("userData") 解析数据根（%APPDATA%\slime-gui），
   // 此处 setName 不会改变已解析的 userData 路径。
   app.setName("Slime");
+
+  /**
+   * A-1092：任务栏图标异常的真实根因 —— **AUMID 与安装版不一致**。
+   *
+   * 症状（用户截图）：任务栏里 slime 的图标是「一个白色的空框 / 默认兜底图标」，而托盘里那张是对的。
+   *
+   * 判据链：
+   *   ① Windows 任务栏按 **AppUserModelID** 把窗口归组并取图标；
+   *   ② 安装版（NSIS）建立的快捷方式带 `System.AppUserModel.ID = com.slime.gui`，
+   *      但**进程自己**在 `whenReady` 之前从未声明过身份，Electron 用的是默认 AUMID
+   *      （等于 exe 路径 `/path/to/Slime.exe`）——两者不匹配；
+   *   ③ 不匹配 → 任务栏不套用安装版快捷方式的图标，只能拿窗口的 `icon` 兜底；
+   *      而窗口 `icon` 走 `resolveAppIcon()` → Windows 上是 `build/icon.ico`，
+   *      它由 `make-notify-icon.mjs` 从 1024² 大图**降采样**而来。小尺寸（16/24/32）降采样后
+   *      细节全糊成一片白，视觉上就是「异常图标」。
+   *   ④ 托盘那张看起来正常，是因为托盘走的是 Windows 自己的缩放管线（对同一张源图在不同尺寸下
+   *      的处理与任务栏不同）——**同一份资产、两种渲染路径**，这正是"一处好一处坏"的根源。
+   *
+   * 修法：把身份**提前且显式**声明（`app.setAppUserModelId` 是幂等的，`initNotify` 里那次保留，
+   * 保证通知路径即使将来早于本行执行也不会丢身份）。窗口图标显式设成 `nativeImage` 而非路径。
+   */
+  app.setAppUserModelId(APP_AUMID);
 
   // 单实例锁：重复启动/残留实例时聚焦已有窗口而非再开一个无窗进程。
   // 否则第二个实例会因 SLIME_PORT(19000) 端口竞争 + Electron cache 锁(`拒绝访问`)

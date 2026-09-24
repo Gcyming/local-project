@@ -10,14 +10,19 @@
  *
  * 本模块把「每分钟最多发几次」变成一个**被执行的判据**，而不是一句注释。
  *
- * ## 三层取值（判据唯一）
+ * ## 四层取值（判据唯一）
  *
  *   ① **实测**（上游响应头 `x-ratelimit-limit-requests` / `ratelimit-limit`…）—— 最可信，随环境变化
- *   ② **声明**（能力表 `resolveDeclaredRpm`，官方公布档位）—— 没探测到时的安全兜底
- *   ③ **未知** —— `resolveRpm` 返回 `null` ⇒ **直接放行，不发明阈值**
+ *   ② **手填**（用户在「模型供应商 → 配置栏」里自己填的 RPM）—— 兜底中的兜底：探针与本地表
+ *      全都失效时，用户仍能凭官方文档 / 合同 / 实测经验亲手定一个额度（`manualRpm`）
+ *   ③ **声明**（能力表 `resolveDeclaredRpm`，官方公布档位）—— 没探测到时的安全兜底
+ *   ④ **未知** —— `resolveRpm` 返回 `null` ⇒ **直接放行，不发明阈值**
  *
- * ⚠️ 第 ③ 条是刻意的：**未知不等于无限，但绝不能猜一个数去卡人**。
+ * ⚠️ 第 ④ 条是刻意的：**未知不等于无限，但绝不能猜一个数去卡人**。
  *    凭空发明一个低阈值会让"能用"变"不能用"，比不限制更糟。
+ * ⚠️ 手填（②）排在声明（③）**之前**：用户手填的一定是他当下真实的额度（可能是付费档、也可能是
+ *    为避限流刻意压低的自保值），官方免费档的声明值只是"没别的信息时的猜测"，不该压过用户。
+ *    但手填**不能压过实测**（①）：实测是上游**当前账号**的真实回应，比任何人工输入都准。
  *
  * ## 边界（都刻意保守）
  *
@@ -43,8 +48,8 @@ export const DEFAULT_429_COOLDOWN_S = 20;
  */
 export const WINDOW_EPSILON_MS = 250;
 
-/** RPM 档位的来源（UI/诊断要如实标注，不许把"声明"说成"实测"） */
-export type RpmSource = "observed" | "declared" | "unknown";
+/** RPM 档位的来源（UI/诊断要如实标注，不许把"声明"说成"实测"、也不许把"手填"说成"实测"） */
+export type RpmSource = "observed" | "manual" | "declared" | "unknown";
 
 export interface RpmResolution {
   /** 生效的每分钟额度；`null` = 未知（放行，不发明阈值） */
@@ -58,17 +63,25 @@ function usableRpm(v: number | null | undefined): v is number {
 }
 
 /**
- * 三层取值**唯一实现**：实测 > 声明 > 未知。
+ * 四层取值**唯一实现**：实测 > 手填 > 声明 > 未知。
  *
  * ⚠️ 不要在这里加"取两者较小值"之类的聪明规则：实测值是上游**当前账号**的真实档位，
  *    声明值是**免费档**的官方值。付费账号的实测值会**大于**声明值（如企业档 20 > 免费 10），
  *    取小会把付费用户按免费档限死。**实测优先就是唯一正确的口径。**
+ *
+ * ⚠️ 手填（`manual`）插在实测与声明之间，理由是二者的**可信度与时效性**不同：
+ *    · 实测 = 上游此刻对**这个账号**的真实回应（最权威，且会随环境变化）；
+ *    · 手填 = 用户根据官方文档/合同/经验**主动设定**的额度（用户比内置表更了解自己的档位）；
+ *    · 声明 = 内置表里那条**免费档的通用猜测**（我们替用户猜的，最不该压过用户自己的设定）。
+ *    但手填**不能压过实测** —— 实测是上游亲口说的，任何人工输入都不该盖过它。
  */
 export function resolveRpm(
   observed: number | null | undefined,
   declared: number | null | undefined,
+  manual?: number | null,
 ): RpmResolution {
   if (usableRpm(observed)) { return { rpm: observed, source: "observed" }; }
+  if (usableRpm(manual)) { return { rpm: manual, source: "manual" }; }
   if (usableRpm(declared)) { return { rpm: declared, source: "declared" }; }
   return { rpm: null, source: "unknown" };
 }
@@ -214,17 +227,35 @@ export class RpmLimiter {
   private readonly states = new Map<string, KeyState>();
   /** 声明的 RPM 解析器（**默认走能力表** `resolveDeclaredRpm`；测试可注入，不依赖真实表） */
   private readonly declaredOf: (model: string | undefined) => number | null | undefined;
+  /** 手填的 RPM 解析器（**默认无** ⇒ 只走能力表；GUI 侧按供应商/模型注入，见 `setManualRpmOf`） */
+  private manualOf: (key: string, model: string | undefined) => number | null | undefined;
 
   constructor(opts: {
     clock?: LimiterClock;
     windowMs?: number;
     declaredOf?: (model: string | undefined) => number | null | undefined;
+    /** A-1092：用户手填 RPM 的解析器（`(供应商键, 模型) => 手填值 | null`）。缺省 = 无手填。 */
+    manualOf?: (key: string, model: string | undefined) => number | null | undefined;
   } = {}) {
     this.clock = opts.clock ?? { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
     this.windowMs = opts.windowMs ?? RPM_WINDOW_MS;
     // ⚠️ 默认解析器 = 能力表（唯一真相源）。**不要**在这里再维护一张 rpm 表：
     //    官方一改档位就有两个地方要改，漏一个就是"改了一半"，而症状只是零星 429。
     this.declaredOf = opts.declaredOf ?? ((model) => (model ? resolveDeclaredRpm(model)?.rpm ?? null : null));
+    // ⚠️ 默认**没有**手填来源 —— 手填值住在 providers 表（GUI 主进程），core-ts 不该反向依赖它。
+    //    接线由 GUI 侧在启动/配置变更时注入（见 `setManualRpmOf`）。
+    this.manualOf = opts.manualOf ?? (() => null);
+  }
+
+  /**
+   * A-1092：注入/更新**手填 RPM** 的来源（GUI 侧在 providers 表加载/保存后调用）。
+   *
+   * 为什么做成 setter 而不是构造参数：共享实例是进程级单例（`getSharedRpmLimiter`），
+   * 而 providers 表会在用户编辑后**热更新** —— 需要一个不重建实例就能换解析器的入口
+   * （重建实例会丢掉已有窗口计数与实测额度）。
+   */
+  setManualRpmOf(fn: (key: string, model: string | undefined) => number | null | undefined): void {
+    this.manualOf = fn;
   }
 
   private state(key: string): KeyState {
@@ -235,7 +266,14 @@ export class RpmLimiter {
 
   /** 该 key 当前生效的额度与来源（诊断/UI 用） */
   resolve(key: string, model?: string): RpmResolution {
-    return resolveRpm(this.state(key).observedRpm, this.declaredOf(model));
+    let manual: number | null | undefined;
+    try {
+      manual = this.manualOf(key, model);
+    } catch {
+      // 手填解析器抛错绝不拖垮请求（与 observe 同一纪律）——降级为"没有手填"
+      manual = null;
+    }
+    return resolveRpm(this.state(key).observedRpm, this.declaredOf(model), manual);
   }
 
   /**

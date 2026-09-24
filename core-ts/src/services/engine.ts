@@ -11,6 +11,7 @@
  */
 import { ModelRouter, RouteEntry, type ClientFactory, type ApiFormat } from "../router.js";
 import { ChatClient } from "../llm/client.js";
+import { getSharedRpmLimiter } from "../llm/rpmLimiter.js";
 import { ChatMessage, ChatRequest } from "shared/schemas";
 import { inferModelCapabilities, resolveEffectivePricing, isAggregatorGateway } from "shared/model-capabilities";
 import { getSharedCapabilityGraph } from "../probe-graph.js";
@@ -57,7 +58,13 @@ export interface ProviderConfig {
   /** API 端点格式（GUI 保存时写入；openai=/v1/chat/completions, anthropic=/v1/messages, auto=按 baseUrl 推断） */
   api_format?: ApiFormat;
   /** 供应商模型列表（GUI 保存时写入；engine 只读 id/selected/api_format 构建模型池降级链） */
-  models?: Array<{ id?: unknown; selected?: unknown; api_format?: unknown; [k: string]: unknown }>;
+  models?: Array<{ id?: unknown; selected?: unknown; api_format?: unknown; rpm?: unknown; [k: string]: unknown }>;
+  /**
+   * A-1092：供应商级**手填 RPM**（用户兜底）。探针实测与能力表声明都失效时，用户凭官方文档/
+   * 合同/经验自己定一个额度。取值链：实测 > 手填（模型级 > 供应商级）> 能力表声明 > 未知。
+   * ⚠️ 模型级的 `models[].rpm` 优先于本字段（与能力表「模型级 > 供应商级」同一口径）。
+   */
+  rpm?: number;
   [key: string]: unknown;
 }
 
@@ -334,6 +341,45 @@ export class SlimeEngine implements ChatEngine {
   /** 重载 providers（GUI 保存 Provider 后热更新，无需重启进程；测试可注入 projectRoot/passFile） */
   public refreshProviders(opts: { projectRoot?: string; passFile?: string } = {}): void {
     this.providers = (decrypt("config/providers.enc.json", { projectRoot: opts.projectRoot, passFile: opts.passFile }) ?? {}) as Record<string, ProviderConfig>;
+  }
+
+  /**
+   * A-1092：把 providers 表里的**手填 RPM** 接到共享限流器上。
+   *
+   * 为什么住在 engine 而不是 GUI 主进程：**providers 表的解密读取唯一实现就在本类**
+   * （`this.providers`，见构造函数与 `refreshProviders`）。让 GUI 再解一份密去喂限流器，
+   * 就是"同一件事两个产地"——迟早漂移出"面板里显示 10、限流器读的是旧的 20"。
+   *
+   * 查表口径（必须与 `rateLimit.key` 一致，否则手填永不命中）：
+   *   `rateLimit.key` = `providerKeyOfRoute(route)` = `route.baseUrl || route.name`。
+   *   这里按**归一化后的 baseUrl** 反查 provider 记录 —— 归一化规则与 `resolveRouteInternal`
+   *   里剥 `/v1` 的那一处**保持一致**（本函数内联复制该规则，改一处务必改两处，
+   *   已有 `a1092-guards.spec.ts` 静态守卫锁住这两个字面量）。
+   *
+   * 值是 undefined / null / 非正数 ⇒ 解析为 null（= 没有手填），让链条继续落到声明值。
+   */
+  private bindManualRpm(): void {
+    const norm = (u: string | undefined): string => {
+      const s = (u ?? "").trim().replace(/\/+$/, "");
+      return s.endsWith("/v1") ? s.slice(0, -3) : s;
+    };
+    /** baseUrl(归一) → { providerKey, manualByModel }（每次调用重建：providers 会热更新） */
+    const byBase = new Map<string, { key: string; cfg: ProviderConfig }>();
+    for (const [k, c] of Object.entries(this.providers)) {
+      const b = norm(c?.api_base);
+      if (b) { byBase.set(b, { key: k, cfg: c }); }
+    }
+    getSharedRpmLimiter().setManualRpmOf((key, model) => {
+      const hit = byBase.get(norm(key));
+      if (!hit) { return null; }
+      // 模型级手填 > 供应商级手填（与能力表「模型级 > 供应商级」同一口径）
+      const models = Array.isArray(hit.cfg.models) ? hit.cfg.models : [];
+      const m = model ? models.find((x) => x && typeof x === "object" && (x as { id?: unknown }).id === model) : undefined;
+      const fromModel = m && typeof m === "object" ? (m as { rpm?: unknown }).rpm : undefined;
+      const fromVendor = (hit.cfg as { rpm?: unknown }).rpm;
+      const raw = fromModel ?? fromVendor;
+      return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    });
   }
 
   /** 工具注册表（SwarmExecutor 注入用） */
@@ -643,6 +689,13 @@ export class SlimeEngine implements ChatEngine {
   /** 组装 ModelRouter：api:key → 云端多供应商降级链；local → 本地路由（失败透出具体原因）；inherit → 沿父链追溯。 */
   private async resolveRouteInternal(agent: AgentState, signal?: AbortSignal): Promise<{ router: ModelRouter | null; error: string | null }> {
     const header = `你好，我是 ${agent.name}，${agent.role}。\n\n`;
+
+    // A-1092：把**用户手填的 RPM** 注入共享限流器（探针与本地表全失效时的最后兜底）。
+    // 放在这里（所有路由分支的**唯一入口**）而不是各分支里：任何一条路径（云 / 本地 / inherit）
+    // 漏绑一次，那条路径上的手填值就静默失效 —— 而症状只是"我明明填了怎么还被限流"。
+    // 取值链：实测 > 手填 > 能力表声明 > 未知。手填优先于声明（用户比内置表更懂自己的档位）。
+    // resolver 按「baseUrl + 模型」查，与 rateLimit.key（= providerKeyOfRoute = baseUrl）同源。
+    this.bindManualRpm();
 
     if (agent.model_choice.startsWith("api:")) {
       // 支持两种形态：api:<key>（用供应商默认模型）/ api:<key>:<model>（精确指定模型）

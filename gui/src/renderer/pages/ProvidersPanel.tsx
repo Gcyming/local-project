@@ -132,6 +132,14 @@ interface EditState {
   vision: boolean;
   thinking?: boolean;
   thinking_efforts?: string[];
+  /**
+   * A-1092：供应商级**手填 RPM**（字符串草稿态，空串 = 未填）。
+   *
+   * 为什么是 string 而不是 number：输入框的中间态（用户敲 "1" 想敲 "10"）必须原样保留，
+   * 直接用 number 会在每次按键时 `parseInt` 把 "1" 归一成 1、小数点/清空都被吃掉
+   * （本项目 `MoneyInput` 修过的同一类坑）。保存时才解析成数字。
+   */
+  rpm: string;
 }
 
 function emptyEdit(): EditState {
@@ -139,6 +147,7 @@ function emptyEdit(): EditState {
     mode: "api-add", key: "", name: "", api_base: "", api_key: "",
     api_format: "auto", models: [], proto: "openai", manualIds: "",
     localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false,
+    rpm: "",
   };
 }
 
@@ -298,6 +307,8 @@ export default function ProvidersPanel(): JSX.Element {
       models: p.models.map((m) => ({ ...m, selected: (m as DraftModel).selected !== false })),
       proto: "openai", manualIds: p.models.map((m) => m.id).join("\n"),
     localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false, thinking: undefined, thinking_efforts: undefined,
+      // A-1092：回填已存的供应商级手填 RPM（数字 → 字符串草稿态；未填 → 空串）
+      rpm: p.rpm !== undefined ? String(p.rpm) : "",
     });
   }
 
@@ -319,6 +330,8 @@ export default function ProvidersPanel(): JSX.Element {
        gpu_layers: m.gpu_layers !== undefined ? String(m.gpu_layers) : "",
        max_output: m.max_output ? String(m.max_output) : "",
        vision: m.vision === true,
+       // A-1092：本地模型不走上游 RPM 限流（进程内推理），无该字段
+       rpm: "",
     });
   }
 
@@ -500,6 +513,8 @@ export default function ProvidersPanel(): JSX.Element {
         price_cache_write_usd: m.price_cache_write_usd ?? undefined,
         // 手填标记必须一起回传，否则一键刷新会用自动探测价覆盖掉用户填的议价
         price_source: m.price_source,
+        // A-1092：手填 RPM 必须一起回传，否则保存时被白名单重建静默抹掉（"填了没用"）
+        rpm: m.rpm ?? undefined,
       }));
       const res = await api.current.providers.save({
         key: edit.name.trim(),
@@ -508,6 +523,9 @@ export default function ProvidersPanel(): JSX.Element {
         // 默认模型字段保留旧值（底层 engine 的 api:<key> 无显式模型时使用；UI 不再提供修改入口）
         api_format: edit.api_format,
         models,
+        // A-1092：供应商级手填 RPM（模型未单独填时生效）。空串 = 未填（undefined，保留旧值）；
+        // 非法输入（0/负数/非数字）→ 视为清除（`NaN` 传给主进程会被校验成 undefined）。
+        rpm: parseRpmInput(edit.rpm),
       });
       if (res.ok) {
         showNotice(true, `已保存供应商「${edit.name}」并热更新 → ${res.path ?? ""}`);
@@ -735,6 +753,28 @@ export default function ProvidersPanel(): JSX.Element {
                       {fetching ? "获取中…" : "获取模型列表"}
                     </button>
                   )}
+                </div>
+
+                {/*
+                  A-1092：**手填 RPM 兜底**（供应商级）。用户原话：「把这个 RPM 限制器的数值填入
+                  写进模型供应商的配置栏，让探针与本地表全部失效时，用户还可以自己选择数值进行最后的兜底」。
+                  取值链：实测（上游响应头）> 手填（本框 / 模型级）> 能力表声明 > 未知（放行）。
+                */}
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 80 }}>RPM 兜底</span>
+                  <input className="input-field" type="number" min={1} step={1}
+                    style={{ maxWidth: 140 }}
+                    placeholder="留空 = 不限制"
+                    value={edit.rpm}
+                    onChange={(e) => setEdit({ ...edit, rpm: e.target.value })}
+                    title={"上游每分钟请求数（RPM）上限 —— 限流的**最后兜底**。\n\n"
+                      + "取值优先级：探针实测（上游响应头）> 手填（这里）> 内置能力表声明 > 未知（不限制）。\n"
+                      + "何时该填：探针拿不到上游限额、且内置表也没有该厂商的官方档位时，\n"
+                      + "可按官方控制台/合同/文档填一个值，避免被上游限流（429 / 生成中途断流）。\n"
+                      + "⚠️ 留空 ≠ 无限：只是我们不主动限制，上游该限还是会限。想要绝对安全就填一个略低于官方档位的数。"} />
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", flex: 1, overflowWrap: "break-word" }}>
+                    每分钟最多请求数（探针实测 &gt; 此处手填 &gt; 内置表；留空 = 不主动限制）
+                  </span>
                 </div>
 
                 {/* ③ 模型调试（A-999 定稿：恢复自然块，滚动统一交给外层「可滚动内容区」——
@@ -1358,6 +1398,27 @@ function chipStyle(bg: string, color: string): React.CSSProperties {
 function fmtPrice(n: number | undefined): string {
   if (typeof n !== "number" || !Number.isFinite(n)) { return ""; }
   return String(Number(n.toFixed(6)));
+}
+
+/**
+ * A-1092：手填 RPM 输入框的字符串 → 提交值（三态）。
+ *
+ *   · 空串（trim 后）      → `undefined` = 未填（主进程保留旧值）
+ *   · 合法正整数（≥1）     → 该整数
+ *   · 其余（0/负数/小数/非数字）→ `undefined`（当"没填"，主进程侧校验同样按此处理）
+ *
+ * ⚠️ 为什么 `undefined` 而不是 `null`：`null` 的语义是"显式清除"，而输入框里
+ *    清空与"输入非法"在这里**不该有区别**（用户不会预期敲个 `-3` 触发"清除"这个第三态）。
+ *    清除走专门的按钮（见 UI 的「清除」，传 `null`）。
+ * ⚠️ 只接受整数：RPM 是"每分钟次数"，小数没有意义；`Math.floor` 会把 10.5 悄悄变成 10，
+ *    不如直接判非法让用户看到"没生效"更诚实。
+ */
+function parseRpmInput(raw: string): number | undefined {
+  const s = (raw ?? "").trim();
+  if (!s) { return undefined; }
+  const n = Number(s);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) { return undefined; }
+  return n;
 }
 
 /** 生效价来源徽标的文案与配色（`origin` 由共享的 resolveEffectivePricing 给出，不在这里重新判断） */

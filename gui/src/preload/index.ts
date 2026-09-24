@@ -371,7 +371,7 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 一键刷新：用已保存的密钥重新探测上游模型列表并就地更新（无需重新填写配置） */
     refresh: (key: string) =>
       ipcRenderer.invoke("slime:providers:refresh", { key }) as Promise<{ ok: boolean; total?: number; added?: number; removed?: number; error?: string }>,
-    save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto"; models?: unknown[] }) =>
+    save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto"; models?: unknown[]; rpm?: number }) =>
       ipcRenderer.invoke("slime:providers:save", input) as Promise<{ ok: boolean; error?: string }>,
     remove: (key: string) =>
       ipcRenderer.invoke("slime:providers:remove", { key }) as Promise<{ ok: boolean; error?: string }>,

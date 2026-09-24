@@ -89,7 +89,14 @@ describe("A-1091 ② — `⟳` 是落盘日志标记，界面必须剥掉", () =
 
   it("T8 「正在执行」那一行也必须剥（它是另一条渲染路径，漏了就一行带标记一行不带）", () => {
     const body = stripComments(chatPanel);
-    expect(body).toMatch(/text-scan-light[^>]*>\{stripToolTraceMark\(pendingRow\.label\)\}/);
+    /*
+     * A-1092 迁移：本断言原先要求 className 是 `text-scan-light`，但 A-1092 把该行改成了
+     * `text-breathe`（`text-scan-light` 在窄元素上有"光带移出文字区 → 文字全透明"的结构性缺陷，
+     * 见 index.css 注释）。**意图（pending 行必须剥 ⟳）不变，只是承载它的类名换了** ——
+     * 按本仓纪律「迁移守卫而非删除」（保留意图 + 配新变异），这里改成**不依赖具体类名**：
+     * 只要求"剥掉 ⟳ 的那一行 span"存在，样式类怎么改都不该再打红这条守卫。
+     */
+    expect(body).toMatch(/<span className="[a-z-]+"[^>]*>\{stripToolTraceMark\(pendingRow\.label\)\}/);
   });
 
   it("T9 剥法只有一处实现（不许再有内联的 /^⟳\\s*/ 正则）", () => {

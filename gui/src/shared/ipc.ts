@@ -649,6 +649,14 @@ export interface ModelSpec {
   pricing_per_request?: { request?: number; image?: number; webSearch?: number; internalReasoning?: number; audio?: number };
   /** 端点格式覆盖（per-model）：聚合网关下不同模型可能走不同端点 */
   api_format?: "openai" | "anthropic" | "responses" | "google" | "auto";
+  /**
+   * A-1092：用户手填的**上游 RPM（每分钟请求数）** —— 限流的最后兜底。
+   *
+   * 取值链（`resolveRpm` 唯一实现）：**实测 > 手填（本字段）> 能力表声明 > 未知（放行）**。
+   * ⚠️ 与主进程 ModelSpec / ProviderRecord 的同名字段必须**同步** —— 不同步会在保存时被
+   * 静默丢弃（用户以为填了、重启后没了，且不报错）。校验见 providers.ts 的 sanitizeModels。
+   */
+  rpm?: number;
 }
 
 /** 渲染层可见的脱敏 Provider 摘要（绝不含明文 api_key） */
@@ -660,6 +668,8 @@ export interface ProviderSummary {
   model: string | null;
   api_format: "openai" | "anthropic" | "responses" | "google" | "auto";
   models: ModelSpec[];
+  /** A-1092：供应商级**手填 RPM** 兜底（模型未单独填时生效；语义见 ModelSpec.rpm） */
+  rpm?: number;
 }
 
 /** 本地模型注册项（model_choice=local:<id>）。

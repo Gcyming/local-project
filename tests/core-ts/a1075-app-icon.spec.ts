@@ -121,7 +121,18 @@ describe("A-1075②：接线 —— 托盘与任务栏走**同一个出处**，�
   });
 
   it("任务栏（窗口）图标用**同一个**出处", () => {
-    expect(MAIN_C, "窗口图标没走唯一出处 → 「任务栏对了托盘还是糊」这类半修").toContain("icon: resolveAppIcon(),");
+    /*
+     * A-1092 迁移：窗口图标由 `resolveAppIcon()`（返回路径字符串）改为
+     * `resolveAppIconImage()`（返回**解码后的 nativeImage**，一次把 ico 里 16/24/32… 全套
+     * 尺寸交给系统，避免任务栏按路径重新采样把小尺寸糊成白块）。
+     * ⚠️ **唯一出处的意图不变** —— `resolveAppIconImage()` 内部就是先调 `resolveAppIcon()`
+     *    再解码，不是另起一份路径。守卫因此改为"必须走 Image 包装器 + 包装器内部复用出处"，
+     *    而不是删掉这条断言（保留意图、迁移断言，见本仓守卫纪律）。
+     */
+    expect(MAIN_C, "窗口图标没走唯一出处 → 「任务栏对了托盘还是糊」这类半修").toContain("icon: resolveAppIconImage(),");
+    // 包装器必须真的复用 resolveAppIcon（否则等于又拼了一份路径）
+    const imgFn = between(MAIN_C, "const resolveAppIconImage = (): Electron.NativeImage | undefined => {", "\n};");
+    expect(imgFn, "resolveAppIconImage 没有复用 resolveAppIcon → 两处路径会漂移").toContain("resolveAppIcon()");
   });
 
   it("打包配置：Windows 用 .ico、Linux 仍用 .png，且 ico 随包（缺了就回落）", () => {

@@ -756,7 +756,37 @@ export const RPM_VERIFIED_AT: Record<string, string> = {
   // Agnes 官方站内公告《Agnes 文本模型 RPM 限额调整公告》2026-09-23 16:48：
   // 免费/企业统一 ↓50% → 免费 10 / 企业 20。
   agnes: "2026-09-23",
+  // Cohere 官方 rate-limits 页（docs.cohere.com/docs/rate-limits）2026-09-24 核对：
+  // Chat API 试用档 20 req/min、生产档 500 req/min（此处取试用档）。
+  cohere: "2026-09-24",
 };
+
+/**
+ * A-1092：**为什么绝大多数厂商这里没有 rpm** —— 这是刻意的，不是漏了。
+ *
+ * 2026-09-24 逐一核对过各厂商官方文档，结论是「**除了极少数，官方根本没有一个可通用的固定 RPM**」，
+ * 所以**留空才是正确**的（`resolveRpm` 对未知返回 `null` ⇒ 放行，等实测值到了再收紧）。
+ * 把下面这些"看似有、实则口径不同"的数字抄进来，正是本项目最忌讳的"猜一个数去卡人"：
+ *
+ *   · **DeepSeek**：官方只公布**并发连接数**（deepseek-flash 2500 / deepseek-v4-pro 500），
+ *     *不是* RPM。且官方明说「一个请求从发出到模型响应完成算一个并发连接」——
+ *     Agent 长流式请求下，并发数与请求数**没有任何固定换算关系**。
+ *     来源：api-docs.deepseek.com/quick_start/rate_limit（2026-09-24 核对）。
+ *   · **OpenAI / Anthropic / Google Gemini**：按**账号 tier** 分层（tier 由累计消费决定），
+ *     同一个 Key 不同账号值不同 ⇒ 写任何一个具体值都会误伤另一档用户。
+ *   · **智谱 / 腾讯混元 / 百度文心 / 百川**：公布的是 **QPS 或并发数**，不是 RPM。
+ *     ⚠️ **QPS × 60 ≠ RPM**：QPS 管的是"每秒能起几个请求"，而 Agent 场景瓶颈在
+ *     **在途并发连接数**（一次长流式请求占住连接几十秒）——机械 ×60 会把额度高估几十倍，
+ *     等于变相关掉了限流。
+ *   · **xAI Grok / Mistral**：公布的是 **RPS**（每秒请求数），同 QPS 陷阱。
+ *   · **OpenRouter**：免费变体（`:free`）有 20 req/min，但那是**平台层**而非厂商层，
+ *     且官方明确「**成功响应不带 `X-RateLimit-*` 头**」（只有 429 错误响应才带）⇒
+ *     探针在正常路径上**学不到**它。此处不写（写死会误伤已购买 ≥10 credits 的账号，
+ *     他们的免费模型日限额会从 50 提到 1000）。
+ *
+ * ⇒ **兜底次序**：用户要精确控制，走「模型供应商 → 配置栏 → RPM 兜底」手填（A-1092）；
+ *    探针能实测到的走上游响应头；两者都没有时**放行**（绝不发明阈值）。
+ */
 
 /** 该厂商声明的 RPM 档位（未声明 → undefined；**不等于无限**） */
 export function rpmDeclared(vendorKey: string | undefined): number | undefined {
@@ -1152,6 +1182,15 @@ export const MODEL_CAPABILITIES: VendorCapabilities[] = [
     label: "Cohere Command",
     context: 131072,
     maxOut: 65536,
+    /*
+     * A-1092：Cohere 的 Chat API 在**试用档**明确公布 20 req/min（生产档 500）。
+     * 一手来源：docs.cohere.com/docs/rate-limits（2026-09-24 核对），原文表格
+     *   「Chat API (per model) — Command A / Command A Reasoning / Command R+ / Command R …
+     *     Trial rate limit: 20 req / min；Production rate limit: 500 req / min」。
+     * ⚠️ 写**试用档 20**（默认用户群）：生产档 500 由实测响应头覆盖（`x-ratelimit-*`），
+     *    若按 500 写死，免费/试用用户会被上游限流而限流器浑然不觉。
+     */
+    rpm: 20,
     models: [
       { match: "cohere|command", thinking: true, efforts: ["low", "medium", "high"] },
     ],
