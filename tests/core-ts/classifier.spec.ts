@@ -56,10 +56,21 @@ describe("network 分类", () => {
   it("HTTPS → auto", () => {
     expect(assessAction({ kind: "network", url: "https://api.openai.com/v1" }).level).toBe("auto");
   });
-  it("内网/明文/云元数据 → block", () => {
-    expect(assessAction({ kind: "network", url: "http://127.0.0.1:19000/" }).level).toBe("block");
+  /* A-1091 **迁移**（原断言是「内网/明文 → block」，见下方说明）。
+     ⚠️ 这条守卫的**意图**是"网络目标要有一个真实存在的边界"，这一点不变；
+     变的是边界的**位置** —— 旧位置把「user 可见的内置浏览器」也一起拦了，
+     而本应用自己的 http_create_app 就是靠内置浏览器打开 http://127.0.0.1:<port> 预览的。
+     实测事故：Agent 想打开用户本地服务被拒，如实回报「内置浏览器的硬规则不允许访问本地回环地址」。
+     ⇒ 内网/明文降到 confirm（说清风险、交审批/联网开关决定）；
+       **云元数据保持 block**（真凭证窃取面，且正常用户永远不会访问它）。 */
+  it("云元数据 → block（真 SSRF 面，唯一保留的硬拦）", () => {
     expect(assessAction({ kind: "network", url: "http://169.254.169.254/latest/meta-data/" }).level).toBe("block");
-    expect(assessAction({ kind: "network", url: "ws://192.168.1.10/chat" }).level).toBe("block");
+    expect(assessAction({ kind: "network", url: "http://metadata.google.internal/x" }).level).toBe("block");
+  });
+  it("内网/明文 → confirm（A-1091：不再是 block —— 那会把内置浏览器通往本地服务的路拦死）", () => {
+    expect(assessAction({ kind: "network", url: "http://127.0.0.1:19000/" }).level).toBe("confirm");
+    expect(assessAction({ kind: "network", url: "ws://192.168.1.10/chat" }).level).toBe("confirm");
+    expect(assessAction({ kind: "network", url: "http://example.com/page" }).level).toBe("confirm");
   });
   it("非标准网络（ftp 等）→ confirm", () => {
     expect(assessAction({ kind: "network", url: "ftp://x.io/file" }).level).toBe("confirm");

@@ -180,10 +180,20 @@ describe("A-1057③ hardRuleCheck：不随开关/档位降级的边界", () => {
     expect(hardRuleCheck({ name: "file_write", riskKind: "write", target: outside, projectRoot: FAKE_ROOT }).blocked).toBe(false);
   });
 
-  it("网络：内网/元数据/非 HTTPS 拦，公网 HTTPS 不拦", () => {
+  /* A-1091 **迁移**：原断言 `n("http://127.0.0.1:8080/a") === true`（内网一律硬拦）。
+     意图（"硬规则必须有一个不随开关降级的边界"）不变，变的是边界位置：
+     内网/明文降到 confirm（交审批/联网开关），**云元数据仍是不可绕过的 block**。
+     理由详见 classifier.ts network 分支的注释与 tests/core-ts/a1091-rpm.spec.ts E 组。 */
+  it("网络：云元数据**硬拦**（不随开关降级），公网 HTTPS 不拦", () => {
     const n = (u: string) => hardRuleCheck({ name: "web_fetch", riskKind: "network", target: u }).blocked;
-    expect(n("http://127.0.0.1:8080/a")).toBe(true);
+    expect(n("http://169.254.169.254/latest/meta-data/")).toBe(true);
     expect(n("https://example.com/a")).toBe(false);
+  });
+
+  it("A-1091 内网/回环不再硬拦（否则内置浏览器打不开用户自己的本地服务）", () => {
+    const n = (u: string) => hardRuleCheck({ name: "browser_navigate", riskKind: "network", target: u }).blocked;
+    expect(n("http://127.0.0.1:8080/a")).toBe(false);
+    expect(n("http://localhost:3000")).toBe(false);
   });
 
   it("无目标时不误拦（无可判内容，交给类别闸门与审批档位）", () => {

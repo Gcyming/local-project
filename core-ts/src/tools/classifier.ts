@@ -138,8 +138,25 @@ export function assessAction(input: AssessInput): AssessResult {
   // network
   const url = (input.url ?? "").toLowerCase();
   if (/^https:\/\//.test(url)) { return { level: "auto", reason: `HTTPS 访问 ${url.slice(0, 60)}`, matched: "https" }; }
-  if (/^(http|ws):\/\//.test(url) || /127\.0\.0\.1|localhost|metadata/i.test(url)) {
-    return { level: "block", reason: `非 HTTPS / 内网地址访问 ${url.slice(0, 60)}`, matched: "lan-insecure" };
+  /* A-1091：**云元数据**是唯一仍然硬拦（block）的网络目标。
+     它同时满足两个条件：① 真正的凭证窃取面（169.254.169.254 / metadata.google 能读到实例临时凭据）；
+     ② **没有任何正常用户会去访问它** —— 拦掉不会伤害任何真实功能。 */
+  if (/169\.254\.169\.254|metadata\.google|metadata\.azure/.test(url)) {
+    return { level: "block", reason: `云元数据地址禁止访问（可读取实例凭据）${url.slice(0, 60)}`, matched: "cloud-metadata" };
+  }
+  /* A-1091：普通 HTTP / 回环 / 内网**降级为 confirm**（原先一律 block）。
+     ⚠️ 根因：那条 block 同时管着两种性质完全不同的东西 ——
+       ① Agent 以**程序身份**去取远端资源（`web_fetch`）：拦内网是合理的 SSRF 边界；
+       ② **用户可见的内置浏览器**（`browser_navigate`）：这是**用户自己的浏览器** ——
+          地址栏本来就允许 `http://` 与 `127.0.0.1`，而且本应用**自己的** `http_create_app`
+          生成单页应用后就是靠内置浏览器打开 `http://127.0.0.1:<port>` 来预览的。
+     实测事故：Agent 想打开用户的本地服务（`http://127.0.0.1:8800`）被硬规则拒绝，
+     于是如实回报「内置浏览器的硬规则不允许访问本地回环地址」——
+     **我们自己的硬规则把自己的功能拦死了**，而用户侧看起来就是"右侧栏浏览器坏了"。
+     现在：如实说清目标性质，把决定权交回审批/「联网」开关（开关放行 = 用户已授权联网）。
+     ⚠️ 终端那条路不受影响：它走上面的 `BLOCK_PATTERNS`（curl|wget + 私网地址）仍然 block。 */
+  if (/^(http|ws):\/\//.test(url) || /127\.0\.0\.1|localhost|\[::1\]/.test(url)) {
+    return { level: "confirm", reason: `非 HTTPS / 本地地址访问 ${url.slice(0, 60)}`, matched: "lan-insecure" };
   }
   return { level: "confirm", reason: `非标准网络访问 ${url.slice(0, 60)}`, matched: "unknown-net" };
 }
