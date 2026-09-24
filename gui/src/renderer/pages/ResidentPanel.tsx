@@ -133,6 +133,10 @@ export default function ResidentPanel(): React.JSX.Element {
   ]);
   // ── A-918+：用户选定的子代理（自建 agent id 列表；派发优先级 = 用户选定 > 内置专家）──
   const [selectedAgentIds, setSelectedAgentIds] = React.useState<string[]>([]);
+  /** A-1091：并行度 = 「设置 → 通用 → 请求频率 · 并发上限」的实时值。
+   *  此前这里写死「最多 3 个并发」，而那个设置**根本没被读取**（死开关）——
+   *  文案与行为不一致 = 说反话（A-1062 那一族：文案描述动作结果，就必须与判据同源）。 */
+  const [maxParallel, setMaxParallel] = React.useState<number | null>(null);
 
   // 加载可选的子代理执行模型：全部供应商的启用模型 + 本地模型
   React.useEffect(() => {
@@ -158,6 +162,14 @@ export default function ResidentPanel(): React.JSX.Element {
       }).catch(() => setModelOptions(opts));
     }).catch(() => { /* 未配置供应商时仅保留继承 */ });
   }, []);
+
+  // A-1091：回显当前的子代理并行度（= 请求频率设置里的「并发上限」）——文案必须与实际生效值同源，
+  // 不许再写死一个数字（写死就是"说反话"：用户调了设置、文案却纹丝不动）。
+  React.useEffect(() => {
+    api.requests?.get?.().then((r: { concurrency?: number }) => {
+      if (typeof r?.concurrency === "number" && r.concurrency >= 1) { setMaxParallel(r.concurrency); }
+    }).catch(() => { /* 未就绪 → 保持 null（文案退化为不带数字的说法） */ });
+  }, [api]);
 
   const refresh = React.useCallback(() => {
     api.resident?.state?.().then((s: any) => {
@@ -322,7 +334,7 @@ export default function ResidentPanel(): React.JSX.Element {
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
           <div style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>
             子代理
-            <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（最多 3 个并发）· 这里手动派发的产出落盘 data/generated/subagent-*.md；<b>对话里由 Agent 委派的，产出会作为工具结果交回主对话并由主 Agent 验收</b></span>
+            <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（{maxParallel !== null ? `最多 ${maxParallel} 个并发` : "并行度见「设置 → 通用 → 请求频率」"}，受上游 RPM 限速保护）· 这里手动派发的产出落盘 data/generated/subagent-*.md；<b>对话里由 Agent 委派的，产出会作为工具结果交回主对话并由主 Agent 验收</b></span>
           </div>
           {/* A-980-R31：运行记录现在持久化（data/subagent-runs.json），给一个显式清空入口 */}
           {runs.length > 0 && (

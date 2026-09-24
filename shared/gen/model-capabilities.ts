@@ -66,6 +66,21 @@ export interface ModelCapability {
   context?: number;
   maxOut?: number;
   /**
+   * A-1091：**上游每分钟请求数上限（RPM）** —— 官方公布的档位值，供 `rpmLimiter` 做安全兜底。
+   *
+   * 为什么必须做成数据：RPM 是**会变的官方参数**，而且变了之后**客户端完全无感** ——
+   * 超限的表现只是「偶尔 429 / 生成到一半被中断」，用户根本不会想到是"我们把人家限流限额用超了"。
+   * 2026-09-23 Agnes 把免费档 RPM 由 20 下调到 10（官方向全体用户发的公告），
+   * 如果我们不把新档位落到代码里，用户就会持续踩限流而查不出原因。
+   *
+   * 取值优先级（`resolveRpm` 唯一实现）：**实测探测值 > 本表声明 > 不限（不发明值）**。
+   * ⚠️ 留空 = 「未知」，**不等于无限**：`resolveRpm` 对未知返回 `null`，限流器直接放行
+   * （不发明阈值），但探测到真实值后立刻起效。宁可先不限，也不要猜一个错的数字去卡用户。
+   * ⚠️ 只填**官方公布**的值（注明档位与核实日期）。免费档与企业档不同值时，
+   *    这里写**免费档**（默认用户群）——企业档按探测值覆盖。
+   */
+  rpm?: number;
+  /**
    * 兜底定价（**USD / 1M tokens**，与 providers.enc.json 的 `price_in_usd` 同单位同语义）。
    * 上游 /models 或网关 /api/pricing 回传价格时**以上游为准**，本字段只是离线兜底。
    *
@@ -633,6 +648,8 @@ export interface VendorCapabilities {
    */
   context?: number;
   maxOut?: number;
+  /** 供应商级兜底 RPM（模型条目未单独声明时使用；语义见 `ModelCapability.rpm`） */
+  rpm?: number;
   /** 供应商级兜底定价（USD/1M tokens）：模型条目未单独标价时使用（语义见 ModelCapability 同名字段） */
   priceIn?: number;
   priceOut?: number;
@@ -725,6 +742,27 @@ export const PRICING_VERIFIED_AT: Record<string, string> = {
 export function pricingVerifiedAtUnknown(vendorKey: string | undefined): boolean {
   const d = vendorKey ? PRICING_VERIFIED_AT[vendorKey] : undefined;
   return d === undefined || d === "unknown";
+}
+
+/**
+ * A-1091：**RPM 档位的核实日期**（与 `PRICING_VERIFIED_AT` 同一纪律）。
+ *
+ * ⚠️ RPM 比价格更容易"悄悄过期"：价格变了用户会看账单，限额变了用户只会看到零星 429。
+ *    所以凡是本表里写了 `rpm` 的厂商，这里**必须**有一条核实日期；否则看着像"永远新鲜"。
+ * ⚠️ 日期是**真去读了官方公告**的那天。厂商把档位一改（如 Agnes 2026-09-23 统一下调 50%），
+ *    不更新这里就等于放任客户端拿旧限额去撞墙。
+ */
+export const RPM_VERIFIED_AT: Record<string, string> = {
+  // Agnes 官方站内公告《Agnes 文本模型 RPM 限额调整公告》2026-09-23 16:48：
+  // 免费/企业统一 ↓50% → 免费 10 / 企业 20。
+  agnes: "2026-09-23",
+};
+
+/** 该厂商声明的 RPM 档位（未声明 → undefined；**不等于无限**） */
+export function rpmDeclared(vendorKey: string | undefined): number | undefined {
+  if (!vendorKey) { return undefined; }
+  const v = MODEL_CAPABILITIES.find((x) => x.key === vendorKey);
+  return v?.rpm;
 }
 
 /** DeepSeek **V4 Pro** 档（含峰谷分时）—— 官方英文定价页 2026-09-18 */
@@ -1674,6 +1712,14 @@ export const MODEL_CAPABILITIES: VendorCapabilities[] = [
     // 官方「65.5K」→ ÷1000 显示 66K（`ProvidersPanel` 取整）。65536 也是 66K，两者界面一致，
     // 故保持 2^16 不动（它同时是真实的 token 上限），避免无意义的数值churn。
     maxOut: 65536,
+    // ── A-1091：RPM 档位（核实日期 2026-09-23）──
+    // 来源：Agnes 官方站内公告《Agnes 文本模型 RPM 限额调整公告》（2026-09-23 16:48，向全体用户推送）：
+    //   「免费用户及企业用户的 RPM 限额将统一下调 50%」→ 免费 20→**10** / 企业 40→**20**。
+    //   （公告另注："请您根据新的限额合理调整 API 请求频率，避免触发限流。"）
+    // 这里写**免费档 10**（默认用户群就是免费档）。企业档由实测响应头覆盖（见 probe-live 的 rateLimit）。
+    // ⚠️ 下调 50% 意味着**旧值 20 已经会踩限**——这正是"官方参数变了而客户端无感"的典型形态：
+    //    用户只会看到零星的 429 与中途中断，不会想到是自己把限额用超了。
+    rpm: 10,
     models: [
       // 官方文档 Thinking 模式：OpenAI 兼容格式用 chat_template_kwargs.enable_thinking（实测有效）
       //
@@ -1849,6 +1895,22 @@ function findPricingEntry(modelId: string): PricingEntry | undefined {
  */
 export function pricingMatchKind(modelId: string): "exact" | "family" | "none" {
   return findPricingEntry(modelId)?.matchKind ?? "none";
+}
+
+/**
+ * A-1091：该模型**声明的** RPM 档位（模型级 > 供应商级；都没声明 → undefined）。
+ *
+ * ⚠️ 复用 `findPricingEntry` 的家族匹配循环，**不另写一套** —— 「哪个家族管这个模型」
+ *    必须只有一个答案，两份匹配循环迟早漂移出"定价认 agnes、限流不认"的经典缺陷
+ *    （本文件就是为消除双份真相源而存在的）。
+ * ⚠️ 返回 `undefined` = **未知**，绝不等于"无限"：调用方（`rpmLimiter.resolveRpm`）据此
+ *    选择"放行且不发明阈值"，等实测值到了再收紧。返回 `0` 则表示"真的不能发请求"。
+ */
+export function resolveDeclaredRpm(modelId: string): { rpm: number; vendor: string } | undefined {
+  const hit = findPricingEntry(modelId);
+  if (!hit) { return undefined; }
+  const rpm = hit.model.rpm ?? hit.vendor.rpm;
+  return rpm === undefined ? undefined : { rpm, vendor: hit.vendor.key };
 }
 
 /**

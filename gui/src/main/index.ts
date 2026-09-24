@@ -1422,7 +1422,12 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         writeFileSync(join(dir, `subagent-${def.name}-${stamp}.md`), body, "utf8");
         return reply;
       }, {
-        concurrency: 3,
+        // A-1091：**接线** —— 子代理并行度取自「设置 → 通用 → 请求频率 · 并发上限」。
+        // 此前这里是硬编码 3，而设置里的「并发上限」**全仓没有任何读取者**（死开关）——
+        // 用户把它调低以为能避开上游限流，实际毫无作用（UI 却写着"并发上限同时约束 Swarm 并行"）。
+        // 现在它真的生效：调 1 即串行派发，调 3 即最多 3 个并行请求。
+        // ⚠️ 每次读取（不缓存）⇒ 改设置立即生效，无需重启（与权限开关同口径）。
+        concurrency: readRequests().concurrency,
         hooks: {
           // A-980-R31：每次广播运行态时顺手把**新到达终态**的记录落盘。
           // 为什么放在广播点而不是只放 onComplete/onError：取消「排队中」的任务是在

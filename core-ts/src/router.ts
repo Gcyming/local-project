@@ -69,6 +69,16 @@ export interface ChatStreamResultRouted extends ChatStreamResult {
 
 export type ClientFactory = (route: RouteEntry) => ChatClient | AnthropicClient | ResponsesClient | GoogleClient;
 
+/**
+ * A-968/A-1091：**provider 维度标识**（同一 baseUrl 视为同一供应商 —— route 无独立 provider 字段）。
+ *
+ * ⚠️ 模块级唯一实现：熔断器与 RPM 限流器**必须按同一个 key 分桶**。
+ *    若各写一套，会出现"熔断的是这个供应商、被限流的是那个供应商"，两个桶都算不对。
+ */
+export function providerKeyOfRoute(route: RouteEntry): string {
+  return route.baseUrl || route.name;
+}
+
 /** 根据 route 的 api_format 创建对应的客户端（全平台：openai/anthropic/responses/google） */
 function createClient(route: RouteEntry): ChatClient | AnthropicClient | ResponsesClient | GoogleClient {
   const format = route.api_format === "anthropic" ? "anthropic"
@@ -76,7 +86,13 @@ function createClient(route: RouteEntry): ChatClient | AnthropicClient | Respons
     : route.api_format === "google" ? "google"
     : route.api_format === "openai" ? "openai"
     : inferApiFormat(route.baseUrl);
-  const opts = { baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs };
+  // A-1091：限流身份按**本条路由**给（供应商键 + 本条路由实际模型）——
+  // 与 max_tokens / 思考参数同一口径：凡「随模型而变」的东西都不能用会话级的值，
+  // 否则降级换模型后仍按旧模型的档位限流（A-1071 踩过的同型缺陷）。
+  const opts = {
+    baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs,
+    rateLimit: { key: providerKeyOfRoute(route), model: route.model },
+  };
   if (format === "anthropic") { return new AnthropicClient(opts); }
   if (format === "responses") { return new ResponsesClient(opts); }
   if (format === "google") { return new GoogleClient(opts); }
@@ -196,9 +212,9 @@ export class ModelRouter {
     this.cooldowns.set(routeName, Date.now() + ms);
   }
 
-  /** A-968：provider 维度标识——同一 baseUrl 视为同一供应商（route 无独立 provider 字段） */
+  /** A-968：provider 维度标识（唯一实现在模块级 `providerKeyOfRoute`） */
   private static providerKeyOf(route: RouteEntry): string {
-    return route.baseUrl || route.name;
+    return providerKeyOfRoute(route);
   }
 
   /** A-968：全局熔断器——同一 provider 连续失败达到阈值时熔断 T 秒。

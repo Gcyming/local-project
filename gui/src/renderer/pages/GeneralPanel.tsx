@@ -294,6 +294,12 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>请求频率</div>
         <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
           用于匹配不同供应商的限流档位（RPM/并发）。若经常「生成到一半标红报错/被中断」，通常是上游节流——把并发调低、把重连间隔调大即可缓解。
+          <br />
+          <span style={{ color: "var(--text-dim)" }}>
+            已内置**每分钟请求数（RPM）限流器**：按供应商自动限速（如 Agnes 免费档 10 次/分），
+            并在额度用满时排队等待而不是硬发出去撞 429；上游响应头里带真实额度时会自动改用实测值。
+            本项控制的是**同时发起**的请求数（子代理并行度），与上面的 RPM 限速叠加生效。
+          </span>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end" }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5 }}>

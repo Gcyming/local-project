@@ -10,6 +10,8 @@ import { ChatCompletionChunk, ChatRequest, ChatResponse, ChatToolCallDelta } fro
 import { modelScopeFromUpstreamText } from "../upstreamErrorScope.js";
 
 import { noteUpstream, formatRetryNotice, formatPrefillNotice } from "./upstreamNotice.js";
+// A-1091：RPM 限流（唯一咽喉见 fetchWithRetry 注释）
+import { getSharedRpmLimiter, parseRateLimitHeaders } from "./rpmLimiter.js";
 
 /** A-1061④：429 退避表（累计最长 ≈110s）—— 每次重试都会经 upstreamNotice 如实上报给界面，
  *  否则这段时间用户只看到"什么都没有"（用户原话："自己加载半天才输出"）。 */
@@ -270,6 +272,16 @@ async function jsonWithTimeout<T>(resp: Response, timeoutMs: number): Promise<T>
 }
 
 /**
+ * A-1091：限流身份 —— 「这次请求打的是谁」。`key` = 供应商键（窗口状态按它分桶），
+ * `model` = 本条路由**实际**要用的模型（能力表按模型解析声明档位）。
+ * 缺省 undefined = 不限流（不发明阈值），用于不经路由的裸调用（探测/健康检查）。
+ */
+export interface RateLimitIdentity {
+  key: string;
+  model?: string;
+}
+
+/**
  * 网络级重试（A-153 扩展为 A-156，A-175 对齐厂商 SDK 默认）：
  * - 429 固定走 RETRY_429_BACKOFF（沿用语义，测试锚定 5,15,30,60 不变）；
  * - 408/500/502/503/504/529 走 RETRY_TRANSIENT_BACKOFF（1/3/7s，全抖动）；
@@ -279,6 +291,11 @@ async function jsonWithTimeout<T>(resp: Response, timeoutMs: number): Promise<T>
  * A-175：500/502 此前被排除（担心结果已产生→重复计费）。但 chat_completions 是无状态请求，
  * 工具/写操作都在客户端收到响应后才执行，重试不会引入重复副作用；对齐 OpenAI/Anthropic
  * 官方 SDK「5xx 自动指数退避重试」的默认行为，换回的是连接抖动自愈（500 常见于网关瞬时故障）。
+ *
+ * A-1091：本函数同时是 **RPM 限流的唯一咽喉**（所有客户端、所有格式的 HTTP 请求都经此处）：
+ *   - 发请求**前** `acquire`（额度用完就等，绝不静默丢请求）；
+ *   - 收到响应**后** `observe`（读 `x-ratelimit-*` / `retry-after` 回填实测额度 + 429 冷却）。
+ * 两件事都只在这里实现一次 —— 在客户端各处再写一份必然漂移出"某个格式忘了限流"。
  */
 async function fetchWithRetry(opts: {
   fetchImpl: typeof fetch;
@@ -287,16 +304,45 @@ async function fetchWithRetry(opts: {
   maxAttempts: number;
   timeoutMs?: number;
   externalSignal?: AbortSignal;
+  /** 限流身份；缺省 = 不限流 */
+  rateLimit?: RateLimitIdentity;
 }): Promise<Response> {
-  const { fetchImpl, url, init, maxAttempts, timeoutMs, externalSignal } = opts;
+  const { fetchImpl, url, init, maxAttempts, timeoutMs, externalSignal, rateLimit } = opts;
   let lastResp: Response | null = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (externalSignal?.aborted) {
       throw new UpstreamError("请求已取消", 0, "protocol");
     }
+    // A-1091：取令牌（额度用完在此等待；未知额度直接放行）——**必须在每次真实请求之前**，
+    // 因为重试的每一次尝试都是一次真实请求、都会占用上游限额（429 尤其如此）。
+    if (rateLimit) {
+      const { waitedMs } = await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);
+      // A-1061④ 同纪律：**先上报再睡**。等超过 1s 就必须说出来，否则界面上是"一整段什么都没有"，
+      // 用户只会以为卡死了（而实际是我们在自我限速）。
+      if (waitedMs >= 1000) {
+        noteUpstream(
+          "retry",
+          `上游每分钟请求额度已用满，等了 ${Math.round(waitedMs / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,
+        );
+      }
+      if (externalSignal?.aborted) {
+        throw new UpstreamError("请求已取消", 0, "protocol");
+      }
+    }
     const { controller, cleanup } = combineAbortSignal(externalSignal, timeoutMs);
     try {
       const resp = await fetchImpl(url, { ...init, signal: controller.signal });
+      // A-1091：回喂限流信息（含**成功**响应 —— 上游通常只在成功响应里带 x-ratelimit-*）。
+      // 必须在下面所有 return 之前，否则最快的那条路径永远学不到实测额度。
+      if (rateLimit) {
+        try {
+          getSharedRpmLimiter().observe(
+            rateLimit.key,
+            parseRateLimitHeaders((n) => resp.headers.get(n)),
+            resp.status,
+          );
+        } catch { /* 观测失败绝不影响请求本身 */ }
+      }
       if (!isTransientStatus(resp.status) || attempt === maxAttempts - 1) {
         return resp;
       }
@@ -644,6 +690,8 @@ export interface ChatClientOptions {
   apiKey?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /** A-1091：限流身份（供应商 + 本条路由的模型）。缺省 = 不限流。 */
+  rateLimit?: RateLimitIdentity;
 }
 
 export class ChatClient {
@@ -651,12 +699,15 @@ export class ChatClient {
   private apiKey?: string;
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
+  /** A-1091：限流身份；由 router 按**本条路由**注入 */
+  private rateLimit?: RateLimitIdentity;
 
   constructor(opts: ChatClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.rateLimit = opts.rateLimit;
   }
 
   private headers(): Record<string, string> {
@@ -699,6 +750,7 @@ export class ChatClient {
         ? Math.max(this.timeoutMs, timeoutMsOverride as number)
         : this.timeoutMs,
       externalSignal,
+      rateLimit: this.rateLimit,
     });
   }
 
@@ -1077,12 +1129,15 @@ export class AnthropicClient {
   private apiKey: string;
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
+  /** A-1091：限流身份 */
+  private rateLimit?: RateLimitIdentity;
 
-  constructor(opts: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch }) {
+  constructor(opts: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch; rateLimit?: RateLimitIdentity }) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey ?? "";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.rateLimit = opts.rateLimit;
   }
 
   private endpoint(): string {
@@ -1109,6 +1164,7 @@ export class AnthropicClient {
       maxAttempts: maxAttempts ?? RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
       externalSignal: signal,
+      rateLimit: this.rateLimit,
     });
     const resp = await send(payload);
     // 同 ChatClient：400 且带思考参数 → 仅当错误确认为「参数不被识别」时剥掉重试一次，
@@ -1486,12 +1542,15 @@ export class ResponsesClient {
   private apiKey?: string;
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
+  /** A-1091：限流身份 */
+  private rateLimit?: RateLimitIdentity;
 
   constructor(opts: ChatClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.rateLimit = opts.rateLimit;
   }
 
   private headers(): Record<string, string> {
@@ -1607,6 +1666,7 @@ export class ResponsesClient {
       init: { method: "POST", headers: this.headers(), body: JSON.stringify(this.toResponsesPayload(payload)) },
       maxAttempts: RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
+      rateLimit: this.rateLimit,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1630,6 +1690,7 @@ export class ResponsesClient {
       maxAttempts: RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
       externalSignal,
+      rateLimit: this.rateLimit,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1704,12 +1765,15 @@ export class GoogleClient {
   private apiKey: string;
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
+  /** A-1091：限流身份 */
+  private rateLimit?: RateLimitIdentity;
 
   constructor(opts: ChatClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey ?? "";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.rateLimit = opts.rateLimit;
   }
 
   private headers(): Record<string, string> {
@@ -1831,6 +1895,7 @@ export class GoogleClient {
       init: { method: "POST", headers: this.headers(), body: JSON.stringify(this.toGooglePayload(payload)) },
       maxAttempts: RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
+      rateLimit: this.rateLimit,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1865,6 +1930,7 @@ export class GoogleClient {
       maxAttempts: RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
       externalSignal,
+      rateLimit: this.rateLimit,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
