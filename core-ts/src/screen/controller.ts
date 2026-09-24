@@ -221,11 +221,24 @@ export class ScreenController {
     return await b.listWindows();
   }
 
-  /** A-977：按标题聚焦窗口并返回其矩形（仅桌面后端支持） */
+  /** A-977：按标题聚焦窗口并返回其矩形（仅桌面后端支持）。
+   *
+   *  A-1088 同判据：**「业务上没做到」与「调用本身失败」必须分两态**。
+   *  旧实现 `catch (e) { return { focused: false, detail: … } }` 把两种完全不同的情形
+   *  在上层压成**同一个形状**（都只有 `focused:false`，没有可区分的标记）：
+   *    · 「未找到标题匹配的窗口」「没抢到前台」—— 后端**正常返回** `focused:false`，
+   *      是业务态，有替代路径（窗口可见时区域截图照样能用）；
+   *    · 「宿主崩溃 / 启动超时 / 从未启动」—— 后端**抛错**，是真故障，
+   *      任何替代路径都不会成功（同一条死掉的宿主）。
+   *  而 `screen_focus` 工具只能看 `focused` ⇒ 对**真故障**也回一句「[未获得前台] …」
+   *  并附上「可直接 screen_capture 传 window 试试区域截图」的建议 ⇒ 模型把它当成
+   *  **焦点限制**去绕（换标题、反复重试、试区域截图），**永远不会去报告那个已经死掉的宿主**。
+   *  现在与 `listWindows` 完全同形：不支持的后端仍回业务态（语义是"该后端没有窗口概念"），
+   *  真故障**原样上抛**，由 `screen_focus` 工具转成 `[错误] …`。 */
   async focusWindow(id: ScreenBackendId, title: string): Promise<{ focused: boolean; detail: string; rect?: { x: number; y: number; width: number; height: number } }> {
     const b = this.backends.get(id);
     if (!b?.focusWindow) { return { focused: false, detail: `${id} 后端不支持窗口聚焦` }; }
-    try { return await b.focusWindow(title); } catch (e) { return { focused: false, detail: e instanceof Error ? e.message : String(e) }; }
+    return await b.focusWindow(title);
   }
 
   /**
