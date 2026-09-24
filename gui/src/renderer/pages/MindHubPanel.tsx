@@ -505,6 +505,11 @@ export default function MindHubPanel({
 
   async function convertToSkill(): Promise<void> {
     if (!skillName.trim() || !skillFile) return;
+    /* A-1019 ④：取值点（本组件 238 行）之后的第一层裸访问必须有守卫 ——
+       漏了这道检查，preload 未就绪时 `api.mind` 直接抛 TypeError，
+       被 ErrorBoundary 换成「界面渲染出错」整页白屏（而不是这一处静默降级）。
+       同文件 locateDep 一直是这么写的，这里此前漏了。 */
+    if (!api?.mind?.bookToSkill) { return; }
     const res = await api.mind.bookToSkill(skillName.trim(), skillFile.content)
       .catch((e: unknown) => ({ ok: false, error: String(e) }));
     if (res.ok) {
