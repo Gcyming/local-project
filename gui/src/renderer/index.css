@@ -12,6 +12,11 @@
   /* A-975：卡片「抬高面」——此前产物卡用 --bg-input（#0f172a）= 与页面底色同色，
      卡片和背景糊在一起分不出边界；这里给一个明确比 --bg 亮一档的面 + 更实的描边。 */
   --card-surface: #1c2740;
+  /* A-1079：**浮层实底** —— 浮在正文之上的面板（悬浮坞等）必须**不透明**，
+     否则背后的字会透出来（用户实测：「展开后界面透明度过高」）。
+     与 --card-surface 的差别不是亮度而是**语义**：card 是"抬高面"（可比页面底色略亮/略透），
+     float 是"遮住背后内容的实底"。 */
+  --float-surface: #1c2740;
   --card-border: rgba(148, 163, 184, 0.30);
   --border-hover: #475569;
   --text: #e2e8f0;
@@ -90,6 +95,9 @@
   /* A-975：卡片抬高面（Beta 主题底色 #05070e 极深，半透明 --bg-input 叠上去几乎不可见 →
      产物卡与背景同色。这里用不透明度更高的蓝灰面 + 明显描边，保证一眼分得出卡片边界）。 */
   --card-surface: rgba(30, 42, 70, 0.82);
+  /* A-1079：beta 的 --card-surface 是 0.82（浮层上会透出正文）→ 浮层专用实底取它的
+     **不透明等效色**（0.82 × (30,42,70) 叠在页面底色 #05070e 上 ≈ #1a243c）。 */
+  --float-surface: #1a243c;
   --card-border: rgba(140, 246, 251, 0.26);
   --border-hover: rgba(56, 189, 248, 0.35);
   --text: #eef4ff;
@@ -760,6 +768,43 @@ code,
 @keyframes compressBar { 0% { width: 6%; opacity: 0.6; } 40% { width: 55%; } 70% { width: 72%; opacity: 1; } 100% { width: 92%; opacity: 0.75; } }
 .compress-bar { animation: compressBar 2.2s ease-in-out infinite; }
 
+/* ── A-1061⑬ / A-1065：流式吐字的「逐单元渐入」──────────────────────────────
+   用户原话（首次）：「现在的 Agent 流式吐字都是一整个一整个的蹦出来，不美观，
+   你也加一个渐入的过渡动画，即吐字的时候由左到右，由浅到深，平滑的吐出。」
+   用户原话（A-1065 更正）：「还是我之前说错了，吐字的时候，出现的部分，**从右到左**的动画，
+   现在老是从左到右的渐入」。
+   · 由右到左 = 相对位移从 **+3px** 归零（新字从它"诞生"的右侧滑进来，向左落位）
+     —— A-1061⑬ 当时写成 -3px（从左侧滑入），方向与用户要的相反；这里按更正翻转符号。
+     ⚠️ A-1076：位移用的是 `left`（不是 `transform`），原因见下面那段（inline 盒子）。
+   · 由浅到深 = opacity 0 → 1（深色字在浅底上：半透明就是"浅"，不透明就是"深"）
+   只挂在 `pages/streamFade.ts` 切出来的**尾巴单元**上。已定型前缀照旧走 Markdown，
+   所以这里不会是"整段重放动画"，也不会把代码块切碎（未闭合围栏时切分会整段退让）。
+   ⚠️ 不做 filter: blur() —— 一帧几十个 span 各自模糊在渲染进程上是明显开销，
+      且模糊会让细笔画更虚，与用户「看不清」的诉求相反。 */
+/* A-1076（Issue 4）：位移**必须用能作用于 inline 盒子的属性**。
+   ⚠️ 用户 A-1065 原话要求「从右到左的动画」，但此前关键帧写的是
+   `transform: translate3d(3px, 0, 0)`，而尾巴单元是 `.stream-partial`（普通块容器）里的
+   **`<span>`（display: inline）** —— 按 CSS Transforms Level 1 §2.1，**非替换 inline 盒子
+   不是 transformable element，transform 会被静默忽略**。于是"从右滑入"从来没生效过，
+   用户实际只看到不透明度在变（观感是"闪一下"而不是"滑进来"）。
+   这类失效过 tsc / 过构建 / 过全部逻辑测试，只在屏幕上看得出 —— 本仓的静默失效典型。
+   ⇒ 改用 `position: relative` + `left`：相对定位**适用于 inline 盒子**，且完全不影响布局
+     （不改行高、不改断行机会）。
+   ⚠️ 不许改成 `display: inline-block` 让 transform 生效：inline-block 是**原子**单元，
+     相邻单元之间没有断行机会 —— CJK 尾巴会整条不断行地溢出，比"没有位移"更糟。 */
+@keyframes streamUnitIn {
+  from { opacity: 0; left: 3px; }
+  to { opacity: 1; left: 0; }
+}
+.stream-fade-unit {
+  position: relative;
+  animation: streamUnitIn 260ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 无障碍：关掉位移与渐入，字符立刻可见（不留 0 透明度的中间态） */
+  .stream-fade-unit { animation: none; }
+}
+
 /* ── A-1015：统一「展开 / 收起」衔接动画 ───────────────────────────────────────
    【为什么以前是"生硬跳变"】此前全仓所有折叠容器都是 `{cond && <div>}` 条件渲染：
    收起时元素**当场卸载**，浏览器没有第二帧可插值 → 再好的 transition 也无从播放。
@@ -860,6 +905,96 @@ code,
 /* 向上弹出的气泡（锚点在下方）：位移方向反过来才自然 */
 .pop.pop-up { transform: translateY(4px) scale(0.985); transform-origin: bottom left; }
 .pop.pop-up.is-open { transform: none; }
+
+/* ══ A-1074（#230）：输入框正上方的「悬浮按钮坞」 ═══════════════════════════════
+   用户原话：「改成输入框**正上方的最右边**悬浮按钮，点击后**横向延伸再向上展开**，
+   动画与产物卡片同族」「子代理从右侧监测栏移出，做成**同款**悬浮按钮」
+   「**一个展开时另一个渐出**」。
+
+   为什么面板要**绝对定位向上长**（而不是像 A-1069 那样在文档流里往下撑）：
+   往下撑会把输入框往下顶、把消息区向上压 —— 展开一个"看状态"的小面板**不该改变输入框的位置**。
+   `absolute + bottom:100%` ⇒ 高度涨、底边钉住 ⇒ 视觉上就是"向上展开"，且**零布局位移**
+   （也顺带避开了 Issue「往上挤着排」那一类位移观感）。
+
+   节拍与 `.collapse` **共用** --collapse-dur / --collapse-ease ⇒ 与产物卡是同一个动画家族。
+   `.dock-panel` 内部直接用 `.collapse`（同一个类，不是"仿一个"），所以"同族"是结构保证的。 */
+.float-dock {
+  position: relative;              /* 面板的绝对定位锚点 */
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;       /* 「最右边」 */
+  gap: 6px;
+  /* A-1078：0 上边距 + **8px 下边距** —— 用户原话「再往上一点点，不要跟下面的窗口碰着，
+     要有几个像素的距离」。左右 16px 与输入框内边距对齐，胶囊右缘与发送键同一条竖线。 */
+  padding: 0 16px 8px;
+}
+/* 面板：贴在被展开按钮的上沿 → 高度增长即"向上展开"；左右铺满坞宽 */
+.dock-panel {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 100%;
+  z-index: 40;
+}
+/* 「先横向延伸、**再**向上展开」：面板的两条主属性各晚 80ms 起跑。
+   时长与缓动一动不动（仍是 --collapse-dur / --collapse-ease）⇒ 仍是同族，只是错开一步。
+   ⚠️ 只延时这两条：`.collapse > *` 的 visibility/content-visibility 有它自己的
+   「0s 时长 + 整段时长延迟」，在这里再叠一层会算错收起时机（内容会提前被裁掉）。 */
+.dock-panel > .collapse { transition-delay: 80ms, 80ms; }
+/* 坞内一格：自占内容宽（`max-width` 只作安全上界，不参与动画）；渐出时淡出并让位 */
+.dock-slot {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 460px;
+  overflow: hidden;
+  transition: opacity var(--collapse-dur) var(--collapse-ease);
+}
+/* 展开态只做**强调**（哪个是开着的要看得出来）；A-1079 起胶囊**不再变宽** */
+.dock-slot.is-open .dock-pill { background: var(--accent-soft); color: var(--text); }
+/* 「一个展开时另一个渐出」：淡出且不再接收点击。
+   ⚠️ 必须 `pointer-events:none`：淡出后仍占位，不设它就是一个"看不见但挡点击"的空洞。 */
+.dock-slot.is-faded { opacity: 0; pointer-events: none; }
+
+/* A-1079：**不再做"横向延伸"** —— 用户原话：「你这样设计直接向上展开窗口的话，
+   那个按钮就不用像第二张图那样扩展了」。既然面板是"贴着按钮上沿向上浮的一张卡片"，
+   按钮再变宽就是多余的动作（而且变宽会把右侧的另一个按钮挤位）。
+   ⇒ 胶囊**任何状态下都是紧凑的**（图标+标签+计数+箭头），点一下只做一件事：把面板抬起来。
+
+   历史（别走回头路）：曾经试过两种"横向延伸"，都不该重来 ——
+   ① `grid-template-columns: 0fr → 1fr`：**列轨在非定宽容器里按内容算**，收起态照样贡献
+     摘要宽度 ⇒ 胶囊一上来就被撑成通栏（A-1077 实测"展开异常"）；
+   ② 摘要 `max-width: 0 → 420px`：能收住，但按用户要求已整体撤掉（A-1079）。 */
+/* 悬浮按钮本体：胶囊形（不是通栏条），带投影 ⇒ 一眼是"浮在上面"的 */
+.dock-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* ⚠️ 不写 width:100%：胶囊要按**内容**定宽（收起态 = 图标+标签+计数），
+     写 100% 会让它去撑满坞格，而坞格宽度又由胶囊内容决定 —— 循环依赖。 */
+  min-width: 0;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  /* A-1078：**没有边框** —— 用户原话「我要的是悬浮窗，**不用框起来**」。
+     "浮"由投影表达（而不是靠一个描边框），展开态改用底色强调。 */
+  border: none;
+  /* 实底：胶囊同样浮在正文上，半透明会让背后的字透出来 */
+  background: var(--float-surface);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+  transition: background var(--collapse-dur) var(--collapse-ease), color var(--collapse-dur) var(--collapse-ease);
+}
+.dock-pill:disabled { cursor: default; opacity: 0.7; }
+/* 面板里的卡片（与坞同宽，向上浮）—— ⚠️ 必须用**实底**，见 --float-surface */
+.dock-panel-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--float-surface);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
 
 /* A-918++：代码语法高亮（VS Code Dark+ 主流配色：注释绿灰/字符串橙红/数字浅绿/关键字紫红） */
 .hl-c { color: #6a9955; font-style: italic; }     /* comment 绿灰斜（VS Code） */
@@ -1667,7 +1802,13 @@ body.slime-resizing {
   padding: 0;
   background: transparent;
   color: var(--text);
-  font-weight: 500;
+  /* A-1061⑫：用户对照后点名「code、powershell 这些栏目内的文本……这么细」。
+     此前继承 14px + 字重 500（比行内 code 的 600 细一档）→ 块内代码明显发虚。
+     现在 14.5px + 600 与行内对齐，并给中文注释补黑体 fallback（Consolas 只覆盖 ASCII）。 */
+  font-size: 14.5px;
+  font-weight: 600;
+  font-family: Consolas, "Cascadia Code", "Courier New", "Microsoft YaHei", "微软雅黑", monospace;
+  line-height: 1.7;
 }
 .markdown-body table {
   border-collapse: collapse;
@@ -1827,6 +1968,19 @@ body.slime-resizing {
 .think-timeline:not(.is-live) .think-step-mark {
   opacity: 0.8;
 }
+/* ── A-1061⑧：正文 / 用户气泡字形栈 ─────────────────────────────
+   用户对照 WorkBuddy 后点名「不论是清晰度还是字体、大小都不如你的」。
+   与思考历程（.think-step-text）用**同一套**黑体优先字形栈 —— 但字号**分开**：
+   正文 15px、思考 12.5px，层级差保持不变（此前正文实际是 14px，与注释宣称的 15px 不符）。
+   ⚠️ 只动正文与用户气泡，绝不碰 .think-step-text（上一回就是把两者改混了）。 */
+.stream-partial,
+.msg-body-text,
+.msg-user-bubble {
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", "Source Han Sans CN", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 /* ── 思考正文：视觉降级（visual demotion）─────────────────────────────
    业界规范（ChatGPT / Claude / Gemini / DeepSeek / Perplexity 已收敛）：
    思考 ≠ 答案，必须一眼可辨——更小字号 + 更暗颜色 + 左侧竖线 + 独立滚动。
@@ -1996,6 +2150,47 @@ body.slime-resizing {
 }
 @media (prefers-reduced-motion: reduce) {
   .todo-announce.is-done .todo-announce-text::after { animation: none; width: 100%; }
+}
+
+/* ── A-1064：思考历程里的「引导卡」（用户中途插入的那句话） ────────────────────
+   用户原话："思考历程看不到我插入的引导的卡片"。
+   此前它被当成一段 think 文本塞进去 → ① 会被合并进相邻思考段，根本不成形；
+   ② 污染了 onDone 里"要不要用 reasoning 兜底补思考节点"的判据（历程完整性）。
+   现在是一等节点（kind="steer"）：与规划卡同一套"从思考正文里立出来"的语言，
+   但用强调左边条与「引导」标签表明**这是用户说的话**，不是模型思考。 */
+.think-step .steer-step-mark { background: var(--accent-hover); }
+.steer-card {
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-left: 2px solid var(--accent-hover);
+  border-radius: 8px;
+  padding: 5px 8px 5px 7px;
+  min-width: 0;
+}
+.steer-card-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 0; text-align: left;
+  background: transparent; border: none; cursor: pointer;
+}
+.steer-card-title {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.steer-card-preview {
+  font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1; min-width: 0;
+}
+.steer-card-text {
+  margin-top: 4px;
+  font-size: 12px; line-height: 1.65;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px; /* 长引导独立滚动，不把消息流撑爆（与规划卡同一策略） */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .think-tool-node {

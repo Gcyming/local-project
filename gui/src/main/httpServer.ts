@@ -33,6 +33,15 @@ export interface HttpServeParams {
   host?: string;
   /** 是否开启 SPA fallback：未命中且非静态资源的路径回退到 index.html */
   spa?: boolean;
+  /**
+   * 这个服务是**谁起的**（#230 的范围判据）。
+   *   · `agent`（缺省）= 本次应用运行期间由 Agent 的工具起的 → 属于「Agent 后台资源」面板；
+   *   · `restored`    = 启动时由 `restore()` 按上一次运行的清单**重建**的
+   *     —— 它是应用自己在启动阶段建的，不是"本次 Agent 运行途中打开的服务"。
+   *     用户要求面板只显示「Agent 运行途中打开的工具、脚本、端口」，所以它**不进面板**。
+   *     （A-977 的持久化目的——"重启后旧链接仍可用"——不受影响：服务照常运行、照常可访问。）
+   */
+  origin?: "agent" | "restored";
 }
 
 /** 运行中的服务信息（list 返回） */
@@ -51,6 +60,8 @@ export interface HttpServerInfo {
   startedAt: number;
   /** 累计请求数 */
   requests: number;
+  /** #230：谁起的（`agent` = 本次 Agent 运行途中起的；`restored` = 启动时按上次清单重建的） */
+  origin: "agent" | "restored";
 }
 
 /** serve 成功返回 */
@@ -75,6 +86,8 @@ interface ServerEntry {
   requests: number;
   /** A-977：SPA 回退开关（持久化时需一并记录） */
   spa?: boolean;
+  /** #230：谁起的（见 HttpServeParams.origin） */
+  origin: "agent" | "restored";
 }
 
 /** 常见 MIME 类型映射（扩展名小写 → Content-Type） */
@@ -244,10 +257,11 @@ class HttpStaticServerManager {
       if (!dir) { continue; }
       const host = (e.host ?? DEFAULT_HOST).trim() || DEFAULT_HOST;
       const port = Number.isFinite(e.port) ? Number(e.port) : 0;
-      let r = await this.serve({ dir, host, port, spa: Boolean(e.spa) });
+      // #230：标记为「启动时重建」——它不进「Agent 后台资源」面板（用户只想要运行途中打开的）
+      let r = await this.serve({ dir, host, port, spa: Boolean(e.spa), origin: "restored" });
       if (!r.ok && port > 0) {
         // 端口被占 → 改选空闲端口（链接会变，但服务可用）
-        r = await this.serve({ dir, host, port: 0, spa: Boolean(e.spa) });
+        r = await this.serve({ dir, host, port: 0, spa: Boolean(e.spa), origin: "restored" });
       }
       if (r.ok) { restored++; this.schedulePersist(); } else { failed++; }
     }
@@ -277,6 +291,14 @@ class HttpStaticServerManager {
     // 避免"每次生成都新开端口"导致链接漂移、进程里堆一堆服务（也保证重启后链接尽量稳定）。
     for (const e of this.entries.values()) {
       if (resolve(e.dir) === dir && e.host === host) {
+        /* #230：复用发生在**本次运行**里的 Agent 调用中 → 这个服务从这一刻起就是
+           "Agent 运行途中打开的服务"，把 restored 标记**升格**为 agent，
+           否则会出现"Agent 明明刚起过它、面板里却看不到"的反向错位。 */
+        if (e.origin === "restored") {
+          e.origin = "agent";
+          e.startedAt = Date.now(); // 时长从"本次被 Agent 起用"算起，不把上次运行的时长算进去
+          this.schedulePersist();
+        }
         return { ok: true, id: e.id, port: e.port, host: e.host, urls: buildUrls(e.port, e.host), reused: true } as HttpServeResult;
       }
     }
@@ -300,7 +322,11 @@ class HttpStaticServerManager {
     // 先建 entry（server 稍后回填），handler 通过闭包累加请求计数
     const id = `http_${Date.now().toString(36)}_${(this.seq++).toString(36)}`;
     const startedAt = Date.now();
-    const entry: ServerEntry = { id, dir, host, port, server: null as unknown as Server, startedAt, requests: 0, spa };
+    const entry: ServerEntry = {
+      id, dir, host, port, server: null as unknown as Server, startedAt, requests: 0, spa,
+      // #230：缺省即"Agent 起的"（`restore()` 会显式传 restored）
+      origin: params.origin === "restored" ? "restored" : "agent",
+    };
 
     const handler = (req: IncomingMessage, res: ServerResponse): void => {
       // 计数：每进入一次请求 +1
@@ -394,6 +420,7 @@ class HttpStaticServerManager {
       urls: buildUrls(e.port, e.host),
       startedAt: e.startedAt,
       requests: e.requests,
+      origin: e.origin,
     }));
   }
 }

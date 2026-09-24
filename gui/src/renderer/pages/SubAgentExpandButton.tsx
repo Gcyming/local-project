@@ -1,11 +1,19 @@
 /**
- * gui/src/renderer/pages/SubAgentExpandButton.tsx — 监测栏右侧子代理展开按钮（A-976）。
- * 有活跃子代理时显示向上箭头，点击弹出详情列表。
+ * gui/src/renderer/pages/SubAgentExpandButton.tsx — 子代理的**悬浮按钮坞**条目（A-976 → A-1074）。
+ *
+ * A-1074（#230）用户原话：「**子代理从右侧监测栏移出**，做成**同款**悬浮按钮」。
+ * ⇒ 本组件不再渲染在底部监测栏的数值行里（那行只报数：tokens / 耗时 / context / 模型），
+ *   而是和「后台进程」并排放在输入框正上方的坞里，用**同一套**类名：
+ *   `dock-slot` / `dock-pill`（胶囊按钮，展开时横向延伸）/ `dock-panel` + `.collapse`（向上展开）。
+ *
+ * 展开/渐出的判据**不在这里**：`open` / `faded` 由父级从 `floatDock.ts` 的**单值** state 派生后传进来 ——
+ * 这样"两个同时展开"这种非法状态在结构上就不存在（见 floatDock.ts 的说明）。
  */
 import React, { type JSX, useEffect, useState } from "react";
 import SubAgentModal from "./SubAgentModal.js";
 import SubagentAvatar from "../components/SubagentAvatar.js";
 import { ChevronIcon } from "../components/Icon.js";
+import { dockSlotClassOf } from "./floatDock.js";
 
 interface SubRun {
   id: string;
@@ -34,9 +42,11 @@ const STATUS_META: Record<string, { txt: string; c: string }> = {
   cancelled: { txt: "取消", c: "var(--text-muted)" },
 };
 
-export default function SubAgentExpandButton(): JSX.Element | null {
+export default function SubAgentExpandButton(
+  { slot, onToggle }: { slot: { open: boolean; faded: boolean }; onToggle: () => void },
+): JSX.Element | null {
+  const { open, faded } = slot;
   const [runs, setRuns] = useState<SubRun[]>([]);
-  const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const refresh = React.useCallback((): void => {
@@ -55,90 +65,86 @@ export default function SubAgentExpandButton(): JSX.Element | null {
   }, [refresh]);
 
   const active = runs.filter((r) => r.status === "running" || r.status === "pending");
+  /* 没有任何子代理记录 → 这一格整个不渲染（不留空壳，与"后台进程"同约定）。
+     调用方（ChatPanel）据 `runs` 判定是否需要把坞显示出来 —— 故这里先给出 null。 */
   if (runs.length === 0) { return null; }
 
   return (
     <>
-      <span style={{ color: "var(--text-dim)" }}>|</span>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          background: "transparent", border: "none", cursor: "pointer",
-          color: active.length > 0 ? "#22c55e" : "var(--text-muted)",
-          display: "flex", alignItems: "center", gap: 4,
-          padding: "2px 6px", fontSize: 11,
-        }}
-        title={active.length > 0 ? `${active.length} 个子代理运行中` : "查看子代理"}
-      >
-        <span style={{
-          display: "inline-block", width: 6, height: 6, borderRadius: "50%",
-          background: active.length > 0 ? "#22c55e" : "var(--text-dim)",
-          animation: active.length > 0 ? "liveDot 1.5s ease-in-out infinite" : "none",
-        }} />
-        <span style={{ fontWeight: 600 }}>{runs.length}</span>
-        {/* A-1015：字符 ▲（靠 rotate(180deg) 翻面）+ 自写 0.2s 过渡，换成图标库 ChevronIcon：
-            旋转由组件自带（走全局 --collapse-dur），与全仓展开箭头同约定（open ? 90 : 0）。 */}
-        <ChevronIcon size={10} rotate={open ? 90 : 0} style={{ flexShrink: 0 }} />
-      </button>
-
-      {/* 展开列表：A-1015b 改 **常驻挂载 + .pop 进出场**（原先 `{open && …}` 弹出/收起都是瞬跳）。
-          锚点在下方 → 用 `.pop-up`（向上弹出的位移方向）。绝对定位不做高度插值
-          （bottom/right 是按按钮实时定位的，"从 0 高度长出来"没意义还会算歪锚点）。
-          ⚠️ `.pop` 收起态自带 pointer-events:none —— 常驻浮层不设它就会盖住触发按钮，
-          表现为"点箭头没反应"。 */}
-      <div
-          className={`pop pop-up${open ? " is-open" : ""}`}
-          style={{
-            position: "absolute", bottom: "100%", right: 14, marginBottom: 8,
-            width: 320, maxHeight: 400, overflow: "auto",
-            background: "var(--bg-card, #1e293b)", border: "1px solid var(--border)",
-            borderRadius: 8, boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
-            zIndex: 100,
-          }}
-        >
-          <div style={{
-            padding: "10px 12px", borderBottom: "1px solid var(--border)",
-            fontSize: 12, fontWeight: 700, color: "var(--text)",
-            display: "flex", justifyContent: "space-between", alignItems: "center",
-          }}>
-            <span>子代理 ({runs.length})</span>
-            <button
-              onClick={() => setOpen(false)}
-              style={{
-                background: "transparent", border: "none", cursor: "pointer",
-                color: "var(--text-muted)", fontSize: 14, padding: 0,
-              }}
-            >
-              ✕
-            </button>
+      {/* 面板：**常驻挂载** + 切 `is-open` 类名（A-1015b 约定），向上展开。
+          绝对定位在坞的上沿 → 高度增长不顶动输入框。 */}
+      <div className="dock-panel">
+        <div className={`collapse${open ? " is-open" : ""}`}>
+          <div className="dock-panel-card">
+            <div style={{
+              padding: "8px 11px", borderBottom: "1px solid var(--border)",
+              fontSize: 12, fontWeight: 700, color: "var(--text)",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span>子代理 ({runs.length})</span>
+              <button
+                onClick={onToggle}
+                title="收起"
+                style={{
+                  background: "transparent", border: "none", cursor: "pointer",
+                  color: "var(--text-muted)", fontSize: 14, padding: 0,
+                }}
+              >✕</button>
+            </div>
+            {/* 列表可滚动（子代理可能很多） */}
+            <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4, maxHeight: 340, overflow: "auto" }}>
+              {runs.slice().reverse().map((r) => {
+                const m = STATUS_META[r.status] ?? { txt: r.status, c: "var(--text-dim)" };
+                return (
+                  <button
+                    key={r.id}
+                    onClick={() => { setSelectedId(r.id); onToggle(); }}
+                    style={{
+                      width: "100%", display: "flex", alignItems: "center", gap: 8,
+                      padding: "8px 10px", borderRadius: 6, background: "var(--bg-hover)",
+                      border: "none", cursor: "pointer", textAlign: "left",
+                    }}
+                  >
+                    {/* A-980-R31：与设置页同一套头像（图标=身份），下拉与详情里能一眼对上人 */}
+                    <SubagentAvatar name={r.name} size={22} running={r.status === "running"} />
+                    <span style={{
+                      flex: 1, fontSize: 12, fontWeight: 600, color: "var(--text)",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {r.name}
+                    </span>
+                    <span style={{ fontSize: 11, color: m.c, flexShrink: 0 }}>{m.txt}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-            {runs.slice().reverse().map((r) => {
-              const m = STATUS_META[r.status] ?? { txt: r.status, c: "var(--text-dim)" };
-              return (
-                <button
-                  key={r.id}
-                  onClick={() => { setSelectedId(r.id); setOpen(false); }}
-                  style={{
-                    width: "100%", display: "flex", alignItems: "center", gap: 8,
-                    padding: "8px 10px", borderRadius: 6, background: "var(--bg-hover, #334155)",
-                    border: "none", cursor: "pointer", textAlign: "left",
-                  }}
-                >
-                  {/* A-980-R31：与设置页同一套头像（图标=身份），下拉与详情里能一眼对上人 */}
-                  <SubagentAvatar name={r.name} size={22} running={r.status === "running"} />
-                  <span style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, color: "var(--text)",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {r.name}
-                  </span>
-                  <span style={{ fontSize: 11, color: m.c, flexShrink: 0 }}>{m.txt}</span>
-                </button>
-              );
-            })}
-          </div>
+        </div>
       </div>
+
+      {/* 悬浮按钮：与「后台进程」同款（同一套 .dock-slot / .dock-pill） */}
+      <span className={dockSlotClassOf(open, faded)}>
+        <button
+          className="dock-pill"
+          onClick={onToggle}
+          title={active.length > 0 ? `${active.length} 个子代理运行中` : "查看子代理"}
+        >
+          <span style={{
+            display: "inline-block", width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+            background: active.length > 0 ? "#22c55e" : "var(--text-dim)",
+            animation: active.length > 0 ? "liveDot 1.5s ease-in-out infinite" : "none",
+          }} />
+          <span style={{ fontWeight: 600, flexShrink: 0 }}>子代理</span>
+          <span style={{
+            flexShrink: 0, padding: "0 6px", borderRadius: 8, lineHeight: "15px",
+            background: "var(--bg-hover)", border: "1px solid var(--border)",
+            color: "var(--text-muted)", fontSize: 10.5, fontWeight: 600,
+          }}>{runs.length}</span>
+          {/* A-1079：**不再有"横向延伸"的摘要段**（与「后台进程」同款：任何状态下都紧凑） */}
+          {/* A-1079：箭头收起态**朝上**（面板从上方浮出），展开态朝下 */}
+          <ChevronIcon size={10} rotate={open ? 90 : 270} style={{ flexShrink: 0 }} />
+        </button>
+      </span>
 
       {/* 详情弹窗 */}
       {selectedId && (

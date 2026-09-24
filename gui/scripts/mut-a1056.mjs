@@ -115,7 +115,13 @@ const MUTATIONS = [
   {
     name: "A-1056③ 激励语被搬回底部监测栏（用户在输入区读到系统闲话）",
     file: CHAT,
-    mutate: (t) => sub(t, "<SubAgentExpandButton />", "<SubAgentExpandButton />{pickCheer(0)}"),
+    /* A-1074 迁移：子代理坞条目从自闭合的 `<SubAgentExpandButton />` 改成带 `slot`/`onToggle`
+       的挂载点（悬浮坞重构）。旧锚点从那时起**未命中** —— 而 `sub()` 未命中是**静默返回原文**
+       （一个字没改），所以这条守卫当时已经变成"永远绿"的假守卫。
+       按铁律【重构要同步变异脚本的锚点】换成当前唯一形态（目标文件里的挂载点只有一处）。 */
+    mutate: (t) => sub(t,
+      "<SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot(\"subs\")} />",
+      "<SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot(\"subs\")} />{pickCheer(0)}"),
   },
 
   /* ── ④ 状态行必须真的接上线 ─────────────────────────────────────── */
@@ -129,11 +135,21 @@ const MUTATIONS = [
 
   /* ── ⑤ 入队路径：不打断是唯一默认 ───────────────────────────────── */
   {
-    name: "A-1054④ 入队路径改回抢占（打断正在跑的流）",
+    name: "A-1054④ 入队路径改回抢占（把 queue 换成 interrupt = 打断正在跑的流）",
+    file: CHAT,
+    /* A-1062 迁移：入队从「先算 queued 局部量再 enqueue」改成对象字面量内联，
+       旧锚点 `syncQueue(enqueue(interruptQueueRef.current, queued));` 已失配 ——
+       改用**分支内唯一**的字段组合（`text: queuedText` 只属于 send() 那条路）。 */
+    mutate: (t) => sub(t,
+      '        text: queuedText,\n        mode: "queue",',
+      '        text: queuedText,\n        mode: "interrupt",'),
+  },
+  {
+    name: "A-1054④ 入队路径外加 promote 抢先（把待发卡片顶到队首抢先执行）",
     file: CHAT,
     mutate: (t) => sub(t,
-      "syncQueue(enqueue(interruptQueueRef.current, queued));",
-      "syncQueue(promote(interruptQueueRef.current, queued.id));"),
+      "      syncQueue(enqueue(interruptQueueRef.current, {\n        id: nextQueueId(),\n        text: queuedText,",
+      "      syncQueue(promote(interruptQueueRef.current, nextQueueId()));\n      syncQueue(enqueue(interruptQueueRef.current, {\n        id: nextQueueId(),\n        text: queuedText,"),
   },
 
   /* ── ⑥ A-1058② 待发卡片的位置：必须在输入圆角容器**之上** ─────────── */
