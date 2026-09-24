@@ -6,6 +6,9 @@
  */
 import { describe, it, expect } from "vitest";
 import { inferModelCapabilities, isAggregatorGateway, sortEfforts, MODEL_CAPABILITIES, EFFORT_RANK } from "../../shared/gen/model-capabilities.js";
+/* A-1087：显示判据的唯一产地 —— 本节断言"界面读作 512K"必须调真函数，
+ * 不许在测试里再写一遍 `Math.round(x/1000)`（那正是被废掉的那个口径）。 */
+import { fmtTokens } from "../../gui/src/renderer/pages/contextMath.js";
 
 describe("inferModelCapabilities（模型 ID 推断，单一真相源）", () => {
   it("deepseek 全系识别为思考模型（含 v4-pro，此前漏判的回归锚点）", () => {
@@ -131,17 +134,18 @@ describe("MODEL_CAPABILITIES（数据表完整性）", () => {
  * 历史 bug：表里写成 131072，且 match 只写 "dots"（「dot4」这类写法不命中）→
  * 上游不回传窗口时被锁死显示 128K，用户反复刷新也改不动。
  *
- * A-1054：表内值 `524288` → `512000`（十进制口径）。断言不钉裸数字，而是钉
- * **界面实际读出的 K**（`context / 1000`），锁行为而非字面量 —— 改回 2^19 会让
- * 界面显示 "524K"，与本用例、与官方 512K、与用户设置三处互相矛盾。
+ * A-1054：表内值 `524288` → `512000`。
+ * A-1087：断言**改用真的显示函数**（`fmtTokens`），不再用 `Math.round(context/1000)` 这种
+ * "近似显示层"的代理 —— 显示层已改成按上限自适进制，任何一个进制都不再是全站口径，
+ * 代理也就失去了意义。行为锚点 = 用户看得见的那串字（「512K」）。
  */
 describe("A-975 dots 家族窗口（上游不回传时的兜底真值）", () => {
   it("dots / dots3 / dots.llm1 / dot4 / dot-4 均命中 note 家族且界面读作 512K", () => {
     for (const id of ["dots", "dots3", "dots.llm1", "dot4", "dot-4", "dots4-preview", "xhs/dot4"]) {
       const cap = inferModelCapabilities(id);
       expect(cap.vendor, id).toBe("note");
-      // 行为锚点：显示层口径是十进制 K（÷1000）
-      expect(Math.round((cap.context ?? 0) / 1000), id).toBe(512);
+      // 行为锚点：**真的**调显示函数（不是自己再算一遍近似值）
+      expect(fmtTokens(cap.context ?? 0, cap.context ?? 0), id).toBe("512K");
       expect(cap.context, id).toBe(512000);
     }
   });

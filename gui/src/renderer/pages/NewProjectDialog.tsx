@@ -18,6 +18,9 @@ import { PlusIcon } from "../components/Icon.js";
  * 所以在这里拦住就等于从源头堵住。
  */
 import { GROUP_MAX_PARTICIPANTS, isGroupRosterFull } from "../../../../shared/gen/groupRoster.js";
+// 上下文窗口的唯一 token 格式化（进制按上限自适应）：这里此前直接打印裸 token 数，`524288 ctx`
+// 读起来就是「524K」—— 与右栏「512K」对不上（用户原话：「没有 524K 容量的上下文，只有 512K」）。
+import { fmtTokens } from "./contextMath.js";
 
 export interface DraftProvider {
   key: string;
@@ -419,7 +422,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
                                     }}>
                                     <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.label}</span>
                                     {typeof m.ctx === "number" && m.ctx > 0 && (
-                                      <span style={{ fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{m.ctx} ctx</span>
+                                      <span style={{ fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{fmtTokens(m.ctx, m.ctx)} ctx</span>
                                     )}
                                     {active && <span style={{ fontSize: 10.5, color: "var(--success)", marginLeft: "auto" }}>✓ 已选</span>}
                                   </button>

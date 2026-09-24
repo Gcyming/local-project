@@ -26,6 +26,9 @@ import {
   PROBE_OUTCOME_HINT,
   classifyProbeOutcome,
 } from "../../shared/gen/model-capabilities.js";
+/* A-1087 迁移：上下文 K 的显示判据已收口到 contextMath 的 fmtTokens / pickTokenBase ——
+ * 本节 ③ 的"显示层"那两条必须调**真函数**，不许在这里自己写一遍 n/1000 之类的近似。 */
+import { fmtTokens, pickTokenBase } from "../../gui/src/renderer/pages/contextMath.js";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const read = (rel: string): string => readFileSync(`${ROOT}/${rel}`, "utf8");
@@ -185,13 +188,20 @@ describe("A-1054② 品牌图标：侧栏必须用应用图标，不许再是字
 });
 
 /* ══════════════════════════════════════════════════════════════════
- * ③ Agnes / 小红书 上下文口径（**行为**层：直接读表）
+ * ③ Agnes / 小红书 上下文口径（**两层**：表内值 + 它渲染出来的 K）
+ *
+ * A-1087 迁移说明：本节原来是「十进制 K（÷1000）必须与官方 K 一致」，判据挂在
+ * `context / 1000 === 512` 上。A-1087 把显示层改成**按上限自适进制**后，÷1000 不再是
+ * 全项目口径（它会把 524288 读成 524K）—— 那条判据的**判据家**搬到了
+ * `gui/src/renderer/pages/contextMath.ts` 的 `pickTokenBase` / `fmtTokens`。
+ * 这里保留两层：① 表内值（不改数值的约定）；② **用户看得见的那一层** ——
+ * 表内值经显示函数必须正好渲染成官方标注的 K（这才是 A-1054 当初真正想守的东西）。
  * ══════════════════════════════════════════════════════════════════ */
 
-describe("A-1054③ 上下文口径：十进制 K（÷1000）必须与官方标注的 K 一致", () => {
+describe("A-1054③ 上下文口径：表内值 + 它渲染出的 K 都必须等于官方标注", () => {
   const familyOf = (key: string) => MODEL_CAPABILITIES.find((v) => v.key === key);
 
-  it("agnes 家族 = 512000（官方文档写「512K」；写 524288 会在界面读成 524K）", () => {
+  it("agnes 家族 = 512000（A-1054 的数值约定；⚠️ 显示层现在两种进制都读 512K，见下一条）", () => {
     const f = familyOf("agnes");
     expect(f, "MODEL_CAPABILITIES 里没有 agnes 家族").toBeTruthy();
     expect(f?.context).toBe(512000);
@@ -204,10 +214,38 @@ describe("A-1054③ 上下文口径：十进制 K（÷1000）必须与官方标�
     expect(f?.context).toBe(512000);
   });
 
-  it("两个家族的 context / 1000 必须正好等于官方那个 K（本案 512）", () => {
+  /**
+   * ② 用户看得见的那一层（A-1087 新增）。判据挂在**显示函数**上，而不是某个数字口径：
+   * 官方标「512K」而界面显示别的数，就是 A-1054 那起事故的形态。
+   * 这条同时守住"表内值被改成非整数 K 的数"（如 512100 → 渲染成别的写法）。
+   */
+  it("两个家族的 context 经 fmtTokens 必须正好渲染成官方那个 K（本案 512K）", () => {
     for (const key of ["agnes", "note"]) {
-      expect((familyOf(key)?.context ?? 0) / 1000, `${key} 的显示口径 K 不等于 512`).toBe(512);
+      const cap = familyOf(key)?.context ?? 0;
+      expect(cap, `${key} 的 context 没取到`).toBeGreaterThan(0);
+      expect(fmtTokens(cap, cap), `${key} 渲染出的 K 不等于官方的 512K`).toBe("512K");
     }
+  });
+
+  /**
+   * ③ 回归钉子（A-1087）：**这次事故的原始触发值**。`config/global_config.json` 里用户自己
+   * 写的是 2^19，右栏上限就取它 —— 旧实现 `fmtK(n)=n/1000` 把它印成「524K」，
+   * 而厂商文档写 512K（用户原话：「没有 524K 容量的上下文，只有 512K」）。
+   * ⚠️ 这条**不能只用 `512000` 测**：512000 在两个进制下都是整数 512，恰好绕过了差异。
+   */
+  it("★ 回归：524288 必须读作 512K（不是 524K）—— 事故的原始触发值", () => {
+    expect(fmtTokens(524288, 524288)).toBe("512K");
+  });
+
+  /**
+   * ④ 另一半（A-1087）：**进制不许全局写死**。把显示层"干脆统一成 ÷1024"是同一个错误的镜像 ——
+   * 它会把这些厂商自己写的十进制 K 印成文档里查不到的数（128000 → 125K）。
+   * 判据必须"按上限反推"，而不是"选一个进制全站硬套"。
+   */
+  it("★ 回归：十进制口径的上限必须仍读作厂商写法（128K / 200K，不许变 125K / 195K）", () => {
+    expect(pickTokenBase(128000)).toBe(1000);
+    expect(fmtTokens(128000, 128000), "gpt-4o 的 128K 被二进制口径印成了 125K").toBe("128K");
+    expect(fmtTokens(200000, 200000), "claude 的 200K 被二进制口径印成了别的数").toBe("200K");
   });
 
   it("反空转：家族表非空且 key 唯一（否则上面几条全在比 undefined、恒真）", () => {
@@ -332,7 +370,16 @@ describe("A-1054④ 接线：待发指令队列必须真的接到界面上", () 
   });
 
   it("生成中也给得出「发送」按钮（否则鼠标用户无法插入指令，只能按回车）", () => {
-    expect(chat).toContain("(input.trim() || pendingImages.length > 0) && (");
+    /* A-1062 **迁移**（不删）：判据从内联 `(input.trim() || pendingImages.length > 0)`
+       搬到纯模块 `insertCopy.canSubmitSteer` —— 语义等价（"有文字或有图才给按钮"），
+       但从此与输入框 placeholder / 发送按钮 title 同源，且能喂真值表。
+       本意（有内容才给按钮）逐字保留，故这里只把判据**搬到新家**：
+         · 新判据在这条断言（接线）；
+         · 真值表在 `tests/gui/insert-copy.spec.ts`；
+         · 弄红它的是 `mut-a1062-insertcopy` M4（纯空格也能提交）。 */
+    expect(chat).toContain("canSubmitSteer(input, pendingImages.length) && (");
+    // 旧内联写法必须绝迹：留着就说明"能不能发"有两个产地，必然漂移
+    expect(chat).not.toContain("(input.trim() || pendingImages.length > 0) && (");
   });
 
   /* A-1056③：**「默认插入方式」这个全局开关已被撤掉**（连它的 localStorage 模块一起删）。
@@ -362,9 +409,15 @@ describe("A-1054④ / A-1056③ 默认插入行为：不打断是唯一默认", 
   it("入队路径不再读任何'插入方式'配置：loading/stopping 时一律 enqueue（不打断）", () => {
     // 入队分支里必须出现 enqueue(...)，且**不得**出现 promote(...) 抢先 —— 抢先只允许来自
     // 用户的显式「直接插入」动作（insertQueueItemNow）。
-    expect(chat).toContain("syncQueue(enqueue(interruptQueueRef.current, queued));");
-    // 入队那一段（if (loading || stopping) { ... }）里不许有 promote
-    const seg = chat.slice(chat.indexOf("if (loading || stopping) {"), chat.indexOf("if (loading || stopping) {") + 1600);
-    expect(seg).not.toContain("promote(");
+    // A-1062 迁移：入队从「先算 queued 局部量再 enqueue」改成「对象字面量内联」，
+    // 旧锚点 `syncQueue(enqueue(interruptQueueRef.current, queued));` 已失配 ——
+    // 改按**入队分支内部**断言（同一意图：这一支只排队、不抢先、也不投递）。
+    const at = chat.indexOf("if (loading || stopping) {");
+    expect(at, "找不到入队分支").toBeGreaterThan(-1);
+    const seg = chat.slice(at, at + 1600);
+    expect(seg, "入队分支必须调 enqueue").toContain("syncQueue(enqueue(interruptQueueRef.current, {");
+    expect(seg, "入队分支必须落在 queue 态（排队不直接发送）").toContain('mode: "queue"');
+    expect(seg, "入队分支不许出现 promote 抢先").not.toContain("promote(");
+    expect(seg, "入队分支不许顺手投递（否则「排队」这条语义再无出口）").not.toMatch(/chat\??\.steer\??\.\(/);
   });
 });

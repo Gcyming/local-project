@@ -12,6 +12,12 @@ import type { ProviderSummary, ModelSpec, ConfigOverview, ConfigFileInfo, SkillI
 import { ChevronIcon, PlusIcon, CheckIcon, CloseIcon, RefreshIcon } from "../components/Icon.js";
 import { confirmAsync } from "../dialog.js";
 import { readCollapseDurMs } from "../collapseTiming.js";
+/*
+ * 「上下文K / 输出K」两栏的换算与悬停文案 —— 进制按**该行存量值**自适应
+ * （`524288 ↔ 512`、`512000 ↔ 512`、`65536 ↔ 64`；旧实现写死 `×1000` 会把 524288
+ * 显示成 `524`，正是用户说的「没有 524K 容量的上下文，只有 512K」）。
+ */
+import { kInputBase, kInputToTokens, kInputTitle, tokensToKInput } from "./contextMath.js";
 import { REASONING_PRESETS, useReasoningPreset, saveReasoningPreset, EFFORT_LABEL, THINKING_PRESETS, useThinkingPreset, saveThinkingPreset } from "../reasoning.js";
 import {
   describeTierSpec, describeCacheRateSource,
@@ -875,8 +881,8 @@ export default function ProvidersPanel(): JSX.Element {
                         <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
                           <th style={{ padding: "5px 6px 5px 8px", width: "9%", whiteSpace: "nowrap" }}>启用</th>
                           <th style={{ padding: "5px 8px" }}>模型 ID</th>
-                          <th style={{ padding: "5px 6px", width: "9.5%", whiteSpace: "nowrap" }} title="上下文窗口，单位 K token（输入 1024 = 1048576 token）">上下文K</th>
-                          <th style={{ padding: "5px 6px", width: "9.5%", whiteSpace: "nowrap" }} title="最大输出，单位 K token（输入 64 = 65536 token）">输出K</th>
+                          <th style={{ padding: "5px 6px", width: "9.5%", whiteSpace: "nowrap" }} title="上下文窗口，单位 K token。换算的进制按**该行存量值**自适应（能写成整数 K 的进制优先）—— 见每行输入框的悬停提示。">上下文K</th>
+                          <th style={{ padding: "5px 6px", width: "9.5%", whiteSpace: "nowrap" }} title="最大输出，单位 K token。进制同「上下文K」，按该行存量值自适应（见输入框悬停提示）。">输出K</th>
                           <th style={{ padding: "5px 6px", width: "6.5%", whiteSpace: "nowrap" }} title="支持图片输入">图片</th>
                           {/*
                             A-994：**外层列表不再放单价输入框**（用户指令：删掉这两个框，只留折叠明细栏）。
@@ -913,20 +919,20 @@ export default function ProvidersPanel(): JSX.Element {
                                 }}>{m.id}</span>
                               </td>
                               <td style={{ padding: "5px 6px" }}>
-                                <input type="number" min={0} placeholder="auto" title="上下文窗口 (K token，输入 32 = 32768 token)"
-                                  value={m.context_window ? String(Math.round(m.context_window / 1000)) : ""}
+                                <input type="number" min={0} placeholder="auto"
+                                  title={kInputTitle("上下文窗口", kInputBase(m.context_window))}
+                                  value={tokensToKInput(m.context_window)}
                                   onChange={(e) => {
-                                    const v = e.target.value;
-                                    updateDraftModel(i, { context_window: v ? Number(v) * 1000 : undefined });
+                                    updateDraftModel(i, { context_window: kInputToTokens(e.target.value, kInputBase(m.context_window)) });
                                   }}
                                   style={cellInputStyle()} />
                               </td>
                               <td style={{ padding: "5px 6px" }}>
-                                <input type="number" min={0} placeholder="auto" title="最大输出 (K token，输入 8 = 8192 token)"
-                                  value={m.max_output ? String(Math.round(m.max_output / 1000)) : ""}
+                                <input type="number" min={0} placeholder="auto"
+                                  title={kInputTitle("最大输出", kInputBase(m.max_output))}
+                                  value={tokensToKInput(m.max_output)}
                                   onChange={(e) => {
-                                    const v = e.target.value;
-                                    updateDraftModel(i, { max_output: v ? Number(v) * 1000 : undefined });
+                                    updateDraftModel(i, { max_output: kInputToTokens(e.target.value, kInputBase(m.max_output)) });
                                   }}
                                   style={cellInputStyle()} />
                               </td>
@@ -1063,8 +1069,12 @@ export default function ProvidersPanel(): JSX.Element {
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>上下文 ctx_len (K)</div>
                     <input className="input-field" type="number" min={0} placeholder="auto（默认 8192）"
-                      value={edit.ctx_len ? String(Math.round(Number(edit.ctx_len) / 1000)) : ""}
-                      onChange={(e) => setEdit({ ...edit, ctx_len: e.target.value ? String(Number(e.target.value) * 1000) : "" })} />
+                      title={kInputTitle("上下文 ctx_len", kInputBase(edit.ctx_len))}
+                      value={tokensToKInput(edit.ctx_len)}
+                      onChange={(e) => {
+                        const t = kInputToTokens(e.target.value, kInputBase(edit.ctx_len));
+                        setEdit({ ...edit, ctx_len: t == null ? "" : String(t) });
+                      }} />
                   </div>
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>GPU 层数</div>
@@ -1074,8 +1084,12 @@ export default function ProvidersPanel(): JSX.Element {
                   <div>
                     <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>最大输出 (K)</div>
                     <input className="input-field" type="number" min={0} placeholder="auto"
-                      value={edit.max_output ? String(Math.round(Number(edit.max_output) / 1000)) : ""}
-                      onChange={(e) => setEdit({ ...edit, max_output: e.target.value ? String(Number(e.target.value) * 1000) : "" })} />
+                      title={kInputTitle("最大输出", kInputBase(edit.max_output))}
+                      value={tokensToKInput(edit.max_output)}
+                      onChange={(e) => {
+                        const t = kInputToTokens(e.target.value, kInputBase(edit.max_output));
+                        setEdit({ ...edit, max_output: t == null ? "" : String(t) });
+                      }} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 18 }}>
                     <input type="checkbox" checked={edit.vision} onChange={(e) => setEdit({ ...edit, vision: e.target.checked })} />

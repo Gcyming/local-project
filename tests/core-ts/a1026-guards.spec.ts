@@ -91,8 +91,10 @@ function fnBody(src: string, header: string): string {
 describe("① providerCtxWindow：本地端点不吃家族表兜底（A-1018 ③ 的喂入口）", () => {
   /* dots（小红书点点笔记）在家族表里是 vendor 级 `context: 512000`（官方公布 512K）。
      这正是用户实测过的那条：界面按 512K 显示、llama-server 实际只给了 8192。
-     ⚠️ A-1054：表内值由 `524288` 改为 `512000`（十进制口径，显示层 ÷1000 → 界面读作 512K）；
-     此常量随之同步，否则守卫会钉住旧值、对真实行为假绿。 */
+     ⚠️ A-1054：表内值由 `524288` 改为 `512000`；
+     ⚠️ A-1087：当时给的理由（显示层 ÷1000 → 写 2^19 会读成 524K）**已作废** —— 显示层改成
+       按上限自适进制后 524288 也读作 512K。此常量仍随之同步，因为它钉的是**表内值本身**，
+       表内值变了这条守卫就该跟着动，否则会钉住旧值、对真实行为假绿。 */
   const DOTS_TRAINING_512K = 512000;
   /** qwen 家族兜底（同一类病的小号版本：131072 vs 实际 -c 8192） */
   const QWEN_FAMILY = 131072;
@@ -212,9 +214,37 @@ describe("③ 跨进程契约：done 载荷的 windowCap（注释不会变红，
     }
   });
 
-  it("★ 每处 windowCap 都必须由 resolveSessionWindowCap 定（不许就地写别的来源）", () => {
+  it("★ 每处 windowCap 都必须由唯一决策函数定（引擎请求 2 处 + done 载荷 2 处，一处都不能少）", () => {
+    /* ── A-1084 迁移（本用例的**原意逐字保留**，只是把"产地"从 2 处扩到 4 处）──
+     * 原判据是「windowCap 出现次数应与 **done 路径数**一致（=2）」——因为当时 windowCap
+     * **只有一个用途**：done 载荷把它送回渲染层。
+     *
+     * A-1084 给它加了第二个用途：`ChatRequest.windowCap` → 引擎侧保险门（`planEngineSend`）
+     * 靠它判"装不装得下、发不发"。**缺了这一处，保险门永远放行 = 等于没做**（而界面上
+     * 完全看不出来，只是又回到"发出去才知道超"）。⇒ 产地从 2 变 4。
+     *
+     * ⚠️ 本用例锁的是**集合的完整性**（每个应存在的产地都在），不是"数量够"：
+     *    只数个数的话「done 丢一处 + 请求多一处」也能凑够 4 —— 而那正是 A-933 的形态
+     *    （当时 retry 有、stream 没有）。所以两组各自按**载体**枚举，再锁总数做绊线。 */
+    const reqs = [...MAIN.matchAll(/:\s*ChatRequest\s*=\s*\{/g)];
+    expect(
+      reqs.length,
+      `引擎请求应当恰好 2 条（stream / retry），实测 ${reqs.length} 条 —— 新增发送路径请同步本守卫`,
+    ).toBe(2);
+    for (const [i, m] of reqs.entries()) {
+      const from = m.index ?? 0;
+      expect(
+        MAIN.slice(from, from + 1400),
+        `第 ${i + 1} 条引擎请求缺 windowCap（保险门会永远放行 = 等于没做，且界面看不出来）`,
+      ).toContain("windowCap:");
+    }
+
+    // 产地总数 = 2 引擎请求 + 2 done 载荷（done 那两条的"是否在载荷内"由上一用例负责）
     const withCap = [...MAIN.matchAll(/windowCap:\s*([^\n]+)/g)].map((m) => m[1].trim());
-    expect(withCap.length, "windowCap 出现次数应与 done 路径数一致").toBe(2);
+    expect(
+      withCap.length,
+      `windowCap 产地数应为 4（2 引擎请求 + 2 done 载荷），实测 ${withCap.length} —— 增删任一载体都要回到本行同步`,
+    ).toBe(4);
     for (const expr of withCap) {
       expect(expr, `windowCap 的来源不是唯一决策函数：${expr}`).toContain("resolveSessionWindowCap(");
     }

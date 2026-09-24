@@ -18,7 +18,7 @@ import {
 import { alertAsync, confirmAsync } from "../dialog.js";
 import { SIDEBAR_OPEN_EVENT, requestSidebarOpen, type SidebarOpenPayload } from "./Markdown.js";
 import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
-import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments } from "./contextMath.js";
+import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments, fmtTokens } from "./contextMath.js";
 import { failTitle, failHint, failCodeName } from "./browserErrors.js";
 import BrainstormPanel from "./BrainstormPanel.js";
 import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT, resolveToolLabel } from "./ChatPanel.js";
@@ -2529,21 +2529,27 @@ function useAgentMaxContext(
             const m = list2.find((x: { id: string; ctx_len?: number }) => x.id === id);
             ctx = m?.ctx_len;
           } else {
-            // api:<provider_key>[:model_id] 或纯粹 model_id
+            /* `api:<provider_key>:<model_id>` / `api:<provider_key>` / 纯 `<model_id>` */
             const parts = choice.split(":");
-            const modelId = parts[parts.length - 1];
-            const key = parts.length >= 2 ? parts[0] : null;
-            if (key && api.providers.list) {
-               const providers = await api.providers.list().catch(() => [] as Array<{ key: string; models?: Array<{ id: string; context_window?: number }> }>);
-               const prov = providers.find((p: { key: string; models?: Array<{ id: string; context_window?: number }> }) => p.key === key);
-              const m = prov?.models?.find((x: { id: string; context_window?: number }) => x.id === modelId);
-              ctx = m?.context_window;
-            } else if (!key && api.providers.list) {
-              // 无 key 时尝试在全部 provider 中查找
-              const providers = await api.providers.list().catch(() => [] as Array<{ key: string; models?: Array<{ id: string; context_window?: number }> }>);
-               for (const p of providers) {
-                 const m = p.models?.find((x: { id: string; context_window?: number }) => x.id === modelId);
-                if (m) { ctx = m.context_window; break; }
+            /* ⚠️ 这里曾写 `key = parts[0]` —— 而 `parts[0]` 恒为字面量 `"api"`：
+             * 于是 `providers.find(p => p.key === "api")` **永远命中不了任何供应商**，
+             * 那段「按 provider 规格取 context_window」的分支是**死代码**，
+             * 上限只能落到运行时探测的兜底值（甚至 0）。表现为面板上的上限与
+             * 供应商配置里写的规格对不上（本仓实测：配置 1M，界面 512K/524K）。
+             * `api:` 是**格式标记**，不是供应商 key —— key 在第二段。 */
+            const isApiForm = parts[0] === "api";
+            const modelId = isApiForm ? (parts[parts.length - 1] ?? "") : choice;
+            const key = isApiForm && parts.length >= 3 ? parts[1] : null;
+            const providers = await api.providers.list().catch(() => [] as Array<{ key: string; models?: Array<{ id: string; context_window?: number }> }>);
+            if (key) {
+              const prov = providers.find((p: { key: string }) => p.key === key);
+              const hit = prov?.models?.find((x: { id: string; context_window?: number }) => x.id === modelId);
+              // 供应商 key 命中但没这个模型 → 不跨供应商乱找（那会把别家的窗口扣到本模型头上）
+              ctx = hit?.context_window;
+            } else {
+              for (const p of providers) {
+                const m = p.models?.find((x: { id: string; context_window?: number }) => x.id === modelId);
+                if (m?.context_window && m.context_window > 0) { ctx = m.context_window; break; }
               }
             }
           }
@@ -3193,6 +3199,12 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
     );
   };
 
+  /* 本会话窗口上限的**唯一**本地取值（流式事件下发的权威值优先，其次 Agent/模型解析值）。
+     上下文进度条、距压缩余量、会话指标、明细四项构成全部用它 —— 既是数值来源，也是
+     **K 进制**的来源（`fmtTokens(n, cap)`）：同屏 token 数必须同进制，否则「64K/512K」
+     与「累计 447K」会像两组不相干的量。 */
+  const capNow = liveCap > 0 ? liveCap : maxCtx;
+
   return (
     <div className="right-tab-pane" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <div className="right-pane-head">
@@ -3234,7 +3246,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
             <span>会话指标</span>
             {isStreaming && <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", animation: "thinkGlow 1.4s ease-in-out infinite", flexShrink: 0 }} />}
           </div>
-          <MetricsGrid usage={usage} pref={ledgerPref} live={{ reply: liveTurn.reply, reason: liveTurn.reason, elapsedMs: liveElapsed }} />
+          <MetricsGrid usage={usage} pref={ledgerPref} cap={capNow} live={{ reply: liveTurn.reply, reason: liveTurn.reason, elapsedMs: liveElapsed }} />
           <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.5, display: "flex", alignItems: "center", gap: 5 }}>
             {isStreaming
               ? "流式中 · 指标随本轮输出实时刷新"
@@ -3317,10 +3329,9 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
         <div style={{ borderBottom: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
           <ContextWindowBar
             used={liveUsed}
-            cap={liveCap > 0 ? liveCap : maxCtx}
+            cap={capNow}
             // A-974：距压缩余量 = 触发阈值(cap×ratio) - 当前占用（真实同源；旧值为硬编码 0 → 恒显"距压缩 0"，误导）
             compressCount={(() => {
-              const capNow = liveCap > 0 ? liveCap : maxCtx;
               if (capNow <= 0 || liveUsed <= 0) { return 0; }
               const thr = capNow * acRatio;
               return Math.max(0, Math.round(thr - liveUsed));
@@ -3343,7 +3354,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
               收起时又是瞬间塌陷。现在整块走 .collapse，卡片高度连续伸展/收缩。 */}
           <div className={`collapse${detailOpen ? " is-open" : ""}`}>
             <div>
-              <UsageBreakdown usage={usage} live={liveTurn} detailOpen={detailOpen} onToggleDetail={() => setDetailOpen((v) => !v)} />
+              <UsageBreakdown usage={usage} live={liveTurn} detailOpen={detailOpen} cap={capNow} onToggleDetail={() => setDetailOpen((v) => !v)} />
             </div>
           </div>
         </div>
@@ -3478,7 +3489,7 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
           <span style={{ width: 6, height: 6, borderRadius: 999, background: status.cls }} />
           {status.txt}
         </span>
-        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{fmtK(used)}/{cap > 0 ? fmtK(cap) : "-"}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{fmtTokens(used, cap)}/{cap > 0 ? fmtTokens(cap, cap) : "-"}</span>
       </div>
       <div style={{ position: "relative", margin: "2px 0 10px", height: 8, borderRadius: 999, background: "var(--input-bg, #161b22)", border: "1px solid var(--border)", overflow: "hidden" }}>
         {/* A-975：压缩触发阈值刻度线——位置与标签都跟随设置的 ratio（不再写死 80%） */}
@@ -3492,7 +3503,7 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
         <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 4 }}>
           <span style={{ fontSize: 10, color: "var(--text-muted)", flexShrink: 0 }}>构成</span>
           <div style={{ flex: 1, display: "flex", height: 4, borderRadius: 999, overflow: "hidden", background: "var(--input-bg)" }}>
-            {comps.map((c) => c.pct > 0 && <div key={c.label} title={`${c.label} ${fmtK(c.n)}`} style={{ width: `${c.pct}%`, background: c.color }} />)}
+            {comps.map((c) => c.pct > 0 && <div key={c.label} title={`${c.label} ${fmtTokens(c.n, cap)}`} style={{ width: `${c.pct}%`, background: c.color }} />)}
           </div>
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
             {comps.filter((c) => c.n > 0).map((c) => (
@@ -3508,7 +3519,7 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
         <div style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 4, marginTop: 2 }}>
           <span style={{ fontSize: 10, color: "var(--text-muted)", flexShrink: 0 }}>来源</span>
           <div style={{ flex: 1, display: "flex", height: 4, borderRadius: 999, overflow: "hidden", background: "var(--input-bg)" }}>
-            {bucketComps(buckets).map((c) => c.pct > 0 && <div key={c.label} title={c.label + " " + fmtK(c.n)} style={{ width: c.pct + "%", background: c.color }} />)}
+            {bucketComps(buckets).map((c) => c.pct > 0 && <div key={c.label} title={c.label + " " + fmtTokens(c.n, cap)} style={{ width: c.pct + "%", background: c.color }} />)}
           </div>
           <div style={{ display: "flex", gap: 6, flexShrink: 0, overflow: "hidden" }}>
             {bucketComps(buckets).filter((c) => c.n > 0).map((c) => (
@@ -3526,19 +3537,22 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
           <ChevronIcon size={10} rotate={detailOpen ? 90 : 0} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
           明细 {detailOpen ? "收起" : "展开"}
         </button>
-        <span>{compressCount > 0 ? `距压缩 ${fmtK(compressCount)}` : "距压缩 已达阈值"}</span>
+        <span>{compressCount > 0 ? `距压缩 ${fmtTokens(compressCount, cap)}` : "距压缩 已达阈值"}</span>
       </div>
     </div>
   );
 }
 
-function MetricsGrid({ usage, live, pref = "auto" }: {
+function MetricsGrid({ usage, live, pref = "auto", cap = 0 }: {
   usage: AccumUsage;
   /** A-975：本轮在途量（正文/思考 token + 已耗时）——流式期间「运行时间 / 累计 tokens」也随之走字，
    *  不再整轮只在 done 跳一次（用户反馈"各项数值刷新慢"）。 */
   live?: { reply: number; reason: number; elapsedMs: number };
   /** A-990-D：「通用」设置里手选的消费币种；`auto` = 沿用下面的成本占比推断 */
   pref?: LedgerCurrencyPref;
+  /** 本会话窗口上限 —— 只为**选 K 进制**（512K 还是 524K 读法由它定）。
+   *  同一块面板里所有 token 数必须传同一个 cap，否则同屏出现两种进制。 */
+  cap?: number;
 }): JSX.Element {
   const liveReply = live?.reply ?? 0;
   const liveReason = live?.reason ?? 0;
@@ -3564,7 +3578,7 @@ function MetricsGrid({ usage, live, pref = "auto" }: {
   const items: Array<[string, string, boolean?]> = [
     ["平均命中", usage.requests === 0 && !inFlight ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
     ["运行时间", fmtMsSmart(usage.elapsedMs + liveElapsed)],
-    ["累计 tokens", fmtK(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens + liveReply + liveReason)],
+    ["累计 tokens", fmtTokens(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens + liveReply + liveReason, cap)],
     ["会话费用", usage.requests === 0 ? "—（未配置单价）" : usage.costUsd === 0 ? "—" : formatUsdAs(usage.costUsd, ledgerCurrency)],
     ["请求数", String(usage.requests)],
     ["", inFlight ? "含本轮在途" : "—"],
@@ -3581,11 +3595,13 @@ function MetricsGrid({ usage, live, pref = "auto" }: {
   );
 }
 
-function UsageBreakdown({ usage, live, detailOpen, onToggleDetail }: {
+function UsageBreakdown({ usage, live, detailOpen, onToggleDetail, cap = 0 }: {
   usage: AccumUsage;
   /** A-974-R6：本轮在途输出估算（正文/回复 + 思考），并入明细让数值随流式刷新 */
   live?: { reply: number; reason: number };
   detailOpen: boolean; onToggleDetail: () => void;
+  /** 本会话窗口上限 —— 见 `MetricsGrid.cap` 的说明（同一面板同一进制） */
+  cap?: number;
 }): JSX.Element {
   const liveReply = live?.reply ?? 0;
   const liveReason = live?.reason ?? 0;
@@ -3607,7 +3623,7 @@ function UsageBreakdown({ usage, live, detailOpen, onToggleDetail }: {
   const pOther = total > 0 ? Math.max(0, 100 - pPrompt - pReply - pReason) : 0;
 
   const pct = (n: number): string => `${n.toFixed(0)}%`;
-  const dashOr = (n: number, unit = ""): string => n === 0 ? "—" : `${fmtK(n)}${unit}`;
+  const dashOr = (n: number, unit = ""): string => n === 0 ? "—" : `${fmtTokens(n, cap)}${unit}`;
 
   return (
     <div>
@@ -3664,13 +3680,6 @@ function LegendDot(props: { color: string; label: string; value: string; pct: nu
       <span style={{ color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{props.value}{props.pct > 0 ? ` ${props.pct.toFixed(0)}%` : ""}</span>
     </div>
   );
-}
-
-function fmtK(n: number): string {
-  if (!Number.isFinite(n)) return "0";
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 function fmtMsSmart(ms: number): string {
