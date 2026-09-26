@@ -18,6 +18,11 @@ import { clearSubagentRuns, mergedSubagentRuns, syncSubagentRuns } from "./subag
 import { startMainWatchdog, markMainActivity } from "./watchdog.js";
 // A-986：意外退出保底（脏标记判定异常退出 + 清障 + 留证 → data/crash-report.log）
 import { sweepAfterCrash, markRunning, markCleanExit } from "./crashGuard.js";
+// A-1110：开发期 CDP 端口的选择与发布（**唯一出处**：env 覆盖 / 占用顺延 / 临时端口 / 落盘）
+import {
+  DEVTOOLS_PORT_ENV, DEVTOOLS_PORT_SCAN,
+  listeningPortsSync, resolveDevtoolsPort, writeDevtoolsPortFile, parseDevToolsActivePort,
+} from "./devtoolsPort.js";
 
 // A-937：退出行为（模块级，IPC handlers 与窗口 close 拦截共用）
 let exitModeStore: "quit" | "background" = "quit";
@@ -101,32 +106,108 @@ const saveExitMode = (mode: "quit" | "background"): void => {
   try { writeFileSync(exitModePath(), mode, "utf8"); } catch { /* ignore */ }
 };
 
-// 全局子代理默认模型（对齐 Claude Code subagents model: frontmatter 全局版，A-942）
-// 持久化 userData/subagent-model.json；空串 = 不覆盖（回退 inherit）
-let subagentDefaultModel = "";
-const subagentModelPath = () => join(app.getPath("userData"), "subagent-model.json");
-try {
-  subagentDefaultModel = readFileSync(subagentModelPath(), "utf8").trim();
-} catch { subagentDefaultModel = ""; }
-const saveSubagentDefaultModel = (model: string): void => {
-  subagentDefaultModel = model;
-  try { writeFileSync(subagentModelPath(), model, "utf8"); } catch { /* 落盘失败不阻断 */ }
+// 全局子代理**执行模型池**（A-942 的单值默认模型 → A-1097 可多选）。
+// 持久化 userData/subagent-models.json = { models: string[] }；**池首 = 执行兜底档**（不传 model 时用它）。
+// ⚠️ 空池 ≠ "继承"：空池表示**不指定**，由 SubAgentManager.spawn 回退到目标 Agent 模型（inherit 是占位不是档位）。
+const subagentModelsPath = () => join(app.getPath("userData"), "subagent-models.json");
+/** 旧版单值文件（A-942~A-1096）：**只读一次做兼容迁移**，此后不再写它。 */
+const legacySubagentModelPath = () => join(app.getPath("userData"), "subagent-model.json");
+let subagentDefaultModels: string[] = (() => {
+  try {
+    const raw = JSON.parse(readFileSync(subagentModelsPath(), "utf8")) as { models?: unknown };
+    if (Array.isArray(raw?.models)) { return normalizeModelPool(raw.models); }
+  } catch { /* 无新文件 → 走旧单值兼容 */ }
+  try {
+    return normalizeModelPool([readFileSync(legacySubagentModelPath(), "utf8")]);
+  } catch { return []; }
+})();
+const saveSubagentDefaultModels = (models: unknown): void => {
+  subagentDefaultModels = normalizeModelPool(models);
+  try { writeFileSync(subagentModelsPath(), JSON.stringify({ models: subagentDefaultModels }), "utf8"); } catch { /* 落盘失败不阻断 */ }
 };
 
-// 用户选定的子代理（设置→子代理菜单勾选的自建 agent，A-918+）
-// 持久化 userData/subagent-selection.json；自动派发优先级 = 用户选定子代理 > slime 自建专家
-let subagentSelectedAgentIds: string[] = [];
-const subagentSelectionPath = () => join(app.getPath("userData"), "subagent-selection.json");
-try {
-  const rawSel = JSON.parse(readFileSync(subagentSelectionPath(), "utf8")) as { selectedAgentIds?: unknown };
-  if (Array.isArray(rawSel.selectedAgentIds)) {
-    subagentSelectedAgentIds = rawSel.selectedAgentIds.filter((x): x is string => typeof x === "string");
+/* A-1100：子代理执行模型池的**写入链路** —— 必须住在**模块级**，不许再埋进惰性的 `ensureServicesOnce()`。
+ *
+ * 病灶（用户可见）：「界面保存按钮无法实现功能」（点了一点反应都没有）。三条证据互洽：
+ *   ① 通道此前只在惰性块里 `ipcMain.handle` 注册，而该块要等技能扫描 / scheduler / SILAM 一串
+ *      重活跑完（实测好几秒）⇒ 冷启动窗口内点保存 = **通道未注册**；
+ *   ② 渲染层是**裸 `await`** ⇒ `ipcRenderer.invoke` reject（`No handler registered for
+ *      'slime:resident:subagent:setModels'`）后 `setModelModal(false)` 不执行 ⇒ 弹层卡住不关；
+ *   ③ `userData/subagent-models.json` **磁盘上根本不存在** ⇒ 保存从未真正到达主进程。
+ *   这与 A-1048 修的 `slime:resident:state` 是**同一个坑**（同一块惰性初始化）。
+ *
+ * 修法：**让写链路不依赖管理器**。真值落在模块级 `subagentDefaultModels`（= 唯一持久化真相源），
+ *   管理器就绪（`subagentsRef`）时同步推一份；管理器尚未创建时，它在创建时会读本变量播种
+ *   （见 `ensureServicesOnce` 里的 `subagents.setDefaultModels(subagentDefaultModels)`）。
+ *   ⇒ 任何时刻点保存都**真的生效**，不存在「注册了但写不进去」的半吊子态。
+ *   通道本身在 `registerIpcHandlers()` 启动期注册（见该函数内的 A-1100 注释）。
+ */
+
+/** 子代理执行模型取值的**唯一**归一化实现（单值 / 多选两条通道共用）。
+ *  顺手治好两处历史坑：① `api:<key>.<model>`（点号）自动纠正为冒号分隔；
+ *  ② 供应商 key 允许中文 —— 此前 `[A-Za-z0-9_-]+` 把「小红书」这类中文 key 判为非法。 */
+const normalizeSubagentModelValue = (raw: string): { ok: true; value: string } | { ok: false; error: string } => {
+  const s = (raw ?? "").trim();
+  const normalized = s && s.startsWith("api:") && !s.includes(":")
+    ? (() => {
+        const rest = s.slice(4);
+        const dotIdx = rest.lastIndexOf(".");
+        if (dotIdx > 0 && /[A-Za-z0-9_.\-\u4e00-\u9fa5]+$/.test(rest)) {
+          return `api:${rest.slice(0, dotIdx)}:${rest.slice(dotIdx + 1)}`;
+        }
+        return s;
+      })()
+    : s;
+  if (!/^(api:[A-Za-z0-9_.\-\u4e00-\u9fa5]+(:[^\s:]+)?|local:[A-Za-z0-9_.\-\u4e00-\u9fa5]+|inherit|)$/.test(normalized)) {
+    return {
+      ok: false,
+      error: `非法模型格式：${raw}\n\n正确格式示例：\n  api:供应商名:模型名（如 api:openai:gpt-5）\n  api:供应商名（用该供应商默认模型）\n  api:小红书:dots3-note-prev（中文 key + 模型名）\n  local:本地模型名\n  inherit（沿用父 Agent 模型）\n  留空（不设置）`,
+    };
   }
-} catch { subagentSelectedAgentIds = []; }
-const saveSubagentSelection = (ids: string[]): void => {
-  subagentSelectedAgentIds = ids;
-  try { writeFileSync(subagentSelectionPath(), JSON.stringify({ selectedAgentIds: ids }), "utf8"); } catch { /* 落盘失败不阻断 */ }
+  return { ok: true, value: normalized };
 };
+
+/** 应用一个新的执行模型池：落盘（模块级真值）→ 管理器就绪则同步 → 广播刷新。
+ *  ⚠️ 顺序有意：**先落真值再推管理器**（管理器未就绪时由创建期播种兜住），
+ *  这样"保存成功"与"真的生效"才是同一件事。 */
+const applySubagentModels = (models: unknown): void => {
+  saveSubagentDefaultModels(models);                      // 模块级真值 + 磁盘（唯一真相源）
+  subagentsRef?.setDefaultModels(subagentDefaultModels);  // 管理器就绪才推；未就绪由创建时播种
+  mainWindow?.webContents.send("slime:resident:update", null);
+};
+
+/** A-1097：多选执行模型池（**池首 = 执行兜底档**）。
+ *  逐项归一化，**任一项非法即整体拒绝并指名是哪一项** —— 不做「静默丢弃非法项」：
+ *  静默丢弃 = 用户以为选上了、实际没生效（本项目的静默失效家族）。 */
+const setSubagentModels = (models: unknown): { ok: true; defaultModels: string[] } | { ok: false; error: string } => {
+  const list = Array.isArray(models) ? models : [];
+  const out: string[] = [];
+  for (const [i, item] of list.entries()) {
+    const r = normalizeSubagentModelValue(typeof item === "string" ? item : "");
+    if (!r.ok) { return { ok: false, error: `第 ${i + 1} 项：${r.error}` }; }
+    // "inherit" 是"不覆盖"的占位，不是档位 ⇒ 不进池（与 normalizeModelPool 同口径）。
+    if (r.value && r.value !== "inherit") { out.push(r.value); }
+  }
+  applySubagentModels(out);
+  return { ok: true, defaultModels: [...subagentDefaultModels] };
+};
+
+/** 旧通道（单值）：语义 = **把池子整体换成"只有一个档位"的池**。
+ *  ⚠️ 刻意不做成"只改池首"：那会造出"面板显示池首新值、池里其余档位还在"的两套真相源。
+ *  旧 UI 调它时，用户意图本来就是"执行档就这一个"。 */
+const setSubagentDefaultModel = (model: unknown): { ok: true; defaultModel: string; defaultModels: string[] } | { ok: false; error: string } => {
+  const r = normalizeSubagentModelValue(typeof model === "string" ? model : "");
+  if (!r.ok) { return { ok: false, error: r.error }; }
+  applySubagentModels(r.value ? [r.value] : []);
+  return { ok: true, defaultModel: r.value, defaultModels: [...subagentDefaultModels] };
+};
+
+// A-1096：`userData/subagent-selection.json` **已退役**（原 A-918+ 的"用户勾选子代理"独立文件）。
+// 退役原因：它是**第二套真相源** —— Agent 设置里没有对应开关，用户在这个文件里勾了什么、
+// 在 Agent 详情里完全看不出来；且默认为空 ⇒ 自建 Agent 一个都派不出去（"配好了也派不到"）。
+// 现在授权判据唯一收敛到 `config/agents.json` 的 `subagent_dispatch` 字段。
+// ⚠️ 不做静默迁移也不删旧文件：新语义是"缺省即允许"，比旧清单**更宽**，不会让任何 Agent 失去能力；
+//    用户若想收回授权，在 Agent 设置里关掉即可（开关的初值按字段缺省 = 允许回显）。
 /** 托盘图标提示语：随主窗口可见性变化（用户一眼能看出"它还在后台"）。 */
 const syncTrayTooltip = (): void => {
   try {
@@ -249,8 +330,20 @@ import { capabilityMatchesModel, clearLocalCapabilityCache, getLocalCapability, 
 import { resolveWindowCap } from "../../../core-ts/src/model_introspect.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
-import { SubAgentManager, type SubagentDefinition } from "../../../core-ts/src/services/subagent.js";
-import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setSidebarOpener, setScreenController, setTrashService } from "../../../core-ts/src/tools/builtin.js";
+import { SubAgentManager, DEFAULT_EXEC_BUDGET_MS, normalizeModelPool, sanitizeSubagentRunName } from "../../../core-ts/src/services/subagent.js";
+import {
+  dispatchableAgentIds,
+  dispatchableSubagentDefinitions,
+  groupSubagentCatalog,
+  isSubagentDispatchAllowed,
+  renderSubagentCatalogLines,
+  renderSubagentModelSegments,
+} from "../../../core-ts/src/services/subagentCatalog.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setScreenController, setTrashService } from "../../../core-ts/src/tools/builtin.js";
+// A-1121（②）：右栏打开请求的归一是**纯函数、唯一出处**（core-ts），主进程只做转发
+import { setSidebarOpener, normalizeSidebarOpenRequest } from "../../../core-ts/src/sidebarOpen.js";
+// A-1122（③）：子代理会话前缀的唯一出处（此前 gui/main 与 todoStore 各有一份字面量）
+import { SUBAGENT_SESSION_PREFIX } from "../../../core-ts/src/services/subagent.js";
 import { setBrowserAdapter } from "../../../core-ts/src/tools/browser.js";
 import { BrowserBridge } from "./browserBridge.js";
 import { StreamChunkBatcher } from "./streamBatch.js";
@@ -280,8 +373,7 @@ import { loadUsage, clearUsage, rewriteUsageCosts } from "../../../core-ts/src/s
 import { getLlmGatewayManager, readLlmGatewayConfig, type LlmGatewayConfig } from "./llmGateway.js";
 import { AgentRegistry, type AgentState } from "../../../core-ts/src/services/agents.js";
 import { createEngine, buildSilamTraitSignals } from "../../../core-ts/src/services/engine.js";
-import { ChatClient, AnthropicClient } from "../../../core-ts/src/llm/client.js";
-import { inferApiFormat, type RouteEntry } from "../../../core-ts/src/router.js";
+import { createRouteClient, type RouteEntry } from "../../../core-ts/src/router.js";
 import { chromiumFetch } from "./providers.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
 import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult, ResidentState, AgentProcsListResult, AgentProcsStopRequest, AgentProcsStopResult } from "../shared/ipc.js";
@@ -297,6 +389,10 @@ import {
 import { overview as configOverview, readConfigFile, writeConfigFile, setMcpEnabled, setSkillEnabled, deleteSkill, deleteMcp, skillDirPath } from "./config_files.js";
 // A-980-R26：系统通知 + 可定制提示音（设置 → 通用）
 import { initNotify, notifyUser, readNotifyConfig, writeNotifyConfig, importSound, clearSound, readSoundData, customSoundPath } from "./notify.js";
+// A-1108：全局降级池（设置 → 通用）。判据唯一出处是 core-ts 的 fallbackPool 模块
+// —— 主进程只做「读写 + 消毒」，**不许**在这里再写一份「哪些条目算可用」的规则
+// （引擎每次解析路由时读同一个文件，两边的口径因此不可能漂移）。
+import { readFallbackPool, writeFallbackPool } from "../../../core-ts/src/services/fallbackPool.js";
 // A-1092：任务栏图标归属 —— AUMID 是**进程级**身份，必须在 `whenReady` 之前、且早于任何
 // 窗口/托盘创建就设好（`initNotify` 里那次是窗口创建前调用，仍晚于 Electron 的初始身份绑定）。
 import { APP_AUMID } from "./notifyIdentity.js";
@@ -316,6 +412,7 @@ import {
   DesktopScreenBackend,
   AndroidScreenBackend,
   setImageOptimizer,
+  setImageDiffer,
 } from "../../../core-ts/src/screen/index.js";
 import { MemoryStore, resolveMemoryPaths, setLancedbModuleLoader } from "../../../core-ts/src/memory/store.js";
 import { requireLancedb, lancedbComponentStatus, type LancedbComponentStatus } from "./__stubs/lancedb-stub.js";
@@ -445,23 +542,50 @@ let subagentsRef: SubAgentManager | null = null;
 function subagentCatalogSegment(): string[] {
   const cat = subagentsRef?.catalog?.() ?? [];
   if (cat.length === 0) { return []; }
-  const user = cat.filter((c) => c.source === "user");
-  const builtin = cat.filter((c) => c.source !== "user");
+  // A-1096：分组与标签改走 `services/subagentCatalog.ts` 的**唯一出处**。
+  // 此前这里与 `tools/builtin.ts::subagentCatalogHint` 各写一遍分组 + 标签 ⇒ 一处改了另一处没改，
+  // 模型/用户会看到两套互相矛盾的说法（同一语义两个渲染产地必须同源）。
   const lines = [
     "## 可用子代理（delegate_subagent）",
     "你可以把**独立、自包含**的子任务交给下列子代理并行执行（各自独立上下文与工具面，产出会作为工具结果交回给你验收）：",
+    ...renderSubagentCatalogLines(groupSubagentCatalog(cat)),
   ];
-  if (user.length > 0) {
-    lines.push("用户选定的子代理（优先用）：");
-    for (const c of user) { lines.push(`- ${c.name}：${c.description}`); }
-  }
-  if (builtin.length > 0) {
-    lines.push("内置专家子代理：");
-    for (const c of builtin) { lines.push(`- ${c.name}：${c.description}`); }
-  }
   lines.push('用法：`delegate_subagent({ agent: "<上面的名字>", task: "目标 + 期望输出格式 + 边界" })`；不点名则由系统按任务语义自动选。');
   lines.push("派发后**必须验收**产出：对照目标核对是否真的完成、产物是否落地；存疑就点名同一子代理追问，或自己补齐——不要把子代理的结论不加核对地当事实转述给用户。");
-  return [lines.join("\n")];
+  // A-1097：执行模型池也必须进上下文，否则用户在设置页多选了一堆档位、模型却一个都不知道
+  // ⇒ "能设置却没人用"（死开关）。池首是兜底档，其余供按子任务难度点名。作为**独立段**追加（自己带 ## 标题）。
+  return [lines.join("\n"), ...renderSubagentModelSegments(subagentsRef?.getDefaultModels?.() ?? subagentDefaultModels)];
+}
+
+/**
+ * A-1106：把「当前允许被派发的 Agent」重新登记进子代理管理器。
+ *
+ * ⚠️ **为什么必须是可重入的**（而不是启动时算一次就完）：Agent 的**增删改**都会改变
+ * 「谁可以被派发」—— 新建 / fork / 删除 / 改设置 / 导入身份包。此前本函数只活在启动期
+ * 那一段惰性装配里（外加「设置页勾选」一个入口），于是**新建出来的 Agent 永远进不了清单**：
+ * 用户配好了子代理、主 Agent 却在系统提示里看不到它、也就永远调不动
+ * （症状是「整个任务全是主 Agent 一个智能体做」，而日志与门禁全绿）。
+ *
+ * ⚠️ 参数**显式传入管理器**而不是只读 `subagentsRef`：启动期那次调用发生在
+ * `subagentsRef = subagents` **之前**，只读模块级引用会静默拿到 `null`
+ * ⇒ 「改了但没生效」——正是本项目最忌讳的一类缺陷（见 ref-engineering §23）。
+ *
+ * 返回是否真的登记成功，便于调用方（与测试）断言。
+ */
+function syncDispatchableSubagents(mgr: SubAgentManager | null = subagentsRef): boolean {
+  if (!mgr) {
+    // 不静默：管理器未装配时如实出声。否则「清单没刷新」会被误读成「没有可派发的 Agent」。
+    console.warn("[subagent] 管理器尚未装配，本次「可派发清单」刷新被跳过（装配时会统一登记一次）");
+    return false;
+  }
+  const defs = dispatchableSubagentDefinitions(agentRegistry?.loadedAgents ?? []);
+  mgr.setUserSelected(defs);
+  if (defs.length > 0) {
+    console.log(`[subagent] 已登记 ${defs.length} 个可派发 Agent 子代理：${defs.map((d) => d.name).join("、")}`);
+  } else {
+    console.log("[subagent] 当前没有被授权派发的自建 Agent（均已在 Agent 设置里关闭）—— 仅内置专家可用");
+  }
+  return true;
 }
 
 
@@ -895,7 +1019,7 @@ import {
 import { loadHistoryForSession, loadHistoryForSessionBefore, clearSessionHistory, clearLegacySessionHistory } from "../../../core-ts/src/services/history.js";
 import { formatSpeakerBlob, isSpeechFailure, expandHistoryRecord, type ExpandedMessage } from "../../../core-ts/src/services/grouptalkTranscript.js";
 import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO, SUMMARIZE_INPUT_CAP, HISTORY_LOAD_LIMIT, buildCompactedHistory, truncateTurnAligned } from "../../../core-ts/src/services/context_compress.js";
-import { acceptSummary, formatCannotFit, formatRescueHint, pickRescueModel, INITIAL_BREAKER, isRealShrink, nextBreakerState, planSend, validateHistory, type BreakerState, type CapCandidate, type LoopMessage, type RescuableModel } from "../../../core-ts/src/services/context_loop.js";
+import { acceptSummary, countTurns, formatCannotFit, formatRescueHint, pickRescueModel, INITIAL_BREAKER, isRealShrink, nextBreakerState, planSend, validateHistory, type BreakerState, type CapCandidate, type LoopMessage, type RescuableModel } from "../../../core-ts/src/services/context_loop.js";
 import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
 // A-980-R32：点击路径的多基准候选解析（纯逻辑，vitest 直测）
 import { buildTargetCandidates, normalizeTargetPath } from "./targetPath.js";
@@ -929,7 +1053,9 @@ const pendingPerms = new Map<string, (decision: PermissionDecision) => void>();
  * 实测后果：子代理在等一个永远不会出现的用户点击，直到自己的执行预算耗尽 → 被记为"超时中断"。
  * 所以这两类请求必须在**主进程**就按"后台无人可交互"处理掉。
  */
-const SUBAGENT_SESSION_PREFIX = "__subagent__:";
+/* A-1122：子代理会话前缀**改从 core-ts 取**（`subagent.ts` 是唯一出处，import 见文件顶部）。
+   此前这里是本地字面量、`todoStore.ts` 里另有一份推导 —— 前缀一改，只有改动过的那一处
+   继续生效，其余照旧"看着对"，而**文件回滚会因此静默地漏掉子代理改过的文件**。 */
 /** 权限请求超时（渲染层无响应时自动拒绝，避免工具调用卡死） */
 const PERM_TIMEOUT_MS = 300_000;
 /** ask_user 提问 → 渲染层等待用户回答的挂起解析器（requestId → resolver） */
@@ -1227,15 +1353,12 @@ const ensureServicesOnce = singleFlight<void>(async () => {
     onSilamEvolve: notifySilamEvolve,
     // 聊天请求走 Chromium 网络栈（同 providers 探测）：绕过 Cloudflare 对
     // Electron 内置 Node(BoringSSL) fetch 指纹的风控拦截（opencode.ai 实测）
-    clientFactory: (route: RouteEntry) => {
-      const format = route.api_format === "anthropic" ? "anthropic"
-        : route.api_format === "openai" ? "openai"
-        : inferApiFormat(route.baseUrl);
-      if (format === "anthropic") {
-        return new AnthropicClient({ baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs, fetchImpl: chromiumFetch as typeof fetch });
-      }
-      return new ChatClient({ baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs, fetchImpl: chromiumFetch as typeof fetch });
-    },
+    // A-1106：**不再手抄一份 client 工厂** —— 此前那份漏了 `rateLimit`，导致 RPM 限流器在
+    // **生产链路里一次都没被调用**（`fetchWithRetry` 里 `if (rateLimit)` 恒假），而测试走的是
+    // `router.createRouteClient`，所以 `a1091-rpm.spec` 全绿也发现不了。它同时还只覆盖
+    // anthropic/openai 两个分支（responses/google 会退化成 ChatClient）。
+    // 现在统一走 `createRouteClient`，只注入「Chromium fetch」这一项差异。
+    clientFactory: (route: RouteEntry) => createRouteClient(route, chromiumFetch as typeof fetch),
     hooks: {
       fixedSegments: (agent) => {
         const segs: string[] = [];
@@ -1403,8 +1526,14 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         // 协调成本可能超过收益。需要多级时走「链式」：主 Agent 依次派发并把上下文转交下一个。
         const dispatchTools = new Set(["delegate_subagent", "subagent_result"]);
         const allToolNames = engine.listTools?.().map((t) => t?.function?.name).filter((n): n is string => !!n) ?? [];
+        // A-1114：**深度守卫不能被「自带工具白名单」绕过**。
+        // 此前 `def.toolsOnly` 是**原样**交给引擎的（`??` 左边直接透传），而内联 spec（`tools`）
+        // 让调用方能自己指定工具面 ⇒ 只要写 ["delegate_subagent"]，这条"子代理不能再派子代理"
+        // 的守卫就被绕开（每层 3 并发 → 指数级套娃，正是 A-980-R30 要防的形态）。
+        // 现在无论工具面来自声明式定义还是内联 spec，都先剔掉派发/收取工具（判据只有一个产地）。
         const subToolsOnly = def.toolsOnly
-          ?? (allToolNames.length > 0 ? allToolNames.filter((n) => !dispatchTools.has(n)) : undefined);
+          ? def.toolsOnly.filter((n) => !dispatchTools.has(n))
+          : (allToolNames.length > 0 ? allToolNames.filter((n) => !dispatchTools.has(n)) : undefined);
         // A-980-R31 **超时率 100% 的根因**：此前这里没有把 `ctx.signal` 交给 engine.stream，
         // 于是 SubAgentManager.execute() 里那句 `setTimeout(() => controller.abort(), timeoutMs)`
         // 只是让一个**没人监听**的信号变成 aborted——模型流照旧跑到自然结束
@@ -1445,7 +1574,11 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         const body = reply.trim()
           ? `${aborted ? "> ⚠️ 本次执行被中断，以下为中断前已产出的部分内容。\n\n" : ""}${reply}`
           : `> 本次执行${aborted ? "被中断" : "结束"}，子代理未产出任何正文。\n`;
-        writeFileSync(join(dir, `subagent-${def.name}-${stamp}.md`), body, "utf8");
+        // A-1114：落盘名必须过 `sanitizeSubagentRunName` —— 内联 spec 让 `def.name` 第一次
+        // 由模型决定，`a/b` / `..` / `报告:1` 这类名字会让 writeFileSync 抛 ENOENT（多一层目录）
+        // 或写出 data/generated 之外（路径逃逸），而报错只指向路径、看不出是名字的问题。
+        // ⚠️ 只改文件名；`run.name`（界面/审计）保留原文。
+        writeFileSync(join(dir, `subagent-${sanitizeSubagentRunName(def.name)}-${stamp}.md`), body, "utf8");
         return reply;
       }, {
         // A-1091：**接线** —— 子代理并行度取自「设置 → 通用 → 请求频率 · 并发上限」。
@@ -1455,9 +1588,18 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         // ⚠️ 每次读取（不缓存）⇒ 改设置立即生效，无需重启（与权限开关同口径）。
         concurrency: readRequests().concurrency,
         hooks: {
+          // A-1106/5b：**派发即推送**（run 刚登记、状态还是 pending）。
+          // 为什么不能只靠 onStart：并发槽位被占满时，新派发的子代理会一直停在 pending，
+          // 而 onStart 要等**拿到槽位**才触发 ⇒ 那段时间面板一个事件都收不到，
+          // 用户看到「我派了 3 个却只显示 1 个」（只能靠 3 秒轮询兜底）。
+          onSpawn: (run) => {
+            console.log(`[subagent] 派发 ${run.name} (${run.id})`);
+            mainWindow?.webContents.send("slime:resident:update", null);
+          },
           // A-980-R31：每次广播运行态时顺手把**新到达终态**的记录落盘。
           // 为什么放在广播点而不是只放 onComplete/onError：取消「排队中」的任务是在
-          // SubAgentManager.cancel() 里直接改状态、**不触发任何钩子**，只挂钩子会漏掉这一类记录。
+          // SubAgentManager.cancel() 里直接改状态、**不触发任何钩子**（onError 只覆盖
+          // 已进入 execute 的任务）—— 所以取消入口自己补一次广播，见下方 cancel 通道。
           onStart: (run) => {
             console.log(`[subagent] 开始 ${run.name} (${run.id})`);
             syncSubagentRuns(subagents.list());
@@ -1483,8 +1625,11 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         description: "审查代码质量、发现潜在 bug、静态分析、给出改进建议",
         systemPrompt: "你是资深代码审查专家，输出问题清单与修复建议。",
         model: "inherit",
-        // A-980-R31：执行预算 120s→300s（原值配上"abort 不生效"= 必然超时；预算应防挂死，不该是常态失败源）
-        timeoutMs: 300_000,
+        // A-1096：预算改取 `DEFAULT_EXEC_BUDGET_MS`（**唯一真源**，15 分钟）。
+        // 历史：此处硬编码 300s —— A-983 审计日志实录它把"已做到第 4/4 步"的工作掐掉
+        //（用户体感"子代理全部超时、从没成功过"）。预算只该**防挂死**，不该是常态失败源；
+        // 工具层 wait 上限（SUBAGENT_WAIT_DEFAULT）严格大于它，两处现在同源。
+        timeoutMs: DEFAULT_EXEC_BUDGET_MS,
         outputSchema: true,
       });
       subagents.register({
@@ -1492,7 +1637,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         description: "联网搜索资料、汇总信息、多来源调研与引用整理",
         systemPrompt: "你是多来源调研专家，输出带引用的结构化调研摘要。",
         model: "inherit",
-        timeoutMs: 300_000,
+        timeoutMs: DEFAULT_EXEC_BUDGET_MS,
         outputSchema: true,
       });
       subagents.register({
@@ -1500,43 +1645,38 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         description: "数据清洗、统计、表格/指标计算与分析",
         systemPrompt: "你是数据分析专家，输出可核验的统计与结论。",
         model: "inherit",
-        timeoutMs: 300_000,
+        timeoutMs: DEFAULT_EXEC_BUDGET_MS,
         outputSchema: true,
       });
 
-      // A-918+：注册用户选定的自建 agent 作为子代理（派发优先级 = 用户选定 > 内置专家）。
-      // 读 subagent-selection.json → findAgent → 包装成 SubagentDefinition（description=role 作路由键，
-      // systemPrompt=identity_prompt，agentId 绑定具体持久 agent），打 userSelected:true。
-      const syncUserSelectedSubagents = async (): Promise<void> => {
-        const defs: SubagentDefinition[] = [];
-        for (const id of subagentSelectedAgentIds) {
-          const ag = await agentRegistry?.findAgent(id).catch(() => undefined);
-          if (!ag) { continue; }
-          defs.push({
-            name: ag.name,
-            description: `${ag.name}：${ag.role}`,
-            systemPrompt: ag.identity_prompt?.trim() || `你是「${ag.name}」，负责：${ag.role}。`,
-            agentId: ag.id,
-            model: "inherit",
-            timeoutMs: 300_000,
-            outputSchema: true,
-          });
-        }
-        subagents.setUserSelected(defs);
-        if (defs.length > 0) {
-          console.log(`[subagent] 已登记 ${defs.length} 个用户选定子代理：${defs.map((d) => d.name).join("、")}`);
-        }
-      };
-      void syncUserSelectedSubagents();
+      // A-1096：注册**全部同意被派发**的自建 Agent 作为子代理（派发优先级 = 自建 Agent > 内置专家）。
+      //
+      // 为什么改成「全量 + 逐 Agent 开关」（用户原话：「不能所有项目都让主Agent做，效率太低了」）：
+      //   旧实现读 `subagent-selection.json` 的**勾选清单**，而该文件默认不存在、勾选默认为空
+      //   ⇒ 一个自建 Agent 都登记不进来 ⇒ 清单里只剩 3 个内置专家，用户自己配的 Agent 永远派不到。
+      //   "配好了也派不到 / 主 Agent 只能独自工作"的根因就在这条数据链上，不在模型身上。
+      //   现在授权判据收敛到 Agent 自己的 `subagent_dispatch` 字段（缺省即允许，设置页可关），
+      //   不再依赖独立勾选文件 —— 判据唯一出处 `services/subagentCatalog.ts`（与设置页同源）。
+      // A-1106：这里是**模块级可重入**版 `syncDispatchableSubagents`（Agent 增删改后也会调它，
+      // 见各 `slime:agents:*` 通道）。⚠️ 必须**显式传 `subagents`** —— 此处 `subagentsRef`
+      // 还没赋值（它在下面的 `setSubagentManager` 之后才写），只读那个模块级引用会静默拿到
+      // `null` ⇒ 启动时一个自建 Agent 都登记不进来，而日志只会说"没有可派发的 Agent"。
+      syncDispatchableSubagents(subagents);
 
       // 自动委派注入：把管理器挂到 delegate_subagent 工具（模型对话中可自行委派）
       setSubagentManager(subagents);
       // A-980-R30：同时挂到 fixedSegments 的清单注入（让模型知道"能问谁"）
       subagentsRef = subagents;
+      /* A-1095③（返工②）：**成功也出声**（一次性日志）。
+       * 此前整块装配一条成功日志都没有 ⇒「子代理派发还在不在 Agent-Loop 循环里」这个问题
+       * 只能靠观感去猜（用户原话：「好久没看见了」）。有了这条，看一眼主进程日志即可回答。
+       * 失败路径也各自独立出声（见本块下方的 else 与 catch —— 都写明后果，不再说"不影响主流程"）。
+       * ⚠️ 计数必须取 `catalog()`（定义清单），不是 `list()`（运行记录）——后者此刻恒为 0。 */
+      console.log(`[subagent] 装配完成：SubAgentManager 已接线 delegate_subagent（可用定义 ${subagents.catalog().length} 个 = 内置 3 + 被授权派发的自建 Agent）`);
       // 全局子代理默认模型：恢复上次设置（无显式 def/委派模型时生效；继承优先级最低）
-      if (subagentDefaultModel) {
-        subagents.setDefaultModel(subagentDefaultModel);
-        console.log(`[subagent] 全局默认模型已应用：${subagentDefaultModel}`);
+      if (subagentDefaultModels.length > 0) {
+        subagents.setDefaultModels(subagentDefaultModels);
+        console.log(`[subagent] 执行模型池已应用（${subagentDefaultModels.length} 档，兜底档=${subagentDefaultModels[0]}）：${subagentDefaultModels.join(" / ")}`);
       }
 
       // Phase 2 事件触发源：本地 HTTP 端点（127.0.0.1:19011）
@@ -1569,6 +1709,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         // A-980-R31：内存运行态 + 落盘历史合并（重启后不再是空白面板 / 消失的下拉按钮）
         subagents: mergedSubagentRuns(subagents.list()),
         defaultModel: subagents.getDefaultModel(),
+        defaultModels: subagents.getDefaultModels(),
       });
       ipcMain.handle("slime:resident:scheduler:add", (_e, p: { name?: string; cron?: string; prompt?: string; agentId?: string }) => {
         if (!p?.name || !p?.cron || !p?.prompt) { return { ok: false, error: "name/cron/prompt 必填" }; }
@@ -1606,9 +1747,17 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         return { ok: true, run };
       });
       // v2 取消运行中/排队中的子代理
-      ipcMain.handle("slime:resident:subagent:cancel", (_e, p: { id?: string }) => ({
-        ok: !!p?.id && subagents.cancel(p.id!),
-      }));
+      ipcMain.handle("slime:resident:subagent:cancel", (_e, p: { id?: string }) => {
+        const ok = !!p?.id && subagents.cancel(p.id!);
+        // A-1106/5b：**「排队中」被取消是唯一不触发任何钩子的状态变化**（onError 只覆盖
+        // 已进入 execute 的任务）⇒ 这条记录既不落盘（重启后消失）、面板也只能等 3 秒轮询。
+        // 这里补齐与 onComplete/onError 同口径的一步：落盘终态 + 广播。
+        if (ok) {
+          syncSubagentRuns(subagents.list());
+          mainWindow?.webContents.send("slime:resident:update", null);
+        }
+        return { ok };
+      });
       // A-980-R31：清空**历史记录**（落盘 + 内存中已终态的痕迹）。
       // 运行中/排队中的**保留**——用户要清的是"跑完的痕迹"，不能顺手把在途任务也干掉。
       // 必须同时 `forgetTerminal()`：只清文件的话，下一次广播的 `syncSubagentRuns(list())`
@@ -1631,51 +1780,70 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         if (!run) { return { ok: false, error: p.agent ? `没有名为「${p.agent}」的子代理` : "无可派发的子代理定义" }; }
         return { ok: true, run };
       });
-      // A-942：全局子代理默认模型（贵模型统筹、廉价模型执行档位；持久化 + 即时生效）
-      ipcMain.handle("slime:resident:subagent:setDefaultModel", (_e, p: { model?: string }) => {
-        const raw = typeof p?.model === "string" ? p.model.trim() : "";
-        // A-918++ 兼容用户常见写错：api:<key>.<model>（点号分隔）自动转 api:<key>:<model>（冒号）
-        // 原生支持中文 key（之前 [A-Za-z0-9_-]+ 限制让"小红书"等中文供应商名被拒）
-        const normalized = raw && raw.startsWith("api:") && !raw.includes(":")
-          ? (() => {
-              const rest = raw.slice(4);
-              const dotIdx = rest.lastIndexOf(".");
-              if (dotIdx > 0 && /[A-Za-z0-9_.\-\u4e00-\u9fa5]+$/.test(rest)) {
-                return `api:${rest.slice(0, dotIdx)}:${rest.slice(dotIdx + 1)}`;
-              }
-              return raw;
-            })()
-          : raw;
-        if (!/^(api:[A-Za-z0-9_.\-\u4e00-\u9fa5]+(:[^\s:]+)?|local:[A-Za-z0-9_.\-\u4e00-\u9fa5]+|inherit|)$/.test(normalized)) {
-          return {
-            ok: false,
-            error: `非法模型格式：${raw}\n\n正确格式示例：\n  api:供应商名:模型名（如 api:openai:gpt-5）\n  api:供应商名（用该供应商默认模型）\n  api:小红书:dots3-note-prev（中文 key + 模型名）\n  local:本地模型名\n  inherit（沿用父 Agent 模型）\n  留空（不设置）`,
-          };
-        }
-        subagents.setDefaultModel(normalized);
-        saveSubagentDefaultModel(normalized);
-        mainWindow?.webContents.send("slime:resident:update", null);
-        return { ok: true, defaultModel: normalized };
-      });
-      // A-918+：用户选定子代理（设置→子代理菜单勾选的自建 agent）读写
+      /* A-1100：⚠️ 两条「执行模型池」通道（`setDefaultModel` / `setModels`）的**实现与注册都已上移到
+       * 模块级 + 启动期**（实现见文件上方 `normalizeSubagentModelValue` / `applySubagentModels` /
+       * `setSubagentModels` / `setSubagentDefaultModel`，注册见 `registerIpcHandlers()` 内的 A-1100 段）。
+       *
+       * 此前它们住在**这个惰性块**里 —— 与 A-1048 修过的 `slime:resident:state` 是同一个坑：
+       * 冷启动到服务就绪之前点「保存」= 通道**未注册** ⇒ `ipcRenderer.invoke` reject ⇒
+       * 渲染层那次 `await` 抛出、弹层卡住不关（用户实测「界面保存按钮无法实现功能」）。
+       *
+       * ⚠️ 这里**不要**再把它们 `ipcMain.handle` 回来：同一通道两处注册 = 第二个真相源，
+       * 且惰性块可能被跑两次（singleFlight 只保证并发不保证只跑一次）。
+       * 管理器仍在这里被播种（见下方 `subagents.setDefaultModels(subagentDefaultModels)`）。 */
+      /* A-1096：子代理「可派发」读写 —— **与 Agent 设置里的开关同一个真相源**
+       * （`config/agents.json` 的 `subagent_dispatch` 字段），`subagent-selection.json` 已退役。
+       *
+       * 为什么必须同源：此前这里是"勾选清单"（独立文件），而 Agent 设置里**根本没有对应开关**
+       * ⇒ 面板上勾了、Agent 详情里看不出来；刷新/换机后清单还在但用户不知道它管的是什么。
+       * 现在：get 返回**由开关推导**的允许清单（与装配层 `dispatchableSubagentDefinitions` 同一判据），
+       * set 直接把每个 Agent 的开关写成 true/false（显式落盘，三态语义不丢）。
+       */
       ipcMain.handle("slime:resident:subagent:getSelection", () => ({
         ok: true,
-        selectedAgentIds: [...subagentSelectedAgentIds],
+        selectedAgentIds: dispatchableAgentIds(agentRegistry?.loadedAgents ?? []),
       }));
       ipcMain.handle("slime:resident:subagent:setSelection", async (_e, p: { selectedAgentIds?: unknown }) => {
-        const ids = Array.isArray(p?.selectedAgentIds)
-          ? p!.selectedAgentIds.filter((x): x is string => typeof x === "string")
-          : [];
-        saveSubagentSelection(ids);
-        await syncUserSelectedSubagents();
+        const ids = new Set(
+          Array.isArray(p?.selectedAgentIds)
+            ? (p!.selectedAgentIds as unknown[]).filter((x): x is string => typeof x === "string")
+            : [],
+        );
+        for (const a of agentRegistry?.loadedAgents ?? []) {
+          const want = ids.has(a.id);
+          // 无变化不落盘：`isSubagentDispatchAllowed` 把 undefined 视作"允许"，
+          // 所以"勾选"在字段缺省时是**零写入**（不会把整份 agents.json 无谓重写一遍）。
+          if (isSubagentDispatchAllowed(a) === want) { continue; }
+          await agentRegistry!.updateAgent(a.id, { subagent_dispatch: want });
+        }
+        syncDispatchableSubagents();
         mainWindow?.webContents.send("slime:resident:update", null);
-        return { ok: true, selectedAgentIds: [...subagentSelectedAgentIds] };
+        return { ok: true, selectedAgentIds: dispatchableAgentIds(agentRegistry?.loadedAgents ?? []) };
       });
 
       // A-916（slime:requests:get / :set）已移到模块级 + 启动时注册 —— 见文件上方 readRequests 的注释。
+    } else {
+      /* A-1095③（返工②）：这条 else 是**可达路径**，不是死代码 —— data/schedules.json 存在、
+       * 能被 JSON.parse，但**不是数组**（例如被手改成 `{}`），且还没有运行态快照。
+       * 历史形态下这里是**完全静默**的：整块（含子代理装配）被跳过而一个日志都不打。
+       * ⇒ 现在如实出声，并点明被连带跳过的范围，便于一眼归因。 */
+      console.warn(
+        "[scheduler] data/schedules.json 不是数组且无运行态快照 —— 跳过定时唤醒装配"
+        + "（⚠️ 同块内的子代理装配 / 事件 HTTP 端点 / 后台任务 IPC 也一并被跳过；"
+        + "delegate_subagent 将不可用。请把该文件写成 JSON 数组）",
+      );
     }
   } catch (e) {
-    console.warn(`[scheduler] 启动失败（不影响主流程）: ${e instanceof Error ? e.message : String(e)}`);
+    /* ⚠️ A-1095③（返工②）「诚实归因」：这个 catch 兜住的**不只是定时唤醒**。同一块里还装着
+     * 子代理装配（`setSubagentManager` 是 `delegate_subagent` 的**唯一**接线点）、
+     * 事件 HTTP 端点、「后台任务」IPC —— 它们会被一起跳过。
+     * 原文案把这个失败报成「不影响主流程」，是**假安慰**：它把"Agent-Loop 少一条腿"
+     * 说成"定时任务没起来"，于是用户只看到"派发不见了"，日志里却没有任何线索。
+     * ⇒ 文案必须点明后果与归属（哪些能力被一起带走），不许再含糊其辞。 */
+    console.warn(
+      "[scheduler] 定时唤醒装配失败 —— ⚠️ 同块内的子代理装配 / 事件端点 / 后台任务 IPC 一并被跳过"
+      + `（delegate_subagent 将不可用）: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
   statsService = new StatsService(registry);
   // 依赖下载进度 → 渲染层（下载条 UI）
@@ -1708,7 +1876,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
 // 就开始轮询，而服务初始化要等技能扫描 / scheduler / SILAM 等一串重活跑完（实测好几秒）。
 // ⇒ 通道**在启动时注册**，值由"提供者"惰性给出：初始化完成前返回空态，完成后换成真实现。
 //   顺带消掉 `ipcMain.handle` 重复注册的风险（singleFlight.ts 注释里那条 ×2 报错的同类）。
-let residentStateProvider: () => ResidentState = () => ({ scheduler: [], subagents: [], defaultModel: undefined });
+let residentStateProvider: () => ResidentState = () => ({ scheduler: [], subagents: [], defaultModel: undefined, defaultModels: [] });
 
 /** A-916：请求频率调节（config/requests.json）——并发上限 + 断流重连基间隔，双端（TS/Python）均可读。
  *  ⚠️ 它只读一个本地 json，与 scheduler / subagent 初始化**毫无关系**，不该被惰性初始化牵连。 */
@@ -2660,6 +2828,15 @@ function registerIpcHandlers(): void {
     }
   });
 
+  // A-1100：子代理「执行模型池」的两条写通道也必须在启动时就在（与上面 A-1048 同因）。
+  // 病灶：此前只有惰性 `ensureServicesOnce()` 里那一份注册 ⇒ 冷启动窗口内点「保存」时
+  // `invoke` reject（No handler registered），渲染层裸 await 抛出 ⇒ 弹层卡住、
+  // 按钮「点了没反应」（用户实测「界面保存按钮无法实现功能」）。
+  // ⚠️ 这两条**不依赖** `ensureServicesOnce`：实现是模块级纯函数（真值 = `subagentDefaultModels`
+  //    + 磁盘，管理器就绪时顺带同步）。所以这里可以放心直连，不需要 provider 间接层。
+  ipcMain.handle("slime:resident:subagent:setModels", (_e, p: { models?: unknown }) => setSubagentModels(p?.models));
+  ipcMain.handle("slime:resident:subagent:setDefaultModel", (_e, p: { model?: unknown }) => setSubagentDefaultModel(p?.model));
+
   /** 获取当前选中 Agent ID（优先渲染层传入，回退到第一个 root Agent） */
   function resolveAgentId(inputAgentId: string | undefined): string {
     if (inputAgentId) { return inputAgentId; }
@@ -2683,9 +2860,10 @@ function registerIpcHandlers(): void {
    *  现在：只要 `summaryCount` 存在（**与摘要是否成功无关**）就真的裁；切口一律走 turn 对齐纯函数。 */
   /** 持久化历史的一行（`HistoryRecord` 只有 user/ai 两个字符串字段 ⇒ 恒为 user/assistant 成对） */
   type SessionHistoryLine = { role: "user" | "assistant"; content: string };
+  type LoadedHistory = { raw: SessionHistoryLine[]; meta: Awaited<ReturnType<typeof getSession>> };
 
   /**
-   * 加载会话历史（已按压缩状态裁剪为「摘要头 + 垫脚 + 最近 K 整轮」）。
+   * 读**原始全量历史**（未按压缩状态折叠）+ 会话元数据 —— 压缩判据与摘要素材的**唯一**入口。
    *
    * A-1085：`opts.full` —— **摘要轮必须传 true**。
    * 常规发送只读最近 `HISTORY_LOAD_LIMIT` 条（保护发送体积），但那条上限对**摘要**是灾难：
@@ -2695,36 +2873,54 @@ function registerIpcHandlers(): void {
    * ⚠️ `readLines` 本来就是全量读盘 + 逐行 parse，`limit` 只在最后 slice 一次 ⇒
    *    `full` **不增加任何 I/O 成本**。
    */
-  async function loadSessionHistory(sessionId: string | undefined, opts?: { full?: boolean }): Promise<SessionHistoryLine[]> {
-    if (!sessionId) { return []; }
+  async function loadRawHistoryWithMeta(sessionId: string | undefined, opts?: { full?: boolean }): Promise<LoadedHistory> {
+    if (!sessionId) { return { raw: [], meta: null }; }
     try {
       const meta = await getSession(sessionId);
-      if (!meta) { return []; }
+      if (!meta) { return { raw: [], meta: null }; }
       const agentSessions = (await listSessions()).filter((m) => m.agentId === meta.agentId);
       const firstSession = agentSessions.every((s) => s.createdAt >= meta.createdAt);
       // `0` = 不限（见 core-ts 的 loadHistoryForSession / tailLimit）
       const records = await loadHistoryForSession(meta.agentId, meta.id, opts?.full ? 0 : HISTORY_LOAD_LIMIT, firstSession);
-      const lines: SessionHistoryLine[] = records.flatMap((r) => [
+      const raw: SessionHistoryLine[] = records.flatMap((r) => [
         { role: "user" as const, content: r.user },
         { role: "assistant" as const, content: r.ai },
       ]);
-      const keep = meta.summaryCount ?? DEFAULT_TAIL_KEEP;
-      // 至少两轮以上才值得裁（裁到不足一轮会把当前话题一起丢掉）
-      if (meta.summaryCount !== undefined && lines.length > keep * 2) {
-        if (meta.contextSummary) {
-          // 摘要档：摘要头 + 垫脚 + 最近 K 整轮（含「理解总结」环的续接认知）。
-          // buildCompactedHistory 是 LoopMessage 泛化签名，生产数据恒为 user/assistant + string，
-          // 此处按契约收窄（ChatMessage 的 role 是 enum、content 是 string|null，不许放宽契约）。
-          return buildCompactedHistory(meta.contextSummary, lines, keep, { comprehend: meta.contextComprehend }) as SessionHistoryLine[];
-        }
-        // trim 档：摘要不可用 ⇒ **只裁不摘要**（诚实降级，但请求必须真的变小）
-        return truncateTurnAligned(lines, keep);
-      }
-      return lines;
+      return { raw, meta };
     } catch (e) {
-      console.warn("[gui:main] 会话上下文加载失败:", e);
-      return [];
+      console.warn("[gui:main] 会话原始历史加载失败:", e);
+      return { raw: [], meta: null };
     }
+  }
+
+  /**
+   * 把原始历史折叠成**实际会发出去**的消息序列
+   * （摘要头 + 垫脚 + 最近 K 整轮；摘要不可用时只做 turn 对齐裁剪）。
+   *
+   * ⚠️ A-1106：这里是**纯**函数（只依赖入参），刻意与「读盘」分离 ——
+   *    因为压缩判据必须**同时**拿到「原始全量」（可裁量 / 摘要素材）与「折叠视图」（真实发送体积），
+   *    而旧实现把两者揉在一个函数里，压缩 handler 只拿得到折叠视图 ⇒ 两个 P0（详见压缩 handler）。
+   */
+  function foldSessionHistory(raw: SessionHistoryLine[], meta: LoadedHistory["meta"]): SessionHistoryLine[] {
+    const keep = meta?.summaryCount ?? DEFAULT_TAIL_KEEP;
+    // 至少两轮以上才值得裁（裁到不足一轮会把当前话题一起丢掉）
+    if (meta?.summaryCount !== undefined && raw.length > keep * 2) {
+      if (meta.contextSummary) {
+        // 摘要档：摘要头 + 垫脚 + 最近 K 整轮（含「理解总结」环的续接认知）。
+        // buildCompactedHistory 是 LoopMessage 泛化签名，生产数据恒为 user/assistant + string，
+        // 此处按契约收窄（ChatMessage 的 role 是 enum、content 是 string|null，不许放宽契约）。
+        return buildCompactedHistory(meta.contextSummary, raw, keep, { comprehend: meta.contextComprehend }) as SessionHistoryLine[];
+      }
+      // trim 档：摘要不可用 ⇒ **只裁不摘要**（诚实降级，但请求必须真的变小）
+      return truncateTurnAligned(raw, keep);
+    }
+    return raw;
+  }
+
+  /** 加载**折叠后**的会话历史（摘要头 + 垫脚 + 最近 K 整轮）—— 请求路径与「压缩后体积校验」用。 */
+  async function loadSessionHistory(sessionId: string | undefined, opts?: { full?: boolean }): Promise<SessionHistoryLine[]> {
+    const { raw, meta } = await loadRawHistoryWithMeta(sessionId, opts);
+    return foldSessionHistory(raw, meta);
   }
 
   /* ── 异步对话框（A-151）：渲染层不再用 window.confirm/alert（Electron 同步阻塞渲染进程 JS，
@@ -3101,30 +3297,39 @@ function registerIpcHandlers(): void {
       const agent = await agentRegistry!.findAgent(meta.agentId).catch(() => null);
       const capRaw = await resolveSessionWindowCap(meta.agentId, agent?.model_choice ?? "").catch(() => undefined);
       const cap = capRaw ?? (agent?.max_context ?? 0);
-      // A-1085：摘要轮读**全部**历史（`full: true`）—— 摘要的职责就是把早期内容收进摘要，
-      // 受常规上限（50 条）截断会让更早的对话从未进入摘要、也不在保留尾巴里 ⇒ 静默丢失。
-      const history = await loadSessionHistory(sessionId, { full: true });
+      /* ══ A-1106：压缩必须基于**原始全量历史**，不能基于折叠视图 ══
+         旧实现只调 `loadSessionHistory(sessionId, { full: true })`，而它在「已压缩过」时返回的是
+         **折叠视图**（摘要头 + 最近 6 轮 ≈ 14 行）。由此产生两个 P0：
+           ① **压缩一辈子只会发生一次**：`noRoomToCut` 拿折叠后的长度判「还有没有可裁素材」，
+              而它恒 ≈14 ≤ `DEFAULT_TAIL_KEEP*2+2` ⇒ 恒真 ⇒ `canShrink` 恒假 ⇒ 此后再不压缩：
+              要么贴着阈值照发、要么直接 `cannot-fit` 拒发（用户只能换模型或开新会话）；
+           ② **静默丢上下文记忆**：摘要素材同样来自折叠视图 ⇒ 两次压缩之间累积的那批轮次
+              （既不在上次摘要里、又被挤出保留尾巴）**从未进入任何摘要**，永久消失。
+         现在：`historyAll` = 原始全量（判据 + 摘要素材 + 指纹）；`historyView` = 折叠视图（真实发送体积）。 */
+      const { raw: historyAll, meta: histMeta } = await loadRawHistoryWithMeta(sessionId, { full: true });
+      const historyView = foldSessionHistory(historyAll, histMeta);
       /* ⚠️ 下面两条 `skipped` 在 `force`（上游已报超限）下必须**如实回带 `stillOverflow: true`**：
          它们意味着「我们一点也没压下去」⇒ 反应式调用方据此**放弃那次注定失败的重复请求**，
          而不是白等一轮再报错（这正是「连接半天还是重连」的残留形态）。
          `stale` 那条**不**回带 —— 期间已有别的压缩落地，重试是有意义的。 */
-      if (history.length < 6) {
+      if (historyAll.length < 6) {
         return { ok: true, skipped: true, reason: "历史过短（不足 6 条），压缩无意义", used: 0, cap, ...(force ? { stillOverflow: true } : {}) };
       }
       // A-974-R3：占用口径取「历史轮次估算」与「渲染层实测输入侧占用」的**较大值**。
       // 实测值 = 上游 prompt_tokens + cache_read（含系统提示/记忆/技能/工具定义/工作区注入），
       // 比只看可见轮次的估算更贴近真实窗口压力；此前只用估算 → 实测已超阈值却判 skipped，
       // 压缩永不执行（用户实测"逼近硬阈值却毫无动作/压缩失效"的根因）。
-      const histUsed = estimateHistoryTokens(history);
+      // ⚠️ A-1106：估算用**折叠视图**（那才是真实发出去的历史），否则与 `hint` / `tokensAfter` 口径不一致。
+      const histUsed = estimateHistoryTokens(historyView);
       const hint = typeof p?.used === "number" && Number.isFinite(p.used) && p.used > 0 ? Math.round(p.used) : 0;
       const used = Math.max(histUsed, hint);
       const ratio = typeof p?.ratio === "number" && p.ratio > 0 ? p.ratio : DEFAULT_COMPRESS_RATIO;
       // A-974-R3 护栏：由「实测占用（hint）抬高」触发的场景，必须确有**多余轮次可裁**才动手——
-      // 压缩后 loadSessionHistory 只剩「摘要头 + 最近 K 整轮」（长度回落到 ~K*2+2），若固定开销
-      // （系统提示/记忆/技能/工具定义/工作区注入）本身就逼近上限，裁历史降不下来 →
+      // 若固定开销（系统提示/记忆/技能/工具定义/工作区注入）本身就逼近上限，裁历史降不下来 →
       // 每轮都会空跑一次摘要模型调用并刷一条「已压缩上下文」。此处显式拦掉这种空转。
+      // ⚠️ A-1106：判据必须用**原始全量**长度 —— 折叠视图恒 ≈K*2+2，用它判等于恒真（见上，P0①）。
       // ⚠️ `force`（上游已报超限）时**必须越过**这条：否则就是「上游说太长 → 我们什么都不做 → 原样重发」。
-      const noRoomToCut = history.length <= DEFAULT_TAIL_KEEP * 2 + 2;
+      const noRoomToCut = historyAll.length <= DEFAULT_TAIL_KEEP * 2 + 2;
       /* ══ A-1083：判据收口到**唯一出处** `planSend`（发送前预算门） ══
          旧实现把三档散成两条 `!force &&` 判断（阈值档 + 空转护栏），于是：
            ① 「发出去才知道超」—— 输入本身已超窗口时也照发，然后靠 300s 超时 + N 次重连来"发现"
@@ -3138,7 +3343,10 @@ function registerIpcHandlers(): void {
         estimatedInput: used,
         cap,
         afterOverflow: force,
-        ratioTriggered: needsCompress(used, cap, ratio, history.length),
+        // ⚠️ A-1106：第 4 个参数是**轮数**，不是消息条数 —— 曾直接传 `historyAll.length`
+        //（消息数 ≈ 轮数 × 2 以上）⇒ 6 轮的最小门槛实际在 2-3 轮就放行，压缩触发早一倍。
+        // 「轮」的唯一口径 = `context_loop.countTurns`（与 planCut 的 turn 边界同源）。
+        ratioTriggered: needsCompress(used, cap, ratio, countTurns(historyAll)),
         canShrink: !noRoomToCut,
       });
       if (plan.action === "cannot-fit") {
@@ -3159,7 +3367,7 @@ function registerIpcHandlers(): void {
         return { ok: true, skipped: true, used, cap, reason: plan.reason };
       }
       // 熔断：同一段历史连续失败 ≥3 次 ⇒ 不再调用摘要模型（如实告知 + 给可操作项）
-      const key = historyFingerprint(history);
+      const key = historyFingerprint(historyAll);
       if (compressBreaker.open && compressBreaker.lastKey === key) {
         return {
           ok: true, skipped: true, used, cap, breakerOpen: true,
@@ -3175,11 +3383,24 @@ function registerIpcHandlers(): void {
       let summaryText: string | null = null;
       let comprehend: string | null = null;
       let summaryElided = 0;
+      let summaryTruncated = false;
       if (agent && engine) {
-        const s = await engine.summarizeContext(agent, history, { maxInputTokens: budget, priorSummary: meta.contextSummary });
+        const s = await engine.summarizeContext(agent, historyAll, { maxInputTokens: budget, priorSummary: meta.contextSummary });
         if (s) {
           summaryText = s.summary;
           summaryElided = s.elided;
+          summaryTruncated = s.truncated;
+          // A-1106：摘要素材不完整必须**出声** —— 此前 elided 与截断都静默通过。
+          // 两条独立的「丢记忆」路径：`elided>0` = 受输入预算所限被丢弃的中段消息
+          // （**从未进入摘要**，而它们同时也不在保留尾巴里 ⇒ 真的没了）；
+          // `truncated` = 触达输出上限被腰斩。二者都意味着"压缩后 Agent 看到的不是全部历史"。
+          // 摘要仍然写入（半截也强于全无），但**必须留痕**，不许安静地丢。
+          if (s.elided > 0 || s.truncated) {
+            console.warn(
+              `[gui:main] 摘要不完整（丢记忆风险）：elided=${s.elided} 条中段消息未进摘要、` +
+              `truncated=${s.truncated}（输出被腰斩）。摘要仍会写入，但早期细节可能缺失。`,
+            );
+          }
           // ⑤「理解总结」环：压缩后**恰好一次**只读回读（有界）。失败重试 1 次，再失败 ⇒ 非阻塞降级。
           let c = await engine.comprehendContext(agent, s.summary);
           if (!c) { c = await engine.comprehendContext(agent, s.summary); }
@@ -3203,18 +3424,26 @@ function registerIpcHandlers(): void {
       if (!validation.ok) {
         console.error("[gui:main] 压缩产物未过硬不变量校验（I1/I3）:", validation.violations);
       }
-      compressBreaker = nextBreakerState(compressBreaker, { ok: summaryText !== null && validation.ok, historyKey: key });
       // 固定开销 = 实测输入侧占用 − 历史估算（系统提示/记忆/技能/工具定义/工作区注入）。
       // tokensAfter 与 `used` **同口径**（历史 + 固定开销），渲染层可直接用它替换占用镜像。
       const fixedOverhead = Math.max(0, hint - histUsed);
       const tokensAfter = estimateHistoryTokens(after) + fixedOverhead;
+      // A-1106：熔断判据必须含 `realShrink` —— 否则「压是压了、体积几乎没降」的**假压缩**
+      // 每一次都被记成**成功**，熔断器永不开闸 ⇒ 同一段历史反复触发、反复白花一次摘要
+      // 加一次理解调用，而用户看到的永远是「已压缩 N 轮」却怎么都发不出去。
+      // 判据：`!realShrink` 与「摘要失败」「产物非法」同属"这次压缩没解决问题"，一起计入失败。
+      const realShrink = isRealShrink(used, tokensAfter);
+      compressBreaker = nextBreakerState(compressBreaker, {
+        ok: summaryText !== null && validation.ok && realShrink,
+        historyKey: key,
+      });
       const stillOverflow = cap > 0 && tokensAfter >= cap;
       /* A-1086：压完仍超限 ⇒ 换更大窗口的模型是**唯一**出路，顺手把"换哪个"算出来。
          ⚠️ 只在**真超限**时才查（罕见路径）；正常压缩不该为一次候选扫描买单。
          ⚠️ `stillOverflow` 为真时**无条件**回带 rescueHint（包括"没有候选"那条）——
             沉默会让用户以为工具没查过，于是继续在同一个死局里点重试。 */
       const rescue = stillOverflow ? await suggestWiderChatModel(tokensAfter, cap) : null;
-      const dropped = Math.max(0, history.length - after.length);
+      const dropped = Math.max(0, historyAll.length - after.length);
       return {
         ok: true,
         summary: summaryText ?? undefined,
@@ -3228,8 +3457,9 @@ function registerIpcHandlers(): void {
         ...(stillOverflow ? { rescueHint: formatRescueHint(rescue) } : {}),
         // A-1090：同上 —— 有候选才回带结构化记录（渲染层据此给「一键切换」按钮）
         ...(stillOverflow && rescue ? { rescueModel: rescue } : {}),
-        realShrink: isRealShrink(used, tokensAfter),
+        realShrink,
         elided: summaryElided,
+        summaryTruncated,
       };
     } catch (e) {
       console.error("[gui:main] chat:compress crashed:", e);
@@ -3258,6 +3488,38 @@ function registerIpcHandlers(): void {
     console.info(`[gui:main] 回滚截断历史：agent=${payload.agentId} 会话=${payload.sessionId ?? "-"} 删除 ${removed} 条`);
     return { ok: true, removed };
   });
+
+  /**
+   * A-1122（③）：**文件回滚** —— 回滚一条消息时把磁盘上的改动也还原。
+   *
+   * 为什么必须有这条通路：`rollbackTo` 此前只改前端 `messages` + 截断 `history.jsonl`，
+   * **磁盘上的文件一个都没动** ⇒ 用户以为回滚干净了，实际 Agent 改过的文件还是改过的。
+   *
+   * `mode` 两个值走**同一份选择实现**（`selectUndo`）：
+   *  · `plan`  → 只读，供渲染层先给「将还原 N 个文件」确认；
+   *  · `apply` → 真正还原。两处各写一份"哪些算数"必然分家（界面说 3 个、实际动 2 个）。
+   *
+   * ⚠️ 调用方（渲染层 `rollbackTo`）必须**先 undo 再 truncateFrom**：
+   * 切分线靠 `history.jsonl` 里那条用户消息定位，先截断历史 ⇒ `findRollbackCut` 找不到
+   * ⇒ 文件还原直接失效（而且是静默失效）。
+   */
+  handleTrusted<{ agentId: string; sessionId?: string; userMsg: string; mode?: "plan" | "apply" }>(
+    "slime:file:undo", async (_event, payload) => {
+      if (!payload || typeof payload.userMsg !== "string" || !payload.agentId) {
+        return { ok: false, error: "参数不完整" };
+      }
+      const svc = await import("../../../core-ts/src/services/file_undo.js");
+      if (payload.mode === "plan") {
+        const plan = await svc.planFileUndo(payload.agentId, payload.sessionId, payload.userMsg);
+        if (plan.count || plan.dirs || plan.blocked.length) {
+          console.info(`[gui:main] 回滚预演：还原 ${plan.count} 个文件 / 重建 ${plan.dirs} 个目录 / ${plan.blocked.length} 处不可还原`);
+        }
+        return plan;
+      }
+      const res = await svc.applyFileUndo(payload.agentId, payload.sessionId, payload.userMsg);
+      console.info(`[gui:main] 回滚文件：还原 ${res.restored} / 删除 ${res.deleted} / 重建目录 ${res.dirs} / 失败 ${res.failed.length} / 不可还原 ${res.blocked.length}`);
+      return res;
+    });
 
   /** P0: 重试上条 — 重发最后一条 user 消息 */
   handleTrusted<{ agentId: string; sessionId?: string }>("slime:chat:retry", async (_event, payload) => {
@@ -4340,9 +4602,15 @@ function registerIpcHandlers(): void {
     }).catch(() => { /* 恢复失败不影响启动 */ });
   } catch { /* userData 不可用时退化为不持久化 */ }
 
-  /** A-918++：生成网页应用后，由 core-ts 工具层回调 → 主进程通知渲染层在右侧栏浏览器自动打开 */
-  setSidebarOpener((url: string, name?: string): void => {
-    mainWindow?.webContents.send("slime:sidebar:open", { kind: "url", url, name });
+  /** A-918++ / A-1121（②）：右栏打开器的装配点。
+   *  opener 已 **payload 化**（`{kind:"url"|"terminal"|"files"}`），字符串入参仍按 url 处理
+   *  ⇒ 任何未同步更新的调用点都不会静默失效；归一用 core-ts 的纯函数（判据只有一份）。
+   *  ⚠️ 归一返回 null = **这次请求不成立**（如 url 为空）→ 主进程不发事件，
+   *     由调用方（工具）在回执里如实说明"没打开"（`fireSidebarOpen` 返回 false）。 */
+  setSidebarOpener((req, name): void => {
+    const payload = normalizeSidebarOpenRequest(req, name);
+    if (!payload) { return; }
+    mainWindow?.webContents.send("slime:sidebar:open", payload);
   });
 
   /* ═══════════════ 图形控制能力（screen_*）：slime 全程序级 ═══════════════ */
@@ -4381,6 +4649,41 @@ function registerIpcHandlers(): void {
     } catch {
       return null; // 优化失败 → 上层回退原 PNG
     }
+  });
+
+  /** ①′ A-1123：**画面差异度量** —— 命中校验的判据来源（nativeImage 逐像素比，零新依赖）。
+   *
+   * 为什么需要：动作回执里的 detail 只陈述「输入已注入」（"已在 (x,y) 左键单击"），
+   * 而点空 / 目标被遮挡 / 窗口没聚焦 / 元素还没渲染 —— 四种情形与成功**逐字同形**。
+   * controller 现在会在动作前后各取一张图，用这里算出的差异率判定"画面有没有可见变化"，
+   * 未命中还会自动重试一次。core-ts 不许 import electron，所以这里与 setImageOptimizer 同款注入。
+   *
+   * 判据纪律（三态，缺一不可）：
+   *  · 尺寸不一致 → 返回 **1**（画面整体变了，显然是"有变化"），**不是** null；
+   *  · 解码失败 / 空图 / 长度对不上 → 返回 **null**（= **没有判据**，controller 会如实说
+   *    "未判定"并且**不重试** —— 把"没判据"当"未命中"会把一次其实成功的点击再点一遍）；
+   *  · 逐像素带颜色容差（BGRA 三通道曼哈顿距离 > 24 才算变），避免抗锯齿与亚像素渲染
+   *    把"画面没变"读成"变了"（那会让校验彻底失效 —— 永远报命中）。
+   */
+  setImageDiffer((pngA: string, pngB: string): number | null => {
+    try {
+      const ia = nativeImage.createFromBuffer(Buffer.from(pngA, "base64"));
+      const ib = nativeImage.createFromBuffer(Buffer.from(pngB, "base64"));
+      if (ia.isEmpty() || ib.isEmpty()) { return null; }
+      const sa = ia.getSize();
+      const sb = ib.getSize();
+      if (sa.width !== sb.width || sa.height !== sb.height) { return 1; }
+      const ba = ia.toBitmap();
+      const bb = ib.toBitmap();
+      if (ba.length !== bb.length || ba.length === 0) { return null; }
+      let changed = 0;
+      for (let i = 0; i + 3 < ba.length; i += 4) {
+        const d = Math.abs(ba[i] - bb[i]) + Math.abs(ba[i + 1] - bb[i + 1]) + Math.abs(ba[i + 2] - bb[i + 2]);
+        if (d > 24) { changed += 1; }
+      }
+      const pixels = ba.length / 4;
+      return pixels > 0 ? changed / pixels : null;
+    } catch { return null; }
   });
 
   /** ② 注册图形控制后端：桌面（Windows PowerShell+user32.dll 常驻宿主）与 Android（adb shell input）。
@@ -4544,9 +4847,9 @@ function registerIpcHandlers(): void {
     const ctl = getScreenController();
     const backends = ctl.listBackends();
     let targets: Array<{ backend: string; target: string; width: number; height: number; label: string }> = [];
-    try {
-      targets = await ctl.listTargets();
-    } catch { /* 无可用目标不抛错 */ }
+    // A-1123：`listTargetsReport` 自己**不抛**（每个后端的失败已被归集进 failures），
+    // 这里只取 targets；失败原因由工具层 `screen_info` 逐条展示（面板不做二次加工）。
+    targets = (await ctl.listTargetsReport()).targets;
     return { enabled, halted: ctl.isHalted(), backends, targets };
   });
 
@@ -5045,6 +5348,9 @@ function registerIpcHandlers(): void {
     const a = await createAgent(params.name, params.role, params.toolProfile);
     selectedAgentId = a.id;
     a2aBus?.register(a.name);
+    // A-1106：新建的 Agent **立刻**进可派发清单。此前这里没有刷新 —— 清单是启动期算一次，
+    // 于是「刚建的子代理主 Agent 看不到、也调不动」，而所有日志与门禁都是绿的。
+    syncDispatchableSubagents();
     mainWindow?.webContents.send("slime:agents:selected", a.id);
     return { id: a.id, name: a.name, role: a.role, children: [], parent_id: null, lifecycle: a.lifecycle ?? "unknown" } as AgentInfo;
   });
@@ -5056,6 +5362,8 @@ function registerIpcHandlers(): void {
     const child = await forkAgent(parent, params.name, params.role);
     selectedAgentId = child.id;
     a2aBus?.register(child.name);
+    // A-1106：分裂出来的子 Agent 同样立刻进清单（§7 分裂场景下"先隔离再派活"的同一判据）。
+    syncDispatchableSubagents();
     mainWindow?.webContents.send("slime:agents:selected", child.id);
     return { id: child.id, name: child.name, role: child.role, children: [], parent_id: parent.id, lifecycle: child.lifecycle ?? "unknown" } as AgentInfo;
   });
@@ -5096,6 +5404,9 @@ function registerIpcHandlers(): void {
       selectedAgentId = null;
     }
     console.info(`[gui:main] 已删除 Agent 子树: ${deleted.join(", ")}`);
+    // A-1106：删除后**必须**把被删的 Agent 从可派发清单里摘掉。否则清单里会留着一个
+    // 已经不存在的名字：模型点名派发 ⇒ `delegate()` 找不到可执行 Agent ⇒ 每次派发都失败。
+    syncDispatchableSubagents();
     return { ok: true, deleted };
   });
 
@@ -5114,6 +5425,9 @@ function registerIpcHandlers(): void {
       max_output: a.max_output ?? undefined,
       lifecycle: a.lifecycle ?? "unknown",
       tool_profile: a.tool_profile as { mode: "default" | "custom"; skills: string[]; mcp: string[] } | undefined,
+      // A-1096：透传「同意被派发为子代理」开关。⚠️ 必须原样透传 `undefined`（而不是 `?? true`）——
+      // 渲染层要区分三态（未设置 / 显式允许 / 显式拒绝）才能正确回显与落盘；在这里合并就等于丢信息。
+      subagent_dispatch: a.subagent_dispatch as boolean | undefined,
     };
   });
 
@@ -5122,6 +5436,10 @@ function registerIpcHandlers(): void {
     await ensureServices();
     const updated = await agentRegistry!.updateAgent(payload.agentId, payload.patch as Partial<AgentState>);
     if (!updated) { throw new Error(`Agent ${payload.agentId} 不存在`); }
+    // A-1106：改设置后立刻重算清单 —— 两个方向都要：① 把「同意被派发」被关掉的 Agent 摘出去；
+    // ② 名字/角色（= 自动路由的 description）改了，清单里的描述必须同步更新，
+    // 否则模型仍在按**旧描述**自动选人，派给一个能力已经变了的执行者。
+    syncDispatchableSubagents();
     return { ok: true };
   });
 
@@ -5166,6 +5484,8 @@ function registerIpcHandlers(): void {
     if (res.ok) {
       // 注册表已被 importAgent 落盘改动，重载内存态并通知渲染层刷新
       await agentRegistry!.load();
+      // A-1106：导入进来的 Agent 也要立刻进清单（否则"导入成功"却在派发侧不可见）。
+      syncDispatchableSubagents();
       mainWindow?.webContents.send("slime:agents:selected", res.agentId ?? null);
       console.info(`[gui:main] 导入成功: agent=${res.agentId} (${res.agentName})`);
     } else {
@@ -6014,6 +6334,33 @@ function registerIpcHandlers(): void {
     return { ok: true, config: readNotifyConfig() };
   });
 
+  /* ── A-1108：全局降级池（设置 → 通用） ──
+     背景：用户点名「我都没设置，哪来的全局降级池？」—— 那份池是 engine 里硬编码的
+     「自动把其他所有已配置供应商的启用模型塞进降级链」，**不是**任何配置文件写的。
+     现在改为用户自定义，默认空（= 不跨供应商降级）。
+     ⚠️ 这里**不做**任何「补一个默认池」的事：空就是空。任何贴心的默认值都会让同一句话
+        被再问一遍，而且会把用户的对话悄悄发到他没同意过的供应商去。
+     ⚠️ 引擎侧每次解析路由都会重读这个文件 ⇒ 保存后**下一条消息即生效**，不需要重启。 */
+
+  /** 读取降级池 + 可选供应商摘要（界面要「供应商 → 模型」两个下拉，省一次往返） */
+  handleTrusted<void>("slime:fallback:get", async () => {
+    return { ok: true, entries: readFallbackPool().entries, providers: listProviders() };
+  });
+
+  /** 保存降级池（**整体替换**；形状在主进程侧再消毒一遍 —— 不信任渲染层传来的数组） */
+  handleTrusted<{ entries?: unknown }>("slime:fallback:set", async (_event, p) => {
+    try {
+      const next = writeFallbackPool({ entries: p?.entries });
+      console.info(
+        `[gui:main] 全局降级池已更新：${next.entries.length} 条`
+        + (next.entries.length > 0 ? `（${next.entries.map((e) => `${e.provider}:${e.model}`).join(" → ")}）` : "（空 = 不跨供应商降级）"),
+      );
+      return { ok: true, entries: next.entries };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
   // ── LLM 网关（设置 → LLM 网关） ────────────────
   handleTrusted<void>("slime:llmgw:get", async () => {
     const cfg = readLlmGatewayConfig();
@@ -6380,8 +6727,27 @@ function main(): void {
   // CDP 远程调试端口（仅开发环境开启，便于 agent-browser 自动化接入）。
   // 安全：以 app.isPackaged 判定——构建产物中 process.env.NODE_ENV 不做静态替换且运行时未设置，
   // 旧判定会让正式包默认开放 9222，本机任意进程可附到渲染层执行任意 JS、读取全部 IPC 流量。
-  if (!app.isPackaged) {
-    app.commandLine.appendSwitch("remote-debugging-port", "9222");
+  // ⚠️ A-1110：端口**不再硬编码 9222**。Chromium 的 devtools http server **不会自己换端口**：
+  //   9222 被占（上一个 dev 实例没退干净 / 另一个 userData 目录的实例 / agent-browser 之类的
+  //   工具自己开着 9222）时只会 bind 失败，在调试面板刷出那两条
+  //   `…bind() returned an error…(0x2740)` + `Cannot start http server for devtools`，
+  //   并让整套 CDP 能力**静默消失**（verify-packaged / agent-browser 全哑）。
+  // 选择逻辑（env 覆盖 → 占用顺延 → 临时端口 → 落盘发布）全在 `devtoolsPort.ts`（唯一出处）。
+  // ⚠️ 必须在这里（`ready` 之前）appendSwitch —— ready 之后再调用**不生效**，
+  //   而那正是「探针必须同步」的原因（见该模块文件头）。
+  const devtoolsDecision = app.isPackaged
+    ? null
+    : resolveDevtoolsPort(process.env[DEVTOOLS_PORT_ENV], listeningPortsSync());
+  if (devtoolsDecision) {
+    app.commandLine.appendSwitch("remote-debugging-port", String(devtoolsDecision.port));
+    // 出声：端口会变 ⇒ 默认值不再可信，变了必须能被看见（老文档/老习惯写的都是 9222）
+    if (devtoolsDecision.reason === "shifted") {
+      console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 已被占用 → CDP 端口顺延为 ${devtoolsDecision.port}`);
+    } else if (devtoolsDecision.reason === "ephemeral") {
+      console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 及其后 ${DEVTOOLS_PORT_SCAN} 个端口均被占用 → 交系统分配临时端口（真实端口见 DevToolsActivePort）`);
+    } else if (devtoolsDecision.explicit) {
+      console.log(`[gui:devtools] CDP 端口 ${devtoolsDecision.port}（来自 ${DEVTOOLS_PORT_ENV}）`);
+    }
   }
 
   app.whenReady()
@@ -6396,6 +6762,26 @@ function main(): void {
         session.fromPartition("persist:slime-browser").protocol.handle("slime", () => new Response(null, { status: 204 }));
       } catch { /* 忽略 */ }
       createWindow();
+      // A-1110：**发布实际 CDP 端口**。端口现在会变（占用顺延），而外部工具（verify-packaged /
+      // agent-browser）历史上都写死 9222 ⇒ 不发布就等于把它们悄悄弄坏。
+      // `port === 0` 时真值由 Chromium 写在 `<userData>/DevToolsActivePort`，所以轮询几帧再落盘。
+      // ⚠️ 落盘与上面的日志是**两条独立的发现路径**（日志给坐在终端前的人，文件给脚本）。
+      if (devtoolsDecision) {
+        void (async () => {
+          let actual: number | null = null;
+          if (devtoolsDecision.port === 0) {
+            const activePath = join(app.getPath("userData"), "DevToolsActivePort");
+            for (let i = 0; i < 25 && actual === null; i++) {
+              try { actual = parseDevToolsActivePort(readFileSync(activePath, "utf8")); } catch { /* 还没写出来 */ }
+              if (actual === null) { await new Promise((r) => setTimeout(r, 100)); }
+            }
+          }
+          const file = writeDevtoolsPortFile(app.getPath("userData"), devtoolsDecision, actual);
+          if (file) {
+            console.log(`[gui:devtools] CDP 端口 ${actual ?? devtoolsDecision.port} 已发布到 ${file}`);
+          }
+        })();
+      }
       // A-1055：托盘常驻 —— 应用一起来就出现在系统托盘栏（用户要求"只要 slime 打开就直接出现图标"）。
       // 不再依赖"关闭窗口时是否后台模式"这个条件（那正是"要的时候没有"的根因）。
       ensureTray();
@@ -6602,7 +6988,21 @@ async function startPythonBackend(): Promise<void> {
     return;
   }
 
-  const env: Record<string, string | undefined> = { ...process.env, SLIME_PORT };
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    SLIME_PORT,
+    /* A-1101：把 python 管道编码**显式钉成 UTF-8**，与下面 `data.toString()` 的解码口径**成对**。
+     * ⚠️ 诚实记录（本机实测）：这台机器的系统已启用「Beta: UTF-8」⇒ venv 解释器(3.12.9)往管道
+     * 写的**本来就是 utf-8**（`sys.stdout.encoding = utf-8`）⇒ 本机 cmd 里看到的乱码**不是**这一层，
+     * 而是**终端渲染层**（控制台代码页 CP936 收到 UTF-8 字节）—— 那一层归
+     * `gui/scripts/dev-utf8.mjs` 的 `chcp 65001` 管。
+     * 那这两个变量还要不要？要 —— 这是**部署面加固**：默认编码跟解释器版本与系统设置走
+     * （未开 UTF-8 模式的 Windows 上 `locale.getpreferredencoding(False)` = cp936），
+     * 一旦写解两侧口径错开就是**双重乱码**且极难归因。显式钉住 = 两层口径从此不随环境漂。
+     * ⚠️ 只改一侧 = 更彻底的乱码 —— 改这里必须同时核对 `data.toString()` 的解码参数。 */
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+  };
   if (process.platform !== "win32") {
     // Linux/macOS：llama-server 动态库加载（随包布局：资源根/llama.cpp/build/bin）
     const libDir = resolveBundled(join("llama.cpp", "build", "bin"));

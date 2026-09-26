@@ -217,10 +217,28 @@ export function applyWindowsNotificationIdentity(iconPath?: string | null): Iden
     return { ok: true, detail: `已注册（${values.map((v) => `${v.name}=${v.value}`).join(" / ")}），跳过` };
   }
   try {
-    // 一次性写入全部值（/f 覆盖；父键由 reg add 自动创建）
-    const args: string[] = ["add", key, "/f"];
-    for (const v of values) { args.push("/v", v.name, "/t", "REG_SZ", "/d", v.value); }
-    execFileSync(regExe(), args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+    // ⚠️ `reg add` 一条命令**只接受一组** `/v /t /d`（本机实测 2026-09-25：
+    //   两组塞一条 → **exit 1** + 打印用法帮助；逐值两条 → **exit 0** 且 reg query 回读两值俱在）。
+    //   A-1055 引入 IconUri 后的写法正是把两组塞一条 ⇒ 注册**每次启动都在失败**，
+    //   toast 头部一直退回 `com.slime.gui`、图标一直缺席，而这行 warn 天天在响。
+    //   ⇒ 逐值写入（每个值一次调用），失败**逐值**如实上报。
+    // ⚠️ 失败信息**只报退出码、不透传 reg 的 stderr**：那是控制台代码页文本（本机 936），
+    //   在 UTF-8 终端里必然渲染成乱码（用户截图里 `[notify]` 下面那坨天书就是它），
+    //   除了吓人没有任何信息量；要复现细节就手动跑注释里的命令（参数全 ASCII，可读）。
+    const failures: string[] = [];
+    for (const v of values) {
+      try {
+        execFileSync(regExe(), ["add", key, "/f", "/v", v.name, "/t", "REG_SZ", "/d", v.value], {
+          windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+        });
+      } catch (e) {
+        const err = e as { status?: number };
+        failures.push(`${v.name}（reg add 退出码 ${err.status ?? "未知"}）`);
+      }
+    }
+    if (failures.length > 0) {
+      return { ok: false, detail: `写注册表失败：${failures.join("；")}` };
+    }
     const got = currentValues(key, values.map((v) => v.name));
     const bad = values.filter((v) => got[v.name] !== v.value);
     return bad.length === 0

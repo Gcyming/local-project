@@ -75,6 +75,9 @@ export const IPC_CHANNELS = {
   settings_autostart_get: "slime:settings:autostart:get",
   settings_autostart_set: "slime:settings:autostart:set",
   settings_uninstall: "slime:settings:uninstall",
+  // 全局降级池（设置 → 通用）：用户自定义的跨供应商降级顺序；默认空 = 不降级（A-1108）
+  fallback_get: "slime:fallback:get",
+  fallback_set: "slime:fallback:set",
   // LLM 网关（设置 → LLM 网关）
   llmgw_get: "slime:llmgw:get",
   llmgw_set: "slime:llmgw:set",
@@ -432,6 +435,12 @@ export interface AgentDetail {
   lifecycle: string;
   /** A-980-R22：工具面白名单（skill/MCP 差异化配置） */
   tool_profile?: ToolProfileDTO;
+  /**
+   * A-1096：是否同意被派发为子代理。三态语义（判据唯一出处
+   * `core-ts/services/subagentCatalog.ts::isSubagentDispatchAllowed`）：
+   * `undefined`（缺省）与 `true` 都表示允许，`false` 才表示拒绝。
+   */
+  subagent_dispatch?: boolean;
 }
 
 export interface StatsSnapshot {
@@ -891,6 +900,21 @@ export type { AgentProcEntry, AgentProcView } from "../../../core-ts/src/service
    用 `import type` 就没有"两份形状"这回事。 */
 import type { RescuableModel } from "../../../core-ts/src/services/context_loop.js";
 
+/* ── A-1121（②）：右栏打开请求（url / terminal / files）────────────────────────
+   生产者 = core-ts 工具层（`sidebar_open_terminal` / `sidebar_open_files` / `http_create_app`），
+   转发者 = 主进程（`setSidebarOpener` → `slime:sidebar:open`），
+   消费者 = 渲染层 RightSidebar。
+   三段共用**同一形状**，所以同样只借类型（理由同上面两条：抄一份 = 多一种静默丢字段的方式）。 */
+export type { SidebarOpenRequest, SidebarOpenKind } from "../../../core-ts/src/sidebarOpen.js";
+
+/* ── A-1122（③）：文件回滚（改动账本的预演与还原）────────────────────────────
+   生产者 = core-ts `services/file_undo.ts`（`planFileUndo` / `applyFileUndo`），
+   转发者 = 主进程 `slime:file:undo`，
+   消费者 = 渲染层 `ChatPanel.rollbackTo` 的确认框与失败横幅。
+   ⚠️ 这里**不许手抄形状**：抄一份的后果是"主进程多算了一类（例如 `dirs` 目录重建），
+   渲染层却静默不显示" —— tsc 也发现不了。理由与上面三条完全相同。 */
+export type { UndoPlan as FileUndoPlan, UndoResult as FileUndoResult } from "../../../core-ts/src/services/file_undo.js";
+
 /** 列表返回：视图**或**失败原因（失败必须能说出来，不许静默给个空列表 ——
  *  空列表的含义是"没有后台资源"，与"查询失败"完全不同，混在一起会让用户以为没东西在跑）。 */
 export type AgentProcsListResult =
@@ -1062,9 +1086,30 @@ export interface NotifyConfigDTO {
   soundName: string | null;
 }
 
+/* ── 全局降级池（A-1108，设置 → 通用） ── */
+
+/** 一条降级池条目：某供应商（providers 表里的 key）的某个模型 id */
+export interface FallbackPoolEntryDTO {
+  provider: string;
+  model: string;
+}
+
+/**
+ * 全局降级池配置（落盘 `config/fallback-pool.json`）。
+ *
+ * ⚠️ **空数组 = 不降级**（默认语义）：首选供应商整体不可用（限流/下线）时**如实报错**，
+ * 不再自动换到别家供应商。`entries` 的顺序 = 尝试顺序（先加的先试）。
+ * 没有独立的 `enabled` 开关 —— 「开关开着但一个条目都没有」是无法向用户解释的态。
+ *
+ * ⚠️ 与 core-ts `src/services/fallbackPool.ts` 的 `FallbackPoolConfig` 是**同一份契约**
+ * （preload/renderer 不能 import core-ts），字段增删必须同步。
+ */
+export interface FallbackPoolConfigDTO {
+  entries: FallbackPoolEntryDTO[];
+}
+
 /**
  * A-1055：自动更新状态（主进程 → 渲染层 `slime:update:status`）。
- *
  * ⚠️ 与主进程 `updater.ts` 的 `UpdateStatus` 是**同一份契约**（字段增删必须同步）。
  * 之所以在这里再声明一次：preload/renderer 不能 import 主进程模块（会拖进 electron-updater）。
  */
@@ -1120,6 +1165,12 @@ export interface CompressResult {
   realShrink?: boolean;
   /** A-1082：摘要轮因预算所限摘录掉的中间消息条数（0 = 全量喂给摘要轮） */
   elided?: number;
+  /**
+   * A-1106：摘要**被输出上限腰斩**（上游 `finish_reason === "length"`，抬满上限重试一次后仍是）。
+   * 与 `elided` 并列的另一条「丢记忆」路径：写入的摘要**不完整**，早期细节可能缺失。
+   * 界面据此可如实提示（此前该情形静默通过，用户只会觉得「压缩后 Agent 丢了上下文」）。
+   */
+  summaryTruncated?: boolean;
   /** A-1082：本次结果因期间已有更新压缩落地而丢弃（skip-stale） */
   stale?: boolean;
   /** A-1082：同一段历史连续失败 ≥3 次已熔断 */
@@ -1193,6 +1244,8 @@ export interface ResidentState {
   subagents: SubAgentRunView[];
   /** A-942：全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
   defaultModel?: string;
+  /** A-1097：子代理**执行模型池**（多选；`[0]` 为执行兜底档）。空数组 = 不指定（回退 inherit）。 */
+  defaultModels?: string[];
 }
 
 /** A-939 上下文分桶（引擎 done 事件携带，随 slime:chat:done 透传渲染层） */

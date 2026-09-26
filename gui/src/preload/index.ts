@@ -24,9 +24,14 @@ import type {
   TraceSnapshot, PlanInfo, CompressResult,
   ToolProfileDTO,
   NotifyConfigDTO,
+  FallbackPoolEntryDTO,
   UpdateStatusDTO,
   OperationFocusUI,
 } from "../shared/ipc.js";
+// A-1121（②）：右栏打开请求的唯一形状（core-ts 侧定义，这里只借类型）
+import type { SidebarOpenRequest } from "../shared/ipc.js";
+// A-1122（③）：文件回滚的预演/还原结果（core-ts 侧定义，这里只借类型）
+import type { FileUndoPlan, FileUndoResult } from "../shared/ipc.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
 function onMessage<T>(channel: string, cb: (payload: T) => void) {
@@ -222,9 +227,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** A-918++：GUI 表单新增 MCP 服务器（追加 [[mcp_servers]] 块） */
     mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) =>
       ipcRenderer.invoke("slime:extras:mcpAdd", input) as Promise<{ ok: boolean; error?: string }>,
-    /** A-918++：MCP 官方 registry 联网搜索 */
+    /** A-918++：MCP 官方 registry 联网搜索（A-1106：回带 appliedQuery / unrecognized，供界面如实显示检索词） */
     mcpRegistrySearch: (query?: string) =>
-      ipcRenderer.invoke("slime:mcpRegistrySearch", { query }) as Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; error?: string }>,
+      ipcRenderer.invoke("slime:mcpRegistrySearch", { query }) as Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; appliedQuery?: string; unrecognized?: boolean; error?: string }>,
     /** A-918++：从官方 registry 安装 MCP */
     mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) =>
       ipcRenderer.invoke("slime:mcpRegistryInstall", { card }) as Promise<{ ok: boolean; error?: string }>,
@@ -247,6 +252,16 @@ contextBridge.exposeInMainWorld("slimeAPI", {
   files: {
     /** 导入文件对话框：返回本地路径（聊天输入区附件） */
     pick: () => ipcRenderer.invoke("slime:files:pick") as Promise<{ ok: boolean; path?: string; error?: string }>,
+  },
+  /**
+   * A-1122（③）：文件回滚账本 —— 回滚一条消息时把磁盘上的改动也还原。
+   * `plan` 只读（供确认框报「将还原 N 个文件」），`apply` 才真正动磁盘。
+   */
+  fileUndo: {
+    plan: (agentId: string, sessionId: string | undefined, userMsg: string) =>
+      ipcRenderer.invoke("slime:file:undo", { agentId, sessionId, userMsg, mode: "plan" }) as Promise<FileUndoPlan>,
+    apply: (agentId: string, sessionId: string | undefined, userMsg: string) =>
+      ipcRenderer.invoke("slime:file:undo", { agentId, sessionId, userMsg, mode: "apply" }) as Promise<FileUndoResult>,
   },
   images: {
     /** 识图：选择图片（多选≤4）→ 主进程编码 data URL（给聊天输入区附件 / 直接发送） */
@@ -439,6 +454,21 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 主进程 → 渲染层：该播自定义提示音了（系统默认音不用走这里） */
     onPlaySound: (cb: () => void) => onMessage<Record<string, never>>("slime:notify:playsound", cb),
   },
+  /**
+   * A-1108：全局降级池（设置 → 通用）。
+   *
+   * 与别的设置不同，它的**消费方是 core-ts 的引擎**（不是主进程 UI）：
+   * 配置由主进程落盘（见 core-ts `services/fallbackPool.ts`），引擎每次解析路由时重读
+   * ⇒ **改完下一条消息即生效，无需重启**。
+   * `get` 一并回传 `providers`（脱敏摘要）—— 界面要拿「供应商 → 模型」两个下拉，省一次往返；
+   * 摘要里没有明文 api_key（`has_key` / `key_hint` 而已），不会因为这里多带一份就泄出去。
+   * ⚠️ 频道名与 `IPC_CHANNELS.fallback_get / fallback_set` 必须同值（有静态守卫钉住）。
+   */
+  fallback: {
+    get: () => ipcRenderer.invoke("slime:fallback:get") as Promise<{ ok: boolean; entries: FallbackPoolEntryDTO[]; providers: ProviderSummary[] }>,
+    set: (entries: FallbackPoolEntryDTO[]) =>
+      ipcRenderer.invoke("slime:fallback:set", { entries }) as Promise<{ ok: boolean; entries?: FallbackPoolEntryDTO[]; error?: string }>,
+  },
   /** LLM 网关（设置 → LLM 网关） */
   llmGateway: {
     get: () => ipcRenderer.invoke("slime:llmgw:get") as Promise<{ ok: boolean; config: LlmGatewayConfigDTO; status: LlmGatewayStatusDTO }>,
@@ -599,7 +629,10 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:resident:subagent:delegate", p) as Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>,
     /** A-942：设置全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空=继承） */
     subagentSetDefaultModel: (model: string) =>
-      ipcRenderer.invoke("slime:resident:subagent:setDefaultModel", { model }) as Promise<{ ok: boolean; defaultModel?: string; error?: string }>,
+      ipcRenderer.invoke("slime:resident:subagent:setDefaultModel", { model }) as Promise<{ ok: boolean; defaultModel?: string; defaultModels?: string[]; error?: string }>,
+    /** A-1097：设置子代理**执行模型池**（多选；第 1 项 = 执行兜底档）。列表顺序即优先级。 */
+    subagentSetModels: (models: string[]) =>
+      ipcRenderer.invoke("slime:resident:subagent:setModels", { models }) as Promise<{ ok: boolean; defaultModels?: string[]; error?: string }>,
     /** A-918+：读取用户选定的子代理（自建 agent id 列表） */
     subagentGetSelection: () =>
       ipcRenderer.invoke("slime:resident:subagent:getSelection") as Promise<{ ok: boolean; selectedAgentIds?: string[] }>,
@@ -685,9 +718,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     onOperationFocus: (cb: (e: OperationFocusUI) => void) =>
       onMessage<OperationFocusUI>("slime:screen:opFocus", cb),
   },
-  /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
-  onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string; from?: "site" | "user" }) => void) =>
-    onMessage<{ kind: "url"; url: string; name?: string; from?: "site" | "user" }>("slime:sidebar:open", cb),
+  /** A-918++ / A-1121：主进程通知「在右侧栏打开某项」（url / terminal / files）。
+   *  ⚠️ 类型取**唯一出处**（core-ts/src/sidebarOpen.ts）而不是在这里手抄一份：
+   *  抄一份的下场是"主进程多发了一个字段、渲染层不知道"，而那正是 `cmd`/`root` 会被静默丢掉的形态。 */
+  onSidebarOpen: (cb: (payload: SidebarOpenRequest) => void) =>
+    onMessage<SidebarOpenRequest>("slime:sidebar:open", cb),
 });
 
 declare global {
@@ -713,6 +748,15 @@ declare global {
         onCommand: (cb: (cmd: { id: string; kind: string } & Record<string, unknown>) => void) => () => void;
         sendResult: (payload: { id: string; ok: boolean; data?: unknown; error?: string }) => void;
         onPopupNotice: (cb: (p: { url: string; ts: number; kind?: string; scheme?: string }) => void) => () => void;
+      };
+      /**
+       * A-1122（③）：文件回滚账本。`plan` 只读（供确认框报「将还原 N 个文件」），
+       * `apply` 才真正动磁盘。渲染层必须**先走这两个、再截断历史** ——
+       * 切分线靠 `history.jsonl` 里那条用户消息定位，先截断 = 还原静默失效。
+       */
+      fileUndo: {
+        plan: (agentId: string, sessionId: string | undefined, userMsg: string) => Promise<FileUndoPlan>;
+        apply: (agentId: string, sessionId: string | undefined, userMsg: string) => Promise<FileUndoResult>;
       };
       /** A-980-R2：深度链接真实打开（探测系统处理器并交给系统应用） */
       protocol: {
@@ -759,7 +803,7 @@ declare global {
         mcpOpen: () => Promise<{ ok: boolean; error?: string }>;
         mcpDelete: (name: string) => Promise<{ ok: boolean; error?: string }>;
         mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) => Promise<{ ok: boolean; error?: string }>;
-        mcpRegistrySearch: (query?: string) => Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; error?: string }>;
+        mcpRegistrySearch: (query?: string) => Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; appliedQuery?: string; unrecognized?: boolean; error?: string }>;
         mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) => Promise<{ ok: boolean; error?: string }>;
       };
       runtime: {
@@ -865,6 +909,11 @@ declare global {
         test: () => Promise<{ ok: boolean; config?: NotifyConfigDTO }>;
         onPlaySound: (cb: () => void) => () => void;
       };
+      /** A-1108：全局降级池（设置 → 通用）—— 默认空 = 不跨供应商降级 */
+      fallback: {
+        get: () => Promise<{ ok: boolean; entries: FallbackPoolEntryDTO[]; providers: ProviderSummary[] }>;
+        set: (entries: FallbackPoolEntryDTO[]) => Promise<{ ok: boolean; entries?: FallbackPoolEntryDTO[]; error?: string }>;
+      };
       llmGateway: {
         get: () => Promise<{ ok: boolean; config: LlmGatewayConfigDTO; status: LlmGatewayStatusDTO }>;
         set: (cfg: LlmGatewayConfigDTO) => Promise<{ ok: boolean; error?: string; status: LlmGatewayStatusDTO }>;
@@ -951,6 +1000,9 @@ declare global {
         subagentCancel: (id: string) => Promise<{ ok: boolean }>;
         subagentClear: () => Promise<{ ok: boolean; cleared: number; dropped: number }>;
         subagentDelegate: (p: { task: string; agentId?: string }) => Promise<{ ok: boolean; run?: SubAgentRunView; error?: string }>;
+        subagentSetDefaultModel: (model: string) => Promise<{ ok: boolean; defaultModel?: string; defaultModels?: string[]; error?: string }>;
+        /** A-1097：执行模型池（多选；第 1 项 = 执行兜底档） */
+        subagentSetModels: (models: string[]) => Promise<{ ok: boolean; defaultModels?: string[]; error?: string }>;
         subagentGetSelection: () => Promise<{ ok: boolean; selectedAgentIds?: string[] }>;
         subagentSetSelection: (selectedAgentIds: string[]) => Promise<{ ok: boolean; selectedAgentIds?: string[]; error?: string }>;
         onUpdate: (cb: (payload: unknown) => void) => () => void;
@@ -983,8 +1035,8 @@ declare global {
         list: () => Promise<Array<{ id: string; dir: string; port: number; host: string; urls: string[]; startedAt: number; requests: number }>>;
         open: (url: string) => Promise<{ ok: boolean; error?: string }>;
       };
-      /** A-918++：主进程通知「HTTP 生成的网页应用在右侧栏浏览器自动打开」 */
-      onSidebarOpen: (cb: (payload: { kind: "url"; url: string; name?: string; from?: "site" | "user" }) => void) => () => void;
+      /** A-918++ / A-1121：主进程通知「在右侧栏打开某项」（url / terminal / files） */
+      onSidebarOpen: (cb: (payload: SidebarOpenRequest) => void) => () => void;
       /** 图形控制能力（screen_*）：桌面 + 安卓统一 */
       screen: {
         info: () => Promise<{

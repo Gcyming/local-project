@@ -9,6 +9,7 @@
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { frontmatterDescription } from "../../../core-ts/src/skills.js";
 import { encrypt, decrypt } from "../../../core-ts/src/encryption.js";
+import { expandMarketQuery } from "../../../core-ts/src/services/marketLocalize.js";
 import { existsSync, readFileSync, statSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, openSync, readSync, closeSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 
@@ -713,10 +714,25 @@ export interface RegistryServerCard {
   install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string };
 }
 
-/** 联网搜索 MCP 官方 registry（按 name/description 关键词） */
-export async function searchMcpRegistry(query: string): Promise<{ ok: boolean; servers?: RegistryServerCard[]; error?: string }> {
+/** 联网搜索 MCP 官方 registry（按 name/description 关键词）
+ *
+ *  A-1106：`query` 先过 `expandMarketQuery` —— 中文输入（「浏览器」「数据库」）被展开成
+ *  上游认得的英文检索词再发出去。此前的形态是**把中文原样 URL 编码发给上游**，上游当然
+ *  搜不到任何东西 ⇒ 中文用户实际只有"看字母序前 60 条长尾"这一条路，「太不能用」。
+ *  ⚠️ 这一点必须在 main 做而不是渲染层：它是**上游请求参数的构造**，
+ *     渲染层无权知道也不该复制一份规则（唯一出处在 `marketLocalize.ts`）。
+ *  回带 `appliedQuery` / `unrecognized` 是为了**如实告知**用户"真正搜的是什么"。
+ */
+export async function searchMcpRegistry(query: string): Promise<{
+  ok: boolean; servers?: RegistryServerCard[]; error?: string;
+  /** 真正发给上游的检索词（可能已从中文展开成英文）；便于界面如实显示 */
+  appliedQuery?: string;
+  /** 非空输入但一个词都没识别出来（纯中文且词典未收录）⇒ 上游大概率搜不到，界面必须提醒 */
+  unrecognized?: boolean;
+}> {
   try {
-    const q = (query ?? "").trim();
+    const expanded = expandMarketQuery(query ?? "");
+    const q = expanded.query;
     const url = `https://registry.modelcontextprotocol.io/v0.1/servers?limit=60${q ? `&search=${encodeURIComponent(q)}` : ""}`;
     const res = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "slime-agent" } });
     if (!res.ok) { return { ok: false, error: `registry 请求失败（HTTP ${res.status}）` }; }
@@ -751,7 +767,12 @@ export async function searchMcpRegistry(query: string): Promise<{ ok: boolean; s
         cards.push({ name: safeName, displayName, description: desc, source: "registry" });
       }
     }
-    return { ok: true, servers: cards };
+    // A-1106：如实回带「实际检索词」与「没认出来」——
+    // ⚠️ 不静默：输入中文却没认出来时，界面必须说清（否则用户以为搜过了，其实上游什么都没搜到）
+    return {
+      ok: true, servers: cards, appliedQuery: q,
+      ...(expanded.unrecognized ? { unrecognized: true } : {}),
+    };
   } catch (e) {
     return { ok: false, error: `联网搜索 MCP registry 失败：${e instanceof Error ? e.message : String(e)}` };
   }

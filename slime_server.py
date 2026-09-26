@@ -8,6 +8,7 @@ import os
 import time
 import secrets
 import asyncio
+import sys
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -34,6 +35,18 @@ from social.base import WeChatWorkAdapter
 # 此前仅 lifespan 内函数级导入，/chat 端点每次调用 NameError（流式主路径掩盖了该崩溃）
 from core.a2a import ServerA2ABus
 from core.mcp_client import get_mcp_client
+
+
+# ── A-1101：日志统一走 **stdout**（必须在**任何** logging 调用之前配置）───────
+# 事实链：root logger 不配 handler 时用 lastResort（**stderr**），uvicorn 默认 log config 也写 **stderr**；
+# 而 GUI 主进程把后端 stderr 一律冠以 `[slime-server:err]` 前缀转发 ⇒
+# `INFO: Application startup complete`、`[mcp] …: 迟到/未知响应 id=1 丢弃` 这类
+# **普通信息/警告**全被标成"错误"，用户在 cmd 窗口里看到一片 :err 还以为后端挂了（用户实测投诉）。
+# 配到 stdout 后，stderr 只剩真正的 traceback ⇒ `:err` 前缀重新名副其实。
+# ⚠️ format 对齐 logging 默认形态（levelname:name:message），python 与 uvicorn 两种日志混在同一条流里也可读。
+# ⚠️ basicConfig 在 root **已有 handler** 时是 no-op —— 故必须放在文件顶部、任何 logging.* 之前。
+logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                    format="%(levelname)s:%(name)s:%(message)s")
 
 
 # ── slime.toml 配置读取 ────────────────────────────────────
@@ -2203,4 +2216,8 @@ if __name__ == "__main__":
     import uvicorn
     # access_log=False：GUI/CLI 高频轮询状态接口时，避免每次请求都写一条 access log
     #（日志 IO 是本地全链路真实的 CPU/磁盘开销，且无任何远程访问场景需要审计日志）
-    uvicorn.run(app, host="127.0.0.1", port=SLIME_PORT, log_level="info", access_log=False)
+    # A-1101：log_config=None —— **不许**让 uvicorn 安装自带的 stderr handler：
+    # 那会把 `INFO: Application startup complete` 这类普通信息又写回 stderr，
+    # 被 GUI 冠以 `[slime-server:err]` 前缀 ⇒ 用户把启动信息当成报错。
+    # 级别统一由顶部的 basicConfig（root, stdout, INFO）管辖。
+    uvicorn.run(app, host="127.0.0.1", port=SLIME_PORT, access_log=False, log_config=None)
