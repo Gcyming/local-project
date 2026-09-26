@@ -79,8 +79,18 @@ export function providerKeyOfRoute(route: RouteEntry): string {
   return route.baseUrl || route.name;
 }
 
-/** 根据 route 的 api_format 创建对应的客户端（全平台：openai/anthropic/responses/google） */
-function createClient(route: RouteEntry): ChatClient | AnthropicClient | ResponsesClient | GoogleClient {
+/**
+ * 根据 route 的 api_format 创建对应的客户端（全平台：openai/anthropic/responses/google）。
+ *
+ * ⚠️ **A-1106：这是「按路由造 client」的唯一实现，必须 export** ——
+ *    此前 `gui/src/main/index.ts` 为了注入 Chromium fetch（绕 Cloudflare 对 Node fetch 的
+ *    指纹风控）**另抄了一份 clientFactory**，那一份**漏了 `rateLimit`** ⇒ RPM 限流器在生产
+ *    链路里**一次都没被调用**（`fetchWithRetry` 里 `if (rateLimit)` 恒假），而测试走的是本函数
+ *    ⇒ `a1091-rpm.spec` 全绿也发现不了。**重复产地 = 一半的真相。**
+ *
+ * @param fetchImpl 可选的 fetch 实现（Electron 注入 Chromium 网络栈；缺省用全局 fetch）
+ */
+export function createRouteClient(route: RouteEntry, fetchImpl?: typeof fetch): ChatClient | AnthropicClient | ResponsesClient | GoogleClient {
   const format = route.api_format === "anthropic" ? "anthropic"
     : route.api_format === "responses" ? "responses"
     : route.api_format === "google" ? "google"
@@ -92,6 +102,7 @@ function createClient(route: RouteEntry): ChatClient | AnthropicClient | Respons
   const opts = {
     baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs,
     rateLimit: { key: providerKeyOfRoute(route), model: route.model },
+    ...(fetchImpl ? { fetchImpl } : {}),
   };
   if (format === "anthropic") { return new AnthropicClient(opts); }
   if (format === "responses") { return new ResponsesClient(opts); }
@@ -183,7 +194,10 @@ export class ModelRouter {
 
   constructor(routes: RouteEntry[] = [], createClientFn?: ClientFactory) {
     this.routes = [...routes];
-    this.createClient = createClientFn ?? createClient;
+    // A-1106：缺省走 `createRouteClient`（带 `rateLimit`）—— 改名前此处叫 `createClient`。
+    // 不传 factory 的调用方（测试 / 纯 core 场景）由此获得完整限流能力；传了 factory 的
+    // 调用方（生产 GUI 注入 Chromium fetch）**必须自己带上 rateLimit**，见 gui/src/main/index.ts。
+    this.createClient = createClientFn ?? createRouteClient;
   }
 
   /** 注入「已知失效模型」判定钩子（引擎在创建 router 后调用，读实时探测共享缓存）。

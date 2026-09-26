@@ -47,6 +47,31 @@ export const RATIO_MAX = 0.97;
 export const DEFAULT_TAIL_KEEP = 6;
 /** 摘要轮输入**预算**（tokens）。A-1082：超预算不再放弃摘要，而是走 `buildSummaryInput` 摘录。 */
 export const SUMMARIZE_INPUT_CAP = 24000;
+/**
+ * A-1106：摘要轮**输出**上限的绝对封顶（tokens）。
+ *
+ * ⚠️ 旧实现写死 `max_tokens: 1024` 且**不检查 `finish_reason`** —— CJK 下 1024 token
+ * 约只能写出几百个汉字，长会话摘要触达上限时**被腰斩**，而半截文本 `trim()` 后非空
+ * ⇒ 被当作**完整摘要**写入 `contextSummary` ⇒ **静默丢失早期上下文**（用户症状：
+ * "压缩后 Agent 丢失上下文记忆"）。而 `validateHistory` 只校验序列合法性，**查不出**这个。
+ *
+ * 现在：输出上限按输入规模自适应（见 `summarizeOutputCap`），并在上游
+ * `finish_reason === "length"` 时**抬满到本上限重试一次**；仍截断则**如实标记**
+ * （`truncated: true`）交由上层出声 —— 绝不静默当完整。
+ */
+export const SUMMARIZE_OUTPUT_CAP = 4096;
+
+/**
+ * 摘要轮的输出上限：按**输入规模**给（摘要天然短于母本），钳在 `[1024, SUMMARIZE_OUTPUT_CAP]`。
+ *
+ * 为什么不是常数：同一次摘要的输入跨度从几千 token 到 `SUMMARIZE_INPUT_CAP` 不等，
+ * 一个固定值必然「对小输入浪费、对大输入腰斩」。0.25 是压缩比的常见下界
+ * （业界摘要任务通常要求 ≤1:4）；下界 1024 保证小会话不被无谓收紧。
+ */
+export function summarizeOutputCap(inputTokens: number): number {
+  const n = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+  return Math.max(1024, Math.min(SUMMARIZE_OUTPUT_CAP, Math.ceil(n * 0.25)));
+}
 /** 每条消息的固定结构开销（tokens；role 标记 + 分隔符 + chat template 骨架） */
 export const MESSAGE_OVERHEAD_TOKENS = 30;
 

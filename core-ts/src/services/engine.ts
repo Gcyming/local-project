@@ -27,6 +27,8 @@ import { foldUserReminder } from "../llm/userReminder.js";
 // A-1061④：上游重试 / 切模型的瞬时通知（见 upstreamNotice.ts）
 import { takeUpstreamNotice } from "../llm/upstreamNotice.js";
 import { AgentRegistry, AgentState } from "./agents.js";
+// A-1106：委派规范的**唯一出处**（与 `ChatService.systemPromptFor` 共用同一常量）。
+import { DELEGATION_GUIDANCE } from "./subagentCatalog.js";
 import {
   ChatEngine,
   ChatEngineCall,
@@ -44,9 +46,14 @@ import { loadSlimeMemories, type SilamAffectState, type SilamBrain, type SilamRe
 // S3：本地模型清单的键名与条目形状来自唯一来源（见 core-ts/src/local_models.ts）。
 // 此前本文件自定义了一份 interface（实测已漂移：缺 `vision`）并硬编码键名 2 次 ——
 // 键改名时这两处会静默失效，症状是"UI 里明明有这个模型，一发消息就报『未注册』"。
-import { LOCAL_MODELS_KEY, findLocalModelSpec, type LocalModelSpec } from "../local_models.js";
+import { findLocalModelSpec, type LocalModelSpec } from "../local_models.js";
+// ⚠️ 本文件不再直接需要 `LOCAL_MODELS_KEY`：A-1108 之后「跳过本地模型伪供应商」这条规则
+// 跟着降级池一起搬进了 `./fallbackPool.ts`（唯一判据出处），在此留个路标免得下一个人又加回来。
+// A-1108：**全局降级池**的用户配置（默认空 = 不跨供应商降级）。唯一判据出处见该模块头注释
+// ——它记录了「那份池不是配置写进去的，是这里硬编码的」这段由来。
+import { readFallbackPool, resolveFallbackTargets, type FallbackPoolConfig } from "./fallbackPool.js";
 import { appendUsage, computeRecordCost, defaultCacheReadInPrompt } from "./usage.js";
-import { buildCompressSummaryPrompt, buildSummaryInput, estimateHistoryTokens, estimateTokensLocal, SUMMARIZE_INPUT_CAP } from "./context_compress.js";
+import { buildCompressSummaryPrompt, buildSummaryInput, estimateHistoryTokens, estimateTokensLocal, SUMMARIZE_INPUT_CAP, SUMMARIZE_OUTPUT_CAP, summarizeOutputCap } from "./context_compress.js";
 // A-1084：引擎侧**保险门**（发送前判"装不装得下"）。它与主进程压缩编排共用同一函数
 // （planEngineSend = planSend(canShrink:false) 的薄包装）⇒ 两处口径不可能漂移。
 import { buildResumeBlock, parseComprehend, planEngineSend, LOCAL_PREFLIGHT_MARKER, type EngineSendGuard } from "./context_loop.js";
@@ -79,6 +86,13 @@ export interface SlimeEngineOptions {
   registry: AgentRegistry;
   /** 解密后的 providers 表（缺省读 config/providers.enc.json；测试注入） */
   providers?: Record<string, ProviderConfig>;
+  /**
+   * A-1108：**全局降级池**配置（缺省从 `config/fallback-pool.json` 读；测试注入）。
+   * 空池（默认）= 不跨供应商降级 —— 首选供应商全挂就如实报错，不再自动换家。
+   */
+  fallbackPool?: FallbackPoolConfig;
+  /** A-1108：降级池配置的**读取根**（缺省 PROJECT_ROOT；测试注入 tmp，避免读到开发机真实配置） */
+  fallbackPoolRoot?: string;
   hooks?: InjectionHooks;
   tools?: ToolRegistry;
   sandbox?: SandboxManager;
@@ -313,6 +327,10 @@ export function buildSilamTraitSignals(state: SilamAffectState): Array<{ name: s
 export class SlimeEngine implements ChatEngine {
   private registry: AgentRegistry;
   private providers: Record<string, ProviderConfig>;
+  /** A-1108：注入的降级池配置（undefined = 每次调用从 `config/fallback-pool.json` 重新读 ⇒ 改完即时生效） */
+  private fallbackPoolOverride: FallbackPoolConfig | undefined;
+  /** A-1108：降级池配置读取根（缺省 PROJECT_ROOT） */
+  private fallbackPoolRoot: string | undefined;
   private hooks: InjectionHooks;
   private tools: ToolRegistry;
   private sandbox: SandboxManager | null;
@@ -341,6 +359,17 @@ export class SlimeEngine implements ChatEngine {
   /** 重载 providers（GUI 保存 Provider 后热更新，无需重启进程；测试可注入 projectRoot/passFile） */
   public refreshProviders(opts: { projectRoot?: string; passFile?: string } = {}): void {
     this.providers = (decrypt("config/providers.enc.json", { projectRoot: opts.projectRoot, passFile: opts.passFile }) ?? {}) as Record<string, ProviderConfig>;
+  }
+
+  /**
+   * A-1108：取**当前**全局降级池配置。
+   *
+   * 每次路由解析都重读（注入的除外）——用户在「设置 → 通用 → 全局降级池」里加一条，
+   * 下一条消息就该生效，而不是「重启才认」。文件很小（几十字节），读一次远低于一次 LLM 请求的成本。
+   * 读失败/文件不存在 ⇒ 空池（= 不降级），绝不沿用上一次的值、更不发明默认池。
+   */
+  private currentFallbackPool(): FallbackPoolConfig {
+    return this.fallbackPoolOverride ?? readFallbackPool(this.fallbackPoolRoot ?? PROJECT_ROOT);
   }
 
   /**
@@ -395,6 +424,9 @@ export class SlimeEngine implements ChatEngine {
   constructor(opts: SlimeEngineOptions) {
     this.registry = opts.registry;
     this.providers = opts.providers ?? ((decrypt() ?? {}) as Record<string, ProviderConfig>);
+    /** A-1108：降级池配置（注入优先；不注入则每次路由解析时读盘 ⇒ 设置里改完下一条消息即生效） */
+    this.fallbackPoolOverride = opts.fallbackPool;
+    this.fallbackPoolRoot = opts.fallbackPoolRoot;
     this.hooks = opts.hooks ?? NOOP_HOOKS;
     this.tools = opts.tools ?? getRegistry();
     this.sandbox = opts.sandbox ?? null;
@@ -708,12 +740,12 @@ export class SlimeEngine implements ChatEngine {
         return { router: null, error: `${header}未找到已配置的 Provider「${key}」。请到 设置 → 模型供应商 添加/核对该 API（Agent 的模型字段须为 api:<与配置一致的名称>）。` };
       }
 
-      // ── 跨供应商全局降级池（A-158）——「用不了」真根因修复：
-      // 上一版（A-157）只把「同一供应商」的启用模型注入降级链。但免费池/网关会整体限流
-      // （opencode-zen 免费池实测全 429/超时），同池换模型仍是同一上游 → 依然失败。
-      // 正确做法 = 行业成熟客户端（Cherry Studio/Chatbox）逻辑：首选供应商全挂 →
-      // 自动转移到「其他已配置供应商」的启用模型（如 agnes 实测完全可用）。
-      // 路由排序：首选供应商显式/默认模型优先 → 首选供应商其余启用模型 → 其他供应商模型。
+      // ── 降级链的组成（A-158 立，A-1108 改）：
+      // ① 首选供应商自己的模型（显式/默认优先，再其余启用）——「同一家换模型」，永远生效；
+      // ② 跨供应商后备 —— 曾经是「自动把其他所有供应商的启用模型全塞进来」（A-158 那版，
+      //    起因是 opencode-zen 免费池整体 429，同池换模型仍是同一上游）；A-1108 起改为
+      //    **只认用户在 设置 → 通用 → 全局降级池 里显式写的条目，默认空**。
+      // 路由排序：首选供应商显式/默认模型 → 首选供应商其余启用模型 → 用户配置的降级池（按配置顺序）。
       const base = (cfg.api_base ?? "").replace(/\/+$/, "");
       // ⚠️ A-1008：这里只剥 `/v1`，**故意不同步**到 joinApiEndpoint —— 别"顺手统一"。
       // 本行做的是「剥版本段」，与「拼端点」是两种操作。若照抄通配规则把**厂商自带**的
@@ -781,34 +813,31 @@ export class SlimeEngine implements ChatEngine {
       order = [...new Set([primaryModel, ...primaryEnabled].filter((x): x is string => typeof x === "string" && Boolean(x)))].slice(0, MODEL_POOL_MAX);
       pushGroup(primaryBase, cfg.api_key || undefined, order, key, 1000, cfg.api_format, modelFormatsOf(cfg));
 
-      // ② 跨供应商后备：其余已配置 provider 的启用模型（按 provider 键名稳定排序，避免顺序抖动）
-      const others = Object.entries(this.providers)
-        .filter(([k, p]) => k !== key && k !== LOCAL_MODELS_KEY && !p?.api_base?.startsWith("http://127.0.0.1") && !p?.api_base?.startsWith("http://localhost"))
-        .sort(([a], [b]) => a.localeCompare(b));
+      // ② 全局降级池：**只认用户在「设置 → 通用 → 全局降级池」里显式配置的条目**（A-1108）。
+      //
+      // 旧行为（≤A-1107）是自动把「其它所有已配置供应商的启用模型」全量注入（A-158）。用户视角
+      // 是「我根本没设过降级池，它哪来的？」—— 那是这里硬编码出来的，不是任何配置文件写的。
+      // 那个默认值有三个具体危害：① 悄悄把对话（含工具输出/文件片段/长期记忆）发到别家供应商；
+      // ② 候选爆炸（N 家 × M 模型）⇒ 首选一挂就要顺序试完整池，表现为「卡很久然后回别的模型的话」；
+      // ③ 用户无法解释「为什么最后是另一家的模型在答话」。
+      // 现在默认**空池**（不降级，失败如实报错），条目与顺序由用户给定 —— 连「哪些条目算可用」
+      // 的丢弃规则也只在 `./fallbackPool.ts` 里有一处实现（不许在本文件里再抄一遍）。
+      const poolTargets = resolveFallbackTargets(this.currentFallbackPool(), this.providers, key, {
+        isChatCapable: isChatCapableModel,
+      });
       let bias = 900;
-      for (const [otherKey, otherCfg] of others) {
-        const oBase = (otherCfg.api_base ?? "").trim().replace(/\/+$/, "");
-        if (!oBase || !/^https?:\/\//i.test(oBase)) { continue; }
-        // ⚠️ A-1008：同上面首选供应商那处 —— 只剥 `/v1`，**不要**扩成版本段通配（会把智谱
-        // `/api/paas/v4` 剥掉 → 下游补 `/v1` → 404 回归）。拼接唯一实现在 joinApiEndpoint。
-        const ob = oBase.endsWith("/v1") ? oBase.slice(0, -3) : oBase;
-        const oModels = enabledOf(otherCfg);
-        if (oModels.length === 0) {
-          // 无模型列表也注入单路由（上游可用则救场）
-          pushGroup(ob, otherCfg.api_key || undefined, [undefined], otherKey, bias, otherCfg.api_format);
-          bias -= 1;
-          continue;
-        }
-        const cap = oModels.slice(0, MODEL_POOL_MAX / 2); // 跨供应商候选收敛，避免总候选爆炸
-        pushGroup(ob, otherCfg.api_key || undefined, cap, otherKey, bias, otherCfg.api_format, modelFormatsOf(otherCfg));
-        bias -= cap.length;
+      for (const t of poolTargets) {
+        pushGroup(t.base, t.apiKey, [t.model], t.provider, bias, t.apiFormat);
+        bias -= 1;
       }
 
       if (router.list().length === 0) {
         return { router: null, error: `${header}Provider「${key}」没有可用的模型（未配置模型列表或全部未启用）。请到 设置 → 模型供应商 编辑启用至少一个模型。` };
       }
       this.logger.info?.(
-        `[engine] 注入全局降级池（${router.list().length} 个候选）：${router.list().slice(0, 12).map((r) => r.name).join(" → ")}${router.list().length > 12 ? " …" : ""}`,
+        poolTargets.length > 0
+          ? `[engine] 路由候选 ${router.list().length} 个（仅首选供应商「${key}」＋用户降级池 ${poolTargets.length} 个：${poolTargets.map((t) => `${t.provider}:${t.model}`).join(" → ")}）`
+          : `[engine] 路由候选 ${router.list().length} 个（仅首选供应商「${key}」，未配置全局降级池）`,
       );
       if (!cfg.api_key) {
         this.logger.warn(`[engine] Provider「${key}」未配置 API Key，上游可能返回 401（模型 ${primaryModel ?? "默认"}）。`);
@@ -897,6 +926,11 @@ export class SlimeEngine implements ChatEngine {
         "计划整体改版时才用 action=replace 重写。\n" +
         "分阶段执行能显著提高结果的可靠性与可追踪性，也让用户随时看得见进度。",
     );
+    // A-1106：委派规范（**唯一出处**，与 `ChatService.systemPromptFor` 共用同一常量）。
+    // 补在这里的理由：本函数是**另一条系统提示词产地**（定时任务 / 非 ChatService 的引擎路径），
+    // 此前拿不到任何委派引导 ⇒ 那条路径上的任务 100% 由主 Agent 单干。
+    // `delegate_subagent` 工具是无条件注册的，所以在这里引导不会指向一个不存在的工具。
+    parts.push(DELEGATION_GUIDANCE);
     // 工作目录注入：会话级 workspace 优先，回退 Agent sandbox_override（旧模型）；让 Agent 感知其被指定的工作区，文件工具据此访问
     const ws = workspaceOverride ?? (agent.sandbox_override && typeof agent.sandbox_override === "object" ? String(agent.sandbox_override.workspace ?? "") : "");
     if (ws) {
@@ -1228,7 +1262,7 @@ export class SlimeEngine implements ChatEngine {
     agent: AgentState,
     messages: Array<{ role: string; content: unknown }>,
     opts?: { maxInputTokens?: number; priorSummary?: string },
-  ): Promise<{ summary: string; inputTokens: number; elided: number } | null> {
+  ): Promise<{ summary: string; inputTokens: number; elided: number; truncated: boolean } | null> {
     try {
       const { router, error } = await this.resolveRouteInternal(agent);
       if (!router) {
@@ -1242,20 +1276,45 @@ export class SlimeEngine implements ChatEngine {
         "你是一个专业的会话上下文压缩器。只做一件事：把用户提供的对话历史压缩成结构化中文摘要，保留接续任务所需的关键信息。" +
         "不要回答摘要之外的内容、不要自我介绍。"
       );
-      const payload: ChatRequest = {
-        messages: [
-          { role: "system", content: sys },
-          { role: "user", content: buildCompressSummaryPrompt(text, opts?.priorSummary) },
-        ],
-        max_tokens: 1024,
-      };
       const route = router.select("chat");
-      Object.assign(payload, this.reasoningParams(agent, route));
-      const { response } = await router.chat(withModel(payload, route!));
-      const raw = response.choices[0]?.message?.content ?? "";
+      const ask = (maxOut: number): ChatRequest => {
+        const p: ChatRequest = {
+          messages: [
+            { role: "system", content: sys },
+            { role: "user", content: buildCompressSummaryPrompt(text, opts?.priorSummary) },
+          ],
+          max_tokens: maxOut,
+        };
+        Object.assign(p, this.reasoningParams(agent, route));
+        return p;
+      };
+      // A-1106：输出上限按**输入规模**给（旧实现写死 1024 ⇒ CJK 长会话摘要被腰斩，
+      // 半截文本 trim() 后非空 ⇒ 被当作完整摘要写入 ⇒ 静默丢早期上下文）。
+      let maxOut = summarizeOutputCap(inputTokens);
+      const r1 = await router.chat(withModel(ask(maxOut), route!));
+      let raw = r1.response.choices[0]?.message?.content ?? "";
+      let truncated = r1.response.choices[0]?.finish_reason === "length";
+      if (truncated && maxOut < SUMMARIZE_OUTPUT_CAP) {
+        // 抬满上限重试**恰好一次**：截断只说明"输出不够"，唯一有意义的补救是把上限抬满；
+        // 换 prompt / 换模型都是引入新变量。仍截断 ⇒ 如实标记（见下），绝不静默当完整。
+        this.logger.warn(`[engine] 摘要轮触达输出上限（max_tokens=${maxOut}）⇒ 抬到 ${SUMMARIZE_OUTPUT_CAP} 重试一次`);
+        maxOut = SUMMARIZE_OUTPUT_CAP;
+        const r2 = await router.chat(withModel(ask(maxOut), route!));
+        const t2 = r2.response.choices[0]?.message?.content ?? "";
+        if (t2.trim()) {
+          raw = t2;
+          truncated = r2.response.choices[0]?.finish_reason === "length";
+        }
+      }
       const trimmed = raw.trim();
       if (!trimmed) { return null; }
-      return { summary: trimmed, inputTokens, elided };
+      if (truncated) {
+        this.logger.warn(
+          `[engine] 摘要轮即便抬满 ${SUMMARIZE_OUTPUT_CAP} token 仍被截断 ⇒ 标记 truncated=true` +
+          "（摘要不完整，早期细节可能未进摘要；上层必须如实告知，不许当完整摘要使用）",
+        );
+      }
+      return { summary: trimmed, inputTokens, elided, truncated };
     } catch (e) {
       this.logger.warn(`[engine] 摘要轮失败：${e instanceof Error ? e.message : String(e)}`);
       return null;

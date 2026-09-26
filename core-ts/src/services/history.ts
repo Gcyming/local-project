@@ -528,6 +528,45 @@ export async function popLastRecordForAgent(agentId: string, sessionId?: string)
 }
 
 /**
+ * A-1122：**回滚锚点的唯一出处** —— 「这条历史记录往前切，切在哪」。
+ *
+ * 为什么必须抽出来：此前只有 `truncateHistoryFrom` 会做这个定位（找该 agent+session 内
+ * **最后一条** `user === targetUserMsg` 的记录）。文件回滚（`file_undo.ts`）需要**同一个锚点** ——
+ * 若各自再写一份"从后往前找内容相等的记录"，两份口径迟早分家，症状是
+ * **对话回滚到了 A，磁盘却按 B 的边界还原**（两个产地各说各话，且都不报错）。
+ *
+ * 返回 `{ index, prevTimestamp }`：
+ *  · `index` = 目标记录在 `records` 里的下标；`-1` = 找不到（本次回滚不成立）。
+ *  · `prevTimestamp` = **同一 agent+session 在该记录之前最后一条**记录的时间戳（ms）；
+ *    没有则 `0`。这是"上一轮结束的时刻" —— 文件账本用它当切分线（见 `file_undo.ts` 的说明）。
+ */
+export function findRollbackCut(
+  records: readonly HistoryRecord[],
+  agentId: string,
+  sessionId: string | undefined,
+  targetUserMsg: string,
+): { index: number; prevTimestamp: number } {
+  let cutIdx = -1;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i];
+    if (r.agent_id === agentId && (sessionId === undefined || r.session_id === sessionId)) {
+      if (r.user === targetUserMsg) { cutIdx = i; break; }
+    }
+  }
+  if (cutIdx < 0) { return { index: -1, prevTimestamp: 0 }; }
+  let prevTimestamp = 0;
+  for (let i = cutIdx - 1; i >= 0; i--) {
+    const r = records[i];
+    if (r.agent_id === agentId && (sessionId === undefined || r.session_id === sessionId)) {
+      const t = Date.parse(r.timestamp ?? "");
+      prevTimestamp = Number.isFinite(t) ? t : 0;
+      break;
+    }
+  }
+  return { index: cutIdx, prevTimestamp };
+}
+
+/**
  * A-161：截断历史到指定用户消息之前 —— 回滚（rollback）持久化一致性修复。
  * 此前 rollbackTo 只改前端 messages 与输入框，从不删除 history.jsonl 中的历史记录，
  * 重启后 loadHistoryForSession 从文件加载 → 回滚前的旧消息原样复现。
@@ -556,16 +595,8 @@ export async function truncateHistoryFrom(
         // 损坏行跳过
       }
     }
-    let cutIdx = -1;
-    for (let i = records.length - 1; i >= 0; i--) {
-      const r = records[i];
-      if (r.agent_id === agentId && (sessionId === undefined || r.session_id === sessionId)) {
-        if (r.user === targetUserMsg) {
-          cutIdx = i;
-          break;
-        }
-      }
-    }
+    // A-1122：定位逻辑搬到 `findRollbackCut`（与文件回滚共用同一个锚点，不许第二份口径）
+    const cutIdx = findRollbackCut(records, agentId, sessionId, targetUserMsg).index;
     if (cutIdx < 0) {
       return 0;
     }
@@ -586,6 +617,18 @@ export async function truncateHistoryFrom(
     return removed;
   });
 }
+
+/** A-1122：读出全部历史记录（供文件回滚定位切分线；损坏行跳过，与 `truncateHistoryFrom` 同口径）。 */
+export async function readHistoryRecords(): Promise<HistoryRecord[]> {
+  if (!(await stat(HISTORY_PATH).catch(() => null))) { return []; }
+  const lines = await readLines();
+  const out: HistoryRecord[] = [];
+  for (const l of lines) {
+    try { out.push(JSON.parse(l) as HistoryRecord); } catch { /* 损坏行跳过 */ }
+  }
+  return out;
+}
+
 
 /** P0: 辅助导出（主进程使用） */
 export { popLastRecordForAgent as popLastRecordForAgentExport };

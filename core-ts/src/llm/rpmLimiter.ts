@@ -63,6 +63,25 @@ function usableRpm(v: number | null | undefined): v is number {
 }
 
 /**
+ * `resolveRpm` 的入参。
+ *
+ * ⚠️ **为什么是对象而不是位置参数**（A-1106）：这三个值的**优先级顺序**是
+ *     `observed > manual > declared`，而历史上按位置传的是 `(observed, declared, manual)` ——
+ *     **位置顺序与优先级顺序不一致**。所有参数都是 `number | null | undefined`，
+ *     类型系统完全无法阻止下一个人把 `declared` 填进 `manual` 的槽位；一旦填错，
+ *     后果是「用户手填的额度被内置表的通用猜测盖过」或反之，**且不报任何错**。
+ *     改成按 key 传之后，顺序不再承载语义，填错 key 会直接被 tsc 拒绝。
+ */
+export interface RpmSources {
+  /** 实测：从上游响应头学到的额度（最权威，且随账号档位变化） */
+  observed?: number | null;
+  /** 手填：用户在服务商设置里主动设定的额度 */
+  manual?: number | null;
+  /** 声明：内置能力表里那条通用猜测（我们替用户猜的） */
+  declared?: number | null;
+}
+
+/**
  * 四层取值**唯一实现**：实测 > 手填 > 声明 > 未知。
  *
  * ⚠️ 不要在这里加"取两者较小值"之类的聪明规则：实测值是上游**当前账号**的真实档位，
@@ -75,11 +94,8 @@ function usableRpm(v: number | null | undefined): v is number {
  *    · 声明 = 内置表里那条**免费档的通用猜测**（我们替用户猜的，最不该压过用户自己的设定）。
  *    但手填**不能压过实测** —— 实测是上游亲口说的，任何人工输入都不该盖过它。
  */
-export function resolveRpm(
-  observed: number | null | undefined,
-  declared: number | null | undefined,
-  manual?: number | null,
-): RpmResolution {
+export function resolveRpm(sources: RpmSources): RpmResolution {
+  const { observed, manual, declared } = sources ?? {};
   if (usableRpm(observed)) { return { rpm: observed, source: "observed" }; }
   if (usableRpm(manual)) { return { rpm: manual, source: "manual" }; }
   if (usableRpm(declared)) { return { rpm: declared, source: "declared" }; }
@@ -273,21 +289,41 @@ export class RpmLimiter {
       // 手填解析器抛错绝不拖垮请求（与 observe 同一纪律）——降级为"没有手填"
       manual = null;
     }
-    return resolveRpm(this.state(key).observedRpm, this.declaredOf(model), manual);
+    // A-1106：改按 key 传（位置顺序不再承载语义 —— 历史上 `(observed, declared, manual)`
+    // 的槽位顺序与优先级顺序不一致，全靠调用方记对位置，填反了也不会报错）。
+    return resolveRpm({
+      observed: this.state(key).observedRpm,
+      manual,
+      declared: this.declaredOf(model),
+    });
   }
 
   /**
    * 取一个令牌（发请求前调用）。额度用完则**等到**窗口滑动 ——
    * 绝不抛错、绝不静默丢弃请求（丢弃 = 用户看到"什么都没发生"）。
+   *
+   * ⚠️ A-1106：等待期间必须**先出声再睡**。本函数自己 `await sleep`，所以调用方在
+   *    `acquire` **返回之后**才出声 = **等完了才说**（用户在这段时间里看到的是一整段空白，
+   *    只会以为卡死）。`onWait` 在**每次真正 sleep 之前**回调，让上层先上报再睡。
+   *    `onWait` 抛错绝不影响限流本身（与 `observe` 同一纪律）。
    */
-  async acquire(key: string, model?: string): Promise<{ waitedMs: number; source: RpmSource }> {
+  async acquire(
+    key: string,
+    model?: string,
+    onWait?: (waitMs: number, totalMs: number) => void,
+  ): Promise<{ waitedMs: number; source: RpmSource }> {
     const s = this.state(key);
     let waited = 0;
+    const notify = (ms: number): void => {
+      if (!onWait) { return; }
+      try { onWait(ms, waited + ms); } catch { /* 上报失败绝不影响限流 */ }
+    };
     for (;;) {
       const now = this.clock.now();
       // 429 冷却优先（上游明确要求等待，不要靠自己的额度推算）
       if (s.cooldownUntil !== undefined && now < s.cooldownUntil) {
         const ms = s.cooldownUntil - now;
+        notify(ms);                       // 先上报，再睡
         await this.clock.sleep(ms);
         waited += ms;
         continue;
@@ -300,6 +336,7 @@ export class RpmLimiter {
         s.hits = plan.keep.length > MAX_HITS_PER_KEY ? plan.keep.slice(-MAX_HITS_PER_KEY) : plan.keep;
         return { waitedMs: waited, source };
       }
+      notify(plan.waitMs);                // 先上报，再睡
       await this.clock.sleep(plan.waitMs);
       waited += plan.waitMs;
     }

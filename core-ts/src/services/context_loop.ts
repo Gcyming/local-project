@@ -79,6 +79,23 @@ export function planCut(messages: LoopMessage[], keep: number): number {
 }
 
 /**
+ * 轮数计数（**「轮」的唯一口径**，与 `planCut` 的 turn 边界同源）：
+ * 一轮 = 一条 `role === "user"` 消息（及其后的全部 assistant / tool 消息）。
+ *
+ * ⚠️ A-1106：本函数存在的唯一理由是**堵住单位错配**。`needsCompress` 的第 4 个参数语义是
+ *    **轮数**，而调用点曾直接传 `historyAll.length`（**消息条数**）——一条用户消息通常带
+ *    1 条 assistant（有工具调用时更多）⇒ 消息数 ≈ 轮数的 2 倍以上 ⇒ 最小轮次门槛（6 轮）
+ *    实际在 ~2-3 轮就放行，**压缩触发得比设计早一倍**（用户症状：还没聊几句就开始压缩）。
+ *    凡是要给 `needsCompress` / `planCut` 这类"以轮为单位"的判据传值，必须先过本函数。
+ */
+export function countTurns(messages: readonly { role?: string }[] | null | undefined): number {
+  if (!Array.isArray(messages)) { return 0; }
+  let n = 0;
+  for (const m of messages) { if (m?.role === "user") { n += 1; } }
+  return n;
+}
+
+/**
  * turn 对齐裁剪：保留最后 `keep` **整轮**，切口之前一律丢弃。
  *
  * 与旧 `hardTruncate`（`[首条, ...末 K 条]`）的关键差别：

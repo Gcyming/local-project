@@ -316,15 +316,19 @@ async function fetchWithRetry(opts: {
     // A-1091：取令牌（额度用完在此等待；未知额度直接放行）——**必须在每次真实请求之前**，
     // 因为重试的每一次尝试都是一次真实请求、都会占用上游限额（429 尤其如此）。
     if (rateLimit) {
-      const { waitedMs } = await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);
-      // A-1061④ 同纪律：**先上报再睡**。等超过 1s 就必须说出来，否则界面上是"一整段什么都没有"，
-      // 用户只会以为卡死了（而实际是我们在自我限速）。
-      if (waitedMs >= 1000) {
-        noteUpstream(
-          "retry",
-          `上游每分钟请求额度已用满，等了 ${Math.round(waitedMs / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,
-        );
-      }
+      // A-1106：`onWait` 在**每次真正 sleep 之前**回调 ⇒ 真的做到「先上报再睡」。
+      // 旧写法把上报放在 `acquire` **返回之后** —— 那时已经睡完了，用户在整个等待期
+      // 看到的是一整段空白（只会以为卡死），等于没上报。
+      await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {
+        // A-1061④ 同纪律：等超过 1s 就必须说出来，否则界面上是"一整段什么都没有"
+        //（而实际是我们在自我限速）。
+        if (ms >= 1000) {
+          noteUpstream(
+            "retry",
+            `上游每分钟请求额度已用满，需要等 ${Math.round(ms / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,
+          );
+        }
+      });
       if (externalSignal?.aborted) {
         throw new UpstreamError("请求已取消", 0, "protocol");
       }
