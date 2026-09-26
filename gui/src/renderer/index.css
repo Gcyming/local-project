@@ -17,6 +17,14 @@
      与 --card-surface 的差别不是亮度而是**语义**：card 是"抬高面"（可比页面底色略亮/略透），
      float 是"遮住背后内容的实底"。 */
   --float-surface: #1c2740;
+  /* A-1100：**模态遮底** —— 全屏对话框（设置 / 新建 / 详情…）的面板底。
+     与 --float-surface 的差别是**语义**不是亮度：float 是"浮在正文上的小面板"（悬浮坞），
+     modal 是"整屏遮住的对话框面板"。此前 `.modal-card` 直接借用了 --float-surface，
+     于是 beta 主题的模态底取到 #1a243c（beta 的"抬高面"蓝灰）——
+     用户实测观感就是「**设置面板全变成 Alpha 主题配色了**」（跨主题串色）。
+     ⚠️ 两个主题必须各给一个：模态要的是"比页面底略抬、但仍是本主题调子"的实底，
+     不是"抬高卡片色"。 */
+  --modal-surface: #1c2740;
   --card-border: rgba(148, 163, 184, 0.30);
   --border-hover: #475569;
   --text: #e2e8f0;
@@ -98,6 +106,11 @@
   /* A-1079：beta 的 --card-surface 是 0.82（浮层上会透出正文）→ 浮层专用实底取它的
      **不透明等效色**（0.82 × (30,42,70) 叠在页面底色 #05070e 上 ≈ #1a243c）。 */
   --float-surface: #1a243c;
+  /* A-1100：beta 的**模态遮底** = 近黑（= A-1098 之前设置面板 inline `rgba(10,16,32,0.96)` 的
+     不透明等效色）。⚠️ 刻意**不等于** --float-surface（#1a243c 蓝灰抬高面）：
+     整屏模态用蓝灰抬高色会显得"像 Alpha 主题的 slate 配色"（用户实测观感）。
+     它比页面底 #05070e 略抬，保持"黑里透蓝"的品牌基调，不跳到蓝灰。 */
+  --modal-surface: #0a1020;
   --card-border: rgba(140, 246, 251, 0.26);
   --border-hover: rgba(56, 189, 248, 0.35);
   --text: #eef4ff;
@@ -318,7 +331,12 @@ code,
      A-980-R35：0.6s → 0.5s（用户"又太长了，稍微缩短一点点"）；缓动 ease-in-out → **decelerate
      cubic-bezier(0,0,0.2,1)**——展开/收起都是**由快到慢**的动态节奏（起步快、收尾缓） */
   transition: width 0.5s cubic-bezier(0, 0, 0.2, 1);
-  overflow: hidden;
+  /* A-1111：`hidden` → `clip` + 放宽裁剪 7px —— 让拖拽命中区能**跨过分隔线**左右对称
+     （分隔线是本元素的 border，在 padding box 之外；`hidden` 会把越界那半边连命中区一起裁掉）。
+     详见 `.sidebar-resizer` 那一节的 A-1111 段。⚠️ 这两个数是**成对**的：resizer 外伸 6px ⇐
+     裁剪必须 ≥6px，否则"看着变宽、实际没变"（静默失效）。守卫 a1106-ui-guards ① 锁这条配对。 */
+  overflow: clip;
+  overflow-clip-margin: 7px;
   flex-shrink: 0;
   position: relative;
 }
@@ -333,19 +351,197 @@ code,
 .sidebar-no-min {
   min-width: 0 !important;
 }
+/* ══ A-1106（问题 4）：拖拽分隔条 —— 命中区放大几个像素 + 跟随鼠标的流光 ═══════════
+   用户原话：「你把这中间的判定做大一点，不用太大，稍微大一点点几个像素就够了，
+   然后做个鼠标放上去的流光效果，描述的话就是，对于这个拖拽控制界面大小的部分，
+   鼠标放置的位置来个最大的弧形以及颜色变化，然后鼠标放置的那个位置的上下部分
+   逐渐变浅、变窄，直至变成正常界面间隔线的样子。」
+
+   ⚠️⚠️ 一条**必须先读**的硬约束（决定了下面所有几何取值）：两个 resizer 都是
+   `.sidebar` / `.right-sidebar` 的**子元素**，而这两个父级都是
+   `position: relative; overflow: hidden`（宽度过渡动画必需，见各自规则）。
+   ⇒ **凡是越过父级 padding box 的部分一律被裁掉**（裁剪发生在 padding box，且被裁掉的区域
+   **不参与命中测试**）。所以：
+     · 「朝外扩，把命中区做大」这个直觉做法**在这里是失效的** —— 旧值 `right: -3px; width: 6px`
+       实际可命中宽度只有 **3px**，外扩那 3px 全在裁剪区外。
+     · 也**不能**在 resizer 里再画一条 1px 分隔线：父级自己已有
+       `border-right/border-left: 1px solid var(--border)`，而 1px 线要落在边界上就会被裁掉
+       —— 要么画不出来（静默失效），要么和真边框叠成 2px（观感不对）。
+   ⇒ 结论：命中区**整体落在父级内侧**，分隔线**就用父级自己的那条 border**；
+     hover / 拖动中的效果**也画在那条真 border 上**（`border-image`，见本节末）—— 不复制线、不加覆盖层。
+
+   · 命中区：`right/left: 0; width: 12px`。
+     ⚠️⚠️ A-1109 更正（用户原话：「不是让你加宽一下这个侧边栏拖拽控制宽度的判定范围吗？
+       怎么反倒越来越窄了，现在窄的跟个针似的。」）：上一版这里写的
+       「`width: 8px` ⇒ 实际可命中 7px（1px 压在 border 上）」**是错的**。
+       `position: absolute; right: 0` 相对的是父级的 **padding box**，而那条可见的
+       1px 分隔线是父级自己的 **border**（在 padding box **之外**）⇒ 8px **不可能**
+       压到 border 上，实际就是 8px 全在**内侧**。
+       ⇒ 由此暴露出真正的体感来源：**命中区不含视觉锚点**。用户把指针精确对在那条线上
+       时，指针其实落在命中区**外面**（线在 padding box 外，而那一带被 `overflow: hidden`
+       裁掉、连命中测试一起没了）⇒ 他感觉「判定范围只有一条针」。
+       对策：**加宽到 12px**，让「在线左边附近随便一点都能抓」；hover 流光的响应区
+       与命中区同宽（同一个 `:has(.sidebar-resizer:hover)`）⇒ 指针一进这 12px 就有
+       视觉反馈，不再需要凭运气对准。
+     · 拖动逻辑（pointer capture，见 App.tsx `handleSidebarResize`）**一行都没改**。
+   · ⚠️ 业界标杆如实交代：VS Code / DevTools 的 sash 高亮是**整条均匀**的（hover 变色，
+     常配 ~300ms 延时防误触），**没有**跟随鼠标 Y 的聚光。这一条是**用户点名的差异化
+     设计**，不是标杆做法。向标杆借的只有两条：① 可见宽度 ≪ 命中区宽度；② hover 有明确的
+     颜色反馈（且**不动**：聚光是静态渐变、没有动画帧 ⇒ 不需要 reduced-motion 分支）。
+   · 聚光位置由 CSS 变量 `--rz-y` 驱动，宿主在 `onMouseMove` 里写它
+     （唯一产地 `gui/src/renderer/resizerGlint.ts`，左右栏共用一个实现）。**不用 JS 测量布局**。
+     ⚠️ 它写在**父级**上（不是 resizer 自己）—— 渐变由父级的 border-image 绘制，见本节末。
+
+   ── A-1106 续轮：形状**重做**（用户「效果不对，应该是这个效果」+ 参考实现截图）──────
+   上一版是「20×140 的椭圆光斑」（`radial-gradient` + `::before`），用户判定不对。
+   对参考实现**逐像素量**出来的形状（`_pngprobe` 一次性探针，量完即删）：
+
+     · 线宽**恒定 1px**：在指针处（y=700）与远端（y=200 / y=1200）的横剖面**完全相同**
+       —— 都是 1px + 抗锯齿，峰值列 x=210。**没有任何横向光晕**：
+       相邻列（207/208 与 212/213）在整条线上恒为背景值。
+     · 只有**颜色/亮度沿 y 变化**。把峰值归一化后的亮度增量 vs |距指针|：
+       0→1.00 / 100→0.86 / 200→0.68 / 300→0.51 / 400→0.33 / 500→0.15 / 600→0.00
+       ⇒ **线性斜坡，半长 ≈ 600px**（不是椭圆、不是高斯）。
+     · 该图元素高 1428px ⇒ 斜坡半长 = **42% 元素高**，峰值落在 50% ⇒ 该实现等价于
+       `linear-gradient(to bottom, 常态线色 8%, accent 50%, 常态线色 92%)`。
+     · 峰值色与常态线色之间的中间值**逐通道线性插值**（实测 常态 rgb(44,44,44) →
+       峰值 rgb(104,109,249)；65% 处实测 rgb(83,86,177) = 理论值 (83,86,177) 逐通道相同）
+       ⇒ 两点线性 gradient 即可复现，不需要多段色标。
+   ⇒ 结论：流光 = **分隔线本身沿 y 的聚光渐变**，线宽恒 1px；斜坡半长取 42%（= 参考实现的比例，
+      因而指针居中时与参考实现**逐值重合**）；峰值位置跟随 `--rz-y`
+      （用户 A-1106 点名要跟随鼠标；这条是差异化设计，标杆 VS Code 的 sash 是整条均匀高亮）。
+
+   ⚠️⚠️ **为什么是父级的 `border-image`，而不是任何"覆盖层"**（上一版正是死在这里）：
+     · 覆盖层要**落在 border 上** ⇒ 越出父级 padding box ⇒ 被裁 ⇒ 画不出来（静默失效）；
+     · 退一步画在 padding box **内侧** 1px 处 ⇒ 与父级真 border **叠成 2px** 的亮线。
+     `border-image` 画的是**父级自己的 border 区域** ⇒ 零位移、零裁切、零叠加，
+     且线宽天然 = 父级 border 宽度（1px）—— 不会再有人"顺手"把它改粗。
+   ⚠️ 代价（如实交代）：`border-image` 不可过渡 ⇒ 聚光是**瞬时**出现的（不再有 0.18s 淡入）。
+     这与 VS Code 的 sash 瞬时高亮一致；想要淡入只能再叠一层覆盖层，那正是上面被否掉的做法。
+   ⚠️ `--rz-y` 因此必须写在**父级**上（渐变由父级绘制，自定义属性只向下继承、不向上）——
+     `resizerGlint.ts` 写的是 `currentTarget.parentElement`，那正是 `.sidebar` / `.right-sidebar`。
+     ⇒ **resizer 必须是这两个 aside 的直接子元素**，中间加一层 wrapper 会让它静默失灵。
+   ⚠️ `--rz-ramp` 是渐变的**唯一出处**；左/右栏共用同一个渐变值，只有 slice 方向不同。 */
+/* ══ A-1111：命中区**跨在分隔线上**（左右对称各 6px）+ 与命中区同中心的可见热带 ══════════
+   用户原话：「你怎么只变宽了判定范围，没有同步加宽光标的展示效果？还有，你这个判定范围
+   怎么只往左增加？我想要的一直是左右同步增加相同位数的像素点判定范围，同时显示效果也统一
+   随判定范围左右拓宽几个像素点的显示效果。」
+   A-1109 只把宽度 8px → 12px，锚点仍是 `right: 0` ⇒ 那 12px **全落在侧栏内侧**，
+   用户的体感正是「只往左长了」——他说得对，这不是观感问题，是几何事实。
+   ⚠️ 而「往右扩」过去**做不到**：分隔线是父级（`.sidebar`）自己的 1px `border`，它在
+   **padding box 之外**；而父级原来是 `overflow: hidden` ⇒ 越界的那半边连同命中区一起被裁掉
+   （A-1106 ① 的守卫锁的正是这条 —— 这次按铁律**迁移**它，不是删）。
+   ⇒ 所以先**把裁剪放宽**：父级 `overflow: clip` + `overflow-clip-margin: 7px`
+   （Chromium 90+ 支持，Electron 35 = 134），再让 resizer 以分隔线为中心左右各伸 6px。
+   选 `overflow-clip-margin` 而不是"加一层内层 wrapper 承接裁剪"：**零 DOM 改动**，
+   不动 App/RightSidebar 的 JSX 层级，也就不碰那里的 flex 语义。
+   ⚠️ 代价（如实交代）：裁剪放宽后，侧栏**收起/展开动画**期间内容会多露出 7px（原为 0）。
+   实测影响极小：各行左缘都是 padding、且同时有 opacity 逐帧淡出；若日后被看见，
+   把 `overflow-clip-margin` 按需收紧（例如 `0 7px`）即可，判据只有这一个数。
+   ⚠️ 压到邻居（`<main>`）上的那 6px **仍可命中**：resizer 带 `z-index: 10`，
+   而 `.sidebar` / `.main` 都是 `z-index: auto` ⇒ 正值层永远画在它们之上（命中测试同一套顺序）。
+   ── ⚠️ A-1117 更正：**「可见热带」整块删除**（撤销 A-1111 那半条）──────────────────
+   用户原话：「这个发光部分体感不对啊，怎么是覆盖在边界线上的？但凡仔细一看，我都感觉有点错位、
+   臃肿感，**应该是边界线本身变化才对**。」—— 他说得对，而且这是一个**真缺陷**：
+   A-1111 在这里用**元素自身背景**画了一条 `background-size: 5px 100%` 的柔光带，
+   而 A-1106 的父级 `border-image` **又**在真 1px border 上画了一遍 ⇒ **同时存在两条产地**：
+   - 5px 宽的那条在指针 y 处是**实心 accent**（纵向渐变到 100%），所以看到的是一个**5px 光块盖在 1px 线上**
+     ⇒ 观感"覆盖 + 臃肿"（宽 5 倍）；
+   - 两条的中心虽都在分隔线上，但**宽度差 5 倍**、且一条是半透明柔光、一条是实线 ⇒ 仔细看就是"错位"。
+   ⇒ 结论：**只保留父级那条真 border 的 border-image 聚光**（= 「边界线本身变化」），
+   resizer 自身**不再画任何东西**（连伪元素都没有）。它也顺带满足用户那句「左右缩减几个像素」——
+   可见部分从「5px 光带 + 1px 线」变成「1px 线」，**命中区宽度不变**（那是 A-1109 特意加宽过的，
+   不能再瘦回去：同一轮里用户还在抱怨别处"鼠标放上去没反应"）。
+   ⚠️ 如果哪天想要"显示效果随判定范围拓宽"，**不要**回到"在 resizer 上画一条更宽的带"
+   （那必然是覆盖层）—— 可行方向是让**父级 border 之外的相邻像素**参与（例如改父级的
+   `box-shadow`/`outline` 而不是加覆盖元素），且必须只有**一个**产地。 */
+/* ⚠️ 右栏只差几何（left 而非 right），其余（变量纪律）与左栏**逐条对齐** ——
+   两栏各写一份 ≠ 两个产地，因为这里没有判据，只有几何镜像。 */
 .sidebar-resizer {
   position: absolute;
   top: 0;
-  right: -3px;
-  width: 6px;
+  /* 分隔线在父级 padding box **右外** 1px 处 ⇒ 以它为中心 ⇒ 右边缘落在 padding box 外 6px，
+     即 `-(width / 2)`。守卫按「|offset| === width / 2」这条关系校验，不锁字面量。 */
+  right: -6px;
+  /* A-1109：8px → 12px（体感「针一样」的更正与对策见本节顶部 A-1109 段） */
+  width: 12px;
   height: 100%;
   cursor: col-resize;
   z-index: 10;
-  transition: background 0.15s;
+  /* A-1117：**不画任何东西**（`background: none` 是显式的：提醒后来者这里曾有一条 5px「热带」、
+     以及为什么不能加回来 —— 见本节顶部 A-1117 更正）。
+     下面这两行 `opacity`/`transition` 目前是**惰性**的（没东西可显隐），保留它们是为了让热态规则的
+     意图可读；若将来真在这里加视觉效果，热态**必须**沿用 `:is(:hover, :active)`（拖拽期 `:hover` 会掉）。 */
+  background: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  /* ⚠️ 这里**不**声明 `--rz-y`：聚光由**父级**的 border-image 绘制，变量也写在父级上
+     （自定义属性只向下继承）。写在这里是死代码 —— 而且会给人"默认值住在这儿"的错觉。 */
 }
-.sidebar-resizer:hover,
-.sidebar-resizer.active {
-  background: var(--accent);
+.right-sidebar-resizer {
+  position: absolute;
+  top: 0;
+  /* A-1111：与左栏镜像 —— 分隔线在父级 padding box **左外** 1px ⇒ 以它为中心 ⇒ 左边外伸 6px。 */
+  left: -6px;
+  /* A-1109：与左栏同步 —— 8px → 12px（右栏的分隔线在左边缘，同样不含视觉锚点） */
+  width: 12px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+  background: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+/* 热带的热态：`:active` 与 `:hover` 并列（拖拽期 hover 会掉、active 留得住）——
+   与下面 `.sidebar:has(...:is(:hover, :active))` 那条**同一条理由**，两处必须一起改。 */
+.sidebar-resizer:is(:hover, :active),
+.right-sidebar-resizer:is(:hover, :active) {
+  opacity: 1;
+}
+/* 聚光渐变（**唯一出处**；左右栏共用同一个值，只有 slice 方向不同）。
+   `--rz-y` 缺省 50% ⇒ 与参考实现的 8%/50%/92% 逐值重合（见本节顶部实测）。 */
+.sidebar,
+.right-sidebar {
+  --rz-ramp: linear-gradient(
+    to bottom,
+    var(--border) calc(var(--rz-y, 50%) - 42%),
+    var(--accent) var(--rz-y, 50%),
+    var(--border) calc(var(--rz-y, 50%) + 42%)
+  );
+}
+/* 「热」态（指针在分隔条上 **或** 正按着它拖） = 用聚光渐变**替换**那条静态 border 的绘制
+   （宽度/位置/布局一律不变）。
+   slice/width：分隔线在**右**侧的那一栏（`.sidebar`）⇒ `0 1 0 0 / 0 1px 0 0`；
+               分隔线在**左**侧的那一栏（`.right-sidebar`）⇒ 镜像 `0 0 0 1 / 0 0 0 1px`
+               （写反 = 画在没有 border 的那条边上 = 什么都不亮，静默失效）。
+   `stretch`：1px 宽的切片沿分隔线方向铺满 —— 纵向渐变因此**逐值保留**（不会被拉伸变形）。
+   `:has()` 需 Chromium 105+（本应用 Electron 35 = 134）。
+   ⚠️⚠️ **为什么是 `:is(:hover, :active)` 而不是只写 `:hover`**（真渲染器实测逼出来的）：
+      拖拽时指针被 pointer capture 接管，一旦移出那 8px 命中区，`:has(...:hover)` 就不再命中
+      ⇒ 聚光**在拖拽中途熄灭**（实测 `hasSelHover=0` / `borderImageSource=none`，而同一次
+      `hasSelActive=1`）。补 `:active` 让「按住拖」也保持流光 —— 它同时是旧版 CSS 里那个
+      **从未被加上**的死选择器 `.is-hot` 的意图（原作者的构想，这里用 CSS 原生伪类落地；
+      **不引入任何 JS 类名 ⇒ 不产生第二个产地**）。
+   ⚠️ 同一规则里保留 `border-*-color: var(--accent-hover)` 作**显式降级**：
+      `border-image` 一旦解析失败（例如上面渐变写错一个字符），整条线会变 accent —— 响亮可见，
+      而不是退回「和没 hover 一样」的静默失效。border-image 生效时它不参与绘制（不叠色）。
+   ⚠️ **刻意不配 `transition`**：`.sidebar.collapsed` / `.right-sidebar.collapsed` 用的是
+      `border-right/left: none`，而 `none` 会把 border-color 重置回 `currentColor` ——
+      一旦父级带上 border-color 过渡，展开动画的头 150ms 就会闪出一条**正文色**的亮线。 */
+.sidebar:has(.sidebar-resizer:is(:hover, :active)) {
+  /* A-1117②：**让线本身变粗** —— `border-image-width` 允许大于 `border-width`，多出来的部分**向内**
+     画在 padding box 里 ⇒ 那 1px 分隔线视觉上变成 **3px**，而且 **零布局位移、零覆盖元素、仍然只有一个产地**。
+     这正是用户那句「应该是**边界线本身变化**才对」的正解：不是叠一层更宽的柔光（上一版的 5px 带就是那么错的），
+     而是这条线自己变粗、并且沿 y 由同一个 `--rz-ramp` 聚光。
+     ⚠️ 上一步只删了那条带、没做这件事 ⇒ 用户立刻反馈「拖拽光标太窄了，怎么这么细」—— 教训：
+     **拆掉错的方案时，要先确认它原本承担的那份"可见性"有人接住**，否则就是过删。
+     ⚠️ `3` 是唯一可调参数（觉得细/粗就改它，`border-*-width` 保持 1px 不动 ⇒ 布局不受影响）。 */
+  border-image: var(--rz-ramp) 0 3 0 0 / 0 3px 0 0 stretch;
+  border-right-color: var(--accent-hover);
+}
+.right-sidebar:has(.right-sidebar-resizer:is(:hover, :active)) {
+  border-image: var(--rz-ramp) 0 0 0 3 / 0 0 0 3px stretch;
+  border-left-color: var(--accent-hover);
 }
 
 .brand {
@@ -693,15 +889,141 @@ code,
   font-weight: 600;
 }
 
-/* ── 滚动条：A-980-R20 统一为「超薄细线 + 天蓝位置指示」样式（对齐前沿 Agent 产品位置指示条：
-   轨道透明、滑块是细色线、hover 加深；深灰滑块观感即用户反馈"样式不对"，已改为 accent 细线） ── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+/* ── A-1098：浮层实底（模态窗口专用）；A-1100：改用 `--modal-surface` ──────────
+   ⚠️ 浮层**不能用 `.card`**。`.card` 是"抬高面"语义（可比页面底色略亮/略透，见 A-975 注释），
+   而 beta 主题把 `.card` 的底改成了**字面渐变**
+   `linear-gradient(180deg, rgba(38,52,92,.42), rgba(17,24,46,.5))`
+   （见上方 `:root[data-theme="beta"] .card`；其特异性 (0,2,1) 高于 `.card` 的 (0,1,0)）
+   —— 两层 alpha 都 ≤ 0.5，模态窗浮在正文之上时**背后的字会直接透出来**
+   （用户实测："这个面板的透明度也是太高了…不然会看不清字"）。
+   ⚠️ A-1100：实底来源从 `--float-surface` 换成 `--modal-surface`。原因（用户实测）：
+   与悬浮坞共用 `--float-surface` 时，beta 的模态底取到 #1a243c（"抬高面"蓝灰）⇒
+   观感变成「**设置面板全变成 Alpha 主题配色了**」（跨主题串色）。
+   两者都是**不透明**实底，但语义不同：`--float-surface` = 悬浮坞那类"浮在正文上的小面板"，
+   `--modal-surface` = 整屏遮住的对话框面板。**别再把两者合并成一个变量**。
+   ⚠️ 用法约束（静默失效防区）：本类**必须独立使用** —— `className="modal-card"`。
+   **不要写成 `className="card modal-card"`**：那样 beta 的 `.card` 规则特异性更高，
+   会把刚设的实底又盖回半透明（改完看不出问题，只在 beta 主题下翻车）。
+   padding / border / 圆角与 `.card` **逐字相同**（14px 16px / 1px var(--border) / --radius-lg），
+   故原本用 `.card` 的浮层换成它**零布局位移**；若某处不需要内边距，就地用 inline `padding: 0` 覆盖。
+   ⚠️ 不给它加 box-shadow：beta 有"卡片不做逐帧 box-shadow 重算"的性能约定（见 `.card` beta 注释），
+   浮层的层次由遮罩层（rgba 深底）承担，与既有实现一致。 */
+.modal-card {
+  background: var(--modal-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+}
+
+/* ── 设置左栏的**分组标题**（A-1125，用户实测「菜单排序很混乱」的修复）───────────────
+   13 个栏目平铺在 224px 宽的左栏里、彼此无差别 ⇒ 用户只能**逐行读**才能找到目标。
+   分组后可以**先扫组名、再读组内 2~5 项**（识别而非回忆，NN/g Heuristic 6）。
+   依据 = Android 官方设置规范「11~15 项 ⇒ 用 2~4 个分组分隔符」+ NN/g
+   「列表不该按字母/随意排，应按重要度或频率」。排序判据写在 `SettingsDialog.tsx`
+   的 `SECTIONS` 注释里（**唯一产地**，改顺序只改那里）。
+   ⚠️ 形态刻意"弱"于可点条目：小字号 + 弱色 + `user-select:none`（它不是按钮，别让人去点）。
+   ⚠️ 只做**视觉**分层，不引入缩进 —— 条目缩进会与"选中态整行高亮"的圆角冲突，且在 224px
+      宽度下把中文标签挤窄（"Agent 与能力"那组尤其明显）。 */
+.settings-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  padding: 10px 12px 5px;
+  user-select: none;
+  letter-spacing: 0.02em;
+}
+/* 首个组标题紧贴搜索框 ⇒ 吃掉多余上间距（否则搜索框下方空出一道） */
+.settings-group-title:first-child { padding-top: 2px; }
+
+/* ── 滚动条（A-1113，用户点名需求 #304「按悬浮细胶囊做」）：全应用**唯一**一份定义 ──
+   形态：轨道透明（没有凹槽 = 视觉上悬浮在内容之上）· 滑块 6px 全圆角天蓝胶囊 ·
+   静止半透明 · hover 加深。改宽度/圆角只改下面这 4 条，**别在别处再写一份**。
+   ⚠️ 本文件任何位置都不许出现 `scrollbar-color` / `scrollbar-width`：
+   Chromium 121+ 起这两个**标准属性**的优先级高于 `::-webkit-scrollbar-*`，
+   一旦写上，该元素的自定义滚动条会被整块忽略、静默回落到平台默认样式
+   （Windows 上 ≈15–17px 宽的灰条）。这正是 A-1113 修掉的真缺陷：
+   `.chat-scroll` 原先那条 `scrollbar-color` 让聊天区的细条**从来没有生效过**。 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(96, 165, 250, 0.4);
-  border-radius: 2.5px;
+  background: rgba(96, 165, 250, 0.45);
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(96, 165, 250, 0.85); }
+
+/* ── 目录卷轴（A-1115，用户点名需求 #305）：对话页与 md 文档的**滚动条替代品** ──
+   见 `pages/TopicRail.tsx`。这段只负责"盒子的位置与观感"，几何与绘制全在组件里（canvas）。
+   ⚠️⚠️ `contain: paint` **绝不能放 `.topic-rail` 上**：它等价于 `overflow: clip`，
+   会把向左外伸的悬浮气泡整条裁掉（状态/几何全正常、就是一个像素不画）。只放 canvas。
+   ⚠️ 卷轴尺寸/左右余量三件套是**成对**的：宿主 `padding-right` = RAIL_INSET + 卷轴宽 + LEFT_ROOM。
+      改宿主内边距就必须同时看 `TopicRail.tsx` 里的 LEFT_ROOM / RIGHT_ROOM / RAIL_INSET。 */
+.rail-host { scrollbar-width: none; }
+.rail-host::-webkit-scrollbar { width: 0; height: 0; }
+
+.topic-rail {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  right: 6px;
+  width: 12px;
+  outline: none;
+  z-index: 3;
+}
+.topic-rail-canvas { position: absolute; top: 0; display: block; pointer-events: none; contain: paint; }
+/* 判定区：**左侧刻意比视觉宽得多**（左 −10 / 右 −3）。
+   用户反馈「有时候不合直觉，我鼠标放上去了没反应」⇒ 指针从正文那侧过来时，
+   原先只有 3px 的余量、常常落在判定区外。左侧那 10px 仍在正文的右留白里（留白 44 ≫ 卷轴外伸 12），
+   **不会盖住正文的可点击内容**。⚠️ 改这个数时必须一起看宿主的 `padding-right`（对话页 44）。 */
+.topic-rail-hit { position: absolute; top: 0; bottom: 0; left: -10px; right: -3px; cursor: pointer; touch-action: none; }
+.topic-rail:focus-visible { box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.55); border-radius: 999px; }
+.topic-rail-tip {
+  position: absolute;
+  right: 22px;
+  top: 0;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  max-width: 300px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  font-size: 12.5px;
+  color: var(--text);
+  /* 只动 transform（合成器属性）：跟随鼠标不引发重排/重绘 */
+  transform: translate3d(0, 0, 0);
+  pointer-events: none;
+}
+.topic-rail-tip.on { display: flex; }
+.topic-rail-tip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.topic-rail-tip .ord { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--accent); opacity: 0.9; }
+.topic-rail-tip .txt { overflow: hidden; text-overflow: ellipsis; }
+
+/* ── 外观设置页的演示框（A-1115）：一个能真滚的小窗，里面只有卷轴 + 演示内容 ──
+   ⚠️ 圆角与裁剪放在**内层滚动容器**上，不放在外层框上 —— 外层一旦 `overflow:hidden`，
+      就会把卷轴向左外伸的悬浮气泡裁掉（A-1078 同宗家族，这个坑踩过两次）。
+   右侧内边距 30 = RAIL_INSET(6) + 卷轴宽 + LEFT_ROOM(12)，与真实宿主同口径。 */
+.appearance-demo {
+  position: relative;
+  flex: 1;
+  min-height: 220px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+}
+.appearance-demo-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  border-radius: 12px;
+  padding: 14px 30px 14px 14px;
+}
+.appearance-demo-scroll h1 { font-size: 15px; margin: 12px 0 6px; }
+.appearance-demo-scroll h2 { font-size: 13.5px; margin: 12px 0 6px; color: var(--accent); }
+.appearance-demo-scroll h3 { font-size: 12.5px; margin: 8px 0 4px; }
+.appearance-demo-scroll p { margin: 0 0 10px; font-size: 11.5px; color: var(--text-muted); line-height: 1.6; }
 
 /* 流式光标闪烁 */
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0; } 100% { opacity: 1; } }
@@ -749,12 +1071,36 @@ code,
 .stream-dot-row { display: inline-flex; gap: 3px; align-items: center; }
 .stream-dot { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: streamDotJump 1.2s ease-in-out infinite; will-change: transform, opacity; }
 
-/* A-918++：文字扫光（用户要的光效，业界 shimmer 变体）— 仅用于思考历程的文本（非正文/表格/代码）。
-   高亮斜带从文字左扫到右，4.5s 循环；高亮带用低透明度 rgba 柔和不刺眼 */
+/* A-918++：文字扫光（用户点名的光效，业界 shimmer 变体）— 仅用于「正在动」的提示文本。
+   高亮斜带从文字左扫到右，4.5s 循环；高亮带用低透明度 rgba 柔和不刺眼。
+
+   ══ A-1106：失效真根因（离线 Electron 探针 + 真应用 CDP **双重复现**实测，推翻 A-1094 的「窄元素」归因）
+   A-1094 曾判定「元素不够宽 ⇒ 200% 宽的渐变光带整段移出文字区 ⇒ 文字全透明 = 空白框格」，
+   并据此把 6 处扫光整体换成 `.text-breathe`。**该归因是错的**，实测三组对照：
+     · 孤立 `.text-scan-light`（宽 64px 长文本）→ `backgroundClip: text` ✅ 正常；
+     · 孤立 `.text-scan-light`（**窄元素 40px**）→ 同样 ✅ 正常
+       （`background-repeat` 默认 `repeat`，200% 宽的 tile 平铺，行程两端也总有字被填充）；
+     · `.think-tool-status.text-scan-light`（A-1094 之前的**组合**）→
+       `backgroundImage: none` + `backgroundClip: border-box` + `webkitTextFillColor: transparent`
+       ⇒ **文字全透明**（= 用户当年截图里那个空白框格）。
+   真正的原因是：**`background` 简写会重置所有 background longhand** ——
+   `background-clip` 被重置成 `border-box`、`background-image` 被重置成 `none`，
+   而 `-webkit-text-fill-color: transparent` 是**无条件生效**的 ⇒ 背景没了、字也透明。
+   `.think-tool-status` 恰好写了 `background: color-mix(...)` 简写且源序在后、特异性相同，
+   于是把同一元素上的 `.text-scan-light` 连根拔掉。**与元素宽度无关**。
+
+   ⇒ 两条判据（守卫见 `tests/gui/a1106-ui-guards.spec.ts`）：
+     ① 本类**只用 longhand** 声明背景，绝不写 `background` 简写（自己不会被别人重置的写法）；
+     ② **同一元素上禁止再出现任何 `background` 简写**
+        （工具卡状态胶囊走它自己的 `data-running` / `data-settled` 专用动画，不挂本类）。 */
 @keyframes textScanLight { 0% { background-position: 200% 50%; } 100% { background-position: -200% 50%; } }
 .text-scan-light {
-  background: linear-gradient(90deg, var(--text) 0%, var(--text) 42%, rgba(147, 197, 253, 0.55) 50%, var(--text) 58%, var(--text) 100%);
+  /* A-1106：全部走 longhand —— 见上方判据① */
+  background-image: linear-gradient(90deg, var(--text) 0%, var(--text) 42%, rgba(147, 197, 253, 0.55) 50%, var(--text) 58%, var(--text) 100%);
+  background-color: transparent;
+  background-repeat: repeat;
   background-size: 200% 100%;
+  background-position: 0% 50%; /* 静态位：动画被 reduced-motion 关掉时文字仍是实体色 */
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -762,15 +1108,20 @@ code,
   animation: textScanLight 4.5s linear infinite;
   will-change: background-position;
 }
+@media (prefers-reduced-motion: reduce) {
+  /* 无障碍：关掉扫光。⚠️ 必须同时确认文字仍可见 —— 能见度由上面的
+     `background-position: 0% 50%` 静态位保证（渐变两端都是 `var(--text)` 实色）。 */
+  .text-scan-light { animation: none; }
+}
 
-/* ── A-1094：**窄元素**上的「正在动」信号（替代 `.text-scan-light`）───────────────
-   ⚠️ `.text-scan-light` 有一个**结构性的前提**：元素必须足够宽，让 200% 宽的渐变光带
-   在整段行程里始终有一截压在文字上。用在只有 2–4 个字（还带 min-width / padding）的
-   状态胶囊或短标签上时，光带会整段移出文字区 —— 而 `-webkit-text-fill-color: transparent`
-   是无条件的 ⇒ **文字变成全透明**，看上去就是一个空白框格。
-   用户实测原话：「为什么脚本运行中的时候，卡片右侧的框格是**空白**的？」
-   ⇒ 判据：**短元素不要用 background-clip 方案**。用透明度呼吸即可（光效视觉相近、
-     文字永远实体可读、也不依赖元素宽度）。长文本（整句思考）继续用 `.text-scan-light`。 */
+/* ── A-1094 → A-1106：`.text-breathe`（透明度呼吸）**降级为备用** ─────────────
+   A-1094 的立论（见上，已被实测推翻）是「短元素不能用 background-clip 方案」。
+   A-1106 恢复「正在思考 / 思考过程 / 思考中… / 状态行」四处走扫光（那才是用户点名要的），
+   本类目前**没有调用点**，但**保留**：
+     · 它不是"被否决的方案锁"（锁被否决方案的守卫才必须删），而是一个可用的备用信号；
+     · 真正被否决的是「把 6 处扫光整体换成呼吸」这个**决定**，不是这个 CSS 类本身。
+   ⚠️ 若将来要在**带 `background` 简写**的元素上做"正在动"信号，用本类（或像
+      `.think-tool-status` 那样做 `data-*` 专用动画），**不要**挂 `.text-scan-light`。 */
 .text-breathe {
   animation: slime-text-breathe 1.6s ease-in-out infinite;
 }
@@ -815,13 +1166,27 @@ code,
   from { opacity: 0; left: 3px; }
   to { opacity: 1; left: 0; }
 }
+/* A-1124：减动效下**保留**的淡入（只去掉位移）。见下面 @media 块的长注释。 */
+@keyframes streamUnitFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .stream-fade-unit {
   position: relative;
   animation: streamUnitIn 260ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 @media (prefers-reduced-motion: reduce) {
-  /* 无障碍：关掉位移与渐入，字符立刻可见（不留 0 透明度的中间态） */
-  .stream-fade-unit { animation: none; }
+  /* A-1124（用户实测问题 c）：**只去掉位移，保留不透明度渐入**。
+     ⚠️ 这里原来写的是 `.stream-fade-unit { animation: none; }` —— 一个开关同时关掉
+        「思考」与「正文」两处的吐字渐入，而且完全静默（过 tsc / 过构建 / 过全部逻辑测试，
+        只在用户眼里消失）。用户实测原话：「现在所有吐字均看不到我让你设计的渐入的由浅入深的
+        衔接动画了，思考、正文哪里都没有。」——「哪里都没有」正是这条全局开关的指纹。
+     ⚠️ 无障碍口径：`prefers-reduced-motion` 的立法意图是**运动**（位移 / 缩放 / 视差）；
+        不透明度交叉淡入不属于前庭刺激源（WCAG 2.3.3 只约束 motion animation）。
+        ⇒ 正确降级 = 「去掉 `left` 位移、留下淡入」，而不是把整段动画抹掉。
+     ⚠️ 只覆盖 `animation-name`（**不动** shorthand）：时长 / 缓动 / `both` 填充全部沿用主规则 ——
+        少写一个属性就少一处会与主规则漂移的地方。 */
+  .stream-fade-unit { animation-name: streamUnitFadeIn; }
 }
 
 /* ── A-1015：统一「展开 / 收起」衔接动画 ───────────────────────────────────────
@@ -1048,7 +1413,9 @@ code,
      A-980-R34：0.45s → 0.6s——用户"展开跟收起的动画再长一点"
      A-980-R35：0.6s → 0.5s（用户"又太长了"）；缓动改 decelerate cubic-bezier(0,0,0.2,1)——由快到慢 */
   transition: width 0.5s cubic-bezier(0, 0, 0.2, 1);
-  overflow: hidden;
+  /* A-1111：与左栏同款 —— `hidden` → `clip` + 7px 裁剪放宽（右栏 resizer 要跨过分隔线向左伸 6px）。 */
+  overflow: clip;
+  overflow-clip-margin: 7px;
   flex: 0 0 auto;
   position: relative;
 }
@@ -1077,41 +1444,25 @@ code,
   width: var(--right-pin-w, 100%) !important;
   flex: 0 0 auto !important;
 }
-.right-sidebar-resizer {
-  position: absolute;
-  top: 0;
-  left: -3px;
-  width: 6px;
-  height: 100%;
-  cursor: col-resize;
-  z-index: 10;
-  transition: background 0.15s;
-}
-.right-sidebar-resizer:hover,
-.right-sidebar-resizer.active {
-  background: var(--accent);
-}
+/* A-1106（问题 4）：右栏分隔条的**几何与流光**已上移到 `.sidebar-resizer` 那一节
+   （两个 resizer 的伪元素样式完全共用，只是命中区朝左外扩而非朝右）。
+   ⚠️ 别在这里再写一份 —— 同一元素两条几何规则 = 第二个真相源。 */
 
 /* A-980-R17：悬浮窗整体 no-drag——拖到与程序标题栏（-webkit-app-region: drag）重叠时
-   仍能收到鼠标事件（否则按到的是整窗拖拽），标题栏内按钮的 no-drag 由 .titlebar-btn 自带 */
+   仍能收到鼠标事件（否则按到的是整窗拖拽），标题栏内按钮的 no-drag 由 .titlebar-btn 自带。
+   ⚠️ A-1106 回修：本规则曾在改右栏 resizer 时被误删（连带本注释）。它不是装饰 ——
+   少了它，悬浮窗与标题栏重叠的区域会变成"整个窗口可拖"，按钮点不动。 */
 .float-window {
   -webkit-app-region: no-drag;
 }
 
-/* ── A-980-R18：全局超薄滚动条沿用既有全局细条（line 606：6px + var(--border-hover) 可见滑块）。
-   注意：曾用 *::-webkit-scrollbar-thumb 覆盖成 rgba(148,163,184,0.25) 极淡色，用户反馈"看不清/没落地"，
-   已回退到可见样式——统一超薄宽度 + 清晰滑块，hover 变 accent（既有全局规则） ── */
-
-/* 聊天消息区滚动条：天蓝 accent 细条（跟随主题，比全局稍醒目） */
-.chat-scroll {
-  scrollbar-color: rgba(96, 165, 250, 0.55) transparent;
-}
-.chat-scroll::-webkit-scrollbar-thumb {
-  background: rgba(96, 165, 250, 0.55);
-}
-.chat-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(96, 165, 250, 0.85);
-}
+/* ── 聊天消息区滚动条：A-1113 起**不再自带**任何滚动条样式 ──
+   历史：这里曾同时写 `scrollbar-color`（本意给 Firefox）与 `::-webkit-scrollbar-thumb`（给 Chromium）。
+   实测结论：Chromium 121+ 下标准属性优先 ⇒ 该元素的 `::-webkit-scrollbar-*` 全部被忽略
+   （连全局那条 5px 宽度一起），聊天区实际渲染成**平台默认宽滚动条** ——
+   本文件里那两条 webkit 规则是**从未生效的死代码**（用户看到的"样式不对"就是它）。
+   现在统一交给文件上方唯一那份胶囊定义，聊天区与其它滚动容器**逐像素同款**。
+   ⚠️ 别在这里再写一份 —— 同一元素两套定义 = 第二个真相源，几何一改就漂移。 ── */
 
 /* A-980-R18：加载更早历史分段胶囊（对齐前沿 Agent 聊天「第 N 个问题（点击加载）」模式） */
 .load-earlier-pill {
@@ -1941,20 +2292,69 @@ body.slime-resizing {
    光带的可见窗口在 200%→-200% 的行程中会**整段移出文字区**，于是
    `background-clip: text` 什么都画不出来、`-webkit-text-fill-color: transparent` 又强制透明
    ⇒ 用户看到的正是「运行中的时候卡片右侧的框格是**空白**的」（他截图里那一格）。
-   修法：给运行态一条**自己的**动画，字符始终有实体颜色，动的是"呼吸 + 省略号"：
+   修法：给运行态一条**自己的**动画，字符始终有实体颜色、永远可读
+   （当时的实现是「胶囊底色明度呼吸」；该形态已在 A-1108 换成真正的呼吸灯 —— 见下）。
 
-     · 胶囊底色随 currentColor 从 10% → 26% 明度呼吸（"在动"的信号）
-     · 文字用不透明色（**不再 transparent**），永远可读
-     · 三个点逐帧替换文字结尾 —— 这是"进行中"最直观的语汇（对齐业界 loading 惯例）
-   合计 1.1s 一个循环，`prefers-reduced-motion` 下退化为静态「执行中」。 */
+   ══ A-1108：改成**真·呼吸灯**（用户原话：「执行中做了动画很好，但是是频闪效果看起来怪怪的，
+   用呼吸灯特效吧」）。上面那一版**看起来像频闪**，探针（真 Chromium + 真 stylesheet +
+   确定性相位采样：`pause()` 后手动设 `currentTime`）量到了两个机械原因 —— 不是审美问题：
+
+     ① `getAnimations()[0].effect.getKeyframes()` 的属性清单是
+        `background-color / -image / -position-x / -position-y / -repeat / -size /
+         -attachment / -clip / -origin` **＋ `opacity`** —— `background` 简写被展开成 10 条
+        longhand ⇒ 每一帧都要**主线程重绘**。而流式期间主线程每帧都在解析 markdown +
+        重渲染 ⇒ 重绘帧被不规律地推迟 ⇒ 动画**走时忽快忽慢**。
+     ② 周期 1100ms、opacity 幅度 1.000→0.920（spread 0.080）—— 快而浅，本来就在"抖"的区间。
+
+     两件事叠起来，用户看到的就是**不规则地闪**，而不是平稳的呼吸。
+     ⇒ 改法（结构性，不是调参）：
+       · 光晕搬到 `::before`，`inset: 0` + `border-radius: inherit` ⇒ **永不溢出胶囊盒子**，
+         因此**不存在**被祖先 `overflow: hidden` 裁掉的风险 —— 这条不是假设：胶囊的祖先链上
+         确实有（`.collapse > *` 就是 `overflow: hidden`，且胶囊贴着行右缘），见 A-1078 的教训；
+       · 关键帧**只动 `opacity`** —— 合成器属性，不触发主线程重绘，主线程再忙也照样平滑；
+       · 周期放慢到 2.4s、幅度放到 0.25→1（呼吸灯的常态节拍与幅度）；
+       · 文字**任何相位都是实色**（`color: var(--accent)`，不再用半透明表达状态）
+         ⇒ 不会重演 A-1094 那次「文字全透明 = 空白框格」。
+   ⚠️ `isolation: isolate` 不能省：`z-index: -1` 的伪元素会被画到**最近的层叠上下文**底部；
+      不隔离时它会落到 `.think-tool-btn` 自己的背景之下 ⇒ 光晕整个看不见（静默失效）。
+   ⚠️ 别给这个伪元素加 `box-shadow` 光晕：那会画出盒子之外，必定被上面提到的
+      `overflow: hidden` 裁掉右半边 —— 与其加一个"有时看得见有时看不见"的光，不如不加。 */
 .think-tool-status[data-running="1"] {
+  position: relative;
+  isolation: isolate;
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  animation: slime-status-breathe 1.1s ease-in-out infinite;
+  /* 运行态的背景改由 ::before 提供（走 longhand，不重置别的 background longhand） */
+  background-color: transparent;
+  /* ══ A-1109：呼吸动画**搬到胶囊自身** ═══════════════════════════════════════
+     用户原话：「为什么这个执行中的文本不闪，只有后面的文本框闪？这个设计不好，
+     我觉得二者应该是绑定的，同步闪动频率进行呼吸灯的闪烁。」
+     A-1108 那版把动画**只**放在 `::before` 上 ⇒ 只有底色在呼吸、文字恒定
+     ⇒ 观感上「框在闪、字不闪」—— 正是用户指出的分裂。
+     改法：动画回到胶囊自身、**只动 `opacity`**（合成器属性 ⇒ 主线程忙也不顿）。
+     文字与底色是**同一个元素**，一起淡入淡出 ⇒ **天然同频**，结构上不可能再分裂。
+     ⚠️ 幅度取 0.55→1（而不是原来那版的 0.25→1）：文字最暗时仍有 55% 不透明度
+        ⇒ 仍然可读；底色同步变浅，观感是平稳呼吸而不是「闪」。 */
+  animation: slime-status-breathe 2.4s ease-in-out infinite;
+}
+/* 底色层：**静态**画一次。呼吸由父级那条 `opacity` 统一驱动 —— 它自己不再单独动，
+   否则两层各自呼吸就会重新引入「字和框不同步」。
+   ⚠️ `z-index: -1` 需要一个层叠上下文才不会掉到 `.think-tool-btn` 背景下面：
+      动画期间父级 `opacity < 1` 会创建层叠上下文，但 **reduced-motion 关掉动画后
+      `opacity` 恒为 1** ⇒ 那时唯一的上下文来源就是上面的 `isolation: isolate`
+      —— 所以那条**不能删**。 */
+.think-tool-status[data-running="1"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 @keyframes slime-status-breathe {
-  0%, 100% { background: color-mix(in srgb, var(--accent) 10%, transparent); opacity: 1; }
-  50% { background: color-mix(in srgb, var(--accent) 28%, transparent); opacity: 0.92; }
+  /* 峰谷都**不透明到底**：谷相位保持 0.55 ⇒ 文字任何时刻都读得清（A-1094 的教训是
+     「文字全透明 = 空白框格」，这里不会重演）。 */
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
 }
 /* 状态词从「执行中」翻成「成功 / 失败」时**放大一下再落位** —— 这就是用户要的
    「从执行中到成功之间的衔接动画」。用独立的 pop（不带扫光），落位后停在终态。 */
@@ -1967,6 +2367,9 @@ body.slime-resizing {
   100% { transform: scale(1); opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
+  /* ⚠️ 呼吸动画现在住在**主规则**上（A-1109 从 `::before` 搬回来）—— 这条覆盖必须
+     跟着同一个选择器走，否则 reduced-motion 用户反而**唯一**保留一条永不停歇的
+     呼吸动画（无障碍回退静默失效）。 */
   .think-tool-status[data-running="1"],
   .think-tool-status[data-settled="1"] { animation: none; }
 }
@@ -2006,10 +2409,23 @@ body.slime-resizing {
   margin: 10px 0; opacity: 0.7;
 }
 /* ── A-171：交错时间线（思考段落正文 + 工具调用小节点 + 参考内容独立折叠） ── */
+/* A-1106（几何校准）：`margin-left` 7px → **12px**。
+   下面所有节点圆点的光晕都是「绝对定位 + 负 left + box-shadow/filter 外扩」，会**向左伸出**
+   时间轴的 border-box 左边缘；而最外层那个 `.collapse > * { overflow: hidden }`
+   （折叠动画必需，不能去掉）就在时间轴外侧 —— 于是光晕被**切掉一刀**，
+   用户原话「这些光点的光晕怎么有点被截断的感觉，看起来不自然啊」。
+   算一算需要多少余量（几何实测，非目测）：
+     · 圆点盒：`left: L`，宽 8 ⇒ 左缘 = step.left + L
+     · `step.left` = 时间轴 border-box 左缘 + 2(border-left) + 14(padding-left) = +16
+     · 取 L = −19（见 `.think-step-mark` 的对齐推导）⇒ 圆点左缘 = border-box 左缘 − 3
+     · `box-shadow: 0 0 0 3px` 的环 ⇒ 外扩到 −6
+     · 流式期的 `breatheGlow { filter: drop-shadow(0 0 6px) }` ⇒ 外扩到 −9
+   ⇒ `margin-left` 必须 ≥ 9px 才不切光晕。取 **12px**（留 3px 余量）。
+   ⚠️ 别再改回 7px：那会让光晕的左侧再被切掉约 2px —— 门禁全绿、只在屏幕上看得出来。 */
 .think-timeline {
   display: flex; flex-direction: column;
   border-left: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
-  margin: 2px 0 4px 7px;
+  margin: 2px 0 4px 12px;
   padding-left: 14px;
 }
 .think-step {
@@ -2017,8 +2433,19 @@ body.slime-resizing {
   margin: 2px 0 6px;
   animation: fadeIn 0.18s ease; /* A-918+：思考段落淡入（离散新节点一次性淡入，不闪烁） */
 }
+/* A-1106（几何校准）：`left: -20px` → **-19px** —— 让圆点**正中心穿过轴线**。
+   用户原话：「这些光点也不是正中心穿过那根轴线的啊，你校准、优化一下。」
+   绝对定位的包含块是**最近的定位祖先** = `.think-step`（`position: relative`），
+   **不是** `.think-timeline`（它是 static）。推导（真应用 CDP 实测 `deltaAxis = −1.2px` 印证）：
+     · 令轴线所在 `.think-timeline` 的 border-box 左缘 = X
+     · 轴线本身 = border-left 2px ⇒ 轴线中心 = X + 1
+     · `.think-step` 的左缘（= 它的 padding box 左缘）= X + 2 + 14 = X + 16
+     · 圆点盒左缘 = X + 16 + L，圆心 = X + 16 + L + 4（宽 8）
+     · 要圆心落在轴心：X + 16 + L + 4 = X + 1 ⇒ **L = −19**
+   ⚠️ 别改成 `-(borderLeft + dotSize)/2 = −5`：那是"包含块 = 时间轴本身"时的公式，
+     在这里会把圆点推进内容区里 14px（一眼可见的错位）。 */
 .think-step-mark {
-  position: absolute; left: -20px; top: 8px;
+  position: absolute; left: -19px; top: 8px;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
@@ -2068,6 +2495,44 @@ body.slime-resizing {
   font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", "Source Han Sans CN", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+/* ── A-1095 #8′：思考历程里「穿插的正文」片段（.body-step-text）─────────────
+   用户诉求（A-1095 初始需求）：「也可以在思考历程中穿插正文输出」，随后带截图追问
+   「我要的思考期间穿插的正文总结呢？」。它与**思考**必须一眼可辨，否则会被当成思考的一部分：
+     · 字号 13.5px（思考 12.5 / 底部正文 15）—— 介于两者之间，明确是「内容」而非「推理」；
+     · 颜色 `--text`（正文色）而非 `--text-secondary`（思考色）—— 提亮一档；
+     · 左侧竖线走 accent 系而非 `--border` 灰；
+     · **不受** `.think-step-text` 的 420px 独立滚动限制 —— 正文片段不该被截在一屏里。
+   ⚠️ 与 plan / steer / think 摘要行不同：正文片段**不做折叠**（用户要的就是直接读到它）。 */
+.body-step-text {
+  margin: 4px 0 2px;
+  padding: 2px 4px 2px 12px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  font-size: 13.5px;
+  line-height: 1.75;
+  font-weight: 400;
+  color: var(--text);
+  word-break: break-word;
+  white-space: pre-line;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", "Source Han Sans CN", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+/* 内部 Markdown 带 .markdown-body（显式 15px/正文色），会覆盖外层 —— 必须后代压制 */
+.body-step-text .markdown-body {
+  font-size: 13.5px;
+  line-height: 1.75;
+  font-weight: 400;
+  color: var(--text);
+}
+.body-step-text .markdown-body p { margin: 0.45em 0; }
+.body-step-text .markdown-body :is(ul, ol) { margin: 0.45em 0; padding-left: 1.5em; }
+.body-step-text .markdown-body li { margin: 0.2em 0; }
+/* 节点标记：**方形**（思考是圆形）—— 形状本身承担"这不是思考"的信息，不靠颜色单打独斗 */
+.think-step-mark.body-step-mark {
+  border-radius: 2px;
+  background: var(--accent-hover);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .think-step-text .markdown-body {
   font-size: 12.5px;
@@ -2263,8 +2728,14 @@ body.slime-resizing {
   margin: 2px 0 6px;
   animation: fadeIn 0.18s ease; /* A-918+：工具节点淡入 */
 }
+/* A-1106：与 `.think-step-mark` **同一套对齐推导**（`left: -19px`，见上方那段）。
+   包含块是 `.think-tool-node`（position: relative），它的左缘同样落在
+   时间轴 border-box 左缘 + 16px 处 ⇒ 同一个 L 值才落在轴心。
+   ⚠️ 本类**没有** box-shadow（工具节点用实色小点区分种类：读取=黄 / 执行=紫 /
+     写入=绿 / 搜索=蓝，见 ChatPanel 的 `statusColor`），所以它没有光晕截断问题 ——
+     用户截图里的**黄点 / 紫点**就是它，之前偏左 1px 的错位同样由本次校准一并修掉。 */
 .think-tool-mark {
-  position: absolute; left: -20px; top: 9px;
+  position: absolute; left: -19px; top: 9px;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-dim);
 }
@@ -2319,6 +2790,16 @@ body.slime-resizing {
   padding: 0 8px;
   white-space: pre;
   color: var(--text);
+  /* ══ A-1109：行盒必须**随内容变宽**，否则背景只画在「可视宽度」内 ══════════════
+     病根：`.think-diff-body` 是 `overflow: auto` 的滚动容器，而 `.think-diff-row` 是
+     **block-level flex** ⇒ 宽度默认 `auto` = 填满容器**可视**宽度。长行因 `white-space: pre`
+     不换行、**溢出**行盒（`overflow` 不是 hidden，所以画得出来），但**背景**只画在行盒的
+     border-box 里 ⇒ 横向滚动到右侧就只剩字符、没有绿/红底色（用户实测截图）。
+     · `width: max-content` ⇒ 行盒宽度 = 内容宽度 ⇒ 背景跟着内容一路延伸；
+     · `min-width: 100%` ⇒ 短行仍铺满可视宽（否则右侧会缺一块底色）。
+     ⚠️ 这两条必须**同时**有：只写 max-content 会让短行的背景缩成一小截。 */
+  width: max-content;
+  min-width: 100%;
 }
 .think-diff-row.diff-add { background: var(--diff-add-bg); }
 .think-diff-row.diff-del { background: var(--diff-del-bg); }
@@ -2376,6 +2857,40 @@ body.slime-resizing {
   border-top: 1px solid var(--border);
   margin: 10px 0 12px;
   opacity: 0.55;
+}
+
+/* ══ A-1106（问题 6）：产物卡的**横向**展开过渡 ═════════════════════════════════
+   用户原话：「这个位置的产物展开成（diff 详情）样子时，为什么没有横向的动画过渡？
+   优化一下，由于这个问题，我基本都看不到收起的过渡动画。」
+
+   根因（真渲染器逐帧实测，不是推断）：
+     · `.prod-host` 是 `flex-wrap` 行里的 flex item，`width: auto` ⇒ 主轴基准 = **max-content**；
+     · 折叠时 `.collapse > *` 的 `content-visibility: hidden` 是**尺寸包含** ⇒ diff 对
+       max-content 的贡献 = 0 ⇒ 宿主宽 209px；
+     · 展开那一帧 `content-visibility`（离散属性）翻成 visible ⇒ 贡献 ~362px
+       ⇒ 宽度**在第 1 帧就跳完**，而高度还在用 450ms 播 —— 于是"横向没有过渡"。
+   ⚠️ 为什么单写 `transition: width` 没用：两态的**指定**宽度都是 `auto`，变的是内容撑出来的
+      **使用**值，而过渡只在**指定值**变化时触发 ⇒ 不是"没写 transition"，是"根本没得过渡"。
+      必须把宽度写成两个**可插值的指定值**。
+
+   修法：折叠 `width: fit-content`（≈ 现在的 209px）→ 展开 `width: 100%`（= flex 行宽，
+   与现在被行宽钳住后的值一致）；两者都是指定值，再由 `interpolate-size: allow-keywords`
+   打开「内建尺寸关键字 ↔ 长度/百分比」的插值（Chrome 129+ 正式支持；本应用 Electron 35
+   = Chromium 134.0.6998.44）。
+   ⚠️ 删掉 `interpolate-size` 或把两态改回同一关键字都**不会报错**、门禁全绿，
+      只是**又变回第 1 帧跳变** —— 属于静默失效家族，守卫见
+      `tests/gui/a1106-ui-guards.spec.ts`。
+   ⚠️ 刻意**不**写 `@supports` 兜底：支持时是动画、不支持时是跳变，两种都不坏；
+      多一个分支就多一个"只在某个 Electron 版本上翻车"的形态。
+   ⚠️ 高度那条过渡仍归 `.collapse`（`grid-template-rows`），两者同节拍同时长，不要各调各的。 */
+.prod-host {
+  width: fit-content;
+  interpolate-size: allow-keywords;
+  transition: width var(--collapse-dur) var(--collapse-ease);
+}
+.prod-host.is-open { width: 100%; }
+@media (prefers-reduced-motion: reduce) {
+  .prod-host { transition: none; }
 }
 
 /* A-975：产物卡「抬高面」——此前 background:var(--bg-input) 与页面底色同色，卡片看不出边界。

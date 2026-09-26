@@ -16,7 +16,12 @@ export interface PlanItemLite {
 
 /** 时间线节点（结构对齐 ChatPanel.TimelineStep，独立类型避免跨组件耦合） */
 export interface TimelineStepLite {
-  kind: "think" | "tool" | "plan" | "todo" | "steer";
+  kind: "think" | "body" | "tool" | "plan" | "todo" | "steer";
+  /**
+   * A-1095 #8′：kind=body —— 该阶段的**正文片段**（Markdown），即「思考历程里穿插的正文」。
+   * 必须一起持久化：否则重启后回看历史，思考历程里的正文整段消失、只剩思考与工具
+   * （与 `items` 不能丢是同一个理由 —— 当次会话成立、回看就没了，用户会认为功能不存在）。
+   */
   text?: string;
   name?: string;
   label?: string;

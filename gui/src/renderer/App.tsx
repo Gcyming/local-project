@@ -33,6 +33,7 @@ import { confirmAsync } from "./dialog.js";
 import { readNetworkEnabled } from "./networkToggle.js";
 // A-980-R26：自定义通知提示音播放端（主进程没有音频能力，只发"该响了"的信号）
 import { subscribeNotifySound } from "./notifySound.js";
+import { trackResizerGlint, clearResizerGlint } from "./resizerGlint.js";
 
 interface AgentBrief {
   id: string;
@@ -1432,9 +1433,10 @@ export default function App(): JSX.Element {
           background: "rgba(2, 6, 23, 0.66)", backdropFilter: "blur(2px)",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
-          <div style={{
+          {/* A-1098：浮层实底用 `modal-card`（原 `var(--bg-input)` 在 beta 主题是 rgba(10,15,30,0.55)，
+              模态窗浮在正文上会透字）。padding/圆角由 inline 覆盖，无布局位移。 */}
+          <div className="modal-card" style={{
             width: 360, borderRadius: 16, padding: "24px 26px",
-            background: "var(--bg-input)", border: "1px solid var(--border)",
             textAlign: "center",
           }}>
             <div style={{
@@ -1505,7 +1507,13 @@ export default function App(): JSX.Element {
              `--sidebar-w: clamp(240px, 17.5%, 520px)` 随窗口比例自适应（拖动过则用 px 覆盖） */
           style={{ width: sidebarCustom ? sidebarWidth : undefined, flexShrink: 1, minWidth: sidebarOpen ? SIDEBAR_MIN_W : 0 }}
         >
-          {sidebarOpen && <div className="sidebar-resizer" onPointerDown={handleSidebarResize} />}
+          {/* A-1106（问题 4）→ A-1109：分隔条 —— 命中区与流光的**唯一出处是 index.css**
+              （`.sidebar-resizer` 的 width）。此处**不再重复数值** —— 上一版这里写「10px」、
+              CSS 里却是 8px，两处漂移成假陈述，正是用户「加宽了怎么反而更窄」的观感来源之一。 */}
+          {sidebarOpen && (
+            <div className="sidebar-resizer" onPointerDown={handleSidebarResize}
+              onMouseMove={trackResizerGlint} onMouseLeave={clearResizerGlint} />
+          )}
           <div className="brand">
             {/* A-1054：此前这里是字面量 `S`（一个蓝色圆角方块里写个字母），用户反复要求换成
                 应用图标 —— 这正是 A-1049 在欢迎页修过的同一类残留（那次也只改了欢迎页，

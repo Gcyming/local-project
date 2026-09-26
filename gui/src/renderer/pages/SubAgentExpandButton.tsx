@@ -65,8 +65,14 @@ export default function SubAgentExpandButton(
   }, [refresh]);
 
   const active = runs.filter((r) => r.status === "running" || r.status === "pending");
-  /* 没有任何子代理记录 → 这一格整个不渲染（不留空壳，与"后台进程"同约定）。
-     调用方（ChatPanel）据 `runs` 判定是否需要把坞显示出来 —— 故这里先给出 null。 */
+  /* 没有任何子代理记录 → 这一格整个不渲染（不留空壳，与「后台进程」同约定）。
+     ⚠️ A-1106/5b 更正：可见性判据**就住在本组件里** —— 调用方 ChatPanel 是**无条件**挂载本组件的
+     （外层只判 `!pendingAsk`），并不存在「ChatPanel 据 runs 决定要不要显示坞」那一层（旧注释那条
+     说法是错的，会把人引去改错地方）。故「看不到子代理按钮」= 一条记录都没拉回来：
+       ① 主因是委派没发生（提示词层，见 subagentCatalog.ts 的力度预算分档）；
+       ② 次因是派发/取消没**如实推送**（见 gui/src/main/index.ts 的 onSpawn 与 cancel 通道）——
+          此前 pending 阶段与「取消排队中」都不广播 ⇒ 面板只能等 3 秒轮询，观感就是「不实时」。
+     放宽这里（改成恒显）只会多一个恒为 0 的空壳，不解决上面两条。 */
   if (runs.length === 0) { return null; }
 
   return (
@@ -135,8 +141,19 @@ export default function SubAgentExpandButton(
             animation: active.length > 0 ? "liveDot 1.5s ease-in-out infinite" : "none",
           }} />
           <span style={{ fontWeight: 600, flexShrink: 0 }}>子代理</span>
+          {/* A-1109：数字框格里的数字「不在最中心」—— 用户原话「这个悬浮按钮的后面的数字
+              感觉不在框格最中心，你微调一下」。
+              病根：上一版靠 `padding: 0 6px` + `lineHeight: "15px"` **伪居中** ——
+              行盒高度由 line-height 决定，而**字形在行盒里的落位由字体度量（ascent/descent）
+              决定**；`Microsoft YaHei` 的数字是半角、其度量与中文字面不同 ⇒ 视觉上偏离中心。
+              改法：不再依赖行高，改成**几何居中** —— `inline-flex` + 两个方向都 `center`，
+              并给一个固定方框（`minWidth: 16` / `height: 16`）。这样"3"这个字形是被
+              **盒子的中心对齐**拉正的，与字体度量无关 ⇒ 换字体也不会再歪。
+              `minWidth` 而非 `width`：两位数仍能自动变宽，不会被挤压。
+              `lineHeight: 1`：把行高对字形的残余影响清零（居中已由 flex 负责）。 */}
           <span style={{
-            flexShrink: 0, padding: "0 6px", borderRadius: 8, lineHeight: "15px",
+            flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+            minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, lineHeight: 1,
             background: "var(--bg-hover)", border: "1px solid var(--border)",
             color: "var(--text-muted)", fontSize: 10.5, fontWeight: 600,
           }}>{runs.length}</span>

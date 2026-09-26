@@ -8,6 +8,14 @@ export interface ComposeTokens {
   completionTokens: number;
   reasoningTokens: number;
   cacheReadTokens: number;
+  /**
+   * 本份 usage 的协议语义：`prompt_tokens` **是否已包含** `cache_read_tokens`。
+   *   - `true`  → OpenAI / DeepSeek / 各类 OpenAI 兼容网关（prompt 是总量）
+   *   - `false` → Anthropic / Claude（input 不含 cache_read）
+   *   - 缺省 → `true`（与 `core-ts/services/usage.ts` 的 `computeRecordCost` 缺省一致）
+   * 判据出处见 `llm/client.ts` 的 `cache_read_in_prompt`。
+   */
+  cacheReadInPrompt?: boolean;
 }
 
 export interface ComposeSegment {
@@ -45,16 +53,71 @@ export function ringLevel(ratio: number): { color: string; label: string } {
   return { color: "var(--danger)", label: "逼近硬阈值" };
 }
 
-/** token 四项构成分段（输入/缓存/输出/思考；分母防零，任意项为 0 不产出段）。 */
+/**
+ * 一份 usage 的**真实构成**（子集不并计）—— 侧栏「Token 构成 / 明细」与进度条「构成微条」的
+ * **唯一算术产地**。渲染层只把这里算出的数映射成字与色，不许在 JSX 里再列一遍公式。
+ *
+ * ## 为什么必须有它：上一版把两个**子集**当成了并列项
+ *
+ * 上游 usage 的四个字段**不是四个平级桶**，而是两组父子：
+ *
+ * | 字段 | 关系 | 判据出处 |
+ * |---|---|---|
+ * | `cache_read_tokens` | **⊂ `prompt_tokens`**（OpenAI/DeepSeek 系，`cache_read_in_prompt=true`） | `llm/client.ts` |
+ * | 同上 | **∩ `prompt_tokens` = ∅**（Anthropic 系，`cache_read_in_prompt=false`） | `llm/client.ts` |
+ * | `reasoning_tokens` | **⊂ `completion_tokens`** | 实测 47/47（`services/usage.ts`） |
+ *
+ * 旧实现写 `total = prompt + completion + reasoning + cache` —— 把两个子集**又加了一遍**：
+ * 用户截图实测明细合计 17,007,635，而真实用量约 8.96M，虚高约 86%；
+ * 且图例第 4 项把「缓存读」标成了「其他」（值却是缓存读）。这就是"假信息"的来源。
+ *
+ * 判据与**记账层** `computeRecordCost` 完全同源（同一件事不许两个数）：
+ *   - 输入侧 = `cacheReadInPrompt ? prompt : prompt + cache`（命中已含 → 不重复加）
+ *   - 输出侧 = `max(completion, reasoning)`（思考 ⊂ 回复 → 取大值，不重复也不漏计）
+ *   - 合计   = 输入侧 + 输出侧
+ */
+export interface UsageComposition {
+  /** 输入侧总量（含缓存读命中） */
+  inputSide: number;
+  /** 缓存读（命中）—— ⊂ `inputSide` */
+  cacheRead: number;
+  /** 输出侧总量（含思考） */
+  outputSide: number;
+  /** 推理/思考 —— ⊂ `outputSide` */
+  reasoning: number;
+  /** 输入侧 + 输出侧（**去重后**的真实总量） */
+  total: number;
+  /** 本次构成采用的语义（缺省 true = OpenAI 兼容系） */
+  cacheInPrompt: boolean;
+}
+
+export function usageComposition(t: ComposeTokens): UsageComposition {
+  const prompt = Math.max(0, t.promptTokens ?? 0);
+  const completion = Math.max(0, t.completionTokens ?? 0);
+  const reasoning = Math.max(0, t.reasoningTokens ?? 0);
+  const cacheRead = Math.max(0, t.cacheReadTokens ?? 0);
+  // 缺省 true：与 core `computeRecordCost(cacheReadInPrompt = true)` 的缺省一致（OpenAI 兼容系是主流）
+  const cacheInPrompt = t.cacheReadInPrompt ?? true;
+  const inputSide = prompt + (cacheInPrompt ? 0 : cacheRead);
+  const outputSide = Math.max(completion, reasoning);
+  return { inputSide, cacheRead, outputSide, reasoning, total: inputSide + outputSide, cacheInPrompt };
+}
+
+/**
+ * token 构成微条的**互斥**四段（占比之和恒为 100%，不再是"四个都能占满"）：
+ * `输入(未命中) + 缓存读 + 输出(可见) + 思考 === total`。
+ * 任意项为 0 不产出段；`n` 是原始 token 数，供 tooltip 用**同一 cap 进制**打印。
+ */
 export function composeSegments(t: ComposeTokens): { segments: ComposeSegment[]; any: boolean } {
-  const tot = Math.max(1,
-    (t.promptTokens ?? 0) + (t.completionTokens ?? 0) + (t.reasoningTokens ?? 0) + (t.cacheReadTokens ?? 0));
-  const seg = (n: number): number => ((n ?? 0) / tot) * 100;
+  const c = usageComposition(t);
+  const seg = (n: number): number => (c.total > 0 ? (n / c.total) * 100 : 0);
+  const missIn = Math.max(0, c.inputSide - c.cacheRead);
+  const visibleOut = Math.max(0, c.outputSide - c.reasoning);
   const items: ComposeSegment[] = [
-    { label: "输入", pct: seg(t.promptTokens), color: "#4b9eff", n: t.promptTokens ?? 0 },
-    { label: "缓存", pct: seg(t.cacheReadTokens), color: "#2ea8dc", n: t.cacheReadTokens ?? 0 },
-    { label: "输出", pct: seg(t.completionTokens), color: "#9a7bff", n: t.completionTokens ?? 0 },
-    { label: "思考", pct: seg(t.reasoningTokens), color: "#d29922", n: t.reasoningTokens ?? 0 },
+    { label: "输入", pct: seg(missIn), color: "#4b9eff", n: missIn },
+    { label: "缓存", pct: seg(c.cacheRead), color: "#2ea8dc", n: c.cacheRead },
+    { label: "输出", pct: seg(visibleOut), color: "#9a7bff", n: visibleOut },
+    { label: "思考", pct: seg(c.reasoning), color: "#d29922", n: c.reasoning },
   ];
   const any = items.some((i) => i.n > 0);
   return { segments: items, any };

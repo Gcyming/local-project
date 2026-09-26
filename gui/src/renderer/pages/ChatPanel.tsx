@@ -22,6 +22,10 @@ import {
 import { readNetworkEnabled, writeNetworkEnabled } from "../networkToggle.js";
 import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel, toolStatusPhase, stripToolTraceMark } from "./thinkingText.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
+/* A-1106：自动压缩比率的**唯一出处**是 core-ts 的 `context_compress`（主进程判据同源）。
+   此前这里硬编码 `0.5 / 0.97 / 0.85` —— 与 `DEFAULT_COMPRESS_RATIO` / `RATIO_MIN` / `RATIO_MAX`
+   是同一组数的第二个产地：主进程一改，界面回显与刻度线就悄悄对不上（静默失效家族）。 */
+import { DEFAULT_COMPRESS_RATIO, RATIO_MIN, RATIO_MAX } from "../../../../core-ts/src/services/context_compress.js";
 import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, TerminalIcon, DownloadIcon, CloudUploadIcon, NotesIcon, HistoryIcon, StageListIcon, type IconProps } from "../components/Icon.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
 /** A-980-R19/R21：悬浮窗唤出按钮图标（用户指定目录 message-circle.svg——聊天悬浮窗=对话气泡） */
@@ -53,9 +57,13 @@ import queueCancelIcon from "../../../icon/icon_fpbc119q3rk/close.svg";
 // A-1052：正文渲染前净化（折叠连续空行）——「巨型气泡」是 pre-wrap 把空行各撑成整行，见该模块文件头
 import { collapseBlankRuns } from "./messageText.js";
 // A-1061⑬：流式尾巴的逐单元渐入切分（纯逻辑，见该文件头部对三条翻车边界的说明）
-import { splitStreamFade, fadeUnitText } from "./streamFade.js";
+import { splitStreamFade, visibleTailUnits } from "./streamFade.js";
 // A-1091：吐字光标的显示判据（唯一出处）
 import { shouldShowStreamCursor } from "./streamCursor.js";
+import { FOLLOW_RESUME_PX, decideFollow, hasInnerScroller, type ScrollBox } from "../scrollFollow.js";
+// A-1115：对话页的「目录卷轴」（滚动条替代品）+ 它的参数（唯一出处，设置页改完即时生效）
+import TopicRail, { type RailEntry } from "./TopicRail.js";
+import { loadRailParams, onRailParams, type RailParams } from "./railParams.js";
 // 本组件只**写**在途快照；取样方是右栏（readLiveMonitor 由 RightSidebar 直接引用）
 import { publishLiveMonitor } from "./liveMonitor.js";
 // SubAgentBar 已移除（A-978：监测栏按钮是唯一子代理入口）
@@ -131,11 +139,11 @@ export function readAutoCompressCfg(): AutoCompressCfg {
     const raw = localStorage.getItem("slime_auto_compress");
     if (raw) {
       const p = JSON.parse(raw) as Partial<AutoCompressCfg>;
-      const ratio = typeof p.ratio === "number" && p.ratio >= 0.5 && p.ratio <= 0.97 ? p.ratio : 0.85;
+      const ratio = typeof p.ratio === "number" && p.ratio >= RATIO_MIN && p.ratio <= RATIO_MAX ? p.ratio : DEFAULT_COMPRESS_RATIO;
       return { enabled: p.enabled !== false, ratio, mode: p.mode === "silent" ? "silent" : "animated" };
     }
   } catch { /* 配置损坏 → 默认 */ }
-  return { enabled: true, ratio: 0.85, mode: "animated" };
+  return { enabled: true, ratio: DEFAULT_COMPRESS_RATIO, mode: "animated" };
 }
 
 /** 工具类型标签映射：将内部 tool name 转为用户友好的中文名 + 图标库 SVG 组件（A-1xx：弃用 emoji） */
@@ -216,6 +224,11 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   plan_create: { label: "制定计划", Icon: TodoListIcon },
   plan_update: { label: "更新计划", Icon: StageListIcon },
   browser_drag: { label: "拖拽网页元素", Icon: ManualIcon },
+  /* A-1121（②）：右栏 = Agent 的工具栏 —— 终端页 / 文件树页也能被 Agent 打开。
+     这张表是「工具名 → 中文标签 + 图标」的**唯一出处**，新工具注册时必须同步补这里，
+     否则思考历程里会退化成「⚡ sidebar_open_terminal」（A-1091 的守卫会当场报红）。 */
+  sidebar_open_terminal: { label: "打开终端页", Icon: TerminalIcon },
+  sidebar_open_files: { label: "打开文件页", Icon: FolderIcon },
 };
 
 export function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
@@ -327,7 +340,9 @@ import {
   parseTodoPanorama,
   foldTodoWriteIntoSteps,
   lastPlanItems,
+  groupTimeline,
   type TimelineStep,
+  type TimelineGroup,
 } from "./todoPanorama.js";
 
 /** A-934：会话级「思考时间线 + 窗口占用」持久化纯函数（独立模块，无 React 依赖、vitest 可直测）——
@@ -463,6 +478,11 @@ type ChatStreamReq = {
    被误判成"不可恢复" → `failReconnect(msg, 0)` 把自动重连整段跳过
    （用户原话："我以前定下的十次请求失败的重连阈值呢？"）。详见该模块头注释。 */
 import { explainStreamError, isPermanentStreamError, isContextOverflowError, contextOverflowHint, rescueSwitchLabel, RESCUE_SWITCH_TITLE } from "./streamErrors.js";
+/* A-1122（③）：回滚磁盘改动的**用户可见文案**唯一出处（确认框 + 失败横幅）。
+   文案抽成纯函数才能被守卫直接断言 —— 卷在这里手搓一句「已回滚」是最省事、
+   也最容易把"还原失败"说成成功的地方。 */
+import { fileUndoConfirmText, fileUndoReport } from "./fileUndoReport.js";
+import type { FileUndoPlan, FileUndoResult } from "../../shared/ipc.js";
 
 /** A-1090：可救模型的类型**取自跨进程契约**（`ipc.ts` 的 `CompressResult.rescueModel`），
  *  不再手抄一份形状 —— 主进程加字段（例如 `choice`）而这里没跟上时，
@@ -949,28 +969,40 @@ const LiveStatusLine = React.memo(function LiveStatusLine({ status, stageKey }: 
 
   return (
     <div style={{
-      display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap",
+      // A-1095：改为**两行式**容器（原先是一行 flex-wrap，主句+副句+激励语同级）——
+      // 用户原话：「你把激励语换个行，换到最后一行，现在跟状态返回一行的话，有时候激励语过长
+      // 会出现自动换行的问题」。flex-wrap 下激励语一长就把主句挤到下一行，观感是"状态行莫名断行"。
+      // 现在：第一行只放「主句 · 副句」，激励语**独占第二行**，彻底退出主句的行内流。
+      display: "flex", flexDirection: "column", gap: 2,
       // 与正文同栏但略微下沉：它是"叙述"，不是 Agent 说出来的话
-      padding: "6px 0 10px 42px", fontSize: 13, lineHeight: 1.55,
+      // A-1106（问题 3）：字号整体上调一档。用户原话：「你把正在思考下面那一块的字体调大一些啊，
+      // 看着好小啊」——原来主句 13 / 副句 11.5 / 激励语 13，在 15px 正文旁边明显"缩了一圈"。
+      // 现在 14.5 / 13 / 14：主句逼近正文（叙述 vs 陈述的层级差保留在字重与颜色上，不再靠字号）。
+      padding: "6px 0 10px 42px", fontSize: 14.5, lineHeight: 1.55,
       animation: "fadeIn 0.18s ease",
     }}>
-      <span
-        className={status.animated ? "text-breathe" : undefined}
-        title={`${status.text}${status.detail ? `（${status.detail}）` : ""}`}
-        style={{ fontWeight: 600, color: "var(--text)", minWidth: 0 }}
-      >
-        {status.text}
-      </span>
-      {status.detail && (
-        <span style={{ color: "var(--text-dim)", fontSize: 11.5 }}>· {status.detail}</span>
-      )}
-      {/* 激励语：带表情包的循环，直到下一阶段（stageKey 变化即重置）——
-          用 visibility 之外的独立 span，避免它一出现就把主句挤跑。
-          A-1061⑧：用户原话「激励语，又细又小，看都看不清楚」——
-          此前 11.5px + text-muted（最暗的一档）+ 斜体，三个因素叠一起就是"看不清"。
-          现在 13px + 正常体（去斜体）+ 提亮一档 + 500 字重，仍与主句保持层级差。 */}
+      {/* 第一行：主句 + 副句（仍可 flex-wrap —— 长主句自己折行，不再被激励语牵连） */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+        <span
+          className={status.animated ? "text-scan-light" : undefined}
+          title={`${status.text}${status.detail ? `（${status.detail}）` : ""}`}
+          style={{ fontWeight: 600, color: "var(--text)", minWidth: 0 }}
+        >
+          {status.text}
+        </span>
+        {status.detail && (
+          <span style={{ color: "var(--text-dim)", fontSize: 13 }}>· {status.detail}</span>
+        )}
+      </div>
+      {/* 第二行（最后一行）：激励语独占。带表情包的循环，直到下一阶段（stageKey 变化即重置）。
+          A-1061⑧：用户原话「激励语，又细又小，看都看不清楚」——此前 11.5px + text-muted
+          （最暗的一档）+ 斜体，三个因素叠一起就是"看不清"。现在 13px + 正常体（去斜体）
+          + 提亮一档 + 500 字重，仍与主句保持层级差。
+          A-1095：换到**最后一行**后，它过长时只在自身这一行内折行，不再挤跑主句。 */}
       {cheer && (
-        <span style={{ color: "var(--text-secondary)", fontSize: 13, fontWeight: 500 }}>{cheer}</span>
+        <span style={{ color: "var(--text-secondary)", fontSize: 14, fontWeight: 500, minWidth: 0 }}>
+          {cheer}
+        </span>
       )}
     </div>
   );
@@ -1191,8 +1223,113 @@ const DiffBlock = React.memo(function DiffBlock({ oldText, newText }: { oldText:
   );
 });
 
+/**
+ * A-1095 #5：流式**吐字渐入**的共用渲染（正文与思考内容同一实现 —— 单一产地）。
+ *
+ * 用户诉求：「顺便推广吐字动画到思考内容」。
+ * 逻辑原封不动从正文那段搬来（A-1061⑬ / A-1065 / A-1080 / A-1094）：
+ *   · `settled`（止于最后换行）交 Markdown 正式渲染；
+ *   · `linePrefix`（最后一行前半段）纯文本，**紧贴 settled 之后** —— 三段同处一个行内流，
+ *     中间不插任何块级边界。这样接缝落在**真实换行**上：settled 不再以"半行"结尾，
+ *     尾巴也就不会另起一行（那正是 A-1080「倒数第二行尾端留空白 + 整段往上挤着重排」的根因）；
+ *   · `units`（尾巴单元）逐单元 key=`at`（**绝对索引**，追加时已有单元 at 不变 ⇒ 不重挂不重播）。
+ *
+ * ⚠️ 只有一个产地：正文与思考都调它（用户 A-1095 #5 要求"推广到思考内容"，
+ *   若各写一份，A-1080 那条"三段同行内流"的约束迟早在一处失守）。
+ */
+function StreamFadeText({ text }: { text: string }): JSX.Element {
+  /* A-1095 #6（S6）：**渐入节拍的稳定化** —— 根治吐字残留闪烁的唯一产地。
+   *
+   * 病根：A-1070 那条「追加字符不会改已有单元的 at」有**隐含前提** —— 被渐入的文本必须单调累积。
+   *   正文满足（`partialRef` 只加不减），但**思考内容不满足**：这里是每帧重新净化的
+   *   `sanitizeThinking(splitToolTrace(step.text).text)`，净化会**回溯改写已定型前缀**
+   *   （`"DeepSeek s w"` 追加 `e` → `"DeepSeek swe"`，那个已显示的空格被删 ⇒ 之后 at 整体前移；
+   *   `splitToolTrace` 还会在 `### 工具调用记录` 写全的瞬间砍掉已显示整行）。
+   *   ⇒ at（React key）平移 ⇒ 尾巴卸载重挂 ⇒ 260ms 渐入**重播** = 闪烁。
+   *
+   * 为什么不去逼净化单调：断词拼合的 `{2,}` 正是正确判据（`B ing`→`Bing` 该拼），
+   *   而 `b c`（不该拼）与 `s w`→`swe`（该拼）**形态完全一样** —— 帧 N 无从知道 `w` 会不会长成 `we`。
+   *   同理用**内容**做身份会被重复字符（`人人`/`1234`）误判成"已播过"。
+   *
+   * 正解：问一个净化影响不到的问题 —— 「这个位置的字我播过没有？」
+   *   只有 `at` **超过历史水位**的单元才挂渐入类 ⇒ 漂移不会重播、新字符（总在末尾）不会漏播。
+   *   完整论证与不变量见 `tests/gui/a1095-fade-stability.spec.ts`。 */
+  const maxAtRef = React.useRef(-1);
+  const prevTextRef = React.useRef("");
+  const fade = splitStreamFade(text);
+  /* ⚠️ 换轮/换段检测：`text` 不再以上一帧为前缀（正文清零重来、思考切新段）⇒ 水位重置，
+   *   否则新一轮所有 `at` 都小于旧水位 ⇒ 整轮不播渐入（漏播）。组件被 key 重挂时自动得新 ref。 */
+  if (!text.startsWith(prevTextRef.current)) { maxAtRef.current = -1; }
+  prevTextRef.current = text;
+  const units = visibleTailUnits(fade.units).filter((u) => u.text);
+  const seenAt = maxAtRef.current;
+  for (const u of units) { if (u.at > maxAtRef.current) { maxAtRef.current = u.at; } }
+  return (
+    <>
+      {fade.settled ? <Markdown text={fade.settled} streaming /> : null}
+      {fade.linePrefix}
+      {units.map((u) => (
+        /* 仅在 `at` 突破水位时挂渐入类；key 仍是 `at`（A-1070 的稳定锚点） */
+        <span key={u.at} className={u.at > seenAt ? "stream-fade-unit" : undefined}>{u.text}</span>
+      ))}
+    </>
+  );
+}
+
+/**
+ * A-1124：**正文后置闸门 + 吐字渐入 + 关闸期占位**的唯一产地。
+ *
+ * 【为什么必须抽出来】此前同一份「本轮正文」有**两套互不相干的渲染实现**：
+ *   ① 流式现场块里那份（`loading && resumeMsgId === null`）：`gateOpen = !loading` 闸门
+ *      ＋ `StreamFadeText` 逐单元渐入 ＋ 两态占位文案；
+ *   ② 切会话恢复时 `messages` 里那条**占位气泡**（`AssistantMessage`）那份：裸 `<Markdown>`，
+ *      既没有闸门、也没有渐入。
+ * 于是「切走会话再切回来」＝ 悄悄换成了**② 那套更旧的实现**。用户实测原话：
+ *   「出现了我之前让你调过的问题……我切换会话后，再回来这个会话，这个设定便会被我让你修改前的老设定覆盖。」
+ * ——他描述得完全准确：所谓"老设定"就是这条从未被同步过的旧路径。
+ * 抽成单一产地之后，两条路径**共用同一份实现**，不可能再各自漂移（守卫见
+ * `tests/gui/a1095-body-gate.spec.ts` 的 ⑤：`<GatedBody` 必须恰好被调用 **2** 次）。
+ *
+ * 【为什么关闸期只 `display:none`、**不卸载**】`StreamFadeText` 的渐入水位（`maxAtRef`）活在 ref 里；
+ *   若关闸期不挂载、开闸那一刻才挂载，水位从 -1 起 ⇒ 整篇正文一起套 `stream-fade-unit` =
+ *   一次**大闪烁**（本仓反复踩过的那个家族）。常驻后水位全程推进，开闸呈现的是"已定型的完整正文"。
+ *
+ * ⚠️ `shown` 是**显示层缓冲**（`displayPartialRef` 逐字推进出来的那个），不是 `partialRef` ——
+ *    关闸期它被冻结（见 `schedulePartialRender` 里 `bodyGateRef` 的推导），所以开闸才会从零播渐入。
+ * ⚠️ 判据变量名刻意叫 `gateOpen` 而不是 `showBody`：它是**显示层**闸门（`partialRef` 全程照常累积，
+ *    token 统计 / 断流兜底 / 持久化都靠它），改名会让人误以为连数据也一起被闸住。
+ */
+const GatedBody = React.memo(function GatedBody({ shown, gated, runningTool }: { shown: string; gated: boolean; runningTool: boolean }): JSX.Element {
+  /* A-1095 #8（返工）：判据 = **本轮结束**（`gated` 由调用方按 `loading` 传入）。
+     上一版判据「首个 chunk = 思考结束」从根上就是错的 —— agentic 轮内事件序列是
+       `reasoning → tool-start → tool → chunk → tool-start → tool → chunk → done`
+     正文与工具调用在**同一轮内反复交错**，首个 chunk 只说明"这一段正文写完了"。
+     闸门是个**单向闩**，第一段正文就把它永久敞开 ⇒ 视觉上与改动前毫无区别
+     （用户驳回原话：「工具调用和正文怎么还是这个布局？你改了什么？」）。 */
+  const gateOpen = !gated;
+  return (
+    <>
+      <div style={gateOpen && shown ? undefined : { display: "none" }}>
+        <StreamFadeText text={shown} />
+      </div>
+      {/* 关闸期占位：区分「只在思考」与「思考 + 工具在跑」，让用户知道卡在哪一步。
+          ⚠️ 这里必须挂 `.text-scan-light`（A-1106 问题 1 点名的四处「正在动」文本之一）。 */}
+      {(!gateOpen || !shown) && (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 14, fontWeight: 500 }}>
+          <span className="text-scan-light">{runningTool ? "思考与工具调用进行中" : "正在思考"}</span>
+          <span className="stream-dot-row">
+            <span className="stream-dot" />
+            <span className="stream-dot" style={{ animationDelay: "0.2s" }} />
+            <span className="stream-dot" style={{ animationDelay: "0.4s" }} />
+          </span>
+        </span>
+      )}
+    </>
+  );
+});
+
 /** 时间线节点组件（A-171：思考段落直接正文显示，工具调用为小型可折叠行；detail 可点击在右侧栏打开） */
-const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { step: TimelineStep; autoExpand?: boolean }): JSX.Element {
+const TimelineNode = React.memo(function TimelineNode({ step, autoExpand, streamingTail }: { step: TimelineStep; autoExpand?: boolean; streamingTail?: boolean }): JSX.Element {
   // hooks 必须在每次渲染同序调用（React 规则，否则条件返回导致渲染崩溃/黑屏）：
   const [expanded, setExpanded] = React.useState(Boolean(autoExpand));
   // 思考步：可展开条目——摘要行（去 markdown 符号）默认收起，展开后按 Markdown 渲染全文
@@ -1227,9 +1364,31 @@ const TimelineNode = React.memo(function TimelineNode({ step, autoExpand }: { st
         <div className={`collapse${expanded ? " is-open" : ""}`}>
           <div>
             <div className="think-step-text" style={{ marginTop: 4 }}>
-              <Markdown text={cleanThink} />
+              {/* A-1095 #5：**正在写的最后一段思考**走吐字渐入（与正文同一实现）；
+                  历史思考 / 已定型的段落走普通 Markdown（零行为变化，且避免无谓的逐单元切分）。 */}
+              {streamingTail ? <StreamFadeText text={cleanThink} /> : <Markdown text={cleanThink} />}
             </div>
           </div>
+        </div>
+      </div>
+    );
+  }
+  /* A-1095 #8′：该阶段的**正文片段** —— 思考历程里穿插的正文（§5.3 目标图里"该轮正文"那一格）。
+     与 `think` 段的关键差别：think 是**摘要行 + 可展开**（推理没必要逐字读，默认收起）；
+     正文是**结论性内容**，用户要的就是"在思考历程里直接读到它"，所以这里**不折叠**，
+     直接 Markdown 全文渲染（用户驳回原话：「我要的思考期间穿插的正文总结呢？」）。
+     流式中最后一段走吐字渐入（`streamingTail`）—— 与思考段、底部正文区**共用同一实现**
+     （`StreamFadeText`，单一产地），不另写第三份渐入。
+     ⚠️ 本支必须排在**工具卡兜底之前**：下面的 `const tool = step as …{kind:"tool"}` 是 if 链的
+        收尾兜底，任何没被前面列举的 kind 都会掉进去被渲染成"一个叫 undefined 的工具"。 */
+  if (step.kind === "body") {
+    const bodyText = step.text ?? "";
+    if (!bodyText.trim()) { return <span style={{ display: "none" }} />; }
+    return (
+      <div className="think-step">
+        <span className="think-step-mark body-step-mark" />
+        <div className="think-step-text body-step-text" data-body-step="1">
+          {streamingTail ? <StreamFadeText text={bodyText} /> : <Markdown text={bodyText} />}
         </div>
       </div>
     );
@@ -1650,8 +1809,18 @@ function UrlPanelRow({ u, host, clickable }: { u: { url: string; label: string }
 }
 
 /** 思考过程折叠面板（A-174：与参考内容互相独立——展开/收起互不影响，各自记忆自己的状态） */
-const ThinkingPanel = React.memo(function ThinkingPanel({ timeline }: { timeline: TimelineStep[] }): JSX.Element {
+const ThinkingPanel = React.memo(function ThinkingPanel({ timeline, liveStream = false }: { timeline: TimelineStep[]; liveStream?: boolean }): JSX.Element {
   const [open, setOpen] = React.useState(true);
+  /* A-1095 #9：按「工作阶段」归组显示。
+     用户原话（含澄清）：「把每次的工具调用放在对应的工作阶段内……每个时间线阶段为一组」，
+     并明确「我说的是**实时显示的调用工具的文本挪位置**，别给我理解成最后调用工具」
+     ⇒ 工具照旧实时执行、结果照旧实时回流，这里只是把已经出现的工具行**挂进它所属的阶段组**。
+     投影（`groupTimeline`）不改数据结构 ⇒ 持久化格式 / 既有 todoPanorama 用例零迁移风险。
+     渲染形态对齐业界（ChatGPT「Worked for 2m」/ Claude Code `collapseReadSearchGroups` /
+     Cline `groupLowStakesTools`）：**活跃组默认展开**（成员实时追加可见），历史组默认折叠。
+     ⚠️ A-1124 补充：`liveStream` 必须**穿过**本组件到达 `TimelineGroupBlock`，且**默认 false**
+     （不传 = 历史消息 = 不渐入、不恒展开）。切会话恢复的占位气泡与流式现场块都会显式传它。 */
+  const groups = React.useMemo(() => groupTimeline(timeline), [timeline]);
   return (
     <div className="think-card">
       <button className="think-card-title" onClick={() => setOpen(!open)}
@@ -1666,11 +1835,99 @@ const ThinkingPanel = React.memo(function ThinkingPanel({ timeline }: { timeline
       <div className={`collapse${open ? " is-open" : ""}`}>
         <div>
           <div className="think-timeline" style={{ marginTop: 6 }}>
-            {timeline.map((step, i) => (
-              <TimelineNode key={`s${i}`} step={step} />
+            {groups.map((g) => (
+              <TimelineGroupBlock key={`g${g.from}`} group={g} liveStream={liveStream} />
             ))}
           </div>
         </div>
+      </div>
+    </div>
+  );
+});
+
+/**
+ * A-1095 #9：一个「工作阶段」组。
+ *
+ * 组边界 = **新的 think 段开始**（见 `todoPanorama.ts::groupTimeline`）：一段思考 + 它之后触发的
+ * 工具 / 计划 / 播报 = 一个工作阶段。组头文案 = 该段思考首行；徽标 `N 步` 只统计**工具调用**。
+ *
+ * ⚠️ A-1115 修正（用户原话：「我要的是对应编辑、调用、执行、查看等所有动作全部要在对应的时间线阶段里，
+ *    你这样完全分开做的话，我的时间线设计就没有意义了」）：
+ *    旧写法是 `foldable = !group.isLast && steps.length > 1` 且 `if (!foldable) return body`
+ *    ⇒ **最后一组不画阶段容器与组头**。而模型很常见的行为是「先把思考一次吐完、再连续调一串工具」，
+ *    这时整条时间线**只有一组**、`isLast` 为真 ⇒ 组头被跳过 ⇒ **所有动作平铺成一列**，
+ *    阶段信息全部丢失 —— 正是用户看到的形态。
+ *    ⇒ 现在：**只要组内多于 1 个节点就画壳**（末组也画）；末组**恒展开且不提供折叠**
+ *    （它一直在长，折叠它没有意义），所以它的组头渲染成**非交互**标题（无 chevron，避免"看着能点却点不动"）。
+ *    单个节点（纯 think）仍不套壳 —— 否则每段思考都多一层空抽屉。
+ *
+ * 折叠态：**这一份时间线正在流（`liveStream`）⇒ 所有组恒展开**（A-1124，见组件内长注释）；
+ * 非流式（历史消息）时：历史组默认折叠、可点开，末组恒展开 ——
+ * 与 ChatGPT/Claude Code 的"历史步骤默认收成一行"一致。 */
+const TimelineGroupBlock = React.memo(function TimelineGroupBlock({ group, liveStream }: { group: TimelineGroup; liveStream?: boolean }): JSX.Element {
+  // 历史组默认折叠；末组恒展开（下面是 effectiveOpen）
+  const [open, setOpen] = React.useState(false);
+  const hasShell = group.steps.length > 1;
+  /* A-1124（问题 d）：`liveStream` ＝「**这一份时间线正在流**」⇒ 整条时间线**恒展开**。
+     用户原话（配 18 行折叠壳的截图）：「怎么每个阶段做完直接就收起了？没必要，
+     等所有思考历程结束输出正文时，再直接收起思考历程就行了。」
+
+     ⚠️ 旧判据 `const effectiveOpen = group.isLast ? true : open` 的失效机制：
+        只认「最后一组」。而一个新阶段一出现，上一组的 `isLast` **当场翻假** ⇒ 它立刻折叠成一行 ——
+        于是一轮跑 18 个工作阶段就攒出 18 行「1 步」折叠壳（正是用户截图里的形态），
+        每个阶段刚做完就从视野里消失。`group.isLast` 是**位置的**判据，而用户要的是
+        **时间的**判据：整轮在跑 ⇒ 都摊开；整轮收尾 ⇒ 才收起（收尾时连整个「思考过程」卡
+        一起折叠，见 onDone 的 `setCollapsedReasoning` / `setReasoningOpen(false)`）。
+
+     ⚠️ `holdOpen` 为真时连**折叠交互**都不给（同末组的处理）：此刻点折叠没有意义，
+        下一秒新阶段又把它撑开，做成按钮只会变成"看着能点却会自己弹回去"。 */
+  const holdOpen = Boolean(liveStream);
+  const canCollapse = hasShell && !group.isLast && !holdOpen;
+  const effectiveOpen = group.isLast || holdOpen ? true : open;
+  const body = (
+    <div className="think-timeline" style={{ marginTop: 2 }}>
+      {group.steps.map((step, i) => {
+        // A-1095 #5：只有**活跃组的最后一个文本节点**才是"正在写的" —— 它走吐字渐入。
+        // A-1095 #8′：`body` 同样适用（正文片段也是流式吐出来的）；判据仍是 `isLastOfGroup`，
+        //   所以"工具前的思考段"不会因为后面又来了正文而继续渐入（那会是错的：它已经定型了）。
+        const isLastOfGroup = i === group.steps.length - 1;
+        const streamingTail = Boolean(
+          liveStream && group.isLast && isLastOfGroup && (step.kind === "think" || step.kind === "body"),
+        );
+        return (
+          <TimelineNode key={`s${group.from + i}`} step={step} autoExpand={group.isLast && isLastOfGroup} streamingTail={streamingTail} />
+        );
+      })}
+    </div>
+  );
+  if (!hasShell) { return body; }
+  const headInner = (
+    <>
+      <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.headline}</span>
+      {group.toolCount > 0 && (
+        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{group.toolCount} 步</span>
+      )}
+    </>
+  );
+  return (
+    <div className="think-group" style={{ marginBottom: 4 }}>
+      {canCollapse ? (
+        <button className="think-group-head" onClick={() => setOpen((v) => !v)}
+          title={open ? "收起这一阶段" : "展开这一阶段"}
+          style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", background: "transparent", border: "none", cursor: "pointer", padding: "2px 0", color: "var(--text-secondary)", fontSize: 12 }}>
+          <ChevronIcon size={10} rotate={open ? 90 : 0} style={{ flexShrink: 0 }} />
+          {headInner}
+        </button>
+      ) : (
+        /* 末组：恒展开 ⇒ 不画 chevron、不做成按钮（避免"看着能点却点不动"） */
+        <div className="think-group-head"
+          style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "2px 0", color: "var(--text-secondary)", fontSize: 12, cursor: "default" }}>
+          <span style={{ width: 10, flexShrink: 0 }} />
+          {headInner}
+        </div>
+      )}
+      <div className={`collapse${effectiveOpen ? " is-open" : ""}`}>
+        <div>{body}</div>
       </div>
     </div>
   );
@@ -1730,7 +1987,11 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
   const renderCard = (p: ProductItem): JSX.Element => {
     const i = products.indexOf(p);
     return (
-      <div key={`p${i}`} style={{ display: "flex", flexDirection: "column", maxWidth: "100%" }}>
+      /* A-1106（问题 6）：**宿主**承载"横向"过渡。
+         折叠 `width: fit-content` ↔ 展开 `width: 100%`（两个**指定值**才谈得上插值，见 index.css 那段）。
+         ⚠️ 类挂在这一层（宿主）而不是 `.prod-card` 上：卡片自己 `maxWidth: 100%`，
+            宽度由宿主决定；挂在卡片上会因为 flex item 的基准仍是 max-content 而看不出过渡。 */
+      <div key={`p${i}`} className={`prod-host${expanded === i ? " is-open" : ""}`} style={{ display: "flex", flexDirection: "column", maxWidth: "100%" }}>
         <div
           title={p.diffFull ? `点击展开变更详情（${p.diffFull.old.split("\n").length} → ${p.diffFull.new.split("\n").length} 行）` : p.rel}
           onClick={(e) => {
@@ -1869,8 +2130,8 @@ const CompressNoteLine = React.memo(function CompressNoteLine({ note, live }: { 
  *    （`splitToolTrace` / `splitThinkingIntoSteps` / `sanitizeThinking` 的开销全在子节点里）。
  *    接入顺序是契约的一部分，回归守卫见 `tests/core-ts/a1054-guards.spec.ts`。
  */
-const ReasoningSection = React.memo(function ReasoningSection({ m, collapsed }: {
-  m: Message; collapsed: boolean;
+const ReasoningSection = React.memo(function ReasoningSection({ m, collapsed, liveStream = false }: {
+  m: Message; collapsed: boolean; liveStream?: boolean;
 }): JSX.Element | null {
   const open = !collapsed;
   // 「正文已挂载过」与「可以把类名切成展开」是**两个**状态，见 reasoningGate 的两帧说明
@@ -1925,7 +2186,7 @@ const ReasoningSection = React.memo(function ReasoningSection({ m, collapsed }: 
           )}
           {/* 面板二：思考过程（时间线：思考段落 ↔ 工具调用交错；独立折叠） */}
           {timeline.length > 0 && (
-            <ThinkingPanel timeline={timeline} />
+            <ThinkingPanel timeline={timeline} liveStream={liveStream} />
           )}
         </div>
       </div>
@@ -1933,8 +2194,18 @@ const ReasoningSection = React.memo(function ReasoningSection({ m, collapsed }: 
   );
 });
 
-const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, showThinking, collapsed, onToggle, isMember }: {
+const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, showThinking, collapsed, onToggle, isMember, liveStream = false, gated = false, liveText, runningTool = false }: {
   m: Message; agentName: string; showThinking: boolean; collapsed: boolean; onToggle: (id: number) => void; isMember?: boolean;
+  /** A-1124：这一条是「切会话恢复中的占位气泡」⇒ 思考历程按**活的那条**渲染（整条恒展开 + 尾巴渐入） */
+  liveStream?: boolean;
+  /** A-1124：正文后置闸门（由调用方按 `loading` 传入）——恢复态与流式现场块**同一判据** */
+  gated?: boolean;
+  /** A-1124：**只在恢复中的占位气泡上**传这个 —— 它是显示层缓冲（`partial`），
+   *  传了就走 `GatedBody`（与流式现场块共用一份实现）；不传则走普通 Markdown（历史消息）。
+   *  ⚠️ 用 `liveText != null` 做判据，**不许**拿 `m.content` 里的「（恢复中…）」字面量当判据 ——
+   *     那是一句文案，改文案就会静默失效（本仓 §静默失效家族）。 */
+  liveText?: string;
+  runningTool?: boolean;
 }): JSX.Element {
   const [copied, setCopied] = React.useState(false);
   const handleCopy = async (): Promise<void> => {
@@ -2004,7 +2275,7 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
             实测最大会话 IPC 载荷 8.76MB（其中 reasoning 4.2MB / content 仅 150KB），
             `splitThinkingIntoSteps` 单次 37.5ms、`sanitizeThinking` 66ms，全是看不见的白工。
             展开动画（`--collapse-dur`）与两帧提交的实现说明见 `ReasoningSection` 定义处。 */}
-        {showThinking && <ReasoningSection m={m} collapsed={collapsed} />}
+        {showThinking && <ReasoningSection m={m} collapsed={collapsed} liveStream={liveStream} />}
         {/* A-975：压缩报告分隔线（在正文之前，思考卡折叠也可见） */}
         {m.compressNote && <CompressNoteLine note={m.compressNote} />}
         <div className="msg-body-divider" />
@@ -2032,12 +2303,17 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
           </div>
         ) : (
           <div className="msg-body-text" style={{ lineHeight: 1.75, fontSize: 15, color: "var(--text)", wordBreak: "break-word" }}>
-            {m.content ? (() => {
-              // 剥离 ### 工具调用记录 段（旧格式残留，已由独立卡片展示）
-              // A-1027：与思考区共用唯一解析实现（旧内联正则的停止条件与它不完全一致）
-              const cleanContent = splitToolTrace(m.content).text.trim();
-              return <Markdown text={cleanContent} />;
-            })() : null}
+            {/* A-1124：恢复中的占位气泡走 `GatedBody`（与流式现场块共用**同一份**正文实现：
+                正文后置闸门 + 吐字渐入 + 两态占位）。此前这条路是裸 `<Markdown>` ——
+                没有闸门、没有渐入，于是"切走再切回"等于把用户已经调好的观感整套丢掉。 */}
+            {liveText != null
+              ? <GatedBody shown={liveText} gated={gated} runningTool={runningTool} />
+              : (m.content ? (() => {
+                // 剥离 ### 工具调用记录 段（旧格式残留，已由独立卡片展示）
+                // A-1027：与思考区共用唯一解析实现（旧内联正则的停止条件与它不完全一致）
+                const cleanContent = splitToolTrace(m.content).text.trim();
+                return <Markdown text={cleanContent} />;
+              })() : null)}
           </div>
         )}
         {/* A-1007：产物卡片区——消息正文之后、独立于「思考过程」折叠卡；无产物时零渲染 */}
@@ -2119,6 +2395,29 @@ export default function ChatPanel({
    *  这个是"上一次真推进的墙钟"，语义不同，合并会一改就牵连两处行为。 */
   const lastEmitAtRef = React.useRef(0);
 
+  /** A-1106（问题 5a）：**正文后置闸门**的镜像（`gateOpen = !loading`）。
+   *
+   *  用户原话：「吐字渐入效果消失了……你不会是给我回滚版本了吧？」
+   *
+   *  机制（不是猜的，是把两个产地的时序对起来推的）：
+   *    · A-1095 #8 给正文加了「后置闸门」—— `gateOpen = !loading`，本轮**全部**工作收尾前
+   *      只把正文容器 `display: none`，正文照旧逐帧推进（当时的理由是"开闸呈现已定型的正文、
+   *      零重播"）；
+   *    · `StreamFadeText` 的渐入判据是「**首个挂载时** `at > 水位`」——水位（`maxAtRef`）在
+   *      关闸期**照常推进**（组件一直挂着，只是不可见）；
+   *    ⇒ 开闸那一刻，所有单元的 `at` 都已经 ≤ 水位 ⇒ **一个渐入都不会播**。
+   *
+   *  修法：关闸期**冻结显示缓冲**（`displayPartialRef` 不推进）—— 它本来就是"显示层"的
+   *  缓冲，冻结它不影响任何数据（`partialRef` 继续累积，token 统计 / 兜底 / 持久化都在那上面）。
+   *  开闸那一刻才算"开始显示"，水位从 0 起，渐入照旧逐单元播。
+   *
+   *  ⚠️ 为什么在**渲染期**赋值、不走 effect：`loading` 一变，同一帧的 rAF 回调读到的必须是
+   *     新值；effect 晚一帧 ⇒ 开闸那一帧仍按"关闸"处理（正文再冻 16ms，肉眼可见地卡一下）。
+   *  ⚠️ 冻结的**只是显示层**：`gated` 只出现在两个地方（推进分支 + 自续条件），
+   *     任何第三处加闸门都是"两处判据各说各话"的复发形态。 */
+  const bodyGateRef = React.useRef(false);
+  bodyGateRef.current = !loading;
+
   /** A-980-R24：打字机限速的「追平阈值」（字符）。
    *  显示落后超过这个量就切换到按比例追赶——否则高速率模型下 buffer 会无限堆积，
    *  而每帧都要对全文重跑 Markdown 解析 → 渲染进程 OOM（详见 schedulePartialRender 注释）。 */
@@ -2137,7 +2436,10 @@ export default function ChatPanel({
       //  显示位置与真实输出的差距被**有界地**压在 TYPING_CATCHUP_CHARS 附近，不再无限滞后。
       const full = partialRef.current;
       const shown = displayPartialRef.current;
-      if (shown.length < full.length) {
+      /* A-1106（问题 5a）：关闸期**冻结显示缓冲**——水位（渐入水位）不能在关闸期推到底，
+         否则开闸时所有单元都"已过水位"，一个渐入都不播（见 `bodyGateRef` 的推导）。 */
+      const gated = !bodyGateRef.current;
+      if (!gated && shown.length < full.length) {
         const backlog = full.length - shown.length;
         const now = Date.now();
         if (backlog > TYPING_CATCHUP_CHARS) {
@@ -2226,7 +2528,9 @@ export default function ChatPanel({
         });
       }
       // A-918++：自续——若 partialRef 还有未显示字符（buffer 堆积，模型快于打字），下一帧继续推进，直到追平
-      if (displayPartialRef.current.length < partialRef.current.length) {
+      // A-1106（问题 5a）：自续条件也带 `!gated` —— 关闸期"还没显示完"恒成立，
+      // 不带就会整轮 60fps 空转（每帧 setPartial 同值、跑完整段 ctx 同步逻辑）。
+      if (!gated && displayPartialRef.current.length < partialRef.current.length) {
         partialRafRef.current = null;
         schedulePartialRender();
       }
@@ -2243,6 +2547,19 @@ export default function ChatPanel({
     lastEmitAtRef.current = 0; // A-1091：复位"最近吐字"——否则新一轮开头会残留上一轮的时间戳
     setPartial("");
   }, []);
+
+  /** A-1106（问题 5a）：**开闸点火**。
+   *
+   *  冻结显示缓冲之后，关闸期没有任何东西在推进 rAF 链 —— 本轮最后一个 chunk 早就处理完了，
+   *  不会再有人调 `schedulePartialRender`。所以开闸（`loading` 变 false）这一刻**必须主动点火**，
+   *  否则正文会**永远停在空白**（比"没有渐入"严重得多：用户会以为这一轮没有任何输出）。
+   *
+   *  ⚠️ 判据里带 `partialRef.current`：空 buffer 时不点火（免得给"用户按了停止、什么也没产出"
+   *     这种轮次白起一条 rAF 链，它自己也不会自续，纯属浪费）。
+   *  ⚠️ 这是本组唯一"漏了就静默失效"的地方 —— 守卫见 `tests/gui/a1106-ui-guards.spec.ts` 的 ③。 */
+  React.useEffect(() => {
+    if (!loading && partialRef.current) { schedulePartialRender(); }
+  }, [loading, schedulePartialRender]);
   /** f6：推理/思考过程内容（独立于正文字，输出中实时流式、完成后可主动展开查看） */
   const [reasoningTmp, setReasoningTmp] = React.useState("");
   const [reasoningOpen, setReasoningOpen] = React.useState(true);
@@ -2625,6 +2942,26 @@ export default function ChatPanel({
     writeNetworkEnabled(networkEnabled);
   }, [networkEnabled]);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  /* ── A-1115 目录卷轴（#305）──────────────────────────────────────────────
+     三件事都刻意"不进 React 的逐帧路径"：
+       · 参数：只在**设置页改动时**更新一次 state（卷轴内部逐帧读 ref，不重渲染）；
+       · 条目：`collectRailEntries` 由卷轴在**测量时机**回调，不在滚动里做 DOM 查询；
+       · 容器：用回调惰性取，避免把 ref 对象当 props 传（那样每次渲染都是新引用）。 */
+  const [railParams, setRailParams] = React.useState<RailParams>(() => loadRailParams("wave"));
+  React.useEffect(() => onRailParams((m, p) => { if (m === "wave") { setRailParams(p); } }), []);
+  const railScroller = React.useCallback((): HTMLElement | null => scrollRef.current, []);
+  const collectRailEntries = React.useCallback((): RailEntry[] => {
+    const sc = scrollRef.current;
+    if (!sc) { return []; }
+    const scTop = sc.getBoundingClientRect().top;
+    // 话题 = 一条用户发言；位置取**内容坐标**（与 offsetParent 无关，滚动中也稳定）
+    return Array.from(sc.querySelectorAll<HTMLElement>(".msg-user-bubble")).map((el) => {
+      const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+      return { top: el.getBoundingClientRect().top - scTop + sc.scrollTop, label: txt.slice(0, 34) || "（空消息）" };
+    });
+  }, []);
+
   const [atBottom, setAtBottom] = React.useState(true);
   /** A-1015b：`atBottom` 的 ref 镜像 —— ResizeObserver / MutationObserver 的回调是**异步**的，
    *  闭包捕获 state 会读到旧值（典型症状：贴底判断永远停在组件首次挂载时的 true）。
@@ -3450,6 +3787,13 @@ export default function ChatPanel({
             const content = c.data?.content ?? "";
             snap.partial += content;
             snap.hasActive = true;
+            /* A-1095 #8′：后台镜像的会话时间线也要收 `body` 节点。
+               否则「流式期间切走会话」这条路会把穿插的正文整段丢掉 —— 切回来时思考历程里
+               只剩思考与工具（与下面 reasoning 支必须镜像 think 节点是同一个理由）。
+               漏了它 = 用户的正文时有时无，而门禁全绿（典型静默失效）。 */
+            if (content) {
+              snap.timeline = appendTimelineStep(snap.timeline, { kind: "body", text: content });
+            }
             bumpMonitor(snap.monitor, content.length, 0, c.data?.model);
           } else if (c.type === "reasoning") {
             const content = c.data?.content ?? "";
@@ -3580,8 +3924,12 @@ export default function ChatPanel({
         });
         /* A-1061②′：思考历程里**立刻**出现这张卡（running 态）——
            用户原话：「我希望是直接在思考历程的卡片中显示……在运行期间就显示“执行中”。
-           展开后可以看到具体跑的脚本」。这正是用户盯着的区域，只在下面的"工具调用摘要"
-           小行里显示是不够的。索引记进 ref，结果到了就**原地**翻状态（不重排、不重复）。 */
+           展开后可以看到具体跑的脚本」。这正是用户盯着的区域。
+           A-1095 #9（返工）：原先在思考卡**下方**还有一块由 `toolEvents` 驱动的「工具调用」
+           摘要（分组计数 + 最近 5 条实时行）—— 那是**第二个产地**，用户看到的正是它，
+           所以"工具调用挪进时间线"看起来没有发生。现已删除：工具的实时状态**只由**这张卡产出
+           （`running` → 「执行中」/ 结果到了原地翻「成功 · 失败」，走同一套 `toolStatusLabel`）。
+           索引记进 ref，结果到了就**原地**翻状态（不重排、不重复）。 */
         const steps = appendTimelineStep(timelineStepsRef.current, {
           kind: "tool", name: rawName,
           label: stripToolTraceMark(rawName.startsWith("delegate:") ? `⟳ ${label}「${rawName.slice(9)}」` : `⟳ ${label}`),
@@ -3680,6 +4028,18 @@ export default function ChatPanel({
           streamCharCountRef.current += delta;
           recomputeStreamTokens();
           ensureStreamTimer();
+        }
+        /* A-1095 #8′（返工）：**正文片段进交错时间线** —— 用户第一轮诉求「也可以在思考历程中
+           穿插正文输出」的唯一落点。此前本分支只写 `partialRef`，正文**根本不进时间线**，
+           所以思考历程里永远看不到穿插的正文（用户驳回原话：「我要的思考期间穿插的正文总结呢？」）。
+           ⚠️ 与上一行 `partialRef` 是**并存**关系而非二选一：`partialRef` 管底部正文区的
+              统一输出（token 统计 / 断流兜底 / 持久化都依赖它），时间线里的 `body` 节点管
+              「思考历程里能读到穿插的正文」。两处职责不同，谁都不许删（闸门只管显示层，
+              见本文件底部的 `gateOpen` 与该处注释）。
+           细则与合并规则见 `todoPanorama.appendTimelineStep` 的 body 支。 */
+        const bodyChunk = c.data?.content ?? "";
+        if (bodyChunk) {
+          timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, { kind: "body", text: bodyChunk });
         }
         // A-974-R9：用首个 chunk 携带的 model 提前点亮监测栏模型标签（此前只在 done 才设置 →
         // 流式全程模型栏空白，且 R9 快照的 model 也一直是空串）
@@ -4088,8 +4448,14 @@ export default function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, makeMessage]);
 
-  /** 判断是否处于底部（阈值 48px 内视为底部）。
-   *  A-129：rAF 合帧，避免每次 scroll 事件（≈60Hz）都触发 setState 整面板重渲染 */
+  /** 判断是否处于底部、要不要继续自动跟随。
+   *  A-129：rAF 合帧，避免每次 scroll 事件（≈60Hz）都触发 setState 整面板重渲染。
+   *  A-1107：判据本身搬到了 `scrollFollow.ts`（唯一出处、可行为单测）——
+   *  用户意图的**主信号**是 `handleWheel`，这里的 scroll 支只作补充
+   *  （覆盖拖滚动条 / PageUp / 触屏这些不产生 wheel 的上翻）。
+   *  ⚠️ A-1109：**上一帧 `scrollTop` 基线已删除** —— 它撑起的方向判据
+   *  （`top < prevTop - 1`）会把「重排把 `scrollTop` 钳小」误判成用户上翻（详见
+   *  `scrollFollow.ts` 文件头）。判据现在只看 `gap` + 滞回，不需要历史帧。 */
   const scrollRafRef = React.useRef<number | null>(null);
   function handleScroll(): void {
     if (scrollRafRef.current !== null) { return; }
@@ -4097,15 +4463,80 @@ export default function ChatPanel({
       scrollRafRef.current = null;
       const el = scrollRef.current;
       if (!el) { return; }
-      setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 48);
-      setAtTop(el.scrollTop < 8); // A-980-R18：顶部渐变遮罩显隐
+      const top = el.scrollTop;
+      /* 距离 + **滞回**，全在 `scrollFollow.ts` 里（判据唯一出处）。
+         传 `following: atBottomRef.current` 是滞回的必要条件：落在不动作区时保持现状。 */
+      const next = decideFollow({
+        top,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        following: atBottomRef.current,
+      });
+      /* ⚠️ **同步**写 ref（不只 setState）：贴底循环 `tick` 读的是 ref，
+         `setState` → `useEffect` 之间隔着一整轮渲染，那一帧里 `tick` 会继续把视口拉底
+         —— 正是「像被按住」的来源。 */
+      atBottomRef.current = next;
+      /* 同值让 React 自行 bail out：滞回下 `next` 常常等于现状，
+         不这样做每帧都要重渲染整个面板。 */
+      setAtBottom((cur) => (cur === next ? cur : next));
+      setAtTop(top < 8); // A-980-R18：顶部渐变遮罩显隐
     });
+  }
+
+  /** A-1107：**用户往上滚这个动作本身**是最早、最可靠的意图信号。
+   *
+   *  为什么必须单开一条 wheel 判据（而不是只靠 scroll）：贴底时 `scrollTop` 被程序
+   *  每帧写成 `scrollHeight`，用户滚轮的上滚量被「内容还在增高」抵消，scroll 事件里
+   *  看到的 `scrollTop` 甚至可能**变大** ⇒ 判反（把上滚当成下滚，于是继续贴底）。
+   *  `deltaY < 0` 与 `scrollTop` 无关 ⇒ 不受这个抵消影响。
+   *  ⚠️ 同步解锁（不走 rAF）：让**本帧**的贴底循环立刻看到 `atBottomRef = false` 并停表。
+   *  ⚠️ 内层可滚元素（代码块 `<pre>` 等）自己滚时**不算** —— 否则在代码块里滚一下
+   *     就把整条对话流的自动跟随解掉了。把事件目标到 scroller 之间的祖先链读成
+   *     `ScrollBox[]`，判定交给 `scrollFollow.ts`（那里说明为什么必须同时看 overflowY）。 */
+  function handleWheel(e: React.WheelEvent<HTMLDivElement>): void {
+    const scroller = scrollRef.current;
+    if (!scroller) { return; }                     // 滚动容器还没挂上，无从判定
+    if (e.deltaY === 0) { return; }                // 纯水平滚动：与纵向跟随无关
+    if (e.deltaY > 0) {
+      /* ── A-1109：**向下滚** = 「我要回到最新」的明确信号 ──────────────────────
+         没有这一支时存在一条**永久失锁**路径：跟随被解掉之后，若视口恰好停在底部
+         （`gap ≈ 0`），用户再怎么往下滚都**不会产生 scroll 事件**（已经在底了）
+         ⇒ 距离支永远不执行 ⇒ 跟随再也锁不回来 —— 这正是用户说的
+         「不能在用户滚到最新吐字位置后锁定在最新位置」。 */
+      const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      /* 只在**真的到底**时才重锁（`FOLLOW_RESUME_PX`=8px，与判据同一个常量）；
+         用户在半空往下挪（还在看历史）不该被拉到底。 */
+      if (gap > FOLLOW_RESUME_PX || atBottomRef.current) { return; }
+      atBottomRef.current = true;
+      setAtBottom(true);
+      return;
+    }
+    /* ── 向上滚：这是**用户上翻**最早、最可靠的意图信号（`deltaY` 与 `scrollTop`
+          无关，不受「程序每帧拉底」抵消）⇒ 立刻松手。
+      ⚠️ 同步解锁（不走 rAF）：让**本帧**的贴底循环立刻看到 `atBottomRef = false` 并停表。 */
+    const ancestors: ScrollBox[] = [];
+    for (let n = e.target as Element | null; n && n !== scroller; n = n.parentElement) {
+      if (!(n instanceof HTMLElement)) { break; }
+      ancestors.push({
+        scrollHeight: n.scrollHeight,
+        clientHeight: n.clientHeight,
+        overflowY: getComputedStyle(n).overflowY,
+      });
+    }
+    if (hasInnerScroller(ancestors)) { return; }   // 内层自己的滚动，不打扰外层
+    if (!atBottomRef.current) { return; }          // 已经是「不跟随」态，无需重复 setState
+    atBottomRef.current = false;
+    setAtBottom(false);
   }
 
   /** 准星回底：跳回最新消息并恢复自动追踪 */
   function jumpToLatest(): void {
     const el = scrollRef.current;
     if (el) { el.scrollTop = el.scrollHeight; }
+    /* A-1107：同步写 `atBottomRef` —— 贴底循环读的是 ref，
+       只 setState 的话它要等一整轮渲染才「看到」用户已经回底（那一帧会白等）。
+       ⚠️ A-1109：这里**不再**需要重置「上一帧 scrollTop」基线（那个 ref 已随方向判据一起删除）。 */
+    atBottomRef.current = true;
     setAtBottom(true);
     setAtTop(el ? el.scrollTop > 8 : false);
   }
@@ -5113,27 +5544,75 @@ export default function ChatPanel({
     }
   }, [appendImageFiles]);
 
-  /** 回滚：撤销某条用户消息及其之后的全部对话，内容放回输入框。
+  /** 回滚：撤销某条用户消息及其之后的全部对话（**含磁盘上的文件改动**），内容放回输入框。
    *  useCallback(messages)：流式期间 messages 不变 → 引用稳定 → UserMessage(memo) 不因
    *  onRollback 引用变化而重渲染；仅在真正换消息时重建。 */
   const rollbackTo = React.useCallback((id: number): void => {
     if (loading) { return; }
-    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    type UndoApi = {
+      chat?: { truncateFrom?: (a: string, s: string | undefined, m: string) => Promise<unknown> };
+      fileUndo?: {
+        plan: (a: string, s: string | undefined, m: string) => Promise<FileUndoPlan>;
+        apply: (a: string, s: string | undefined, m: string) => Promise<FileUndoResult>;
+      };
+    };
+    const api = (window as unknown as { slimeAPI?: UndoApi }).slimeAPI;
     const idx = messages.findIndex((m) => m.id === id);
     if (idx < 0) { return; }
     const target = messages[idx];
     const retained = messages.slice(0, idx);
-    setMessages(retained);
-    setInput(target.content);
-    resetPartial();
-    inputRef.current?.focus();
-    // A-161：回滚持久化一致性 —— 同步截断后端历史到该用户消息之前，
-    // 否则仅改前端 UI，重启后 loadHistoryForSession 仍会加载回滚前的旧消息。
-    // 目标 user 消息（其内容放回输入框）及其后的记录全部删除。
-    if (api?.chat?.truncateFrom && target.role === "user" && sessionId) {
-      void api.chat.truncateFrom(agentId, sessionId, target.content).catch(() => undefined);
-    }
-  }, [messages, resetPartial, agentId, sessionId, loading]);
+
+    /** 撤前端 + 截断后端历史（原 A-161 行为，抽出来供"有无文件改动"两条路径共用） */
+    const commit = (): void => {
+      setMessages(retained);
+      setInput(target.content);
+      resetPartial();
+      inputRef.current?.focus();
+      // A-161：回滚持久化一致性 —— 同步截断后端历史到该用户消息之前，
+      // 否则仅改前端 UI，重启后 loadHistoryForSession 仍会加载回滚前的旧消息。
+      // 目标 user 消息（其内容放回输入框）及其后的记录全部删除。
+      if (api?.chat?.truncateFrom && target.role === "user" && sessionId) {
+        void api.chat.truncateFrom(agentId, sessionId, target.content).catch(() => undefined);
+      }
+    };
+
+    // A-1122（③）：回滚必须**连磁盘上的改动一起退**。此前只改前端 + 截断历史，
+    // 于是"回滚了消息，Agent 改过的文件还是改过的"——用户以为回滚干净了。
+    //
+    // ⚠️ 顺序是硬约束，别调换：**先 undo 文件、再 truncateFrom 历史**。
+    //    切分线靠 `history.jsonl` 里那条用户消息定位（`findRollbackCut`）；
+    //    先截断 ⇒ 那条消息没了 ⇒ 文件还原直接失效，而且是**静默**失效。
+    const fileUndo = api?.fileUndo;
+    if (!fileUndo || target.role !== "user" || !sessionId) { commit(); return; }
+    void (async () => {
+      let banner: string | null = null;
+      let plan: FileUndoPlan | null = null;
+      try {
+        plan = await fileUndo.plan(agentId, sessionId, target.content);
+      } catch (e) {
+        banner = `⚠️ 无法预演文件回滚（未还原任何文件）：${e instanceof Error ? e.message : String(e)}`;
+      }
+      if (plan && !plan.ok) {
+        // 拿不到回滚边界 ⇒ 不能假装"没有文件需要还原"，如实出声（但对话回滚照常进行）
+        banner = `⚠️ 文件未还原：${plan.error ?? "无法确定回滚边界"}`;
+      }
+      const ask = plan ? fileUndoConfirmText(plan) : null;
+      if (ask) {
+        // 用户取消 ⇒ 整次回滚中止（不是只跳过文件）——否则"点了取消却还是把对话撤了"更费解
+        if (!(await confirmAsync(ask.message, ask.detail))) { return; }
+        try {
+          banner = fileUndoReport(await fileUndo.apply(agentId, sessionId, target.content));
+        } catch (e) {
+          banner = `⚠️ 文件还原失败：${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      commit();
+      // ⚠️ 横幅必须在 `commit()` **之后**设：`commit` 里会走 `resetPartial()`，
+      //    而复位系列函数会 `setStreamErrorBanner(null)`（A-1090 踩过的静默失效 ——
+      //    同一批 setState 后者胜，先设后清 = 横幅在本会话里永远看不见）。
+      if (banner) { setStreamErrorBanner(banner); }
+    })();
+  }, [messages, resetPartial, agentId, sessionId, loading, setStreamErrorBanner]);
   const filteredCmd = cmdList;
 
   /* ── 当前模型思考/推理能力（动态，随模型切换与上游返回实时变化）── */
@@ -5498,8 +5977,15 @@ export default function ChatPanel({
 
       {/* 消息区域：卡片化 + 事件行 + A-980-R18 顶部/底部渐变遮罩 + 更早历史分段胶囊 */}
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-        <div ref={scrollRef} onScroll={handleScroll} className="chat-scroll"
-          style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "14px 16px 0", overflowAnchor: "none" }}>
+        {/* A-1115：目录卷轴 —— 原生滚动条由 `rail-host` 隐藏，改由 canvas 卷轴接管（#305）。
+            z-index:3 保证它画在滚动内容与渐变遮罩之上。
+            ⚠️ 右侧内边距 = 卷轴占位(RAIL_INSET 6 + 卷轴宽 12 = 18) + **隆起要伸出去的那 12px** + 呼吸余量。
+            用户先反馈「正文跟卷轴挤在一起」（30 → 38），随后又要「整体再向左移一点点」⇒ 现取 **44**。
+            改这个数时**必须**一起看 `TopicRail.tsx` 的 LEFT_ROOM / RAIL_INSET 与
+            `index.css` 里 `.topic-rail-hit` 的 `left`（判定区左侧那 10px 就吃在这段留白里）。 */}
+        <TopicRail mode="wave" scroller={railScroller} collect={collectRailEntries} params={railParams} />
+        <div ref={scrollRef} onScroll={handleScroll} onWheel={handleWheel} className="chat-scroll rail-host"
+          style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "14px 44px 0 16px", overflowAnchor: "none" }}>
           {olderInfo && (
             <div style={{ display: "flex", justifyContent: "center", margin: "2px 0 12px" }}>
               <button className="load-earlier-pill" onClick={() => void loadOlder()} disabled={loadingOlder}>
@@ -5517,8 +6003,14 @@ export default function ChatPanel({
             )}
           </div>
         )}
-        {messages.map((m) =>
-          m.role === "user"
+        {messages.map((m) => {
+          /* A-1124：这一条是不是「切会话恢复中的占位气泡」。
+             是 ⇒ 整条消息按**活的那条**渲染：思考历程恒展开 + 尾巴渐入 +
+             正文走 `GatedBody`（后置闸门 + 渐入）—— 与"从未切过会话"的流式现场块**同一份实现**。
+             用户实测原话：「我切换会话后，再回来这个会话，这个设定便会被我让你修改前的老设定覆盖」——
+             他要的正是这两条路径行为一致。 */
+          const isResumeLive = resumeMsgId !== null && resumeMsgId === m.id;
+          return m.role === "user"
             ? <UserMessage key={m.id} m={m} onRollback={rollbackTo} />
             : (
               <AssistantMessage
@@ -5529,11 +6021,18 @@ export default function ChatPanel({
                 showThinking={showThinking}
                 // A-974-R5：恢复中的占位气泡强制展开思考面板（与正常流式观感一致）；
                 // 该轮结束后 resumeMsgId 归空，自动回落到常规折叠默认值。
-                collapsed={resumeMsgId === m.id ? false : (collapsedReasoning[m.id] ?? true)}
+                collapsed={isResumeLive ? false : (collapsedReasoning[m.id] ?? true)}
                 onToggle={toggleReasoning}
+                liveStream={isResumeLive}
+                gated={loading}
+                // ⚠️ 传的是**显示层缓冲** `partial`（不是 `partialRef`/`m.content`）：
+                //    与流式现场块同源，于是"关闸期冻结显示缓冲 → 开闸从零播渐入"这套机制
+                //    在恢复态同样成立（否则恢复态一开闸就是整篇硬出、零渐入）。
+                liveText={isResumeLive ? partial : undefined}
+                runningTool={Boolean(runningTool)}
               />
-            )
-        )}
+            );
+        })}
         {/* 流式现场块。A-974-R5：恢复活跃流时（resumeMsgId 非空）**整块让位**给 messages 里的
             占位气泡——此前只抑制了下面的正文区，思考过程卡片与工具摘要仍在渲染，
             于是同一轮被拆成"正文一块 + 思考/工具一块"（用户实测"先出现截断字样，再在底下接着输出"）。 */}
@@ -5566,7 +6065,7 @@ export default function ChatPanel({
                     title={reasoningOpen ? "收起思考过程" : "展开思考过程"}
                   >
                     <ThinkingIcon size={12} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-                    <span className="text-breathe" style={{ fontWeight: 600, letterSpacing: 0.3 }}>思考过程</span>
+                    <span className="text-scan-light" style={{ fontWeight: 600, letterSpacing: 0.3 }}>思考过程</span>
                     {!reasoningOpen && (
                       <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                         · {toolEvents.length > 0 ? formatToolSummary(toolEvents) : (reasoningTmp.slice(0, 60) + (reasoningTmp.length > 60 ? "…" : ""))}
@@ -5576,15 +6075,17 @@ export default function ChatPanel({
                   </button>
                   {/* A-1015：常驻 + 高度插值（与其它折叠块同节拍）。
                       TimelineNode 的 expanded 只在挂载时取 autoExpand，靠 key={`l${i}`} 随长度变化
-                      让"最新一步"重挂载来取得自动展开——常驻挂载不改变这个机制（key 仍在变）。 */}
+                      让"最新一步"重挂载来取得自动展开——常驻挂载不改变这个机制（key 仍在变）。
+                      A-1095 #9：流式实时区同样按**工作阶段**归组（用户澄清针对的正是这一处：
+                      「实时显示的调用工具的文本挪位置」）——历史组折叠成一行，活跃组恒展开。 */}
                   <div className={`collapse${reasoningOpen ? " is-open" : ""}`}>
                     <div>
                       <div className="think-timeline is-live" style={{ marginTop: 4 }}>
-                        {liveTimeline.map((step, i) => (
-                          <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />
+                        {groupTimeline(liveTimeline).map((g) => (
+                          <TimelineGroupBlock key={`lg${g.from}`} group={g} liveStream />
                         ))}
                         {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
-                          <span className="text-breathe" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
+                          <span className="text-scan-light" style={{ fontSize: 13, color: "var(--text-secondary)" }}>思考中…</span>
                         )}
                       </div>
                     </div>
@@ -5592,82 +6093,6 @@ export default function ChatPanel({
                 </div>
               )}
 
-              {/* 工具调用摘要：流式时按类型分组显示（独立于思考过程，无论是否有思考都显示） */}
-              {loading && (toolEvents.length > 0 || runningTool) && (() => {
-                const groups = computeToolGroups(toolEvents);
-                /* A-1061②：逐条**实时行** —— 「执行中…」→「✓ 成功 / ✗ 失败」。
-                   为什么要它：分组摘要只说"调了几次什么类别的工具"，跑一条几十秒的命令时
-                   用户看不到在跑什么（用户原话：「中间运行脚本的过程也加上……要可以跟你一样，
-                   实时监测进程，成功了要返回成功提示」）。形态对齐 Claude Code 的
-                   `• ToolName(params) 2.3s` + 结果摘要。
-                   只渲染最近 5 条：实时区是"当下在做什么"，不是完整日志（完整留痕在思考历程里）。 */
-                const recent = toolEvents.slice(-5);
-                const pendingRow = runningTool && !recent.some((t) => !!t.toolId && t.toolId === runningTool.id)
-                  ? runningTool : null;
-                return (
-                  <div style={{ marginBottom: 6 }}>
-                    <div style={{
-                      display: "flex", alignItems: "center", gap: 6,
-                      padding: "4px 0", color: "var(--text-muted)", fontSize: 12,
-                    }}>
-                      <BoltIcon size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>工具调用</span>
-                      <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 4 }}>· {formatToolSummary(toolEvents)}</span>
-                    </div>
-                    <div style={{ padding: "4px 0 8px 16px", display: "flex", flexDirection: "column", gap: 3 }}>
-                      {groups.map((g) => (
-                        <div key={g.type} style={{
-                          fontSize: 12, color: "var(--text-muted)",
-                          display: "flex", alignItems: "center", gap: 6,
-                        }}>
-                          <g.Icon size={13} style={{ color: "var(--accent-hover)", flexShrink: 0 }} />
-                          <span>{g.label}</span>
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: "auto" }}>×{g.count}</span>
-                        </div>
-                      ))}
-                      {/* 正在跑的那一条：结果还没回来，状态列必须显式说「执行中…」 */}
-                      {pendingRow && (
-                        <div style={{ fontSize: 12, color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                          {/* A-1094：标签用**呼吸**而不是 `.text-scan-light` —— 后者在窄元素上会让
-                              文字整体透明（同卡片状态区那个"空白框格"的根因），"正在跑什么"必须看得见。 */}
-                          <span className="text-breathe" style={{ flexShrink: 0 }}>{stripToolTraceMark(pendingRow.label)}</span>
-                          {pendingRow.detail && (
-                            <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{pendingRow.detail}</span>
-                          )}
-                          <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, color: "var(--accent)" }}>执行中…</span>
-                        </div>
-                      )}
-                      {recent.map((t) => {
-                        const running = !!runningTool && !!t.toolId && t.toolId === runningTool.id;
-                        const isFail = isToolFailResult(stripDiffTag(t.result ?? "").trim());
-                        const status = toolStatusLabel(t.result, isFail, running);
-                        const phase = toolStatusPhase(t.result, running);
-                        return (
-                          <div key={t.id} style={{ fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                            <span style={{ flexShrink: 0, color: running ? "var(--accent)" : undefined }}>{t.label}</span>
-                            {t.detail && (
-                              <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{t.detail}</span>
-                            )}
-                            {status && (
-                              <span
-                                /* A-1094：这一行与思考历程的卡片**共用同一份阶段判据 + 同一套动画** ——
-                                   两处各写一份必然漂移（"卡片里在动、摘要行里是死的"就是这么来的）。 */
-                                className="think-tool-status"
-                                data-running={phase === "running" ? "1" : undefined}
-                                data-settled={phase === "settled" ? "1" : undefined}
-                                style={{
-                                  marginLeft: "auto", flexShrink: 0, fontSize: 11,
-                                  color: running ? "var(--accent)" : isFail ? "#f87171" : "var(--success, #4ade80)",
-                                }}
-                              >{status}</span>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
 
               {/* A-975：本轮压缩报告分隔线（流式期即时可见，不依赖思考卡展开） */}
               {compressNote && <CompressNoteLine note={compressNote} live />}
@@ -5684,37 +6109,15 @@ export default function ChatPanel({
                       （原话：「出现了很多 markdown 渲染不全的 *、# 等符号」）→ 显示文本走
                       `fadeUnitText`（抹符号但保留空白）；空白单元之外的成果落进前缀后由
                       Markdown 正式渲染，所以不会"少看到内容"。 */}
-                  {(() => {
-                    const shown = deferredPartial || partial;
-                    if (!shown) {
-                      return (
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-secondary)", fontSize: 14, fontWeight: 500 }}>
-                          <span className="text-breathe">正在思考</span>
-                          <span className="stream-dot-row">
-                            <span className="stream-dot" />
-                            <span className="stream-dot" style={{ animationDelay: "0.2s" }} />
-                            <span className="stream-dot" style={{ animationDelay: "0.4s" }} />
-                          </span>
-                        </span>
-                      );
-                    }
-                    const fade = splitStreamFade(shown);
-                    return (
-                      <>
-                        {fade.settled ? <Markdown text={fade.settled} streaming /> : null}
-                        {/* A-1080：**最后一行的前半段**（不参与渐入的纯文本）。
-                            它必须紧贴在上面的 settled 之后、尾巴之前 —— 三段同处一个**行内流**，
-                            中间不插任何块级边界。这样接缝落在**真实换行**上：
-                            settled 不再以"半行"结尾，尾巴也就不会另起一行（那正是
-                            「倒数第二行尾端留空白 + 整段往上挤着重排」的根因）。 */}
-                        {fade.linePrefix}
-                        {fade.units.map((u) => {
-                          const t = fadeUnitText(u.text);
-                          return t ? <span key={u.at} className="stream-fade-unit">{t}</span> : null;
-                        })}
-                      </>
-                    );
-                  })()}
+                  {/* A-1124：正文后置闸门 / 吐字渐入 / 关闸期占位**全部**收进 `GatedBody`（唯一产地）。
+                      这里只负责把三个输入交出去：
+                        `shown` = 显示层缓冲（未闭合时回落 `partial`）
+                        `gated` = 本轮是否仍在跑（判据 = `loading`，见 `GatedBody` 内长注释）
+                        `runningTool` = 是否卡在工具上（决定占位文案）
+                      ⚠️ 切会话恢复的占位气泡（`AssistantMessage` 的 `liveText` 支）调用的是**同一个组件** ——
+                         这正是用户实测问题「切回来被改动前的老设定覆盖」的结构性根因修法。
+                      ⚠️ 判据不许退回"首个 chunk"那种单向闩：agentic 轮内正文与工具**反复交错**。 */}
+                  <GatedBody shown={deferredPartial || partial} gated={loading} runningTool={Boolean(runningTool)} />
                   {/* A-1091：吐字光标 —— **只在真正吐字时显示**（判据见 `streamCursor.ts`）。
                       改前是「只要这一轮没结束就一直闪」：真机上状态行走到「已 6m49s」、
                       整整 6 分多钟没有新字符，光标仍一刻不停地闪，看起来像在打字。
@@ -5746,27 +6149,41 @@ export default function ChatPanel({
           pointerEvents: "none", opacity: atBottom ? 0 : 1, transition: "opacity 0.2s ease",
           background: "linear-gradient(to top, var(--bg), transparent)",
         }} />
-      </div>
 
-      {/* A-918++：回到最新——小巧胶囊内嵌于输入框正上方，随输入区自然排布、不遮挡消息内容 */}
-      {!atBottom && (
-        <div style={{ display: "flex", justifyContent: "center", marginTop: 8 }}>
-          <button onClick={jumpToLatest}
-            title="回到最新消息（恢复自动追踪）"
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 5,
-              padding: "3px 11px", borderRadius: 999,
-              border: "1px solid var(--border-hover)", background: "var(--bg-secondary)",
-              color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
-              transition: "background 0.12s, color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-soft)"; e.currentTarget.style.color = "var(--accent-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-secondary)"; e.currentTarget.style.color = "var(--text-secondary)"; }}>
-            <img src={downIcon} alt="↓" width={11} height={11} style={{ filter: "brightness(0) invert(0.75)" }} draggable={false} />
-            最新
-          </button>
-        </div>
-      )}
+        {/* A-1112：回到最新——**绝对定位浮在消息区底部**（A-918++ 时它是流内的一块，
+            在输入框正上方占位）。
+            ⚠️ 为什么必须脱离文档流（用户报「每次从非最新滚到最新，中间界面都会抖动一次」）：
+              这枚胶囊在流内 ⇒ `!atBottom && …` 的**出现/消失会改变消息区的高度**。
+              滚动容器是 `flex:1`，它一增高 ⇒ `clientHeight` 变 ~+30px（≈22px 胶囊 +
+              8px `marginTop`）⇒ `scrollTop` 被浏览器**钳**着改、可视内容整体位移一次 ——
+              用户看到的「抖动」就是这个，**与虚化遮罩无关**（那两块是 `opacity` 过渡的
+              absolute 覆盖层，不参与布局，不可能产生位移）。
+              ⇒ 修法 = 胶囊脱离文档流：无论 `atBottom` 真假，消息区高度恒等。
+            ⚠️ 外层 `pointerEvents:none` + 按钮自己 `auto`：浮层不许吃掉消息区下半屏的点击/选词
+              （它是个「悬浮按钮」，不是「底部工具条」）。 */}
+        {!atBottom && (
+          <div style={{
+            position: "absolute", left: 0, right: 0, bottom: 10,
+            display: "flex", justifyContent: "center", pointerEvents: "none", zIndex: 6,
+          }}>
+            <button onClick={jumpToLatest}
+              title="回到最新消息（恢复自动追踪）"
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 5,
+                padding: "3px 11px", borderRadius: 999,
+                border: "1px solid var(--border-hover)", background: "var(--bg-secondary)",
+                color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                pointerEvents: "auto", boxShadow: "0 2px 10px rgba(0,0,0,0.28)",
+                transition: "background 0.12s, color 0.12s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-soft)"; e.currentTarget.style.color = "var(--accent-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-secondary)"; e.currentTarget.style.color = "var(--text-secondary)"; }}>
+              <img src={downIcon} alt="↓" width={11} height={11} style={{ filter: "brightness(0) invert(0.75)" }} draggable={false} />
+              最新
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* A-917：流失败/重连耗尽的就地错误横幅（红字，随当前会话立即显示，不追加到消息流） */}
       {streamErrorBanner && (

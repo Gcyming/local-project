@@ -42,6 +42,21 @@ export function normalizeThinkingText(text: string): string {
  *   ② 归一空白（逐词断行 / 多余空格合并）；
  *   ③ 拼合被 token 断行切开的英文词。
  * 输出为可读纯文本，供思考卡与最终 reasoning 折叠卡。
+ *
+ * ⚠️ **A-1095 #6（S6）已知边界：本函数对流式输入不是"前缀单调"的。**
+ *   即 `raw1` 是 `raw2` 的前缀时，`sanitizeThinking(raw1)` **未必**是 `sanitizeThinking(raw2)` 的前缀 ——
+ *   上面第 ③ 条断词拼合依赖**右侧字母数**（`[a-z]{2,}`），而流式到达时无从知道
+ *   右侧字母会不会继续生长：实测 `"DeepSeek s w"` 追加 `e` 后变 `"DeepSeek swe"`，
+ *   `s` 与 `w` 之间那个**已被显示过的空格被删掉** ⇒ 该位置之后所有下标**整体前移**。
+ *   `splitToolTrace` 同理（`### 工具调用记录` 标题写全的瞬间把已显示的整行砍掉）。
+ *
+ *   **这个非单调性无法在纯函数里消除**：`b c`（两个独立 token，不该拼）与
+ *   `s w`→`swe`（断词，该拼）的**形态完全一样**，帧 N 无法区分 —— 收窄或放宽 `{2,}`
+ *   只会引入误拼（`b c`→`bc`）或漏拼，不能换来单调。
+ *
+ *   ⇒ 依赖"净化输出单调"的下游（渐入动画的绝对下标锚点）**必须自己免疫**，
+ *     做法见 `ChatPanel.tsx` 的 `StreamFadeText`（按 `at` 历史水位判定"是否新字符"，
+ *     而不是假设下标稳定）。回归守卫：`tests/gui/a1095-fade-stability.spec.ts`。
  */
 export function sanitizeThinking(text: string): string {
   const stripped = (text ?? "")

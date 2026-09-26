@@ -160,17 +160,23 @@ export function splitStreamFade(shown: string, maxTail = STREAM_FADE_TAIL_MAX): 
   };
 }
 
-/** 尾巴单元里"整块只由 markdown 标记字符组成"的形态（`**` / `#` / `>` / `` ` `` / `-` …） */
+/** 尾巴单元里"整块只由 markdown 标记字符组成"的形态（`**` / `#` / `>` / `` ` `` / `-` …）。
+ *  ⚠️ **刻意不含 `|`**：纯管道单元（`|` / `||`）由下面那条 `TABLE_SEP_MARKER` 之前的
+ *  兜底 `replace(/[*#|`]/g, "")` 抹成空串 —— 往里加 `|` 是**等价变异体**（删掉它行为不变），
+ *  按项目铁律「冗余条件 = 等价变异体，删掉而不是留着」，这里就不列。 */
 const PURE_MARKER = /^[-+*>#`~_]+$/;
 /** 有序列表标记（`1.` / `12.`）；单元的 ASCII 连字符集把数字和点连在一起，故单独一判 */
 const ORDERED_MARKER = /^\d{1,2}\.$/;
+/** 表格分隔单元（`---` / `:--` / `|---|` 等，只由 `-` `:` `|` 空格组成且含 `-`）——
+ *  整块隐藏；否则用户在吐字期会看到一排 `-----`（A-1094）。 */
+const TABLE_SEP_MARKER = /^[|\-:\s]+$/;
 
 /**
  * 尾巴单元的**显示文本**（渲染时用；切分时不用）。
  *
  * 为什么必须有这一层：尾巴是**纯文本**渲染的（见文件头——它要切成独立 span 才能各自渐入），
- * 于是 `**` / `#` / `~~` 这些 markdown 控制符号会**裸露**给用户。用户 A-1065 原话：
- * 「而且还出现了很多 markdown 渲染不全的 *、# 等符号」。
+ * 于是 `**` / `#` / `~~` / `|` 这些 markdown 控制符号会**裸露**给用户。用户 A-1065 原话：
+ * 「而且还出现了很多 markdown 渲染不全的 *、# 等符号」；A-1094 追加 `|`（表格语法）。
  * 修法不是"把尾巴也交给 Markdown"，而是**在尾巴上把控制符号抹掉**：
  *   ① 尾巴只存在几十毫秒到一秒多，随后整段落进 `settled` 由 Markdown 正式渲染
  *      （`**粗体**` 那时才变粗）——所以这里抹掉符号不会让用户"少看到内容"，
@@ -180,16 +186,94 @@ const ORDERED_MARKER = /^\d{1,2}\.$/;
  *
  * 规则（**保守**：只动明确是 markdown 语法的形态，宁可少抹不可乱抹）：
  *   · 空白单元**原样保留** —— 抹掉它会让相邻词粘在一起（`foo bar` → `foobar`）；
- *   · 整块只有标记字符（`**` / `#` / `>` / `` ` `` / `-`）→ 整块隐藏（返回空串）；
+ *   · 整块只有标记字符（`**` / `#` / `>` / `` ` `` / `-` / `|`）→ 整块隐藏（返回空串）；
+ *   · 表格分隔符单元（`---` / `|---|---|`）→ 整块隐藏；
  *   · 有序列表标记（`1.`）→ 隐藏；
- *   · 其余：抹掉 `**` `~~` 与残余的 `*` `#` `` ` ``。
- *     （于是 `**bold**` 显示为 `bold`；`### 标题` 显示为 `标题`。）
+ *   · 其余：抹掉 `**` `~~` 与残余的 `*` `#` `` ` `` `|`，行首标题标记被吃掉后的前导空格 trim。
+ *
+ * ⚠️ 单单元净化**无法**处理跨单元的空白（`| 序号 |` 会切成 `"|"`,`" "`,`"序"`…）：
+ *   `|` 单元变空后，它旁边的 `" "` 单元就成了多余的前导/重复空格。所以**边界处的空格收敛
+ *   必须整体做** —— 见 `visibleTailText`；本函数只管单单元。
  */
 export function fadeUnitText(raw: string): string {
   if (!raw) { return raw; }
   if (/^\s+$/.test(raw)) { return raw; }
   if (PURE_MARKER.test(raw)) { return ""; }
   if (ORDERED_MARKER.test(raw)) { return ""; }
-  return raw.replace(/\*\*|~~/g, "").replace(/[*#`]/g, "");
+  // 表格分隔单元（如 `---`、`|---|---|`）——`PURE_MARKER` 已挡纯 `-`，这里挡带 `:`/`|` 的变体
+  if (TABLE_SEP_MARKER.test(raw) && /-/.test(raw)) { return ""; }
+  // `**粗体**`→`粗体`；残余 `*#`|`` 抹掉；行首标题标记被吃掉后遗留的前导空格 trim 掉
+  return raw
+    .replace(/\*\*|~~/g, "")
+    .replace(/[*#|`]/g, "")
+    .replace(/^[ \t]+(?=\S)/, "");
+}
+
+/**
+ * 尾巴整段的**可见文本**（把所有单元的显示文本拼起来后做跨单元收尾）。
+ *
+ * 存在的理由：净化单位是**单元**，但空白是**跨单元**的（`| 序号 |` → `"|"`,`" "`,`"序"`…）——
+ * `|` 单元变空后，它旁边的空格单元就变成多余的前导空格或重复空格。收尾放在**拼好之后**做，
+ * 才是唯一能看全上下文的位置。
+ *
+ * ⚠️ 只做**收尾**（去首尾空格 + 收敛内部连续空格），**不改变文字内容**：
+ *   保留 `const a = 1;` 里的单空格，也保留中文之间原本没有空格的事实。
+ */
+export function visibleTailText(units: readonly StreamFadeUnit[]): string {
+  return units
+    .map((u) => fadeUnitText(u.text))
+    .join("")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/^[ \t]+/, "")
+    .replace(/[ \t]+$/, "");
+}
+
+/**
+ * 与 `visibleTailText` 同源，但**保留单元结构**（供渲染层逐 span 挂动画）。
+ *
+ * 做法：先在整段上算出**收尾后的可见串**，再按原单元边界把结果切回各单元。
+ * 收尾只会削掉整段的首/尾空白与内部连续空格 —— 映射回单元时，最多把某个单元的前缀/后缀
+ * 削短或整块清空，**中间文字一个字符都不会动**。`at` 原样保留（React key 稳定 ⇒ 不重播动画）。
+ *
+ * ⚠️ 不许在这里**丢弃**空单元（要 push `text: ""` 占位）：单元数量/顺序若变，
+ * 下游按 `at` 对齐的动画节拍会跟着变。是否渲染空 span 由渲染层决定。
+ */
+/**
+ * 与 `visibleTailText` 同源，但**保留单元结构**（供渲染层逐 span 挂动画）。
+ *
+ * 做法：把整段先净化成"可见串"，再按各单元的**净化后长度**把可见串切回单元；长度不足的单元
+ * 分到空串。收尾/收敛都发生在可见串上，所以跨单元的空格问题一次解决，而 `at` 原样保留
+ * （React key 稳定 ⇒ 不重播动画）。空单元保留占位（`text: ""`），是否渲染由渲染层决定。
+ */
+export function visibleTailUnits(units: readonly StreamFadeUnit[]): StreamFadeUnit[] {
+  const perUnit = units.map((u) => fadeUnitText(u.text));
+  const joined = perUnit.join("");
+  // 收尾后的**可见串**（唯一真源）：收敛连续空格 + 去首尾空格
+  const visible = joined.replace(/[ \t]{2,}/g, " ").replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+  /* 逐单元把可见串切回去。⚠️ 不能简单地"从头按各单元长度顺次取"——那会在跨单元被收敛掉
+     空格时把后面单元的字**错位**到前面的 key 上。改为按**锚点对齐**：每个单元取其净化后文本
+     在可见串中**原样出现**的那一段（找不到则空），保证字符归属不漂移。 */
+  const out: StreamFadeUnit[] = [];
+  let vi = 0;
+  for (let i = 0; i < perUnit.length; i++) {
+    const t = perUnit[i];
+    if (!t) { out.push({ text: "", at: units[i].at }); continue; }
+    // 空白单元：从当前位置吞一个空格（若可见串此处正是空格）
+    if (/^\s+$/.test(t)) {
+      if (visible[vi] === " ") { out.push({ text: " ", at: units[i].at }); vi += 1; }
+      else { out.push({ text: "", at: units[i].at }); }
+      continue;
+    }
+    if (visible.startsWith(t, vi)) {
+      out.push({ text: t, at: units[i].at });
+      vi += t.length;
+    } else {
+      // 兜底：逐字符对齐（正常不会走到；保证不丢字、不越界）
+      const chunk = visible.slice(vi, vi + t.length);
+      out.push({ text: chunk, at: units[i].at });
+      vi += chunk.length;
+    }
+  }
+  return out;
 }
 

@@ -71,10 +71,16 @@ export default function SubAgentModal({ runId, onClose }: Props): JSX.Element {
       onClick={onClose}
     >
       <div
+        className="modal-card"
         style={{
           width: 1180, maxWidth: "96vw", height: "84vh", maxHeight: "90vh",
-          background: "var(--bg-card, #1e293b)", borderRadius: 12,
-          border: "1px solid var(--border)", boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+          // A-1098：原为 `background: "var(--bg-card, #1e293b)"` —— beta 主题的 `--bg-card`
+          // 是 rgba(20,28,52,0.5)，浮层上背后正文会透出来（与用户本次反馈同一根因，
+          // 只是这条在别的弹窗上）。实底统一交给 `.modal-card` 的 `--float-surface`。
+          // ⚠️ 本面板此前**没有**来自 class 的内边距 ⇒ 补 `padding: 0` 抵消 `.modal-card` 的
+          // 默认 14/16，保持与改前逐像素一致（子元素各自带内边距）。
+          padding: 0,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
         onClick={(e) => e.stopPropagation()}
