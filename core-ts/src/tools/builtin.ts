@@ -21,22 +21,32 @@ import { randomUUID } from "node:crypto";
 import { execFile, exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
+// A-1121（②）：右栏打开请求的契约与触发（唯一出处；`setSidebarOpener` 也在这里）
+import { fireSidebarOpen, hasSidebarOpener } from "../sidebarOpen.js";
+// A-1122（③）：文件改动账本 —— 「回滚（rollbackTo）时把磁盘也还原」的记账口径唯一出处。
+// 记账必须发生在**真正改动之前**（改完就再也拿不到"改前状态"）。
+import {
+  recordFileChange, recordDirEntry, recordUnundoable, undoScopeOf, UNDO_DELETE_MAX_FILES,
+  type UndoScope,
+} from "../services/file_undo.js";
 import { createPlan, updateStage, advanceByLabel, planProgress, planToJSON, parsePlan, type PlanStageStatus } from "../planning/plan.js";
 import { PROTECTED_DIRS_SET, SENSITIVE_FILENAMES_SET, WRITE_BLOCK_SUFFIXES_SET } from "shared/security-policy";
 import { extractDocText, docKindFromExt, legacyBinaryName, extractOleText, oleKindFromExt } from "../doc_text.js";
 import type { MemoryStore } from "../memory/store.js";
 import type {
+  ActionVerify,
   DisplayInfo,
   ScreenAction,
   ScreenActionKind,
   ScreenActionResult,
   ScreenCaptureResult,
-  UiElement,
+  UiDumpOutcome,
 } from "../screen/types.js";
 import { toOptimizedDataUrl } from "../screen/optimize.js";
 import { registerBrowserTools } from "./browser.js";
 // A-983：子代理执行预算的**唯一真源**（等待上限由它推导，避免两处手写字面量漂移）
 import { DEFAULT_EXEC_BUDGET_MS } from "../services/subagent.js";
+import { groupSubagentCatalog, renderSubagentCatalogLines } from "../services/subagentCatalog.js";
 // A-1093：改动标记的**唯一产地**（`[__slime_diff__]old|new[/__slime_diff__]`）。
 // 此前是下面 fileWrite 里一行内联模板串，与三处解析各写各的 —— 格式漂一次就全线失灵。
 import { buildDiffMarker } from "../diff_marker.js";
@@ -416,7 +426,18 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
     await mkdir(dirname(abs), { recursive: true });
     // A-918++：写入前读原内容（供 renderer 工具节点展开时显示 VS Code 风格 diff 块）
     let oldContent = "";
-    try { oldContent = await readFile(abs, "utf-8"); } catch { /* 新文件/无权限 → 视为空 */ }
+    let existed = false;
+    try { oldContent = await readFile(abs, "utf-8"); existed = true; } catch { /* 新文件/无权限 → 视为空 */ }
+    /* A-1122（③）：把「改前状态」记进**改动账本** —— 回滚（rollbackTo）靠它把磁盘也还原。
+       必须在这里（真正写入**之前**）：事后无法重建旧内容。
+       ⚠️ 账本写失败**不阻断**写入（返回 false）——但这次改动就不可回滚了，
+          `_undo_note` 会把它带到回执里（静默失败 = 用户以为能回滚、实际不能）。 */
+    const undoOk = await recordFileChange(
+      undoScopeOf(args),
+      abs,
+      existed,
+      existed ? oldContent : null,
+    );
     const tmp = join(dirname(abs), `${basename(abs)}.${randomUUID().slice(0, 8)}.tmp`);
     await writeFile(tmp, data);
     await rename(tmp, abs);
@@ -431,7 +452,11 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
     // ⚠️ 标记构造走 `buildDiffMarker`（`core-ts/src/diff_marker.ts`，唯一产地）：
     //    格式字符串散在产地与三个消费者里时，"改了一处"就等于"三处静默失效"。
     const diffTag = buildDiffMarker(oldContent, content);
-    return `已保存 ${data.length} 字节到 ${abs}${diffTag}`;
+    // A-1122：账本写失败时**如实说出来**（不阻断写入，但也不许让用户以为它能被回滚）
+    const undoNote = (!undoOk && undoScopeOf(args))
+      ? "\n（⚠️ 本次改动未纳入回滚账本：账本写入失败，回滚这条消息时此文件不会被还原）"
+      : "";
+    return `已保存 ${data.length} 字节到 ${abs}${diffTag}${undoNote}`;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg === "路径超出项目范围" || msg === "禁止跟随符号链接") {
@@ -452,6 +477,99 @@ async function countEntries(dir: string): Promise<number> {
     }
   } catch { /* 读不了就不报数 */ }
   return n;
+}
+
+/**
+ * A-1122：递归收集目录下的**文件与子目录**（供删除前把"改前状态"存进回滚账本）。
+ *
+ * `limit` 是**条目数**硬上限：超过就返回 `truncated=true`，由调用方 `recordUnundoable`
+ * 如实报出 —— 递归删掉的目录可能是整个 `node_modules`，把它整份塞进账本既慢又没意义。
+ * ⚠️ 目录也收：只收文件的话，"递归删掉一个含**空子目录**的目录"回滚后内容回来了、
+ *    空目录却静默消失（骨架没了）。目录由 `recordDirEntry` + `mkdir` 还原。
+ * ⚠️ 符号链接**跳过**（跟随会走出工作区）；读目录失败按 `truncated` 计（**不许**当成遍历成功）。
+ */
+async function collectTree(dir: string, limit: number): Promise<{ dirs: string[]; files: string[]; truncated: boolean }> {
+  const dirs: string[] = [];
+  const files: string[] = [];
+  const walk = async (d: string): Promise<boolean> => {
+    let list;
+    try { list = await readdir(d, { withFileTypes: true }); } catch { return false; }
+    for (const e of list) {
+      if (e.isSymbolicLink()) { continue; }
+      const p = join(d, e.name);
+      if (dirs.length + files.length >= limit) { return false; }
+      if (e.isDirectory()) {
+        dirs.push(p);
+        if (!(await walk(p))) { return false; }
+      } else {
+        files.push(p);
+      }
+    }
+    return true;
+  };
+  const ok = await walk(dir);
+  return { dirs, files, truncated: !ok };
+}
+
+/** 删除前采到的「改前状态」（删除**之后**才提交进账本 —— 见 `commitDeleteUndo` 的说明） */
+interface DeleteCapture {
+  scope: UndoScope;
+  /** 被删对象本身的绝对路径（`recordUnundoable` 的归属与界面展示用） */
+  abs: string;
+  /** 递归删目录时收集到的子目录（还原时 `mkdir`） */
+  dirs: string[];
+  /** 待留痕的文件；`data=null` ⇒ 读不到改前内容（只能记 `skip`） */
+  files: Array<{ abs: string; data: Buffer | null }>;
+  /** 整个对象都还原不了的原因（目录过大 / 读取失败） */
+  unundoable?: string;
+}
+
+/**
+ * 删除**之前**采集"改前状态"（删完就再也采集不到了）。无归属（CLI/测试未注入）时返 null。
+ */
+async function captureDeleteUndo(
+  args: Record<string, unknown>,
+  abs: string,
+  isDir: boolean,
+): Promise<DeleteCapture | null> {
+  const scope = undoScopeOf(args);
+  if (!scope) { return null; }
+  if (isDir) {
+    const tree = await collectTree(abs, UNDO_DELETE_MAX_FILES);
+    if (tree.truncated) {
+      return { scope, abs, dirs: [], files: [], unundoable: `目录过大（超过 ${UNDO_DELETE_MAX_FILES} 个条目）或读取失败` };
+    }
+    const files: Array<{ abs: string; data: Buffer | null }> = [];
+    for (const f of tree.files) { files.push({ abs: f, data: await readFile(f).catch(() => null) }); }
+    return { scope, abs, dirs: tree.dirs, files };
+  }
+  const data = await readFile(abs).catch(() => null);
+  return { scope, abs, dirs: [], files: [{ abs, data }] };
+}
+
+/**
+ * 把采到的"改前状态"提交进账本。返回**要拼进回执的告警**（空串 = 全部留痕成功）。
+ *
+ * ⚠️ 为什么读在删之前、提交在删之后：
+ *  · 内容必须在删除**之前**读（删完就没了，`captureDeleteUndo` 负责）；
+ *  · 提交却在删除**成功之后** —— 否则"移入回收站失败"提前 `return` 时账本里会多出一条
+ *    凭空出现的还原项（回滚会把一个从没被删过的文件再写一遍，且确认框里的数字虚高）。
+ * ⚠️ 留不下痕时必须**出声**（`recordUnundoable` ⇒ `plan.blocked[]` ⇒ 界面横幅），
+ *    绝不静默跳过 —— 用户以为回滚干净了是最糟的结果。
+ */
+async function commitDeleteUndo(cap: DeleteCapture | null): Promise<string> {
+  if (!cap) { return ""; }
+  if (cap.unundoable) {
+    await recordUnundoable(cap.scope, cap.abs, cap.unundoable);
+    return `\n（⚠️ 本次删除未纳入回滚账本：${cap.unundoable}，回滚这条消息时此目录不会被还原）`;
+  }
+  let ok = true;
+  for (const d of cap.dirs) { if (!(await recordDirEntry(cap.scope, d))) { ok = false; } }
+  for (const f of cap.files) {
+    if (f.data === null) { await recordUnundoable(cap.scope, f.abs, "读不到改前内容"); ok = false; continue; }
+    if (!(await recordFileChange(cap.scope, f.abs, true, f.data))) { ok = false; }
+  }
+  return ok ? "" : "\n（⚠️ 本次删除未完整纳入回滚账本：部分条目留痕失败，回滚时可能还原不了）";
 }
 
 /**
@@ -500,6 +618,10 @@ async function fileDelete(args: Record<string, unknown>): Promise<string> {
         return `[错误] 目录非空（${entryCount} 个条目）：${path}。确认要连同内容一起删除时，请显式传 recursive=true。`;
       }
     }
+    // A-1122（③）：**删除前**采集"改前状态"，供回滚（rollbackTo）把磁盘也还原。
+    // ⚠️ 必须在 `trash` / `rm` **之前**：删完就再也读不到旧内容了。
+    // ⚠️ 提交在删除**成功之后**（见 `commitDeleteUndo`）—— 提前 return 的分支不留账。
+    const captured = await captureDeleteUndo(args, abs, st.isDirectory());
     // ⑤ 首选回收站（可还原）；未注入回收站能力时退化为永久删除，并如实标注
     const trash = trashServiceRef;
     let viaTrash = false;
@@ -518,9 +640,10 @@ async function fileDelete(args: Record<string, unknown>): Promise<string> {
       await rm(abs, { recursive, force: false });
     }
     const what = st.isDirectory() ? `目录（含 ${entryCount} 个条目）` : "文件";
-    return viaTrash
+    const undoNote = await commitDeleteUndo(captured);
+    return (viaTrash
       ? `已把${what}移入回收站：${abs}（可从系统回收站还原）`
-      : `已永久删除${what}：${abs}（未进回收站：当前环境未装配回收站能力，此操作不可还原）`;
+      : `已永久删除${what}：${abs}（未进回收站：当前环境未装配回收站能力，此操作不可还原）`) + undoNote;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg === "路径超出项目范围" || msg === "禁止跟随符号链接") {
@@ -953,7 +1076,13 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
 // 于是"派发"与"验收"这两半都成了摆设（用户："都没见过 subagent 与主 agent 之间的派发与交互"）。
 //
 // 现在对齐 Claude Code 的 Agent 工具语义：**默认前台阻塞，子代理最终消息作为 tool result 回给主 Agent**；
-// 需要真并行时才用 background:true 派发，之后用 subagent_result 收口。
+// 需要「派完先干别的、稍后再收」时才用 background:true，之后用 subagent_result 收口。
+// ⚠️ A-1106：**并行不需要 background** —— 同一轮里的多个工具调用本就并发执行
+//   （`tool_loop.executePendingTools` 用的是 `Promise.all`），所以「一次派 3 个独立子任务」
+//   在同一轮里连调 3 次本工具即可，三者并行跑、各自把结果交回。
+//   background 只解决「派完之后主 Agent 还想继续做别的事」这一种场景。
+// ⚠️ A-1106：前台等待**可被中断** —— 工具循环注入 `_signal`，用户点「停止生成」时
+//   `SubAgentManager.wait` 立刻收口（**只结束等待、不取消子代理**），不再出现"停止按钮没反应"。
 // 管理器由装配层（gui/src/main/index.ts）在启动时注入；未注入时如实报错。
 
 /** 子代理运行记录（装配层注入的实现至少要有这些字段；其余可选，缺失时降级展示） */
@@ -972,10 +1101,15 @@ interface SubAgentRunLike {
 
 /** 注入接口：只有 delegate 是必需能力，其余按能力探测（兼容老装配与测试假实现） */
 interface SubAgentManagerLike {
-  delegate: (task: string, overrides?: { model?: string; agent?: string; agentId?: string; networkEnabled?: boolean }) => SubAgentRunLike | null;
-  wait?: (id: string, timeoutMs?: number) => Promise<SubAgentRunLike | undefined>;
+  // A-1114：overrides 增 `name` / `systemPrompt` / `toolsOnly` / `adhoc` —— 内联 spec（临时子代理）
+  // 走的就是这条既有通道（delegate 的 overrides），**不新增第二条派发入口**。
+  delegate: (task: string, overrides?: { model?: string; agent?: string; agentId?: string; networkEnabled?: boolean; name?: string; systemPrompt?: string; toolsOnly?: string[]; adhoc?: boolean }) => SubAgentRunLike | null;
+  /** A-1106：第三参 `signal` = 中断通路（用户点「停止生成」时立刻结束等待，不取消子代理） */
+  wait?: (id: string, timeoutMs?: number, signal?: AbortSignal) => Promise<SubAgentRunLike | undefined>;
   list?: () => SubAgentRunLike[];
-  catalog?: () => Array<{ name: string; description: string; source: string }>;
+  // A-1096：`source` 收窄为字面量联合（原先写 `string`）—— 共享渲染模块 `renderSubagentCatalogLines`
+  // 按 `"user" | "builtin"` 分组，宽类型会被静默放宽成"什么字符串都能传"，分组判据就失去类型保护。
+  catalog?: () => Array<{ name: string; description: string; source: "user" | "builtin" }>;
 }
 
 let subagentManagerRef: SubAgentManagerLike | null = null;
@@ -1002,6 +1136,18 @@ function resolveWaitMs(raw: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.min(n, SUBAGENT_WAIT_MAX) : SUBAGENT_WAIT_DEFAULT;
 }
 
+/**
+ * A-1106：取出工具循环**注入**的中断信号（`_signal`）。
+ *
+ * 为什么用 `instanceof` 而不是信任入参：`_signal` 与 `_network_enabled` / `_workspace` /
+ * `_agent_id` 同属「受信注入」的一族 —— 模型传上来的 JSON 参数里**不可能**有真的 AbortSignal，
+ * 所以任何非 AbortSignal 的值都必须被丢弃（工具循环侧也会先 delete 再注入，双保险）。
+ */
+function injectedSignal(args: Record<string, unknown>): AbortSignal | undefined {
+  const raw = args._signal;
+  return raw instanceof AbortSignal ? raw : undefined;
+}
+
 /** 回给主 Agent 的正文上限：子代理产出可能很长，全文落盘、只把摘要送进上下文（"压缩"原则） */
 const SUBAGENT_RESULT_MAX = 4000;
 
@@ -1018,18 +1164,10 @@ const SUBAGENT_STATUS_TEXT: Record<string, string> = {
 function subagentCatalogHint(): string {
   const cat = subagentManagerRef?.catalog?.() ?? [];
   if (cat.length === 0) { return "（当前没有任何已登记的子代理定义，直接自己完成即可）"; }
-  const user = cat.filter((c) => c.source === "user");
-  const builtin = cat.filter((c) => c.source !== "user");
-  const lines: string[] = [];
-  if (user.length > 0) {
-    lines.push("用户选定的子代理（优先）：");
-    for (const c of user) { lines.push(`- ${c.name}：${c.description}`); }
-  }
-  if (builtin.length > 0) {
-    lines.push("内置专家子代理：");
-    for (const c of builtin) { lines.push(`- ${c.name}：${c.description}`); }
-  }
-  return lines.join("\n");
+  // A-1096：分组与标签改走 `services/subagentCatalog.ts` 的**唯一出处**。
+  // 此前这里与 `gui/src/main/index.ts::subagentCatalogSegment` 各写一遍分组 + 标签 ⇒
+  // 系统提示与工具回执会给出**两套互相矛盾的清单说法**，而两边都"看起来对"，最难查。
+  return renderSubagentCatalogLines(groupSubagentCatalog(cat)).join("\n");
 }
 
 /**
@@ -1093,12 +1231,40 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   if (!subagentManagerRef) { return "[错误] 子代理管理器未就绪（当前运行环境未装配 SubAgentManager）"; }
   const model = typeof args.model === "string" ? args.model.trim() : "";
   const wantAgent = typeof args.agent === "string" ? args.agent.trim() : "";
+  // A-1114 临时子代理（inline spec）：由主 Agent **现场**给出「角色 + 工具面 + 展示名」。
+  // 解析只在这一处；「有定义内容才算临时子代理」的判据与 SubAgentManager.delegate 同语义
+  // （只给 name 不构成定义 —— 那只是改展示名，不该绕过点名/自动路由变成第三种行为）。
+  const adhocName = typeof args.name === "string" ? args.name.trim() : "";
+  const adhocSystem = typeof args.systemPrompt === "string" ? args.systemPrompt.trim() : "";
+  const adhocTools = Array.isArray(args.tools)
+    ? args.tools
+        .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+        .map((x) => x.trim())
+    : [];
   const background = args.background === true || args.background === "true";
   const waitMs = resolveWaitMs(args.timeoutMs);
+  // A-1106：本轮的中断信号（由工具循环注入，模型伪造不了）。前台等待据此可在
+  // 「停止生成」时立刻收口 —— 不再出现"按了停止还卡着等满 960s"。
+  const signal = injectedSignal(args);
 
-  const overrides: { model?: string; agent?: string; networkEnabled?: boolean } = {};
+  const overrides: {
+    model?: string;
+    agent?: string;
+    networkEnabled?: boolean;
+    name?: string;
+    systemPrompt?: string;
+    toolsOnly?: string[];
+    adhoc?: boolean;
+  } = {};
   if (model) { overrides.model = model; }
   if (wantAgent) { overrides.agent = wantAgent; }
+  if (adhocSystem || adhocTools.length > 0) {
+    // 临时子代理：**不写盘、不进清单、跑完即弃**（落点全在 overrides，无任何持久化动作）。
+    overrides.adhoc = true;
+    overrides.systemPrompt = adhocSystem || undefined;
+    overrides.toolsOnly = adhocTools.length > 0 ? adhocTools : undefined;
+    if (adhocName) { overrides.name = adhocName; }
+  }
   // 断链 C 修复：继承父请求的联网开关（tool_loop 注入的 _network_enabled，模型不可伪造）。
   // 父关联网→子代理也关；父未传（如 CLI 环境）→ undefined，交由引擎缺省即开（A-918+ 语义）。
   overrides.networkEnabled = typeof args._network_enabled === "boolean" ? args._network_enabled : undefined;
@@ -1125,7 +1291,13 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
     // 老装配/测试假实现没有 wait：降级为后台回执，不让整条链路失败
     return `[已委派] 子代理「${run.name}」已开始执行（id=${run.id}${modelSuffix}）。当前装配不支持等待结果，请稍后用 subagent_result（id=${run.id}）取回。`;
   }
-  const final = await subagentManagerRef.wait(run.id, waitMs);
+  const final = await subagentManagerRef.wait(run.id, waitMs, signal);
+  // A-1106：中断优先于其它归因。否则会把「用户按了停止」误报成「超时/仍在执行」，
+  // 主 Agent 于是去重派一个用户其实已经不想再等的任务（也可能反过来一直空等）。
+  if (signal?.aborted) {
+    return `[已停止等待] 用户停止了本次生成，我不再等「${run.name}」（id=${run.id}）的结果。` +
+      `\n⚠️ 该子代理**仍在后台继续执行**（没有被取消）；需要它的产出时用 subagent_result（id=${run.id}）取回。`;
+  }
   if (!final) {
     return `[错误] 子代理「${run.name}」（id=${run.id}）等待结果超时/记录丢失，请用 subagent_result 复查或重派。`;
   }
@@ -1147,7 +1319,13 @@ async function subagentResult(args: Record<string, unknown>): Promise<string> {
   if (id) {
     if (typeof subagentManagerRef.wait !== "function") { return "[错误] 当前装配不支持等待子代理结果"; }
     const waitMs = resolveWaitMs(args.timeoutMs);
-    const run = await subagentManagerRef.wait(id, waitMs);
+    const signal = injectedSignal(args);
+    const run = await subagentManagerRef.wait(id, waitMs, signal);
+    // A-1106：与 delegate_subagent 同口径 —— 中断优先归因，且不把「用户停止等待」报成「超时」。
+    if (signal?.aborted) {
+      return `[已停止等待] 用户停止了本次生成，不再等 id=${id} 的结果。` +
+        `\n⚠️ 该子代理**仍在后台继续执行**（没有被取消）；稍后再用 subagent_result（id=${id}）取回。`;
+    }
     if (!run) { return `[错误] 未找到子代理运行记录 id=${id}`; }
     if (run.status === "running" || run.status === "pending") {
       return `[子代理仍在执行] ${run.name}（id=${run.id}）等待 ${(waitMs / 1000).toFixed(0)}s 后仍未结束，可稍后再取。`;
@@ -1206,13 +1384,17 @@ export function setAdbService(s: AdbServiceLike | null): void { adbServiceRef = 
 // 直接复用 screen 模块的类型，避免结构性重复声明导致的接口漂移。
 interface ScreenControllerLike {
   listBackends(): string[];
-  listTargets(id?: "desktop" | "android"): Promise<DisplayInfo[]>;
+  /** A-1123：目标枚举**连同失败原因**一起回传（故障不许与"没有目标"同形） */
+  listTargetsReport(id?: "desktop" | "android"): Promise<{
+    targets: DisplayInfo[];
+    failures: Array<{ backend: "desktop" | "android"; error: string }>;
+  }>;
   displayInfo(id: "desktop" | "android", target?: string): Promise<DisplayInfo>;
   capture(id: "desktop" | "android", target?: string, opts?: { marks?: boolean }): Promise<ScreenCaptureResult>;
   perform(id: "desktop" | "android", action: ScreenAction, target?: string): Promise<ScreenActionResult>;
   isHalted(): boolean;
-  /** A-975：UI 层级元素导出（安卓元素级定位） */
-  uiDump(id: "desktop" | "android", target?: string): Promise<UiElement[]>;
+  /** A-975 / A-1123：UI 层级元素导出（安卓元素级定位）——三态结果 */
+  uiDump(id: "desktop" | "android", target?: string): Promise<UiDumpOutcome>;
   /** A-975：外部截屏（adb_screencap）登记坐标基准 */
   noteCaptureBasis(id: "desktop" | "android", target: string | undefined, imageW: number, imageH: number, devW: number, devH: number): void;
   /** A-977：枚举可见窗口（桌面） */
@@ -1224,6 +1406,29 @@ interface ScreenControllerLike {
 }
 let screenControllerRef: ScreenControllerLike | null = null;
 export function setScreenController(c: ScreenControllerLike | null): void { screenControllerRef = c; }
+
+/**
+ * A-1123：把「命中校验」结果翻成回执里的一行 —— **唯一出处**（工具用它，守卫断言它）。
+ *
+ * 判据的三种形态在这里必须各自可读，不能合并：
+ *   · `ratio === null` → **未判定**（没有差异度量/画面不可比）——说"未判定"，绝不说"未命中"；
+ *   · `hit`           → 命中（带变化百分比；重试过就说明是第几次）；
+ *   · `!hit`          → 未命中，**并给出下一步**（重新截图，而不是"换个坐标再试一次"）。
+ *
+ * 为什么要把"下一步"写进文案：模型看到"未命中"的本能反应是**重试同一坐标**——
+ * 而点空的常见原因（被遮挡 / 窗口没聚焦 / 元素没渲染完）**换坐标也没用**，必须重新看画面。
+ */
+export function describeVerify(v: ActionVerify): string {
+  if (v.ratio === null) {
+    return `命中校验：未判定（${v.note}）`;
+  }
+  const pct = (v.ratio * 100).toFixed(2);
+  if (v.hit) {
+    return `命中校验：✓ 命中（画面变化 ${pct}%${v.attempts > 1 ? `，第 ${v.attempts} 次尝试才生效` : ""}）`;
+  }
+  return `命中校验：✗ 未命中（画面变化仅 ${pct}%，${v.note}）—— 常见原因是目标被遮挡 / 窗口未聚焦 / 元素还没渲染出来；`
+    + `请重新 screen_capture 看清当前画面再决定下一步，不要盲目重复同一坐标。`;
+}
 
 // --- HTTP 静态服务搭建工具（A-918++）：把本地目录变成可访问的 HTTP 服务 ---
 // 服务由装配层（gui/src/main/index.ts）在启动时注入（对齐 setAdbService 模式）；未注入时如实报错。
@@ -1245,10 +1450,9 @@ interface HttpServerLike {
 let httpServerRef: HttpServerLike | null = null;
 export function setHttpServer(s: HttpServerLike | null): void { httpServerRef = s; }
 
-/** A-918++：侧边栏浏览器自动打开回调（由 main 进程注入，转 reach webContents.send("slime:sidebar:open")）。
-    生成网页应用后调用它，让 GUI 右侧栏浏览器自动跳到新应用地址。未注入时静默不触发。 */
-let sidebarOpenerRef: ((url: string, name?: string) => void) | null = null;
-export function setSidebarOpener(fn: ((url: string, name?: string) => void) | null): void { sidebarOpenerRef = fn; }
+/** A-1121（②）：侧栏打开器已从本文件**搬到 `core-ts/src/sidebarOpen.ts`**（唯一出处）——
+ *  它跨「工具层 → 主进程 → 渲染层」三个进程，而 gui 侧不该为了拿一个类型去 import 本文件。
+ *  `setSidebarOpener` 的导入点随之改为 `sidebarOpen.js`（语义不变）。 */
 
 /** 删除动作的「进回收站」能力（由装配层注入；core-ts 不 import electron）。
  *
@@ -1321,6 +1525,35 @@ async function memoryForget(args: Record<string, unknown>): Promise<string> {
   return removed > 0 ? `[已遗忘] 删除 ${removed} 条记忆` : "[提示] 无匹配的记忆可遗忘";
 }
 
+/**
+ * A-1116：把模型给的 `files` 收敛成**安全的、可写**的文件清单（纯函数，可单测）。
+ *
+ * 为什么必须收敛（不是"顺手校验一下"）：
+ *   - 这是**模型可控的路径**第一次允许写"子目录"（原来 `http_create_app` 只写死 `dir/index.html`），
+ *     于是 `../../config/agents.json` 这种一次手滑就能写到 apps 之外；
+ *   - 绝对路径 / 盘符 / 任何 `..` 段一律**拒绝**（而不是"清洗后写入"）—— 清洗会静默改掉模型的意图，
+ *     而它收到的是"成功"，于是它以为自己写了一处实际上并不存在的文件（假成功，比报错更难查）。
+ *   - 目录型条目（以 `/` 结尾）与空路径直接跳过。
+ *
+ * 只作用于**写入位置**；调用方仍以 `dir` 为根，回执里如实列出真实落点。
+ */
+export function normalizeAppFiles(input: unknown): Array<{ path: string; content: string }> {
+  if (!Array.isArray(input)) { return []; }
+  const out: Array<{ path: string; content: string }> = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") { continue; }
+    const o = raw as Record<string, unknown>;
+    const p = typeof o.path === "string" ? o.path.trim() : "";
+    const c = typeof o.content === "string" ? o.content : "";
+    if (!p || p.endsWith("/")) { continue; }
+    const norm = p.split("\\").join("/");
+    if (isAbsolute(norm) || /^[a-zA-Z]:/.test(norm)) { continue; }
+    if (norm.split("/").some((seg) => seg === "..")) { continue; }
+    out.push({ path: norm, content: c });
+  }
+  return out;
+}
+
 export function registerBuiltinTools(target?: ToolRegistry): void {
   const registry = target ?? getRegistry();
   registry.register(new Tool({
@@ -1328,24 +1561,32 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     // A-980-R30：描述按 Anthropic《multi-agent research system》的两条原则重写——
     // ①「教协调器如何委派」：task 必须写清目标 + 期望输出格式 + 边界（只写一句"研究半导体短缺"
     //   会让多个子代理重复劳动，这是他们实测的第一大坑）；
-    // ②「按查询复杂度伸缩」：简单事实查不必委派，1 个独立子任务派 1 个，多个互不依赖的才并行派。
+    // ②「按查询复杂度伸缩」：力量预算按复杂度分档（1 / 2–4 / 10+，见 DELEGATION_GUIDANCE 唯一出处）；
+    //    ⚠️ 这里**不重复那份分档文本**（第二产地 = 迟早漂移），只负责把「何时不用」收敛到
+    //    真正浪费的形状：一次工具调用就能拿到答案的（单文件读取 / 单文件精确查找）。
     // 另注：调用是**阻塞等结果**的（可并行发多个），产出会作为工具结果交回给你验收。
+    //       A-1106：阻塞等待**可被「停止生成」中断**（工具循环注入 `_signal` ⇒
+    //       SubAgentManager.wait 提前收口）；中断只结束等待、**不取消**子代理。
     description:
       "**委派**一个**独立、自包含**的子任务给专家子代理执行（独立上下文 + 独立工具面），它的产出会作为本次工具结果交回给你验收。\n" +
       "何时用：子任务能独立完成、不需要跟你来回确认，且产出较冗长（调研/审查/数据分析/批量处理），你不想让它污染主线上下文。\n" +
-      "何时不用：主线对话本身（要频繁追问/修改/确认的）、一两步就能做完的、以及必须共享同一上下文才能做的。\n" +
+      "何时不用：主线对话本身（要频繁追问/修改/确认的）、一次工具调用就能拿到答案的（单文件读取 / 单文件精确查找）、以及必须共享同一上下文才能做的。\n" +
       "怎么派：task 里必须写清 **①要达到的目标 ②期望的输出格式 ③边界**（不要只说\"研究一下 X\"，否则子代理会跑偏或和别的子代理重复劳动）。\n" +
-      "并行：多个互不依赖的子任务，可以在同一轮里连续调用多次本工具（每次都阻塞等自己的结果），也可以 background=true 先全部派出再逐个用 subagent_result 收。\n" +
+      "并行：多个互不依赖的子任务，**在同一轮里一次性全部派出**——同一轮的工具调用本来就并发执行，不必串着来（每个调用各自阻塞等自己的结果）。只有当你需要\"派出去后自己接着做别的、稍后再收\"时才用 background=true，之后用 subagent_result 收口。\n" +
       "点名：想指定某个子代理就在 agent 里写它的名字（见系统提示里的「可用子代理」清单）；不确定就留空，会按任务语义自动选。\n" +
-      "模型：用户明确要求用某模型执行子任务时（如「用便宜/免费的模型做」），把 model 填成 api:<供应商 key>[:<模型>] 或 local:<本地模型 id>；否则留空。",
+      "临时子代理：清单里没有合适的人时**现场定义一个**——填 systemPrompt（角色 + 约束），并按需填 tools（工具白名单）/ name（展示名）/ model（档位）；系统会据此造一个只跑这一次的执行者（**不写盘、不进清单、跑完即弃**）。此时不要再填 agent。\n" +
+      "模型：见系统提示「子代理执行模型」段列出的档位——**可按子任务难度为不同子代理点名不同 model**（机械/批量活给便宜档、需要推理的给强档），用户明确要求用某模型时也填这里。不填 = 用默认执行档；想跟随主对话模型就填 inherit。",
     parameters: {
       type: "object",
       properties: {
         task: { type: "string", description: "子任务说明（必填）：目标 + 期望输出格式 + 边界。要自包含——子代理看不到你和用户的对话。" },
         agent: { type: "string", description: "点名子代理（可选）：填系统提示「可用子代理」清单里的名字；留空则按任务自动选" },
-        model: { type: "string", description: "子代理专属模型（可选）：api:<key>[:<model>] / local:<id>；用户指定执行档时填" },
-        background: { type: "boolean", description: "true=只派发、不阻塞（之后用 subagent_result 取结果）；默认 false=等它跑完并把产出交回给你验收" },
-        timeoutMs: { type: "number", description: "等待上限（毫秒）。默认 960000（= 子代理默认执行预算 900000 + 60s 收尾余量）；上限 1260000。注意这是**等待**上限，不是子代理的执行预算（预算到点由子代理自身 abort，等待到点只是主 Agent 先撤）。**等待必须 ≥ 预算**" },
+        model: { type: "string", description: "子代理专属模型（可选）：取系统提示「子代理执行模型」段列出的档位（api:<key>[:<model>] / local:<id>），或 inherit 跟随主对话模型；不填 = 用默认执行档" },
+        name: { type: "string", description: "临时子代理的展示名（可选）：**仅在你现场定义**（给了 systemPrompt 或 tools）时生效，用于界面展示与产物文件名。不填则自动按任务取一个名字" },
+        systemPrompt: { type: "string", description: "**现场定义一个临时子代理**（可选）：它的角色设定与约束（工作流 / 输出要求 / 边界）。给了它（或 tools）就等于现场造一个**只在本任务里存在**的执行者——不写盘、不进「可用子代理」清单、跑完即弃。清单里没有合适的人时用它，别退回自己全做。⚠️ 此时**不要再填 agent**（以现场定义为准）" },
+        tools: { type: "array", items: { type: "string" }, description: "临时子代理的工具白名单（可选，工具名列表）：限定它只能用这些工具（例 [\"file_read\",\"file_list\"]）。派发/收取类工具会被系统强制剔除（子代理不允许再派子代理）" },
+        background: { type: "boolean", description: "true=只派发、不阻塞（之后用 subagent_result 取结果）；默认 false=等它跑完并把产出交回给你验收（等待期间用户点「停止生成」可中断等待，中断**不会**取消子代理）" },
+        timeoutMs: { type: "number", description: "等待上限（毫秒）。默认 960000（= 子代理默认执行预算 900000 + 60s 收尾余量）；上限 1260000。注意这是**等待**上限，不是子代理的执行预算（预算到点由子代理自身 abort，等待到点只是主 Agent 先撤）。**等待必须 ≥ 预算**；用户「停止生成」会让等待提前结束（子代理不受影响）" },
       },
       required: ["task"],
     },
@@ -1358,7 +1599,8 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     name: "subagent_result",
     description:
       "取子代理的运行结果与状态。传 id → 等它跑完并返回完整产出与验收提示；不传 id → 列出本会话全部子代理记录（名称/状态/摘要/id），便于挑一个来收。\n" +
-      "用 background=true 派发过子代理、想收口时用它；或用户问\"那个子代理跑得怎么样了\"时用它。",
+      "用 background=true 派发过子代理、想收口时用它；或用户问\"那个子代理跑得怎么样了\"时用它。\n" +
+      "（等待可被用户「停止生成」中断：中断只结束等待、不取消子代理，稍后仍可用本工具取回。）",
     parameters: {
       type: "object",
       properties: {
@@ -2332,25 +2574,42 @@ ${body}
     }
     try {
       await mkdir(dir, { recursive: true });
-      const html = wrapApp(title, appBody(kind, title));
-      await writeFile(join(dir, "index.html"), html, "utf8");
+      /* A-1116：**支持任意多文件**（不再只能出固定模板）—— 这是"产出各式各样本地 web 程序"的关键。
+         `files` 传了就按它写（多文件 / 子目录都行）；不传才回落到模板。
+         ⚠️ 路径由 `normalizeAppFiles` 收敛在 dir 内（拒绝绝对路径与 `..`）。 */
+      const custom = normalizeAppFiles(args.files);
+      const written: string[] = [];
+      if (custom.length > 0) {
+        for (const f of custom) {
+          const absFile = join(dir, f.path);
+          await mkdir(dirname(absFile), { recursive: true });
+          await writeFile(absFile, f.content, "utf8");
+          written.push(absFile);
+        }
+      } else {
+        const html = wrapApp(title, appBody(kind, title));
+        await writeFile(join(dir, "index.html"), html, "utf8");
+        written.push(join(dir, "index.html"));
+      }
+      const filesLine = written.map((w) => `  - ${w}`).join("\n");
       // 起一个静态服务，返回可点击地址
       if (!httpServerRef) {
-        return `[已生成] ${title}（类型=${kind}）\n文件：${join(dir, "index.html")}\n（HTTP 服务未就绪，未能自动起服务；可在本地用浏览器直接打开该文件）`;
+        return `[已生成] ${title}（类型=${kind}）\n已写入文件：\n${filesLine}\n（HTTP 服务未就绪，未能自动起服务；可在本地用浏览器直接打开 index.html）`;
       }
       const r = await httpServerRef.serve({ dir, port, spa: false });
-      if (!r?.ok) { return `[已生成文件] ${title}（类型=${kind}）\n文件：${join(dir, "index.html")}\n（启动服务失败：${r?.error ?? "未知错误"}；可直接用浏览器打开该文件）`; }
+      if (!r?.ok) { return `[已生成文件] ${title}（类型=${kind}）\n已写入文件：\n${filesLine}\n（启动服务失败：${r?.error ?? "未知错误"}；可直接用浏览器打开 index.html）`; }
       const urls = (r.urls ?? []).map((u) => `  - ${u}`).join("\n");
       const localUrl = `http://127.0.0.1:${r.port}`;
-      // A-918++：生成后自动在右侧栏浏览器打开
-      try { sidebarOpenerRef?.(localUrl, title); } catch { /* 打开失败不影响返回结果 */ }
+      // A-918++ / A-1121：生成后自动在右侧栏浏览器打开。回执**按真实结果**写 ——
+      // 未装配界面时不能声称"已自动打开"（那是假陈述，用户会去找一个不存在的页签）。
+      const opened = fireSidebarOpen({ kind: "url", url: localUrl, name: title });
       return [
         `[已生成网页应用] ${title}（类型=${kind}）`,
-        `文件：${join(dir, "index.html")}`,
+        `已写入文件：\n${filesLine}`,
         `可访问地址（点击即可打开）：`,
         urls,
         ``,
-        `已在右侧栏浏览器自动打开：${localUrl}`,
+        opened ? `已在右侧栏浏览器自动打开：${localUrl}` : `（界面未就绪，未自动打开；可点上方地址手动打开）`,
       ].join("\n");
     } catch (e) {
       return `[错误] 生成应用失败：${e instanceof Error ? e.message : String(e)}`;
@@ -2359,19 +2618,149 @@ ${body}
 
   registry.register(new Tool({
     name: "http_create_app",
-    description: "根据用户的自然语言需求生成一个「自包含、零依赖、可直接使用」的单页网页应用（纯 HTML + 内联 CSS/JS，无 CDN）。按需求关键词自动选模板：待办清单(todo)/计算器(calculator)/计时器倒计时秒表(timer)/展示落地页(landing)/表单(form)/通用(fallback)。生成后自动起一个本地 HTTP 服务，并在右侧栏浏览器自动打开，返回可点击的访问地址（http://127.0.0.1:<port>）。参数：description 必填（用户需求，如「一个待办清单应用」）；title 可选（应用名）；dir 可选（输出目录，默认 项目根/apps/<slug>/）；port 可选。用户说「做个网页/应用/小工具/页面/网站」时直接用本工具生成并给出链接，不要让用户自己配置。",
+    // A-1116：**从「6 个固定模板」升级为「能产出任意本地 web 程序」**。
+    // 关键不是模板数量，而是两件事：① `files` 让模型自己写任意多文件；② 描述里写清「做成什么样才算好」——
+    // 模型的能力上限取决于它知道什么，所以这段描述本身就是产出质量的一部分（别再退回一句话模板描述）。
+    description:
+      "做一个**本地 web 程序**并直接跑起来（写完自动在右侧栏浏览器打开，用户立刻能看到）。\n"
+      + "两种用法：\n"
+      + "① **自由创作（推荐）**：传 `files: [{path, content}]` 写任意多文件（HTML / CSS / JS / JSON / 子目录都行），"
+      + "`path` 里必须有 `index.html` 作为入口。适合做完整的小应用（多页、带数据、带交互）。\n"
+      + "② **模板快捷方式**：只传 `description`，按关键词套用内置模板（待办 / 计算器 / 计时器 / 落地页 / 表单 / 通用）。\n"
+      + "**做到什么程度才算好**（别交一个裸 HTML）：\n"
+      + "  - **自包含**：CSS/JS 内联或放同目录文件，**不引外网 CDN**（离线、断网也能跑）；\n"
+      + "  - **能交互**：真的有状态与事件（点击 / 输入 / 计算 / 增删 / 持久化），不是一张静态图；\n"
+      + "  - **像样的视觉**：主题统一、间距层级与圆角、hover/active 有反馈、内容居中且能适应窄屏；\n"
+      + "  - **零构建**：不要 webpack/vite，浏览器直接跑；数据写死在 JS 里或放同目录 JSON。\n"
+      + "用户说「做个网页 / 应用 / 小工具 / 页面 / 网站」时直接用本工具，不要让用户自己配置。"
+      + "返回可点击地址 + **实际写入的文件清单**。",
     parameters: {
       type: "object",
       properties: {
-        description: { type: "string", description: "必填。用户的自然语言需求，如「一个待办清单应用」「一个简单的计算器」" },
-        title: { type: "string", description: "可选。应用名（缺省取需求前 20 字）" },
-        dir: { type: "string", description: "可选。输出目录绝对路径；缺省为 项目根/apps/<slug>/" },
-        port: { type: "integer", description: "可选。HTTP 服务端口（1-65535），留空自动选空闲端口", default: 0 },
+        description: { type: "string", description: "用户的自然语言需求（做什么、给谁用、要哪些功能）。模板模式必填" },
+        title: { type: "string", description: "应用名（缺省取需求前 20 字）" },
+        files: {
+          type: "array",
+          description: "自由创作模式：要写入的文件清单（至少含一个 index.html）。path 相对 dir，"
+            + "绝对路径与 `..` 会被拒绝；content 是文件全文（可以是任意长度的真实代码）",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "相对路径，如 index.html / style.css / app.js / data/list.json" },
+              content: { type: "string", description: "文件全文（HTML/CSS/JS/JSON 原样写出，不要转义）" },
+            },
+            required: ["path", "content"],
+          },
+        },
+        dir: { type: "string", description: "输出目录绝对路径；缺省为 项目根/apps/<slug>/" },
+        port: { type: "integer", description: "HTTP 服务端口（1-65535），留空自动选空闲端口", default: 0 },
       },
-      required: ["description"],
+      required: [],
     },
     executeFn: httpCreateApp,
     permissions: ["network", "write"],
+  }));
+
+  /* ══════════ A-1121（②）：右栏是 Agent 的工具栏 —— 终端 / 文件树也要能被打开 ══════════
+   *
+   * 现状对照：浏览器类 **12 个工具早已齐全**（`tools/browser.ts`，且会主动展开右栏），
+   * 而终端与文件树**一个工具都没有** —— Agent 说"你可以在终端里跑 npm run dev"，
+   * 却没法把终端打开给它看。这一组补齐的正是这个缺口。
+   *
+   * 【权限口径】两个工具都声明 `read` / `riskKind: "read"` / `autoApprovable: true`：
+   *   它们**不执行、不读盘、不联网**，只把界面切到一个页签（终端那个最多把命令**预填**进输入框，
+   *   是否回车由用户自己按）。声明成 `terminal` 会让"打开一个面板"每次都弹审批框 ——
+   *   与 ② 的目的（右栏 = 工具栏，随手可用）正好相反。
+   *   ⚠️ 别把 `prefill` 参数改名成 `cmd` / `command`：那是 `targetFromArgs` 认定的**终端命令字段**，
+   *      一旦改名，同一份字符串会以"终端命令"的身份进入硬规则/分类器，产生难以解释的误拦。 */
+  async function sidebarOpenTerminal(args: Record<string, unknown>): Promise<string> {
+    // 参数名刻意用 `prefill`（不是 cmd / command）——见上面对 targetFromArgs 的说明
+    const prefill = typeof args.prefill === "string" ? args.prefill.trim() : "";
+    const name = typeof args.name === "string" ? args.name.trim() : "";
+    if (!fireSidebarOpen({ kind: "terminal", cmd: prefill, name })) {
+      return hasSidebarOpener()
+        ? "[错误] 打开终端页失败（界面拒绝了这次请求）"
+        : "[错误] 右侧栏未就绪（当前运行环境未装配界面），无法打开终端页";
+    }
+    return prefill
+      ? `[已打开] 右侧栏终端页，命令已**预填**到输入框（未执行，需用户自行回车）：${prefill}`
+      : "[已打开] 右侧栏终端页";
+  }
+
+  async function sidebarOpenFiles(args: Record<string, unknown>): Promise<string> {
+    const ws = String(args._workspace ?? "");
+    const rawRoot = typeof args.root === "string" ? args.root.trim() : "";
+    const rel = typeof args.rel === "string" ? args.rel.trim() : "";
+    let root = "";
+    if (rawRoot) {
+      // 与 file_* 工具同一套解析口径（相对路径锚定工作目录 → 项目根），不做第二套
+      root = projectRootPath(rawRoot, ws);
+      try {
+        const st = await stat(root);
+        if (!st.isDirectory()) { return `[错误] 不是目录：${root}`; }
+      } catch {
+        // 目录不存在必须当场说 —— 否则界面会开出一个空树，用户读成"这里没有文件"
+        return `[错误] 目录不存在：${root}`;
+      }
+    }
+    if (!fireSidebarOpen({ kind: "files", root, rel })) {
+      return hasSidebarOpener()
+        ? "[错误] 打开文件页失败（界面拒绝了这次请求）"
+        : "[错误] 右侧栏未就绪（当前运行环境未装配界面），无法打开文件树";
+    }
+    if (!root) {
+      return rel
+        ? `[已打开] 右侧栏文件页（未给 root，界面按当前会话工作目录打开；未能定位到 ${rel}）`
+        : "[已打开] 右侧栏文件页（浏览根 = 当前会话工作目录）";
+    }
+    return rel
+      ? `[已打开] 右侧栏文件页：浏览根 ${root}，并定位到 ${rel}`
+      : `[已打开] 右侧栏文件页：浏览根 ${root}`;
+  }
+
+  registry.register(new Tool({
+    name: "sidebar_open_terminal",
+    description:
+      "在**右侧栏打开终端页**，让用户看得见终端（右栏就是 Agent 的工具栏）。\n"
+      + "· 可传 `prefill` 把一条命令预填在输入框里（**不会自动执行** —— 执行与否是用户的决定，"
+      + "这也是本工具不需要终端权限、不会弹审批的原因）；\n"
+      + "· 适合：你要用户手动看/手动跑某条命令时（如 `npm run dev`、查看日志），"
+      + "或需要用户在真实终端里交互（本工具不接管终端，别指望用它拿回 stdout —— 要回显请用命令执行类工具）。\n"
+      + "返回是否真的打开了；未装配界面时如实报错，不要假设它一定成功。",
+    parameters: {
+      type: "object",
+      properties: {
+        prefill: { type: "string", description: "预填到终端输入框的命令（不会自动执行），可省" },
+        name: { type: "string", description: "页签标题，可省" },
+      },
+      required: [],
+    },
+    executeFn: sidebarOpenTerminal,
+    permissions: ["read"],
+    riskKind: "read",
+    autoApprovable: true,
+  }));
+
+  registry.register(new Tool({
+    name: "sidebar_open_files",
+    description:
+      "在**右侧栏打开文件页**（文件树），把目录展示给用户看（右栏就是 Agent 的工具栏）。\n"
+      + "· `root` 传目录（绝对路径，或相对当前工作目录的路径；缺省 = 当前会话工作目录）；\n"
+      + "· `rel` 可选，用来在该目录下**定位/高亮**某个条目；\n"
+      + "· 适合：汇报「我改了哪些文件」、让用户自己接着看/接着改，而不是把文件内容整段贴进对话。\n"
+      + "目录不存在会当场报错（不会开出一个空树让用户以为这里没东西）。",
+    parameters: {
+      type: "object",
+      properties: {
+        root: { type: "string", description: "要浏览的目录（绝对路径，或相对当前工作目录）；缺省为当前会话工作目录" },
+        rel: { type: "string", description: "要在该目录下定位到的条目（相对 root），可省" },
+      },
+      required: [],
+    },
+    executeFn: sidebarOpenFiles,
+    permissions: ["read"],
+    riskKind: "read",
+    autoApprovable: true,
   }));
 
   /* ── 补齐 ADB 文件通道（A-918++）：设备 ⇄ 本机 文件互传 ── */
@@ -2521,14 +2910,17 @@ ${body}
       if (backends.length === 0) { return "[提示] 当前没有任何图形控制后端可用"; }
       const lines: string[] = [`可用图形控制后端：${backends.join("、")}`];
       for (const b of backends) {
-        try {
-          const list = await screenControllerRef.listTargets(b as "desktop" | "android");
-          if (list.length === 0) { lines.push(`- ${b}：无可用目标`); continue; }
-          for (const t of list) {
-            lines.push(`- ${b}｜目标=${t.target}｜${t.label}`);
-          }
-        } catch (e) {
-          lines.push(`- ${b}：不可用（${e instanceof Error ? e.message : String(e)}）`);
+        // A-1123：走 `listTargetsReport` —— 失败原因**逐条列出**，不再与"没有目标"同形。
+        const rep = await screenControllerRef.listTargetsReport(b as "desktop" | "android");
+        for (const f of rep.failures) {
+          lines.push(`- ${f.backend}：枚举失败（${f.error}）——这是后端/宿主的问题，不是「没有目标」`);
+        }
+        if (rep.targets.length === 0) {
+          if (rep.failures.length === 0) { lines.push(`- ${b}：无可用目标`); }
+          continue;
+        }
+        for (const t of rep.targets) {
+          lines.push(`- ${b}｜目标=${t.target}｜${t.label}`);
         }
       }
       lines.push("");
@@ -2583,25 +2975,34 @@ ${body}
     }
   }
 
-  /** A-975：导出 UI 层级元素（元素级定位，安卓最稳） */
+  /** A-975：导出 UI 层级元素（元素级定位，安卓最稳）
+   *  A-1123：桌面也支持了 —— 粒度是**窗口**（系统枚举的矩形，等价于"窗口级编号框"）。
+   *  两个后端都可调，但**粒度不同必须说清**（不说清 = 模型以为桌面也能拿到按钮级元素而反复重试）。 */
   async function screenUiDump(args: Record<string, unknown>): Promise<string> {
     if (!screenControllerRef) { return "[错误] 图形控制未就绪（当前运行环境未装配 ScreenController）"; }
     const backend = pickBackend(args.backend);
     if (!backend) { return "[错误] backend 需为 desktop 或 android"; }
-    if (backend !== "android") {
-      return "[提示] 元素层级导出目前仅支持 android（桌面无 uiautomator）；桌面请用 screen_capture 的网格刻度定位。";
-    }
     const target = typeof args.target === "string" ? args.target.trim() : "";
     const max = typeof args.limit === "number" && args.limit > 0 ? Math.min(200, args.limit) : 60;
     try {
-      const els = await screenControllerRef.uiDump(backend, target || undefined);
+      const dump = await screenControllerRef.uiDump(backend, target || undefined);
+      // A-1123：**导出故障**与**界面没有可操作元素**必须分两态（旧写法把两者压成同一句"未能导出元素层级"，
+      // 模型据此去修一个并不存在的 uiautomator 问题）。
+      if (!dump.ok) {
+        return `[错误] 元素层级导出失败（${dump.error ?? "未知原因"}）——这是后端/宿主的故障，不是「界面没有元素」。请检查设备连接/宿主是否存活后重试；其间可用 screen_capture 网格刻度目测定位。`;
+      }
+      const els = dump.elements;
       if (els.length === 0) {
-        return "[提示] 未能导出元素层级（可能是 uiautomator 不可用、界面为全屏画布/游戏、或页面仍在加载）。请改用 screen_capture 网格刻度目测定位。";
+        return backend === "desktop"
+          ? "[提示] 元素层级已导出成功，但当前桌面没有可见的顶层窗口（都可能已最小化或无标题）。若你确信某程序已打开，请先手动把它的窗口还原出来。"
+          : "[提示] 元素层级已导出成功，但当前界面没有可操作元素（全屏画布/游戏/页面仍在加载都会这样）。请改用 screen_capture 的网格刻度目测定位。";
       }
       // 只挑「可点 / 可滚 / 有文本」的前 N 个，避免淹没模型
       const actionable = els.filter((e) => e.clickable || e.scrollable || e.text).slice(0, max);
       const lines: string[] = [
-        `[界面元素] 共解析 ${els.length} 个节点，下列为可操作项（${actionable.length} 个）：`,
+        backend === "desktop"
+          ? `[界面元素] 桌面的元素层级粒度是「窗口」（共 ${els.length} 个可见顶层窗口，下列 ${actionable.length} 个）。用法：screen_action({kind:"click", selector:{index:N}}) 点窗口中心（通常等于把它带到前台）；窗口内的按钮仍需截图目测或用 screen_focus 聚焦后按窗口坐标点。`
+          : `[界面元素] 共解析 ${els.length} 个节点，下列为可操作项（${actionable.length} 个）：`,
         "用法：screen_action({kind:\"click\", selector:{index:N}})，或用 text/id 精确定位（比手填坐标稳）。",
       ];
       for (const e of actionable) {
@@ -2609,7 +3010,7 @@ ${body}
         if (e.clickable) { tags.push("可点"); }
         if (e.scrollable) { tags.push("可滚"); }
         if (e.enabled === false) { tags.push("禁用"); }
-        const label = e.text ? `"${e.text}"` : e.desc ? `desc="${e.desc}"` : e.id ? `id=${e.id}` : "(无文本)";
+        const label = e.text ? `「${e.text}」` : e.desc ? `desc=${e.desc}` : e.id ? `id=${e.id}` : "(无文本)";
         lines.push(`#${e.index} ${label}${tags.length ? ` [${tags.join("/")}]` : ""} 中心=(${e.center.x},${e.center.y}) 框=[${e.bounds.x1},${e.bounds.y1}][${e.bounds.x2},${e.bounds.y2}]`);
       }
       return lines.join("\n");
@@ -2659,6 +3060,9 @@ ${body}
       const r = await screenControllerRef.perform(backend, action, target || undefined);
       if (!r.ok) { return `[错误] 图形动作失败（${backend}/${kind}）：${r.error ?? "未知错误"}`; }
       const parts = [`[已执行] ${backend}｜${kind}｜${r.detail ?? "完成"}`];
+      // A-1123：命中校验结果**必须显式回传** —— 它是"动作有没有真的生效"的唯一判据，
+      // 而 `detail` 只陈述"输入已注入"（两者此前同形，这是"用起来总是糊涂"的另一半）。
+      if (r.verify) { parts.push(describeVerify(r.verify)); }
       if (r.capture?.ok && r.capture.dataUrl) {
         const sz = r.capture.imageWidth && r.capture.imageHeight ? `${r.capture.imageWidth}×${r.capture.imageHeight}` : "尺寸未知";
         parts.push(`操作后画面已回传（${sz}）`);
@@ -2702,15 +3106,16 @@ ${body}
   registry.register(new Tool({
     name: "screen_ui_dump",
     description: [
-      "导出当前界面的**元素层级**（安卓：uiautomator dump）——返回可点/可滚/有文本的元素列表，每个带编号、文本、id、中心坐标、包围盒。",
-      "**这是安卓上最可靠的定位方式**：拿到 #编号 后直接用 screen_action 的 selector:{index:N} 点击，或按 text/id 定位，比目测坐标准得多。",
-      "适用：原生界面、设置页、列表、按钮。不适用：全屏游戏/画布/视频（无元素树）——那时请用 screen_capture 的网格刻度目测。",
+      "导出当前界面的**元素层级**——返回可点/可滚/有文本的元素列表，每个带编号、文本、id、中心坐标、包围盒。",
+      "**android（粒度：控件）**：走 uiautomator dump，能拿到按钮级元素 —— **这是安卓上最可靠的定位方式**：拿 #编号 用 screen_action 的 selector:{index:N} 点击，或按 text/id 定位，比目测坐标准得多。",
+      "**desktop（粒度：窗口）**：返回系统枚举的可见顶层窗口矩形 —— 用 selector:{index:N} 点窗口中心通常等于把它带到前台。窗口**内部**的按钮没有元素树，需先 screen_focus 聚焦，再按窗口坐标目测点。",
+      "适用（android）：原生界面、设置页、列表、按钮。不适用：全屏游戏/画布/视频（无元素树）——那时请用 screen_capture 的网格刻度目测。",
       "元素太多时可传 limit 限制条数（默认 60）。若目标元素不在列表里，先 screen_action 下滑/swipe 再重新 dump。",
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
-        backend: { type: "string", description: "留空则默认 android（本工具仅安卓有效）" },
+        backend: { type: "string", description: "desktop 或 android；留空则桌面优先（desktop）" },
         target: { type: "string", description: "可选。安卓设备 serial" },
         limit: { type: "integer", description: "最多返回多少个元素（默认 60，最大 200）" },
       },
@@ -2736,7 +3141,8 @@ ${body}
       "  type（键入文本，需 text；**安卓仅支持英文数字**，中文需设备装 ADBKeyboard）",
       "  key（按键，需 key，如 \"Enter\" / \"ctrl+c\" / \"BACK\" / \"KEYCODE_HOME\"）",
       "  wait（等待，需 durationMs，最多 30000）",
-      "**标准流程**：screen_capture 看画面 → screen_ui_dump 拿元素（安卓）→ screen_action（selector 或坐标）→ 看回传画面**核对是否生效**；若没点中，重新截图再试，不要盲目重试同一坐标。",
+      "**A-1123 命中校验**：点击 / 按键 / 输入 / 滚动这类动作执行后，系统会自动比对**动作前后两张截图**，在回执里给出「命中校验：✓ 命中 / ✗ 未命中 / 未判定」；**判定未命中时会自动重试一次**。看到「✗ 未命中」不要立刻重复同一坐标 —— 常见原因是目标被遮挡 / 窗口没聚焦 / 元素还没渲染出来，先重新 screen_capture 看清当前画面。",
+      "**标准流程**：screen_capture 看画面 → screen_ui_dump 拿元素（安卓控件级 / 桌面窗口级）→ screen_action（selector 或坐标）→ 看回执里的**命中校验**与画面核对是否生效；若没点中，重新截图再试，不要盲目重试同一坐标。",
     ].join("\n"),
     parameters: {
       type: "object",

@@ -37,6 +37,12 @@ function uiIsPathTool(name: string): boolean {
  * - 允许模型传值 = 可以跨会话读写别人的待办/计划（越权面）。
  */
 const SESSION_SCOPED_TOOLS = new Set(["todo_write", "plan_create", "plan_update"]);
+/**
+ * A-1122（③）：会**改动磁盘文件**的工具 ⇒ 注入受信 `_undo_scope`，
+ * 让它们把"改前状态"记进改动账本（`file_undo.ts`），回滚时据此认领并还原。
+ * 不含 `file_read`/`file_list`（只读，注入就是污染入参）。
+ */
+const UNDO_SCOPED_TOOLS = new Set(["file_write", "file_delete"]);
 
 /** 截断工具结果时保护 [__slime_diff__] 标记（renderer 产物卡 +n/-m 与 diff 详情依赖它；
  *  正文可截断，标记必须完整保留——此前直接 slice(0,1200) 会把长 diff 的 base64 标记砍掉，
@@ -659,6 +665,15 @@ export class ToolLoop {
       delete args._network_enabled;
       args._network_enabled = this.networkEnabled;
     }
+    // A-1106：把本轮的 AbortSignal 透传给子代理工具 —— 前台委派默认 `await` 到子代理终态
+    // （等待上限 960s），此前那条 await **没有任何中断通路**，于是用户点「停止生成」后
+    // 工具仍会等满全程，表现为「停止按钮没反应」。
+    // 与上面 `_network_enabled` 同一条纪律：`_signal` 是**受信注入**，只能来自本循环持有的
+    // 那个 signal —— 先 delete 覆盖模型伪造的同名参数（普通 JSON 参数里不可能有真 AbortSignal）。
+    if (tc.name === "delegate_subagent" || tc.name === "subagent_result") {
+      delete args._signal;
+      if (signal) { args._signal = signal; }
+    }
 
     // 注入受信 sessionId：会话级工具（待办 / 计划）据此定位本会话的存储文件。
     // ⚠️ 先 delete 再写，覆盖模型可能伪造的同名参数（防跨会话越权）。
@@ -666,6 +681,15 @@ export class ToolLoop {
     if (SESSION_SCOPED_TOOLS.has(tc.name) && sessionId) {
       delete args.sessionId;
       args.sessionId = sessionId;
+    }
+
+    // A-1122（③）：注入受信归属，供 `file_write`/`file_delete` 把改动记进回滚账本。
+    // 与 `_agent_id` 同一条纪律：**先 delete 再写**。`_undo_scope` 是对象，模型完全可以在
+    // JSON 参数里伪造一个"别的会话"的 scope ⇒ 把改动记到别人头上，回滚时自己的改动认不出来。
+    // 无 sessionId（CLI/测试）时写空串：`undoScopeOf` 仍认（记成"本 Agent、无会话"）。
+    if (UNDO_SCOPED_TOOLS.has(tc.name)) {
+      delete args._undo_scope;
+      args._undo_scope = { agentId, sessionId: sessionId ?? "" };
     }
 
     // 联网搜索开关：web_search / web_fetch 在未启用时被静默拒绝（模型侧无法绕过）
