@@ -75,6 +75,21 @@ export interface SubAgentDef {
   timeoutMs?: number;
   /** 请求结构化结果契约；runner 被要求按 SubAgentResult 产出（见 parseStructuredResult） */
   outputSchema?: boolean;
+  /**
+   * A-1114：**临时子代理**标记 —— 由主 Agent 现场定义（inline spec）、只跑这一次的执行者。
+   *
+   * 与「声明式定义（SubagentDefinition）」的边界，四条都要成立：
+   *   ① **不落盘**：绝不写 `config/agents.json`，不产生持久 Agent；
+   *   ② **不进清单**：`catalog()` 只遍历 `this.defs`，带此标记的 def 从不注册进去，
+   *      所以主 Agent 的「可用子代理」段里**不会**出现它（下次也别指望点名点得到）；
+   *   ③ **不参与路由**：`delegate()` 见到它**直接合成派发**，跳过 `findByName` / `matchDefinition`
+   *      —— 现场定义比清单里任何人都更贴合本次任务，再拿去做语义打分只会选错人；
+   *   ④ **跑完即弃**：除 `runs` 里的那条记录外不留任何痕迹，进程重启即无痕。
+   *
+   * 为什么不做成"注册一个临时定义再删掉"：那会出现在 `catalog()` 里、被并发派发看到的清单污染，
+   * 还要处理"何时删"（跑完？进程退出？）—— 那不叫临时，那叫**持久但难清理**。
+   */
+  adhoc?: boolean;
 }
 
 /**
@@ -169,6 +184,16 @@ export type SubAgentRunner = (
 // ---------------------------------------------------------------------------
 
 export interface SubAgentHooks {
+  /**
+   * A-1106/5b：**派发即触发** —— `spawn()` 里 run 刚进 `runs`、状态还是 `pending` 时。
+   *
+   * 为什么必须补这一条：`onStart` 只在**拿到并发槽位、即将调用 runner** 时触发。
+   * 并发槽位被占满时，新派发的子代理会**长时间停在 pending**，这期间一个事件都不发
+   * ⇒ 悬浮面板只能靠轮询兜底，用户看到的是「我派了 3 个，面板上只显示 1 个」。
+   * 本钩子把「派发（queued）」这一状态变化也补进事件流，让面板**事件驱动**而不是靠 3 秒轮询
+   * （对齐 A2A 的 TaskStatusUpdateEvent：queued 与 working 都是应当发出的状态）。
+   */
+  onSpawn?: (run: SubAgentRun, def: SubAgentDef) => void | Promise<void>;
   /** 进入执行（拿到并发槽位、即将调用 runner）时触发 */
   onStart?: (run: SubAgentRun, def: SubAgentDef) => void | Promise<void>;
   /** 成功完成时触发（result/structured 已就绪） */
@@ -195,6 +220,74 @@ export interface SubAgentHooks {
  * 预算只应作为**防挂死**的下限保障，不该成为常态失败源。故放宽到 15 分钟。
  */
 export const DEFAULT_EXEC_BUDGET_MS = 900_000;
+
+/**
+ * A-1097：子代理执行模型池的**规范化唯一出处**（装配层 / IPC / 单元测试共用同一判据）。
+ *
+ * 为什么必须有这个函数，而不是各处 `filter(...)` 完事：
+ *  ① 池子是用户多选出来的，输入可能带空串/重复/`inherit`（"继承"是**不覆盖**的占位，
+ *     不是档位——若放进池首，会退化成 A-975 修过的那个 bug："能设置却不生效"）；
+ *  ② 池首是**执行兜底档**，所以顺序有意义（去重要保序，不能排序）；
+ *  ③ 上限只防手滑（多选窗口一次全选上百个模型没有意义），取 12 个足够覆盖"便宜/中/强/本地"分工。
+ */
+export const SUBAGENT_MODEL_POOL_MAX = 12;
+
+/**
+ * A-1122：**子代理会话 id 前缀的唯一出处**。
+ *
+ * 子代理的流必须带专属 sessionId，否则 chunk 的 sessionId 为 undefined，渲染层会把子代理
+ * chunk 误判成主 Agent 流（主 Agent 监测栏被污染，A-978 的用户实测）。
+ *
+ * ⚠️ 这个字面量此前**存在于三处**（`gui/src/main/index.ts` 的 `SUBAGENT_SESSION_PREFIX`、
+ * `todoStore.ts` 的注释与推导、以及这里新增的消费者）。分成多份的症状是**静默的**：
+ * 前缀一改，只有改动过的那一处继续生效，其余几处照旧"看着对"——
+ * 对文件回滚来说，那意味着**子代理改过的文件再也无法被回滚**，且没有任何报错。
+ * ⇒ 现在只有这一份；`gui/src/main/index.ts` 从这里 import。
+ */
+export const SUBAGENT_SESSION_PREFIX = "__subagent__:";
+
+/** 这个会话 id 是不是子代理的（文件回滚据此把子代理的改动算到「当时那一轮」头上） */
+export function isSubagentSessionId(sid: unknown): boolean {
+  return typeof sid === "string" && sid.startsWith(SUBAGENT_SESSION_PREFIX);
+}
+
+
+export function normalizeModelPool(input: unknown): string[] {
+  if (!Array.isArray(input)) { return []; }
+  const out: string[] = [];
+  for (const x of input) {
+    const v = typeof x === "string" ? x.trim() : "";
+    if (!v || v === "inherit") { continue; }
+    if (out.includes(v)) { continue; }
+    out.push(v);
+    if (out.length >= SUBAGENT_MODEL_POOL_MAX) { break; }
+  }
+  return out;
+}
+
+/**
+ * A-1114：把子代理名收敛成**可安全落盘**的一段文件名（唯一出处，落盘前必经）。
+ *
+ * 为什么必须有：`delegate_subagent` 新增 `name` 入参后，**产物文件名第一次由模型决定**。
+ * 模型写出 `a/b`、`..`、`报告:1`、`x*y` 这类名字时，`join(dir, `subagent-${name}-${stamp}.md`)` 会：
+ *   - `a/b` → 多出一层不存在的目录 ⇒ `writeFileSync` 抛 ENOENT ⇒ **整个子代理被判失败**，
+ *     而错误信息指向路径，谁也看不出是"名字里有个斜杠"；
+ *   - `..` → 写出 `data/generated` 之外（路径逃逸）；
+ *   - `:` `*` `?` `"` `<` `>` `|` → Windows 非法字符，同样抛异常。
+ * 三条都是"模型一换措辞就翻车"的形态，且**修在调用点会漏**（落盘点不止一处时会漂移），
+ * 故收敛为纯函数，由落盘方与单测共用。
+ *
+ * ⚠️ 只作用于**文件名**：`run.name`（界面展示 / 审计 / 清单）保留原文，**不做改写** ——
+ * 用户看到的必须是他/模型给的那个名字，被替换过就成了假陈述。
+ */
+export function sanitizeSubagentRunName(raw: string): string {
+  const cleaned = (raw ?? "")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\.\.+/g, "_")
+    .trim()
+    .replace(/^[.\s]+|[.\s]+$/g, "");
+  return cleaned.slice(0, 64) || "unnamed";
+}
 
 const STRUCTURED_INSTRUCTION =
   "请在最终回复末尾输出一个 JSON 代码块，形如 ```json {\"status\":\"completed|partial|failed\",\"summary\":\"...\",\"artifacts\":[\"...\"],\"confidence\":0.0} ```";
@@ -267,11 +360,18 @@ export class SubAgentManager {
   private inflight = 0;
   private readonly maxConcurrency: number;
   /**
-   * 全局子代理默认模型（对齐 Claude Code subagents `model:` frontmatter 的全局版）。
-   * 路由优先级：委派/调用显式 model > 声明式定义 def.model > 全局默认 > inherit（沿用目标 Agent 模型）。
-   * 格式：api:<key>[:<model>] / local:<id> / inherit；空串 = 不覆盖（回退 inherit）。
+   * 全局子代理**执行模型池**（A-1097：由「单个默认模型」升级为可多选的池）。
+   *
+   * 为什么从单值升级：只允许指定一个执行模型时，主 Agent 面对"便宜的做机械活 / 强的做难活"
+   * 这种天然分工**无从选择**——它只有一个档位可用（用户原话：「只能指定一个，还是太少了」）。
+   * 现在可多选，且：
+   *   - `models[0]` = **执行兜底档**（未显式指定 model 时用），保持 A-975/A-942 的"贵模型统筹、
+   *     廉价模型执行"语义不变（旧单值配置读进来就是只有一个元素的池子）；
+   *   - 整个池子会写进系统提示，主 Agent 可按子任务难度**为不同子代理点名不同档位**。
+   * 路由优先级仍是：委派/调用显式 model > 声明式定义 def.model > 池首（兜底档）> inherit。
+   * 格式：`api:<key>[:<model>]` / `local:<id>`；`inherit` 不是池内档位（它是"不覆盖"的占位）。
    */
-  private defaultModel: string;
+  private defaultModels: string[];
   /** 并发槽位排队 FIFO（execute 专用）：每次槽位释放恰好唤醒一个（取代 busy-wait 轮询） */
   private slotWaiters: Array<() => void> = [];
   /** awaitIdle 专用等待队列（与槽位队列隔离，inflight→0 时整体唤醒） */
@@ -281,12 +381,13 @@ export class SubAgentManager {
 
   constructor(
     runner: SubAgentRunner,
-    opts: { concurrency?: number; hooks?: SubAgentHooks; defaultModel?: string } = {},
+    opts: { concurrency?: number; hooks?: SubAgentHooks; defaultModel?: string; defaultModels?: string[] } = {},
   ) {
     this.runner = runner;
     this.hooks = opts.hooks ?? {};
     this.maxConcurrency = Math.max(1, opts.concurrency ?? 3);
-    this.defaultModel = opts.defaultModel ?? "";
+    // 兼容：旧调用点传单值 defaultModel ⇒ 视为只有一个元素的池；新调用点传 defaultModels。
+    this.defaultModels = normalizeModelPool(opts.defaultModels ?? (opts.defaultModel ? [opts.defaultModel] : []));
   }
 
   /** 当前并发进行中的子代理数 */
@@ -309,9 +410,14 @@ export class SubAgentManager {
   }
 
   /**
-   * 同步用户选定的子代理定义（设置→子代理菜单勾选的自建 agent）。
+   * 同步「自定义 Agent 子代理定义」（A-1096 起 = 全部**同意被派发**的持久 Agent，见
+   * `services/subagentCatalog.ts::dispatchableSubagentDefinitions`）。
    * 先清除上一批 userSelected 定义，再注册新的一批（打 userSelected:true），
-   * 保证派发优先级「用户选定 > 内置专家」始终反映最新勾选状态。
+   * 保证派发优先级「自建 Agent > 内置专家」始终反映最新授权状态。
+   *
+   * ⚠️ 历史语义（A-918+）：这里只登记用户在设置页**勾选**的少数几个 agent，默认勾选为空
+   * ⇒ 一个自建 Agent 都派不出去（"配好了也派不到"）。A-1096 起授权改为**每个 Agent 自己的
+   * `subagent_dispatch` 开关**（缺省即允许），不再依赖独立的勾选文件。
    */
   setUserSelected(defs: SubagentDefinition[]): void {
     for (const [name, def] of this.defs.entries()) {
@@ -327,15 +433,28 @@ export class SubAgentManager {
     return [...this.defs.values()].filter((d) => d.userSelected).map((d) => ({ ...d }));
   }
 
-  /** 设置全局子代理默认模型（api:<key>[:<model>] / local:<id> / inherit / 空串=不覆盖）。
-   *  设置后新派发的子代理在无显式 model 与 def.model 时应用；运行中的不受影响。 */
-  setDefaultModel(model: string): void {
-    this.defaultModel = typeof model === "string" ? model.trim() : "";
+  /**
+   * 设置全局子代理**执行模型池**（A-1097）。`models[0]` 即执行兜底档。
+   * 设置后新派发的子代理在无显式 model 与 def.model 时应用；运行中的不受影响。
+   * 传入值一律过 `normalizeModelPool`（去空/去重/剔 `inherit`/限长）。
+   */
+  setDefaultModels(models: unknown): void {
+    this.defaultModels = normalizeModelPool(models);
   }
 
-  /** 当前全局默认模型（设置页回显用）。 */
+  /** 兼容旧调用点：单值即"只有一个档位的池"。 */
+  setDefaultModel(model: string): void {
+    this.setDefaultModels(model ? [model] : []);
+  }
+
+  /** 当前执行模型池（设置页回显用；顺序即优先级，[0] 为兜底档）。 */
+  getDefaultModels(): string[] {
+    return [...this.defaultModels];
+  }
+
+  /** 当前兜底档（= 池首；空串 = 不覆盖，回退 inherit）。兼容旧调用点。 */
   getDefaultModel(): string {
-    return this.defaultModel;
+    return this.defaultModels[0] ?? "";
   }
 
   /** 已注册的声明式定义清单。 */
@@ -414,20 +533,32 @@ export class SubAgentManager {
    * 返回派发的 run 记录。
    */
   delegate(task: string, overrides: Partial<SubAgentDef> & { agent?: string } = {}): SubAgentRun | null {
-    const wanted = (overrides.agent ?? "").trim();
-    if (wanted) {
-      const named = this.findByName(wanted);
-      if (!named) { return null; } // 点名失败必须如实上报，交由工具层列出可用清单
-      return this.spawnFromDef(named, task, overrides);
+    // A-1114 临时子代理（inline spec）：现场给了**定义内容**（systemPrompt / toolsOnly）就
+    // **不再去清单里找人**——现场定义比清单里任何人都更贴合本次任务，再拿去做语义打分只会选错。
+    // 判据只看这两个字段：`name` 单独出现**不构成定义**（那只是改个展示名），
+    // 否则模型随手填个 name 就会意外绕过点名 / 自动路由，变成一个说不清的第三种行为。
+    const adhoc = overrides.adhoc === true
+      && (!!overrides.systemPrompt?.trim() || (overrides.toolsOnly?.length ?? 0) > 0);
+    if (!adhoc) {
+      const wanted = (overrides.agent ?? "").trim();
+      if (wanted) {
+        const named = this.findByName(wanted);
+        if (!named) { return null; } // 点名失败必须如实上报，交由工具层列出可用清单
+        return this.spawnFromDef(named, task, overrides);
+      }
+      const def = this.matchDefinition(task);
+      if (def) { return this.spawnFromDef(def, task, overrides); }
     }
-    const def = this.matchDefinition(task);
-    if (def) { return this.spawnFromDef(def, task, overrides); }
-    // 不足自动创建：合成通用子代理兜底（不中断主链路，只回摘要）
-    const autoName = `通用助手（${task.slice(0, 12).replace(/\s+/g, " ").trim()}）`;
+    // 不足自动创建 / 临时代理：合成一个只跑这一次的执行者（不中断主链路，只回摘要）。
+    // ⚠️ 两条路**共用同一处合成逻辑**：临时代理不是「另一条派发路径」，
+    // 它只是**不做路由**的那条 —— 拆成两段各写一遍就是下一个漂移源（改一处漏一处）。
+    const autoName = `${adhoc ? "临时代理" : "通用助手"}（${task.slice(0, 12).replace(/\s+/g, " ").trim()}）`;
     return this.spawn({
       name: overrides.name ?? autoName,
       task,
       systemPrompt: overrides.systemPrompt ?? "你是通用任务执行助手，独立完成指派任务并返回简洁摘要。",
+      // A-1114：带上 adhoc 标记（spawn 据此不把名字误记成「命中的声明式定义名」）。
+      ...(adhoc ? { adhoc: true } : {}),
       agentId: overrides.agentId,
       toolsOnly: overrides.toolsOnly,
       model: overrides.model,
@@ -458,6 +589,11 @@ export class SubAgentManager {
       maxTurns: overrides.maxTurns ?? def.maxTurns,
       timeoutMs: overrides.timeoutMs ?? def.timeoutMs,
       outputSchema: overrides.outputSchema ?? def.outputSchema,
+      // A-1096 修复（静默缺陷）：**这条路径此前漏传联网开关**——delegate() 的两条主路
+      // （点名 spawnFromDef / 打分 spawnFromDef）全部经由这里，而只有"无匹配时的兜底合成"
+      // 走了 spawn（那里有 networkEnabled）。即：用户关掉联网后，**只要子代理是命中定义的**
+      // 就照样偷偷联网（与"关了还联网"的旧缺陷同形，只是漏在了另一条分支上）。
+      networkEnabled: overrides.networkEnabled,
     });
   }
 
@@ -469,11 +605,13 @@ export class SubAgentManager {
    *  模型路由：def.model 缺省时应用全局默认模型（无显式定义时即"全局子代理模型档"）。 */
   spawn(def: SubAgentDef): SubAgentRun {
     // A-975：`inherit` 语义 = 「跟随主对话（目标 Agent）模型」——它是**继承占位**而非显式档位，
-    // **不应遮挡**用户配置的全局子代理默认模型（廉价执行档）。优先级：显式 api:/local: 具体模型
-    // > 全局默认模型 > inherit(继承目标 Agent)。此前 `|| this.defaultModel` 因 inherit 非空导致
+    // **不应遮挡**用户配置的执行模型池。优先级：显式 api:/local: 具体模型
+    // > 执行模型池首（兜底档）> inherit(继承目标 Agent)。此前 `|| this.defaultModel` 因 inherit 非空导致
     // 内置专家（model:"inherit"）永远继承主对话模型，用户设的"执行档"模型对它们无效（"能设置却不生效"根因）。
+    // A-1097：兜底档从"唯一的那个模型"变成"池首"——池子里其余档位供主 Agent 按子任务难度点名（见系统提示）。
     const raw = (def.model ?? "").trim();
-    const effectiveModel = (!raw || raw === "inherit") ? this.defaultModel : raw;
+    const fallbackTier = this.defaultModels[0] ?? "";
+    const effectiveModel = (!raw || raw === "inherit") ? fallbackTier : raw;
     const run: SubAgentRun = {
       id: def.id ?? randomUUID(),
       name: def.name,
@@ -482,10 +620,16 @@ export class SubAgentManager {
       ...(def.timeoutMs && def.timeoutMs > 0 ? { timeoutMs: def.timeoutMs } : {}),
     };
     run.model = effectiveModel;
-    if (this.defs.has(def.name)) {
+    // A-1114：临时子代理**没有**命中的声明式定义 —— 名字撞上清单里的同名定义也不能记成它，
+    // 否则审计里会出现「临时代理被记成用了「代码审查员」定义」这种假归因（比没有字段更坏）。
+    if (!def.adhoc && this.defs.has(def.name)) {
       run.definitionName = def.name;
     }
     this.runs.set(run.id, run);
+    // A-1106/5b：**派发即出声**（status 仍是 pending）—— 只靠 onStart 的话，并发槽位被占满时
+    // 新派发的子代理会一直停在 pending 且不发事件，面板要等下一次轮询才看得到它。
+    // fire-and-forget（spawn 是同步 API，必须立刻返回 run）；钩子异常由 fireHook 吞掉，不影响派发。
+    void this.fireHook(this.hooks.onSpawn, run, def);
     void this.execute(run, effectiveModel ? { ...def, model: effectiveModel } : def);
     return run;
   }
@@ -526,18 +670,36 @@ export class SubAgentManager {
   /**
    * 事件驱动等待某个子代理到达终态（done/fail/timeout/cancelled）。
    * 取代「轮询 status」；超时兜底防挂死。返回终态快照，未知 id 立即返回 undefined。
+   *
+   * ⚠️ A-1106：`signal` 是**中断通路**（此前没有）。前台委派默认会 `await` 到子代理终态，
+   *    等待上限 960s（= 执行预算 900s + 60s 收尾余量，必须 > 预算，见 tools/builtin 的常量注释）。
+   *    在没有中断通路时，用户点「停止生成」只能停住主 Agent 的模型流 —— 卡在这个 await 里的
+   *    工具调用**照旧等满全程**（最长约 16 分钟），界面上表现为「停止按钮没反应」。
+   *
+   *    abort 时**只结束等待、不取消子代理**（保守取舍：子代理可能已跑了几分钟、只差最后一步，
+   *    回杀会白白丢掉它的产出）。上层据此如实回执，并告知可用 `subagent_result` 取回结果。
    */
-  async wait(id: string, timeoutMs = 300_000): Promise<SubAgentRun | undefined> {
+  async wait(id: string, timeoutMs = 300_000, signal?: AbortSignal): Promise<SubAgentRun | undefined> {
     const existing = this.runs.get(id);
     if (!existing) { return undefined; }
     if (isTerminal(existing.status)) { return this.status(id); }
+    // 已经中断：不进等待，立刻把当前快照如实交回（状态多半还是 running，由调用方归因）
+    if (signal?.aborted) { return this.status(id); }
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => resolve(), timeoutMs);
-      const waiters = this.completionWaiters.get(id) ?? [];
-      waiters.push(() => {
-        clearTimeout(timer);
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (): void => {
+        if (settled) { return; }
+        settled = true;
+        if (timer !== undefined) { clearTimeout(timer); }
+        // `{ once: true }` 只在 abort 路径自动摘除；超时/终态路径必须手动摘，否则监听器会残留
+        signal?.removeEventListener("abort", done);
         resolve();
-      });
+      };
+      timer = setTimeout(done, timeoutMs);
+      signal?.addEventListener("abort", done, { once: true });
+      const waiters = this.completionWaiters.get(id) ?? [];
+      waiters.push(done);
       this.completionWaiters.set(id, waiters);
     });
     return this.status(id);

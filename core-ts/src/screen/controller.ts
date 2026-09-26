@@ -12,6 +12,7 @@
  * 桌面与应用窗口同样通过它驱动。
  */
 import {
+  ActionVerify,
   DisplayInfo,
   ScreenAction,
   ScreenActionKind,
@@ -19,9 +20,12 @@ import {
   ScreenBackend,
   ScreenBackendId,
   ScreenCaptureResult,
+  UiDumpOutcome,
   UiElement,
   coordToDeviceInRegion,
 } from "./types.js";
+// A-1123：画面差异度量（命中校验的数据源）—— 与 setImageOptimizer 同款的注入点，见 optimize.ts
+import { getImageDiffer, imageDiffRatio } from "./optimize.js";
 // A-1044：用户让位仲裁（人优先）+ 操作区域几何 —— 判据唯一实现见 arbiter.ts
 import {
   decideUserYield,
@@ -58,6 +62,43 @@ const USER_CONFLICT_ACTIONS: ReadonlySet<ScreenActionKind> = new Set<ScreenActio
   "click", "double_click", "right_click", "middle_click", "long_press",
   "mouse_move", "drag", "scroll", "type", "key", "tap", "swipe",
 ]);
+
+/* ───────────────────── A-1123：命中校验（动作后自动复核 + 未命中自动重试一次） ─────────────────────
+ *
+ * 【要修的到底是什么】`detail` 只陈述「输入已注入」（"已在 (x,y) 左键单击"），**不陈述「效果已发生」**。
+ * 点空 / 目标被遮挡 / 窗口没聚焦 / 元素还没渲染出来 —— 四种情形的回执与成功**逐字相同**，
+ * 模型于是只能靠目测两张图来判断，而它**没有判据**（这就是"用起来总是糊涂"的另一半）。
+ *
+ * 【数据源】`imageDiffRatio`（optimize.ts 的注入点，GUI 用 nativeImage 实现）。
+ *   比较不了时返回 `null` —— 那是**没有判据**，不是"没变化"：此时**不许判负、不许重试**，
+ *   否则会把一次其实已经成功的点击再点一遍（对外是"双击了"，可能触发完全不同的行为）。
+ */
+
+/**
+ * **期望产生可见反馈**的动作集合 —— 命中校验只对它们做。
+ * `mouse_move`（只搬指针）与 `wait`（纯等待）画面本就不该变，纳入只会制造**假未命中**。
+ *
+ * ⚠️ **刻意不写成上面 `USER_CONFLICT_ACTIONS` 的派生**（`filter(k => k !== "mouse_move")`）：
+ *   两处回答的是**两个不同问题**（"会碰用户的输入吗" / "画面该变吗"），派生会让"新增一类动作"
+ *   悄无声息地同时改变另一边 —— 那正是本项目出过两次事故的「一个规则两处语义」。
+ * ⚠️ 也**不许**把第一行写成与上行逐字相同：`mut-a1044` M6 是**按行锚定**的，
+ *   行内容一撞，`check-mut-anchors` 就会报"不唯一 ⇒ 可能改错对象"（本轮真实踩到）。
+ */
+const VERIFY_ACTIONS: ReadonlySet<ScreenActionKind> = new Set<ScreenActionKind>([
+  "click", "double_click", "right_click",
+  "middle_click", "long_press",
+  "tap", "key", "type", "scroll", "drag", "swipe",
+]);
+
+/**
+ * 判定「画面有可见变化」的最小像素差异率。
+ * 留足噪声余量：时钟跳秒、文本光标闪烁、抗锯齿在 1440p 下各只占几百像素（<0.02%），
+ * 这里取 0.2% —— **宁可漏报"未命中"，也不要把噪声读成命中、更不要把命中读成未命中**（后者会触发一次多余点击）。
+ */
+const VERIFY_MIN_RATIO = 0.002;
+
+/** 未命中时的最大注入次数（2 = 自动重试一次；业界做法） */
+const VERIFY_MAX_ATTEMPTS = 2;
 
 /** controller 级错误（工具层据此回传可读原因） */
 export class ScreenError extends Error {
@@ -135,16 +176,31 @@ export class ScreenController {
     return b;
   }
 
-  /** 列出某后端（缺省全部）的目标 */
-  async listTargets(id?: ScreenBackendId): Promise<DisplayInfo[]> {
+  /**
+   * 列出某后端（缺省全部）的目标 —— **并回报每个失败后端的原因**（唯一实现）。
+   *
+   * A-1123：旧实现把每后端的异常 `catch` 后**连原因一起吞掉**（只留一句"不影响其它后端枚举"）。
+   * "不影响其它后端"是对的，但"原因也没了"是错的：全部后端都枚举失败时，
+   * `screen_info` 只能报「无可用目标 / 当前没有任何图形控制后端可用」——
+   * 模型据此以为**后端没装配**，去修一个并不存在的装配问题；真故障其实在宿主
+   * （PowerShell 启动失败 / adb 掉线 / 设备未授权）。现在把失败按后端归集回传，
+   * 由工具层逐条如实列出。判据与 A-1088 的 `listWindows` 完全一致：**故障不许与业务态同形**。
+   */
+  async listTargetsReport(id?: ScreenBackendId): Promise<{
+    targets: DisplayInfo[];
+    failures: Array<{ backend: ScreenBackendId; error: string }>;
+  }> {
     const ids: ScreenBackendId[] = id ? [id] : this.listBackends();
-    const out: DisplayInfo[] = [];
+    const targets: DisplayInfo[] = [];
+    const failures: Array<{ backend: ScreenBackendId; error: string }> = [];
     for (const bid of ids) {
       try {
-        out.push(...(await this.backend(bid).listTargets()));
-      } catch { /* 单后端不可用不影响其它后端枚举 */ }
+        targets.push(...(await this.backend(bid).listTargets()));
+      } catch (e) {
+        failures.push({ backend: bid, error: e instanceof Error ? e.message : String(e) });
+      }
     }
-    return out;
+    return { targets, failures };
   }
 
   /** 截屏（不占用互斥锁 —— 纯读，可并发）。同时记录坐标换算基准。 */
@@ -198,14 +254,26 @@ export class ScreenController {
     });
   }
 
-  /** A-975：导出某后端的 UI 元素层级（不支持/失败时返回空数组，工具层据此降级为纯视觉） */
-  async uiDump(id: ScreenBackendId, target?: string): Promise<UiElement[]> {
+  /**
+   * A-975 / A-1123：导出某后端的 UI 元素层级 —— **三态**（唯一实现）。
+   *
+   *  · `ok:true` + 有元素 = 导出成功，界面有可操作元素；
+   *  · `ok:true` + 空数组  = 导出**成功**，但界面确实没有可操作元素（全屏画布/游戏/页面未加载完）——**业务态**；
+   *  · `ok:false`          = 后端未注册 / 该后端没有元素树能力 / **导出本身失败**（宿主机崩 / dump 超时）——**故障态**。
+   *
+   * 旧实现是 `catch { return [] }`：把后两者压成**同一个空数组**，于是 `screen_ui_dump` 只能回
+   * 一句"未能导出元素层级（可能是 uiautomator 不可用、界面为全屏画布/游戏、或页面仍在加载）"
+   * —— 把一个**确定的后端故障**说成三种可能，模型于是去反复重试或改代码修一个不存在的问题。
+   * 这与 A-1088 对 `listWindows` / `focusWindow` 的修法同宗：**先把两态分开，再谈措辞**。
+   */
+  async uiDump(id: ScreenBackendId, target?: string): Promise<UiDumpOutcome> {
     const b = this.backends.get(id);
-    if (!b?.uiDump) { return []; }
+    if (!b) { return { ok: false, elements: [], error: `图形控制后端 '${id}' 未注册` }; }
+    if (!b.uiDump) { return { ok: false, elements: [], error: `后端 '${id}' 没有元素树能力（不支持元素层级导出）` }; }
     try {
-      return await b.uiDump(target);
-    } catch {
-      return [];
+      return { ok: true, elements: await b.uiDump(target) };
+    } catch (e) {
+      return { ok: false, elements: [], error: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -355,16 +423,24 @@ export class ScreenController {
     let resolved = action;
     let locateNote = "";
     if (action.selector && (action.kind === "click" || action.kind === "tap" || action.kind === "double_click" || action.kind === "long_press")) {
-      const els = await this.uiDump(id, target);
-      const el = matchElement(els, action.selector);
+      // A-1123：**导出故障**与**selector 没匹配**必须分两态（否则模型会去改 selector，
+      // 而真正坏掉的是宿主）。这里先看三态的 ok，再看匹配结果。
+      const dump = await this.uiDump(id, target);
+      if (!dump.ok) {
+        return {
+          ok: false,
+          error: `元素层级导出失败（不是 selector 的问题：后端没能给出元素树）：${dump.error ?? "未知原因"}。请改用 screen_capture 的网格刻度目测定位，或先修好后端。`,
+        };
+      }
+      const el = matchElement(dump.elements, action.selector);
       if (!el) {
         return {
           ok: false,
-          error: `元素定位失败（selector=${JSON.stringify(action.selector)}）——请先 screen_ui_dump 查看可选元素（必要时先下滑/翻页）`,
+          error: `元素定位失败（selector=${JSON.stringify(action.selector)}）——已导出 ${dump.elements.length} 个元素但没有匹配项；请先 screen_ui_dump 查看可选元素（必要时先下滑/翻页）`,
         };
       }
       resolved = { ...action, x: el.center.x, y: el.center.y, coordSpace: "device" };
-      locateNote = `（按元素 #${el.index}${el.text ? ` "${el.text}"` : el.id ? ` ${el.id}` : ""} 的中心）`;
+      locateNote = `（按元素 #${el.index}${el.text ? `「${el.text}」` : el.id ? ` ${el.id}` : ""} 的中心）`;
     }
 
     // 坐标换算：统一折算到物理像素（A-978：带上截图区域原点，按窗口截图才不会整体偏移）
@@ -408,8 +484,11 @@ export class ScreenController {
       selector: undefined,
     };
 
-    let result: ScreenActionResult;
-    try {
+    /**
+     * A-1123：**一次「注入 + 复截」** —— 抽成函数是因为未命中时要**原样重试一次**，
+     * 两处各写一遍（让位仲裁 / 焦点事件 / 复截）必然漂移（本项目「一个规则两处实现」出过两次事故）。
+     */
+    const injectOnce = async (): Promise<ScreenActionResult> => {
       // A-1044：**用户让位仲裁**（人优先）。放在这里而不是更早，是为了不为一个
       // 注定会被拒的动作（缺基准/元素定位失败）白等几秒。
       const conflictsWithUser = USER_CONFLICT_ACTIONS.has(action.kind) && !!backend.userIdleMs;
@@ -423,6 +502,7 @@ export class ScreenController {
         // `begin` 在注入**之前**发出：用户先看到"Agent 要动了"，才有机会把手挪开（人优先的可见化）
         this.emitFocus({ phase: "begin", backend: id, action: action.kind, label: describeAction(scaled), region: focusRegion, waitingUser: true });
       }
+      let r: ScreenActionResult;
       try {
         if (conflictsWithUser) {
           const gate = await this.awaitUserIdle(backend);
@@ -431,26 +511,124 @@ export class ScreenController {
           }
           yieldNote = gate.note;
         }
-        result = await backend.perform(scaled, target, info);
-        if (result.ok && yieldNote) { result.detail = `${result.detail ?? ""}${yieldNote}`; }
+        r = await backend.perform(scaled, target, info);
+        if (r.ok && yieldNote) { r.detail = `${r.detail ?? ""}${yieldNote}`; }
       } finally {
         if (conflictsWithUser) {
           this.emitFocus({ phase: "end", backend: id, action: action.kind, label: describeAction(scaled), region: focusRegion });
         }
       }
+      // 动作后自动复截（wait 无副作用、halt 已停 → 不复截）—— 这张图同时是命中校验的「动作后」证据
+      if (r.ok && this.autoCapture && action.kind !== "wait") {
+        const shot = await this.capture(id, target);
+        if (shot.ok) { r.capture = shot; }
+      }
+      return r;
+    };
+
+    // A-1123：命中校验的「动作前」参考图。
+    // ⚠️ 直接调 `backend.capture`（**不经** `this.capture`）：后者会 `rememberBasis`，
+    //    而这只是一张额外的比较用图，**不许**污染"模型看的那张图"的坐标基准 ——
+    //    按窗口截图时基准带 originX/originY，被一张整屏参考图覆盖后，下一次动作会整体偏移。
+    // ⚠️ `marks:false`：比较像素不需要标注，省一次标注绘制。
+    // ⚠️⚠️ 只有**真的能比较**时才拍这张图：没有差异度量时它永远用不上，
+    //    白拍一张整屏截图（每次点击多一次截图开销），并且让"动作后复截恰好一次"
+    //    这个既有判据变成两次（A-1123 首轮就是这么把 `screen.spec.ts` 打红的）。
+    const kindVerifiable = VERIFY_ACTIONS.has(action.kind);
+    const differReady = getImageDiffer() !== null;
+    const wantVerify = kindVerifiable && this.autoCapture && differReady;
+    let beforePng: string | undefined;
+    if (wantVerify) {
+      try {
+        const b0 = await backend.capture(target, { marks: false });
+        if (b0.ok) { beforePng = b0.pngBase64; }
+      } catch { beforePng = undefined; }
+    }
+
+    let result: ScreenActionResult;
+    try {
+      result = await injectOnce();
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
 
-    // 动作后自动复截（wait 无副作用、halt 已停 → 不复截）
-    if (result.ok && this.autoCapture && action.kind !== "wait") {
-      const shot = await this.capture(id, target);
-      if (shot.ok) { result.capture = shot; }
+    // ── A-1123：命中校验（未命中 → 自动重试一次）───────────────────────────────
+    // ⚠️ 条件用 `kindVerifiable` 而不是 `wantVerify`：关掉复截时**也要出声**
+    //    （回执里说明"跳过命中校验"），否则"没校验"与"校验通过"又变成同一句话。
+    if (result.ok && kindVerifiable) {
+      result = await this.verifyFeedback(result, beforePng, injectOnce);
     }
+
     if (result.ok && locateNote && result.detail) {
       result.detail = `${result.detail}${locateNote}`;
     }
     return result;
+  }
+
+  /**
+   * A-1123：**动作效果复核** —— 命中校验 + 未命中自动重试一次。
+   *
+   * 判据三分（关键：`ratio === null` **不是**"没变化"，而是**没有判据**）：
+   *   · `null`     → `hit:true` 且**不重试**（宁可放过，也不要把一次其实成功的点击再点一遍）；
+   *   · `>= 阈值`   → `hit:true`；
+   *   · `< 阈值`    → `hit:false`，**原样再注入一次**后重判（业界做法）。
+   *
+   * @param prev       首次注入的结果（`capture` 即"动作后"证据）
+   * @param beforePng  动作**前**的参考图（base64）；取不到时无法比较
+   * @param injectOnce 再次注入同一动作 —— 与首次**共用同一段实现**（含让位仲裁与复截）
+   * @returns 最终该回给模型的结果（重试过则以重试那次为基底，并带上 `verify`）
+   */
+  private async verifyFeedback(
+    prev: ScreenActionResult,
+    beforePng: string | undefined,
+    injectOnce: () => Promise<ScreenActionResult>,
+  ): Promise<ScreenActionResult> {
+    if (!this.autoCapture) {
+      return {
+        ...prev,
+        verify: { hit: true, ratio: null, attempts: 1, note: "已关闭动作后复截，本次不做命中校验" },
+      };
+    }
+    let ratio = imageDiffRatio(beforePng, prev.capture?.pngBase64);
+    if (ratio === null) {
+      // 「没有判据」有三种成因，**必须分开说**（否则用户拿不到可操作的下一步）：
+      //   未装配度量 → 换环境/开能力；参考图没取到 → 截图那条路坏了；不可比 → 尺寸不一致/解码失败。
+      const why = getImageDiffer() === null
+        ? "未装配画面差异度量，未做命中判定"
+        : beforePng === undefined
+          ? "动作前的参考图未取到，未做命中判定"
+          : "两张截图不可比（尺寸不一致或解码失败），未做命中判定";
+      const v: ActionVerify = { hit: true, ratio: null, attempts: 1, note: why };
+      return { ...prev, verify: v };
+    }
+    if (ratio >= VERIFY_MIN_RATIO) {
+      return { ...prev, verify: { hit: true, ratio, attempts: 1, note: "检测到画面可见变化" } };
+    }
+    // `attemptsMax` 显式标注为 number：否则 TS 按字面量类型 2 判「与 1 无交集」而报 ts(2367)
+    const attemptsMax: number = VERIFY_MAX_ATTEMPTS;
+    if (attemptsMax <= 1) {
+      return { ...prev, verify: { hit: false, ratio, attempts: 1, note: "画面无可见变化（未开启自动重试）" } };
+    }
+    // 未命中 → 原样重试一次
+    const again = await injectOnce();
+    if (!again.ok) {
+      return {
+        ...again,
+        verify: { hit: false, ratio, attempts: 2, note: "画面无可见变化；自动重试时动作本身失败" },
+      };
+    }
+    const r2 = imageDiffRatio(beforePng, again.capture?.pngBase64);
+    if (r2 !== null) { ratio = r2; }
+    const hit = ratio >= VERIFY_MIN_RATIO;
+    return {
+      ...again,
+      verify: {
+        hit,
+        ratio,
+        attempts: 2,
+        note: hit ? "首次未命中，自动重试后检测到画面可见变化" : "首次未命中，自动重试一次后画面仍无可见变化",
+      },
+    };
   }
 }
 

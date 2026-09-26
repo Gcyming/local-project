@@ -146,6 +146,12 @@ export interface AgentState {
   sandbox_override?: Record<string, unknown>;
   /** A-980-R22：工具面白名单配置（mode=default 内置推荐集 / mode=custom 用户勾选 skills+mcp） */
   tool_profile?: import("./agentTools.js").ToolProfile;
+  /**
+   * A-1096：Agent 设置里的「同意被派发为子代理」开关。三态语义（判据唯一出处
+   * `services/subagentCatalog.ts::isSubagentDispatchAllowed`，**不许把 undefined 与 false 合并**）：
+   *   undefined（缺省 / 历史配置）⇒ 允许；true ⇒ 允许；false ⇒ 拒绝。
+   */
+  subagent_dispatch?: boolean;
   [key: string]: unknown;
 }
 

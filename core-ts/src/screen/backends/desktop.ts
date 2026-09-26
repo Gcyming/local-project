@@ -25,6 +25,7 @@ import {
   ScreenActionResult,
   ScreenBackend,
   ScreenCaptureResult,
+  UiElement,
 } from "../types.js";
 import { toOptimizedDataUrl } from "../optimize.js";
 
@@ -655,8 +656,34 @@ export class DesktopScreenBackend implements ScreenBackend {
         } catch { /* 尺寸取不到不阻断截图 */ }
       }
       const bytes = Math.floor((pngBase64.length * 3) / 4);
-      // 桌面只叠网格刻度（不做元素框：桌面无 uiautomator，元素树不可得）
-      const opt = toOptimizedDataUrl(pngBase64, { grid: opts?.marks !== false });
+      /* A-1123：桌面也能叠**窗口编号框**（此前恒 `marks: 0` —— Set-of-Marks 的底子有、数据源没有）。
+         数据来自 `listWindows`（与"先聚焦窗口"同一份），粒度是**窗口**。
+         ⚠️ 坐标必须**减掉虚拟桌面原点**：标注的 marksSpace 是"图像空间"（见 `imageAnnotate`
+            的缩放 `x * W / marksSpace.width`），而窗口矩形是**虚拟桌面坐标**（副屏在左/上时为负）。
+            这与下面 `uiDump` 返回的坐标**刻意不同** —— 那边用于 `SetCursorPos` 点击，必须原样虚拟坐标。
+         ⚠️ 枚举失败**不阻断截图**（截图是主功能），但必须把原因写进 `warning` 出声 ——
+            否则症状就是"截图上没有编号框"而没有任何解释（静默失效家族的老毛病）。 */
+      let marks: Array<{ index: number; label?: string; x1: number; y1: number; x2: number; y2: number }> = [];
+      let marksWarning = "";
+      if (opts?.marks !== false) {
+        try {
+          const wins = await this.listWindows();
+          marks = wins.slice(0, 40).map((w, i) => ({
+            index: i + 1,
+            label: w.title.slice(0, 16),
+            x1: w.x - originX, y1: w.y - originY,
+            x2: w.x + w.width - originX, y2: w.y + w.height - originY,
+          }));
+        } catch (e) {
+          marksWarning = `窗口编号框未叠加：${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      const opt = toOptimizedDataUrl(
+        pngBase64,
+        marks.length > 0
+          ? { grid: true, marks, marksSpace: { width: devW, height: devH } }
+          : { grid: opts?.marks !== false },
+      );
       const imageW = opt.width; const imageH = opt.height;
       return {
         ok: true, pngBase64, dataUrl: opt.dataUrl,
@@ -664,8 +691,9 @@ export class DesktopScreenBackend implements ScreenBackend {
         originX, originY,
         imageWidth: imageW, imageHeight: imageH,
         bytes: opt.bytes || bytes,
+        ...(marksWarning ? { warning: marksWarning } : {}),
         annotate: opts?.marks !== false
-          ? { grid: true, marks: 0, scaleX: imageW && devW ? Number((devW / imageW).toFixed(4)) : 1, scaleY: imageH && devH ? Number((devH / imageH).toFixed(4)) : 1 }
+          ? { grid: true, marks: marks.length, scaleX: imageW && devW ? Number((devW / imageW).toFixed(4)) : 1, scaleY: imageH && devH ? Number((devH / imageH).toFixed(4)) : 1 }
           : undefined,
       };
     } catch (e) {
@@ -729,6 +757,36 @@ export class DesktopScreenBackend implements ScreenBackend {
       y: Number(w.y ?? 0),
       width: Number(w.width ?? 0),
       height: Number(w.height ?? 0),
+    }));
+  }
+
+  /**
+   * A-1123：桌面后端的**元素级定位**数据源 —— 粒度是**窗口**。
+   *
+   * 【为什么是窗口而不是控件】Windows 上要拿到窗口内的控件树必须走 UIAutomation
+   * （`System.Windows.Automation`）：要在常驻宿主里再挂一个 .NET 程序集，枚举深度与耗时都不可控
+   * （大页面上秒级），且拿到的 bounds 还要再做一次坐标系换算。而**窗口矩形**用现有的
+   * `GetWindowRect` + 进程枚举就能拿到（`listWindows` 已经在用）—— 零新增依赖、零新增宿主命令。
+   * 粒度粗一级，但收益正是 Set-of-Marks 的收益：**把"目测像素"换成"系统给出的矩形中心"**。
+   *
+   * 【坐标空间】返回的 `bounds`/`center` 是**虚拟桌面坐标**（与 `SetCursorPos` 同一个空间）。
+   * controller 把这些值以 `coordSpace:"device"` 直通回后端，两端口径一致，**不要再加原点**。
+   * ⚠️ 与 `capture` 里画编号框用的坐标**刻意不同**（那边要先减 `originX/originY` 变成图像空间）。
+   *
+   * 【故障不许吞】`listWindows` 在真故障时**抛错**（A-1088 判据），这里原样上抛，
+   * 由 controller 折成 `ok:false` 出声 —— 绝不 `catch { return [] }` 变成"桌面没有元素"。
+   */
+  async uiDump(): Promise<UiElement[]> {
+    const wins = await this.listWindows();
+    return wins.map((w, i) => ({
+      index: i + 1,
+      className: "Window",
+      text: w.title,
+      bounds: { x1: w.x, y1: w.y, x2: w.x + w.width, y2: w.y + w.height },
+      center: { x: Math.round(w.x + w.width / 2), y: Math.round(w.y + w.height / 2) },
+      // 窗口即"可点区域"（点它的中心通常就是把它带到前台）
+      clickable: true,
+      enabled: true,
     }));
   }
 

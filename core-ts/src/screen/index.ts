@@ -20,3 +20,5 @@ export {
   type ImageOptimizer,
   type OptimizedImage,
 } from "./optimize.js";
+// A-1123：画面差异度量（命中校验的数据源）—— 与 setImageOptimizer 同款注入点
+export { setImageDiffer, getImageDiffer, imageDiffRatio, type ImageDiffer } from "./optimize.js";

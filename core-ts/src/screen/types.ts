@@ -174,6 +174,24 @@ export interface UiElement {
   enabled?: boolean;
 }
 
+/**
+ * A-1123：一次动作的「命中校验」结果（动作后自动复核的产出口径）。
+ *
+ * 存在的理由：动作回执此前只有 `detail`（"已在 (x,y) 左键单击"）—— 那是**输入已注入**的陈述，
+ * 不是**效果已发生**的陈述。点空、被遮挡、窗口没聚焦时两者**完全同形**，模型只会反复重试同一坐标。
+ * 现在把「画面有没有可见变化」变成回执里的一等公民，未命中还会自动重试一次。
+ */
+export interface ActionVerify {
+  /** 是否检测到画面可见变化（true = 命中）。`ratio === null` 时恒为 true（**没有判据就不许判负**） */
+  hit: boolean;
+  /** 变化像素占比 0..1；`null` = 无法比较（未装配差异度量 / 尺寸不一致 / 解码失败）——**不是"没变化"** */
+  ratio: number | null;
+  /** 实际注入输入的次数（含自动重试；未做校验时恒为 1） */
+  attempts: number;
+  /** 人话说明（工具层直接拼进回执；不出现内部术语） */
+  note: string;
+}
+
 /** 动作执行结果 */
 export interface ScreenActionResult {
   ok: boolean;
@@ -181,6 +199,17 @@ export interface ScreenActionResult {
   detail?: string;
   /** 执行后的自动复截（对齐 Claude Code「每个动作后回一张截图」） */
   capture?: ScreenCaptureResult;
+  /** A-1123：命中校验（动作后自动复核 + 未命中自动重试一次） */
+  verify?: ActionVerify;
+  error?: string;
+}
+
+/** A-1123：元素层级导出的**三态**结果（把"不支持 / 导出故障 / 导出成功但没有元素"分开） */
+export interface UiDumpOutcome {
+  /** 导出是否**成功执行**（不等于"有元素"） */
+  ok: boolean;
+  elements: UiElement[];
+  /** `ok:false` 时的原因（后端未注册 / 不支持 / 抛错）——必须能说出是哪一种 */
   error?: string;
 }
 
@@ -200,7 +229,13 @@ export interface ScreenBackend {
   /**
    * A-975（可选能力）：导出当前界面的 UI 层级元素（Android 走 uiautomator dump）。
    * 返回可操作元素列表（含 bounds 中心），供「元素定位」点击——比目测坐标可靠得多。
-   * 后端不支持时返回空数组（工具层据此降级为纯视觉）。
+   *
+   * ⚠️ A-1123：**实现方「不支持」= 不实现这个方法**（或返回空数组，语义是"该后端没有元素树"）；
+   *    而**导出本身失败（宿主崩了 / dump 命令超时）必须抛错** —— 不许 `catch { return [] }`。
+   *    旧口径把「故障」与「界面就是没有可点元素」在上层压成同一个空数组，
+   *    于是 `screen_ui_dump` 只能回一句"未能导出元素层级（可能是 uiautomator 不可用…）"，
+   *    把**一个确定的后端故障**说成三种可能，模型据此去修并不存在的问题。
+   *    由 controller 统一把抛错转成 {@link UiDumpOutcome} 的 `ok:false`。
    */
   uiDump?(target?: string): Promise<UiElement[]>;
   /**
