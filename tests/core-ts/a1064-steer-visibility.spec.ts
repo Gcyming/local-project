@@ -77,9 +77,14 @@ describe("A-1064-A 引导是时间线上的一等节点（不是折进思考段�
 
 describe("A-1064-B 接线：三处产地同源，缺一处症状就回来", () => {
   it("契约类型认 steer（时间线节点 + 持久化镜像两处都要认，否则回看历史时静默丢节点）", () => {
-    expect(code(PANORAMA), "TimelineStep.kind 不认 steer").toMatch(/kind:\s*"think"\s*\|\s*"tool"\s*\|\s*"plan"\s*\|\s*"todo"\s*\|\s*"steer"/);
-    expect(code(CTX_META), "持久化镜像 TimelineStepLite.kind 不认 steer（重启后引导卡消失）")
-      .toMatch(/kind:\s*"think"\s*\|\s*"tool"\s*\|\s*"plan"\s*\|\s*"todo"\s*\|\s*"steer"/);
+    /* A-1095 #8′ 迁移（原锚点写的是 `"think" | "tool" | "plan" | "todo" | "steer"`）：
+       时间线新增了 `body`（该轮正文片段）这一等节点，两处联合都必须带上它 —— 否则
+       "回看历史时静默丢节点"这个症状会**原样复现**在 body 上（当次会话成立、重启后就没了）。
+       意图逐字保留：这里仍然**整条联合**逐字锁死（新增成员必须同步两处，不许只加一处）。 */
+    expect(code(PANORAMA), "TimelineStep.kind 不认 steer/body")
+      .toMatch(/kind:\s*"think"\s*\|\s*"body"\s*\|\s*"tool"\s*\|\s*"plan"\s*\|\s*"todo"\s*\|\s*"steer"/);
+    expect(code(CTX_META), "持久化镜像 TimelineStepLite.kind 不认 steer/body（重启后引导卡与正文片段消失）")
+      .toMatch(/kind:\s*"think"\s*\|\s*"body"\s*\|\s*"tool"\s*\|\s*"plan"\s*\|\s*"todo"\s*\|\s*"steer"/);
   });
 
   it("🐛 界面折进时间线的是 steer 节点，旧的「折成 think 文本」写法必须绝迹", () => {

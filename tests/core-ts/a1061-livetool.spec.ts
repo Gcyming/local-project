@@ -68,8 +68,16 @@ describe("A-1061②-A 失败判定唯一出处（实时行与完成卡共用）"
     const src = code(PANEL);
     expect(src).toContain("const isFail = isToolFailResult(r);");
     expect(src).not.toContain("isSuccessPrefix");
-    // 实时行也必须走同一个判据
-    expect(src).toContain("isToolFailResult(stripDiffTag(t.result ?? \"\").trim())");
+    /* A-1095 #9（返工）迁移：原断言要求**实时摘要行**也走同一判据
+       （`isToolFailResult(stripDiffTag(t.result ?? "").trim())`）—— 该摘要块已删除，
+       工具状态**只剩**思考历程的工具卡这一个产地，所以判据收敛点也只剩它。
+       意图（"判据唯一 + 先剥 diff 标记再判"）逐字保留，改为锁定卡片里那条**链路**：
+       `stripDiffTag(rawResult)` → `.trim()` → `isToolFailResult(...)`。
+       少了任一段，同一条命令就会在卡片里被判成相反的结果。 */
+    expect(src, "卡片必须先剥 diff 标记再判失败").toMatch(/const displayResult = stripDiffTag\(rawResult\);/);
+    expect(src, "判据的入参必须是剥完标记并 trim 过的文本").toMatch(/const r = displayResult\.trim\(\);/);
+    // 第二个产地不许复活
+    expect(src, "重复的「工具调用」摘要块已删除，不许复活").not.toMatch(/const pendingRow = runningTool &&/);
   });
 });
 
@@ -127,26 +135,37 @@ describe("A-1061②-B 接线：开始事件 → 配对 → 清行", () => {
     expect(toolBody).toContain("setRunningTool((cur) => {");
   });
 
-  it("实时区渲染逐条状态（调 toolStatusLabel 并带 running）", () => {
+  it("工具卡渲染逐条状态（调 toolStatusLabel 并带 running）—— **唯一产地**", () => {
     const src = code(PANEL);
-    const at = src.indexOf("const pendingRow = runningTool &&");
-    expect(at, "实时区没有 pendingRow（在跑的那条不会显示）").toBeGreaterThan(-1);
     /*
-     * A-1092 迁移：窗口从 2600 → 4000。
-     * 判据本身（"逐条状态由 toolStatusLabel(t.result, isFail, running) 产出"）不变，
-     * 但 A-1094 给这一段加了较长的解释性注释（说明为何弃用 `.text-scan-light`），
-     * 把 `toolStatusLabel(...)` 推到了原来的 2600 字窗口之外 —— 于是守卫**因为注释变长而红**，
-     * 与它要保护的行为无关。窗口只用于"限定在同一段代码内找"，放宽不影响判据强度。
-     * ⚠️ 若将来这段注释继续膨胀，请继续调宽窗口，**不要**改成全文 `toContain`
-     * （那会让"别的地方也调了 toolStatusLabel"冒充成实时区调了它）。
+     * A-1095 #9（返工）迁移：本断言原先锚在 `const pendingRow = runningTool && …`——
+     * 那是思考卡**下方**由 `toolEvents` 驱动的「工具调用」摘要块（分组计数 + 最近 5 条实时行）。
+     * 它是工具状态的**第二个产地**：用户看到的正是它，于是"工具调用挪进时间线"看起来**没有发生**
+     * （用户驳回原话：「工具调用和正文怎么还是这个布局？你改了什么？」）。
+     * 该块已**删除**；意图（逐条状态由 `toolStatusLabel` 产出、且阶段判据与卡片同源）**逐字保留**，
+     * 只是产地从"摘要块"收敛到"思考历程的工具卡"。下面同时锁住"第二条路径不许复活"。
      */
-    const body = src.slice(at, at + 4000);
-    expect(body).toContain("执行中…");
-    expect(body).toContain("toolStatusLabel(t.result, isFail, running)");
-    /* A-1094：实时区与卡片共用同一份阶段判据（两处各写一份必然漂移）。 */
-    expect(body).toContain("toolStatusPhase(t.result, running)");
-    // 只渲染最近若干条（实时区是"当下在做什么"，不是完整日志）
-    expect(src).toContain("const recent = toolEvents.slice(-5);");
+    expect(src, "重复的「工具调用」摘要块必须绝迹（否则工具状态有两个产地）")
+      .not.toMatch(/const pendingRow = runningTool &&/);
+    expect(src, "「最近 5 条实时行」是第二个产地的特征 —— 不许复活")
+      .not.toMatch(/const recent = toolEvents\.slice\(-5\);/);
+
+    const at = src.indexOf("const statusLabel = toolStatusLabel(");
+    expect(at, "思考历程的工具卡没有产出状态词").toBeGreaterThan(-1);
+    // 右界取**下一个兄弟语句**（skill §17④：固定窗口会因注释变长而假红）
+    const end = src.indexOf("const statusTitle =", at);
+    expect(end, "取不到工具卡的右界（statusTitle）").toBeGreaterThan(at);
+    const body = src.slice(at, end);
+    expect(body).toContain("toolStatusLabel(tool.result, isFail, isRunning)");
+    /* A-1094：卡片的阶段判据与动画同源（两处各写一份必然漂移）。 */
+    expect(body).toContain("toolStatusPhase(tool.result, isRunning)");
+
+    /* 唯一的渲染点：`data-running` / `data-settled` 各只允许出现一次（多一处就是又开了第二产地）。 */
+    const count = (needle: string): number => src.split(needle).length - 1;
+    expect(count('data-running={statusPhase === "running" ? "1" : undefined}'),
+      "工具卡运行态渲染点必须唯一").toBe(1);
+    expect(count('data-settled={statusPhase === "settled" ? "1" : undefined}'),
+      "工具卡落位渲染点必须唯一").toBe(1);
   });
 
   it("复位时清掉「执行中」行（否则上一轮的命令会在新一轮里假装在跑）", () => {

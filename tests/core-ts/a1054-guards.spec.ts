@@ -150,7 +150,10 @@ describe("A-1054① 接线：组件必须真的用这套闸门，且不许再有
   });
 
   it("AssistantMessage 把思考区委托给 ReasoningSection", () => {
-    expect(assistant).toContain("<ReasoningSection m={m} collapsed={collapsed} />");
+    /* ⚠️ A-1124 **迁移**（不是删）：思考区现在把 `liveStream` 一起透传给 `ReasoningSection`
+       —— 切会话恢复的占位气泡要思考内容是"活"的（吐字渐入 / 阶段恒展开），历史消息则靠默认假。
+       意图（思考区必须由 `ReasoningSection` 渲染，不许退回裸 Markdown）逐字保留。 */
+    expect(assistant).toContain("<ReasoningSection m={m} collapsed={collapsed} liveStream={liveStream} />");
   });
 });
 

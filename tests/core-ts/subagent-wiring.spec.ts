@@ -36,6 +36,8 @@ function codeOf(rel: string): string {
 const MAIN = codeOf("gui/src/main/index.ts");
 const CHAT = codeOf("gui/src/renderer/pages/ChatPanel.tsx");
 const SIDEBAR = codeOf("gui/src/renderer/pages/RightSidebar.tsx");
+/** A-1122：子代理会话前缀的**唯一产地**（main 从这里 import） */
+const SUBAGENT_SRC = codeOf("core-ts/src/services/subagent.ts");
 
 describe("子代理装配层源码约定（A-980-R31 防回归）", () => {
   /** 子代理 runner 的源码片段：从"子代理专属会话 id"起切一段。
@@ -70,7 +72,13 @@ describe("子代理装配层源码约定（A-980-R31 防回归）", () => {
   });
 
   it("后台子代理的授权/提问请求在主进程即时处理（渲染层会话过滤必然静默丢弃）", () => {
-    expect(MAIN).toContain("const SUBAGENT_SESSION_PREFIX = \"__subagent__:\"");
+    // A-1122：前缀字面量已**收归 core-ts 单一出处**（文件回滚要按它把子代理改动算到当时那一轮头上）。
+    // ⇒ 这里断言的是「main 从 core-ts 引入」，而不是「main 里有一份自己的字面量」。
+    //   ⚠️ 若哪天又出现本地定义，两份会各自漂移，症状是静默的（子代理改过的文件再也回滚不了）。
+    expect(MAIN).toContain('import { SUBAGENT_SESSION_PREFIX } from "../../../core-ts/src/services/subagent.js"');
+    expect(MAIN).not.toContain('const SUBAGENT_SESSION_PREFIX = "__subagent__:"');
+    // 而那份字面量必须**仍在** core-ts（迁走了却没落地 = 全是空引用，tsc 之外还得有人看着）
+    expect(SUBAGENT_SRC).toContain('export const SUBAGENT_SESSION_PREFIX = "__subagent__:"');
     // 权限：立即拒绝并给出可操作原因
     expect(MAIN).toContain("reqSid.startsWith(SUBAGENT_SESSION_PREFIX)");
     // 提问：按跳过返回
@@ -99,5 +107,45 @@ describe("子代理装配层源码约定（A-980-R31 防回归）", () => {
   it("清空在途估算时连挂起值一起清（否则 done 后旧在途值被灌回来 → 重复计数）", () => {
     expect(SIDEBAR).toContain("pendingCtxRef.current.reply = 0");
     expect(SIDEBAR).toContain("pendingCtxRef.current.reason = 0");
+  });
+});
+
+describe("A-1095③ 装配可见性（「派发还在不在循环里」必须可核对，不许只能靠观感猜）", () => {
+  /* 用户原话：「顺手看一下子代理派发还在不在 Agent-Loop 循环，好久没看见了」。
+   * 这句话本身能问得出来，就说明装配层缺的是**可核对性**：成功时一声不响，日志里也没有线索。
+   * 本组锁的正是"能不能核对"，全部属静默失效家族（过 tsc / 过构建 / 过逻辑测试）。 */
+
+  it("① 接线点必须真的被调用（工具注入 + 清单注入同一处）", () => {
+    expect(MAIN).toContain("setSubagentManager(subagents);");
+    expect(MAIN).toContain("subagentsRef = subagents;");
+  });
+
+  it("② 装配成功必须留一条可 grep 的日志，且点明接的是哪个工具", () => {
+    expect(MAIN).toContain("[subagent] 装配完成");
+    expect(MAIN).toContain("已接线 delegate_subagent");
+    /* 日志必须紧跟在接线点之后：挪到别处（或复制到别的分支）就等于"装配完成"与接线脱钩，
+       下次再有人问"派发还在不在"，这条日志会给出**错误的安全感**。 */
+    const wire = MAIN.indexOf("setSubagentManager(subagents);");
+    const log = MAIN.indexOf("[subagent] 装配完成");
+    expect(wire).toBeGreaterThan(-1);
+    expect(log).toBeGreaterThan(wire);
+    expect(log - wire).toBeLessThan(1500);
+  });
+
+  it("③ catch 归因必须写明后果（禁止「不影响主流程」这类假安慰）", () => {
+    /* 历史文案是 `[scheduler] 启动失败（不影响主流程）`，而它兜住的其实是**整个后半段**
+       （含子代理装配 / 事件端点 / 后台任务 IPC）—— 把"Agent-Loop 少一条腿"报成
+       "定时任务没起来"，于是用户只看到"派发不见了"，日志里没有任何线索。 */
+    expect(MAIN).not.toContain("[scheduler] 启动失败（不影响主流程）");
+    expect(MAIN).toContain("[scheduler] 定时唤醒装配失败");
+    expect(MAIN).toContain("一并被跳过");
+    expect(MAIN).toContain("delegate_subagent 将不可用");
+  });
+
+  it("④ 判假分支也必须出声（历史上是**完全静默**跳过，连 catch 都不进）", () => {
+    /* 可达路径：data/schedules.json 存在、能解析，但不是数组（如被手改成 `{}`）且无运行态快照。
+       判据是 `Array.isArray(schedDefs) || existsSync(statePath)`（⚠️ 文件不存在时 schedDefs 是
+       `[]`，`Array.isArray([]) === true` ⇒ 正常情况走的是真分支，**不是**恒假）。 */
+    expect(MAIN).toContain("不是数组且无运行态快照");
   });
 });

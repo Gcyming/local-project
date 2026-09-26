@@ -489,9 +489,22 @@ describe("A-1085 摘要覆盖不受 50 条静默上限（tailLimit：limit<=0 = 
   });
 
   it("接线：压缩摘要轮**读全量**，常规发送走命名常量（不许再出现裸 50）", () => {
+    // ⚠️ A-1106 迁移（**保留意图，不许删**）：A-1085 当初把「摘要轮」与「压缩后校验」
+    //    两处读全量写成同一个函数 `loadSessionHistory(…, { full: true })`，所以断言是「2 次」。
+    //    但 A-1106 把读盘拆成了两个入口 —— `loadRawHistoryWithMeta`（原始全量：判据 + 摘要素材）
+    //    与 `loadSessionHistory`（折叠视图：真实发送体积）——
+    //    **A-1085 的不变量没有变**：两处都必须 `full: true`（否则摘要只覆盖最后 50 条 ⇒
+    //    早期对话从不进入摘要，且 tokensAfter 与 used 不同源 ⇒ isRealShrink 失真）。
+    //    所以这里按**新形态**迁移，而不是把断言删掉。
+    const rawFull = (MAIN_C.match(/loadRawHistoryWithMeta\(sessionId, \{ full: true \}\)/g) ?? []).length;
+    const viewFull = (MAIN_C.match(/loadSessionHistory\(sessionId, \{ full: true \}\)/g) ?? []).length;
+    expect(rawFull, "摘要轮没读全量 ⇒ 早期对话从不进入摘要（静默丢上下文记忆）").toBe(1);
+    expect(viewFull, "压缩后校验没读全量 ⇒ tokensAfter 与 used 不同源 ⇒ isRealShrink 失真").toBe(1);
+    // 兜底：带 `{ full: true }` 的读盘点只许这两处。新增第三处时必须一并审「它该不该读全量」，
+    // 而不是悄悄多出一个（多出来的那处若漏了 full，就是又一条静默丢记忆的路）。
     expect(
-      (MAIN_C.match(/loadSessionHistory\(sessionId, \{ full: true \}\)/g) ?? []).length,
-      "摘要轮没读全量，或压缩前后口径不一致（tokensAfter 与 used 不同源 ⇒ isRealShrink 失真）",
+      (MAIN_C.match(/\{ full: true \}/g) ?? []).length,
+      "多了一个读全量的入口（或有一处漏了 full）—— 请逐个审它是否该读全量",
     ).toBe(2);
     expect(MAIN_C).toContain("HISTORY_LOAD_LIMIT");
     expect(MAIN_C, "裸 50 又回来了 → 与常量成了两个产地").not.toMatch(/loadHistoryForSession\(meta\.agentId, meta\.id, 50,/);

@@ -12,6 +12,8 @@ import {
   skillsRootDir,
   type ToolProfile,
 } from "../../core-ts/src/services/agentTools.js";
+import { getRegistry, resetRegistry } from "../../core-ts/src/tools/registry.js";
+import { registerBuiltinTools } from "../../core-ts/src/tools/builtin.js";
 
 describe("resolveAgentToolProfile", () => {
   it("缺省/默认模式 → 内置推荐集（default）", () => {
@@ -57,6 +59,25 @@ describe("agentToolsOnly", () => {
     const out = agentToolsOnly({ mode: "custom", skills: [], mcp: ["web"] }, () => ["mcp_web", "mcp_web_search"]);
     expect(out).toContain("mcp_web");
     expect(out).toContain("mcp_web_search");
+  });
+});
+
+describe("组合：真实注册表 → Agent 工具面（A-1095③）", () => {
+  /* 为什么需要这一条：上面两个 describe 各自只锁了一半 ——「注册表里确实有 delegate_subagent」
+   * （delegate-subagent.spec）与「agentToolsOnly 保留非 mcp_ 工具」（用**合成名单**验）分别成立，
+   * 但**组合起来**（真实注册表穿过真实过滤器）没有任何断言。
+   * 组合一旦断掉：模型手里就没有委派工具 ⇒ `delegate_subagent` 永远不会被调用，
+   * 用户体感是「子代理派发好像消失了」，而 tsc / 构建 / 全部逻辑测试照样全绿。
+   * ⚠️ 必须用**真实注册表**：合成名单过不了这一关 —— 那正是本测试存在的理由。 */
+  it("delegate_subagent / subagent_result 必须穿过工具面过滤（模型据此才可能派发）", () => {
+    resetRegistry();
+    registerBuiltinTools();
+    const names = getRegistry().listToolNames();
+    expect(names).toContain("delegate_subagent");
+    expect(names).toContain("subagent_result");
+    const face = agentToolsOnly(DEFAULT_TOOL_PROFILE, () => names);
+    expect(face).toContain("delegate_subagent");
+    expect(face).toContain("subagent_result");
   });
 });
 

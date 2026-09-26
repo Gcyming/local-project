@@ -51,31 +51,42 @@ function fakeClock(): LimiterClock & { sleeps: number[] } {
 
 describe("A-1092 A 组 — 四层取值优先级", () => {
   it("A1 实测 > 手填（实测是上游亲口说的，任何人工输入都不该盖过它）", () => {
-    expect(resolveRpm(50, 10, 7)).toEqual({ rpm: 50, source: "observed" });
+    expect(resolveRpm({ observed: 50, declared: 10, manual: 7 })).toEqual({ rpm: 50, source: "observed" });
   });
 
   it("A2 无实测 → 手填压过声明（用户比内置表更懂自己的档位）", () => {
-    expect(resolveRpm(null, 10, 7)).toEqual({ rpm: 7, source: "manual" });
-    expect(resolveRpm(undefined, 10, 7)).toEqual({ rpm: 7, source: "manual" });
+    expect(resolveRpm({ observed: null, declared: 10, manual: 7 })).toEqual({ rpm: 7, source: "manual" });
+    expect(resolveRpm({ observed: undefined, declared: 10, manual: 7 })).toEqual({ rpm: 7, source: "manual" });
   });
 
-  it("A3 无实测无手填 → 声明", () => {
-    expect(resolveRpm(null, 10, null)).toEqual({ rpm: 10, source: "declared" });
-    expect(resolveRpm(null, 10)).toEqual({ rpm: 10, source: "declared" }); // 第三参数可选（向后兼容）
+  it("A3 无实测无手填 → 声明（手填/声明都是可选 key：缺省即「没这个信息」）", () => {
+    expect(resolveRpm({ observed: null, declared: 10, manual: null })).toEqual({ rpm: 10, source: "declared" });
+    expect(resolveRpm({ observed: null, declared: 10 })).toEqual({ rpm: 10, source: "declared" });
   });
 
   it("A4 三者都没有 ⇒ 未知（放行，不发明阈值）", () => {
-    expect(resolveRpm(null, null, null)).toEqual({ rpm: null, source: "unknown" });
+    expect(resolveRpm({ observed: null, declared: null, manual: null })).toEqual({ rpm: null, source: "unknown" });
+    expect(resolveRpm({})).toEqual({ rpm: null, source: "unknown" });
   });
 
   it("A5 手填的坏值（0 / 负数 / NaN）当**没有手填**，链条继续落到声明", () => {
-    expect(resolveRpm(null, 10, 0)).toEqual({ rpm: 10, source: "declared" });
-    expect(resolveRpm(null, 10, -3)).toEqual({ rpm: 10, source: "declared" });
-    expect(resolveRpm(null, 10, Number.NaN)).toEqual({ rpm: 10, source: "declared" });
+    expect(resolveRpm({ observed: null, declared: 10, manual: 0 })).toEqual({ rpm: 10, source: "declared" });
+    expect(resolveRpm({ observed: null, declared: 10, manual: -3 })).toEqual({ rpm: 10, source: "declared" });
+    expect(resolveRpm({ observed: null, declared: 10, manual: Number.NaN })).toEqual({ rpm: 10, source: "declared" });
   });
 
   it("A6 手填有效时，源标注必须是 manual（不许把手填说成实测）", () => {
-    expect(resolveRpm(null, null, 5).source).toBe("manual");
+    expect(resolveRpm({ observed: null, declared: null, manual: 5 }).source).toBe("manual");
+  });
+
+  it("A7 A-1106：入参按 key 传 ⇒ **位置不再承载语义**（填错 key 由 tsc 拒绝，而不是静默按位置错配）", () => {
+    // 同一组值用不同书写顺序给出，结果必须完全一致 —— 锁住「顺序无关」这条不变式。
+    const a = resolveRpm({ observed: null, manual: 7, declared: 10 });
+    const b = resolveRpm({ declared: 10, observed: null, manual: 7 });
+    const c = resolveRpm({ manual: 7, declared: 10, observed: null });
+    expect(a).toEqual({ rpm: 7, source: "manual" });
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
   });
 });
 
@@ -263,8 +274,14 @@ describe("A-1092 J 组 — RPM 限流器已经是 Agent-Loop 的必经之路（�
 
   it("J4 限流的**唯一咽喉**是 fetchWithRetry：发前 acquire、收后 observe", () => {
     const src = read("core-ts/src/llm/client.ts");
-    expect(src).toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);");
+    // ⚠️ A-1106 迁移（2026-09-25）：`acquire` 现在多带一个 `onWait` 回调
+    //（在**每次真正 sleep 之前**上报，否则是「等完了才出声」）。
+    // 原断言的 `acquire(rateLimit.key, rateLimit.model);` 形态随之失效 —— 按纪律**迁移**：
+    // 意图「限流咽喉恰好一处、且是两参调用形态」改为「前缀两参 + 末参是 onWait 回调」。
+    expect(src).toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {");
     expect(src).toContain("getSharedRpmLimiter().observe(");
+    // 反向：不许退化成不带 onWait 的两参调用（那就是「等完了才说」）
+    expect(src, "等待期界面会重新变成一整段空白").not.toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);");
   });
 
   it("J5 限流器是**进程级共享单例**（各层各持一份会让合起来超限）", () => {

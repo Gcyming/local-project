@@ -267,9 +267,12 @@ describe("SlimeEngine 非流式 chat", () => {
       .rejects.toThrow(/chat 全部路由失败/);
   });
 
-  it("跨供应商全局降级（A-158）：首选供应商全挂（免费池整体 429）自动转移到其他已配置供应商", async () => {
-    // opencode-zen 整池 429 场景：首选「primary」8 个免费模型全 FreeUsageLimit，
-    // 应自动落到「backup」供应商的启用模型（实测 agnes 可用正是此场景）
+  it("跨供应商降级（A-1108）：按**用户配置的降级池**转移 —— 首选整池 429 时落到备用供应商", async () => {
+    // A-158 立的是「跨供应商转移」这个**能力**，当时的实现是自动把其他所有已配置供应商的
+    // 启用模型全量注入。用户实测反馈「我都没设置过降级池，它哪来的？」（A-1108）
+    // ⇒ 能力保留、默认改为空池，必须有用户显式配置的条目才会转移。
+    // 本用例是**迁移后**的形态：意图（首选整池挂掉 → 落到 agnes 那类备用供应商）一字未改，
+    // 只是触发条件从「自动」变成「用户配置」。
     const callLog: string[] = [];
     const multiProviders = {
       "primary": {
@@ -295,6 +298,8 @@ describe("SlimeEngine 非流式 chat", () => {
       registry: reg,
       providers: multiProviders,
       logger: quietLogger(),
+      // A-1108：跨供应商降级**不再是默认行为** —— 这一条就是用户自己加的降级池条目
+      fallbackPool: { entries: [{ provider: "backup", model: "stable-x" }] },
       clientFactory: (route) => new ChatClient({
         baseUrl: route.baseUrl,
         apiKey: route.apiKey,
@@ -316,6 +321,87 @@ describe("SlimeEngine 非流式 chat", () => {
     expect(r.reply).toBe("备用供应商救场");
     // 首选全挂后确实落到了 backup（至少一次请求打到 mock.backup）
     expect(callLog.some((c) => c.includes("mock.backup"))).toBe(true);
+  });
+
+  /** A-1108 的两个「不许再自己造一个池」入口共用的夹具：备用供应商**存在且完全可用** ——
+   *  它仍不该被用，这才是反证（如果只是「备用不可用所以没转移」，那证明不了任何事）。 */
+  const noPoolFixture = (): { providers: Record<string, unknown>; callLog: string[] } => {
+    const callLog: string[] = [];
+    return {
+      callLog,
+      providers: {
+        "primary": {
+          api_base: "http://mock.primary/v1",
+          api_key: "p",
+          model: "free-a",
+          models: [{ id: "free-a", selected: true }],
+        },
+        "backup": {
+          api_base: "http://mock.backup/v1",
+          api_key: "b",
+          model: "stable-x",
+          models: [{ id: "stable-x", selected: true }],
+        },
+      },
+    };
+  };
+
+  it("默认无降级池（A-1108）：空池 ⇒ 首选全挂如实报错，**不**偷偷换到其他已配置供应商", async () => {
+    // 用户原话：「我都没设置（降级池），是哪来的？」—— 这就是本次要根除的行为。
+    const { providers, callLog } = noPoolFixture();
+    const engine = new SlimeEngine({
+      registry: reg,
+      providers: providers as never,
+      logger: quietLogger(),
+      fallbackPool: { entries: [] },
+      clientFactory: (route) => new ChatClient({
+        baseUrl: route.baseUrl,
+        apiKey: route.apiKey,
+        fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as { model?: string };
+          callLog.push(`${String(url)}:${body.model ?? ""}`);
+          if (String(url).includes("primary")) {
+            return new Response(JSON.stringify({ error: { type: "FreeUsageLimitError", message: "rate limit" } }), {
+              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "0" },
+            });
+          }
+          return chatReply("本不该被调用");
+        }) as unknown as typeof fetch,
+      }),
+    });
+    await expect(engine.chat({ agent: makeAgent({ model_choice: "api:primary" }), message: "hi", history: [], systemPrompt: "", toolsOnly: [] }))
+      .rejects.toThrow(/chat 全部路由失败/);
+    // 关键反证：备用的 base 一次都没被请求过（旧实现会打过去）
+    expect(callLog.some((c) => c.includes("mock.backup"))).toBe(false);
+  });
+
+  it("默认无降级池（A-1108）：磁盘上没有 config/fallback-pool.json ⇒ 同样是空池", async () => {
+    // 「没配置过」在真实机器上就是这个形态：文件不存在。绝不允许"读不到就补一个默认池"。
+    const { providers, callLog } = noPoolFixture();
+    const engine = new SlimeEngine({
+      registry: reg,
+      providers: providers as never,
+      logger: quietLogger(),
+      // 指向一个**不存在**的根 ⇒ readFallbackPool 必然回空池（无需写盘，确定性）
+      fallbackPoolRoot: join(tmpdir(), "slime-a1108-no-such-root"),
+      clientFactory: (route) => new ChatClient({
+        baseUrl: route.baseUrl,
+        apiKey: route.apiKey,
+        fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as { model?: string };
+          callLog.push(`${String(url)}:${body.model ?? ""}`);
+          if (String(url).includes("primary")) {
+            return new Response(JSON.stringify({ error: { type: "FreeUsageLimitError", message: "rate limit" } }), {
+              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "0" },
+            });
+          }
+          return chatReply("本不该被调用");
+        }) as unknown as typeof fetch,
+      }),
+    });
+    await expect(engine.chat({ agent: makeAgent({ model_choice: "api:primary" }), message: "hi", history: [], systemPrompt: "", toolsOnly: [] }))
+      .rejects.toThrow(/chat 全部路由失败/);
+    expect(callLog.some((c) => c.includes("mock.backup"))).toBe(false);
   });
 
   it("显式引用不存在的 Provider key → 明确报错（不静默切到其他供应商）", async () => {

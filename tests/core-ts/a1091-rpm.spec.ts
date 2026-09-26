@@ -45,22 +45,22 @@ function fakeClock(): LimiterClock & { advance: (ms: number) => void; sleeps: nu
 
 describe("A-1091 A 组 — 额度取值：实测 > 声明 > 未知（不发明阈值）", () => {
   it("A1 实测优先于声明（付费档实测 20 > 免费档声明 10 —— 绝不能取小）", () => {
-    expect(resolveRpm(20, 10)).toEqual({ rpm: 20, source: "observed" });
+    expect(resolveRpm({ observed: 20, declared: 10 })).toEqual({ rpm: 20, source: "observed" });
   });
 
   it("A2 无实测 → 用声明档位", () => {
-    expect(resolveRpm(null, 10)).toEqual({ rpm: 10, source: "declared" });
-    expect(resolveRpm(undefined, 10)).toEqual({ rpm: 10, source: "declared" });
+    expect(resolveRpm({ observed: null, declared: 10 })).toEqual({ rpm: 10, source: "declared" });
+    expect(resolveRpm({ observed: undefined, declared: 10 })).toEqual({ rpm: 10, source: "declared" });
   });
 
   it("A3 两者都没有 ⇒ **未知**（rpm=null ⇒ 放行，不猜一个数去卡人）", () => {
-    expect(resolveRpm(null, null)).toEqual({ rpm: null, source: "unknown" });
+    expect(resolveRpm({ observed: null, declared: null })).toEqual({ rpm: null, source: "unknown" });
   });
 
   it("A4 坏配置（0 / 负数 / NaN）视为**未知**而不是「不能发」（坏配置的降级方向必须是「能用」）", () => {
-    expect(resolveRpm(0, 0).source).toBe("unknown");
-    expect(resolveRpm(-5, -5).source).toBe("unknown");
-    expect(resolveRpm(Number.NaN, Number.NaN).source).toBe("unknown");
+    expect(resolveRpm({ observed: 0, declared: 0 }).source).toBe("unknown");
+    expect(resolveRpm({ observed: -5, declared: -5 }).source).toBe("unknown");
+    expect(resolveRpm({ observed: Number.NaN, declared: Number.NaN }).source).toBe("unknown");
   });
 
   it("A5 能力表的 Agnes 声明档位 = 10（官方 2026-09-23 下调后的免费档）", () => {

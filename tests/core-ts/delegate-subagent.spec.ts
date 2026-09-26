@@ -131,7 +131,9 @@ function fakeManagerWithWait(final: FakeRun, opts: { onDelegate?: (o?: { agent?:
     },
     wait: async (id: string): Promise<FakeRun | undefined> => (id === final.id ? final : undefined),
     list: (): FakeRun[] => [final],
-    catalog: () => [{ name: final.name, description: "专家", source: "builtin" }],
+    // A-1096：`source` 用 `as const` 收窄为字面量（装配侧接口已收窄为 "user" | "builtin"）。
+    // 不收窄的话这里会推断成 string，假实现与真实接口的契约就悄悄松掉了。
+    catalog: () => [{ name: final.name, description: "专家", source: "builtin" as const }],
   };
 }
 
