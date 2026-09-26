@@ -190,12 +190,14 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
       display: "flex", alignItems: "center", justifyContent: "center",
     }}
       onClick={(e) => { if (e.target === e.currentTarget) { props.onClose(); } }}>
-      <div className="card" style={{
+      <div className="modal-card" style={{
         width: 480, maxWidth: "92vw", maxHeight: "76vh",
         display: "flex", flexDirection: "column",
         animation: "fadeIn 0.18s ease",
-        // A-918+ 性能：面板本体去 backdrop-filter（滚动选文件夹列表时 GPU 持续重绘）；改纯实色底
-        background: "var(--bg-card, rgba(22, 30, 56, 0.96))",
+        // A-1098：原为 inline `background: var(--bg-card, rgba(22,30,56,0.96))`——那个 0.96 兜底
+        // **被 beta 主题的 `--bg-card`（rgba(20,28,52,0.5)）击穿**，弹窗在 beta 下是半透明的
+        // （兜底值只在变量缺失时生效，主题一旦定义了变量就轮不到它）。实底统一交给 `.modal-card`
+        // 的 `--float-surface`，此处不再自带背景（也就不会再有第二个真相源）。
       }}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
           <PlusIcon size={16} style={{ color: "var(--accent)", marginRight: 8, flexShrink: 0 }} />

@@ -6,6 +6,8 @@
 import React, { type JSX } from "react";
 import type { McpServerInfo } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
+import { marketSource } from "./marketView.js";
+import { localizeServerTags } from "../../../../core-ts/src/services/marketLocalize.js";
 
 /** A-918++：内置 MCP 插件广场目录（业界常用 MCP 服务器一键安装；envHint 提示需要的环境变量） */
 const MCP_MARKETPLACE: Array<{
@@ -58,19 +60,33 @@ export default function McpPanel(): JSX.Element {
   }> | null>(null);
   const [registryLoading, setRegistryLoading] = React.useState(false);
   const [registryError, setRegistryError] = React.useState("");
+  // A-1106：**最近一次生效的搜索词** —— 列表「归谁」只由它决定（空 = 内置精选视图）。
+  // 不能直接用 `marketQuery` 判定：那样用户一打字、还没回车，列表就会在两种数据源间跳变。
+  const [registryQuery, setRegistryQuery] = React.useState("");
+  // A-1106：**真正发给上游的检索词**（中文输入会被展开成英文）+ 「没认出来」标记。
+  // 两者都只用于**如实显示**——用户搜了中文，界面必须说清实际搜的是什么（不许静默）。
+  const [registryApplied, setRegistryApplied] = React.useState("");
+  const [registryUnrecognized, setRegistryUnrecognized] = React.useState(false);
   // A-918++：列表只渲染前 20 条（防 60+ 卡片全量渲染卡顿）+「显示更多」
   const [showAll, setShowAll] = React.useState(false);
 
-  /** 联网拉取官方 MCP registry（打开广场时触发一次；带搜索词则按关键词搜） */
+  /** 联网拉取官方 MCP registry（**只在用户主动搜索时**调用；空词 = 重置回内置精选） */
   const loadRegistry = React.useCallback(async (force = false, q = ""): Promise<void> => {
     if (!api.current?.extras?.mcpRegistrySearch) { return; }
     if (!force && registryServers !== null && !q) { return; }
+    const term = q.trim();
     setRegistryLoading(true);
     setRegistryError("");
     try {
-      const res = await api.current.extras.mcpRegistrySearch(q || undefined);
-      if (res?.ok && Array.isArray(res.servers)) { setRegistryServers(res.servers); }
-      else { setRegistryError(res?.error ?? "联网搜索失败"); }
+      const res = await api.current.extras.mcpRegistrySearch(term || undefined);
+      if (res?.ok && Array.isArray(res.servers)) {
+        setRegistryServers(res.servers);
+        // A-1106：只有「用户主动搜索且搜到了」才让 registry 结果接管列表；空词 = 回到内置精选
+        setRegistryQuery(term);
+        // 如实记录"上游实际收到的检索词"（中文会被展开成英文）与"没认出来"
+        setRegistryApplied(res.appliedQuery ?? term);
+        setRegistryUnrecognized(res.unrecognized === true);
+      } else { setRegistryError(res?.error ?? "联网搜索失败"); }
     } catch (e) {
       setRegistryError(`联网搜索失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -78,9 +94,14 @@ export default function McpPanel(): JSX.Element {
     }
   }, [registryServers]);
 
+  // A-1106：**打开广场不再自动联网**（原为 `if (marketOpen) { void loadRegistry(); }`）。
+  // 旧行为：一打开就拉全量 registry，网络返回后 `hasRegistry` 把整个列表替换成 registry 的
+  // 30 条按字母序通用目录项（`ac.inference.sh/mcp` 之类），用户正想装的内置精选
+  // （filesystem / playwright / memory …，只有它们带准确安装命令）**当场消失、无声无息**
+  // —— 用户报「刚打开是内置精选，过一会就变成 registry 了」。
+  // 现在：内置精选常驻；registry 只在用户按回车 / 点「联网搜索」时接管（见下方 useRegistry）。
   React.useEffect(() => {
-    if (marketOpen) { void loadRegistry(); }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (marketOpen) { setShowAll(false); }
   }, [marketOpen]);
 
   /** 从官方 registry 一键安装 */
@@ -258,7 +279,8 @@ export default function McpPanel(): JSX.Element {
   }
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>MCP 接入</h2>
         <button className="btn" style={{ padding: "5px 12px", fontSize: 12.5, marginRight: 8 }}
@@ -352,18 +374,29 @@ export default function McpPanel(): JSX.Element {
         const q = marketQuery.trim().toLowerCase();
         const regList = (registryServers ?? []).map((s) => ({ ...s, __registry: true as const }));
         const builtinList = MCP_MARKETPLACE.map((m) => ({ ...m, name: m.name, desc: m.desc, tags: m.tags }));
-        // 展示列表：registry 联网优先；联网失败/未加载回退内置
-        const hasRegistry = registryServers !== null && registryServers.length > 0;
+        // A-1106：**registry 结果只在用户主动搜索过（registryQuery 非空）时才接管列表**。
+        // 旧的 `hasRegistry` 只看「联网是否拿到数据」⇒ 打开广场自动联网一返回，内置精选就被
+        // registry 全量目录无声替换掉（用户报的症状）。现在内置精选是默认视图、永不被替换。
+        // ⚠️ 判据**不在这里内联**：唯一出处是 `marketView.ts` 的 `marketSource()`（纯逻辑、可测）。
+        //    内联一份 = 两个产地，改一处漏一处（A-1100 同型）。
+        const useRegistry = marketSource(registryQuery, registryServers?.length ?? 0) === "registry";
         const viewList: Array<{ name: string; desc: string; tags?: string[]; registry: boolean; installCmd?: string; needEnv?: boolean; kind?: string }> =
-          hasRegistry
+          useRegistry
             ? regList.map((s) => ({
                 name: s.displayName, desc: s.description, registry: true,
+                // A-1106：registry 的描述是**英文原文**，给人一眼看得懂的**中文类别标签**
+                // （唯一出处 `marketLocalize.localizeServerTags`，不翻译整句以免半中半英）。
+                tags: localizeServerTags(s.displayName, s.description),
                 installCmd: s.install?.kind === "stdio" ? `${s.install.command} ${s.install.args.join(" ")}` : s.install?.kind === "http" ? s.install.url : "",
                 needEnv: (s.install?.kind === "stdio" && s.install.envHints.length > 0) || false,
                 kind: s.install?.kind,
               }))
             : builtinList.map((m) => ({ name: m.name, desc: m.desc, tags: m.tags, registry: false }));
-        const filtered = q
+        /* A-1106：本地二次过滤**只对内置精选做**。
+           registry 的结果**已经由上游按检索词筛过**（检索词还可能被 `expandMarketQuery`
+           展开成英文）——此处若再拿用户输入的**中文**去比英文字段，必然全部落空 ⇒ 得到空列表。
+           （这正是"修一个坏一个"的典型形态：不处理它，中文搜索会稳定显示"没找到"。） */
+        const filtered = !useRegistry && q
           ? viewList.filter((it) => it.name.toLowerCase().includes(q) || it.desc.toLowerCase().includes(q) || (it.tags ?? []).some((t) => t.toLowerCase().includes(q)))
           : viewList;
         const LIMIT = 20;
@@ -373,27 +406,41 @@ export default function McpPanel(): JSX.Element {
         <div className="card" style={{ padding: "14px 16px", marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <div style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>
-              插件广场{hasRegistry ? ` · 官方 registry ${filtered.length}` : ` · 内置精选 ${filtered.length}`}
+              插件广场{useRegistry ? ` · 官方目录 ${filtered.length}` : ` · 内置精选 ${filtered.length}`}
             </div>
             <input className="input-field" style={{ width: 230, padding: "5px 10px", fontSize: 12.5 }}
-              placeholder="搜索插件（名称/描述），回车联网搜官方 registry"
+              placeholder="搜索插件（中英文都行，如 浏览器 / database），回车搜官方目录"
               value={marketQuery}
-              onChange={(e) => setMarketQuery(e.target.value)}
+              onChange={(e) => {
+                setMarketQuery(e.target.value);
+                // A-1106：**清空输入框 = 回到内置精选**（否则列表会停在旧搜索结果上，用户看不出怎么回去）
+                if (e.target.value.trim() === "") { setRegistryQuery(""); }
+              }}
               onKeyDown={(e) => { if (e.key === "Enter" && q) { void loadRegistry(true, marketQuery.trim()); } }} />
             <button className="btn" style={{ padding: "4px 12px", fontSize: 12, flexShrink: 0 }} disabled={registryLoading}
-              onClick={() => void loadRegistry(true, marketQuery.trim())}>
+              onClick={() => { if (q) { void loadRegistry(true, marketQuery.trim()); } else { setRegistryQuery(""); } }}>
               {registryLoading ? "搜索中…" : "联网搜索"}
             </button>
           </div>
           <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10, lineHeight: 1.6 }}>
-            {registryLoading ? "正在拉取官方 MCP registry（registry.modelcontextprotocol.io，Linux Foundation 维护）…" :
-              hasRegistry ? "来源：MCP 官方 registry（全球权威目录，publisher 验证）。点「安装」按 registry 给出的配置写入 slime.toml。"
-              : registryError ? `官方 registry 联网失败（${registryError}），显示内置精选。点「联网搜索」重试。`
-              : "内置精选（有准确安装命令）；点「联网搜索」接入官方 registry 全网资源。"}
+            {registryLoading ? "正在检索官方 MCP 目录（registry.modelcontextprotocol.io，Linux Foundation 维护）…" :
+              /* A-1106：**如实显示实际检索词** —— 中文输入会被展开成英文再发给上游，
+                 用户有权知道"我搜的这个词到底变成了什么"（瞒着他就变成"为什么搜不到"）。
+                 另外「没认出来」的情形必须点名 + 给可操作建议，不许静默按原词搜一遍了事。 */
+              useRegistry ? `来源：MCP 官方目录（全球权威索引）。按「${registryQuery}」检索`
+                + (registryApplied && registryApplied.toLowerCase() !== registryQuery.toLowerCase() ? `（实际检索词：${registryApplied}）` : "")
+                + (registryUnrecognized ? `。⚠️ 未收录「${registryQuery}」对应的英文关键词，已按原词搜索 —— 多半搜不到，换个说法或直接输英文（如 browser / database / filesystem）` : "")
+                + `。清空搜索框回到内置精选。`
+              : registryError ? `官方目录联网失败（${registryError}），显示内置精选。点「联网搜索」重试。`
+              : "内置精选（有准确安装命令，全中文）；点「联网搜索」用中文关键词检索官方目录全网资源。"}
           </div>
           {filtered.length === 0 ? (
             <div style={{ padding: "20px", textAlign: "center", color: "var(--text-dim)", fontSize: 12.5 }}>
-              {registryServers === null && q ? `「${marketQuery}」暂无本地匹配——按回车联网搜官方 registry` : `没找到匹配「${marketQuery}」的插件`}
+              {!useRegistry && q ? `「${marketQuery}」暂无本地匹配——按回车联网搜官方目录`
+                /* A-1106：registry 模式下 0 条**不是**"没找到匹配"，而是**上游就没返回**。
+                   两种情况必须分开说：前者是本地筛选结果，后者要提示换检索词。 */
+                : useRegistry ? `官方目录没有与「${registryQuery}」（检索词：${registryApplied || registryQuery}）匹配的条目 —— 换个关键词试试，或清空搜索框回到内置精选`
+                : `没找到匹配「${marketQuery}」的插件`}
             </div>
           ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -407,11 +454,23 @@ export default function McpPanel(): JSX.Element {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>
                       {item.name}
-                      {item.registry ? <span style={{ marginLeft: 6, fontSize: 10, color: "var(--accent)", fontWeight: 600 }}>registry</span> : null}
+                      {item.registry ? <span style={{ marginLeft: 6, fontSize: 10, color: "var(--accent)", fontWeight: 600 }}>官方目录</span> : null}
                       {item.needEnv ? <span style={{ marginLeft: 6, fontSize: 11 }} title="需要配置环境变量/API Key">🔑</span> : null}
                       {isInstalled ? <span style={{ marginLeft: 6, fontSize: 11, color: "var(--success)", fontWeight: 400 }}>已安装</span> : null}
                     </div>
                     <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>{item.desc || "（无描述）"}</div>
+                    {/* A-1106：**中文类别标签**（内置精选的 tags 此前是死数据 —— 定义了却从没渲染过）。
+                        registry 条目的描述是英文原文，标签给人一眼看得懂的类别线索。 */}
+                    {(item.tags ?? []).length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
+                        {(item.tags ?? []).map((t) => (
+                          <span key={t} style={{
+                            fontSize: 10, lineHeight: "15px", padding: "0 6px", borderRadius: 4,
+                            color: "var(--text-dim)", background: "var(--bg-soft, rgba(127,127,127,.12))",
+                          }}>{t}</span>
+                        ))}
+                      </div>
+                    )}
                     {item.installCmd && (
                       <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 3, fontFamily: "Consolas, monospace", wordBreak: "break-all" }}>
                         {item.installCmd}

@@ -798,7 +798,8 @@ export default function UsageStatsPanel(): JSX.Element {
 
   /* ──────────────── 渲染 ──────────────── */
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "0 4px" }}>
+    /* A-1119：左/右地板归 `SettingsDialog` 内容区，此处左右 padding 归 0（此前左右各 4px，是"贴线"那一族）。 */
+    <div className="settings-pane" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {/* 标题栏 + 刷新控制 */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div style={{ fontSize: 14, fontWeight: 800, color: "var(--text)" }}>使用统计</div>

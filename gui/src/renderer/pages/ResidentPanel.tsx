@@ -9,6 +9,10 @@
 import React from "react";
 /** A-980-R31：子代理头像抽成公共组件（三处面板共用"图标=身份"的口径） */
 import SubagentAvatar from "../components/SubagentAvatar.js";
+/** A-1098：模型池的勾选判据抽成纯模块（可单测 / 可变异；判据不许住在 .tsx 里）*/
+import { INHERIT_MODEL, toggleModelInPool } from "./modelPool.js";
+/** A-1100：IPC 调用的唯一安全口（裸 await 的 reject 会变 Uncaught 红字 + 后续语句不执行）*/
+import { asReply, tryInvoke } from "./ipcSafe.js";
 
 type ResJob = { id: string; name: string; cron: string; prompt: string; agentId?: string; nextRun?: number; lastRun?: number; lastResult?: string; paused?: boolean; running?: boolean };
 type SubRun = {
@@ -126,11 +130,30 @@ export default function ResidentPanel(): React.JSX.Element {
   const [saAgentId, setSaAgentId] = React.useState("");
   const [presetId, setPresetId] = React.useState<string | null>(null);
 
-  // ── A-942：全局子代理默认模型（贵模型统筹、廉价/免费模型执行档位）──
-  const [defaultModel, setDefaultModel] = React.useState("");
+  // ── A-942 → A-1097：子代理**执行模型池**（多选；第 1 档 = 兜底档，其余供主 Agent 按难度点名）──
+  /** 已保存的池（唯一写入者 = 主进程返回值：首载 / 保存回执 / 4s 轮询）。**弹层绝不直接读写它**。 */
+  const [defaultModels, setDefaultModels] = React.useState<string[]>([]);
+  /**
+   * A-1098：弹层里的**草稿池**——勾选读写的是它，不是已保存池。
+   *
+   * ⚠️ 必须与已保存池分开，否则症状是「勾选几秒后自动取消勾选」：
+   *   4s 轮询 `refresh()` 会用服务端快照 `setDefaultModels(...)` 覆盖 `defaultModels`，
+   *   而弹层 checkbox 此前直接绑在 `defaultModels` 上 ⇒ 用户每勾一项，最多 4 秒后就被
+   *   服务端快照**回滚**（用户眼里就是"自己把勾去掉了"）。
+   *   草稿态隔离后：轮询只刷新"已保存"的徽标，弹层里未保存的勾选不再受影响。
+   *   生命周期：打开弹层 = `setDraftModels(defaultModels)` 拷一份；保存 = 提交草稿；
+   *   取消 / 点遮罩关闭 = 丢弃草稿（下次打开重新从已保存值拷，故无需显式清理）。
+   */
+  const [draftModels, setDraftModels] = React.useState<string[]>([]);
+  const [modelModal, setModelModal] = React.useState(false);
+  /** A-1100：保存失败的**弹层内**就地提示（回显在弹层里，不靠面板底部的 `notice` —— 那个被弹层遮着）。 */
+  const [saveError, setSaveError] = React.useState("");
   const [modelOptions, setModelOptions] = React.useState<Array<{ value: string; label: string }>>([
     { value: "inherit", label: "继承（沿用目标 Agent 模型）" },
   ]);
+  /** 池内可勾选的档位：`inherit` 不是档位（它是"不覆盖"的占位）⇒ 不进多选列表。
+   *  ⚠️ 判据常量与纯逻辑都在 `./modelPool.ts`（唯一出处），此处不再写字面量 "inherit"。 */
+  const modelPoolOptions = React.useMemo(() => modelOptions.filter((o) => o.value !== INHERIT_MODEL), [modelOptions]);
   // ── A-918+：用户选定的子代理（自建 agent id 列表；派发优先级 = 用户选定 > 内置专家）──
   const [selectedAgentIds, setSelectedAgentIds] = React.useState<string[]>([]);
   /** A-1091：并行度 = 「设置 → 通用 → 请求频率 · 并发上限」的实时值。
@@ -176,7 +199,9 @@ export default function ResidentPanel(): React.JSX.Element {
       if (!s) { return; }
       setJobs(Array.isArray(s.scheduler) ? s.scheduler : []);
       setRuns(Array.isArray(s.subagents) ? s.subagents : []);
-      if (typeof s.defaultModel === "string") { setDefaultModel(s.defaultModel); }
+      // A-1097：池子（多选）。只认数组 —— 旧字段 defaultModel 不再作为控制源，
+      // 但主进程仍返回它（= 池首）供旧入口回显，这里不读，避免"两套真相源"。
+      if (Array.isArray(s.defaultModels)) { setDefaultModels(s.defaultModels); }
     }).catch(() => { /* 服务未就绪 */ });
     api.agents?.list?.().then((list: AgentBrief[]) => {
       if (Array.isArray(list)) {
@@ -197,7 +222,10 @@ export default function ResidentPanel(): React.JSX.Element {
   }, [refresh]);
 
   const act = async (fn: () => Promise<unknown>, msg: string): Promise<void> => {
-    const r: any = await fn();
+    /* A-1100：走安全口 —— `slime:resident:*` 的写通道在冷启动窗口内可能尚未注册，
+       裸 await 会把 reject 抛成 Uncaught（= 用户看到的「调试面板有 error」），
+       且后面的 `setNotice` / `refresh` 永不执行（按钮"点了没反应"）。 */
+    const r: any = asReply(await tryInvoke(fn));
     if (r?.ok ?? r?.id) { setNotice(msg); refresh(); } else { setNotice(`操作失败：${r?.error ?? "未知"}`); }
   };
 
@@ -213,7 +241,13 @@ export default function ResidentPanel(): React.JSX.Element {
 
   /** 自动创建默认 Agent 兜底（用户无需预先建 Agent） */
   const ensureAgent = async (): Promise<void> => {
-    const a: any = await api.agents?.create?.("助手", "通用助理").catch(() => null);
+    /* A-1100：⚠️ 此前写作 `api.agents?.create?.(…).catch(() => null)` ——
+       可选链**短路成 `undefined`** 时，紧跟的 `.catch` 是在 `undefined` 上取属性 ⇒ 同步 TypeError，
+       被 async 包成 reject；而两处调用点都是 `void ensureAgent()`（丢弃 promise、无 catch）
+       ⇒ 一条 `Uncaught (in promise)` 红字 —— 与「调试面板有 error」同源（另一处产地）。
+       现在同样走安全口：短路 / 未注册 / 异常都**如实交回**，由这里决定怎么出声。 */
+    const r = await tryInvoke(() => api.agents?.create?.("助手", "通用助理"));
+    const a: any = r.ok ? r.value : null;
     if (a?.id) {
       setAgents((prev) => [{ id: a.id, name: a.name ?? "助手", role: a.role }, ...prev]);
       setJAgentId(a.id);
@@ -243,7 +277,8 @@ export default function ResidentPanel(): React.JSX.Element {
    * 否则历史只增不减。在途（运行中/排队中）的任务**不受影响**——清的是跑完的痕迹。
    */
   const clearRuns = async (): Promise<void> => {
-    const r: any = await api.resident?.subagentClear?.();
+    /* A-1100：同样走安全口（该通道在主进程属「后台任务 IPC」组，冷启动窗口内可能未注册）*/
+    const r: any = asReply(await tryInvoke(() => api.resident?.subagentClear?.()));
     if (r?.ok) {
       setNotice(`已清空 ${r.cleared ?? 0} 条历史记录（在途任务保留）`);
       refresh();
@@ -261,7 +296,8 @@ export default function ResidentPanel(): React.JSX.Element {
   }, [agents, jAgentId, saAgentId]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: "6px 4px 16px", maxWidth: 860 }}>
+    /* A-1119：左/右地板归 `SettingsDialog` 内容区，此处左右 padding 归 0（此前左右各 4px，是"贴线"那一族）。 */
+    <div className="settings-pane" style={{ display: "flex", flexDirection: "column", gap: 16, padding: "6px 0 16px", maxWidth: 860 }}>
       {notice && <div style={{ fontSize: 12.5, color: "var(--accent-hover)", padding: "8px 12px", background: "var(--bg-input)", borderRadius: 8 }}>{notice}</div>}
 
       {/* ── 定时任务 ── */}
@@ -345,36 +381,111 @@ export default function ResidentPanel(): React.JSX.Element {
           )}
         </div>
 
-        {/* A-942：全局子代理默认模型档位（贵模型统筹、廉价/免费模型执行） */}
+        {/* A-942 → A-1097：子代理执行模型池（贵模型统筹、多档可点名执行） */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10,
           padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
-          <span style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>子代理默认模型</span>
-          <select style={{ ...input, width: "auto", flex: 1, minWidth: 220 }} value={defaultModel}
-            onChange={(e) => void (async () => {
-              const r: any = await api.resident?.subagentSetDefaultModel?.(e.target.value);
-              if (r?.ok && typeof r.defaultModel === "string") {
-                setDefaultModel(r.defaultModel);
-                setNotice(`子代理默认模型已设为 ${r.defaultModel || "继承"}`);
-              } else {
-                setNotice(`设置失败：${r?.error ?? "未知"}`);
-              }
-            })()}
-            title="主 Agent 负责统筹规划（沿用其自身模型）；此处指定子代理执行模型。对话中也可直接说「用 XX 执行子任务」临时覆盖">
-            {modelOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
+          <span style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>子代理执行模型</span>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", flex: 1, minWidth: 180 }}>
+            {defaultModels.length === 0
+              ? "未指定 —— 子代理跟随目标 Agent 的模型"
+              : `兜底档 ${defaultModels[0]}${defaultModels.length > 1 ? `　（另 ${defaultModels.length - 1} 档可点名）` : ""}`}
+          </span>
+          {/* A-1098：打开弹层时把**已保存池**拷成草稿——之后弹层内的一切勾选都只动草稿，
+              4s 轮询刷新已保存池时不会再把用户的勾选冲掉。 */}
+          <button style={{ ...miniBtn, flexShrink: 0 }}
+            onClick={() => { setDraftModels(defaultModels); setModelModal(true); setSaveError(""); }}
+            title="多选子代理可用的执行模型档位：第 1 个是默认兜底档，其余档位主 Agent 可按子任务难度点名">
+            选择模型（可多选）
+          </button>
         </div>
         <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 6, lineHeight: 1.7 }}>
-          优先级：对话中临时指定（如「用 XX 执行」）&gt; 专家子代理自身定义 &gt; 此处全局默认 &gt; 继承（沿用目标 Agent 模型）。
+          所选档位会写进系统提示，主 Agent 可以「按子任务难度为不同子代理点名不同模型」（机械活用便宜档、推理活用强档）；
+          不点名则用第 1 档（兜底档）。
+          优先级：对话中临时指定（如「用 XX 执行」）&gt; 专家子代理自身定义 &gt; 兜底档 &gt; 继承（沿用目标 Agent 模型）。
           建议用便宜的/免费模型执行机械子任务，贵的模型专司统筹规划与评审。
         </div>
 
+        {/* A-1097：多选窗口（弹层）。第 1 个勾选项 = 兜底档，勾选顺序即优先级。 */}
+        {modelModal && (
+          <div onClick={() => setModelModal(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 2000,
+              display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {/* A-1098：浮层必须用实底 `modal-card`（beta 主题下 `.card` 是 0.42/0.5 半透明渐变，
+                背后正文会透出来）。⚠️ 不要写成 `card modal-card`，否则又会被 `.card` 规则盖回半透明。 */}
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}
+              style={{ width: 560, maxWidth: "92vw", maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>子代理执行模型（可多选）</div>
+              <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10, lineHeight: 1.7 }}>
+                勾选多个档位后，主 Agent 可按子任务难度点名换用；<b>第 1 个</b>是默认兜底档（它不点名时用的就是这一档）。
+                一个都不勾 = 不指定，子代理跟随目标 Agent 的模型。
+              </div>
+              <div style={{ overflow: "auto", flex: 1, border: "1px solid var(--border)", borderRadius: 8, padding: 8 }}>
+                {modelPoolOptions.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "var(--text-dim)", padding: 6 }}>
+                    没有可选的模型 —— 请先在「供应商」页启用模型，或添加本地模型。
+                  </div>
+                ) : modelPoolOptions.map((o) => {
+                  const idx = draftModels.indexOf(o.value);
+                  const checked = idx >= 0;
+                  return (
+                    <label key={o.value}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 6px", borderRadius: 6,
+                        cursor: "pointer", background: checked ? "var(--bg-hover)" : "transparent" }}>
+                      <input type="checkbox" checked={checked} style={{ cursor: "pointer" }}
+                        onChange={(e) => setDraftModels((prev) => toggleModelInPool(prev, o.value, e.target.checked))} />
+                      <span style={{ fontSize: 12.5, flex: 1 }}>{o.label}</span>
+                      {checked && (
+                        <span style={{ fontSize: 11, padding: "0 6px", borderRadius: 6, whiteSpace: "nowrap",
+                          background: "var(--accent-soft)", color: "var(--accent-hover)" }}>
+                          {idx === 0 ? "兜底档" : `第 ${idx + 1} 档`}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+              {saveError && (
+                <div style={{ marginTop: 10, padding: "7px 10px", borderRadius: 8, fontSize: 12, lineHeight: 1.6,
+                  background: "var(--danger-soft)", color: "var(--danger)", border: "1px solid var(--danger)" }}>
+                  {saveError}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+                <button className="btn" style={{ fontSize: 12.5 }} onClick={() => setModelModal(false)}>取消</button>
+                <button className="btn primary" style={{ fontSize: 12.5 }}
+                  onClick={() => void (async () => {
+                    // A-1098：提交的是**草稿**（弹层内勾选的那份），不是轮询中的已保存池。
+                    /* A-1100：⚠️ 提交那次 IPC **必须**走安全口（`tryInvoke`），此前是裸 `await`。
+                     * `slime:resident:subagent:setModels` 在冷启动窗口内可能**尚未注册**，
+                     * 此时 `ipcRenderer.invoke` 会 **reject**（`No handler registered for …`），后果是：
+                     *   ① 抛出后下面的 `setModelModal(false)` 永不执行
+                     *      ⇒ 弹层卡住不关、按钮「点了没反应」（用户实测「界面保存按钮无法实现功能」）；
+                     *   ② 控制台多一条 `Uncaught (in promise)` 红字（用户看到的「调试面板有 error」）。
+                     * 现在失败**并进同一个失败分支**：弹层内就地如实显示、弹层保持打开供重试
+                     * （不假装成功、也不静默吞掉）。 */
+                    setSaveError("");
+                    const r: any = asReply(await tryInvoke(() => api.resident?.subagentSetModels?.(draftModels)));
+                    if (r?.ok && Array.isArray(r.defaultModels)) {
+                      setDefaultModels(r.defaultModels); // 回写规范化后的池（去重/剔 inherit/限长）
+                      /* ⚠️ 提示必须用**规范化后**的值：`defaultModels` 此刻还是旧 state
+                         （setState 是异步的）——用它会出现"徽标显示有 3 档、提示却说已清空"的自相矛盾。 */
+                      setNotice(r.defaultModels.length === 0 ? "子代理执行模型已清空（跟随目标 Agent）" : "子代理执行模型已保存");
+                      setModelModal(false);
+                    } else {
+                      setSaveError(`保存失败：${r?.error ?? "主进程未返回结果"}`);
+                    }
+                  })()}>保存</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* A-918+：用户选定子代理——勾选自建 agent 作为子代理；任务自动派发时优先于内置专家，不足才自动创建补充 */}
         <div style={{ marginTop: 10, padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
-          <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 2 }}>用户选定子代理（优先派发）</div>
+          <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 2 }}>可派发的 Agent（快捷开关）</div>
           <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8, lineHeight: 1.6 }}>
-            勾选的自建 Agent 将在任务自动派发时优先被选用；未勾选或无匹配时回退内置专家（代码审查/调研/数据分析），仍不足才自动创建通用子代理。
+            勾选的 Agent 会被主 Agent 优先派发；未勾选则回退内置专家（代码审查/调研/数据分析），仍不足才自动创建通用子代理。
+            <b>与每个 Agent 设置里的「子代理派发」开关是同一份数据</b>（config/agents.json 的 subagent_dispatch）——在哪边改都即时生效、两边同步。
           </div>
           {agents.length === 0 ? (
             <div style={{ fontSize: 12, color: "var(--text-dim)" }}>暂无自建 Agent，可到「Agent 管理」页创建后回来勾选。</div>
@@ -397,7 +508,8 @@ export default function ResidentPanel(): React.JSX.Element {
                           ? selectedAgentIds.filter((id) => id !== a.id)
                           : [...selectedAgentIds, a.id];
                         setSelectedAgentIds(next);
-                        const r: any = await api.resident?.subagentSetSelection?.(next);
+                        /* A-1100：走安全口 —— 该通道同属「后台任务 IPC」组，冷启动窗口内可能未注册 */
+                        const r: any = asReply(await tryInvoke(() => api.resident?.subagentSetSelection?.(next)));
                         setNotice(r?.ok ? "子代理选定已保存" : `保存失败：${r?.error ?? "未知"}`);
                       })()}
                       style={{ cursor: "pointer" }} />

@@ -17,14 +17,22 @@ import {
 } from "../components/Icon.js";
 import { alertAsync, confirmAsync } from "../dialog.js";
 import { SIDEBAR_OPEN_EVENT, requestSidebarOpen, type SidebarOpenPayload } from "./Markdown.js";
+// A-1120（①）：产物按类型分流的**唯一判据出处**（可被守卫直接断言，不必驱动整个组件）
+import { shouldRenderAsWeb, splitPath, baseNameOf, buildPreviewUrl } from "./webPreview.js";
 import { readSessionCtxMeta, restoreUsed } from "./sessionCtxMeta.js";
-import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments, fmtTokens } from "./contextMath.js";
+import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments, fmtTokens, usageComposition } from "./contextMath.js";
 import { failTitle, failHint, failCodeName } from "./browserErrors.js";
+// A-1115：右栏 md 文档的「目录卷轴」（滚动条替代品，只保留刻度尺）
+import TopicRail, { type RailEntry } from "./TopicRail.js";
+import { loadRailParams, onRailParams, type RailParams } from "./railParams.js";
 import BrainstormPanel from "./BrainstormPanel.js";
 import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT, resolveToolLabel } from "./ChatPanel.js";
 // A-990：在途快照的读写已从 ChatPanel 拆到 liveMonitor.ts —— 纯内存取样不该依赖整个组件
 import { readLiveMonitor } from "./liveMonitor.js";
+import { trackResizerGlint, clearResizerGlint } from "../resizerGlint.js";
 import { setBrowserHost, registerWebview, unregisterWebview, executeBrowserCommand, isWebNavUrl, normalizeBrowserUrl } from "./browserBridge.js";
+// A-1106b：webview 导航统一走唯一安全出口（接住 loadURL 的异步 reject，-3 不算错）
+import { safeLoadURL } from "./webviewNav.js";
 // A-990：会话总账的币种与金额格式统一取共享层 —— 右栏不允许再出现硬编码汇率
 // （旧实现是 `costUsd * 7.25`，与共享层 USD_CNY_RATE=7.2 不一致 → 同一笔账两处显示不同数）
 import { pricingDisplayCurrency, formatUsdAs, type PriceCurrency } from "../../../../shared/gen/model-capabilities.js";
@@ -66,9 +74,25 @@ interface TabInstance {
   fileContent?: string;
   fileMime?: "text" | "image" | "binary" | "pdf" | "office";
   fileError?: string;
+  /**
+   * A-1120：**降级说明**（不是错误）—— 例如「本想用浏览器渲染这个 .html，但起服务失败，已按源码显示」。
+   * 与 `fileError` 分开是因为二者对用户的意义完全不同：`fileError` = 这一页没有内容可看；
+   * `fileNotice` = 内容在，但**不是用户点这一下所期望的那种形态**。合成一个字段会逼着代码二选一，
+   * 于是必然有一类情况被静默（要么吞掉降级原因、要么把正常的源码页变成"错误页"）。
+   */
+  fileNotice?: string;
+  /** A-1121：终端页被 Agent 打开时预填的命令（配 `termNonce` 使用，见 `TerminalTab`） */
+  termCmd?: string;
+  /** A-1121：预填命令的**序号**——同一个命令连续打开两次也要能重新填回输入框
+   *  （只比字符串的话，用户清空输入框后再让 Agent 开一次，输入框会"没反应"） */
+  termNonce?: number;
   /** A-975：该文件页当前的浏览根——用户在「打开文件夹」选的目录写回这里（可位于工作区之外），
    *  使浏览位置在 tab 生命周期内持久（不被 workspace 变化/重挂载顶回工作目录）。 */
   browseRoot?: string;
+  /** A-1121（②）：Agent 打开文件树时要求**定位到**的子目录（相对 `browseRoot`）。
+   *  与 `browseRoot` 分开是因为语义不同：前者是"看哪儿"，后者是"进到哪儿" ——
+   *  合成一个字段就只能二选一，于是"打开到 apps/"必然表现为"只打开到根"。 */
+  browseRel?: string;
   /** A-918++：默认页标记——任务页（tasks）设为默认页不可删除（类似群聊专属页常驻），
       其他页（浏览器/文件/Git/终端等）可删到 0，无需"至少保留1个"限制 */
   isDefault?: boolean;
@@ -97,6 +121,11 @@ function FileIcon(props: { size?: number }): JSX.Element {
 }
 
 const uid = (): string => Math.random().toString(36).slice(2, 10);
+
+/** A-1121：终端"预填命令"的单调序号（只增不减）。
+ *  为什么要序号：只比命令字符串的话，"Agent 两次要求预填同一条命令、中间用户清空了输入框"
+ *  会让第二次毫无反应 —— 而那正是用户期待它重新填上的时刻。 */
+let termOpenSeq = 0;
 
 const createTab = (type: TabType, index?: number): TabInstance => {
   const meta = TAB_TYPE_META.find((m) => m.type === type)!;
@@ -410,7 +439,7 @@ export default function RightSidebar(props: {
    *  现在第一步交给主进程 `openTarget`：它把**所有合理基准**列出来逐个试（会话工作目录 / 项目根 /
    *  传入的 root / 去首段重试），命中即回真实绝对路径；并且**目录也是合法目标**——
    *  点目录直接开一个浏览该目录的文件页，不再像以前那样被 readFile 判成"是目录"而失败。 */
-  const openFileAbs = (abs: string, name?: string): void => {
+  const openFileAbs = (abs: string, name?: string, notice?: string): void => {
     const clean = (abs ?? "").trim().replace(/^["']|["']$/g, "");
     if (!clean) { return; }
     const fname = (name ?? clean.split(/[\\/]/).pop() ?? clean).trim();
@@ -419,6 +448,8 @@ export default function RightSidebar(props: {
     const tab: TabInstance = {
       id: uid(), type: "file", title: fname,
       fileRel: clean, fileAbs: clean, // 先占位（让本页立即进入"文件预览"形态，而不是"打开文件夹"空态）
+      // A-1120：降级说明随 tab 一起进（后续 updateTab 只 patch 内容字段，不会把它抹掉）
+      fileNotice: notice,
     };
     void (async () => {
       let lastErr = "";
@@ -473,6 +504,108 @@ export default function RightSidebar(props: {
     setActiveId(tab.id);
   };
 
+  /**
+   * A-1120：把一个**已归一化**的 URL 落到浏览器页 —— 优先复用**同址**页，其次**空白**页，
+   * 都没有才新建。
+   *
+   * ⚠️ 这段逻辑原先只内联在「打开链接」那一支里；①（html 产物走浏览器）若自己再写一份，
+   * 就会出现两套"复用谁"的判据 —— 同一地址可能被两个页签同时挂着（本仓已在
+   * 「预演页 vs 真身」上吃过"两份口径"的账）。故抽成唯一实现，两处都调它。
+   */
+  const openBrowserTab = (url: string, title: string): void => {
+    const browsers = tabs.filter((t) => t.type === "browser");
+    const sameUrl = browsers.find((t) => t.url === url);
+    if (sameUrl) { setActiveId(sameUrl.id); return; }
+    const blank = browsers.find((t) => !t.url);
+    if (blank) { updateTab(blank.id, { url, title }); setActiveId(blank.id); return; }
+    const tab = createTab("browser");
+    setTabs((prev) => [...prev, { ...tab, url, title }]);
+    setActiveId(tab.id);
+  };
+
+  /**
+   * A-1120（①）：`.html` 产物 → 右栏**浏览器**跑真页面，而不是文件页里的源码。
+   *
+   * 判据分两层，缺一不可：
+   *   ① **要不要**走浏览器 —— `shouldRenderAsWeb()`（纯函数，唯一出处，只认扩展名）；
+   *   ② **能不能**走浏览器 —— 必须拿到磁盘上的**真绝对路径**（`openTarget` 是唯一权威解析器：
+   *      产物卡的 `rel` 可能是"相对工作目录 / 带项目名前缀"的形态，自己拼绝对路径必然踩空）。
+   *
+   * 任一环失败 → **退回文件页**（照常显示源码，或把"找不到路径"说清楚），并挂一条
+   * `fileNotice` 说明**为什么不是渲染形态** —— 静默退回等于让用户以为功能没做。
+   *
+   * 常驻服务风险由主进程兜底：`httpServer.serve` 自带**同目录复用**（`dir + host` 命中即返回既有端口），
+   * 所以这里不需要自己维护一张"目录 → 服务"表（那会是第二个产地，且必然与真实状态分家）。
+   */
+  const openWebPreview = (rel: string, name?: string): void => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    void (async () => {
+      const resolved = await api?.workspace?.openTarget?.(rel, {
+        root: (props.workspace ?? "").trim(),
+        sessionId: props.sessionId ?? "",
+      }).catch(() => null) as { ok?: boolean; path?: string; isDir?: boolean } | null | undefined;
+      const abs = resolved?.ok && !resolved.isDir ? (resolved.path ?? "").trim() : "";
+      if (!abs) {
+        // 解析不出真路径：交给文件页（它会把"试过哪些基准"列出来），但要说清这次点的是"要看效果"
+        openFileAbs(rel, name, "这是网页产物，本想在浏览器里渲染它，但没能解析出它在磁盘上的绝对路径。");
+        return;
+      }
+      const { dir, base } = splitPath(abs);
+      if (!dir) {
+        openFileAbs(rel, name, "这是网页产物，没能确定它所在的目录（无法起本地服务）。");
+        return;
+      }
+      const served = await api?.http?.serve?.({ dir }).catch(() => null) as
+        { ok?: boolean; urls?: string[]; error?: string } | null | undefined;
+      if (!served?.ok) {
+        openFileAbs(rel, name, `这是网页产物，但启动本地服务失败（${served?.error ?? "未知原因"}），已按源码显示。`);
+        return;
+      }
+      const url = buildPreviewUrl(served.urls, base);
+      if (!url) {
+        openFileAbs(rel, name, "这是网页产物，本地服务没有返回可用地址，已按源码显示。");
+        return;
+      }
+      openBrowserTab(url, (name ?? "").trim() || base);
+    })();
+  };
+
+  /**
+   * A-1121（②）：终端页 —— 复用**已有**终端页（终端是有状态的：历史、运行中的命令，
+   * 多开只会让用户不知道自己在哪个终端里），没有才新建；每次打开都刷新 `termNonce`
+   * 以便同一个命令被再次预填时也能生效。
+   */
+  const openTerminalTab = (cmd?: string, name?: string): void => {
+    const prefill = (cmd ?? "").trim();
+    const title = (name ?? "").trim();
+    const patch = { termCmd: prefill, termNonce: (termOpenSeq += 1), ...(title ? { title } : {}) };
+    const existing = tabs.find((t) => t.type === "terminal");
+    if (existing) { updateTab(existing.id, patch); setActiveId(existing.id); return; }
+    const tab = createTab("terminal");
+    setTabs((prev) => [...prev, { ...tab, ...patch }]);
+    setActiveId(tab.id);
+  };
+
+  /**
+   * A-1121（②）：文件树页 —— 复用**纯浏览页**（只看目录、没在预览某个文件），没有才新建。
+   * ⚠️ 复用判据必须排除"正在看某文件"的页：把用户的文件预览页改造成目录树，
+   *    等于悄悄关掉他正在看的东西（`fileAbs` / `fileContent` 有值即属于这种情况）。
+   */
+  const openFilesTab = (root?: string, rel?: string, name?: string): void => {
+    const r = (root ?? "").trim();
+    const rr = (rel ?? "").trim();
+    const title = (name ?? "").trim() || (r ? baseNameOf(r) : "文件");
+    const patch = {
+      browseRoot: r || undefined, browseRel: rr || undefined, title,
+      fileRel: undefined, fileError: undefined, fileNotice: undefined,
+    };
+    const existing = tabs.find((t) => t.type === "file" && !t.fileAbs && t.fileContent === undefined);
+    if (existing) { updateTab(existing.id, patch); setActiveId(existing.id); return; }
+    const tab: TabInstance = { id: uid(), type: "file", ...patch };
+    setTabs((prev) => [...prev, tab]);
+    setActiveId(tab.id);
+  };
+
   /** A-173：监听聊天消息里的「在右侧栏打开」事件（文件/网址） */
   React.useEffect(() => {
     const onOpen = (e: Event): void => {
@@ -495,7 +628,19 @@ export default function RightSidebar(props: {
         recentPopupRef.current = [...recent, now];
       }
       if (d.kind === "file" && d.rel) {
-        openFileAbs(d.rel, d.name);
+        /* A-1120（①）：**产物按类型分流**在这里落地（不能在 `ProductPanel` 做：`ProductItem`
+           只有 rel/name，没有绝对路径；侧栏才有 workspace + openTarget + `http.serve`）。
+           `.html/.htm/.xhtml` → 浏览器跑真页面；其余（含 `.md`、`.ts`…）仍走文件页源码。
+           ⚠️ 判据只看扩展名，不看产物 kind —— `file_read` 出来的 html 同样该被渲染。 */
+        if (shouldRenderAsWeb(d.rel, d.name)) { openWebPreview(d.rel, d.name); }
+        else { openFileAbs(d.rel, d.name); }
+      } else if (d.kind === "terminal") {
+        /* A-1121（②）：Agent 打开终端。`cmd` 只**预填**，绝不自动执行 —— 自动执行等于把
+           "打开一个面板"变成"代替用户敲了回车"，而用户对这一下的预期只是"看到终端"。 */
+        openTerminalTab(d.cmd, d.name);
+      } else if (d.kind === "files") {
+        // A-1121（②）：Agent 打开文件树（可带 root / rel 定位）
+        openFilesTab(d.root, d.rel, d.name);
       } else if (d.kind === "url" && d.url) {
         // A-980-R6：统一归一 URL（裸地址补 http://）——链接路径不再把 `127.0.0.1:8081`
         // 原样塞进 webview src（无 scheme 加载无效 → 白屏），与地址栏 go() 一致。
@@ -513,20 +658,8 @@ export default function RightSidebar(props: {
           const n = (d.name ?? "").trim();
           return n || domainTitle();
         };
-        // A-976：支持"同时访问多个网站"——优先复用**同址**的浏览器页；
-        // 其次是**空白**浏览器页；都没有才新建。避免此前的"永远挤在唯一一个浏览器页"。
-        const browsers = tabs.filter((t) => t.type === "browser");
-        const sameUrl = browsers.find((t) => t.url === url);
-        const blank = browsers.find((t) => !t.url);
-        const target = sameUrl ?? blank;
-        if (target) {
-          if (!sameUrl) { updateTab(target.id, { url, title: pageTitle() }); }
-          setActiveId(target.id);
-        } else {
-          const tab = createTab("browser");
-          setTabs((prev) => [...prev, { ...tab, url, title: pageTitle() }]);
-          setActiveId(tab.id);
-        }
+        // A-1120：「复用谁」的唯一实现在 `openBrowserTab`（同址 > 空白 > 新建），这里不再内联一份
+        openBrowserTab(url, pageTitle());
       }
     };
     window.addEventListener(SIDEBAR_OPEN_EVENT, onOpen);
@@ -535,15 +668,20 @@ export default function RightSidebar(props: {
   }, [tabs]);
 
   /** A-918++：订阅主进程「HTTP 生成的网页应用在侧边栏浏览器打开」事件（slime:sidebar:open），
-      复用 SIDEBAR_OPEN_EVENT 已有逻辑把 URL 注入浏览器标签。Agent 工具 http_create_app 生成应用后触发。 */
+      复用 SIDEBAR_OPEN_EVENT 已有逻辑把 URL 注入浏览器标签。Agent 工具 http_create_app 生成应用后触发。
+      A-1121（②）：这里是**唯一**把主进程请求转成 `SIDEBAR_OPEN_EVENT` 的地方 ——
+      原先只透传 url，于是终端/文件树两类请求会在这一步被静默丢掉（多一种 kind 就必须跟着改这里，
+      所以别再写成 `if (kind === "url")` 的白名单：直接整包转发，让唯一的消费者 RightSidebar 去判）。 */
   React.useEffect(() => {
     const w = window as unknown as { slimeAPI?: { onSidebarOpen?: (cb: (p: SidebarOpenPayload) => void) => () => void } };
     const off = w.slimeAPI?.onSidebarOpen?.((p) => {
-      if (p && (p.kind === "url" || !p.kind) && p.url) {
-        // A-975-R4：来源透传——主进程 setWindowOpenHandler（站点弹窗）会带 from:"site"，
-        // 走弹窗风暴限流；Agent 的 http_create_app 不带（属于用户意图，不限流）。
-        requestSidebarOpen({ kind: "url", url: p.url, name: p.name, from: p.from === "site" ? "site" : "user" });
-      }
+      if (!p) { return; }
+      // A-975-R4：来源透传——主进程 setWindowOpenHandler（站点弹窗）会带 from:"site"，
+      // 走弹窗风暴限流；Agent 的工具调用不带（属于用户意图，不限流）。
+      requestSidebarOpen({
+        ...p,
+        from: p.from === "site" ? "site" : "user",
+      });
     });
     return () => { off?.(); };
   }, []);
@@ -605,10 +743,18 @@ export default function RightSidebar(props: {
 
   return (
     <aside ref={menuHostRef} className={`right-sidebar${props.open ? "" : " collapsed"}`} style={{ width: props.width }}>
-      {/* A-980-R27：只挂 right-sidebar-resizer（left:-3px）——此前同时挂了 sidebar-resizer
-          （right:-3px），同一元素左/右锚点都写死属于过约束，拖拽期宽度变化会跟着错位；
-          onMouseDown 改 onPointerDown 配合指针捕获，指针划过 <webview> 也不丢松手事件 */}
-      {props.open && <div className="right-sidebar-resizer" onPointerDown={props.onResize} />}
+      {/* A-980-R27：只挂 right-sidebar-resizer（left:-5px）——此前同时挂了 sidebar-resizer
+          （right:-5px），同一元素左/右锚点都写死属于过约束，拖拽期宽度变化会跟着错位；
+          onMouseDown 改 onPointerDown 配合指针捕获，指针划过 <webview> 也不丢松手事件。
+          A-980-R27 → A-1106（问题 4）：命中区宽度与流光的**唯一出处是 `index.css`**
+          （`.sidebar-resizer` / `.right-sidebar-resizer` 共用段）—— 此处**不重复数值**
+          （上一版写「6px → 10px」而 CSS 里是 8px，两处漂移成假陈述）。
+          `--rz-y` 的驱动与左栏**共用同一个实现**（`resizerGlint.ts`，两栏各写一份 =
+          流光位置有第二个定义）。 */}
+      {props.open && (
+        <div className="right-sidebar-resizer" onPointerDown={props.onResize}
+          onMouseMove={trackResizerGlint} onMouseLeave={clearResizerGlint} />
+      )}
 
       {/* ── 标签栏（可滚动 + 拖拽重排） ─ */}
       <div className="right-tabbar" style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border)", padding: "0 4px", background: "var(--sidebar-bg, #1e1e2e)" }}>
@@ -767,7 +913,7 @@ export default function RightSidebar(props: {
           <TasksTab active={activeTab?.type === "tasks"} agentId={props.agentId ?? ""} sessionId={props.sessionId ?? ""} agentName={props.agentName} workspace={props.workspace} dl={props.dl} providerModels={props.providerModels} />
         </div>
         {activeTab && activeTab.type === "terminal" && (
-          <TerminalTab workspace={props.workspace} />
+          <TerminalTab workspace={props.workspace} initialCmd={activeTab.termCmd} nonce={activeTab.termNonce} />
         )}
         {/* A-976：浏览器页**全部常驻挂载**（display 控制显隐）+ 每页独立 key。
             此前只挂载当前激活的那一个、且没有 key：切换/新建浏览器页时 React 复用同一个组件实例与
@@ -1885,6 +2031,25 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   const [copied, setCopied] = React.useState(false);
   /** Markdown 预览模式：preview=渲染预览（默认）/ source=源码 */
   const [mdMode, setMdMode] = React.useState<"preview" | "source">("preview");
+  /* A-1115：md 文档的目录卷轴。参数只在设置页改动时更新一次 state；条目由卷轴在测量时机回调。 */
+  const mdScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const [railParamsMd, setRailParamsMd] = React.useState<RailParams>(() => loadRailParams("ticks"));
+  React.useEffect(() => onRailParams((m, p) => { if (m === "ticks") { setRailParamsMd(p); } }), []);
+  const mdScroller = React.useCallback((): HTMLElement | null => mdScrollRef.current, []);
+  const collectMdEntries = React.useCallback((): RailEntry[] => {
+    const sc = mdScrollRef.current;
+    if (!sc) { return []; }
+    const scTop = sc.getBoundingClientRect().top;
+    // 条目 = 标题（h1/h2/h3）；层级只决定刻度的基础长度
+    return Array.from(sc.querySelectorAll<HTMLElement>("h1,h2,h3")).map((el) => {
+      const lv = el.tagName.toLowerCase();
+      return {
+        top: el.getBoundingClientRect().top - scTop + sc.scrollTop,
+        label: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 34) || "（无标题）",
+        level: (lv === "h1" ? "h1" : lv === "h2" ? "h2" : "h3") as "h1" | "h2" | "h3",
+      };
+    });
+  }, []);
   // A-918++：diff 模式（当前文件 vs Git HEAD，VS Code 风格红绿行）
   const [diffMode, setDiffMode] = React.useState(false);
   const [diffHead, setDiffHead] = React.useState<string | null>(null);
@@ -1965,9 +2130,18 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   React.useEffect(() => {
     if (!browseRoot) { return; }
     if (props.tab.fileAbs) { return; } // 文件预览页不抢列表
+    /* A-1121（②）：带 `browseRel` 的页（Agent 让它「打开文件树到 apps/」）必须**一次到位**：
+       先列根再列子目录 = 两次 IPC 且顺序无保证，用户会看到"闪一下又跳走"。
+       `dirStack` 也要一起设 —— 只改列表不改面包屑的话，界面会显示"在根目录"却在列 apps 的内容。 */
+    const want = (props.tab.browseRel ?? "").trim().replace(/^[\\/]+|[\\/]+$/g, "");
+    if (want) {
+      setDirStack(want.split(/[\\/]+/).filter((s) => s.length > 0));
+      void listDir(browseRoot, want);
+      return;
+    }
     void listDir(browseRoot, "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [browseRoot, props.tab.fileAbs]);
+  }, [browseRoot, props.tab.fileAbs, props.tab.browseRel]);
 
   /** A-173：聊天消息内打开的文件（fileAbs/fileContent 异步预读完成）→ 内容回来即渲染预览 */
   React.useEffect(() => {
@@ -2164,14 +2338,20 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     // Markdown：默认渲染预览；可切到源码查看
     if (!diffMode && isMd && mdMode === "preview") {
       return (
-        <div style={{ flex: 1, overflow: "auto", padding: "12px 16px" }}>
-          {preview.content?.trim() ? (
-            <div className="markdown-body">
-              <Markdown remarkPlugins={[remarkGfm]}>{preview.content}</Markdown>
-            </div>
-          ) : (
-            <div style={{ color: "var(--text-dim)", fontSize: 12 }}>（空的 Markdown 文件）</div>
-          )}
+        /* A-1115：外层改成 relative 以便挂绝对定位的目录卷轴；右侧内边距 16 → 30
+           （卷轴 6 + 宽 w + 左侧 12px 余量 = 30，不改的话"向左突起"会压到正文）。 */
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <div ref={mdScrollRef} className="rail-host"
+            style={{ position: "absolute", inset: 0, overflow: "auto", padding: "12px 30px 12px 16px" }}>
+            {preview.content?.trim() ? (
+              <div className="markdown-body">
+                <Markdown remarkPlugins={[remarkGfm]}>{preview.content}</Markdown>
+              </div>
+            ) : (
+              <div style={{ color: "var(--text-dim)", fontSize: 12 }}>（空的 Markdown 文件）</div>
+            )}
+          </div>
+          <TopicRail mode="ticks" scroller={mdScroller} collect={collectMdEntries} params={railParamsMd} />
         </div>
       );
     }
@@ -2339,6 +2519,17 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
               <span style={{ fontSize: 12, color: "var(--text-dim)" }}>内容预览</span>
             )}
           </div>
+          {/* A-1120：降级说明常驻在内容上方 —— 内容照常可读，同时如实说明"为什么不是你要的那种形态" */}
+          {props.tab.fileNotice && (
+            <div className="file-notice" style={{
+              flexShrink: 0, display: "flex", alignItems: "flex-start", gap: 6, padding: "6px 12px",
+              fontSize: 11, lineHeight: 1.6, color: "var(--warning, #fbbf24)",
+              background: "rgba(251, 191, 36, 0.10)", borderBottom: "1px solid var(--border)",
+            }}>
+              <WarningIcon size={12} style={{ flexShrink: 0, marginTop: 3 }} />
+              <span style={{ flex: 1, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{props.tab.fileNotice}</span>
+            </div>
+          )}
           {renderPreviewBody()}
         </div>
       </div>
@@ -2376,6 +2567,16 @@ function fmtSize(n: number): string {
   /** A-974-R6：推理 token 含**估算成分**（上游 usage 从不回传 reasoning_tokens 时，用实际收到的
    *  思考文本按 ≈4 字符/token 折算并明示为估算，避免该行永远显示 0 造成"侦测不到"的误解）。 */
   reasoningEstimated?: boolean;
+  /**
+   * A-1095：本会话上游的 `prompt_tokens` **是否已包含**缓存命中（`cache_read_in_prompt`）。
+   *   - `true`  → OpenAI / DeepSeek 系（prompt 是总量）
+   *   - `false` → Anthropic / Claude（input 不含 cache_read）
+   *   - `undefined` → 上游未标记（旧持久化数据 / 非流式路径）→ 消费方按 `true` 兜底
+   *
+   * 为什么必须落到累计态：侧栏「Token 构成 / 明细」的**合计要去重**（缓存命中 ⊂ 输入），
+   * 而去重方向取决于是哪一家协议 —— 不记下来，渲染层就只能猜，猜错就是又一次"假信息"。
+   */
+  cacheReadInPrompt?: boolean;
 }
 
 interface ModelPriceInfo {
@@ -3072,6 +3273,10 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
       const ct = typeof t.completionTokens === "number" ? t.completionTokens : 0;
       const rtReal = typeof t.reasoningTokens === "number" ? t.reasoningTokens : 0;
       const cr = typeof t.cacheReadTokens === "number" ? t.cacheReadTokens : 0;
+      // A-1095：协议语义标记（与 ChatPanel 同一编码：timings 里布尔存为 1/0）——
+      // 侧栏「Token 构成 / 明细」的输入侧**去重**依赖它（OpenAI 系 prompt 已含命中）。
+      // 上游没标记（undefined）时**不覆盖**累计值，由消费方按缺省 true 兜底。
+      const cri = t.cacheReadInPrompt === 1 ? true : t.cacheReadInPrompt === 0 ? false : undefined;
       const em = typeof t.elapsedMs === "number" ? t.elapsedMs : 0;
       // A-974-R6：推理 token 兜底——上游 usage 不回传 reasoning_tokens 时（本项目全量历史里它恒为 0，
       // 见 config/usage.jsonl），用本轮**实收思考文本**按 ≈4 字符/token 折算，并置 reasoningEstimated
@@ -3096,6 +3301,7 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
         costUsd: prev.costUsd + cost,
         costUsdFromCn: prev.costUsdFromCn + costFromCn,
         ...(prev.reasoningEstimated || markingEstimated ? { reasoningEstimated: true } : {}),
+        ...(cri === undefined ? {} : { cacheReadInPrompt: cri }),
       }));
       resetLiveTurn(); // 本轮已结算进累计（含估算），清空在途值
       // A-975：done 是"最终值"落地时机 → 立刻应用一次挂起的 ctx 快照（不等 10s 节拍），
@@ -3344,6 +3550,8 @@ function TasksTab(props: { agentId: string; sessionId: string; agentName: string
               completionTokens: usage.completionTokens + liveTurn.reply,
               reasoningTokens: usage.reasoningTokens + liveTurn.reason,
               cacheReadTokens: usage.cacheReadTokens,
+              // A-1095：输入侧去重方向由协议语义决定（OpenAI 系 prompt 已含命中）
+              cacheReadInPrompt: usage.cacheReadInPrompt,
             }}
             buckets={liveBuckets}
             detailOpen={detailOpen}
@@ -3458,7 +3666,7 @@ function bucketComps(b: CtxBuckets): Array<{ label: string; pct: number; color: 
 function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOpen, onToggleDetail, thresholdPct = 80 }: {
   used: number; cap: number; compressCount: number;
   /** A-937：token 构成（四项累计）→ 进度条下方 4 色构成微条 + 图例，让"已用"不再是黑盒 */
-  compose?: { promptTokens: number; completionTokens: number; reasoningTokens: number; cacheReadTokens: number };
+  compose?: { promptTokens: number; completionTokens: number; reasoningTokens: number; cacheReadTokens: number; cacheReadInPrompt?: boolean };
   /** A-939：上下文分桶（按注入来源切分，对齐 Cursor Context Buckets 理念） */
   buckets?: CtxBuckets;
   detailOpen?: boolean; onToggleDetail?: () => void;
@@ -3480,6 +3688,7 @@ function ContextWindowBar({ used, cap, compressCount, compose, buckets, detailOp
     cacheReadTokens: compose?.cacheReadTokens ?? 0,
     completionTokens: compose?.completionTokens ?? 0,
     reasoningTokens: compose?.reasoningTokens ?? 0,
+    cacheReadInPrompt: compose?.cacheReadInPrompt,
   });
 
   return (
@@ -3558,9 +3767,17 @@ function MetricsGrid({ usage, live, pref = "auto", cap = 0 }: {
   const liveReason = live?.reason ?? 0;
   const liveElapsed = live?.elapsedMs ?? 0;
   const inFlight = liveReply > 0 || liveReason > 0 || liveElapsed > 0;
-  // 分母用 promptTokens 本身：Anthropic/OpenAI 的 input_tokens 已包含 cache_read 部分，
-  // 避免「promptTokens + cacheReadTokens」重复计入导致命中率低估。
-  const cacheHit = usage.promptTokens > 0 ? (usage.cacheReadTokens / usage.promptTokens) * 100 : 0;
+  // A-1095：累计口径与侧栏明细**同源**（usageComposition）—— 旧实现把四项子集直接相加
+  // （reasoning ⊂ completion、cacheRead ⊂ prompt），「累计 tokens」因此虚高。
+  const cum = usageComposition({
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens + liveReply,
+    reasoningTokens: usage.reasoningTokens + liveReason,
+    cacheReadTokens: usage.cacheReadTokens,
+    cacheReadInPrompt: usage.cacheReadInPrompt,
+  });
+  // 命中率分母 = **输入侧总量**（Anthropic 系 input 不含 cache，直接除 prompt 会低估命中率）
+  const cacheHit = cum.inputSide > 0 ? (cum.cacheRead / cum.inputSide) * 100 : 0;
   /*
    * A-990：会话总账币种**由模型所属地决定**（用户指令），不用一个全局常量拍板。
    *
@@ -3578,7 +3795,7 @@ function MetricsGrid({ usage, live, pref = "auto", cap = 0 }: {
   const items: Array<[string, string, boolean?]> = [
     ["平均命中", usage.requests === 0 && !inFlight ? "—" : `${cacheHit.toFixed(cacheHit === 0 ? 0 : cacheHit < 0.95 ? 1 : 0)}%`],
     ["运行时间", fmtMsSmart(usage.elapsedMs + liveElapsed)],
-    ["累计 tokens", fmtTokens(usage.promptTokens + usage.completionTokens + usage.reasoningTokens + usage.cacheReadTokens + liveReply + liveReason, cap)],
+    ["累计 tokens", fmtTokens(cum.total, cap)],
     ["会话费用", usage.requests === 0 ? "—（未配置单价）" : usage.costUsd === 0 ? "—" : formatUsdAs(usage.costUsd, ledgerCurrency)],
     ["请求数", String(usage.requests)],
     ["", inFlight ? "含本轮在途" : "—"],
@@ -3605,41 +3822,51 @@ function UsageBreakdown({ usage, live, detailOpen, onToggleDetail, cap = 0 }: {
 }): JSX.Element {
   const liveReply = live?.reply ?? 0;
   const liveReason = live?.reason ?? 0;
-  const prompt = usage.promptTokens;
-  const reply = usage.completionTokens + liveReply;
-  const reasoning = usage.reasoningTokens + liveReason;
-  const cache = usage.cacheReadTokens;
-  const total = prompt + reply + reasoning + cache;
+  // A-1095：构成算术**只有一个产地**（`contextMath.usageComposition`，判据与记账层
+  // `computeRecordCost` 同源）。旧实现在这里手写 `prompt + reply + reasoning + cache`，
+  // 把两个**子集**（缓存读 ⊂ 输入、思考 ⊂ 回复）又加了一遍 → 合计虚高约 86%
+  // （用户截图实测明细合计 17,007,635，真实约 8.96M）；图例还把缓存读错标成「其他」。
+  const c = usageComposition({
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens + liveReply,
+    reasoningTokens: usage.reasoningTokens + liveReason,
+    cacheReadTokens: usage.cacheReadTokens,
+    cacheReadInPrompt: usage.cacheReadInPrompt,
+  });
+  /** 提示词里**未命中**的部分（互斥切片 = 输入侧 − 缓存读） */
+  const missInput = Math.max(0, c.inputSide - c.cacheRead);
+  /** 回复里**可见**的部分（互斥切片 = 输出侧 − 思考） */
+  const visibleOut = Math.max(0, c.outputSide - c.reasoning);
 
   const C_PROMPT = "#56d4dd";
   const C_REPLY = "#a371f7";
   const C_REASON = "#d29922";
-  const C_OTHER = "#8b949e";
   const C_CACHE = "#3fb950";
 
-  const pPrompt = total > 0 ? (prompt / total) * 100 : 0;
-  const pReply = total > 0 ? (reply / total) * 100 : 0;
-  const pReason = total > 0 ? (reasoning / total) * 100 : 0;
-  const pOther = total > 0 ? Math.max(0, 100 - pPrompt - pReply - pReason) : 0;
-
+  const pctOf = (n: number): number => (c.total > 0 ? (n / c.total) * 100 : 0);
   const pct = (n: number): string => `${n.toFixed(0)}%`;
-  const dashOr = (n: number, unit = ""): string => n === 0 ? "—" : `${fmtTokens(n, cap)}${unit}`;
+  const dashOr = (n: number): string => (n === 0 ? "—" : fmtTokens(n, cap));
+  /** 「其中」子行的缩进 + 弱化样式（子项已计入父项，不重复计入合计） */
+  const subRow: React.CSSProperties = { paddingLeft: 12, color: "var(--text-muted)" };
+  const numStyle: React.CSSProperties = { fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 };
 
   return (
     <div>
       <div style={{ borderRadius: 6, background: "var(--input-bg, #161b22)", border: "1px solid var(--border)", padding: 10, marginBottom: 8 }}>
         <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", marginBottom: 8 }}>Token 构成</div>
+        {/* A-1095：四段**互斥**（和恒为 100%）—— 缓存读从「提示词」里切出来、思考从「回复」里切出来，
+            而不是各自再占一份。旧实现四段共用"含子集"的分母，条长与合计都不守恒。 */}
         <div style={{ display: "flex", height: 10, borderRadius: 999, overflow: "hidden", background: "rgba(139,148,158,0.14)", marginBottom: 10 }}>
-          {pPrompt > 0 && <div style={{ width: `${pPrompt}%`, background: C_PROMPT }} title={`提示词 ${pct(pPrompt)}`} />}
-          {pReply > 0 && <div style={{ width: `${pReply}%`, background: C_REPLY }} title={`回复 ${pct(pReply)}`} />}
-          {pReason > 0 && <div style={{ width: `${pReason}%`, background: C_REASON }} title={`推理 ${pct(pReason)}`} />}
-          {pOther > 0 && <div style={{ width: `${pOther}%`, background: C_OTHER }} title={`其他 ${pct(pOther)}`} />}
+          {missInput > 0 && <div style={{ width: `${pctOf(missInput)}%`, background: C_PROMPT }} title={`提示词（未命中） ${pct(pctOf(missInput))}`} />}
+          {c.cacheRead > 0 && <div style={{ width: `${pctOf(c.cacheRead)}%`, background: C_CACHE }} title={`缓存读（命中） ${pct(pctOf(c.cacheRead))}`} />}
+          {visibleOut > 0 && <div style={{ width: `${pctOf(visibleOut)}%`, background: C_REPLY }} title={`回复（可见） ${pct(pctOf(visibleOut))}`} />}
+          {c.reasoning > 0 && <div style={{ width: `${pctOf(c.reasoning)}%`, background: C_REASON }} title={`推理（思考） ${pct(pctOf(c.reasoning))}`} />}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 10.5 }}>
-          <LegendDot color={C_PROMPT} label="提示词" value={dashOr(prompt)} pct={pPrompt} />
-          <LegendDot color={C_REPLY} label="回复" value={dashOr(reply)} pct={pReply} />
-          <LegendDot color={C_REASON} label="推理" value={dashOr(reasoning)} pct={pReason} />
-          <LegendDot color={C_OTHER} label={`其他 ${pct(pOther)}`} value={dashOr(cache)} pct={pOther} hintDot={C_CACHE} />
+          <LegendDot color={C_PROMPT} label="提示词" value={dashOr(missInput)} pct={pctOf(missInput)} />
+          <LegendDot color={C_CACHE} label="缓存读" value={dashOr(c.cacheRead)} pct={pctOf(c.cacheRead)} />
+          <LegendDot color={C_REPLY} label="回复" value={dashOr(visibleOut)} pct={pctOf(visibleOut)} />
+          <LegendDot color={C_REASON} label="推理" value={dashOr(c.reasoning)} pct={pctOf(c.reasoning)} />
         </div>
       </div>
       <div onClick={onToggleDetail} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 11, color: "var(--text-muted)", userSelect: "none" }}>
@@ -3650,18 +3877,36 @@ function UsageBreakdown({ usage, live, detailOpen, onToggleDetail, cap = 0 }: {
           （外层 ContextWindowBar 那一层已由 .collapse 门控），所以原来的 `{detailOpen && …}`
           在此恒为真；若保留，"点明细收起"时这段高度会瞬间归零、外层插值目标突变 → 动画跳。 */}
       <div style={{ marginTop: 6, borderRadius: 4, background: "rgba(139,148,158,0.06)", border: "1px solid var(--border)", padding: "8px 10px", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.65 }}>
-        <div style={{ display: "flex", justifyContent: "space-between" }}><span>提示词 Tokens（输入）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{prompt.toLocaleString()}</span></div>
-        <div title={liveReply > 0 ? `累计 ${usage.completionTokens.toLocaleString()} + 本轮在途 ≈${liveReply.toLocaleString()}` : undefined} style={{ display: "flex", justifyContent: "space-between" }}><span>回复 Tokens（输出）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reply.toLocaleString()}</span></div>
+        {/* A-1095：**两层结构**（父项 = 侧别总量 / 子项 = 其中）。这样"合计"的算式一眼可核：
+            合计 === 输入 + 输出，缓存读与思考是**被包含**的，不再各自再占一行相加。 */}
+        <div
+          title={`${c.cacheInPrompt
+            ? "本会话上游为 OpenAI 兼容语义：prompt_tokens 已含缓存命中"
+            : "本会话上游为 Anthropic 语义：缓存读与 input 并列，已并入本行"}`}
+          style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>输入 Tokens（提示词）</span><span style={numStyle}>{c.inputSide.toLocaleString()}</span>
+        </div>
+        <div title="已计入上方「输入」，不重复计入合计" style={{ display: "flex", justifyContent: "space-between", ...subRow }}>
+          <span>└ 其中 缓存读（命中）</span><span style={numStyle}>{c.cacheRead.toLocaleString()}</span>
+        </div>
+        <div
+          title={liveReply > 0 ? `累计 ${usage.completionTokens.toLocaleString()} + 本轮在途 ≈${liveReply.toLocaleString()}` : undefined}
+          style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>输出 Tokens（回复）</span><span style={numStyle}>{c.outputSide.toLocaleString()}</span>
+        </div>
         <div
           title={[liveReason > 0 ? `累计 ${usage.reasoningTokens.toLocaleString()} + 本轮在途 ≈${liveReason.toLocaleString()}` : "",
-            usage.reasoningEstimated ? "上游 usage 未回传 reasoning_tokens，其中含按实收思考文本 ≈4 字符/token 折算的估算值（上游一旦回传真实值即以其为准）" : ""].filter(Boolean).join("；") || undefined}
-          style={{ display: "flex", justifyContent: "space-between" }}>
-          <span>推理 Tokens（思考）{usage.reasoningEstimated && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · 估算</span>}</span>
-          <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{reasoning.toLocaleString()}</span>
+            usage.reasoningEstimated ? "上游 usage 未回传 reasoning_tokens，其中含按实收思考文本 ≈4 字符/token 折算的估算值（上游一旦回传真实值即以其为准）" : "",
+            "已计入上方「输出」，不重复计入合计"].filter(Boolean).join("；")}
+          style={{ display: "flex", justifyContent: "space-between", ...subRow }}>
+          <span>└ 其中 推理（思考）{usage.reasoningEstimated && <span style={{ fontWeight: 400 }}> · 估算</span>}</span>
+          <span style={numStyle}>{c.reasoning.toLocaleString()}</span>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between" }}><span>缓存读 Tokens（命中）</span><span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-primary)", fontWeight: 600 }}>{cache.toLocaleString()}</span></div>
         <div style={{ height: 1, background: "var(--border)", margin: "6px 0" }} />
-        <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontWeight: 700, color: "var(--text-primary)" }}>合计</span><span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "var(--text-primary)" }}>{total.toLocaleString()}</span></div>
+        <div title="输入侧 + 输出侧（缓存命中 ⊂ 输入、思考 ⊂ 输出，子集不重复计）" style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontWeight: 700, color: "var(--text-primary)" }}>合计（输入 + 输出）</span>
+          <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "var(--text-primary)" }}>{c.total.toLocaleString()}</span>
+        </div>
       </div>
     </div>
   );
@@ -3693,7 +3938,7 @@ function fmtMsSmart(ms: number): string {
 
 /* ═══════════════ 终端 ═══════════════ */
 
-function TerminalTab(props: { workspace: string }): JSX.Element {
+function TerminalTab(props: { workspace: string; initialCmd?: string; nonce?: number }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
   const [lines, setLines] = React.useState<TermLine[]>([{ kind: "info", text: "slime 终端（命令运行器）— 输出直接回显；↑/↓ 切换历史。cwd 默认工作目录。" }]);
   const [input, setInput] = React.useState("");
@@ -3704,6 +3949,19 @@ function TerminalTab(props: { workspace: string }): JSX.Element {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => { const el = scrollRef.current; if (el) { el.scrollTop = el.scrollHeight; } }, [lines]);
+
+  /* A-1121（②）：Agent 让「打开终端并预填某条命令」。按 **nonce** 而不是命令文本触发 ——
+     同一条命令被再次要求预填时（用户刚清空输入框），只比文本的话这里会毫无反应。
+     ⚠️ 只填进输入框，**不自动执行**：回车是用户的动作。 */
+  const lastNonceRef = React.useRef<number | undefined>(undefined);
+  React.useEffect(() => {
+    if (props.nonce === undefined || props.nonce === lastNonceRef.current) { return; }
+    lastNonceRef.current = props.nonce;
+    const cmd = (props.initialCmd ?? "").trim();
+    if (!cmd) { return; }
+    setInput(cmd);
+    inputRef.current?.focus();
+  }, [props.nonce, props.initialCmd]);
 
   const run = async (raw: string): Promise<void> => {
     const cmd = raw.trim();
@@ -3836,8 +4094,10 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
       // 已是目标地址则跳过（防与 did-navigate 写回互相循环触发）
       const cur = typeof wv.getURL === "function" ? wv.getURL() : "";
       if (cur === next) { return; }
-      wv.loadURL(next);
-    } catch { /* loadURL 在 attach 前调用会被拒，did-attach 兜底重试 */ }
+      /* A-1106b：换成唯一安全出口 —— 旧写法 `wv.loadURL(next)` 的异步 reject 接不住，
+         Electron 会把它当未捕获异常打印（调试面板反复刷 GUEST_VIEW_MANAGER_CALL / ERR_ABORTED）。 */
+      safeLoadURL(wv, next);
+    } catch { /* getURL 未 attach 时会同步抛，did-attach 兜底重试 */ }
   }, []);
   // navUrl 变化（链接点击 / go() / props.url 同步）→ 命令式导航
   React.useEffect(() => { forceNav(); }, [forceNav, navUrl]);
@@ -3878,7 +4138,8 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
       try {
         const cur = typeof wv.getURL === "function" ? wv.getURL() : "";
         if (cur && cur !== "about:blank") { return; }
-        wv.loadURL(next);
+        /* A-1106b：安全网每 300ms 会重发 —— 若不接住 reject，-3 会被漏成「反复刷屏」的主产地 */
+        safeLoadURL(wv, next);
       } catch { /* 未 attach → 下一轮再试 */ }
     }, 300);
     return () => window.clearInterval(timer);

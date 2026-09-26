@@ -33,6 +33,12 @@ interface AgentDetail {
   lifecycle: string;
   /** A-980-R22：工具面白名单（skill/MCP 差异化配置） */
   tool_profile?: ToolProfileLocal;
+  /**
+   * A-1096：是否同意被派发为子代理。**必须按三态处理**（与判据唯一出处同源）：
+   * `undefined` = 未设置（默认允许）、`true` = 显式允许、`false` = 显式拒绝。
+   * 若这里写成 `?? true` 就会把"未设置"和"已同意"合并 ⇒ 用户永远看不到自己没设置过。
+   */
+  subagent_dispatch?: boolean;
 }
 
 /** A-980-R22：工具面白名单（与 shared/ipc ToolProfileDTO / core-ts ToolProfile 同构） */
@@ -317,7 +323,9 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
     }
   }, [detail?.id]);
 
-  function patchLocal(patch: Record<string, string>): void {
+  /** 局部改详情（保存前只改本地态）。形参用 Partial<AgentDetail> 而非 Record<string,string>：
+   *  本卡片新增了**布尔**字段（subagent_dispatch），旧签名会把它静态挡在外面。 */
+  function patchLocal(patch: Partial<AgentDetail>): void {
     setDetail((prev) => (prev ? { ...prev, ...patch } : prev));
   }
 
@@ -333,6 +341,10 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
       if (detail.show_thinking !== undefined) { patch.show_thinking = detail.show_thinking; }
       // A-980-R22：工具面白名单随保存一并落库
       if (detail.tool_profile) { patch.tool_profile = detail.tool_profile; }
+      // A-1096：子代理派发开关。**只在用户显式设置过时下发**（undefined 不下发）——
+      // 下发 undefined 会被 updateAgent 的 Object.assign 写成键存在但值 undefined 的畸形字段，
+      // 而且会把"未设置（默认允许）"变成"已设置"。
+      if (detail.subagent_dispatch !== undefined) { patch.subagent_dispatch = detail.subagent_dispatch; }
       const res = await api.current.agents.update(detail.id, patch);
       if (res.ok) {
         showNotice(true, `「${detail.name}」配置已保存`);
@@ -438,7 +450,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
   };
 
   return (
-    <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
+    <div className="settings-pane" style={{ display: "flex", height: "100%", overflow: "hidden" }}>
       {/* ── 左：Agent 列表 ── */}
       <div style={{ width: 280, minWidth: 280, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
@@ -559,6 +571,38 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               ) : null}
             </div>
 
+            {/* A-1096：是否同意被派发为子代理 —— 用户明确要求的「开个开关」。
+                它是「主 Agent 不必独自做完所有事」的数据前提：只有出现在这里被同意的 Agent，
+                才会进系统提示的「可用子代理」清单、也才能被 delegate_subagent 点名。
+                缺省（undefined）= 允许：开箱即可被派发，用户随时可在这里收回。 */}
+            <div style={{ padding: "12px 14px", border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", marginBottom: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>子代理派发</div>
+              <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10, lineHeight: 1.7 }}>
+                同意后，主 Agent 可以把「独立、自包含」的子任务派发给这个 Agent 执行——
+                它会在<b>自己的上下文</b>里跑（不污染主线），只把结论交回主线验收。
+                不同意则它不会出现在「可用子代理」清单里，也不会被点名。
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                {[{ v: true, label: "允许被派发" }, { v: false, label: "不派发" }].map((o) => {
+                  // 判据与装配层同源：undefined / true ⇒ 允许，只有 false 才是拒绝。
+                  const allowed = detail.subagent_dispatch !== false;
+                  return (
+                    <button key={String(o.v)}
+                      className={`btn${allowed === o.v ? " primary" : ""}`}
+                      style={{ fontSize: 12.5, padding: "3px 12px" }}
+                      onClick={() => patchLocal({ subagent_dispatch: o.v })}>
+                      {o.label}
+                    </button>
+                  );
+                })}
+                <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                  {detail.subagent_dispatch === undefined
+                    ? "当前：未设置（默认允许）"
+                    : detail.subagent_dispatch ? "当前：已同意" : "当前：已拒绝"}
+                </span>
+              </div>
+            </div>
+
             {/* A-980-R22：工具能力（skill / MCP 白名单）——创建后可在此随时修改 */}
             <div style={{ padding: "12px 14px", border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>工具能力</div>
@@ -600,7 +644,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
           display: "flex", alignItems: "center", justifyContent: "center",
         }}
           onClick={(e) => { if (e.target === e.currentTarget) { setCreating(false); } }}>
-          <div className="card" style={{ width: 520, maxWidth: "92vw", maxHeight: "86vh", display: "flex", flexDirection: "column" }}>
+          <div className="modal-card" style={{ width: 520, maxWidth: "92vw", maxHeight: "86vh", display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
               <h3 style={{ margin: 0, flex: 1 }}>创建 Agent</h3>
               <button className="titlebar-btn" onClick={() => setCreating(false)}><CloseIcon size={12} /></button>
@@ -637,7 +681,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
           display: "flex", alignItems: "center", justifyContent: "center",
         }}
           onClick={(e) => { if (e.target === e.currentTarget) { setPendingDelete(null); } }}>
-          <div className="card" style={{ width: 400, maxWidth: "90vw" }}>
+          <div className="modal-card" style={{ width: 400, maxWidth: "90vw" }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
               <h3 style={{ margin: 0, flex: 1 }}>删除 Agent</h3>
               <button className="titlebar-btn" onClick={() => setPendingDelete(null)}><CloseIcon size={12} /></button>

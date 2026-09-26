@@ -277,7 +277,8 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
   const tokens: TokenRow[] = cfg.tokens ?? [];
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>LLM 网关（slime 内置）</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
         slime 默认内置的 OpenAI 兼容转发网关：把第三方工具（Cherry Studio / 脚本 / 其它前端）的请求转发到你在「供应商」里配置的多个上游模型，自动完成 OpenAI↔Anthropic↔Gemini 格式互转。本机监听，不依赖任何外部程序。默认为「开」，此页只需按需关闭。

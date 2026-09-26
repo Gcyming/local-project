@@ -5,6 +5,11 @@
 import React, { type JSX } from "react";
 import type { SkillInfo } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
+// A-1106：与 MCP 广场**同一处**判据（`onlineSourceActive`）与**同一套**中文化实现
+// （`expandMarketQuery` 中文检索词展开 / `localizeServerTags` 中文类别标签）——
+// 技能广场此前是 MCP 广场那三件缺陷的同款：打开即联网 + 判据只看「联网有没有数据」+ 官方仓库全英文。
+import { onlineSourceActive, marketNeedles, filterMarketItems } from "./marketView.js";
+import { expandMarketQuery, localizeServerTags } from "../../../../core-ts/src/services/marketLocalize.js";
 
 /** A-918++：内嵌 webview 标签（GitHub 授权页内嵌在面板内，非独立弹窗）
  *  ⚠️ A-975-R6：`allowpopups` 必须转成**字符串** "true" —— React 对未知元素会丢弃值为 true 的
@@ -45,6 +50,11 @@ export default function SkillsPanel(): JSX.Element {
   const [marketOnline, setMarketOnline] = React.useState<Array<{ name: string; description: string }> | null>(null);
   const [marketLoading, setMarketLoading] = React.useState(false);
   const [marketError, setMarketError] = React.useState("");
+  // A-1106：**用户是否主动点过「拉取官方仓库」** —— 列表「归谁」只由它决定（false = 预制视图）。
+  // ⚠️ 不许退化成只看 `marketOnline !== null`：那正是 MCP 广场同款缺陷 —— 打开广场就联网，
+  //    网络一返回就把首屏预制列表**整体替换**成官方仓库（英文名/英文描述），用户没要求过、
+  //    也没有任何提示，只觉得「列表自己变了」。技能广场此前是**同一个形态**。
+  const [requestedOnline, setRequestedOnline] = React.useState(false);
 
   // A-918++：数据源认证（GitHub Token，加密存储；配置后 60→5000 req/h）
   const [githubToken, setGithubToken] = React.useState("");
@@ -52,6 +62,38 @@ export default function SkillsPanel(): JSX.Element {
   const [tokenSaving, setTokenSaving] = React.useState(false);
   // A-918++：内嵌 GitHub 授权区（webview 内嵌在面板内，非独立弹窗）
   const [showGithubAuth, setShowGithubAuth] = React.useState(false);
+
+  /** A-1106：联网拉取官方技能仓库列表（**只在用户主动点击时**调用；不再由「打开广场」自动触发）。
+   *  官方仓库是一次性拉全量，所以 `requestedOnline=true` 之后列表就归它（见下方 `useOnline`）。
+   *  旧行为：`useEffect(() => { if (marketOpen) { void loadMarket(); } }, …)` —— 一打开广场就拉，
+   *  网络返回后 `marketOnline !== null` 把预制列表**整个替换**成官方仓库（英文名/英文描述），
+   *  用户正想装的那 8 条预制（全中文、带分类标签）当场消失、无声无息。 */
+  const loadMarket = React.useCallback(async (force = false): Promise<void> => {
+    if (!api.current?.extras?.skillMarketSearch) { return; }
+    if (!force && requestedOnline) { return; }
+    setMarketLoading(true);
+    setMarketError("");
+    try {
+      const res = await api.current.extras.skillMarketSearch("");
+      if (res?.ok && Array.isArray(res.skills)) {
+        setMarketOnline(res.skills);
+        // A-1106：**只有联网真的成功**才让官方仓库接管列表（失败/空结果一律留在预制视图）
+        setRequestedOnline(true);
+      } else {
+        setMarketError(res?.error ?? "联网拉取失败");
+      }
+    } catch (e) {
+      setMarketError(`联网拉取失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setMarketLoading(false);
+    }
+  }, [requestedOnline]);
+
+  // A-1106：**打开广场不再自动联网**。这里只做与网络无关的事（保留一个具名 effect，
+  // 让「打开广场不许联网」这条守卫有稳定的锚点）。旧写入在这里的是 `void loadMarket();`。
+  React.useEffect(() => {
+    if (marketOpen) { setMarketError(""); }
+  }, [marketOpen]);
 
   async function saveToken(): Promise<void> {
     if (!api.current?.extras?.registryAuthSet) { return; }
@@ -61,25 +103,11 @@ export default function SkillsPanel(): JSX.Element {
       if (res?.ok) {
         setTokenSaved(githubToken.trim().length > 0);
         showNotice(true, githubToken.trim() ? "GitHub Token 已加密保存（后续自动带 Token 拉取，解除限流）" : "已清除 GitHub Token（回到匿名 60 req/h）");
-        // 清缓存用新 token 重新拉取官方仓库
-        setMarketOnline(null);
-        setMarketLoading(true);
-        setMarketError("");
-        try {
-          const sres = await api.current.extras.skillMarketSearch("");
-          if (sres?.ok && Array.isArray(sres.skills)) {
-            setMarketOnline(sres.skills);
-            showNotice(true, `已联网拉取官方技能仓库，共 ${sres.skills.length} 个技能（来源：anthropics/skills）`);
-          } else {
-            setMarketError(sres?.error ?? "联网拉取失败");
-            showNotice(false, `联网拉取失败：${sres?.error ?? "未知错误"}（Token 已保存，但拉取官方仓库失败）`);
-          }
-        } catch (e) {
-          setMarketError(`联网拉取失败：${e instanceof Error ? e.message : String(e)}`);
-          showNotice(false, `联网拉取失败：${e instanceof Error ? e.message : String(e)}`);
-        } finally {
-          setMarketLoading(false);
-        }
+        // A-1106：主进程在保存 token 时已清掉官方仓库缓存（`skillMarketCache = null`）。
+        // ⚠️ **只有用户当前就在看官方仓库时**才自动重拉 —— 否则「保存 token」这个动作会把他
+        //    从预制视图**无声**切到官方仓库（同款「没要求就换列表」缺陷）。
+        //    旧写法是**无条件** `setMarketOnline(null)` 后立刻联网，无论用户在看哪一边。
+        if (requestedOnline) { await loadMarket(true); }
       } else {
         showNotice(false, res?.error ?? "保存失败");
       }
@@ -89,29 +117,6 @@ export default function SkillsPanel(): JSX.Element {
       setTokenSaving(false);
     }
   }
-
-  /** 联网拉取官方技能仓库列表（打开广场时触发一次） */
-  const loadMarket = React.useCallback(async (): Promise<void> => {
-    if (!api.current?.extras?.skillMarketSearch || marketOnline) { return; }
-    setMarketLoading(true);
-    setMarketError("");
-    try {
-      const res = await api.current.extras.skillMarketSearch("");
-      if (res?.ok && Array.isArray(res.skills)) {
-        setMarketOnline(res.skills);
-      } else {
-        setMarketError(res?.error ?? "联网拉取失败");
-      }
-    } catch (e) {
-      setMarketError(`联网拉取失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setMarketLoading(false);
-    }
-  }, [marketOnline]);
-
-  React.useEffect(() => {
-    if (marketOpen) { void loadMarket(); }
-  }, [marketOpen, loadMarket]);
 
   const showNotice = (ok: boolean, text: string): void => {
     setNotice({ ok, text });
@@ -271,7 +276,8 @@ export default function SkillsPanel(): JSX.Element {
   const enabledCount = skills.filter((s) => s.enabled).length;
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>技能库</h2>
         <button className="btn" style={{ padding: "5px 12px", fontSize: 12.5, marginRight: 8 }}
@@ -334,34 +340,64 @@ export default function SkillsPanel(): JSX.Element {
       <div className={`collapse${marketOpen ? " is-open" : ""}`}>
       <div>
       {(() => {
-        const q = marketQuery.trim().toLowerCase();
-        // A-918++：联网官方仓库结果优先；未加载/失败时回退预制列表
-        const useOnline = marketOnline !== null;
+        const q = marketQuery.trim();
+        // A-1106：**判据唯一出处**（`marketView.onlineSourceActive`）—— 技能广场的「请求信号」
+        // 是「用户点过『拉取官方仓库』」（官方仓库是一次性拉全量，与 MCP registry 的
+        // 「按搜索词查」形态不同，所以走底层这个函数而不是 `marketSource`）。
+        // ⚠️ 不许退化成只看 `marketOnline !== null` —— 那就是「打开广场就被无声换掉」的根因判据。
+        const useOnline = onlineSourceActive(requestedOnline, marketOnline?.length ?? 0);
+        // A-1106：中文检索词展开 —— 官方仓库的 name/description 是**英文原文**，
+        // 本地 `includes` 拿中文去比英文字段**恒不命中**（用户看到「没找到」，其实是词没被认出来）。
+        const expansion = expandMarketQuery(q);
+        // 匹配关键词 = 原输入 + 展开后英文词的**并集**（预制列表是中文、官方仓库是英文，
+        // 两个数据源语言不同）。唯一出处 `marketView.marketNeedles`。
+        const needles = marketNeedles(q);
         const sourceList: Array<{ name: string; description: string; tags?: string[]; official?: boolean }> = useOnline
-          ? marketOnline.map((s) => ({ name: s.name, description: s.description, official: true }))
+          ? (marketOnline ?? []).map((s) => ({
+              name: s.name, description: s.description, official: true,
+              // A-1106：官方仓库描述是英文原文，给人一眼看得懂的**中文类别标签**
+              // （唯一出处 `marketLocalize.localizeServerTags`，只加标签不翻译整句以免半中半英）。
+              tags: localizeServerTags(s.name, s.description),
+            }))
           : SKILL_MARKETPLACE.map((s) => ({ name: s.name, description: s.desc, tags: s.tags }));
-        const filtered = q
-          ? sourceList.filter((it) => {
-              if (it.name.toLowerCase().includes(q)) { return true; }
-              if (it.description.toLowerCase().includes(q)) { return true; }
-              if (it.tags?.some((t) => t.toLowerCase().includes(q))) { return true; }
-              return false;
-            })
-          : sourceList;
+        // A-1106：过滤判据收口在 `marketView.filterMarketItems`（纯逻辑、可测；不许内联一份）。
+        const filtered = filterMarketItems(sourceList, needles);
         return (
         <div className="card" style={{ padding: "14px 16px", marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <div style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>
-              技能广场{useOnline ? ` · 官方仓库 ${filtered.length}/${marketOnline!.length}` : ` · 预制 ${filtered.length}/${SKILL_MARKETPLACE.length}`}
+              技能广场{useOnline ? ` · 官方仓库 ${filtered.length}/${(marketOnline ?? []).length}` : ` · 预制 ${filtered.length}/${SKILL_MARKETPLACE.length}`}
             </div>
-            <input className="input-field" style={{ width: 220, padding: "5px 10px", fontSize: 12.5 }} placeholder="搜索技能（名称/描述）"
+            <input className="input-field" style={{ width: 210, padding: "5px 10px", fontSize: 12.5 }} placeholder="搜索技能（中英文都行，如 浏览器 / 代码审查）"
               value={marketQuery} onChange={(e) => setMarketQuery(e.target.value)} />
+            <button className="btn primary" style={{ padding: "5px 12px", fontSize: 12, flexShrink: 0 }} disabled={marketLoading}
+              onClick={() => void loadMarket(true)}>
+              {marketLoading ? "拉取中…" : useOnline ? "↻ 刷新官方仓库" : "⬇ 拉取官方仓库"}
+            </button>
+            {/* A-1106：进得去也要**出得来** —— 否则用户停在官方仓库后找不到回预制精选的路
+                （MCP 广场靠「清空搜索框」回去；技能广场的判据是显式动作，所以给一个显式按钮）。 */}
+            {useOnline ? (
+              <button className="btn" style={{ padding: "5px 10px", fontSize: 12, flexShrink: 0 }}
+                onClick={() => setRequestedOnline(false)}>
+                回到预制
+              </button>
+            ) : null}
           </div>
           <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10, lineHeight: 1.6 }}>
             {marketLoading ? "正在拉取 Anthropic 官方技能仓库（anthropics/skills）…" :
-              useOnline ? "来源：Anthropic 官方技能仓库（anthropics/skills）。点「安装」下载官方 SKILL.md 原样落地。"
-              : marketError ? `联网拉取失败（${marketError}），已回退预制列表。点「安装」创建占位技能。`
-              : "点「安装」一键创建技能目录。"}
+              useOnline
+                ? "来源：Anthropic 官方技能仓库（anthropics/skills）。点「安装」下载官方 SKILL.md 原样落地。"
+                  + (q
+                    ? `按「${q}」过滤`
+                      + (expansion.query && expansion.query.toLowerCase() !== q.toLowerCase() ? `（实际匹配词：${expansion.query}）` : "")
+                      + (expansion.unrecognized
+                        ? `。⚠️ 未收录「${q}」对应的英文关键词，而官方仓库的说明全是英文 —— 多半搜不到，换个说法（如 数据库 / 浏览器 / 表格）或直接输英文`
+                        : "")
+                      + "。"
+                    : "（描述为英文原文，卡片上的中文标签是自动判定的类别线索。）清空搜索框看全部。")
+                : marketError ? `联网拉取失败（${marketError}），显示预制列表。可再点「拉取官方仓库」重试。`
+                : "预制精选（全中文、有分类标签）；点「拉取官方仓库」联网获取 anthropics/skills 的全量技能。"
+            }
           </div>
           {/* A-918++：数据源认证（GitHub Token，加密存储，提升 60→5000 req/h） */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)" }}>
@@ -401,7 +437,13 @@ export default function SkillsPanel(): JSX.Element {
           )}
           {filtered.length === 0 ? (
             <div style={{ padding: "20px", textAlign: "center", color: "var(--text-dim)", fontSize: 12.5 }}>
-              没找到匹配「{marketQuery}」的技能
+              {/* A-1106：三种「0 条」必须分开说 —— 本地筛选无命中 / 中文词没被认出来 / 联网真的没返回。
+                  把「词没认出来」说成「没找到」，用户只会反复换同义词（其实该换说法或输英文）。 */}
+              {q
+                ? (expansion.unrecognized
+                  ? `「${q}」没有对应的英文关键词（官方仓库的说明是英文），换个说法（如 数据库 / 浏览器 / 表格）或直接输英文`
+                  : `没找到匹配「${q}」的技能 —— 已按「${needles.join(" / ")}」在${useOnline ? "官方仓库" : "预制列表"}里比对`)
+                : (useOnline ? "官方仓库没有返回任何技能 —— 点「↻ 刷新官方仓库」再试一次" : "预制列表为空")}
             </div>
           ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 420, overflowY: "auto" }}>

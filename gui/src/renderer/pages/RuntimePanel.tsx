@@ -208,7 +208,8 @@ export default function RuntimePanel(): JSX.Element {
   };
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>运行环境</h2>
         <button className="btn" style={{ padding: "5px 12px", fontSize: 12 }} onClick={() => void load()}>

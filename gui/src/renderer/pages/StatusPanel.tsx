@@ -196,7 +196,8 @@ export default function StatusPanel(): JSX.Element {
   ];
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, marginTop: 0 }}>运行状态</h2>
 
       {/* 数字卡 */}

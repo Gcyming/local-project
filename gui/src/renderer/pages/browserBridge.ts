@@ -18,6 +18,8 @@ import { SIDEBAR_OPEN_EVENT } from "./Markdown.js";
 import { isBrowserSchemeUrl } from "../../shared/ipc.js";
 // A-1044：把「正在操作右栏浏览器」上报给可视化浮层（呼吸灯边框 + 悬浮提示）
 import { publishOperationFocus, type OpFocusRect } from "./operationFocus.js";
+// A-1106b：webview 导航的唯一安全出口（纯模块，见 webviewNav.ts）
+import { safeLoadURL } from "./webviewNav.js";
 
 export interface BrowserTabInfo {
   id: string;
@@ -651,7 +653,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         while (!wv && Date.now() < deadline) { await sleep(80); wv = await awaitWebview(id, 300); }
         if (!wv) { return { ok: false, error: "浏览器页未就绪（webview 未挂载）" }; }
         resetDomReady(wv);           // 新文档要重新 dom-ready
-        wv.loadURL(url);
+        safeLoadURL(wv, url);        // A-1106b：唯一安全出口（reject 被接住，-3 不算错）
         // A-980-R：**不再 waitLoaded（等整页加载完）**——重度站点（视频/富媒体）整页加载
         // 可达 10-15s，Agent 只需 DOM 就绪即可 snapshot/点击；等整页加载是"打开网址墨迹半天"主因之一。
         await waitDomReady(wv, 10000); // ★ 等新页面 dom-ready（后续操作才可用）

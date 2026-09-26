@@ -543,7 +543,8 @@ export default function MindHubPanel({
   const moodCn = shown ? (MOOD_CN[shown.mood] ?? shown.mood) : "—";
 
   return (
-    <div style={{ padding: 12, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 28）。 */
+    <div className="settings-pane" style={{ padding: "12px 0", overflowY: "auto", height: "100%" }}>
       {/* 依赖状态 */}
       <SectionCard title="依赖状态（换设备部署检查 + 一键下载）">
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>

@@ -606,7 +606,8 @@ export default function ProvidersPanel(): JSX.Element {
   const readonlyFiles = (overview?.files ?? []).filter((f) => !f.writable);
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>模型供应商</h2>
         <button className="btn sky" onClick={openLocalAdd} style={{ fontSize: 13 }}><PlusIcon size={12} /> 本地模型</button>
@@ -648,7 +649,7 @@ export default function ProvidersPanel(): JSX.Element {
             四费率格子都在挤（明细内部还要横向滚动）—— 用户原话"既然做这么大了，干脆把整个
             界面扩大点，免得我还要滚动"。1000px 让表格与明细都一次排开。
           */}
-          <div className="card" style={{ width: 1000, maxWidth: "96vw", maxHeight: "92vh", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <div className="modal-card" style={{ width: 1000, maxWidth: "96vw", maxHeight: "92vh", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
               <h3 style={{ margin: 0, flex: 1 }}>
                 {edit.mode === "api-add" && "添加 API 供应商"}

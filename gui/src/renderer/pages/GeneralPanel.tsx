@@ -1,13 +1,15 @@
 /**
  * gui/src/renderer/pages/GeneralPanel.tsx — 设置「通用」专栏。
- * - 主题选择：Alpha（既有 slate 深色）/ Beta（毛玻璃黑里透蓝，史莱姆品牌配色）
  * - 开机自启开关：与安装器 HKCU Run 项语义一致（app.setLoginItemSettings）
  * - A-980-R26：系统通知开关（任务完成/需要选择/出错/意外终止）+ 可定制提示音（可上传音频）
+ * - A-1108：全局降级池（用户自定义；**默认空 = 不跨供应商降级**）
  * - 卸载 Slime：启动 NSIS 卸载器（找不到时提示去控制面板/安装目录）
+ *
+ * ⚠️ A-1115：**主题选择已迁到「外观」栏**（`AppearancePanel.tsx`）。以后外观 / UI 设定一律进那一页，
+ *    别再往本页加 —— 两个入口 = 两个真相源。主题清单的唯一出处是 `theme.ts::THEMES`。
  */
 import React, { type JSX } from "react";
-import type { ThemeName } from "../theme.js";
-import type { NotifyConfigDTO } from "../../shared/ipc.js";
+import type { NotifyConfigDTO, FallbackPoolEntryDTO, ProviderSummary } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
 // A-980-R26：试听走渲染层播放器（主进程无音频能力），换音频后要让它失效缓存
 import { playCustomNotifySound, invalidateNotifySoundCache } from "../notifySound.js";
@@ -15,11 +17,6 @@ import { playCustomNotifySound, invalidateNotifySoundCache } from "../notifySoun
 import { AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
 // A-990-D：主页实时监测的消费币种偏好（localStorage + 广播；右栏「会话指标」跟随）
 import { readLedgerCurrencyPref, saveLedgerCurrencyPref, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
-
-interface Props {
-  theme?: ThemeName;
-  onThemeChange?: (t: ThemeName) => void;
-}
 
 /** 小药丸开关：与既有「已开启/已关闭」按钮同款样式，供通知/提示音两个开关复用 */
 function Pill(props: { on: boolean; disabled?: boolean; title?: string; onClick: () => void }): JSX.Element {
@@ -60,22 +57,7 @@ function MiniBtn(props: { children: React.ReactNode; disabled?: boolean; danger?
   );
 }
 
-const THEMES: Array<{ id: ThemeName; name: string; desc: string; swatch: string[] }> = [
-  {
-    id: "alpha",
-    name: "Alpha",
-    desc: "既有配色：slate 深色 + 天蓝 accent，沉稳清晰",
-    swatch: ["#0f172a", "#1e293b", "#3b82f6"],
-  },
-  {
-    id: "beta",
-    name: "Beta",
-    desc: "毛玻璃质感、黑里透蓝（史莱姆品牌配色：天蓝 / 紫 / 深蓝）",
-    swatch: ["#0a0e1c", "#38bdf8", "#8cf6fb"],
-  },
-];
-
-const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onThemeChange }: Props): JSX.Element {
+const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
   const [autostart, setAutostart] = React.useState<boolean | null>(null);
   const [exitMode, setExitModeState] = React.useState<"quit" | "background">("quit");
   const [busy, setBusy] = React.useState(false);
@@ -97,6 +79,12 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
   });
   // A-980-R26：系统通知 + 可定制提示音
   const [nCfg, setNCfg] = React.useState<NotifyConfigDTO>({ enabled: false, soundEnabled: true, soundFile: null, soundName: null });
+  // A-1108：全局降级池（默认空 = 不降级）。顺序 = 尝试顺序；provider/model 是「当前要添加的那条」
+  const [fbEntries, setFbEntries] = React.useState<FallbackPoolEntryDTO[]>([]);
+  const [fbProviders, setFbProviders] = React.useState<ProviderSummary[]>([]);
+  const [fbProvider, setFbProvider] = React.useState<string>("");
+  const [fbModel, setFbModel] = React.useState<string>("");
+  const [fbBusy, setFbBusy] = React.useState(false);
   // A-990-D：主页（右侧栏「会话指标」）实时监测的消费币种
   const [ledgerCur, setLedgerCur] = React.useState<LedgerCurrencyPref>(() => readLedgerCurrencyPref());
   const [nBusy, setNBusy] = React.useState(false);
@@ -122,6 +110,66 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
     showNotice(true, "上下文自动压缩配置已保存（聊天发送前自动生效）");
   };
 
+  /**
+   * A-1108：当前所选供应商的**可选模型**（引擎同口径：被显式关掉（selected:false）的模型不给选，
+   * 因为引擎解析降级池时也会丢弃它 —— 界面里能选、引擎却丢掉 = 静默失效）。
+   * ⚠️ 这里只做「下拉里列什么」，**不是**降级池的判据来源：真正的白名单在
+   * core-ts `services/fallbackPool.ts` 的 `resolveFallbackTargets`（唯一出处）。
+   * 没有模型列表的供应商（没探测过）改为手填模型 ID —— 否则它永远当不了降级目标。
+   */
+  const fbModelOptions = React.useMemo((): string[] => {
+    const p = fbProviders.find((x) => x.key === fbProvider);
+    const list = p && Array.isArray(p.models) ? p.models : [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const m of list) {
+      const id = typeof m?.id === "string" ? m.id : "";
+      if (!id || seen.has(id) || m.selected === false) { continue; }
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  }, [fbProviders, fbProvider]);
+
+  /** 保存降级池（整体替换；主进程侧会再消毒一遍，返回的是**消毒后**的真实内容，以它为准重绘） */
+  async function saveFallbackEntries(next: FallbackPoolEntryDTO[], okText: string): Promise<boolean> {
+    if (!api.current?.fallback?.set || fbBusy) { return false; }
+    setFbBusy(true);
+    try {
+      const r: { ok: boolean; entries?: FallbackPoolEntryDTO[]; error?: string } = await api.current.fallback.set(next);
+      if (r?.ok && Array.isArray(r.entries)) { setFbEntries(r.entries); }
+      showNotice(Boolean(r?.ok), r?.ok ? okText : `保存失败：${r?.error ?? "未知错误"}`);
+      return Boolean(r?.ok);
+    } catch (e) {
+      showNotice(false, `保存失败：${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    } finally { setFbBusy(false); }
+  }
+
+  function addFallbackEntry(): void {
+    const provider = fbProvider.trim();
+    const model = fbModel.trim();
+    if (!provider || !model) { showNotice(false, "请先选择供应商与模型（没有模型列表时可直接输入模型 ID）"); return; }
+    if (fbEntries.some((e) => e.provider === provider && e.model === model)) { showNotice(false, `这条已在降级池里：${provider} / ${model}`); return; }
+    void saveFallbackEntries([...fbEntries, { provider, model }], `已加入降级池：${provider} / ${model}`).then((ok) => {
+      if (ok) { setFbModel(""); }
+    });
+  }
+
+  function removeFallbackEntry(index: number): void {
+    const hit = fbEntries[index];
+    void saveFallbackEntries(fbEntries.filter((_, i) => i !== index), `已从降级池移除：${hit?.provider ?? ""} / ${hit?.model ?? ""}`);
+  }
+
+  /** 上移一位（顺序 = 尝试顺序，所以顺序本身是配置的一部分） */
+  function moveFallbackEntry(index: number): void {
+    if (index <= 0) { return; }
+    const next = [...fbEntries];
+    const [item] = next.splice(index, 1);
+    next.splice(index - 1, 0, item);
+    void saveFallbackEntries(next, `已上移：${item.provider} / ${item.model}`);
+  }
+
   React.useEffect(() => {
     const w = window as unknown as { slimeAPI?: any };
     api.current = w.slimeAPI;
@@ -145,6 +193,14 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
     if (api.current?.notify?.get) {
       void api.current.notify.get().then((r: { ok: boolean; config: NotifyConfigDTO }) => {
         if (r?.config) { setNCfg(r.config); }
+      }).catch(() => {});
+    }
+    // A-1108：全局降级池 + 供应商摘要（下拉数据源，省一次往返）。读失败就当空池显示 ——
+    // 绝不能"读不出来就自己在内存里编一个池"，那正是这次要根除的病。
+    if (api.current?.fallback?.get) {
+      void api.current.fallback.get().then((r: { ok: boolean; entries?: FallbackPoolEntryDTO[]; providers?: ProviderSummary[] }) => {
+        if (Array.isArray(r?.entries)) { setFbEntries(r.entries); }
+        if (Array.isArray(r?.providers)) { setFbProviders(r.providers); }
       }).catch(() => {});
     }
   }, []);
@@ -272,10 +328,12 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
   }
 
   return (
-    <div style={{ padding: 16, overflowY: "auto", height: "100%" }}>
+    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>通用设置</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
-        应用级行为：界面主题、请求频率、上下文自动压缩、系统通知与提示音、开机自启与卸载。大部分设置即时生效并持久化保存。
+        应用级行为：请求频率、上下文自动压缩、全局降级池、系统通知与提示音、开机自启与卸载。大部分设置即时生效并持久化保存。
+        （主题与界面外观设定已迁到「外观」栏。）
       </div>
 
       {notice && (
@@ -344,44 +402,7 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
         </div>
       </div>
 
-      {/* 主题选择 */}
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>界面主题</div>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          {THEMES.map((t) => {
-            const active = theme === t.id;
-            return (
-              <button key={t.id}
-                onClick={() => onThemeChange?.(t.id)}
-                title={t.desc}
-                style={{
-                  flex: "1 1 220px", maxWidth: 300, textAlign: "left", cursor: "pointer",
-                  padding: "12px 14px", borderRadius: 12,
-                  border: `1.5px solid ${active ? "var(--accent)" : "var(--border)"}`,
-                  background: active ? "var(--accent-soft)" : "var(--bg-input)",
-                  transition: "border-color 0.12s, transform 0.08s, box-shadow 0.12s",
-                }}
-                onMouseEnter={(e) => { if (!active) { e.currentTarget.style.borderColor = "var(--border-hover)"; } }}
-                onMouseLeave={(e) => { if (!active) { e.currentTarget.style.borderColor = "var(--border)"; } }}
-                onMouseDown={(e) => { e.currentTarget.style.transform = "scale(0.98)"; }}
-                onMouseUp={(e) => { e.currentTarget.style.transform = "scale(1)"; }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                  <span style={{ display: "inline-flex", gap: 4 }}>
-                    {t.swatch.map((c) => (
-                      <span key={c} style={{ width: 18, height: 18, borderRadius: "50%", background: c, border: "1px solid rgba(255,255,255,0.15)" }} />
-                    ))}
-                  </span>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: active ? "var(--accent-hover)" : "var(--text)" }}>
-                    {t.name}
-                  </span>
-                  {active && <span style={{ fontSize: 11, color: "var(--accent-hover)", marginLeft: "auto" }}>使用中</span>}
-                </div>
-                <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{t.desc}</div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {/* A-1115：主题选择已迁到「外观」栏（`AppearancePanel.tsx`）——本页不再渲染主题卡片。 */}
 
       {/* A-969：上下文自动压缩阈值设定 */}
       <div className="card" style={{ marginBottom: 14 }}>
@@ -428,6 +449,76 @@ const GeneralPanel = React.memo(function GeneralPanel({ theme = "alpha", onTheme
             </label>
           </div>
         )}
+      </div>
+
+      {/* A-1108：全局降级池（用户自定义；默认空 = 不降级） */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>全局降级池</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.6 }}>
+          首选供应商<b>整体</b>不可用（整池限流、下线）时，按这里的顺序改用别的供应商与模型。
+          <br />
+          <b>默认是空的 —— 不配就不跨供应商降级</b>，首选失败会如实报错。这里只影响「换一家」；
+          首选供应商自己换模型不需要在这里配。
+          <br />
+          <span style={{ color: "var(--text-dim)" }}>
+            注意：加入这里的模型在降级时<b>会收到你的对话内容</b> —— 只填你确实愿意发过去的供应商。
+          </span>
+        </div>
+
+        {fbEntries.length === 0 ? (
+          <div style={{
+            marginTop: 10, padding: "10px 12px", borderRadius: 10,
+            border: "1px dashed var(--card-border, var(--border))",
+            fontSize: 12, color: "var(--text-dim)",
+          }}>
+            当前：无降级池（推荐保持）。首选供应商整体不可用时，聊天会直接报错并说明原因。
+          </div>
+        ) : (
+          <div style={{ marginTop: 8 }}>
+            {fbEntries.map((e, i) => (
+              <div key={`${e.provider}:${e.model}`} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "6px 0",
+                borderBottom: "1px solid var(--card-border, var(--border))",
+              }}>
+                <span style={{ width: 16, fontSize: 11, color: "var(--text-dim)" }}>{i + 1}</span>
+                <span style={{ flex: 1, minWidth: 120, fontSize: 12.5 }}>
+                  <span style={{ color: "var(--accent-hover)", fontWeight: 600 }}>{e.provider}</span>
+                  <span style={{ color: "var(--text-muted)" }}> / </span>
+                  <span>{e.model}</span>
+                </span>
+                <MiniBtn disabled={fbBusy || i === 0} onClick={() => moveFallbackEntry(i)}>上移</MiniBtn>
+                <MiniBtn danger disabled={fbBusy} onClick={() => removeFallbackEntry(i)}>移除</MiniBtn>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <select className="input-field" style={{ maxWidth: 200 }} value={fbProvider}
+            onChange={(e) => { setFbProvider(e.target.value); setFbModel(""); }}>
+            <option value="">选择供应商…</option>
+            {fbProviders.map((p) => <option key={p.key} value={p.key}>{p.key}</option>)}
+          </select>
+          {fbModelOptions.length > 0 ? (
+            <select className="input-field" style={{ maxWidth: 240 }} value={fbModel}
+              onChange={(e) => setFbModel(e.target.value)}>
+              <option value="">选择模型…</option>
+              {fbModelOptions.map((id) => <option key={id} value={id}>{id}</option>)}
+            </select>
+          ) : (
+            <input className="input-field" style={{ maxWidth: 240 }} value={fbModel}
+              placeholder={fbProvider ? "输入模型 ID" : "先选供应商"}
+              disabled={!fbProvider}
+              onChange={(e) => setFbModel(e.target.value)} />
+          )}
+          <MiniBtn disabled={fbBusy || !fbProvider || !fbModel.trim()} onClick={() => addFallbackEntry()}>
+            {fbBusy ? "保存中…" : "加入降级池"}
+          </MiniBtn>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.5 }}>
+          顺序 = 尝试顺序（先加的先试）。最多 12 条，落盘 config/fallback-pool.json；改完下一条消息即生效，不用重启。
+          若某个供应商一个模型都选不出来，请先到「模型供应商」给它探测模型列表（也可以直接手填模型 ID）。
+        </div>
       </div>
 
       {/* A-990-D：主页实时监测的消费币种（用户明确要求放在「通用」栏） */}
