@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A-1115 目录卷轴（双线交织水波）— 设计原型 · slime</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151a22; --panel-2:#1b222c; --line:#252d39;
+    --fg:#dbe3ee; --fg-dim:#8b97a8; --fg-faint:#5b6675;
+    --accent:#60a5fa; --accent-soft:#93c5fd;
+    --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.65 "Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;overflow:hidden}
+  .wrap{display:flex;height:100vh}
+
+  /* ── 舞台：两个场景叠在同一位（切换用 class，不用 hidden）──────────────── */
+  .stage{position:relative;flex:1;min-width:0;background:var(--bg);contain:paint}
+  .scene{display:none;position:absolute;inset:0}
+  .scene.on{display:block}
+
+  .tabs{position:absolute;left:14px;top:12px;z-index:5;display:flex;gap:6px}
+  .tabs button{font:inherit;font-size:12px;padding:4px 12px;border-radius:999px;cursor:pointer;
+    background:var(--panel);border:1px solid var(--line);color:var(--fg-dim)}
+  .tabs button.on{background:#1d2a3f;border-color:#2c4a7a;color:var(--fg)}
+
+  /* 对话场景 */
+  .chat{position:relative;height:100%;overflow-y:scroll;padding:56px 30px 18px 26px;scrollbar-width:none}
+  .chat::-webkit-scrollbar{width:0;height:0}
+  .chat-inner{position:relative}
+  .msg{margin:0 0 20px;max-width:600px}
+  .msg .who{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--fg-faint);margin-bottom:6px}
+  .who i{width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:.7}
+  .msg.user .who i{background:#f472b6}
+  .msg p{margin:0 0 8px}
+  .msg pre{margin:8px 0;padding:10px 12px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;font-family:var(--mono);font-size:12.5px;color:#a8c7fa;overflow:auto}
+  .msg code,.doc code{font-family:var(--mono);font-size:12.5px;color:#a8c7fa}
+
+  /* md 文档场景（模拟右栏阅读器） */
+  .doc{position:relative;height:100%;overflow-y:scroll;padding:56px 30px 24px 26px;scrollbar-width:none}
+  .doc::-webkit-scrollbar{width:0;height:0}
+  .doc-inner{position:relative;max-width:620px}
+  .doc h1{font-size:19px;margin:0 0 10px}
+  .doc h2{font-size:15px;margin:26px 0 8px;color:var(--accent-soft)}
+  .doc h3{font-size:13.5px;margin:18px 0 6px;color:var(--fg)}
+  .doc p{margin:0 0 10px;color:var(--fg-dim)}
+  .doc ul{margin:6px 0 12px;padding-left:20px;color:var(--fg-dim)}
+  .doc li{margin:3px 0}
+  .doc pre{margin:8px 0 12px;padding:10px 12px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;font-family:var(--mono);font-size:12.5px;color:#a8c7fa;overflow:auto}
+
+  .fade{position:absolute;left:0;right:12px;bottom:0;height:74px;pointer-events:none;
+    background:linear-gradient(to bottom,transparent,var(--bg) 82%);
+    opacity:0;transition:opacity .22s ease}
+  .fade.on{opacity:1}
+
+  /* ── 卷轴：⚠️ contain:paint 只放 canvas（放容器 = overflow:clip ⇒ 气泡被裁）── */
+  .rail{position:absolute;top:52px;bottom:16px;right:6px;width:12px;outline:none;border-radius:999px}
+  .rail:focus-visible{box-shadow:0 0 0 2px rgba(96,165,250,.55)}
+  .rail-hit{position:absolute;top:0;bottom:0;left:-3px;right:-3px;cursor:pointer;touch-action:none}
+  .rail canvas{position:absolute;left:0;top:0;display:block;pointer-events:none;contain:paint}
+  .tip{position:absolute;right:22px;top:0;display:none;align-items:center;gap:8px;
+    white-space:nowrap;max-width:300px;padding:6px 10px;border-radius:8px;
+    background:var(--panel-2);border:1px solid var(--line);box-shadow:0 6px 22px rgba(0,0,0,.5);
+    font-size:12.5px;color:var(--fg);transform:translate3d(0,0,0);pointer-events:none}
+  .tip.on{display:flex}
+  .tip .ord{font-family:var(--mono);font-size:11px;color:var(--accent-soft);opacity:.9}
+  .tip .txt{overflow:hidden;text-overflow:ellipsis}
+  .tip .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+
+  /* ── 参数面板 ────────────────────────────────────────────────────── */
+  .side{width:360px;flex:none;height:100%;overflow-y:auto;background:var(--panel);
+    border-left:1px solid var(--line);padding:16px 18px 40px}
+  .side::-webkit-scrollbar{width:6px}
+  .side::-webkit-scrollbar-track{background:transparent}
+  .side::-webkit-scrollbar-thumb{background:rgba(96,165,250,.45);border-radius:999px}
+  .side::-webkit-scrollbar-thumb:hover{background:rgba(96,165,250,.85)}
+  .side h1{font-size:15px;margin:0 0 4px}
+  .side h2{font-size:12.5px;margin:20px 0 8px;color:var(--accent-soft);letter-spacing:.4px}
+  .side .sub{font-size:12px;color:var(--fg-faint);margin:0 0 4px}
+  .side p,.side li{font-size:12.5px;color:var(--fg-dim)}
+  .side ul{margin:6px 0;padding-left:18px}
+  .side li{margin:3px 0}
+  .side b{color:var(--fg)}
+  .kbd{font-family:var(--mono);font-size:11.5px;padding:1px 5px;border-radius:4px;
+    background:var(--panel-2);border:1px solid var(--line);color:#a8c7fa}
+  .ctl{margin:10px 0}
+  .ctl label{display:flex;justify-content:space-between;font-size:12px;color:var(--fg-dim);margin-bottom:2px}
+  .ctl label span{font-family:var(--mono);color:var(--accent-soft)}
+  .ctl input[type=range]{width:100%;accent-color:var(--accent);height:16px}
+  .chk{display:flex;align-items:center;gap:8px;margin:10px 0;font-size:12.5px;color:var(--fg-dim);cursor:pointer}
+  .chk input{accent-color:var(--accent);width:15px;height:15px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  #err{display:none;margin:10px 0;padding:8px 10px;border-radius:8px;font-size:12px;
+    background:#3b1418;border:1px solid #7f1d1d;color:#fca5a5;font-family:var(--mono);white-space:pre-wrap}
+  #probe{font-family:var(--mono);font-size:11px;color:var(--fg-faint);margin-top:8px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="stage" id="stage">
+    <div class="tabs">
+      <button id="tabChat" class="on">对话页</button>
+      <button id="tabDoc">右侧栏 md 文档</button>
+    </div>
+
+    <!-- 场景一：对话页（卷轴**不带刻度** —— 进度靠「已读段更亮」表达） -->
+    <div class="scene on" id="sceneChat">
+      <div class="chat" id="chatA"><div class="chat-inner" id="innerA"></div></div>
+      <div class="fade" id="fadeA"></div>
+      <div class="rail" id="railA" tabindex="0" role="slider" aria-label="对话话题卷轴"
+           aria-valuemin="1" aria-valuemax="0" aria-valuenow="0">
+        <canvas id="cvA"></canvas>
+        <div class="rail-hit" id="hitA"></div>
+        <div class="tip" id="tipA"><i class="dot"></i><span class="ord" id="ordA"></span><span class="txt" id="txtA"></span></div>
+      </div>
+    </div>
+
+    <!-- 场景二：右栏 md 文档（卷轴**带目录刻度** —— 层级决定刻度长度） -->
+    <div class="scene" id="sceneDoc">
+      <div class="doc" id="docB"><div class="doc-inner" id="innerB"></div></div>
+      <div class="fade" id="fadeB"></div>
+      <div class="rail" id="railB" tabindex="0" role="slider" aria-label="文档目录卷轴"
+           aria-valuemin="1" aria-valuemax="0" aria-valuenow="0">
+        <canvas id="cvB"></canvas>
+        <div class="rail-hit" id="hitB"></div>
+        <div class="tip" id="tipB"><i class="dot"></i><span class="ord" id="ordB"></span><span class="txt" id="txtB"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="side">
+    <h1>A-1115 · 目录卷轴（双线交织水波）</h1>
+    <p class="sub">常态：两根深浅不同的线交织并持续微微荡漾。指针处：荡漾停住，两线**合拢重叠**成一个小山包／浪尖凸出，离指针越远凸起越弱、两线越分开，直至恢复常态交织。点击刻度跳转。</p>
+    <div id="err"></div>
+
+    <h2>调参（改完把数字告诉我）</h2>
+    <div class="row">
+      <div class="ctl"><label>波长 λ<sub>0</sub><span id="vLam">46</span></label>
+        <input type="range" id="sLam" min="24" max="110" value="46"></div>
+      <div class="ctl"><label>波长 λ<sub>1</sub><span id="vLam2">53</span></label>
+        <input type="range" id="sLam2" min="24" max="110" value="53"></div>
+    </div>
+    <div class="row">
+      <div class="ctl"><label>常态振幅（占带宽 %）<span id="vAmp">55</span></label>
+        <input type="range" id="sAmp" min="20" max="100" value="55"></div>
+      <div class="ctl"><label>合拢强度 k<span id="vK">1.00</span></label>
+        <input type="range" id="sK" min="0" max="2.5" step="0.05" value="1"></div>
+    </div>
+    <div class="row">
+      <div class="ctl"><label>隆起（占半带宽 %，可伸出卷轴左侧）<span id="vPush">280</span></label>
+        <input type="range" id="sPush" min="0" max="400" value="280"></div>
+      <div class="ctl"><label>凹陷（占半带宽 %）<span id="vQ">110</span></label>
+        <input type="range" id="sQ" min="0" max="190" value="110"></div>
+    </div>
+    <div class="row">
+      <div class="ctl"><label>过渡尺度 σ（px，越小上下越收窄）<span id="vSig">13</span></label>
+        <input type="range" id="sSig" min="6" max="60" value="13"></div>
+      <div class="ctl"><label>平滑区 a（×σ，须盖住凹陷的尾巴）<span id="vP">4.00</span></label>
+        <input type="range" id="sP" min="2.2" max="6.5" step="0.05" value="4"></div>
+    </div>
+    <div class="row">
+      <div class="ctl"><label>端部过渡长度（px）<span id="vTap">90</span></label>
+        <input type="range" id="sTap" min="0" max="220" value="90"></div>
+      <div class="ctl"><label>端部残留（越小越接近直线）<span id="vEf">0.12</span></label>
+        <input type="range" id="sEf" min="0.02" max="0.6" step="0.01" value="0.12"></div>
+    </div>
+    <div class="ctl"><label>md 刻度突起（占卷轴宽 %）<span id="vGrow">55</span></label>
+      <input type="range" id="sGrow" min="0" max="120" value="55"></div>
+    <div class="row">
+      <div class="ctl"><label>荡漾速度<span id="vSpd">1.00</span></label>
+        <input type="range" id="sSpd" min="0" max="3" step="0.05" value="1"></div>
+      <div class="ctl"><label>跟随阻尼（越小越柔）<span id="vDamp">0.22</span></label>
+        <input type="range" id="sDamp" min="0.06" max="0.6" step="0.01" value="0.22"></div>
+    </div>
+    <div class="ctl"><label>卷轴总宽<span id="vW">12</span></label>
+      <input type="range" id="sW" min="9" max="28" value="12"></div>
+    <label class="chk"><input type="checkbox" id="cPause" checked>悬停时暂停荡漾（相位冻住、不跳变）</label>
+    <label class="chk"><input type="checkbox" id="cRead" checked>已读段更亮（对话页用来代替刻度）</label>
+    <label class="chk"><input type="checkbox" id="cFlip">衬托方向反过来（把隆起放到右侧）</label>
+
+    <h2>本轮按你说的改了什么</h2>
+    <ul>
+      <li><b>位移轮廓 = 双极（衬托）</b>：
+        <code>h(t) = Bp·e^(−t²/2) − (Dp + Bp·e^(−T/2))·(t²/T)·e^(1−t²/T)</code>，<code>T=2.7</code>、<code>t=(u−uc)/σ</code>；
+        <code>push = −方向 · 半带宽 · st · h(t)</code>。<code>h(0)=Bp</code>、<code>h(±√T)=−Dp</code> 都**精确**成立
+        ⇒ <b>隆起与凹陷各自独立</b>（都相对半带宽）。
+        ⚠️ 中间那项 <code>Bp·e^(−T/2)</code> **必须显式减掉**：隆起曲线在凹陷的位置还残留约 0.26·Bp，
+        不补掉就会把凹陷抵掉一大半 —— 症状正是「隆起拉得越大、凹陷反而越看不出来」。</li>
+      <li><b>夹紧 = 只夹右边</b>：画布左留 <code>LEFT_ROOM=12</code>、右留 <code>RIGHT_ROOM=6</code>
+        （= 卷轴两侧到「正文 / 面板分隔线」的空白）⇒ 隆起的发光可以**伸出卷轴外面**而不被裁、也不压字；
+        凹陷的发光可以越过卷轴右缘，但**不会在画布边缘被硬裁**（被硬裁 = 你报的那个「凹陷撞墙」）。
+        ⚠️ 这三个量（两个 ROOM + 夹紧边距）与 <code>padding-right</code> / <code>.rail right</code> 是**成对**的，改一个要一起改。
+        默认 隆起 280% / 凹陷 110% ⇒ 隆起伸出约 7.2px、凹陷停在卷轴右缘内约 1.0px。</li>
+      <li><b>两根线的明暗 / 能不能看出两根</b>：亮线 <code>191,219,254</code>（近白蓝）· 暗线 <code>59,130,246</code>（中蓝、低 alpha）。
+        ⚠️ 「整条发虚」要去提**亮线**，抬暗线 alpha 只会把两档并成一档。
+        ⚠️⚠️ 更根本的一条：**常态振幅必须大于两条描边的覆盖宽度**，否则两线**全程糊成一条** ——
+        那时你看到的"明暗区分变小"其实是**根本没有两根线**（本轮踩过：振幅压到 42% + 线宽 0.17W/0.12W 就糊了）。
+        现在 55% 振幅 + 0.13W/0.095W 线宽 ⇒ 两线最大间距 ≈5.2px、可见缝隙 ≈2.7px。</li>
+      <li><b>无杂波、无锐角</b>：振荡抑制用 <b>平顶升余弦窗</b>（<code>|t|≤a</code> 全抑制），
+        过渡带取 <code>b = a + max(1.4, 0.7a)</code> 这种**较宽**的收口 ——
+        ⚠️ 过渡带太窄时，凹陷的尾巴会和刚恢复的振荡叠在一起，衔接处就是用户说的那个「<b>锐角</b>」；
+        加宽后凹陷整段落在无振荡区、振荡在更外面从 0 缓缓升起 ⇒ 弧线衔接。</li>
+      <li><b>md 场景只保留刻度线</b>（不要波纹）：那儿滚动主要靠拖这条目录，波纹反而碍事。
+        基础长度：h1 <b>0.90W</b>、h2 0.68W、h3 0.48W。
+        鼠标处那条**变长并向左突起**（<code>+md刻度突起%×W</code>），上下按平滑权重恢复（**不做凹陷**）；
+        影响范围取 <code>±1.5σ…±3.2σ</code>，**比波形窄** —— 波形那边不能一起收窄（它的过渡带要够宽才能压住
+        凹陷尾巴与振荡的衔接）。颜色与线宽按同一权重插值，换条时不闪。</li>
+      <li><b>刻度的疏密与分布</b>：**均匀等距**铺满中间 2/3 高度（`H/6 ~ 5H/6`）——
+        条目少自然疏、多自然密，且**间距完全一致**。
+        ⚠️ 试过"按内容比例"映射：它忠实复现了文档结构，但 md 里 `h3` 紧跟 `h2`
+        ⇒ **间距一密一疏、成对出现**，被判定「分布不均匀」。目录卷轴要的是**等距刻度尺**，不是文档的缩略图。
+        ⚠️ `u`（显示位置）与 `s`（点击目标）**是两个量**：前者等距（可读），
+        后者取 <code>min(offsetTop, maxScroll)</code>（动作正确：把该条目带进视野）。
+        ⚠️ 刻度端部渐隐的**下界抬到 0.35**（波形是 0.12）：等距下首尾刻度正好在跨度两端，
+        沿用 0.12 会把首尾两条几乎抹掉 —— 那读起来是「少了两条刻度」而不是「渐隐」。</li>
+      <li><b>两端过渡（本轮新增）</b>：离上/下端点 <code>端部过渡长度 TAP</code> 之内，用一个 smoothstep
+        <code>taper(y)</code> 同时做两件事 —— ① 描边 alpha 乘它 ⇒ <b>渐隐变浅</b>；
+        ② 振荡幅度乘它 ⇒ <b>两线收束、波形趋近直线</b>。
+        ⚠️ <code>taper</code> 的下界取 <code>端部残留</code>（默认 0.12）而**不是 0**：要的是
+        「**趋近**直线、但直线不要出现在视野内」—— 真给 0 就成了一段精确的直线，反而成了"看得见的另一种形状"。
+        ⚠️ <code>TAP</code> 被钳在 <code>0.4H</code>：否则上下两段重叠、整条轴都在渐隐，就没有「常态」了。
+        ⚠️ 端部渐隐与已读/未读两个 alpha 规则**收在同一个 <code>lineStyle()</code> 渐变里**（唯一出处）——
+        再用"分段叠两次描边"去拼会留下可见色块边。</li>
+      <li><b>已读/未读交界**渐隐**</b>（<code>createLinearGradient</code>，约 0.07H 的过渡带）——
+        硬切换会留下一条可见的色块分界线（你说的「色块有一点点不自然」）。</li>
+      <li><b>悬停暂停荡漾</b>：相位用时间累加器 <code>driftT</code>，悬停时速度归零而不是重置时间 ⇒ 荡到一半<b>停住</b>、不动不跳。
+        （你说的第二种做法「荡漾继续、顺着突起轨迹慢慢交叠」= 把这个开关关掉，其余几何完全一样。）</li>
+      <li><b>对话页的右侧短刻度删掉了</b>：进度改用「已读段更亮、未读段更淡」表达，不再画任何额外图形。</li>
+      <li><b>目录刻度搬进 md 文档</b>：新增「右侧栏 md 文档」场景，同款卷轴 + <code>h1/h2/h3</code> 分级刻度（层级决定刻度长度）。</li>
+      <li><b>光标改 pointer</b>（之前 <code>cursor:grab</code> 就是你说的巴掌）。</li>
+    </ul>
+
+    <h2>规格</h2>
+    <ul>
+      <li><b>几何</b>：视觉宽 <b>12px</b>，判定 <b>18px</b>（左右各 3px，对称）；正文右侧留 14px。
+        对话页波形用满整个宽度（无刻度）；md 页波形占 76%、右侧留刻度位，两者互不叠压。</li>
+      <li><b>线宽随宽等比</b>：主描边 <code>0.17W</code>、浅线 <code>0.12W</code>、发光 <code>1.5×</code>。
+        ⚠️ 振幅必须<b>明显大于</b>线宽，否则两线视觉上就是一根（实测 1.14px vs 2.2px 的教训）。</li>
+      <li><b>话题/标题映射</b>：取「把它滚到顶所需的 scrollTop」<code>s_k=el.offsetTop</code>；
+        ⚠️ 末尾一屏内的条目滚不到顶（<code>s_k</code> 被 <code>maxScroll</code> 钳住）⇒ 底部留「尾部区」摊开，
+        否则最后几个刻度会叠在同一个 y（实测 712/712）。</li>
+      <li><b>交互</b>：悬停即跟随（不必按住）；点刻度跳转；按住拖动 = 连续擦洗；<span class="kbd">↑</span><span class="kbd">↓</span> 跳条目、<span class="kbd">Home</span><span class="kbd">End</span> 到顶/底。</li>
+      <li><b>无障碍</b>：<code>role=slider</code> + <code>aria-valuetext</code>；<code>prefers-reduced-motion</code> ⇒ 停漂移、只留响应式山包。</li>
+    </ul>
+
+    <h2>渲染优化</h2>
+    <ul>
+      <li>Canvas 单元素，每 2px 采样；<b>禁 <code>shadowBlur</code></b>，发光用第二条更宽更淡的描边伪造。</li>
+      <li>指针移动<b>零 React state</b>：位置只写 ref；只有<b>最近条目序号变了</b>才提交一次渲染。</li>
+      <li>气泡只动 <code>transform</code>（合成器），文字走 <code>textContent</code> 直改。</li>
+      <li>祖先链禁 <code>filter</code>/<code>backdrop-filter</code>/<code>transform</code>/<code>will-change</code>；
+        ⚠️ <b>绘制隔离 <code>contain:paint</code> 只放 canvas</b> —— 放容器会等价于 <code>overflow:clip</code>，把外伸的话题气泡整条裁掉（实测踩到）。</li>
+      <li>空闲即停 rAF（不是空转）；重测量只挂 <code>ResizeObserver</code>，不在滚动里算。</li>
+    </ul>
+
+    <div id="probe">自检：加载中…</div>
+  </aside>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* 0) 出声：任何脚本错误都显示在页面上，绝不静默空白 */
+  function showErr(msg) {
+    var b = $("err");
+    if (b) { b.style.display = "block"; b.textContent = "⚠ 脚本错误（卷轴不会渲染）：\n" + msg; }
+  }
+  window.addEventListener("error", function (e) { showErr(e.message || String(e.error || e)); });
+
+  try {
+
+  /* ── 1) 参数（两个场景共用一套）───────────────────────────────────── */
+  /* 卷轴两侧给「衬托」留的余量（px）：
+     · LEFT_ROOM  = 卷轴左缘 → 正文右缘之间的空白（推导见 R.layout）⇒ 隆起可以伸出去、最多顶到正文边上；
+     · RIGHT_ROOM = 卷轴右缘 → 面板分隔线之间的空白（`.rail { right: 6px }`）⇒ 凹陷的发光可以越过卷轴右缘，
+       但**不会在画布边缘被硬裁**（被裁就是这个用户报的「凹陷撞墙」）。
+     ⚠️ 三者必须一起改：`LEFT_ROOM / RIGHT_ROOM` 是布局推出来的常量，`padding-right`、`.rail` 的 `right` 一动它们就失效。 */
+  var LEFT_ROOM = 12;
+  var RIGHT_ROOM = 6;
+  /* ⚠️ bulge / dip 的口径（各自独立，都相对**半带宽**）：
+     bulge 280% ⇒ 隆起中心伸到卷轴左缘之外约 7.2px（左边不设限，撞的是空白）；
+     dip 110%   ⇒ 凹陷刚好越过卷轴右缘一点、进入右侧那 6px 空白（右边"撞墙"= 面板分隔线，仍有余量）。
+     ⚠️ `amp`（常态振幅）**不能压得太狠**：两线中心最大间距 = 2×常态振幅，
+     而两条描边加抗锯齿的覆盖宽度约 2.6px ⇒ 振幅压到 42% 时两线**全程糊成一条**，
+     用户看到的就是「明暗区分越来越小」（其实是**根本没有两根线**）。现取 55% 保证分得开。 */
+  var P = { lam0: 46, lam1: 53, amp: 55, k: 1, a: 4, bulge: 280, dip: 110, grow: 55, sig: 13,
+            tap: 90, efloor: 0.12,
+            spd: 1, damp: 0.22, w: 12, pause: true, read: true, flip: false };
+  var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ── 2) 造数据：对话页 + md 文档页 ──────────────────────────────── */
+  var TOPICS = [
+    ["dot4 上下文窗口核对", "上游 probe 把 dot4 报成 128K，但它实际是 512K。先别改代码，把能力表里的声明值和实测值对齐。"],
+    ["压缩是不是真压缩", "当前这条链我怀疑只是 trimming。要按压缩的定义去核：有没有「先生成摘要、再用摘要替换原文」这一步。"],
+    ["子代理会不会真的被派出去", "要确认主 Agent 有没有派子代理的通路，而不是它一直自己在串行干。"],
+    ["临时子代理", "清单里没有合适的人时，能不能现场定义一个只跑这一次的执行者：不落盘、不进清单、跑完即弃。"],
+    ["调试端口 9222 冲突", "dev 面板里出现 bind() 失败与 Cannot start http server for devtools 两条报错。"],
+    ["侧栏命中区对称加宽", "判定范围要左右同步增加相同的像素，显示效果也跟着一起拓宽。"],
+    ["滚到最新时的界面抖动", "从非最新位置滚到最新位置，中间会抖一下。重点怀疑底部虚化。"],
+    ["对话内滚动条", "统一换成圆角细胶囊：轨道透明、滑块全圆角、静止半透明、悬停加深。"],
+    ["整个对话页的滚动条", "直接删掉，换成一个「目录」式的体系。"],
+    ["水波卷轴", "两根深浅不同的线交织在一起持续微微荡漾；指针处合拢成小山包并浮出话题，点击跳转。"],
+    ["渲染优化", "这种持续动态效果做不好会非常卡，必须把重绘/重排/重渲染的路径先掐掉。"],
+    ["验收与门禁", "三处类型检查 + 全量测试 + 构建 + 产物断言，逐条跑完再谈收尾。"]
+  ];
+  var chatInner = $("innerA"), chatEntries = [];
+  TOPICS.forEach(function (t, i) {
+    var u = document.createElement("div");
+    u.className = "msg user";
+    u.innerHTML = '<div class="who"><i></i>你 · 第 ' + (i + 1) + ' 段</div><p><b>' + t[0] + "</b></p><p>" + t[1] + "</p>";
+    chatInner.appendChild(u); chatEntries.push({ el: u, label: t[0] });
+
+    var a = document.createElement("div");
+    a.className = "msg";
+    a.innerHTML = '<div class="who"><i></i>slime</div>' +
+      "<p>收到。先取证、再动手：读一遍相关源码与实际日志，确认现象属于哪一层，再决定改哪里；改完补一条静态守卫 + 变异，确认改坏就变红。</p>" +
+      "<pre>evidence \u2192 读源码首行 / 量像素 / 看进程\nmut-aXXXX \u2192 逐条实跑，判据 = exit\u22600 且输出里有 Tests 汇总行</pre>" +
+      "<p>顺手把重复的产地收成一个：<code>llm/rpmLimiter.ts</code>、<code>services/subagentCatalog.ts</code> 这类「唯一出处」模块就是为此存在的。</p>";
+    chatInner.appendChild(a);
+  });
+
+  var docInner = $("innerB"), docEntries = [];
+  [
+    ["h1", "上下文压缩 Agent-Loop 规格"],
+    ["p", "本文是本轮调研与落地决策的唯一记录。所有结论都要求有可复现的证据：源码首行、像素度量、进程快照或权威一手来源。"],
+    ["h2", "一、触发与闸门"],
+    ["h3", "1.1 发送前预算门"],
+    ["p", "planSend 三态：可发 / 需要压缩 / 装不下。三态不许合并成布尔量 —— 合并之后「需要压缩」与「装不下」会走同一条处置路径。"],
+    ["pre", "capModel(agent) \u2192 windowCap\nplanSend(messages, windowCap) \u2192 allow | compress | reject"],
+    ["h3", "1.2 引擎侧保险门"],
+    ["p", "必须在真正出网之前拦截。晚一步就等于没做：请求已经发出去，拦下来也只会得到一个 400。"],
+    ["h2", "二、压缩闭环"],
+    ["h3", "2.1 摘要必须带 full 标记"],
+    ["p", "摘要请求若不带 full，服务端会按会话当前状态再压一次，于是「压缩」看起来发生了、实际上一行都没少。"],
+    ["h3", "2.2 压无可压时要给出可救模型"],
+    ["p", "提示里要带结构化回执（模型 id + 窗口），界面才能一键切换并把输入框回填，而不是只丢一句「装不下」。"],
+    ["h2", "三、子代理"],
+    ["h3", "3.1 授权判据"],
+    ["p", "唯一判据是 subagent_dispatch !== false。写成 === true 会让存量 Agent（该字段根本不存在）全部派不出去。"],
+    ["h3", "3.2 临时子代理"],
+    ["p", "清单里没有合适的人时，现场给 systemPrompt 或 tools 造一个只跑这一次的执行者：不落盘、不进清单、跑完即弃。"],
+    ["h3", "3.3 深度守卫"],
+    ["p", "任何来源的工具白名单都要先剔掉派发类工具，否则内联 tools 一带 delegate_subagent 就绕开了套娃防护。"],
+    ["h2", "四、验收"],
+    ["p", "三处类型检查 + 全量测试 + 构建 + 产物断言，逐项跑完；变异必须逐条实跑，锚点命中不等于能捕获。"],
+    ["h3", "4.1 像素级验收"],
+    ["p", "形状类判断靠 canvas 位图字符图，肉眼在截图上判不出「振幅与线宽的比例」「两线是否真的分离」。"],
+    ["h2", "五、遗留"],
+    ["p", "RPM 限流器的多数厂商档位必须留空（单位不一致：并发 / RPS / tier），不许发明阈值。"],
+  ].forEach(function (spec) {
+    var el = document.createElement(spec[0]);
+    if (spec[0] === "pre") { el.textContent = spec[1]; }
+    else { el.textContent = spec[1]; }
+    docInner.appendChild(el);
+    if (spec[0] !== "p" && spec[0] !== "pre") { docEntries.push({ el: el, label: spec[1], lvl: spec[0] }); }
+  });
+
+  /* ── 3) 卷轴工厂：两个场景共用同一套绘制/交互，只有「要不要刻度」不同 ── */
+  var rails = [];
+  function createRail(cfg) {
+    var scroller = $(cfg.scroller), innerEl = $(cfg.inner), railEl = $(cfg.rail),
+        cv = $(cfg.canvas), hit = $(cfg.hit), tip = $(cfg.tip),
+        tipTxt = $(cfg.tipTxt), tipOrd = $(cfg.tipOrd), fadeEl = $(cfg.fade);
+    var ctx = cv.getContext("2d");
+    if (!ctx) { throw new Error("拿不到 2d context: " + cfg.canvas); }
+
+    var R = {
+      key: cfg.key, entries: cfg.entries, withTicks: !!cfg.withTicks, wave: cfg.wave !== false,
+      W: 12, H: 400, dpr: 1, maxScroll: 1, PAD: 3, OX: 0, CW: 12, TAP: 0, EFLOOR: 0.12,
+      ticks: [], TOP: 0, BOT: 0,
+      ptr: { uc: 0, target: 0, strength: 0, active: false, nearest: -1 },
+      dragging: false, dragU: 0, running: false, lastT: 0,
+      /* 荡漾相位：**累加器**（悬停暂停 = 速度归零，而不是重置时间 ⇒ 停住不跳） */
+      driftT: 0, driftPhase: 0, scrollPhase: 0,
+      visible: false,
+    };
+    /** 端部过渡系数（0..1）：在离上/下端点 `TAP` 之内，由 `EFLOOR` 平滑升到 1。
+     *  **两个端部效果共用它**：① 描边 alpha 乘它 ⇒ **渐隐变浅**；② 振荡幅度乘它 ⇒ **两线收束、波形趋近直线**。
+     *  ⚠️ 下界取 `EFLOOR` 而**不是 0** —— 用户要求「**趋近**直线，但直线不要出现在视野内」：
+     *     真给 0 就成了一段精确的直线，反而变成"看得见的另一种形状"。 */
+    function spanTaper(y, top, bot, floor) {
+      var fl = (floor === undefined) ? R.EFLOOR : floor;
+      var e = Math.min(y - top, bot - y);
+      var s = R.TAP > 0 ? Math.min(1, Math.max(0, e / R.TAP)) : 1;
+      return fl + (1 - fl) * (s * s * (3 - 2 * s));
+    }
+    /** 波形用：端点就是画布的上下边 */
+    function taper(y) { return spanTaper(y, 0, R.H); }
+    /** 一条线沿 y 的描边样式（**唯一出处**）：同时编码「已读/未读亮度差」与「两端渐隐」。
+     *  ⚠️ 不要再用"分段叠两次描边"去拼这两件事 —— 分段会在交界处留下可见色块边（用户报过），
+     *     而且端点还需要各自的渐变，分段的组合会越拼越多。一条渐变把它们一次说完。 */
+    function lineStyle(cr, aLit, aDim, puC) {
+      var Hb = R.H, blend = Math.max(14, Hb * 0.07);
+      var stops = [0, R.TAP, puC - blend, puC + blend, Hb - R.TAP, Hb];
+      stops.sort(function (x, y2) { return x - y2; });
+      var g = ctx.createLinearGradient(0, 0, 0, Hb), seen = {};
+      for (var k = 0; k < stops.length; k++) {
+        var y = Math.max(0, Math.min(Hb, stops[k]));
+        var kk = y.toFixed(2);
+        if (seen[kk]) { continue; }
+        seen[kk] = 1;
+        var a;
+        if (y <= puC - blend) { a = aLit; }
+        else if (y >= puC + blend) { a = aDim; }
+        else { a = aLit + (aDim - aLit) * ((y - (puC - blend)) / (2 * blend)); }
+        g.addColorStop(y / Hb, "rgba(" + cr + "," + Math.max(0, a * taper(y)).toFixed(3) + ")");
+      }
+      return g;
+    }
+    function band() {
+      /* 坐标原点 = **画布左上角**；卷轴本体占 x ∈ [OX, OX+W]。
+         `OX > 0` 就是给「向左突起」留的余量 —— 突起可以伸到卷轴**外面**去而不被画布裁掉。 */
+      var r = R.OX + R.W * (R.withTicks ? 0.76 : 0.88);
+      var l = R.OX + 1.2;
+      var maxAmp = Math.max(0.6, (r - l) / 2);
+      return { l: l, r: r, cx: (l + r) / 2, maxAmp: maxAmp, baseAmp: maxAmp * (P.amp / 100) };
+    }
+    /** 位移轮廓 = **双极**（衬托：中间向左隆起、上下向右凹陷）。
+     *  `h(t) = Bp·e^(−t²/2) − (Dp + Bp·e^(−T/2))·(t²/T)·e^(1−t²/T)`，`T = 2.7`。
+     *  `h(0) = Bp`、`h(±√T) = −Dp` **都精确成立** ⇒ 隆起与凹陷**各自独立**、互不拖累。
+     *  ⚠️ 必须显式减掉 `Bp·e^(−T/2)` 这一项：隆起曲线在凹陷处还残留约 0.26·Bp，
+     *    不补掉的话会把凹陷抵掉一大半（隆起越大、凹陷被吃得越狠 —— 这正是"越拉越不明显"的来源）。
+     *  振荡抑制用**平顶升余弦窗**（|t|≤a 全抑制；a..b 平滑收敛到 0）。
+     *  ⚠️⚠️ 过渡带必须够宽（`b = a + max(1.4, 0.7a)`）：太窄时**凹陷的尾巴会和刚恢复的振荡
+     *    叠在一起** ⇒ 衔接处看着像一个「锐角」而不是弧线（用户原话）。
+     *    加宽后凹陷（|t|≲3）整段落在无振荡区、振荡在 |t|≈3.4~4 的区段里从 0 缓缓升起 ⇒ 弧线衔接。
+     *  ⚠️ 夹紧：**左边不设限**（画布已向左多留 `LEFT_ROOM`，撞到的是空白不是字）；
+     *    **右边必须停住**（撞的是卷轴右缘 / 刻度 / 面板分隔线），留 1.4px 给发光描边。 */
+    function shapeAt(u) {
+      var B = band();
+      var st = R.ptr.strength;
+      var maxAmp = B.maxAmp;
+      var t = (u - R.ptr.uc) / Math.max(1, P.sig);
+      var at = Math.abs(t);
+      var a = P.a, b = a + Math.max(1.4, a * 0.7);
+      var win = at <= a ? 1 : (at >= b ? 0 : 0.5 * (1 + Math.cos((Math.PI * (at - a)) / (b - a))));
+      var wOsc = Math.min(1, P.k * st * win);
+      var T = 2.7;
+      var Bp = P.bulge / 100, Dp = P.dip / 100;
+      var bump = Math.exp(-(t * t) / 2);
+      var dipTerm = ((t * t) / T) * Math.exp(1 - (t * t) / T);
+      var h = Bp * bump - (Dp + Bp * Math.exp(-T / 2)) * dipTerm;
+      var dir = P.flip ? -1 : 1;
+      var push = -dir * maxAmp * st * h;
+      var lo = 1.4 - B.cx, hi = R.CW - 2.0 - B.cx;
+      if (push < lo) { push = lo; }
+      if (push > hi) { push = hi; }
+      return { sep: B.baseAmp * (1 - wOsc) * taper(u), push: push, cx: B.cx, maxAmp: maxAmp, baseAmp: B.baseAmp };
+    }
+
+    R.layout = function () {
+      R.W = P.w;
+      railEl.style.width = R.W + "px";
+      scroller.style.paddingRight = (R.W + 18) + "px";
+      fadeEl.style.right = R.W + "px";
+      var rect = railEl.getBoundingClientRect();
+      R.H = Math.max(1, Math.round(rect.height));
+      R.visible = rect.height > 4;
+      /* 端部过渡长度：上限取 H 的 40%，保证**上下两段不重叠**（否则整条轴都在渐隐，就没"常态"了）。 */
+      R.TAP = Math.max(0, Math.min(P.tap, R.H * 0.4));
+      R.EFLOOR = P.efloor;
+      R.dpr = Math.min(3, window.devicePixelRatio || 1);
+      /* 画布比卷轴**宽**：左右各留余量（左侧供隆起伸出去、右侧让凹陷的发光不被硬裁）。
+         这两个余量不是随便取的（见 LEFT_ROOM / RIGHT_ROOM 的定义）。
+         ⚠️ 画布宽度只算一次、存进 `R.CW`，**清屏与绘制都用它** ——
+         上一版清屏用的是卷轴宽 `W`，画布一加宽就漏清了右半边 ⇒ 逐帧叠加 ⇒ 糊成一坨。 */
+      R.OX = LEFT_ROOM;
+      R.CW = R.OX + R.W + RIGHT_ROOM;
+      cv.width = Math.round(R.CW * R.dpr);
+      cv.height = Math.round(R.H * R.dpr);
+      cv.style.width = R.CW + "px";
+      cv.style.left = (-R.OX) + "px";
+      cv.style.height = R.H + "px";
+      ctx.setTransform(R.dpr, 0, 0, R.dpr, 0, 0);
+      // 隐藏场景的 rect 高度为 0 ⇒ 山包中心会落到 0.5，切回来要重新居中
+      if (!R.ptr.uc || R.ptr.uc > R.H) { R.ptr.uc = R.H / 2; R.ptr.target = R.H / 2; }
+      R.measure();
+      R.draw(performance.now());
+    };
+
+    R.measure = function () {
+      R.maxScroll = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+      /* 刻度分布：**均匀等距**铺满中间 2/3 高度（上下各留 1/6）。
+         ⇒ 条目少时自然疏、多时自然密（同一个公式就满足「越少越散、越多越密」），且**间距完全一致**。
+         ⚠️ 上一版按「内容比例」映射：它忠实复现了文档结构，而 md 里 `h3` 紧跟 `h2`
+         ⇒ **间距一密一疏、成对出现**，用户判定「分布不均匀」。
+         目录卷轴要的是**等距的刻度尺**，不是文档的按比例缩略图。
+         ⚠️ `u`（显示位置）与 `s`（点击目标）**是两个量**：位置等距（可读），
+         点击取 `min(offsetTop, maxScroll)`（动作正确：把该条目带进视野）。 */
+      R.TOP = R.H / 6;
+      R.BOT = R.H * 5 / 6;
+      var n = R.entries.length;
+      R.ticks = R.entries.map(function (e, i) {
+        var top0 = Math.max(0, e.el.offsetTop);
+        var f = n > 1 ? i / (n - 1) : 0.5;
+        return {
+          s: Math.min(top0, R.maxScroll),
+          u: R.TOP + f * (R.BOT - R.TOP),
+          label: e.label, lvl: e.lvl || "h2", i: i,
+        };
+      });
+      railEl.setAttribute("aria-valuemax", String(R.ticks.length));
+      R.updateProbe();
+    };
+
+    R.sFromU = function (u) {
+      var f = (u - R.TOP) / Math.max(1, R.BOT - R.TOP);
+      return Math.min(R.maxScroll, Math.max(0, f * Math.max(1, scroller.scrollHeight - scroller.clientHeight)));
+    };
+    R.jump = function (t) { scroller.scrollTo({ top: t.s, behavior: reduceMotion ? "auto" : "smooth" }); };
+
+    R.updateProbe = function () {
+      if (!R.visible) { return; }
+      var B = band();
+      $("probe").textContent = "自检 · " + R.key + "：卷轴 " + R.W + "×" + R.H
+        + " · 画布 " + cv.width + "×" + cv.height + " · 条目 " + R.ticks.length
+        + "\n波形带 x=" + (B.l - R.OX).toFixed(1) + ".." + (B.r - R.OX).toFixed(1) + "（卷轴内坐标）"
+        + " · 常态振幅 " + B.baseAmp.toFixed(2) + " · 隆起 " + P.bulge + "% / 凹陷 " + P.dip + "%"
+        + "\n刻度 y=" + R.ticks.map(function (t) { return Math.round(t.u); }).join(",")
+        + (reduceMotion ? "\n已按系统偏好停漂移" : "")
+        + "\nσ=" + P.sig + " · 隆起%=" + P.bulge + " · 凹陷%=" + P.dip + " · 刻度突起%=" + P.grow
+        + " · OX=" + R.OX + " · uc=" + Math.round(R.ptr.uc) + " · st=" + R.ptr.strength.toFixed(2);
+    };
+
+    function pointerU(e) {
+      var r = railEl.getBoundingClientRect();
+      return Math.min(R.H, Math.max(0, e.clientY - r.top));
+    }
+    function nearest(u) {
+      if (!R.ticks.length) { return -1; }
+      var best = 0, bd = Infinity;
+      for (var i = 0; i < R.ticks.length; i++) {
+        var d = Math.abs(R.ticks[i].u - u);
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    }
+    function positionTip(u) {
+      var half = 16;
+      tip.style.transform = "translate3d(0," + (Math.min(R.H - half, Math.max(half, u)) - half).toFixed(1) + "px,0)";
+    }
+    function onHover(u) {
+      R.ptr.target = u;
+      var n = nearest(u);
+      if (n !== R.ptr.nearest) {
+        R.ptr.nearest = n;
+        var t = R.ticks[n];
+        if (t) {
+          tipTxt.textContent = t.label;
+          tipOrd.textContent = (n + 1) + " / " + R.ticks.length;
+          railEl.setAttribute("aria-valuenow", String(n + 1));
+          railEl.setAttribute("aria-valuetext", t.label);
+          tip.classList.add("on");
+        }
+      }
+      if (R.ptr.nearest >= 0) { positionTip(u); }
+    }
+
+    R.ensureLoop = function () {
+      if (R.running || !R.visible) { return; }
+      R.running = true; R.lastT = 0; requestAnimationFrame(frame);
+    };
+
+    function strokeWave(uFrom, uTo, lam, phi, width, color, key) {
+      var N = Math.max(2, Math.ceil((uTo - uFrom) / 2));
+      ctx.beginPath();
+      for (var k = 0; k <= N; k++) {
+        var u = uFrom + ((uTo - uFrom) * k) / N;
+        var s = shapeAt(u);
+        var x = s.cx + s.push + s.sep * key * Math.sin((Math.PI * 2 * u) / lam + phi + R.driftPhase + R.scrollPhase);
+        if (k === 0) { ctx.moveTo(x, u); } else { ctx.lineTo(x, u); }
+      }
+      ctx.lineWidth = width; ctx.strokeStyle = color; ctx.lineCap = "round"; ctx.stroke();
+    }
+
+    R.draw = function (tms) {
+      var ctx2 = ctx, W = R.W, H = R.H;
+      /* ⚠️⚠️ 清屏用 `R.CW`（画布总宽），不是 `W`（卷轴宽）——
+         上一版只清 W ⇒ 加宽出来的部分永远清不掉、逐帧往上叠 ⇒ **糊成一坨**。
+         现在宽度只有 `R.CW` 这一个出处，这类错从结构上消掉了。 */
+      ctx2.clearRect(0, 0, R.CW, H);
+      var s = scroller.scrollTop;
+      R.scrollPhase = s * 0.0105;
+      var pu = R.PAD + (s / R.maxScroll) * Math.max(1, H - R.PAD * 2);
+
+      /* ── 波形：只有「对话页」场景画（`R.wave`）。md 场景**只保留刻度线**（用户要求：
+         那里滚动主要靠拖这条目录，波纹反而碍事）。── */
+      if (R.wave) {
+        /* 一条描边就把「已读/未读亮度差 + 两端渐隐」都说清楚（唯一出处 = lineStyle）。
+           ⚠️ 每一条描边都读同一个 shapeAt（含发光层）—— 曾经发光层用「常态形状」画在别处，
+           看起来像**虚化出了另外两条浅色的线**（用户原话）。四者形状必须完全一致。 */
+        var puC = P.read ? Math.min(H, Math.max(0, pu)) : H;
+        for (var i = 0; i < 2; i++) {
+          var lam = i ? P.lam1 : P.lam0, phi = i ? Math.PI : 0, key = i ? -1 : 1;
+          // 线宽随宽等比；**同时给"两线分得开"留余量**（太粗会把两线糊成一条，见 P.amp 处的说明）
+          var wMain = i ? W * 0.095 : W * 0.13;
+          // 亮线 = 近白蓝（主角）· 暗线 = 中蓝 + 低 alpha。「整条发虚」要提**亮线**，别抬暗线。
+          var cr = i ? "59,130,246" : "191,219,254";
+          var aLit = i ? 0.52 : 0.97, aDim = i ? 0.34 : 0.62, aGlow = i ? 0.13 : 0.10;
+          strokeWave(0, H, lam, phi, wMain, lineStyle(cr, aLit, aDim, puC), key);
+          // 发光（更宽更淡 → 不用 shadowBlur）；同样过 taper，否则端部会留一段"没渐隐的亮边"
+          strokeWave(0, H, lam, phi, wMain * (i ? 2.0 : 1.5), lineStyle(cr, aGlow, aGlow, H), key);
+        }
+      }
+
+      /* ── 目录刻度（md 场景）：那里**唯一**的滚动抓手 ⇒ 要长、要清晰、要够好点 ──
+         鼠标处那条**变长并向左突起**，上下按同一个过渡尺度**平滑恢复**（要求：**不凹陷**，只要坡度和缓）。
+         ⇐ 与对话页共用 σ / a / b 这套尺度 ⇒ 两个场景的"影响范围"手感一致。 */
+      if (R.withTicks) {
+        /* 刻度突起的影响范围**比波形更窄**（tA=1.5/σ、tB=3.2/σ）——
+           用户反馈「鼠标隔着老远刻度就都变长了」。波形那边不能一起收窄：它的过渡带要够宽
+           才能压住凹陷尾巴与振荡的衔接（见 shapeAt），两件事的合适尺度本来就不同。 */
+        var tA = 1.5, tB = 3.2;
+        for (var j = 0; j < R.ticks.length; j++) {
+          var tk = R.ticks[j];
+          var ad = Math.abs((tk.u - R.ptr.uc) / Math.max(1, P.sig));
+          var prof = ad <= tA ? 1 : (ad >= tB ? 0 : 0.5 * (1 + Math.cos((Math.PI * (ad - tA)) / (tB - tA))));
+          var qw = prof * R.ptr.strength;
+          // 端部渐出变浅：与波形同一套跨度（只铺满中间 2/3，所以用刻度自己的上下界）。
+          // ⚠️ 刻度的**下界故意抬高到 0.35**（波形用 0.12）：等距分布下首尾刻度正好落在跨度两端，
+          //    沿用 0.12 会把首尾两条几乎抹掉 —— 用户会读成"刻度少了两条"，而不是"渐隐"。
+          var endT = spanTaper(tk.u, R.TOP, R.BOT, 0.35);
+          var frac = tk.lvl === "h1" ? 0.90 : (tk.lvl === "h2" ? 0.68 : 0.48);
+          var tw = Math.max(2.5, W * frac - 1.6) + W * (P.grow / 100) * qw;
+          ctx.beginPath();
+          ctx.lineWidth = Math.max(1.4, W * 0.14) + Math.max(0, W * 0.10) * qw;
+          // 颜色也按同一权重插值：二值跳变会在"最近条目换人"的瞬间闪一下
+          var cr = Math.round(139 + 52 * qw), cg = Math.round(151 + 68 * qw), cb = Math.round(168 + 86 * qw);
+          ctx.strokeStyle = "rgba(" + cr + "," + cg + "," + cb + "," + ((0.62 + 0.36 * qw) * endT).toFixed(3) + ")";
+          ctx.lineCap = "round";
+          ctx.moveTo(R.OX + W - 1.0, tk.u);
+          ctx.lineTo(R.OX + W - 1.0 - tw, tk.u);
+          ctx.stroke();
+        }
+      }
+      if (!R.running) { R.updateProbe(); }
+    };
+
+    function frame(tms) {
+      if (!R.lastT) { R.lastT = tms; }
+      var dt = R.lastT ? Math.min(48, tms - R.lastT) : 16;
+      R.lastT = tms;
+      if (!R.visible) { R.running = false; return; }
+
+      // 荡漾相位：**累加器**（悬停时速度归零 ⇒ 停在原地，不重置、不跳变）
+      var speed = (R.ptr.active && P.pause) ? 0 : P.spd;
+      R.driftT = (R.driftT || 0) + (dt / 1000) * speed;
+      R.driftPhase = reduceMotion ? 0 : R.driftT * (Math.PI * 2 / 5.2);
+
+      var want = R.ptr.active ? 1 : 0;
+      var k = 1 - Math.pow(1 - 0.18, dt / 16.7);
+      R.ptr.strength += (want - R.ptr.strength) * k;
+      if (want === 1 && R.ptr.strength > 0.998) { R.ptr.strength = 1; }
+      if (want === 0 && R.ptr.strength < 0.002) { R.ptr.strength = 0; }
+      var kk = 1 - Math.pow(1 - P.damp, dt / 16.7);
+      R.ptr.uc += (R.ptr.target - R.ptr.uc) * kk;
+      if (Math.abs(R.ptr.target - R.ptr.uc) < 0.25) { R.ptr.uc = R.ptr.target; }
+
+      R.draw(tms);
+
+      var idle = !R.ptr.active && R.ptr.strength === 0 && (reduceMotion || (P.spd === 0));
+      if (idle) { R.running = false; R.draw(tms); return; }
+      requestAnimationFrame(frame);
+    }
+
+    hit.addEventListener("pointerenter", function (e) {
+      R.ptr.active = true; R.ptr.target = pointerU(e); R.ptr.uc = R.ptr.target;
+      onHover(R.ptr.target); R.ensureLoop();
+    });
+    hit.addEventListener("pointermove", function (e) {
+      var u = pointerU(e);
+      if (R.dragging) { R.dragU = u; scroller.scrollTop = R.sFromU(u); }
+      onHover(u); R.ensureLoop();
+    });
+    hit.addEventListener("pointerleave", function () {
+      if (R.dragging) { return; }
+      R.ptr.active = false; R.ptr.nearest = -1; tip.classList.remove("on"); R.ensureLoop();
+    });
+    hit.addEventListener("pointerdown", function (e) {
+      R.dragging = true; R.dragU = pointerU(e);
+      try { hit.setPointerCapture(e.pointerId); } catch (_) {}
+      R.ensureLoop();
+    });
+    hit.addEventListener("pointerup", function (e) {
+      if (!R.dragging) { return; }
+      var upU = pointerU(e), moved = Math.abs(upU - R.dragU) > 3;
+      R.dragging = false;
+      try { hit.releasePointerCapture(e.pointerId); } catch (_) {}
+      onHover(upU);
+      if (!moved) { var t = R.ticks[nearest(upU)]; if (t) { R.jump(t); } }
+    });
+    hit.addEventListener("pointercancel", function () { R.dragging = false; });
+    railEl.addEventListener("keydown", function (e) {
+      var cur = R.ptr.nearest < 0 ? nearest(R.ptr.target) : R.ptr.nearest;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        var d = e.key === "ArrowDown" ? 1 : -1;
+        var t = R.ticks[Math.min(R.ticks.length - 1, Math.max(0, cur + d))];
+        if (t) {
+          R.ptr.nearest = t.i; R.ptr.target = t.u; R.ptr.uc = t.u; R.ptr.active = true;
+          tipTxt.textContent = t.label; tipOrd.textContent = (t.i + 1) + " / " + R.ticks.length;
+          tip.classList.add("on"); positionTip(t.u); R.jump(t);
+        }
+        R.ensureLoop(); e.preventDefault();
+      } else if (e.key === "Home") { scroller.scrollTo({ top: 0, behavior: "smooth" }); e.preventDefault(); }
+      else if (e.key === "End") { scroller.scrollTo({ top: R.maxScroll, behavior: "smooth" }); e.preventDefault(); }
+    });
+
+    function updateFade() {
+      fadeEl.classList.toggle("on", scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 2);
+    }
+    scroller.addEventListener("scroll", function () { updateFade(); R.ensureLoop(); }, { passive: true });
+    new ResizeObserver(function () { R.layout(); }).observe(scroller);
+    new ResizeObserver(function () { R.measure(); R.ensureLoop(); }).observe(innerEl);
+    R.updateFade = updateFade;
+    R.railEl = railEl;
+    return R;
+  }
+
+  var railChat = createRail({
+    key: "对话页", withTicks: false, wave: true, entries: chatEntries,
+    scroller: "chatA", inner: "innerA", rail: "railA", canvas: "cvA", hit: "hitA",
+    tip: "tipA", tipTxt: "txtA", tipOrd: "ordA", fade: "fadeA",
+  });
+  var railDoc = createRail({
+    key: "md 文档", withTicks: true, wave: false, entries: docEntries,
+    scroller: "docB", inner: "innerB", rail: "railB", canvas: "cvB", hit: "hitB",
+    tip: "tipB", tipTxt: "txtB", tipOrd: "ordB", fade: "fadeB",
+  });
+  rails.push(railChat, railDoc);
+
+  /* ── 4) 场景切换 ───────────────────────────────────────────────────── */
+  function showScene(which) {
+    var isChat = which === "chat";
+    $("sceneChat").classList.toggle("on", isChat);
+    $("sceneDoc").classList.toggle("on", !isChat);
+    $("tabChat").classList.toggle("on", isChat);
+    $("tabDoc").classList.toggle("on", !isChat);
+    // 隐藏时 rect 高度为 0 ⇒ 必须重排一次（否则 H=1、画布 1px）
+    rails.forEach(function (r) { r.layout(); r.updateFade(); r.ensureLoop(); });
+    window.__a1115Scene = which;
+  }
+  $("tabChat").addEventListener("click", function () { showScene("chat"); });
+  $("tabDoc").addEventListener("click", function () { showScene("doc"); });
+
+  /* ── 5) 调参绑定（**必须在所有 const 之后** —— 放在顶部会 TDZ 崩掉整段）── */
+  function bind(id, key, outId, fmt) {
+    var el = $(id), o = $(outId);
+    var sync = function () {
+      P[key] = parseFloat(el.value);
+      o.textContent = fmt ? fmt(P[key]) : P[key];
+      rails.forEach(function (r) { r.layout(); for (var i = 0; i < 3; i++) { r.ensureLoop(); } });
+      railChat.draw(performance.now()); railDoc.draw(performance.now());
+    };
+    el.addEventListener("input", sync);
+    sync();
+  }
+  function bindChk(id, key) {
+    var el = $(id);
+    var sync = function () { P[key] = el.checked; rails.forEach(function (r) { r.ensureLoop(); }); };
+    el.addEventListener("change", sync);
+    sync();
+  }
+  bind("sLam", "lam0", "vLam");
+  bind("sLam2", "lam1", "vLam2");
+  bind("sAmp", "amp", "vAmp");
+  bind("sK", "k", "vK", function (v) { return v.toFixed(2); });
+  bind("sPush", "bulge", "vPush", function (v) { return Math.round(v) + "%"; });
+  bind("sSig", "sig", "vSig");
+  bind("sP", "a", "vP", function (v) { return v.toFixed(2); });
+  bind("sQ", "dip", "vQ", function (v) { return Math.round(v) + "%"; });
+  bind("sGrow", "grow", "vGrow", function (v) { return Math.round(v) + "%"; });
+  bind("sTap", "tap", "vTap");
+  bind("sEf", "efloor", "vEf", function (v) { return v.toFixed(2); });
+  bind("sSpd", "spd", "vSpd", function (v) { return v.toFixed(2); });
+  bind("sDamp", "damp", "vDamp", function (v) { return v.toFixed(2); });
+  bind("sW", "w", "vW");
+  bindChk("cPause", "pause");
+  bindChk("cRead", "read");
+  bindChk("cFlip", "flip");
+
+  /* ── 6) 启动 ───────────────────────────────────────────────────────── */
+  window.addEventListener("resize", function () {
+    rails.forEach(function (r) { r.layout(); r.ensureLoop(); });
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { rails.forEach(function (r) { r.ensureLoop(); }); }
+  });
+  showScene("chat");
+
+  } catch (e) {
+    showErr(e && e.message ? e.message : String(e));
+  }
+})();
+</script>
+</body>
+</html>

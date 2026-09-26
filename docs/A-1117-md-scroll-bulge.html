@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>A-1117 · md 卷轴滚动隆起的对照预览</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #131a24;
+    --line: #26303d;
+    --fg: #e6edf6;
+    --dim: #8b93a1;
+    --accent: #5b82f6;
+    --bad: #f0616d;
+    --good: #46c08a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px 26px 34px;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--dim); margin-bottom: 18px; }
+  #err {
+    display: none; margin-bottom: 14px; padding: 10px 12px;
+    background: #3a1620; border: 1px solid #833; border-radius: 8px;
+    color: #ffc9cf; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace;
+  }
+  .wrap { display: flex; gap: 26px; align-items: flex-start; flex-wrap: wrap; }
+  .stage {
+    position: relative; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+  }
+  canvas { display: block; border-radius: 8px; }
+  .ctl { min-width: 330px; flex: 1 1 330px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .row > label { width: 96px; color: var(--dim); flex: none; }
+  input[type=range] { flex: 1 1 auto; accent-color: var(--accent); }
+  .val { width: 62px; text-align: right; font-family: ui-monospace, Consolas, monospace; flex: none; }
+  .seg { display: flex; gap: 6px; }
+  .seg button {
+    flex: 1 1 0; padding: 7px 8px; cursor: pointer;
+    background: #1b2430; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 7px; font-size: 12px;
+  }
+  .seg button.on { border-color: var(--accent); background: #1d2b46; }
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; }
+  td.num { font-family: ui-monospace, Consolas, monospace; text-align: right; }
+  .verdict { margin-top: 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; }
+  .verdict.bad { background: #2c1418; border: 1px solid #5d2733; color: #ffb7bf; }
+  .verdict.good { background: #102420; border: 1px solid #235c46; color: #a6e6c9; }
+  .note { color: var(--dim); margin-top: 14px; font-size: 12px; }
+  code { background: #1b2430; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>A-1117 · md 卷轴「滚到哪、哪条刻度隆起」对照预览</h1>
+<div class="sub">
+  左侧是 md 卷轴本体（刻度等距铺满中间 2/3）；拖“滚动位置”看隆起跟着走。<br />
+  右侧把两种衰减口径并排放，用来回答一个问题：<b>长文档上能不能一眼看出是哪一条？</b>
+</div>
+<div id="err"></div>
+
+<div class="wrap">
+  <div class="stage"><canvas id="cv" width="150" height="560"></canvas></div>
+
+  <div class="ctl">
+    <div class="row">
+      <label>衰减口径</label>
+      <div class="seg" style="flex:1 1 auto">
+        <button id="bOld">改前：按固定像素 sig</button>
+        <button id="bNew">改后：按刻度间距</button>
+      </div>
+    </div>
+    <div class="row">
+      <label>条目数 n</label>
+      <input id="sN" type="range" min="3" max="40" step="1" value="20" />
+      <span class="val" id="vN">20</span>
+    </div>
+    <div class="row">
+      <label>滚动位置</label>
+      <input id="sS" type="range" min="0" max="1000" step="1" value="0" />
+      <span class="val" id="vS">0</span>
+    </div>
+    <div class="row">
+      <label>视口高度 H</label>
+      <input id="sH" type="range" min="300" max="900" step="10" value="560" />
+      <span class="val" id="vH">560</span>
+    </div>
+
+    <table>
+      <tr><th>量</th><th style="text-align:right">值</th></tr>
+      <tr><td>刻度间距</td><td class="num" id="tGap">–</td></tr>
+      <tr><td>首条 / 末条位置</td><td class="num" id="tEnds">–</td></tr>
+      <tr><td>等距偏差（最大）</td><td class="num" id="tDev">–</td></tr>
+      <tr><td>相邻那条的权重</td><td class="num" id="tW1">–</td></tr>
+      <tr><td><b>&gt; 0.5 的条数</b>（等于“亮几条”）</td><td class="num" id="tCnt">–</td></tr>
+    </table>
+    <div class="verdict" id="vd">–</div>
+
+    <div class="note">
+      判据（写进守卫与变异）：<br />
+      · 衰减<b>按刻度间距归一</b>，本单位下 <code>1.0</code> 处归零 ⇒ 停稳时<b>只有一条满亮</b>；
+      相邻那条只在滑动<b>途中</b>半亮。<br />
+      · 刻度<b>均匀等距铺满中间 2/3</b> ⇒ 首末条必须落在 <code>H/6</code> 与 <code>5H/6</code>、
+      <b>等距偏差 = 0</b>（这是用户明确提过的要求：「你这刻度分布不均匀啊」）。<br />
+      ⚠️ 鼠标悬停仍走原来的 <code>bump()</code>（绝对像素 <code>sig</code>）—— 鼠标是连续坐标、
+      与“条目有几条”无关，两个口径各管一件事。
+    </div>
+  </div>
+</div>
+
+<script>
+/* ⚠️ 铁律（A-1115 首版翻车）：函数/绑定调用一律放**所有 const 之后**，否则 TDZ 让整段脚本中断 = 空白页。
+   并自带 window.onerror 横幅 —— 否则错误对用户就是「啥也没有」。 */
+window.onerror = function (msg, src, line, col) {
+  var box = document.getElementById("err");
+  box.style.display = "block";
+  box.textContent = "脚本出错（页面已降级，不是「没画出来」）：\n" + msg + "\n" + (src || "") + ":" + line + ":" + col;
+  return false;
+};
+</script>
+
+<script>
+(function () {
+  "use strict";
+  try {
+    /* ── 全部常量（与 gui/src/renderer/pages/TopicRail.tsx + railParams.ts 的默认参数逐值一致）。
+       ⚠️ 这些是**手抄的第二产地** ⇒ 由 `tests/gui/a1117-preview-drift.spec.ts` 逐条钉住；
+       改真身参数必须同步改这里，否则守卫变红（防"预演和真身不一致"）。── */
+    var LEFT_ROOM = 12;          // TopicRail.LEFT_ROOM
+    var RIGHT_ROOM = 6;          // TopicRail.RIGHT_ROOM
+    var W = 12;                  // p.w 默认值
+    var OX = LEFT_ROOM;          // R.OX
+    var CW = OX + W + RIGHT_ROOM; // R.CW = OX + W + RIGHT_ROOM
+    var RAIL_X = OX + W - 1.0;   // 刻度右端（= 卷轴线左缘内 1px）
+    var GROW = 55;               // p.grow
+    var SIG = 13;                // p.sig
+    var TAP = 90;                // p.tap（**直接用，无钳位** —— 早期这里写了假的"钳 0.4H"）
+    var EFLOOR = 0.12;           // p.efloor
+    var TICK_FLOOR = 0.35;       // 刻度端部渐隐的 floor（比波形高，否则首尾被抹掉）
+    var T_A = 1.5, T_B = 3.2;    // 鼠标态衰减窗口（绝对像素 sig）＝ TopicRail 的 tA / tB
+    var P_A = 0.25, P_B = 1.0;   // 滚动态衰减窗口（**刻度间距**为单位）＝ TopicRail 的 pA / pB
+    var SCROLL_W = 0.62;         // 滚动态权重（背景态，不该比鼠标悬停更抢眼）
+    var DAMP = 0.22;             // p.damp
+
+    var cv = document.getElementById("cv");
+    var ctx = cv.getContext("2d");
+    var els = {
+      bOld: document.getElementById("bOld"),
+      bNew: document.getElementById("bNew"),
+      sN: document.getElementById("sN"),
+      vN: document.getElementById("vN"),
+      sS: document.getElementById("sS"),
+      vS: document.getElementById("vS"),
+      sH: document.getElementById("sH"),
+      vH: document.getElementById("vH"),
+      tGap: document.getElementById("tGap"),
+      tEnds: document.getElementById("tEnds"),
+      tDev: document.getElementById("tDev"),
+      tW1: document.getElementById("tW1"),
+      tCnt: document.getElementById("tCnt"),
+      vd: document.getElementById("vd")
+    };
+    var mode = "old";
+
+    /* 阻尼状态：`curU` 是**渲染用的当前位置**，`curUt` 是目标（= 最近条目的 u）。
+       ⚠️ 与源码同族：目标在两刻度之间是**整格跳**的，不阻尼就会看到隆起硬跳一下；
+       所以这里也照真身做阻尼（`p.damp = 0.22`、`1-(1-0.22)^(dt/16.7)`、<0.25 吸附），
+       否则预览只反映"停稳态"、与真身不一致 —— 本仓踩过"预演和真身不一致"的坑。 */
+    var DAMP = 0.22;
+    var curU = -1, curUt = -1, raf = 0, lastT = 0;
+
+    /* 模型状态：模式、条目数、滚动位置、视口高度 —— 全在闭包里，不进任何框架状态 */
+    function readCfg() {
+      var H = Number(els.sH.value);
+      return {
+        H: H,
+        n: Number(els.sN.value),
+        sFrac: Number(els.sS.value) / 1000,
+        top: H / 6,
+        bot: (H * 5) / 6
+      };
+    }
+
+    /* 内容坐标系：标题**故意不等距**（每节正文长短不一）—— 这正是"用 `s` 而不是 `u` 找当前条目"的理由 */
+    function contentModel(n, H) {
+      var gap = [];
+      var seed = 7;
+      for (var i = 0; i < n; i++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        gap.push(26 + (seed % 130));
+      }
+      gap[n - 1] = Math.min(gap[n - 1], 60);
+      var tops = [], acc = 0;
+      for (var k = 0; k < n; k++) { tops.push(acc); acc += gap[k]; }
+      var contentH = acc + H;                       // 末尾至少留一屏
+      var maxScroll = Math.max(1, contentH - H);
+      return { tops: tops, maxScroll: maxScroll };
+    }
+
+    /* 位移窗口：窗口形状本身两种口径共用，差别只在"距离用什么单位" */
+    function win(ad, a, b) {
+      if (ad <= a) { return 1; }
+      if (ad >= b) { return 0; }
+      return 0.5 * (1 + Math.cos((Math.PI * (ad - a)) / (b - a)));
+    }
+    function bumpAbs(dist) { return win(dist / Math.max(1, SIG), T_A, T_B); }
+    function bumpNorm(ad) { return win(ad, P_A, P_B); }
+
+    /* 端部过渡（与源码 `TopicRail.tsx` 的 spanTaper **逐字对齐**）：渐隐与收束共用。
+       ⚠️ 这里**不许**自己发明钳位 —— 早期版本写成
+       `Math.min(TAP, (bot - top) * 0.4 * 1.5)`，而源码是直接用 `R.TAP`。
+       ⚠️⚠️ 关键区别在**位置**：真身的 0.4H 钳位发生在**布局步**
+       （`R.TAP = Math.max(0, Math.min(p.tap, R.H * 0.4));`，TopicRail.tsx:203），
+       钳完一次、之后到处直接用 `R.TAP`。预览页抄成"在 spanTaper 里现算"
+       ⇒ 值**恰好相等**（`0.6*(2/3)H == 0.4H`）所以看不出来，但**结构是错的**：
+       一旦有两处用 TAP，就会出现两个不同产地。现在照真身放在 `retarget()` 里钳一次。 */
+    function spanTaper(y, top, bot, floor) {
+      var fl = floor === undefined ? EFLOOR : floor;
+      var e = Math.min(y - top, bot - y);
+      var s = tapNow > 0 ? Math.min(1, Math.max(0, e / tapNow)) : 1;
+      return fl + (1 - fl) * (s * s * (3 - 2 * s));
+    }
+
+    function levelOf(i) { return i === 0 ? "h1" : (i % 4 === 3 ? "h3" : "h2"); }
+    var uList = [], bestIdx = 0, gapNow = 1, tapNow = TAP, cfgNow = null;
+    function draw() {
+      if (!cfgNow) { return; }
+      var cfg = cfgNow, cm = cfg.cm;
+      var dpr = Math.min(3, window.devicePixelRatio || 1);
+      cv.width = Math.round(CW * dpr);
+      cv.height = Math.round(cfg.H * dpr);
+      cv.style.width = CW + "px";
+      cv.style.height = cfg.H + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, CW, cfg.H);
+      ctx.fillStyle = "#0f1620";
+      ctx.fillRect(0, 0, CW, cfg.H);
+
+      var ru = curU < 0 ? uList[0] : curU;
+      var weights = [];
+      for (var m = 0; m < cfg.n; m++) {
+        var qw = mode === "old"
+          ? SCROLL_W * bumpAbs(Math.abs(uList[m] - ru))
+          : SCROLL_W * bumpNorm(Math.abs(uList[m] - ru) / gapNow);
+        weights.push(qw);
+      }
+
+      for (var t = 0; t < cfg.n; t++) {
+        var q = weights[t];
+        var endT = spanTaper(uList[t], cfg.top, cfg.bot, TICK_FLOOR);
+        var lvl = levelOf(t);
+        var frac = lvl === "h1" ? 0.90 : (lvl === "h2" ? 0.68 : 0.48);
+        var tw = Math.max(2.5, W * frac - 1.6) + W * (GROW / 100) * q;
+        ctx.beginPath();
+        ctx.lineWidth = Math.max(1.4, W * 0.14) + Math.max(0, W * 0.10) * q;
+        var cr = Math.round(139 + 52 * q), cg = Math.round(151 + 68 * q), cb = Math.round(168 + 86 * q);
+        ctx.strokeStyle = "rgba(" + cr + "," + cg + "," + cb + ","
+          + ((0.62 + 0.36 * q) * endT).toFixed(3) + ")";
+        ctx.lineCap = "round";
+        ctx.moveTo(RAIL_X, uList[t]);
+        ctx.lineTo(RAIL_X - tw, uList[t]);
+        ctx.stroke();
+      }
+
+      /* 当前那条加一个小标记（便于对照"哪条才是当前"）；滑动中标记夹在两条之间 */
+      ctx.fillStyle = "#5b82f6";
+      ctx.beginPath();
+      ctx.arc(OX - 5, ru, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      /* ── 数字（一律按**当前渲染位置**算，这样滑动途中也能看到相邻那条半亮）──
+         ⚠️ 度量口径：先用 `ru` 找**最近刻度** `nIdx`，再取它的左右邻居。
+         早期版本拿**目标条目** `bestIdx` ± 1 —— 在数组边界（bestIdx=0 时 -1 被钳回 0）
+         会把**它自己**当成"相邻那条"，于是停稳态显示 0.620（自己的权重）⇒ 判定假红。 */
+      var nIdx = 0, nd = Infinity;
+      for (var z2 = 0; z2 < cfg.n; z2++) {
+        var dd2 = Math.abs(uList[z2] - ru);
+        if (dd2 < nd) { nd = dd2; nIdx = z2; }
+      }
+      var wNear = 0;
+      if (nIdx - 1 >= 0) { wNear = Math.max(wNear, weights[nIdx - 1]); }
+      if (nIdx + 1 < cfg.n) { wNear = Math.max(wNear, weights[nIdx + 1]); }
+      var cnt = 0;
+      for (var z = 0; z < cfg.n; z++) { if (weights[z] > 0.5) { cnt++; } }
+      var settling = Math.abs(curUt - ru) > 0.01;
+
+      /* ── 几何自检：刻度必须**均匀等距**铺满中间 2/3 ──
+         末条够不到 `bot`、或间距按 n 而不是 n-1 算，都会让"分布不均"回归
+         （用户第七轮原话：「你这刻度分布不均匀啊」）。 */
+      var gStep = cfg.n > 1 ? (cfg.bot - cfg.top) / (cfg.n - 1) : 0;
+      var gDev = 0;
+      for (var g2 = 0; g2 < cfg.n; g2++) {
+        var ideal = cfg.n > 1 ? cfg.top + gStep * g2 : (cfg.top + cfg.bot) / 2;
+        gDev = Math.max(gDev, Math.abs(uList[g2] - ideal));
+      }
+
+      els.tGap.textContent = gapNow.toFixed(1) + " px";
+      els.tEnds.textContent = uList[0].toFixed(1) + " / " + uList[cfg.n - 1].toFixed(1)
+        + "  (期望 " + cfg.top.toFixed(1) + " / " + cfg.bot.toFixed(1) + ")";
+      els.tDev.textContent = gDev.toFixed(3) + " px";
+      els.tW1.textContent = wNear.toFixed(3);
+      els.tCnt.textContent = cnt + " 条" + (settling ? "（滑动中）" : "");
+      /* 判据只在**停稳后**成立：滑行途中相邻那条半亮是**预期**的（平滑过渡），不算违规 */
+      var ok = !settling && cnt === 1 && wNear < 0.2;
+      els.vd.className = "verdict " + (ok ? "good" : (settling ? "" : "bad"));
+      if (settling) {
+        els.vd.textContent = "… 滑动中（阻尼未停稳）：相邻那条半亮 " + wNear.toFixed(2)
+          + " 是预期的平滑过渡，停稳后应回到只有一条满亮";
+      } else {
+        els.vd.textContent = ok
+          ? "✓ 一眼能看出是哪一条（只有它满亮，相邻那条 " + wNear.toFixed(2) + "）"
+          : "✗ 看不出是哪一条：一次亮 " + cnt + " 条，相邻那条权重 " + wNear.toFixed(2)
+            + (mode === "old" ? " —— 这就是改前的缺陷" : "");
+      }
+      els.vN.textContent = String(cfg.n);
+      els.vS.textContent = String(Math.round(cfg.s));
+      els.vH.textContent = String(cfg.H);
+    }
+
+    /** 重算目标（条目数 / 滚动位置 / 视口高度 任一变化时调用），然后让阻尼把它推过去 */
+    function retarget(keepPos) {
+      var cfg = readCfg();
+      var cm = contentModel(cfg.n, cfg.H);
+      var s = cfg.sFrac * cm.maxScroll;
+      var best = 0, bd = Infinity;
+      for (var i = 0; i < cfg.n; i++) {
+        var d = Math.abs(Math.min(cm.tops[i], cm.maxScroll) - s);
+        if (d < bd) { bd = d; best = i; }
+      }
+      var us = [];
+      for (var k = 0; k < cfg.n; k++) {
+        us.push(cfg.n === 1 ? (cfg.top + cfg.bot) / 2
+          : cfg.top + ((cfg.bot - cfg.top) * k) / (cfg.n - 1));
+      }
+      var needSnap = !keepPos || curU < 0 || curU > cfg.H;
+      cfg.cm = cm; cfg.s = s;
+      cfgNow = cfg; uList = us; bestIdx = best;
+      /* 0.4H 钳位**只在这里做一次**（照真身 `R.TAP = Math.max(0, Math.min(p.tap, R.H * 0.4))`）——
+         不许在 spanTaper 里现算（那样会有第二个产地）。 */
+      tapNow = Math.max(0, Math.min(TAP, cfg.H * 0.4));
+      gapNow = cfg.n > 1 ? (cfg.bot - cfg.top) / (cfg.n - 1) : Math.max(1, cfg.bot - cfg.top);
+      curUt = us[best];
+      if (needSnap) { curU = curUt; }
+      draw();
+      if (Math.abs(curUt - curU) > 0.25) { startLoop(true); }
+    }
+
+    /* ⚠️ `resetT` 只允许**从静止重新起跑**时为 true。
+       早期版本让 `step()` 里的续跑也走 `lastT = 0` ⇒ 每帧 `dt` 恒为 0 ⇒ `k = 0` ⇒
+       `curU` 永不收敛、永远显示"滑动中"（探针抓到的真 bug，不是观测噪声）。 */
+    function startLoop(resetT) {
+      if (raf) { return; }
+      if (resetT) { lastT = 0; }
+      raf = requestAnimationFrame(step);
+    }
+    function step(tms) {
+      raf = 0;
+      if (!lastT) { lastT = tms; }
+      var dt = Math.min(48, tms - lastT);
+      lastT = tms;
+      var k = 1 - Math.pow(1 - DAMP, dt / 16.7);
+      curU += (curUt - curU) * k;
+      if (Math.abs(curUt - curU) < 0.25) { curU = curUt; }
+      draw();
+      /* 与真身同一条不变量：**阻尼未停稳时不许停帧**（否则隆起卡在半路）。
+         ⚠️ 续跑不许重置计时基准（见 `startLoop` 的注释）。 */
+      if (curU !== curUt) { startLoop(false); }
+    }
+
+    /* ── 绑定（一律放所有 const/函数声明之后）── */
+    function setMode(next) {
+      mode = next;
+      els.bOld.className = next === "old" ? "on" : "";
+      els.bNew.className = next === "new" ? "on" : "";
+      draw();
+    }
+    els.bOld.addEventListener("click", function () { setMode("old"); });
+    els.bNew.addEventListener("click", function () { setMode("new"); });
+    els.sN.addEventListener("input", function () { retarget(true); });
+    els.sS.addEventListener("input", function () { retarget(true); });
+    els.sH.addEventListener("input", function () { retarget(true); });
+    retarget(false);
+    setMode("new");
+  } catch (e) {
+    var box = document.getElementById("err");
+    box.style.display = "block";
+    box.textContent = "初始化失败：" + (e && e.message ? e.message : String(e));
+  }
+})();
+</script>
+</body>
+</html>
