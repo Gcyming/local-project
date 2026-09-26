@@ -1,6 +1,6 @@
 {
   "name": "slime-gui",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "slime Electron GUI MVP (Phase 5)",
   "author": "slime",
   "repository": {
@@ -28,15 +28,16 @@
     "vite": "^6.3.0"
   },
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node ./scripts/dev-utf8.mjs",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "type": "tsc -p tsconfig.json --noEmit",
     "prepare-runtime": "node ../scripts/prepare-runtime.mjs",
-    "dist:win": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs && node ./scripts/pack-cuda-runtime.mjs",
-    "dist:win:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && node ../scripts/retry-build.mjs --publish always && node ./scripts/pack-cuda-runtime.mjs",
-    "dist:linux": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish never -c.directories.output=release-linux",
-    "dist:linux:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && electron-builder --linux --publish always -c.directories.output=release-linux"
+    "preicons": "node ./scripts/make-notify-icon.mjs && node ./scripts/assert-appicon.mjs",
+    "dist:win": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && npm run preicons && node ../scripts/retry-build.mjs && node ./scripts/assert-appicon.mjs --postbuild && node ./scripts/pack-cuda-runtime.mjs",
+    "dist:win:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-final && npm run prepare-runtime && electron-vite build && npm run preicons && node ../scripts/retry-build.mjs --publish always && node ./scripts/assert-appicon.mjs --postbuild && node ./scripts/pack-cuda-runtime.mjs",
+    "dist:linux": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && npm run preicons && electron-builder --linux --publish never -c.directories.output=release-linux && node ./scripts/assert-appicon.mjs --bundle release-linux/linux-unpacked",
+    "dist:linux:publish": "node ../scripts/preflight-clean.mjs && node ../scripts/build-safety-check.mjs --out-dir=release-linux && npm run prepare-runtime && electron-vite build && npm run preicons && electron-builder --linux --publish always -c.directories.output=release-linux && node ./scripts/assert-appicon.mjs --bundle release-linux/linux-unpacked"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
