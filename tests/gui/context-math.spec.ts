@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "typescript";
 import { contextRatio, contextPct, ringLevel, composeSegments, bucketsSegments, pickTokenBase, fmtTokens,
-  kInputBase, kInputToTokens, kInputTitle, tokensToKInput } from "../../gui/src/renderer/pages/contextMath.js";
+  usageComposition, kInputBase, kInputToTokens, kInputTitle, tokensToKInput } from "../../gui/src/renderer/pages/contextMath.js";
 
 describe("contextRatio / contextPct（环基础）", () => {
   it("cap=0 → 0；常规占比 clamp 0..1", () => {
@@ -37,19 +37,46 @@ describe("ringLevel 色阶阈值（绿<60% / 黄 60-85% / 红 >85%）", () => {
   });
 });
 
-describe("composeSegments 四项构成", () => {
-  it("4:2:3:1 归一为 40% / 20% / 30% / 10%", () => {
+describe("composeSegments 四项构成（互斥；占比之和恒为 100%）", () => {
+  it("★ 回归：缓存读 ⊂ 输入、思考 ⊂ 回复 —— 子集字段不许并计（旧实现合计虚高 86%）", () => {
+    // prompt=40 已含 cache=20（OpenAI 系语义）；completion=30 已含 reasoning=10
     const { segments, any } = composeSegments({ promptTokens: 40, cacheReadTokens: 20, completionTokens: 30, reasoningTokens: 10 });
     expect(any).toBe(true);
-    expect(segments.find((s) => s.label === "输入")!.pct).toBeCloseTo(40, 5);
-    expect(segments.find((s) => s.label === "缓存")!.pct).toBeCloseTo(20, 5);
-    expect(segments.find((s) => s.label === "输出")!.pct).toBeCloseTo(30, 5);
-    expect(segments.find((s) => s.label === "思考")!.pct).toBeCloseTo(10, 5);
+    const at = (l: string): number => segments.find((s) => s.label === l)!.pct;
+    // 真实总量 = 输入侧 40 + 输出侧 max(30,10)=30 = 70（**不是** 40+30+10+20=100）
+    expect(at("输入")).toBeCloseTo((20 / 70) * 100, 5); // 40 − 20 命中
+    expect(at("缓存")).toBeCloseTo((20 / 70) * 100, 5);
+    expect(at("输出")).toBeCloseTo((20 / 70) * 100, 5); // 30 − 10 思考
+    expect(at("思考")).toBeCloseTo((10 / 70) * 100, 5);
+    // 四段互斥 ⇒ 和恰好 100%，且 token 数之和 = 去重后的真实总量
+    expect(segments.reduce((s, x) => s + x.pct, 0)).toBeCloseTo(100, 6);
+    expect(segments.reduce((s, x) => s + x.n, 0)).toBe(70);
+  });
+  it("Anthropic 语义（cacheReadInPrompt=false）→ 缓存读与输入**并列**，合计把缓存算进来", () => {
+    const { segments } = composeSegments({ promptTokens: 40, cacheReadTokens: 20, completionTokens: 30, reasoningTokens: 0, cacheReadInPrompt: false });
+    // 输入侧 = prompt(40) + cache(20)；输出侧 = 30 ⇒ 合计 90
+    expect(segments.reduce((s, x) => s + x.n, 0)).toBe(90);
+    expect(segments.reduce((s, x) => s + x.pct, 0)).toBeCloseTo(100, 6);
   });
   it("全零 → any=false、段 pct 为 0（不渲染微条）", () => {
     const { any, segments } = composeSegments({ promptTokens: 0, cacheReadTokens: 0, completionTokens: 0, reasoningTokens: 0 });
     expect(any).toBe(false);
     expect(segments.every((s) => s.pct === 0)).toBe(true);
+  });
+});
+
+describe("usageComposition：与记账层 computeRecordCost 同一条判据", () => {
+  it("★ 合计 = 输入侧 + 输出侧（去重），与 core 的 max(completion, reasoning) 一致", () => {
+    const c = usageComposition({ promptTokens: 1000, cacheReadTokens: 800, completionTokens: 50, reasoningTokens: 30 });
+    expect(c.inputSide).toBe(1000);       // OpenAI 系：prompt 已含命中
+    expect(c.outputSide).toBe(50);        // max(50, 30) —— 思考不额外加
+    expect(c.total).toBe(1050);
+    expect(c.cacheInPrompt).toBe(true);
+  });
+  it("reasoning > completion（防御）→ 取大值，绝不漏计也不重复", () => {
+    const c = usageComposition({ promptTokens: 0, cacheReadTokens: 0, completionTokens: 10, reasoningTokens: 25 });
+    expect(c.outputSide).toBe(25);
+    expect(c.total).toBe(25);
   });
 });
 
@@ -230,11 +257,36 @@ describe("★ 上下文监测：同一语义只许一个产地 / 一个格式化
     }
   });
 
-  it("进度条 used/cap 与两个兄弟面板共用同一个 capNow（唯一取值 + 唯一进制）", () => {
+  it("进度条 used/cap 与兄弟面板共用同一个 capNow（唯一取值 + 唯一进制）", () => {
     expect(SIDEBAR_CODE).toMatch(/const capNow = liveCap > 0 \? liveCap : maxCtx;/);
     expect(SIDEBAR_CODE).toMatch(/<ContextWindowBar\s*\n\s*used=\{liveUsed\}\s*\n\s*cap=\{capNow\}/);
+    // 会话指标（MetricsGrid）与 Token 构成明细（UsageBreakdown）都要带同一个 capNow
     expect(SIDEBAR_CODE).toMatch(/<MetricsGrid[^>]*cap=\{capNow\}/);
     expect(SIDEBAR_CODE).toMatch(/<UsageBreakdown[^>]*cap=\{capNow\}/);
+  });
+
+  it("★ 侧栏「Token 构成 / 明细」的算术只有 usageComposition 一个产地（不许在 JSX 里再列公式）", () => {
+    // 旧实现：`total = prompt + reply + reasoning + cache` —— 子集并计、合计虚高约 86%，必须绝迹
+    expect(SIDEBAR_CODE).not.toMatch(/prompt\s*\+\s*reply\s*\+\s*reasoning\s*\+\s*cache/);
+    // 新实现：渲染层只消费纯函数的结论
+    expect(SIDEBAR_CODE).toMatch(/usageComposition\(/);
+  });
+
+  it("★ 图例第 4 项必须是「缓存读」，不许再错标成「其他」（值是缓存读）", () => {
+    // 旧状：`label={`其他 ${pct(pOther)}`} value={dashOr(cache)}` —— 标签与值不同源
+    expect(SIDEBAR_CODE).not.toMatch(/\bpOther\b/);
+    expect(SIDEBAR_CODE).not.toMatch(/\bC_OTHER\b/);
+    expect(SIDEBAR_CODE).not.toMatch(/其他 \$\{pct\(/);
+    expect(SIDEBAR_CODE).toMatch(/缓存读/);
+  });
+
+  it("★ 明细「合计」必须直接渲染 usageComposition 的 total（不许在 JSX 里现算一个和）", () => {
+    /* 旧状：`{total.toLocaleString()}` 而 `total = prompt + reply + reasoning + cache` ——
+       子集并计、虚高约 86%。仅断言"那个错公式绝迹"不够：换个写法现算一个和（例如
+       `c.inputSide + c.cacheRead + …`）仍然会重复计，而且**看起来更正确**。
+       所以判据锁在"合计这一格渲染的就是 `c.total`"上 —— 它由纯函数保证去重。 */
+    expect(SIDEBAR_CODE, "明细合计那一格必须渲染 c.total")
+      .toMatch(/合计（输入 \+ 输出）<\/span>[\s\S]{0,160}?\{c\.total\.toLocaleString\(\)\}/);
   });
 
   it("★ ChatPanel 底部芯片读 ctxUsed（锚定值），不得复活 ÷4 的第二个产地", () => {

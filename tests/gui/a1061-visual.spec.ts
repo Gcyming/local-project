@@ -80,10 +80,35 @@ describe("A-1061⑨ 字号 / 字形栈：正文 > 思考，且层级差必须保
     const at = PANEL.indexOf("{cheer && (");
     expect(at).toBeGreaterThan(-1);
     const blk = PANEL.slice(at, at + 200);
-    expect(blk).toContain("fontSize: 13");
+    /* A-1106 问题 3 迁移：用户要求「正在思考下面那一块字体调大」⇒ 激励语 13 → **14px**。
+       判据从「钉死 13」改成「钉可读性下限」—— 意图（不许退回 11.5px 又小又暗）不变，
+       且仍被变异打红（`mut-a1061-visual.mjs` #6 = 14 → 11.5）。 */
+    const size = Number(/fontSize:\s*([\d.]+)/.exec(blk)?.[1]);
+    expect(size, "激励语块里找不到 fontSize —— 断言对象搞错了").not.toBeNaN();
+    expect(size, "激励语字号没提上来（退回 11.5px 那种看不清）").toBeGreaterThanOrEqual(13);
     expect(blk).toContain("fontWeight: 500");
     expect(blk).not.toContain("fontStyle");
     expect(blk).not.toContain("--text-muted");
+  });
+
+  // A-1095：用户原话「你把激励语换个行，换到最后一行……有时候激励语过长会出现自动换行的问题」。
+  // 判据 = 激励语必须**退出主句的行内流**：它所在的容器是 `flexDirection: "column"`（两行式），
+  // 且**不在**那一层带 `flexWrap: "wrap"` 的主句行里 —— 否则长激励语会把主句挤到下一行。
+  it("🐛 激励语独占最后一行：不许再与主句同级 flex-wrap（长文本会挤跑主句）", () => {
+    const at = PANEL.indexOf("{cheer && (");
+    expect(at, "找不到激励语渲染点").toBeGreaterThan(-1);
+    // 回溯到它所在容器的开标签：column 容器在 cheer 之前、且是最近的 `flexDirection` 声明
+    const before = PANEL.slice(0, at);
+    const colAt = before.lastIndexOf('flexDirection: "column"');
+    expect(colAt, "激励语不在 column（两行式）容器内 —— 会退回行内流").toBeGreaterThan(-1);
+    // 主句行（带 flex-wrap）必须是 column 容器**内部**、且已闭合的兄弟节点：
+    // 位置在 column 开标签之后，且在 cheer 之前已经出现过 `</div>`（该行已闭合）
+    const wrapAt = before.lastIndexOf('flexWrap: "wrap"');
+    expect(wrapAt, "主句行没带 flex-wrap").toBeGreaterThan(-1);
+    expect(wrapAt, "主句 flex-wrap 行不在 column 容器内 —— 结构被改坏了").toBeGreaterThan(colAt);
+    const seg = PANEL.slice(colAt, at);
+    expect(seg, "主句 flex-wrap 行没有在激励语之前闭合 —— 说明 cheer 仍待在主句行里")
+      .toContain("</div>");
   });
 });
 
@@ -211,16 +236,36 @@ describe("A-1061⑬ 接线：切分结果真的被用起来了", () => {
   it("ChatPanel 用 splitStreamFade 渲染尾巴 spans + 光标仍在末尾", () => {
     /* A-1065 迁移：尾巴 span 的**显示文本**改走 `fadeUnitText`（抹掉裸露的 markdown 控制符号，
        见 tests/gui/a1065-fade-text.spec.ts）。这里同步锁新的接线形态 —— 保留本用例原本的意图
-       （"切分结果真的被用起来"），不是删掉它。 */
-    expect(PANEL).toContain('import { splitStreamFade, fadeUnitText } from "./streamFade.js";');
-    expect(PANEL).toContain("const fade = splitStreamFade(shown);");
-    expect(PANEL).toContain('className="stream-fade-unit"');
-    expect(PANEL).toContain("fadeUnitText(u.text)");
+       （"切分结果真的被用起来"），不是删掉它。
+       A-1094 再迁移：逐单元 `fadeUnitText` → 整段 `visibleTailUnits`（`|` 抹掉后要跨单元收敛空格）。
+       意图（span 里渲染的是**净化后**的文本、切分结果真的被用起来）逐字保留。 */
+    expect(PANEL).toContain('import { splitStreamFade, visibleTailUnits } from "./streamFade.js";');
+    /* A-1095 #5 迁移：切分+渲染收进**唯一**组件 `StreamFadeText`（正文与思考共用）——
+       本用例的意图（"切分结果真的被用起来"）逐字保留，只是产地由内联改为该组件。
+       断言锚定组件体内，避免"别处同名串"让守卫在真正的产地失效时仍绿。 */
+    const fadeAt = PANEL.indexOf("function StreamFadeText");
+    expect(fadeAt, "找不到 StreamFadeText（切分渲染的唯一产地）").toBeGreaterThan(-1);
+    /* ⚠️ 切片右界取**下一个顶层声明**（下一个 `\nfunction ` / `\nconst ` 之类），
+       而不是硬编码 `+700` —— 注释一膨胀，窗口就把真正的断言目标挤出去，守卫**静默失效**。 */
+    const nextDecl = PANEL.slice(fadeAt + 10).search(/\n(?:function |const |export )/);
+    const fadeBlk = PANEL.slice(fadeAt, nextDecl > 0 ? fadeAt + 10 + nextDecl : fadeAt + 3000);
+    expect(fadeBlk).toContain("const fade = splitStreamFade(text);");
+    /* A-1095 #6（S6）迁移：渐入类名从**恒挂**改成**按水位条件挂**
+       （`className={u.at > seenAt ? "stream-fade-unit" : undefined}`）——
+       意图（渐入类真的被用在 span 上）逐字保留；恒挂形态本身是闪烁的根因
+       （每帧重挂 ⇒ 动画重播），其"不许回来"由 `a1095-fade-stability.spec.ts` 守着。 */
+    expect(fadeBlk, "渐入类没有用在单元上").toContain('"stream-fade-unit"');
+    expect(fadeBlk).toContain("visibleTailUnits(fade.units)");
     // 已定型前缀照旧走 Markdown（否则整段退回纯文本，丢语法高亮）
-    expect(PANEL).toContain("<Markdown text={fade.settled} streaming />");
+    expect(fadeBlk).toContain("<Markdown text={fade.settled} streaming />");
     /* A-1080：「最后一行的前半段」必须真的被渲染出来 —— 少了它那段字直接消失；
        更关键的是**三段同处一个行内流**这条接线（接缝不插块级边界）就断了。 */
-    expect(PANEL, "linePrefix 没被渲染 → 最后半行丢掉（或尾巴又另起一行）").toContain("{fade.linePrefix}");
+    expect(fadeBlk, "linePrefix 没被渲染 → 最后半行丢掉（或尾巴又另起一行）").toContain("{fade.linePrefix}");
+    // ⚠️ 唯一产地：整份文件里 `visibleTailUnits(fade.units)` 只应出现在该组件内
+    const tailHits = (PANEL.match(/visibleTailUnits\(fade\.units\)/g) ?? []).length;
+    expect(tailHits, "出现多个产地 —— A-1080 的同行内流约束迟早在一处失守").toBe(1);
+    // 正文与思考都调它（A-1095 #5 的"推广"必须真的接上）
+    expect((PANEL.match(/<StreamFadeText\b/g) ?? []).length, "正文未走 StreamFadeText").toBeGreaterThanOrEqual(2);
   });
 
   it("CSS 有对应的 keyframes 与类，且在 prefers-reduced-motion 下降级", () => {
@@ -242,6 +287,27 @@ describe("A-1061⑬ 接线：切分结果真的被用起来了", () => {
     expect(unit, "改成 inline-block 会让 CJK 尾巴整条不断行地溢出").not.toMatch(/display:\s*inline-block/);
     const rm = CSS.indexOf("@media (prefers-reduced-motion: reduce)", CSS.indexOf("@keyframes streamUnitIn"));
     expect(rm, "渐入动画没有无障碍降级").toBeGreaterThan(-1);
-    expect(CSS.slice(rm, rm + 200)).toContain(".stream-fade-unit { animation: none; }");
+    /* ⚠️ A-1124 **迁移**（用户实测问题 c）。原来断言的是
+       `expect(CSS.slice(rm, rm + 200)).toContain(".stream-fade-unit { animation: none; }")` ——
+       那条覆盖把**整段动画**抹掉，等于**一个开关同时关掉「思考」与「正文」两处的吐字渐入**，
+       且完全静默（过 tsc / 过构建 / 过全部逻辑测试）。用户实测原话：
+       「现在所有吐字均看不到我让你设计的渐入的由浅入深的衔接动画了，思考、正文哪里都没有。」
+       意图（减动效下必须有降级）逐字保留；判据换成"降级 = **只去位移、保留淡入**"，
+       并要求走一个**专门的**淡入关键帧（而不是把整段 animation 设为 none）。 */
+    /* ⚠️ 切片右界取 `\n}`（媒体块的收尾），不用硬编码 `+900` —— 注释一膨胀，
+       窗口就会把真正的断言目标挤出切片，守卫**静默失效**（本仓 §24 家族）。
+       ⚠️ 而且必须**先剥注释**再断言：本文件的新注释里逐字引用了旧写法
+       `.stream-fade-unit { animation: none; }` 做对照 —— 不剥注释，那条负面断言就被
+       **自己的注释**喂红（本仓已经踩过同款：预览页漂移守卫）。 */
+    const rmEnd = CSS.indexOf("\n}", rm);
+    const rmBlk = stripComments(CSS.slice(rm, rmEnd > rm ? rmEnd : rm + 900));
+    expect(rmBlk, "减动效覆盖又把动画整个关掉了（渐入在思考与正文两处同时消失）")
+      .toMatch(/\.stream-fade-unit \{ animation-name: streamUnitFadeIn; \}/);
+    expect(rmBlk, "减动效覆盖不许退回 `animation: none`").not.toMatch(/\.stream-fade-unit \{ animation: none; \}/);
+    // 那个淡入关键帧必须存在，且**只**含不透明度（含 left/transform 就等于位移没去掉）
+    /* ⚠️ 不用 `rule()` 取它：`rule()` 只切到**第一个** `}`（keyframes 里即 `from` 那行的收尾），
+       拿它断言"整块只有不透明度"是**假绿**（把位移加到 `to` 那行照样过）。这里整块精确匹配。 */
+    expect(CSS_CODE, "减动效专用的淡入关键帧不存在，或里面混进了位移/其它属性")
+      .toMatch(/@keyframes streamUnitFadeIn \{\s*from \{ opacity: 0; \}\s*to \{ opacity: 1; \}\s*\}/);
   });
 });

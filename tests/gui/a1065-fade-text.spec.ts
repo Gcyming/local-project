@@ -17,7 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { splitStreamFade, fadeUnitText, unitize } from "../../gui/src/renderer/pages/streamFade.js";
+import { splitStreamFade, fadeUnitText, unitize, visibleTailText, visibleTailUnits } from "../../gui/src/renderer/pages/streamFade.js";
 
 const ROOT = join(__dirname, "../..");
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
@@ -31,9 +31,9 @@ const keyframes = (name: string): string => {
   return CSS.slice(at, CSS.indexOf("}", at) + 1);
 };
 
-/** 把一段流式文本切成尾巴并**把显示文本拼起来** —— 即用户实际看到的那行字 */
-const visibleTail = (shown: string): string =>
-  splitStreamFade(shown).units.map((u) => fadeUnitText(u.text)).join("");
+/** 把一段流式文本切成尾巴并**把显示文本拼起来** —— 即用户实际看到的那行字。
+ *  A-1094：必须走 `visibleTailText`（整段净化 + 跨单元空格收敛），不是逐单元 join。 */
+const visibleTail = (shown: string): string => visibleTailText(splitStreamFade(shown).units);
 
 describe("A-1065-A 方向：位移必须由**右**到左（旧写法沿用了被用户否掉的那一版）", () => {
   it("🐛 keyframes 从 +3px 归零（新字从右侧滑入）；且不许再出现 -3px", () => {
@@ -104,6 +104,44 @@ describe("A-1065-B 尾巴是纯文本渲染 → 显示文本必须抹掉 markdow
     expect(visibleTail("const a = 1;")).toBe("const a = 1;");
   });
 
+  it("A-1094：表格管道 `|` 同样不许裸露（尾巴期间表格行也不能露语法）", () => {
+    // 恢复用户截图 image#5 的字面形态
+    const vis = visibleTail("| 序号 | 命令 |\n|---|------|");
+    expect(vis, `露出了表格管道：${JSON.stringify(vis)}`).not.toContain("|");
+    expect(fadeUnitText("|---|------|")).toBe("");
+    expect(fadeUnitText("---")).toBe("");
+    expect(fadeUnitText("|---|")).toBe("");
+    expect(fadeUnitText("|")).toBe("");
+    expect(fadeUnitText("||")).toBe("");
+    // 表格单元里的文字不能被连带抹掉
+    expect(visibleTail("| 本地 | ✅ |")).toContain("本地");
+  });
+
+  it("A-1094：单单元层面也须抹 `|`（不许只靠整段收尾兜底）", () => {
+    // 直接锁 fadeUnitText 的行为：`|` 与 `|---|---|` 形态必须变空 / 变干净，
+    // 否则整段收尾只是"擦屁股"，某个单元漏出来就露语法
+    expect(fadeUnitText("| 序号 |")).not.toContain("|");
+    expect(fadeUnitText("| 序号 |")).toContain("序号");
+    // 单单元内 `|` 直接抹掉（不留空格）——跨单元的空格收敛交给 visibleTailText/Units
+    expect(fadeUnitText("a|b")).toBe("ab");
+    // 纯 `|` 集合（PURE_MARKER / TABLE_SEP_MARKER 两族）都必须整块隐藏
+    for (const m of ["|", "||", "|---", "|---|", "|:--|--:|", "|---|---|---|"]) {
+      expect(fadeUnitText(m), `未隐藏：${m}`).toBe("");
+    }
+  });
+
+  it("A-1094：抹掉 `|` 留下的相邻空格要收敛（不许出现双空格）", () => {
+    const vis = visibleTail("| 序号 | 命令 |");
+    expect(vis, `留下了双空格：${JSON.stringify(vis)}`).not.toMatch(/ {2,}/);
+    expect(vis).toContain("序号");
+    expect(vis).toContain("命令");
+  });
+
+  it("A-1094：标题标记被吃掉后不许留前导空格（`### 标题` → `标题`）", () => {
+    expect(fadeUnitText("# 标题")).toBe("标题");
+    expect(fadeUnitText("### 标题")).toBe("标题");
+  });
+
   it("[反例] 断言能抓住坏写法（守卫自检）", () => {
     // 若 fadeUnitText 退化成恒等函数，上面的症状判据必须变红 —— 这里就地验证判据本身有效
     const identity = (s: string): string => s;
@@ -113,16 +151,60 @@ describe("A-1065-B 尾巴是纯文本渲染 → 显示文本必须抹掉 markdow
 });
 
 describe("A-1065-C 接线：显示文本真的经过了净化的那一层", () => {
-  it("🐛 ChatPanel 渲染的是 `fadeUnitText(u.text)`，不是 `u.text`（否则净化为空谈）", () => {
-    expect(PANEL).toContain('import { splitStreamFade, fadeUnitText } from "./streamFade.js";');
-    expect(PANEL, "仍然直接渲染原始单元文本").not.toContain('className="stream-fade-unit">{u.text}<');
-    expect(PANEL).toContain("fadeUnitText(u.text)");
+  it("🐛 ChatPanel 走 `visibleTailUnits(...)`（净化后的单元），不是原始 `fade.units`", () => {
+    // A-1094 迁移：净化从「逐单元 fadeUnitText」升级为「整段 visibleTailUnits」——
+    // 因为 `|` 这类表格标记被抹掉后，**跨单元的空格**必须一起收敛，逐单元净化做不到。
+    // 意图（尾巴不许裸露 markdown 控制符号）逐字保留。
+    // A-1095 #5 再迁移：切分+渲染收进**唯一**组件 `StreamFadeText`（正文与思考共用），
+    // 断言随之锚定该组件体内 —— 否则"别处也有同一串"会让守卫在真正的产地失效时仍绿。
+    expect(PANEL).toContain('import { splitStreamFade, visibleTailUnits } from "./streamFade.js";');
+    const at = PANEL.indexOf("function StreamFadeText");
+    expect(at, "找不到 StreamFadeText（切分渲染的唯一产地）").toBeGreaterThan(-1);
+    // 右界取下一个顶层声明（不硬编码宽度，避免注释膨胀把断言目标挤出窗口 ⇒ 守卫静默失效）
+    const nextDecl = PANEL.slice(at + 10).search(/\n(?:function |const |export )/);
+    const blk = PANEL.slice(at, nextDecl > 0 ? at + 10 + nextDecl : at + 3000);
+    expect(blk, "StreamFadeText 没走净化后的单元").toContain("visibleTailUnits(fade.units)");
+    // 唯一产地：整份文件里 `visibleTailUnits(fade.units)` 只应出现在该组件内
+    const hits = (PANEL.match(/visibleTailUnits\(fade\.units\)/g) ?? []).length;
+    expect(hits, "出现多个产地 —— 净化约束迟早在一处失守").toBe(1);
+    // 渲染 span 的**不得**是原始 `fade.units.map`（那等于没净化）
+    expect(PANEL, "仍然直接渲染原始单元").not.toMatch(/fade\.units\.map\(\(u\)\s*=>/);
   });
 
   it("净化后为空串的单元不渲染 span（避免一堆零宽 span 留在 DOM 里）", () => {
-    const at = PANEL.indexOf("fadeUnitText(u.text)");
+    const at = PANEL.indexOf("visibleTailUnits(fade.units)");
     expect(at).toBeGreaterThan(-1);
-    const blk = PANEL.slice(at, at + 200);
-    expect(blk, "空显示仍然挂了 span").toMatch(/\?\s*<span[^>]*>\{t\}<\/span>\s*:\s*null/);
+    const blk = PANEL.slice(at, at + 400);
+    /* A-1095 #6（S6）迁移：渲染从「`.map` 里 `u.text ? <span className="stream-fade-unit">` 」
+       改成「先 `.filter(u => u.text)` 再用 `u.at > seenAt` 决定是否挂渐入类」——
+       意图（空显示不挂 span）逐字保留：**过滤在前**，空串根本进不了 map。 */
+    expect(blk, "空显示仍然进了渲染列表").toMatch(/visibleTailUnits\(fade\.units\)\.filter\(\(u\)\s*=>\s*u\.text\)/);
+  });
+});
+
+describe("A-1094 尾巴净化：跨单元空格收敛（逐单元净化做不到）", () => {
+  it("`| 序号 | 命令 |` → 可见串无 `|`、无双空格、无首尾空格", () => {
+    const vis = visibleTailText(splitStreamFade("| 序号 | 命令 |").units);
+    expect(vis).not.toContain("|");
+    expect(vis).not.toMatch(/ {2,}/);
+    expect(vis).toBe(vis.trim());
+    expect(vis).toContain("序号");
+    expect(vis).toContain("命令");
+  });
+
+  it("不变量：`visibleTailUnits` 拼起来必须**逐字等于** `visibleTailText`", () => {
+    const cases = [
+      "| 序号 | 命令 |", "hello world", "## 标题 **粗体**", "const a = 1;",
+      "|---|------|", "a | b 是「或」的意思", "| 本地 | ✅ |", "### 标题",
+    ];
+    for (const s of cases) {
+      const units = splitStreamFade(s).units;
+      expect(visibleTailUnits(units).map((u) => u.text).join(""), s).toBe(visibleTailText(units));
+    }
+  });
+
+  it("单元 `at` 必须原样保留（key 稳定 ⇒ 动画不重播）", () => {
+    const units = splitStreamFade("| 序号 | 命令 |").units;
+    expect(visibleTailUnits(units).map((u) => u.at)).toEqual(units.map((u) => u.at));
   });
 });

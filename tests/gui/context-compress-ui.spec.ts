@@ -83,17 +83,29 @@ describe("③ 降级路径必须**真的裁**（「压缩并非真压缩」的�
     has(SESSIONS, "delete meta.contextSummary;", "summary 为 null 时仍应清掉过期摘要文本");
   });
 
-  it("🐛 loadSessionHistory 的注入条件**不许**绑死在 `contextSummary` 上", () => {
-    has(MAIN, "if (meta.summaryCount !== undefined && lines.length > keep * 2) {", "条件仍是 `meta.contextSummary && …` ⇒ 摘要不可用时判假、返回完整历史");
-    has(MAIN, "return truncateTurnAligned(lines, keep);", "没有「只裁不摘要」的 trim 分支");
+  it("🐛 折叠判据的注入条件**不许**绑死在 `contextSummary` 上", () => {
+    /* A-1106 迁移（**保留原意，不许删**）：A-1082 时这段拼装住在 `loadSessionHistory` 里、
+       入参叫 `lines`、`meta` 恒非空。A-1106 把它抽成**纯函数** `foldSessionHistory(raw, meta)`
+       （因为压缩判据必须同时拿到「原始全量」与「折叠视图」，两者不能再揉在一个函数里），
+       于是局部变量改名为 `raw`、`meta` 变可空 ⇒ 锚点演进，但**判据一个字没变**：
+       条件必须绑 `summaryCount`（任何一次压缩都落 K）而**不是** `contextSummary`
+       （摘要不可用时也要**真的裁**，否则界面报「已压缩 N 轮」而请求一字未减）。 */
+    has(MAIN, "if (meta?.summaryCount !== undefined && raw.length > keep * 2) {", "条件仍是 `meta.contextSummary && …` ⇒ 摘要不可用时判假、返回完整历史");
+    has(MAIN, "return truncateTurnAligned(raw, keep);", "没有「只裁不摘要」的 trim 分支");
   });
 
   it("摘要档走纯函数拼装（含「理解总结」环的续接认知）", () => {
-    has(MAIN, "buildCompactedHistory(meta.contextSummary, lines, keep, { comprehend: meta.contextComprehend })", "摘要档没走纯函数拼装");
+    has(MAIN, "buildCompactedHistory(meta.contextSummary, raw, keep, { comprehend: meta.contextComprehend })", "摘要档没走纯函数拼装");
   });
 
-  it("切口不许再按条数硬切（`lines.slice(-(meta.summaryCount …))` 会落在半轮上）", () => {
-    hasNot(MAIN, "lines.slice(-(meta.summaryCount", "又用 slice 按条数硬切了 ⇒ user,user 连续同角色（Anthropic 系 400）");
+  it("切口不许再按条数硬切（`slice(-(meta.summaryCount …))` 会落在半轮上）", () => {
+    /* A-1106 迁移：原锚点用的是旧变量名 `lines`。变量一改名，这条 `hasNot` 就**恒绿**
+       （`lines` 在源码里已不存在）—— 负面断言空转比缺失更坏：它看着像守住了一道门。
+       现在对**两种变量名**都禁，任何名字下重新按条数硬切都会红。 */
+    hasNot(MAIN, ".slice(-(meta?.summaryCount", "又用 slice 按条数硬切了 ⇒ user,user 连续同角色（Anthropic 系 400）");
+    hasNot(MAIN, ".slice(-(meta.summaryCount", "又用 slice 按条数硬切了（非可选链形态）");
+    // 正面锚：切口必须落在 turn 对齐纯函数上（上面两条 hasNot 的对照组 —— 证明不是靠「整段被删」蒙过去的）
+    has(MAIN, "truncateTurnAligned(raw, keep)", "trim 档切口没走 turn 对齐纯函数");
   });
 });
 

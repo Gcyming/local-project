@@ -87,16 +87,25 @@ describe("A-1091 ② — `⟳` 是落盘日志标记，界面必须剥掉", () =
     expect(card![1]).toContain("stripToolTraceMark");
   });
 
-  it("T8 「正在执行」那一行也必须剥（它是另一条渲染路径，漏了就一行带标记一行不带）", () => {
+  it("T8 工具名的每条渲染路径都必须剥标记（旧状：摘要块是第二条路径，已删除）", () => {
     const body = stripComments(chatPanel);
     /*
-     * A-1092 迁移：本断言原先要求 className 是 `text-scan-light`，但 A-1092 把该行改成了
-     * `text-breathe`（`text-scan-light` 在窄元素上有"光带移出文字区 → 文字全透明"的结构性缺陷，
-     * 见 index.css 注释）。**意图（pending 行必须剥 ⟳）不变，只是承载它的类名换了** ——
-     * 按本仓纪律「迁移守卫而非删除」（保留意图 + 配新变异），这里改成**不依赖具体类名**：
-     * 只要求"剥掉 ⟳ 的那一行 span"存在，样式类怎么改都不该再打红这条守卫。
+     * A-1092 迁移：本断言原先要求 className 是 `text-scan-light`，后放宽为不依赖具体类名。
+     *
+     * A-1095 #9（返工）迁移：原先锚在 **策略块里的 `pendingRow` 行**（`stripToolTraceMark(pendingRow.label)`）
+     * —— 那是思考卡下方由 `toolEvents` 驱动的「工具调用」摘要块，属于工具名的**第二条渲染路径**。
+     * 该块已删除（用户看到的"工具调用位置没变"就是它），所以"补剥第二条路径"这个意图**已成为历史**。
+     * 新的风险是反方向的：**将来又加一条渲染工具名的路径却忘了剥** ⇒ 同一工具名一处带 `⟳`、一处不带。
+     * 因此把断言从"盯住某一处"改成**穷举**：凡是把 `tool.label` 送进 JSX 插值的地方，都必须包在
+     * `stripToolTraceMark` 里；同时第二条路径不许复活。
      */
-    expect(body).toMatch(/<span className="[a-z-]+"[^>]*>\{stripToolTraceMark\(pendingRow\.label\)\}/);
+    const exprs = [...body.matchAll(/\{([^{}]*\btool\.label\b[^{}]*)\}/g)].map((m) => m[1]);
+    expect(exprs.length, "找不到渲染 tool.label 的地方（锚点失效）").toBeGreaterThan(0);
+    for (const expr of exprs) {
+      expect(expr, `工具名没有剥 ⟳ 标记：{${expr}}`).toContain("stripToolTraceMark");
+    }
+    // 第二条渲染路径（摘要块的 pending 行）必须绝迹
+    expect(body, "「工具调用」摘要块已删除，pendingRow 不许复活").not.toMatch(/pendingRow/);
   });
 
   it("T9 剥法只有一处实现（不许再有内联的 /^⟳\\s*/ 正则）", () => {
