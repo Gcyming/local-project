@@ -27,13 +27,9 @@ const FADE = "gui/src/renderer/pages/streamFade.ts";
 const PANEL = "gui/src/renderer/pages/ChatPanel.tsx";
 const TARGETS = [CSS, FADE, PANEL];
 
-/** fadeUnitText 的判据体（多行锚点：行尾无关由 `sub` 保证） */
-const BODY =
-  '  if (!raw) { return raw; }\n'
-  + '  if (/^\\s+$/.test(raw)) { return raw; }\n'
-  + '  if (PURE_MARKER.test(raw)) { return ""; }\n'
-  + '  if (ORDERED_MARKER.test(raw)) { return ""; }\n'
-  + '  return raw.replace(/\\*\\*|~~/g, "").replace(/[*#`]/g, "");';
+/* ⚠️ `fadeUnitText` 的**整段判据体**不再做锚点（A-1095 #8′）：
+   它里面夹了 `//` 注释，整段锚点必然与源码脱节（旧核验器还会因此假报命中）。
+   现在改用**函数头一行**做锚点 —— 见 MUTATIONS #3 的说明。 */
 
 const MUTATIONS = [
   {
@@ -53,9 +49,20 @@ const MUTATIONS = [
     mutate: (t) => sub(t, "**由右到左** + 由浅到深", "由左到右 + 由浅到深"),
   },
   {
+    /* A-1095 #8′ 迁移（原锚点是**整段判据体**，止于 `return raw.replace(/…/)`）。两次漂移：
+       ① 判据体后来长出「表格分隔单元」分支 + `|` 剥离 + 前导空格 trim；
+       ② 判据体内部插进了两行 `//` 注释 —— 整段锚点里不含它们 ⇒ **运行期未命中**。
+          （当时 `check-mut-anchors` 因拼接解析「遇注释即截断」而误报命中 = **假绿**，
+           两边结论打架才把它挖出来。）
+       ⇒ 改成打**函数头那一行**：单行、无注释、天然唯一，且对判据体后续增删**免疫**。
+       意图逐字保留：判据体整体失效 ⇒ 退化成恒等函数 ⇒ 控制符号裸露（守卫必红）。 */
     name: "3 fadeUnitText 退化成恒等函数（控制符号又裸露 `*` `#`）",
     file: FADE,
-    mutate: (t) => sub(t, BODY, "  return raw;"),
+    mutate: (t) => sub(
+      t,
+      "export function fadeUnitText(raw: string): string {",
+      "export function fadeUnitText(raw: string): string {\n  return raw;",
+    ),
   },
   {
     name: "4 空白单元也被抹掉（相邻词粘成一段）",
@@ -73,17 +80,28 @@ const MUTATIONS = [
     mutate: (t) => sub(t, 'if (ORDERED_MARKER.test(raw)) { return ""; }', "if (ORDERED_MARKER.test(raw)) { return raw; }"),
   },
   {
+    /* A-1095 S6 迁移（原锚点打的是渲染层的 `const t = fadeUnitText(u.text);`）：
+       S6 把"渲染层逐单元净化"**内聚进 `visibleTailUnits`**（其内部就是
+       `.map((u) => fadeUnitText(u.text))`），渲染层改调 `visibleTailUnits`。
+       旧锚点在 `ChatPanel.tsx` 里已找不到 ⇒ 那条守卫**静默失去保护**。
+       迁移到新产地：把 `visibleTailUnits` 内部的净化调用去掉（= 渲染原始单元文本，
+       净化白写）—— **意图逐字保留**（判据仍是"尾巴不许裸露控制符号"）。 */
     name: "7 接线断裂：渲染原始单元文本，净化函数白写",
-    file: PANEL,
-    mutate: (t) => sub(t, "const t = fadeUnitText(u.text);", "const t = u.text;"),
+    file: FADE,
+    mutate: (t) => sub(t, "const perUnit = units.map((u) => fadeUnitText(u.text));", "const perUnit = units.map((u) => u.text);"),
   },
   {
-    name: "8 净化后为空串仍然挂 span（零宽 span 堆积）",
+    /* A-1095 S6 迁移（原锚点打的是渲染层的 `return t ? <span …> : null;`）。
+       ⚠️ 关键：`visibleTailUnits` **有意保留空单元占位**（`text: ""`，为了 `at` 对齐 /
+       动画节拍，见其文档），"不渲染零宽 span"的最后一道闸在**渲染层**
+       `visibleTailUnits(fade.units).filter((u) => u.text)`。
+       去掉这个 filter ⇒ 空串单元也挂 span ⇒ 零宽 span 堆积（原意图逐字保留）。 */
+    name: "8 渲染层不再滤掉空单元（零宽 span 堆积）",
     file: PANEL,
     mutate: (t) => sub(
       t,
-      'return t ? <span key={u.at} className="stream-fade-unit">{t}</span> : null;',
-      'return <span key={u.at} className="stream-fade-unit">{t}</span>;',
+      "const units = visibleTailUnits(fade.units).filter((u) => u.text);",
+      "const units = visibleTailUnits(fade.units);",
     ),
   },
 ];

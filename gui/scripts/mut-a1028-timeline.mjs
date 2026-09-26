@@ -32,7 +32,11 @@ const ICON = path.join(ROOT, "gui", "src", "renderer", "components", "Icon.tsx")
 /* A-1061②′ 迁移：状态词多了第三参 `running`（思考历程工具卡的「执行中」实时态）——
    锚点跟着契约搬，否则变异未命中 → 假绿（本条在本次重跑里就是这么失效的）。 */
 const STATUS_CALL = "  const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);\n";
-const STATUS_RENDER = "        {statusLabel && (\n";
+/* ⚠️ **A-1092/A-1094 再迁移（2026-09-24 复核实测）**：spec（`a1028-guards`）第 80 行早已把
+   判据从 `statusLabel &&` 换成 `statusPhase !== "none"`，**但这里没跟着改** ⇒ 本锚点
+   长期"未命中" ⇒ 这条守卫**实际从未被验证过**（spec 迁了、变异没迁 = 假绿）。
+   真实形态见 `ChatPanel.tsx`（`/* A-1028：状态列为空（结果未记录）→ 整列省略 … *​/` 之后）。 */
+const STATUS_RENDER = '        {statusPhase !== "none" && (\n';
 const STAGES_GATE = "      const stages = finalReasoning || doneTools.length > 0 || finalTimeline.length > 0\n";
 const ATTACH_GUARD = "        if (finalTimeline.length > 0) {\n";
 const REBUILD = '      if (finalTimeline.length === 0) {\n        const seedTrace = splitToolTrace(finalReasoning ?? "");\n';
@@ -64,7 +68,8 @@ const variants = [
     name: "③ ★ 状态列改回无条件渲染（空状态也占一列，看起来像还没做完）",
     file: PANEL,
     from: STATUS_RENDER,
-    to: "        {statusLabel !== null && (\n",
+    /* 新形态下"无条件渲染"= 相位判断恒真（空状态也照样占一列）。 */
+    to: "        {true && (\n",
   },
 
   // ── ② 时间线：被 stages 的门挡在落盘之外 ─────────────────────────

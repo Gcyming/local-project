@@ -190,7 +190,13 @@ const MUTATIONS = [
   {
     name: "16 压缩路径退回不读全量（摘要只覆盖最后 50 条 ⇒ 早期对话既不在摘要里也不在尾巴里 = 静默丢失）",
     file: MAIN,
-    mutate: (t) => sub(t, "      const history = await loadSessionHistory(sessionId, { full: true });", "      const history = await loadSessionHistory(sessionId);"),
+    /* ⚠️ A-1106 迁移（**保留原意，不许删**）：A-1082 时这段是 `const history = await
+       loadSessionHistory(sessionId, { full: true })` —— A-1106 把「读盘」拆成
+       `loadRawHistoryWithMeta`（原始全量：判据 + 摘要素材 + 指纹）与 `loadSessionHistory`
+       （折叠视图：真实发送体积）两个入口，压缩 handler 顶部因此换名。
+       **缺陷本体没变**：丢掉 `{ full: true }` ⇒ 摘要轮只看到最后 50 条 ⇒ 更早的对话
+       既不在摘要里、也不在保留尾巴里 = 静默丢失。故按新形态迁移锚点。 */
+    mutate: (t) => sub(t, "      const { raw: historyAll, meta: histMeta } = await loadRawHistoryWithMeta(sessionId, { full: true });", "      const { raw: historyAll, meta: histMeta } = await loadRawHistoryWithMeta(sessionId);"),
   },
 
   /* ══════════════ A-1086 可救模型（压无可压时唯一有意义的出路） ══════════════ */

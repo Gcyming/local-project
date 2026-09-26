@@ -104,12 +104,22 @@ const MUTATIONS = [
   {
     name: "A-1055② 进度事件不以 downloading 态广播（进度条整块不会渲染）",
     file: UPDATER,
+    /* ⚠️ 锚点必须带上 `autoUpdater.on("download-progress"` 那两行（2026-09-24 修）：
+       光凭 `status: "downloading", version…, releaseNotes…, percent:` 这 4 行，
+       在 `updater.ts` 里命中**两处**（下载进度事件 151 行 / 点击下载时先置 0% 的 238 行）——
+       `subLines` 只改第一处，核验器无法确定改的是不是"进度事件"那一处 ⇒「不唯一」。
+       本条的意图是**进度事件**不以 downloading 态广播（守卫取的正是那个 handler 块），
+       把 handler 行一起锚上后唯一，且 `to` 逐字保留这两行 ⇒ 语义与原来**完全一致**。 */
     mutate: (t) => subLines(t, [
+      '  autoUpdater.on("download-progress", (p) => {',
+      "    currentStatus = {",
       '      status: "downloading",',
       "      version: currentStatus.version,",
       "      releaseNotes: currentStatus.releaseNotes,",
       "      percent:",
     ], [
+      '  autoUpdater.on("download-progress", (p) => {',
+      "    currentStatus = {",
       '      status: "checking",',
       "      version: currentStatus.version,",
       "      releaseNotes: currentStatus.releaseNotes,",

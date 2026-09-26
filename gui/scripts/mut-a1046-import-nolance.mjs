@@ -32,8 +32,16 @@ const MUTATIONS = [
   {
     name: "M1 新增/改回一处裸 importAgent（漏掉 rebuildDeps → 默认实现拉起 297MB 原生模块）",
     file: F_SPEC,
-    from: `const res = await importAgent({ input: pack, targetRoot: target, rebuildDeps: NO_LANCE_REBUILD });`,
-    to: `const res = await importAgent({ input: pack, targetRoot: target });`,
+    /* ⚠️ 锚点必须带**上一行**做上下文（2026-09-24 修，静态核验实测「命中 3 次」）：
+       这一行调用在 `import.spec.ts` 里逐字出现 **3 次**（三个用例各一份），文本上无法区分。
+       `sub` 是**单次** `replace`，只会改到第一处 ⇒ 核验器只能报「不唯一」（改错对象的可能）。
+       本条的意图是"**一处**裸调用"（与 M2「全部注入点被撤回」是两条不同的变异），
+       所以**不能**改用 `all: true`（那会把 M2 的语义重复一遍）；
+       正解是把上面那行**唯一的**夹具行一起锚上，锁定到第一个用例。
+       守卫是计数闸门（`injected >= 8`，实测恰为 8）⇒ 少一处即红，改哪一处都够，
+       但锚点唯一后核验器才说得清"改的到底是哪一处"。 */
+    from: `const target = await makeTargetRoot([makeAgent("agent_exist", "Exist", "存量")]);\n    const res = await importAgent({ input: pack, targetRoot: target, rebuildDeps: NO_LANCE_REBUILD });`,
+    to: `const target = await makeTargetRoot([makeAgent("agent_exist", "Exist", "存量")]);\n    const res = await importAgent({ input: pack, targetRoot: target });`,
   },
   {
     name: "M2 全部注入点被撤回（8 处一起退回默认重活路径）",

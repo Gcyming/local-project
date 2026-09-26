@@ -62,7 +62,12 @@ const MUTATIONS = [
   {
     name: "C2 任务栏（窗口）图标退回写死 PNG（「托盘对了任务栏还是糊的」这类半修）",
     file: MAIN,
-    mutate: (t) => sub(t, "    icon: resolveAppIcon(),", '    icon: join(INSTALL_ROOT, "build", "icon.png"),'),
+    /* 迁移（2026-09-24 复核实测）：窗口图标从 `icon: resolveAppIcon()` 升级成
+       `icon: resolveAppIconImage()`（后者内部才去按平台取 ico/png 并解码成 NativeImage，
+       见 `ref-ui`「图标尺寸口径」）。原锚点已不存在 ⇒ 守卫静默失效。
+       忠实等价变异：让 `resolveAppIconImage` **绕过平台分支、直接读 png**
+       （= 任务栏拿到的是小尺寸 png，糊）—— 与"退回写死 PNG"意图一致，且不破坏类型。 */
+    mutate: (t) => sub(t, "  const p = resolveAppIcon();", '  const p = join(INSTALL_ROOT, "build", "icon.png");'),
   },
   {
     name: "C3 去掉平台分支（Linux/macOS 也去读 .ico ⇒ 得到空图）",

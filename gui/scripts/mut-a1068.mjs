@@ -77,12 +77,17 @@ const MUTATIONS = [
   {
     name: "A7 else 兜底删掉（配不上的结果事件静默消失：历史回退路径整段没卡）",
     file: PANEL,
-    mutate: (t) => sub(t, "        } else {\n          timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, {\n            kind: \"tool\", name: rawName, label: displayLabel.replace(/^⟳\\s*/, \"\"), detail, result: ev.result,\n          });\n        }", "        }"),
+    /* 迁移（2026-09-24 复核实测）：① 内联的 `displayLabel.replace(/^⟳\s*/, "")` 已抽成
+       `stripToolTraceMark(displayLabel)`；② `appendTimelineStep(` 的参数块现在**换行**了
+       （原锚点按单行写 ⇒ 未命中 ⇒ 守卫静默失效）。判据不变：删掉 else 兜底 ⇒
+       配不上的结果事件静默消失。按当前实际形态（含换行）重写锚点。 */
+    mutate: (t) => sub(t, "        } else {\n          timelineStepsRef.current = appendTimelineStep(timelineStepsRef.current, {\n            kind: \"tool\", name: rawName, label: stripToolTraceMark(displayLabel), detail, result: ev.result,\n          });\n        }", "        }"),
   },
   {
     name: "A8 兜底建卡也带上 running（历史卡永远显示「执行中」）",
     file: PANEL,
-    mutate: (t) => sub(t, "label: displayLabel.replace(/^⟳\\s*/, \"\"), detail, result: ev.result,", "label: displayLabel.replace(/^⟳\\s*/, \"\"), detail, result: ev.result, running: true,"),
+    /* 迁移（2026-09-24 复核实测）：同 A7 —— `displayLabel.replace(...)` → `stripToolTraceMark(displayLabel)`。 */
+    mutate: (t) => sub(t, "label: stripToolTraceMark(displayLabel), detail, result: ev.result,", "label: stripToolTraceMark(displayLabel), detail, result: ev.result, running: true,"),
   },
   {
     name: "A9 组件不再把 running 传进唯一出处（正在跑又变回一行哑行）",

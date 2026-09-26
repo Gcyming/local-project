@@ -70,12 +70,15 @@ const MUTATIONS = [
     ),
   },
   {
+    /* A-1095 #8′ 迁移：时间线新增 `body`（该轮正文片段）成员，联合已变为
+       `"think" | "body" | "tool" | "plan" | "todo" | "steer"`。变异意图逐字保留：
+       让**持久化镜像**的联合少认一个成员 ⇒ 重启回看时该种节点静默丢失。 */
     name: "3 持久化镜像 TimelineStepLite 不认 steer（重启回看时引导节点静默丢失）",
     file: CTX_META,
     mutate: (t) => sub(
       t,
-      'kind: "think" | "tool" | "plan" | "todo" | "steer";',
-      'kind: "think" | "tool" | "plan" | "todo";',
+      'kind: "think" | "body" | "tool" | "plan" | "todo" | "steer";',
+      'kind: "think" | "body" | "tool" | "plan" | "todo";',
     ),
   },
   {

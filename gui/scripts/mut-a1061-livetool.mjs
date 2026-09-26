@@ -74,8 +74,12 @@ const RAW_MUTATIONS = [
   {
     name: "9 实时行不再把 running 传给状态词（在跑的那条没有状态列）",
     file: PANEL,
-    from: "const status = toolStatusLabel(t.result, isFail, running);",
-    to: "const status = toolStatusLabel(t.result, isFail);",
+    /* A-1095 #8′ 迁移：调用点重命名为
+       `const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);`
+       （`status`→`statusLabel`、`t`→`tool`、`running`→`isRunning`；`toolStatusPhase` 是另一处调用）。
+       意图逐字保留：把"正在跑"这一位丢掉 ⇒ 运行中的卡片没有状态词。 */
+    from: "const statusLabel = toolStatusLabel(tool.result, isFail, isRunning);",
+    to: "const statusLabel = toolStatusLabel(tool.result, isFail);",
   },
   {
     name: "10 复位现场不再清「执行中」行（上一轮的命令会在新一轮假装在跑）",
@@ -98,8 +102,12 @@ const RAW_MUTATIONS = [
   {
     name: "12 失败判定恒为 false（失败的工具显示成成功）",
     file: PRODUCTS,
-    from: '  return /^(\\[错误\\]|\\[失败\\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i.test(r);',
-    to: "  return false;",
+    /* 迁移（2026-09-24 复核实测）：内联正则已抽成模块常量 `FAIL_PREFIX_RE`。
+       原锚点 `return /^(...)/i.test(r);` 在源码里已不存在 ⇒ 本守卫**静默失效**。
+       判据不变：失败判据一旦恒 false，失败的工具会被显示成成功。
+       改成把该常量整体替换为"永不匹配"（等价于恒 false，但保留常量名以免下游报错）。 */
+    from: "const FAIL_PREFIX_RE = /^(\\[错误\\]|\\[失败\\]|💥|❌|✕|错误|失败|拒绝|未找到|no such|not found|error|failed|denied|exception)/i;",
+    to: "const FAIL_PREFIX_RE = /(?!)x/i;",
   },
 ];
 

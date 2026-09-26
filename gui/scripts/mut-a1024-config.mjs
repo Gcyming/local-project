@@ -81,8 +81,12 @@ const variants = [
   {
     name: "⑥ engine 重新自定义 LocalModelSpec（三份定义开始漂移，engine 那份曾缺 vision）",
     file: ENGINE,
-    from: 'import { LOCAL_MODELS_KEY, findLocalModelSpec, type LocalModelSpec } from "../local_models.js";',
-    to: 'import { LOCAL_MODELS_KEY, findLocalModelSpec } from "../local_models.js";\ninterface LocalModelSpec { id: string; path: string; }',
+    /* ⚠️ 锚点于 **A-1108 迁移**：engine 的导入行去掉了 `LOCAL_MODELS_KEY`
+       （那条「跳过本地模型伪供应商」的规则跟降级池一起搬进了 `services/fallbackPool.ts`，
+       见 engine.ts 里留下的路标注释）。锚点必须跟着改，否则这条守卫**从那一刻起失去保护**
+       —— 变异名字说的缺陷（engine 自己再声明一份 LocalModelSpec）就没人能复现了。 */
+    from: 'import { findLocalModelSpec, type LocalModelSpec } from "../local_models.js";',
+    to: 'import { findLocalModelSpec } from "../local_models.js";\ninterface LocalModelSpec { id: string; path: string; }',
   },
   {
     name: "⑦ engine 恢复硬编码键名直接下标取清单（绕过唯一实现）",

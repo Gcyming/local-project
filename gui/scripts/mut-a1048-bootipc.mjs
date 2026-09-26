@@ -37,7 +37,11 @@ const MUTATIONS = [
   {
     name: "M3 提供者初始值改成抛错（渲染层轮询直接红，比空态更糟）",
     file: F_MAIN,
-    from: `let residentStateProvider: () => ResidentState = () => ({ scheduler: [], subagents: [], defaultModel: undefined });`,
+    /* ⚠️ 锚点随**源码漂移**同步（2026-09-24，静态核验实测「未命中」= 该守卫已失去保护）：
+       `ResidentState` 后来加了 `defaultModels: []`（A-1097 执行模型池），
+       旧锚点停在 `defaultModel: undefined })` 形态 ⇒ `sub` 一个字都改不到，
+       而脚本只在 `!src.includes(m.from)` 时出声 —— 这正是"锚点静默未命中"的经典形态。 */
+    from: `let residentStateProvider: () => ResidentState = () => ({ scheduler: [], subagents: [], defaultModel: undefined, defaultModels: [] });`,
     to: `let residentStateProvider: () => ResidentState = () => { throw new Error("未就绪"); };`,
   },
   {

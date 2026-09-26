@@ -60,8 +60,12 @@ const RAW_MUTATIONS = [
   {
     name: "6 激励语退回 11.5px（又细又小看不清）",
     file: PANEL,
-    from: '<span style={{ color: "var(--text-secondary)", fontSize: 13, fontWeight: 500 }}>{cheer}</span>',
-    to: '<span style={{ color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500 }}>{cheer}</span>',
+    /* A-1095 S0 迁移：激励语从"与主句同行"改成"独占最后一行"，属性行因此换行
+       并加了 `minWidth: 0`。判据（退回 11.5px = 又细又小）不变，锚点更新到实际形态。
+       A-1106（问题 3）再迁移：激励语 13 → **14px**（用户："正在思考下面那一块字体看着好小"），
+       锚点跟随，判据不变。 */
+    from: '<span style={{ color: "var(--text-secondary)", fontSize: 14, fontWeight: 500, minWidth: 0 }}>',
+    to: '<span style={{ color: "var(--text-secondary)", fontSize: 11.5, fontWeight: 500, minWidth: 0 }}>',
   },
 
   // ── 流式渐入：CSS ─────────────────────────────────────────────────────────
@@ -99,10 +103,16 @@ const RAW_MUTATIONS = [
     to: ".stream-fade-unit {\n  position: relative;\n  opacity: 1;\n}",
   },
   {
-    name: "9 渐入动画没有 prefers-reduced-motion 降级（无障碍回归）",
+    name: "9 减动效退回 animation: none（一个开关同时关掉「思考 + 正文」全部渐入 —— 用户实测问题 c）",
     file: CSS,
-    from: "@media (prefers-reduced-motion: reduce) {\n  /* 无障碍：关掉位移与渐入，字符立刻可见（不留 0 透明度的中间态） */\n  .stream-fade-unit { animation: none; }\n}",
-    to: "/* A-1061⑬：无障碍降级被删（变异用） */",
+    /* A-1124 迁移：旧判据是「**必须存在** `.stream-fade-unit { animation: none; }` 降级」，
+       配套变异是「把整块降级删掉」。用户实测问题 c 之后判据**反转**了 ——
+       降级的正确形态是「**只去位移、留不透明度渐入**」（`animation-name: streamUnitFadeIn`），
+       而 `animation: none` 恰恰是要拦的回归（它一个开关同时关掉思考 + 正文两处渐入，
+       且完全静默：过 tsc / 过构建 / 过逻辑测试，只在用户眼里消失）。
+       ⇒ 变异点跟着反转：把新降级改回 `animation: none`。 */
+    from: "  .stream-fade-unit { animation-name: streamUnitFadeIn; }",
+    to: "  .stream-fade-unit { animation: none; }",
   },
 
   // ── 流式渐入：切分判据 ───────────────────────────────────────────────────
@@ -143,7 +153,9 @@ const RAW_MUTATIONS = [
   {
     name: "13c 最后半行不再渲染（linePrefix 丢掉 → 那段字直接消失，接缝也失去行内连续性）",
     file: PANEL,
-    from: "                        {fade.linePrefix}\n",
+    /* A-1095 S6 迁移：渲染块从"正文内联那段"抽成了 `StreamFadeText` 组件，
+       缩进由 24 空格变 6 空格。判据（丢掉 linePrefix ⇒ 最后半行整段消失）不变。 */
+    from: "      {fade.linePrefix}\n",
     to: "",
   },
   {

@@ -149,8 +149,10 @@ const MUTATIONS = [
   {
     name: "C3 思考区不再委托 ReasoningSection → 懒挂载改了半天，压根没接上",
     file: CHAT,
+    /* A-1124 同步锚点：思考区现在把 `liveStream` 一起透传给 `ReasoningSection`
+       （切会话恢复的占位气泡要它是"活"的）⇒ 锚点补上该 prop。 */
     mutate: (t) => sub(t,
-      "{showThinking && <ReasoningSection m={m} collapsed={collapsed} />}",
+      "{showThinking && <ReasoningSection m={m} collapsed={collapsed} liveStream={liveStream} />}",
       "{showThinking && null}"),
   },
   {
@@ -303,6 +305,13 @@ const MUTATIONS = [
   {
     name: "W3 状态行无条件挂扫光 → 等用户审批时也在扫（界面在骗人，仍按 A-1054④ 断言）",
     file: CHAT,
+    /* ⚠️ **A-1092/A-1094/A-1106 三次迁移**：`a1054-guards.spec.ts` 早已把判据放宽成
+       `status.animated ? "text-(scan-light|breathe)"`，而本锚点曾长期打 `text-scan-light`
+       ⇒ 长期"未命中" ⇒ 这条守卫**实际从未被验证过**。
+       A-1106 把四处「正在动」文本从 `.text-breathe` **恢复成** `.text-scan-light`
+       （用户点名的扫光，A-1094 的"窄元素"归因已被实测推翻）⇒ 锚点回到 `text-scan-light`。
+       判据不变：**动画类必须由 `status.animated` 条件门控，不许无条件挂**。
+       ⚠️ 下次再换类名，**先改这里**（锚点漂移 = 守卫失去保护，而 check-mut-anchors 会报未命中）。 */
     mutate: (t) => sub(t,
       'className={status.animated ? "text-scan-light" : undefined}',
       'className="text-scan-light"'),
