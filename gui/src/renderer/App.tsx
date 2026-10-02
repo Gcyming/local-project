@@ -2060,12 +2060,22 @@ export default function App(): JSX.Element {
    *  左栏被压窄后右栏左缘跟着左移，鼠标↔宽度映射随之漂移，越拖越不跟手（"卡住"）。
    *  左栏宽度取**实测值**（可能已被窗口挤过），不是 state。
    *  ⚠️ 浮层态例外：主区是 fixed 浮层（`.main-float` min-width:0），不占位 → 沿用"可占满窗口"上限。 */
+  /* ⚠️⚠️ A-1149（用户实测"左栏收起后左边缘多出一小块空白"）：**浮层态的上限必须是整窗宽**，
+   *   不能再减 48。原因是**几何**的：`.body` 是 `[.sidebar][.main][.right-wrapper]` 一行 flex，
+   *   浮层态 `.main` 的内容是 `position:fixed`（对布局零贡献）却带着 `flex:1 1 0%` +
+   *   `min-width:0` ⇒ **行内剩余空间全部被 `.main` 吸收**。右栏一请求 `innerWidth - 48`，
+   *   那 48px 立刻变成 `.main` 的**实宽**，落在右栏左侧 —— 正好是收起后的左栏位置，
+   *   观感就是"折叠的左栏又露出来了"（离屏实测：`main.w=48 right.l=48`，守卫见
+   *   `gui/scripts/assert-float-gap.cjs`，它同时锁 App 侧取值与 CSS 上限）。
+   *   整窗宽请求 + CSS 放开 `100vw - 48` 上限之后，行内不存在剩余空间 ⇒ 两个边缘都没有空白。
+   *   （左栏展开时仍由 `.right-wrapper` 的 flex-shrink 让位，实测不溢出。） */
   function rightSidebarMaxW(): number {
     const leftEl = leftSidebarRef.current;
     const leftW = leftEl ? leftEl.getBoundingClientRect().width : 0;
     const floatActive = floatStateRef.current !== "none";
     return Math.max(360, floatActive
-      ? window.innerWidth - 48
+      // A-1149：浮层态按整窗宽（余量不能"留给 .main"——它会把余量变成实宽）
+      ? window.innerWidth
       : Math.min(window.innerWidth - 48, window.innerWidth - leftW - CHAT_MIN_W));
   }
 
@@ -2164,7 +2174,9 @@ export default function App(): JSX.Element {
     // A-980-R25：记住唤出前的右栏宽度——收起浮窗时归还，右栏平滑滑回原宽，
     // 中间聊天栏随之"长出来"（而不是一次性弹到最小宽度）
     preFloatRightWidthRef.current = rightWidth;
-    animateRightSidebar(true, Math.max(560, window.innerWidth - 48));
+    // A-1149：唤出即请求**整窗宽**（原 `innerWidth - 48` 会让那 48px 变成 .main 的实宽，
+    // 在收起后的左栏位置留下一条空白 —— 见 rightSidebarMaxW 上方的几何说明）
+    animateRightSidebar(true, Math.max(560, window.innerWidth));
     setFloatState("float");
   }
 

@@ -1404,8 +1404,15 @@ code,
   min-width: 260px;
   /* A-980-R14：解除 900px 硬上限——右栏可拖到占满窗口（上限对齐拖拽逻辑 innerWidth-48）
      A-975-R4：再加 `100%`——外层 wrapper 允许被 flex 收缩（窗口变窄时优先让位给聊天区），
-     这里用 max-width:100% 跟随收缩后的 wrapper，避免固定宽度溢出 wrapper。 */
-  max-width: min(100%, calc(100vw - 48px));
+     这里用 max-width:100% 跟随收缩后的 wrapper，避免固定宽度溢出 wrapper。
+     ⚠️ A-1149：**删掉 `min(100%, calc(100vw - 48px))` 里的那一半 `100vw - 48px`**。
+     它是"拖拽最多到 innerWidth-48"这条 JS 夹取在 CSS 里的**第二份拷贝**，代价是
+     悬浮态下右栏**永远够不到整窗宽** → 那 48px 被同一行的 `.main`（`flex:1 1 0%`，悬浮态
+     内容是 fixed 浮层、对该行零贡献）吃成实宽，落在右栏**左侧** = 收起后的左栏位置，
+     用户看到的就是"左边缘多出一小块空白"（A-1149 实测：`main.w=48 right.l=48`）。
+     `100%` 一项就足以表达"跟随 wrapper、不溢出"，上限由 `rightSidebarMaxW()` 唯一决定。
+     守卫：`gui/scripts/assert-float-gap.cjs`（静态断言本条不再出现 `100vw - 48px`）。 */
+  max-width: 100%;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   /* A-980-R20：宽度过渡；A-980-R24 起 opacity 与宽度**几何同步**（App 侧 rAF 逐帧写入，不放 CSS）
