@@ -229,27 +229,32 @@ describe("A-1159 浮窗与右栏**同一条时间轴**（衔接动画不抽搐�
       .toBe(`${rightDur[1]} ${rightDur[2]}`.trim());
   });
 
-  it("浮窗淡入只碰 opacity/transform，且缩放**极轻微**", () => {
+  /* ⚠️⚠️ A-1159-R 修订：**keyframes 里不许出现 `opacity`** —— 用户抓到的中间帧证据：
+     浮窗一旦半透明，它**下面正在滑动的右栏内容会透出来**，聊天气泡与右栏的
+     「会话指标 / 累计tokens」两张卡**叠印在同一块区域**，外加一圈"空白一大一小"。
+     浮窗是**不透明窗口**：任何淡入都会与下方内容叠印。⇒ 只允许 `scale`（纯绘制层）。 */
+  it("浮窗淡入**不许碰 opacity**（半透明浮窗会与下方右栏内容叠印）", () => {
     const kf = /@keyframes float-enter-a1159\s*\{([\s\S]*?)\n\}/.exec(CSS_CODE);
     expect(kf, "找不到 @keyframes float-enter-a1159").toBeTruthy();
-    const from = kf![1];
-    expect(from).toMatch(/from\s*\{[^}]*opacity:\s*0/);
-    const scale = /from\s*\{[^}]*scale\(([0-9.]+)\)/.exec(from);
+    expect(kf![1], "keyframes 里出现 opacity ⇒ 浮窗会半透明，右侧栏内容必然透出来叠印")
+      .not.toMatch(/opacity/);
+    const scale = /from\s*\{[^}]*scale\(([0-9.]+)\)/.exec(kf![1]);
     expect(scale, "from 必须带 scale（否则浮窗是硬切出现，没有『跟着长出来』的暗示）").toBeTruthy();
-    expect(Number(scale![1]), "起始缩放应在 0.97~0.99（0.9 之类会变成『弹一下』，反而更像抽搐）")
-      .toBeGreaterThanOrEqual(0.97);
+    /* ⚠️ 幅度必须**小**：这里要的是"跟着长出来"的暗示，
+       0.9 之类会变成"弹一下"，反而更像抽搐。 */
+    expect(Number(scale![1]), "起始缩放应在 0.97~0.99").toBeGreaterThanOrEqual(0.97);
     expect(Number(scale![1])).toBeLessThanOrEqual(0.99);
-    /* ⚠️ 只允许碰 opacity/transform：碰几何（left/top/width/height）就又与右栏的滑动不同步 ——
+    /* ⚠️ 只允许 transform：碰几何（left/top/width/height）就又与右栏的滑动不同步 ——
        那正是本组要根除的病症。 */
-    const props = from
+    const props = kf![1]
       /* ⚠️ 必须先剥掉 `from {` / `to {` **选择器**，否则切出来的第一个"属性"是
-         "from  opacity" 这种把选择器和声明粘在一起的东西。 */
+         "from  transform" 这种把选择器和声明粘在一起的东西。 */
       .replace(/(^|[\s{}])(from|to)\s*\{/g, " ")
       .replace(/[{}]/g, "")
       .split(";").map((s) => s.split(":")[0].trim()).filter(Boolean);
     expect(props.length, "keyframes 解析为空 ⇒ 守卫自己失效了").toBeGreaterThan(0);
     for (const p of props) {
-      expect(["opacity", "transform"], `keyframes 里不该出现属性 ${p}`).toContain(p);
+      expect(["transform"], `keyframes 里不该出现属性 ${p}`).toContain(p);
     }
   });
 });

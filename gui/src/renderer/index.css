@@ -1753,9 +1753,15 @@ body.float-layout .right-wrapper-anim .right-sidebar {
    ⚠️ `scale` 取 0.985（不是 0.9 之类）：这里要的是"跟着长出来"的暗示，
      幅度一大就变成"弹一下"，反而更像抽搐。
    ⚠️ **不动** left/top/width/height：那些是几何，一动就又与右栏的滑动**不同步**了。 */
+/* ⚠️⚠️⚠️ A-1159-R：**不许加 opacity**。用户抓到的中间帧证据：
+     浮窗一旦半透明，它**下面正在滑动的右栏内容会透出来** —— 聊天气泡和右栏的
+     「会话指标 / 平均命中 / 累计tokens」两张卡**叠印在同一块区域**里，
+     外加那一圈"空白一大一小"的闪烁。浮窗是**不透明窗口**，任何"淡入"都是错的：
+     半透明浮窗叠在不透明内容上必然叠印。⇒ 只保留 `scale`（纯绘制层、不影响
+     任何内容可见性），同步感由位移承担。 */
 @keyframes float-enter-a1159 {
-  from { opacity: 0; transform: scale(0.985); }
-  to   { opacity: 1; transform: none; }
+  from { transform: scale(0.985); }
+  to   { transform: none; }
 }
 body.float-layout .float-window {
   animation: float-enter-a1159 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) both;

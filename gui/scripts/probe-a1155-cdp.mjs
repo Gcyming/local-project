@@ -365,6 +365,14 @@ const CLICK_FLOAT_TRACE = `(() => {
   });
   const M = boxes();
   const HOST = M.host;
+  /* 固定探针点：浮窗下方空白、右栏可见区、浮窗右侧空白、左栏与浮窗之间 —— 四个
+     "用户盯着看"的地方。坐标在**当前视口**下按比例取，1900px 与 1332px 都适用。 */
+  const probePoints = [
+    [Math.round(window.innerWidth * 0.35), Math.round(window.innerHeight * 0.90)],
+    [Math.round(window.innerWidth * 0.62), Math.round(window.innerHeight * 0.78)],
+    [Math.round(window.innerWidth * 0.80), Math.round(window.innerHeight * 0.40)],
+    [Math.round(window.innerWidth * 0.18), Math.round(window.innerHeight * 0.55)],
+  ];
   let prev = 0;
   const tick = () => {
     const now = performance.now();
@@ -381,6 +389,19 @@ const CLICK_FLOAT_TRACE = `(() => {
       /* ⚠️ A-1159：浮窗**透明度**与右栏宽度的时间轴是否同步 —— 这才是"抽搐"的判据
          （几何单调不代表观感同步：浮窗可能瞬间到位而右栏还在滑）。 */
       row.push(HOST ? Math.round(Number(getComputedStyle(HOST).opacity) * 100) : null);
+      /* ⚠️⚠️ A-1159-R 真正管用的"闪烁"判据 —— **固定探针点**。
+         用户的原话是「中间那个空白区域一大一小闪烁」：人眼判的是**那块地方
+         画的东西换没换**，不是几何有没有反向移动（几何全程单调也已经测过了）。
+         ⇒ 在若干屏幕固定点上问 elementFromPoint：签名（tag+class）一变，
+         就说明那一小块**换了内容** ⇒ 客观的"闪一下"。
+         ⚠️ 为什么用**固定屏幕坐标**而不是跟着元素走：跟着元素走的采样天然看不到
+         "这块地方空了一下又填上"，而那正是用户说的现象。 */
+      row.push(probePoints ? probePoints.map((pt) => {
+        const el = document.elementFromPoint(pt[0], pt[1]);
+        if (!el) { return "∅"; }
+        const c = el.className;
+        return (typeof c === "string" && c) ? el.tagName.toLowerCase() + "." + c.trim().split(/\s+/).slice(0, 2).join(".") : el.tagName.toLowerCase();
+      }).join("|") : null);
       tr.rows.push(row);
     }
     tr.raf = requestAnimationFrame(tick);
@@ -609,7 +630,28 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
     say(`             右栏宽度   ${JSON.stringify(rsW.slice(0, 3))} … ${JSON.stringify(rsW.slice(-2))}`);
     say(`             ⇒ 浮窗淡入区间 ${JSON.stringify(opSpan)} vs 右栏滑动区间 ${JSON.stringify(rsSpan)}`
       + (opSpan && rsSpan && Math.abs(opSpan[1] - rsSpan[1]) <= 60 ? " ✓ 收尾基本同步" : " ⚠️ 不同步"));
-  }
+
+    /* ⚠️⚠️ A-1159-R：**固定探针点换元素的次数** = "那块地方闪没闪"的客观计数。
+         几何全单调也照样会闪 —— 闪的是**画在那里的东西换了**，不是盒子动了。 */
+    const n = rows.length ? (rows[0].length > 14 ? 14 : -1) : -1;
+    if (n >= 0) {
+      say("  🔦 固定探针点（换元素次数 / 采样点）：");
+      for (let p = 0; p < 4; p++) {
+        let changes = 0, first = null, last = null;
+        const at = [];
+        for (const r of rows) {
+          if (typeof r[14] !== "string") { continue; }
+          const sig = r[14].split("|")[p];
+          if (first === null) { first = sig; }
+          if (last !== null && last !== sig) { changes++; if (at.length < 8) { at.push(r[0] + "ms"); } }
+          last = sig;
+        }
+        say(`      点${p + 1}  ${String(changes).padStart(3)} 次 ${changes === 0 ? "✓ 全程稳定" : "⚠️ 会闪"}`
+            + ` · ${JSON.stringify(first)} → ${JSON.stringify(last)}`
+            + (at.length ? ` · 变于 ${at.join("/")}` : ""));
+      }
+    }
+  }   /* ← 抖动分析块的收尾 */
   await snap("S1 点窗口化后（收敛后）");
   await shot("s1-float-settled");
 
@@ -865,6 +907,92 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
   await new Promise((r) => setTimeout(r, 1600));
   await snap("S12 还原后");
   await shot("s12-restored");
+
+  /* ══ ⑦ 慢动作逐帧取证 ══════════════════════════════════════════════════
+     A-1159-R：用户抓到一帧"浮窗半透明、右栏内容叠印其上、空白一大一小"的中间帧。
+     ⚠️⚠️ **光看稳态帧永远看不出过渡问题**：所有断言在收敛后都是绿的。
+     ⇒ 这里把 `transition-duration` / `animation-duration` **整体放大 12 倍**，
+        每次 CDP 截图的往返（几十~上百 ms）落到的就是一个**稳定可辨认**的中间态。
+     ⚠️ 这是**诊断专用**的注入，结束即移除（`--probe-slowmo` 元素）。
+        它只改时长、不改缓动曲线形状，所以"哪个阶段在闪"的结论仍成立。 */
+  say("\n═══ ⑦ 慢动作逐帧取证（过渡时长 ×12） ═══");
+  await cdp.eval(`(() => {
+    const st = document.createElement("style");
+    st.id = "probe-slowmo";
+    st.textContent = "*{transition-duration:3.36s !important;animation-duration:3.36s !important;}";
+    document.head.appendChild(st);
+    return "slowmo-injected";
+  })()`);
+  say("窗口化=" + (await cdp.eval(CLICK_FLOAT_TRACE)));
+  for (const at of [400, 900, 1500, 2200, 2900]) {
+    await new Promise((r) => setTimeout(r, at === 400 ? 400 : 500));
+    await shot(`s7-slowmo-${at}ms`);
+    say(`  📐 ${at}ms = ${await cdp.eval(`(() => {
+      const h = document.querySelector(".float-window, .inline-chat-host");
+      const rs = document.querySelector(".right-sidebar");
+      if (!h || !rs) { return "n/a"; }
+      const a = h.getBoundingClientRect(), b = rs.getBoundingClientRect();
+      return JSON.stringify({
+        host: Math.round(a.left) + ".." + Math.round(a.right) + "×" + Math.round(a.height),
+        hostOpacity: Number(getComputedStyle(h).opacity).toFixed(2),
+        rs: Math.round(b.left) + ".." + Math.round(b.right),
+        rsOpacity: Number(getComputedStyle(rs).opacity).toFixed(2),
+        /* ⚠️ 「空白区域」= 浮窗与右栏之间的空隙 + 浮窗下方的空隙 —— 用户说它一大一小 */
+        gapX: Math.round(b.left - a.right),
+        gapY: Math.round(window.innerHeight - a.bottom),
+        /* ⚠️ 浮窗与右栏**重叠**的宽度：>0 就意味着两层内容会叠印 */
+        overlap: Math.round(Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))),
+      });
+    })()`)}`);
+  }
+  say("恢复窗口化=" + (await cdp.eval(CLICK_EXIT_TRACE)));
+  for (const at of [400, 900, 1500, 2200]) {
+    await new Promise((r) => setTimeout(r, at === 400 ? 400 : 500));
+    await shot(`s7-slowmo-exit-${at}ms`);
+  }
+  await cdp.eval(`(() => { const s = document.getElementById("probe-slowmo"); if (s) { s.remove(); } return "slowmo-removed"; })()`);
+  await new Promise((r) => setTimeout(r, 4000));
+
+  /* ══ ⑧ 宽窗口复现 ═══════════════════════════════════════════════════════
+     ⚠️⚠️ 用户的窗口比本探针默认的 1332px **宽得多**（截图里整窗近 1900px）。
+        而右栏稳态宽、`.right-body` 的 `max-width: min(1600px, 100%)` 钳制、
+        浮窗 `fitFloatRect` 的可用空间**全都随窗宽变化** ⇒ 1332px 上测不到的
+        现象，在宽窗口上完全可能出现。⇒ 这里用 `Emulation.setDeviceMetricsOverride`
+        把视口撑到 1900px 再跑一遍"窗口化/恢复"。 */
+  say("\n═══ ⑧ 宽窗口（1900px）复现 ═══");
+  try {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1900, height: 1150, deviceScaleFactor: 1, mobile: false });
+    await new Promise((r) => setTimeout(r, 1200));
+    say("视口=" + (await cdp.eval("window.innerWidth + '×' + window.innerHeight")));
+    for (const round of [1, 2]) {
+      say(`第 ${round} 轮：窗口化=` + (await cdp.eval(CLICK_FLOAT_TRACE)));
+      await new Promise((r) => setTimeout(r, 1200));
+      await shot(`s8-wide-float-r${round}`);
+      say(`  📐 浮窗态 ${await cdp.eval(`(() => {
+        const h = document.querySelector(".float-window, .inline-chat-host");
+        const rs = document.querySelector(".right-sidebar");
+        const rb = document.querySelector(".right-body");
+        if (!h || !rs) { return "n/a"; }
+        const a = h.getBoundingClientRect(), b = rs.getBoundingClientRect(), c = rb.getBoundingClientRect();
+        return JSON.stringify({
+          host: Math.round(a.left) + ".." + Math.round(a.right) + "×" + Math.round(a.height),
+          rs: Math.round(b.left) + ".." + Math.round(b.right),
+          rb: Math.round(c.left) + ".." + Math.round(c.right),
+          rbMaxW: getComputedStyle(rb).maxWidth,
+          /* ⚠️ 关键：右栏内容比它的盒子**窄多少** ⇒ 这段差就是"空白一大一小" */
+          rbSlack: Math.round(b.right - c.right),
+          overflowRight: b.scrollWidth - Math.round(b.width),
+        });
+      })()`)}`);
+      say(`         恢复=` + (await cdp.eval(CLICK_EXIT_TRACE)));
+      await new Promise((r) => setTimeout(r, 1200));
+      await shot(`s8-wide-restore-r${round}`);
+    }
+    await cdp.send("Emulation.clearDeviceMetricsOverride");
+    await new Promise((r) => setTimeout(r, 800));
+  } catch (e) {
+    say("⚠️ 宽窗口复现失败：" + String(e).slice(0, 160));
+  }
 
   await new Promise((r) => setTimeout(r, 1800));
   await snap("S7 稳态 (+1.8s)");
