@@ -211,6 +211,13 @@ body,
 .app {
   -webkit-user-select: none;
   user-select: none;
+  /* A-1152：给根容器上底色。此前 `.app` / `.body` 都透明 ⇒ 浮层态下
+     「中间页已卸载」露出的区域显示的是**浏览器根底色（浅灰白）**，
+     用户截图里浮窗右侧/下方那片"空白"就是它 —— 不是布局错，是**没底色**。
+     ⚠️ 用 `var(--bg)` 而不是写死颜色：跟随主题（浅色/深色）自动切换。
+     ⚠️ 只给 `.app` 一层就够：`.body`/`.right-sidebar` 都有各自底色，只有"没人覆盖"的地方
+     会露出来 —— 那正是浮层态下的空区。 */
+  background: var(--bg);
 }
 /* 聊天栏目：整行 Agent/用户消息 + 思考过程可选中复制（渲染不套 .markdown-body 类，“选中”范围限定在此） */
 .msg-row {
@@ -344,6 +351,19 @@ code,
   width: 0 !important;
   min-width: 0;
   border-right: none;
+  /* ⚠️ A-1148：**收起时必须把放宽的裁剪收回来**。
+     `.sidebar` 为了给拖拽命中区让路，用了 `overflow: clip` + `overflow-clip-margin: 7px`
+     （A-1111，那份注释当时就如实交代了代价：收起/展开动画期间内容会多露出 7px）⇒ 收起态收回它。
+     ⚠️ **更正（2026-10-02 晚，重要）**：这段注释此前把用户报的"最左边那一条"归因到这里 ——
+     **归因错了**。经整屏截图确认，那条是**另一个窗口**（PowerShell / WorkBuddy）露在 slime
+     窗口左边界之外，与本节无关。本节保留的唯一理由是它本身成立（7px 溢出确实是存在的），
+     **它不是那条的修复**，别再按它去理解那个问题。
+     ⇒ 收起态收紧（展开态保持 7px，resizer 的命中区不受影响）。
+     ⚠️ 为什么写**两条**：实测 `overflow-clip-margin: 0`（无单位）在压缩后的产物里**计算值仍是 7px**
+     （覆盖没落地）⇒ 用带单位的 `0px` 精确收回，并补一条 `overflow: hidden` 兜底
+     （老写法必定生效；宽度已是 0，隐藏不会带来滚动条或布局副作用）。 */
+  overflow: hidden;
+  overflow-clip-margin: 0px;
 }
 /* A-980-R34：展开动画期间临时解除 min-width——否则 240px 下限把展开过渡钳在下限之上，
    实测宽度起跳即越出渐变带（[0.40,0.95]×full），窄栏展开看不到渐入。
@@ -666,7 +686,40 @@ code,
 }
 /* A-975-R4：右栏处于「占满/浮层」模式（聊天已变悬浮窗）时，主区允许收成 0 宽 ——
    否则 380 + 占满的右栏 会超出窗口 → 整页出现横向滚动条、右栏被推出可视区。 */
+/* ── A-1152：浮层态下，聊天区内部也**不许有绝对像素硬下限** ──────────────────────
+   用户实测（并给出正确猜测）：「slime 界面从常规大小变成最大化后，对话页被强行拉开」，
+   原话「界面缩放时各个页面似乎不会等比自适应保持大小比例，而是会固定一定的大小，
+   而非比例，这就导致两侧边栏回缩，中间的对话页面被强行拉出」。
+
+   ⚠️ **他的猜测成立**，但机制不是"缩放比例"，而是**三处绝对值下限**：
+     ① `.main { min-width: 380px }`（A-975-R4 加的聊天区保底）——**它只在非浮层生效**，
+        而浮层内容是 `position: fixed`（对布局零贡献）⇒ 窗口一变大，`.main` 就从 0 涨回 380；
+     ② 消息流的 `padding: 14px 44px 0 16px`（左右合计 60px 绝对值）；
+     ③ 内部若干 `minWidth: 62 / 80 / 34` 的产物卡标签（绝对像素、不可压缩）。
+     两侧栏是 `flex-shrink: 0` 不肯让位 ⇒ 中间被强行拉开 / 留白。
+
+   本条把 ① 补齐：浮层态下 `.main` 也允许压到 0（此前只有 `.main-float` 生效，
+   而浮层真正显示内容时它恰恰是那个"涨回 380"的盒子）。
+   ⚠️ **别把这条写回 `.main-float`** —— 那个类只挂在 `.main` 自身上，
+   而我们的问题是**浮层内部的容器**（`.float-window` 里的聊天区）在窗口变大时被拉开。 */
 .main.main-float {
+  min-width: 0;
+  /* A-1152：浮层态下 <main> **不渲染**（渲染 null），所以这条是**占位防御** ——
+     万一将来又让它渲染，这里保证它不占位，不会退回"挤压式"。
+     ⚠️ 不许写 display: none（会把 .main 子树里的东西一起干掉）。
+     ⚠️ 回归记录：曾把它改成"浮窗样式"（让 <main> 兼作浮窗，用内联 position: fixed），
+        实测引入可见回归（左栏收起异常 / 右栏不铺满）⇒ 已回退，**勿再改回去**。 */
+  flex: 0 0 0px !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+  border: none !important;
+}
+/* A-1152：浮层/浮窗内的消息流允许被压到比内容更窄（否则内部绝对像素下限会撑开容器）。 */
+.main.main-float .chat-scroll,
+.float-window .chat-scroll {
   min-width: 0;
 }
 
@@ -1234,9 +1287,15 @@ code,
         加上延迟后实测 456ms（≈ --collapse-dur）才跳过渲染，收起过程与不加时逐帧一致。
      ⚠️ 展开方向必须是 0 延迟：1fr 要靠内容的本征高度才能插值。 */
   content-visibility: hidden;
+  /* A-1146：**延迟必须比高度插值晚一截**（原来正好等于 `--collapse-dur`）。
+     实测（`gui/scripts/probe-product-collapse.cjs`，真产物卡结构 + 确定性相位采样）：
+     两者相等时是**边界竞争** —— 延迟一到期元素立刻跳过渲染，`grid-template-rows` 的插值
+     被就地掐断，收起序列从平滑的 `… -11.7, -10, -8.6 …` 变成 `… -10, -33.9, 0, 0 …`
+     ⇒ 末尾 30 余 px 一帧抹掉（用户说的「衔接动画异常」就是这个跳变）。
+     关掉 `content-visibility` 跳变消失（A-1016 的性能优化不能删），所以**加 120ms 余量**。 */
   transition:
-    visibility 0s linear var(--collapse-dur),
-    content-visibility 0s linear var(--collapse-dur);
+    visibility 0s linear calc(var(--collapse-dur) + 120ms),
+    content-visibility 0s linear calc(var(--collapse-dur) + 120ms);
   transition-behavior: allow-discrete;
 }
 .collapse.is-open > * {
@@ -1295,6 +1354,12 @@ code,
    动画与产物卡片同族」「子代理从右侧监测栏移出，做成**同款**悬浮按钮」
    「**一个展开时另一个渐出**」。
 
+   ⚠️ A-1126（用户 2026-09-26）**更正了最后那句的范围**：用户原话
+   「为什么点击后台任务后，同行的子代理悬浮按钮会消失？旧设定没删干净？」
+   ⇒ 渐出/互斥的对象是**面板**，**不是按钮**：两个按钮**都必须常显**
+   （本块里因此不再有 `.dock-slot.is-faded`）。互斥由"同一时刻只有一个
+   `.collapse.is-open`"保证（展开态是单值 `DockState`，见 floatDock.ts）。
+
    为什么面板要**绝对定位向上长**（而不是像 A-1069 那样在文档流里往下撑）：
    往下撑会把输入框往下顶、把消息区向上压 —— 展开一个"看状态"的小面板**不该改变输入框的位置**。
    `absolute + bottom:100%` ⇒ 高度涨、底边钉住 ⇒ 视觉上就是"向上展开"，且**零布局位移**
@@ -1325,20 +1390,22 @@ code,
    ⚠️ 只延时这两条：`.collapse > *` 的 visibility/content-visibility 有它自己的
    「0s 时长 + 整段时长延迟」，在这里再叠一层会算错收起时机（内容会提前被裁掉）。 */
 .dock-panel > .collapse { transition-delay: 80ms, 80ms; }
-/* 坞内一格：自占内容宽（`max-width` 只作安全上界，不参与动画）；渐出时淡出并让位 */
+/* 坞内一格：自占内容宽（`max-width` 只作安全上界，不参与动画）。
+   ⚠️ A-1126（用户 2026-09-26）：**这里不再有渐隐** —— 原来有一条
+   `transition: opacity …` + `.dock-slot.is-faded { opacity: 0; pointer-events: none; }`，
+   效果是"另一个面板展开时，**这一格的按钮**淡成透明"（用户原话：「点击后台任务后，
+   同行的子代理悬浮按钮会消失」）。面板互斥由 `.collapse` 的开合态负责，
+   **按钮必须常显** ⇒ 那条过渡与那条规则一并删除，不要加回来。 */
 .dock-slot {
   display: inline-flex;
   flex: 0 1 auto;
   min-width: 0;
   max-width: 460px;
   overflow: hidden;
-  transition: opacity var(--collapse-dur) var(--collapse-ease);
 }
-/* 展开态只做**强调**（哪个是开着的要看得出来）；A-1079 起胶囊**不再变宽** */
+/* 展开态只做**强调**（哪个面板是开着的要看得出来）；
+   A-1126：这是**唯一**的坞格状态位 —— 不再有 `is-faded`。 */
 .dock-slot.is-open .dock-pill { background: var(--accent-soft); color: var(--text); }
-/* 「一个展开时另一个渐出」：淡出且不再接收点击。
-   ⚠️ 必须 `pointer-events:none`：淡出后仍占位，不设它就是一个"看不见但挡点击"的空洞。 */
-.dock-slot.is-faded { opacity: 0; pointer-events: none; }
 
 /* A-1079：**不再做"横向延伸"** —— 用户原话：「你这样设计直接向上展开窗口的话，
    那个按钮就不用像第二张图那样扩展了」。既然面板是"贴着按钮上沿向上浮的一张卡片"，
@@ -1371,6 +1438,44 @@ code,
   transition: background var(--collapse-dur) var(--collapse-ease), color var(--collapse-dur) var(--collapse-ease);
 }
 .dock-pill:disabled { cursor: default; opacity: 0.7; }
+
+/* ══ A-1137：对话侧「右栏状态条」 ══════════════════════════════════════════════════════
+   位置由 `.float-dock` 的 `justify-content: flex-end` + 这里的 `margin-right: auto` 共同决定
+   ⇒ 它贴**左端**，坞按钮仍贴右端（复用同一行，不新增垂直空间）。
+   ⚠️ 与 `.dock-pill` 的**语义**必须分开：胶囊 = "点开一个面板"（可点、有开合态）；
+   这里是"被动读出的状态"（不可点，只有右边那个按钮可点）。混用会让"哪块能点开"不可预测。
+   ⚠️ 用 `--float-surface` 实底（与坞同族：它同样浮在正文之上，半透明会让背后的字透出来）。 */
+.side-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 46%;
+  margin-right: auto;              /* 顶到最左：坞按钮保持"最右边" */
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--float-surface);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+}
+/* 状态点：右栏有东西开着 = 亮着。用它代替一个图标（不必加载资源，也不会与图标集漂） */
+.side-status-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.side-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ⚠️ A-1144：`.side-status-hand`（「交给 slime」按钮）已删除 —— 右栏内容改为**自动挂载**，
+   状态条现在是一个**纯读出**的元素（整条不可点）。别再加可点元素：那会暗示"不点就不知道"。 */
+
 /* 面板里的卡片（与坞同宽，向上浮）—— ⚠️ 必须用**实底**，见 --float-surface */
 .dock-panel-card {
   border: 1px solid var(--border);
@@ -1397,6 +1502,97 @@ code,
 }
 
 /* ── 右侧栏（工作树 / 任务 / 终端 / 浏览器 / Git） ── */
+/* ⚠️⚠️ A-1152：浮层态（右栏接管整窗、中间页已卸载）⇒ 右栏**铺满整窗宽**。
+   用户截图实测（2143px 窗口）：右栏只到 x≈730，右侧 **1400px 全是根底色**（`rgb(5,7,14)`）。
+   根因：`.right-sidebar { width: var(--right-sidebar-w) }`，而那个变量的定义是
+   `clamp(260px, 21.5vw, 720px)` ⇒ **720px 上限**。宽窗口下右栏永远只有 720，
+   右边那一大片谁也没覆盖 ⇒ 露出`.app` 根底色（观感上就是"空白"）。
+
+   ⚠️⚠️ **分工必须写清，否则会塌成 0**（这个坑我踩过一次）：
+     · **宽度给 wrapper**（`width: 100%`，由 App 按 `mainIsFloatLayout` 下发）；
+     · **右栏填满 wrapper**（下面这条 `width: 100%`）。
+   反过来（只给右栏 `width:100%`、wrapper 仍是 `auto`）⇒百分比参照 0
+   ⇒ **整个右栏消失**（用户实测「右侧边栏直接没了」）。
+   ⚠️ 不写 `100vw`：wrapper 已是整窗宽，100vw 在有滚动条时会溢出。 */
+body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar {
+  width: 100% !important;
+}
+/* ⚠️⚠️ A-1152：右栏铺满整窗时，**内容列要有舒适上限且居中**（用户实测：
+   「右侧边栏占满的时候内部比例甚至都不正常了」）。
+   根因：右栏内部大量布局是 `grid-template-columns: 1fr 1fr` / `flex: 1`，
+   宽度从 720px 涨到 1600px 后每个格子被拉到 600-800px ⇒ 指标卡、表单行全部稀疏失衡。
+
+   ⚠️⚠️ **限宽要加在最外层内容容器 `.right-body` 上，不是逐个面板**：
+     右栏结构是 `<aside.right-sidebar>[resizer][.right-tabbar][.right-body]</aside>`，
+     **所有面板都在 `.right-body` 里面** ⇒ 限它一处 = 覆盖全部；
+     限「每个直接子元素」只会命中 `.right-body` 一个，深度上的网格照样被拉宽。
+   ⚠️ 居中很重要（`margin-inline: auto`）：只限宽不居中会让内容贴左边、右侧留一片
+     —— 那正是用户前面反复报的"空白"（同一个观的另一种成因）。
+   ⚠️ 只作用于**浮层态**：非浮层态右栏本来只有 720px 上限，不需要也不该被影响。
+   ⚠️ `overflow` 保持 hidden（由 `.right-body` 自带）—— 限宽后内容不会溢出。
+
+   ⚠️⚠️⚠️ A-1156（用户实测，本轮）：**上限从 `min(620px, 62%)` 改成 `min(1600px, 100%)`**。
+     真 App CDP 探针（`probe-a1155-cdp.mjs` + 截图 `s1-float-settled.png`，1332px 窗口 / 左栏 240px）：
+       右栏本体已铺满 1092px，而内容列被 620px 封顶 ⇒ `fillRatio = 620/1092 = 0.568`，
+       左右各空 236px；用户原话「**右侧边栏内容一直是只有一段**」。
+     ⇒ 这条封顶**没解决用户的问题，反而制造了它**：A-1152 第一轮怕的是"卡片被拉到 600-800px 失衡"，
+       第二轮为治"不随窗口比例自适应"把它从 620px 死值改成 `min(620px, 62%)` ——
+       但 62% 在常规窗口下永远达不到 620px 的天花板之前就先封顶了，两轮都没让内容列真的长大。
+     ⇒ 现在改成"**铺满 + 高上限**"：常规窗口（≤1600px）内容列 = 右栏整宽，
+       只有超宽屏才留边，且留边时仍居中。
+     ⚠️ 为什么 1600 而不是"不限宽"：2560px 这类超宽屏上单条内容拉到 2000px+ 会一行到底、可读性下降。
+     ⚠️ 与过渡期 `--right-body-pin` 同源：JS 侧 `RIGHT_CONTENT_MAX_W` 常量必须等于这里的 1600
+       （守卫 `tests/core-ts/a1156-right-content-fill.spec.ts` 断言两者相等），
+       否则过渡结束那一帧内容宽度会从 pin 值突跳到稳态值。 */
+/* ⚠️⚠️ A-1152：**浏览器页（webview）不受限宽**（用户实测：切到浏览器页后
+   整个网页被缩成中间一小列、两侧大片留白 —— 观感就是"比例异常"）。
+   判断用 `:has(webview)`：右栏里有 guest 就说明当前是浏览器页 ⇒ 让网页铺满。
+   ⚠️ 用 `:has()` 而不是给 React 传一个"当前是不是浏览器页"的 prop：
+      那是第二份需要同步的状态（铁律 11），而 DOM 里有没有 <webview> 本身就是事实。 */
+body.float-layout .right-sidebar:not(:has(webview)) .right-body {
+  max-width: min(1600px, 100%);
+  width: 100%;
+  margin-inline: auto;
+}
+/* ⚠️ tooltip / 浮层 / 绝对定位面板不受限宽影响（它们要贴边或全宽）。
+   用 `:not()` 排除，比给每个面板加豁免更省事。 */
+body.float-layout .right-sidebar > *:is([data-fullwidth], .right-tabbar, .webview-host) {
+  max-width: none;
+}
+/* ⚠️⚠️ A-1152：**过渡期间不许锁死宽度**（用户截取过渡帧发现问题：「为什么窗口化的过渡帧
+   不是右侧边栏直接向左合上，而是右侧边栏**跑到左边**然后往右合上」）。
+
+   探针实测（`probe-float-transition.cjs`，逐帧量）：
+     float-layout=true时`wrap.w` **恒为 431**，8 帧宽度请求（1400→0）**完全无响应**
+     ⇒ 过渡**根本没有过渡对象**；而 App 的 `rightWidth` 内联值与 CSS 的 `100%` 冲突时
+       会先显示一次旧宽度 ⇒ 观感就是"先跑到左边、再往右合"。
+     float-layout=false 时逐帧正常：右缘恒定、左缘 628→1128（抽屉式向左合）。
+
+   ⇒ 修法：复用项目已有的**过渡期标志** `right-wrapper-no-min`（A-980-R34 同源思路）——
+     过渡期间让宽度回到 CSS/内联的正常通道，`rightWidth` 的逐帧变化才能真正驱动动画；
+     **过渡结束（几何 done）后才恢复"铺满整窗"**。
+   ⚠️ 为什么不用新造一个类：`rightMin0` 已经在 `animateRightSidebar` 的 done 里被置回，
+     新类会多一份需要同步的判据（同铁律11：同一事实写 N 处必漂）。 */
+body.float-layout .right-wrapper-anim .right-sidebar {
+  /* ⚠️⚠️ A-1153：过渡期的宽度来源 = **JS 在过渡起点写入的 `--right-target-w`**。
+     浮层铺满不再改写 `rightWidth` state（那会让退出后右栏永久停在整窗宽 ⇒ 挤压 `.main`，
+     用户截图里的「对话内容被挤压到屏幕外」），改由这个**过渡期专用变量**驱动；
+     几何 done 时成对摘除（铁律 11：写/摘必须成对）。
+     ⚠️ `var()` 故意**不写 fallback**：变量未定义时该声明按 invalid-at-computed-value 处理
+     ⇒ 宽度回落到"内联 `rightWidth` / CSS 类"那一层 ⇒ **完全保持"非浮层展开"的原行为**
+     （普通展开根本不写这个变量，宽度仍由内联 rightWidth 逐帧驱动）。
+     若图省事写 `var(--right-target-w, 100%)` 之类兜底，普通展开就会误用兜底值
+     ⇒ 又一次静默回归。 */
+  width: var(--right-target-w);
+  /*过渡期：宽度交回内联 `rightWidth` / CSS 变量驱动（那才是逐帧变化的对象）。
+     ⚠️ 这里**不能**写 `width: auto` —— 那会让右栏退回 `--right-sidebar-w`（含 720px 上限），
+       宽度请求又被压住。要的是"别锁死"，交给上层给具体宽度。
+     ⚠️⚠️ A-1152：**不要写 `transition: none`**（我曾这么写，用户反馈「过渡帧直接没了，
+       还是衔接一点过渡吧」）。过渡期同样需要 width 过渡，否则几何同步写多少宽度都是硬跳。
+       ⚠️ 时长取 0.28s：略短于 `runGeometrySyncFade` 的几何收敛时间（几何一停，
+         CSS 过渡也基本走完 ⇒ 不会有"几何结束了但过渡还在跑"的拖尾）。 */
+  transition: width 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
 .right-sidebar {
   display: flex;
   flex-direction: column;
@@ -1430,6 +1626,10 @@ code,
   width: 0 !important;
   min-width: 0;
   border-left: none;
+  /* 同 A-1148b：右栏收起后整块不可见（延迟到宽度动画结束）。 */
+  /* 同 A-1148：右栏的裁剪也是放宽过的（同一个 7px），收起时一并收紧（双保险写法同上）。 */
+  overflow: hidden;
+  overflow-clip-margin: 0px;
 }
 /* A-980-R34：展开动画期间临时解除内部 .right-sidebar 的 min-width（260px 下限会钳住展开过渡、
    渐变带 [0.45,0.90]×full 进不去，窄栏展开看不到渐入）。类由 App 在 animateRightSidebar(true)
@@ -1450,6 +1650,31 @@ code,
 .right-wrapper-pin webview {
   width: var(--right-pin-w, 100%) !important;
   flex: 0 0 auto !important;
+}
+/* ⚠️⚠️ A-1152：**过渡期钉住右栏内容宽度**，消灭逐帧重排（用户实测：
+   「过渡帧做出来了，很好，但是优化不行，表现很卡顿」）。
+
+   根因：右栏宽度从 ~350px 过渡到整窗宽（1600px）的**每一帧**，`.right-body` 及其内部
+   所有 `grid 1fr 1fr` / `flex` 面板都要重算宽度、重新换行 ⇒ **每帧全量重排**。
+   这与聊天区那条（`.chat-scroll` 的 `slime-freezing`）是**同一类**问题、**同一个解法**：
+   把内容宽度**钉死在目标值**，让祖先 `overflow: hidden` 裁切
+   ⇒ 内容布局**一次都不变**（零重排），只有外框在动。
+
+   ⚠️ 为什么不用现成的 `.right-wrapper-pin`：那条**只在右栏里有 `<webview>` 时才挂**
+     （A-1016-F3 的省开销判断）⇒ 没开浏览器页时它根本不生效 —— 而卡顿恰恰在那种情况下也有。
+     ⇒ 这里用**过渡期专有**的 `right-wrapper-anim`（与 `rightMin0` 同一条件、已在过渡起点挂）。
+   ⚠️ 钉的值由 JS 在**过渡起点**写进 `--right-body-pin`（= 最终内容宽，见 animateRightSidebar）：
+     必须一次性算好，**不能在 CSS 里用 `62%`** —— 百分比会跟着正在动画的容器一起变 ⇒ 又重排。
+   ⚠️ `flex: 0 0 auto` 必需：否则 `flex-shrink` 会把它压回可视宽、钉宽失效。 */
+body.float-layout .right-wrapper-anim .right-body {
+  width: var(--right-body-pin, auto) !important;
+  max-width: none !important;
+  flex: 0 0 auto !important;
+}
+/* ⚠️ 过渡期**祖先要能裁切**，否则钉住的内容会溢出到窗口外（钉宽的前提）。
+   `.right-sidebar` 默认没有 overflow 约束（内容本来不会超），过渡期补上。 */
+body.float-layout .right-wrapper-anim .right-sidebar {
+  overflow: hidden;
 }
 /* A-1106（问题 4）：右栏分隔条的**几何与流光**已上移到 `.sidebar-resizer` 那一节
    （两个 resizer 的伪元素样式完全共用，只是命中区朝左外扩而非朝右）。
@@ -1496,6 +1721,30 @@ code,
 }
 
 /* ── 侧栏拖拽调整尺寸：拖动期间禁用宽度过渡 + 禁用文本选中，保证跟手流畅 ── */
+/* ⚠️⚠️ A-1153：**拖动第一帧**就禁宽度过渡 —— 由 `slime-dragging` 承担。
+   为什么不能只靠下面的 `slime-resizing`：那个类是拖动开始 **140ms 后**才挂的
+   （两阶段设计要求"先 fading 后 resizing"），而这 140ms 内宽度仍走
+   `.sidebar` / `.right-sidebar` 的 `transition: width 0.5s` ⇒ 鼠标已经走了、面板还在追
+   ⇒ 用户实测「拖拽极其不跟手，手在前面，后面的拖拽内容才跟上」。
+   ⚠️ 只禁 width 过渡：`.chat-scroll` 的 opacity 淡出由 `slime-fading` 独立负责，
+      这条**不许**去碰它，否则淡出也会变成硬跳。
+   ⚠️ 摘除统一在 `endChatFreeze()`（松手 / pointercancel / window blur 三条路都走它）。 */
+body.slime-dragging .sidebar,
+body.slime-dragging .right-sidebar {
+  transition: none;
+}
+/* ⚠️⚠️ A-1154：拖动**第一帧**就要禁文本选中 + 定住光标 —— 不能等 140ms 后的 `slime-resizing`。
+   真机问题（用户实测「一拖拽对话页就出现闪烁 / 拖动很怪」的杂讯来源之一）：
+   拖动头 140ms 内 `user-select` 仍是默认值 ⇒ 鼠标划过对话区会把**大段文本拖成选区**
+   （蓝色高亮块），松手选区消失 —— 观感就是"一拖就闪一下"。
+   同段里 `cursor` 也还是默认箭头 ⇒ 光标在拖动中跳变。
+   ⇒ 这两条与"禁宽度过渡"同属"拖动期语义"，必须一起挂在 `slime-dragging` 上（一个类管全）。
+   ⚠️ 只作用于拖动期；`slime-resizing` 里保留同名声明是为了**松手后**那段（resizing 尚未摘除时）不闪回。 */
+body.slime-dragging {
+  cursor: col-resize !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
 body.slime-resizing .sidebar,
 body.slime-resizing .right-sidebar {
   transition: none;
@@ -1504,6 +1753,85 @@ body.slime-resizing {
   cursor: col-resize !important; /* A-918+：!important 兜底（避免被其他选择器覆盖导致拖动结束后 cursor 卡死） */
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* ── A-1152：拖动分栏时，让消息流暂时不参与布局 ──────────────────────────────
+   ⚠️⚠️ **更正（用户实测后）**：这一条**只解决了"重排"，没解决"React 重渲染"** ——
+   用户反馈「左侧边栏拖拽依旧卡顿很严重」。真正的开销是 `handleSidebarResize` 每个
+   `pointermove` 都 `setSidebarWidth` ⇒ **整个长会话重渲染**（那半边 CSS 压不住）。
+   已改为**拖动期直写 DOM、松手才 setState**（对齐右栏早已存在的做法，见 App.tsx 的 A-1152 注释）。
+   本条保留：它对**右栏拖动**（已 DOM 直写，但布局仍每帧重排）与**浮层宽高过渡**仍然有效。
+
+   实测（`gui/scripts/probe-drag-perf.cjs`，真产物 + 注入 N 段消息模拟长会话，扫 240→520）：
+     注入 1000 条 · 正常重排        → dtP95 12.2ms · 掉帧 10
+     注入 1000 条 · 消息流跳过布局  → dtP95  6.2ms · 掉帧  1  ✅
+   ⇒ 每帧全量重排聊天区（宽度一变，每行都要重算换行）；**高度动画不会**（那只是裁剪）。
+
+   为什么用 `content-visibility`：它让子树**跳过渲染与布局**，代价是"看不见"——
+   而拖动/过渡都是瞬时的（几百 ms），这点代价换不掉帧划算（松手/过渡结束即恢复）。
+   ⚠️ 别写成无条件：那样长会话平时就不渲染消息了（那是另一个 bug）。
+
+   ⚠️ A-1152 补：用户反馈「隐藏的时候能不能加个过渡，加个渐出消失的过渡，现在直接就什么都没了，
+   有点太突兀」。`content-visibility` 是**离散属性、不能过渡**，所以渐出要靠 `opacity`：
+   拖动**开始**的瞬间（class 刚挂上）先把不透明度从 1 压到 0，用一个短过渡淡出，
+   淡出结束前后内容已不可见 ⇒ 此后即便 `content-visibility: hidden` 也不影响观感。
+   ⚠️ 时序要点：class 是拖动**开始**时挂的，所以淡出必须与 class **同时**发生；
+   若等一帧再淡，白闪一帧（内容先消失、后变透明）——那正是"突兀"的来源。 */
+/* ⚠️ A-1152（修正）：**淡出与跳过布局必须分两阶段**，且两个类**各管一件事**：
+     · `slime-fading`   → 只做 opacity 过渡（此时 `content-visibility` 仍 visible，过渡能播）；
+     · `slime-resizing` → 只做 `content-visibility: hidden`（跳过布局）+ 拖动期的 `transition: none`。
+   ⚠️⚠️ 此前 `slime-resizing` **也**带了 `opacity: 0`，而 JS 又在**同一帧**挂两个类
+     ⇒ 元素当帧就`content-visibility: hidden` ⇒ 没有任何一帧被绘制
+     ⇒ **过渡根本不会执行**（用户实测「我要的对话文本渐出消失衔接动画没有」）。
+     ⇒ 现在 `slime-resizing` **不再碰 opacity**；淡出期间它还没挂，opacity 正常过渡。
+
+   ⚠️ 时长 0.12s 必须**短于**一次拖动的最小持续（人手最快一下也 >100ms），
+      否则用户"点一下就松手"时会看到淡出还没播完就跳进第二阶段。 */
+/* ⚠️⚠️ A-1153：`.chat-scroll` 的 opacity 过渡必须**常驻**（不能只写在 `slime-fading` 类规则里）。
+   这是用户实测"一拖拽对话页就闪烁"的另一半根因：恢复方向是"**摘掉** `slime-fading`"，
+   而过渡声明也住在那条**类规则**里 ⇒ 类一摘、transition 声明随之消失
+   ⇒ opacity 从 0 **瞬间**跳回 1（没有任何过渡）= 硬闪。
+   ⇒ 把过渡提到常驻规则：挂类时淡出（1→0 走 0.12s）、摘类时淡入（0→1 同样走 0.12s）。
+   ⚠️ 只声明 opacity，且 `.chat-scroll` 的 opacity 仅由 `slime-fading` / `slime-resizing`
+      两条类规则驱动；"几何同步逐帧写 opacity"那条路写的是**浮窗外框内层**与**内联聊天区外层**
+      （`.float-window` 里的 wrapper / `<main>` 里的 wrapper）——不是 `.chat-scroll`
+      ⇒ 常驻过渡不会把逐帧动画平滑化掉。 */
+.chat-scroll {
+  transition: opacity 0.12s linear;
+}
+body.slime-fading .chat-scroll {
+  opacity: 0;
+  transition: opacity 0.12s linear;
+}
+body.slime-resizing .chat-scroll {
+  content-visibility: hidden;
+  /* ⚠️ 淡出已完成才挂这个类⇒ 此时 opacity 已是 0；显式写出来是为了**恢复时**不会闪回 1
+     （`slime-resizing` 摘掉、`slime-fading` 也已摘掉，若无此条opacity 会瞬间回到 1）。 */
+  opacity: 0;
+}
+
+/* ── A-1152：悬浮窗宽高过渡期间，**把内容宽度钉住**（让它不重排） ──────────────
+   用户报：「聊天页窗口化那一个瞬间，每次必然卡顿掉帧」。
+
+   根因与拖动侧栏**同源**：浮层外框 `width/height` 挂 `FLOAT_TRANSITION`
+   （App.tsx 的 `FLOAT_TRANSITION`）⇒ **每一帧宽度都在变** ⇒ 里面整段会话每帧重排。
+
+   ⚠️⚠️ **更正（用户实测后）**：这里**先试过 `content-visibility: auto`，结果更卡了，已删除**。
+   原因：容器宽度**每帧都在变** ⇒ 可见区判定每帧重算 + 已渲染部分被反复判为"离屏"而丢弃重渲染
+   ⇒ **比不做还慢**。教训：**`content-visibility` 只适合"尺寸稳定的容器"**；
+   尺寸一直在变的容器上用它是负优化。
+
+   ⇒ 正解 = 与右栏 `.right-wrapper-pin`（A-1016-F3）**同构**：把内容宽度**钉在目标宽度**上，
+     只靠祖先 `overflow: hidden` 裁切 ⇒ **内容布局一次都不变**（零重排）。
+   钉"目标宽度"（而不是起始宽度）让两个方向都合理：
+     · 缩小方向：内容按全宽布局，窗口收缩时**裁掉右侧** ⇒ 观感是"内容被窗口裁切"；
+     · 还原方向：内容按全宽布局，窗口长大时**逐步露出更多** ⇒ 观感是"内容展开显现"。
+
+   ⚠️ `!important` + `flex: 0 0 auto`：聊天区默认是 `flex: 1`，若仍参与伸缩，
+   钉的宽度会被 flex 改写回容器宽（那就等于什么都没钉）。 */
+body.slime-freezing .chat-scroll {
+  width: var(--slime-freeze-w, auto) !important;
+  flex: 0 0 auto !important;
 }
 
 /* 浏览器式标签栏 */
@@ -2786,6 +3114,41 @@ body.slime-resizing {
   font-family: "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-weight: 600;
 }
+/* ══ A-1130：diff 行「同宽」的唯一实现 —— 加在**滚动容器**上，行上不许再写宽度 ══════════
+   用户原话：「直接以改动左侧的符号的 +/− 为准，向右一直延伸到**极限位置**，而非文本结束位置」。
+   注意「极限位置」= **滚动内容的最右端**（这类 diff 有横向滚动），所以一行底色的目标宽度是
+   `max(可视宽, 最宽行)` —— 行盒必须**同时**满足这两条，少一条就露白：
+     · 内容比可视区窄 ⇒ 行宽 = 可视宽（否则短行右侧缺块）；
+     · 内容比可视区宽 ⇒ 行宽 = 最宽行（否则底色在可视宽处断掉，文字却继续往外溢）。
+
+   ⚠️ 这一段踩过两次，两次都是"看着像对、实测不对"，所以下面把**实测数据**留在这里：
+   · A-1109：把 `width: max-content` 加在**每一行**上 ⇒ 行宽 = 这一行自己的字宽 ⇒ 短行露白。
+   · A-1130 首版：容器 `grid` + 列轨 `minmax(100%, max-content)` ⇒ **仍有洞**：
+     `100%` 作为下界会**吃掉全部 free space**，列轨因此**涨不到** `max-content`，
+     于是有长行时行盒停在可视宽（实测 874px），而文字溢出到轨道外（滚动内容 1243px）——
+     向右一滚就是「底色断了、字在带子外面」（用户 2026-09-28 截图报的正是它）。
+
+   实测（headless Chromium，探针 `gui/scripts/probe-diff-band.mjs`，结构照 `DiffBlock` 复刻）：
+     | 写法 | 窄内容 | 含长行 |
+     |---|---:|---:|
+     | `minmax(100%, max-content)` | 874 = 铺满 ✓ | 874 < 1243 ✗ 露白 |
+     | `max-content` | 356 ✗ 露白 | 1250 = 铺满 ✓ |
+     | **`minmax(min-content, 1fr)`** | **874 ✓** | **1250 ✓** |
+
+   正解 = `minmax(min-content, 1fr)`：
+     · `min-content` 由**不可断行的整行**给出（行是 `white-space: pre` ⇒ min-content == max-content
+       == 最宽行）⇒ 内容更宽时列轨就是最宽行，底色覆盖全部滚动内容；
+     · `1fr` 是**弹性**轨：内容更窄时把 free space 全部吃下 ⇒ 列轨 = 可视宽 ⇒ 短行也铺满。
+   两者合起来恰好等于 `max(可视宽, 最宽行)`，而这正是 CSS 里**别处写不出来**的那个公式
+   （逐行宽度算不出"兄弟最大值"；`100%` 下界会把弹性吃掉）。
+   ⚠️ 因此 `.think-diff-row` 上**不许**再写 `width: max-content` / `min-width: 100%`：
+      那是 definite width，会让 item 不再 stretch，直接退回"每行各自为政"。
+   ⚠️ 三个 diff 滚动容器都要带这个类（思考历程/工具卡 diff、右栏 git diff、右栏逐行 diff）——
+      漏一处就会出现"这儿的底色到边、那儿不到"的同物异形。 */
+.diff-rows-fit {
+  display: grid;
+  grid-template-columns: minmax(min-content, 1fr);
+}
 .think-diff-body {
   max-height: 280px;
   overflow: auto;
@@ -2797,16 +3160,9 @@ body.slime-resizing {
   padding: 0 8px;
   white-space: pre;
   color: var(--text);
-  /* ══ A-1109：行盒必须**随内容变宽**，否则背景只画在「可视宽度」内 ══════════════
-     病根：`.think-diff-body` 是 `overflow: auto` 的滚动容器，而 `.think-diff-row` 是
-     **block-level flex** ⇒ 宽度默认 `auto` = 填满容器**可视**宽度。长行因 `white-space: pre`
-     不换行、**溢出**行盒（`overflow` 不是 hidden，所以画得出来），但**背景**只画在行盒的
-     border-box 里 ⇒ 横向滚动到右侧就只剩字符、没有绿/红底色（用户实测截图）。
-     · `width: max-content` ⇒ 行盒宽度 = 内容宽度 ⇒ 背景跟着内容一路延伸；
-     · `min-width: 100%` ⇒ 短行仍铺满可视宽（否则右侧会缺一块底色）。
-     ⚠️ 这两条必须**同时**有：只写 max-content 会让短行的背景缩成一小截。 */
-  width: max-content;
-  min-width: 100%;
+  /* ⚠️ 不写 width / min-width：宽度由容器的列轨统一决定（见 `.diff-rows-fit`）。
+     `min-width: 0` 只是保证长行不把行盒撑破、交由容器横向滚动。 */
+  min-width: 0;
 }
 .think-diff-row.diff-add { background: var(--diff-add-bg); }
 .think-diff-row.diff-del { background: var(--diff-del-bg); }
@@ -2893,9 +3249,36 @@ body.slime-resizing {
 .prod-host {
   width: fit-content;
   interpolate-size: allow-keywords;
-  transition: width var(--collapse-dur) var(--collapse-ease);
+  /* ⚠️⚠️ A-1146d：**两段式**（用户口径：「展开先横向再向下；折叠先向上再向左」）。
+     这不只是观感 —— 它同时是"掉帧"的根治：
+       · 横向阶段：高度还是 0 ⇒ 内容处于 `content-visibility: hidden`，**不参与布局**
+         ⇒ 宽度变化**不引起任何内容重排**（200 行 diff 一行都不用重算换行）；
+       · 纵向阶段：宽度已经定住 ⇒ 内容布局不再变，只是被 `overflow: hidden` 裁剪 ⇒ 同样零重排。
+     之前并行播两条曲线时，每帧都要"边变宽边重排 200 行"，在 166Hz（帧预算 6ms）上必然超预算。
+     ⚠️ 顺序在展开/折叠两个方向上是**相反**的，而 CSS 同一属性只有一个 delay ⇒ 靠 `.is-open` 切 -->
+     折叠方向（本条）：横向等纵向收完（`--collapse-dur`）再收回；
+     展开方向（`.is-open` 那条）：横向立刻走，纵向用 `--prod-x-dur` 延后。 */
+  --prod-x-dur: 0.28s;
+  /* ⚠️ 折叠方向的 delay = **等内容彻底 hidden 之后**（`--collapse-dur` + 120ms 是内容
+     `content-visibility` 的延迟；这里再多给 80ms 保证它先落地）—— 实测（probe-x-anim.cjs）：
+     delay 只给 `--collapse-dur` 时，宽度过渡开始时内容**仍在参与布局** ⇒ 首帧重排 200 行 ⇒
+     收起序列从 `660…574` 一帧跳到 `219`（走了 76%）⇒ 用户看到「折叠没有动画」。 */
+  transition: width var(--prod-x-dur) var(--collapse-ease) calc(var(--collapse-dur) + 200ms);
 }
-.prod-host.is-open { width: 100%; }
+.prod-host.is-open {
+  width: 100%;
+  /* 展开方向：横向**先**走（delay 0，覆盖上面那条的折叠 delay）。 */
+  transition-delay: 0s;
+}
+/* 展开方向：纵向（高度）**等横向走完**再开始 —— 与上面的折叠方向刚好相反。 */
+.prod-host.is-open .collapse { transition-delay: var(--prod-x-dur); }
+/* ⚠️⚠️ A-1146e：**横向阶段内容必须继续 hidden**。
+   实测（`gui/scripts/probe-x-anim.cjs`）：展开时宽度从 108.7 出发，**第一帧就跳到 574**（走了 84%）。
+   原因 = `.collapse.is-open > *` 是 0 延迟归 visible ⇒ 宽度一变的**同一帧**里，收起态被
+   `content-visibility: hidden` 挡住的 200 行 diff **全部参与布局** ⇒ 那一帧重排 200 行 ⇒
+   首帧被拖到上百毫秒，动画的 84% 就在这一帧里「跳」完了（用户看到的正是「横向没有动画」）。
+   ⇒ 把可见性也延后到横向走完：横向阶段内容不参与布局（变宽零重排），纵向阶段宽度已定（只裁剪不重排）。 */
+.prod-host.is-open .collapse > * { transition-delay: var(--prod-x-dur), var(--prod-x-dur); }
 @media (prefers-reduced-motion: reduce) {
   .prod-host { transition: none; }
 }
@@ -2903,6 +3286,14 @@ body.slime-resizing {
 /* A-975：产物卡「抬高面」——此前 background:var(--bg-input) 与页面底色同色，卡片看不出边界。
    现在用比背景亮一档的面 + 更实描边 + 轻投影，悬停再提亮一档。 */
 .prod-card {
+  /* ⚠️ A-1146b：**产物卡的折叠时长单独加长**（只影响产物卡，不动坞/侧栏那些折叠点）。
+     用户假设：展开所需时间超过给定窗口 ⇒ 后半段被跳过（"到一半直接跳到终态"）。
+     孤立探针（单卡、无竞争、166Hz）测到的掉帧是 0、单帧跃迁 18px，**复现不出**他的跳跃
+     ⇒ 真实环境里必然有探针模拟不出的竞争（多卡 + 真实代码 diff + 流式渲染）。
+     按他的假设把这个窗口放宽 ~40%（0.45s → 0.62s）做**验证性调整**：
+     每帧位移更小、给主线程更多余量；若无效则应回退，而不是继续加长。
+     ⚠️ 覆盖在 `.prod-card` 上（CSS 变量会继承给后代）⇒ `.prod-host` 的横向过渡也同步变长，
+        两条曲线仍然同源（否则会重新引入脱节）。 */
   background: var(--card-surface);
   border: 1px solid var(--card-border);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
@@ -3330,3 +3721,4 @@ body.slime-resizing {
   pointer-events: auto;         /* 唯一可点元素 */
 }
 .op-focus-hide:hover { background: var(--bg-hover); color: var(--text); }
+

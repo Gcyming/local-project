@@ -88,6 +88,10 @@ interface SessionItem {
   leaderEffort?: string;
   /** A-943：会话模式（brainstorm = 群聊头脑风暴，左侧特殊渲染） */
   type?: "normal" | "brainstorm";
+  /** A-1131：**本会话的模型选择**（覆盖该 Agent 的默认值；缺省 = 跟随 Agent）。
+   *  用户原话：「同一个 Agent 似乎不能在不同会话使用不同模型……」——模型选择住在会话上，
+   *  同 Agent 的其他会话不再被连带改掉（详见 core-ts/services/sessions.ts 的 SessionMeta.modelChoice）。 */
+  modelChoice?: string;
 }
 
 interface WelcomeChatProps {
@@ -333,6 +337,15 @@ function pathBase(p: string): string {
 /** A-980-R16：悬浮窗尺寸下限与窗口内可见上限（尺寸按当前窗口钳制，避免越界） */
 const FLOAT_MIN_W = 340;
 const FLOAT_MIN_H = 300;
+/** A-1152：浮窗初始尺寸占窗口的**比例**（此前是写死的 480×540 绝对值 ——窗口一大就相对变小，
+ *  内容被 `overflow: hidden` 裁掉右缘，用户实测"界面缩放不等比自适应"就是这个）。
+ *  ⚠️ 与主进程的 `WIN_DEFAULT_RATIO {width:0.78,height:0.90}` 是**不同**的东西：那是整窗，
+ *   这是浮窗在整窗里的占比。
+ * ⚠️⚠️ **宽度 0.92 / 高度 0.92**（用户实测「窗口化后…中间空白强行拉开」截图里，
+ *   浮窗只占 62%×72% ⇒ 右侧与下方各留一大片空白，浮层态的语义就是"聊天接管整窗"，
+ *   留那么大余量既不好看、也让"拖右栏"这件事变得诱人（用户要求直接删掉那个手柄）。
+ *   ⇒ 改为**接近铺满**（四周各留一点边距便于拖动与看到窗口边界）。 */
+const FLOAT_RATIO = { w: 0.5, h: 0.48 };
 function clampFloatSize(w: number, h: number): { w: number; h: number } {
   const maxW = Math.max(FLOAT_MIN_W, window.innerWidth - 24);
   const maxH = Math.max(FLOAT_MIN_H, window.innerHeight - 70);
@@ -442,6 +455,43 @@ const GEOM_SYNC_NO_MOVE_FRAMES = 8;
  *  纯几何量（与时长/刷新率无关）：过渡真的动过（而不是卡在未开始的初始宽度）才允许结束。 */
 const GEOM_SYNC_MIN_SHIFT = 5;
 
+/** ⚠️⚠️ A-1154：`measure()` **始终返回 null**（动画对象从未挂载）时的有界等待帧数。
+ *
+ *  背景（真 App CDP 实测复现）：点「收起右侧栏」时 `animateRightSidebar(false)` 先走
+ *  `dismissFloat()` —— 而 `setRightOpen(false)` 会让 `mainIsFloatLayout` 变假 ⇒ 浮窗**当帧
+ *  被 React 卸载**。此时这一轮 `startFloatGeometryFade` 是新起的、`seen` 恒为 false，
+ *  旧代码的 `if (seen) onFrame(_, true)` 分支**永远不成立** ⇒ 一路 `requestAnimationFrame`
+ *  死循环 ⇒ `onFrame(_, true)` 永不触发 ⇒ `body.slime-freezing` 与 `--slime-freeze-w`
+ *  **永久残留**（实测残留 > 3.7s，聊天区被钉死在 666px；后续所有操作都带着这个脏状态）。
+ *
+ *  取 6 帧（60Hz≈100ms）：足以跨过"本次提交尚未落地"的窗口（React 提交在 1~2 帧内），
+ *  又远短于任何真实过渡（最小 0.12s），所以**不会**误伤"动画刚开始、对象还没挂上"的正常路径。
+ *  判据是纯帧数（与时长/刷新率无关的那套几何判据无关——它只解决"对象存在性"，不解决"动没动"）。 */
+const GEOM_SYNC_NEVER_MOUNT_FRAMES = 6;
+
+/** ⚠️⚠️ A-1155：**过渡的绝对帧数上界 —— 到点无条件收工**。
+ *
+ *  背景（真 App CDP 实测，`probe-a1155-cdp.mjs`）：点「窗口化」后右栏卡在 287px，
+ *  而两条几何结束判据**同时失效**：
+ *    · 判据①要求 `netShift >= GEOM_SYNC_MIN_SHIFT(5)` —— 宽度从头到尾没变 ⇒ 永不成立；
+ *    · 判据②要求 `!everBelowHi && w >= hi - 0.5`，而浮层支的 `hi = 0.42 × nextWidth ≈ 559`
+ *      ⇒ 实测 287 < 559 ⇒ `everBelowHi = true` ⇒ 判据②被永久关闭。
+ *  ⇒ `onFrame(_, true)` 永不触发 ⇒ `setRightMin0(false)` 永不执行
+ *  ⇒ `right-wrapper-anim` / `right-wrapper-no-min` 永久挂着
+ *  ⇒ 铺满规则 `body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar`
+ *    被 `:not()` **永久排除** ⇒ 右栏永远算不出整窗宽（实测 287px ≠ 1332px）
+ *  ⇒ 用户截图「右侧边栏内容自适应失效、只有一段」。
+ *
+ *  ⚠️ 为什么不是"改几何判据"：那两条判据是 A-980-R30/R35 反复实测调出来的
+ *    （防"过渡第一帧就被误判稳定"与"过渡无对象"两类回归），**不动它们**。
+ *    这里补的是**正交的一条**：任何真实过渡都不可能在这么大帧数内还没结束，
+ *    所以"到点强制收工"绝不会误伤正常路径，只兜住"判据结构性失效"这种死角
+ *    （与 `GEOM_SYNC_NEVER_MOUNT_FRAMES` 同一个思路：给"可能永不满足的条件"一个有界上界）。
+ *
+ *  取 90 帧（60Hz≈1.5s、120Hz≈0.75s）：显著长于 CSS 最长过渡（0.5s width + 0.28s 过渡期）
+ *  ⇒ 正常过渡早已按几何判据收工，本上界只在"死锁"时才生效。 */
+const GEOM_SYNC_HARD_LIMIT_FRAMES = 90;
+
 /** A-980-R27：侧栏拖拽的「收起」吸附带——距**几何下限**多少像素以内算拖到底。
  *  必须是相对量，不能写死绝对像素：旧实现用 300px（左栏），而左栏下限是 240、
  *  默认宽又只有 `innerWidth × 17.5%`（1080p ≈ 262）——「刚比下限宽一点」整段区间
@@ -461,6 +511,21 @@ const RIGHT_SIDEBAR_MIN_RATIO = 0.15;
 function rightSidebarMinW(): number {
   return Math.max(260, Math.round(window.innerWidth * RIGHT_SIDEBAR_MIN_RATIO));
 }
+
+/** ⚠️⚠️ A-1156：浮层态右栏**内容列**的舒适上限（像素）。
+ *
+ *  取值与 index.css 里
+ *  `body.float-layout .right-sidebar:not(:has(webview)) .right-body { max-width }`
+ *  的 `min(1600px, 100%)` 是**同一处事实**：过渡期 JS 写 `--right-body-pin`，
+ *  稳态由这条 CSS 接管，两者必须同式，否则过渡结束那一帧内容宽度会突跳一下。
+ *  守卫：`tests/core-ts/a1156-right-content-fill.spec.ts`（断言 CSS 字面量 === 本常量）。
+ *
+ *  ⚠️ 为什么从 A-1152 的 `min(620px, 62%)` 改掉（真 App CDP 实测 + 截图 `s1-float-settled.png`）：
+ *  1332px 窗口、左栏 240px 时右栏铺满 1092px，而内容列被 620px 封顶 ⇒
+ *  `fillRatio = 620/1092 = 0.568`，左右各空 236px —— 用户原话「右侧边栏内容**一直是只有一段**」。
+ *  窗口越宽比例越夸张（2143px 窗口下内容列仍只有 620px，两侧共空 ~700px）。
+ *  ⇒ 改成"高上限 + 铺满"：常规窗口下内容列 = 右栏整宽，只有超宽屏（>1600px）才留边。 */
+const RIGHT_CONTENT_MAX_W = 1600;
 
 /**
  * A-980-R24：侧栏 / 悬浮窗「几何同步」渐隐渐显（左右栏与聊天悬浮窗共用）。
@@ -522,15 +587,32 @@ function runGeometrySyncFade(
   let netShift = 0;
   let lastP = 0;
   let seen = false;
+  /* ⚠️⚠️ A-1154：**"从未挂载"必须也能收工**。此前只判 `seen`（曾经在、现在没了）——
+     而"浮窗在我这一轮还没渲染出来时就被 React 卸载"这条路径（用户实测：收起右栏 ⇒
+     `mainIsFloatLayout` 变假 ⇒ 浮窗当帧卸载，而本轮的 `startFloatGeometryFade` 是**新起的**、
+     `seen` 恒为 false）⇒ **永远走 `requestAnimationFrame(step)` 死循环**：
+       · `onFrame(_, true)` 永不触发 ⇒ `slime-freezing` / `--slime-freeze-w` **永久残留**
+         （实测残留 > 3.7s，把聊天区钉死在 666px）；
+       · rAF 循环泄漏（每帧一次 `measure()` 空转）。
+     现在两个方向都收工：见过的（卸载）立刻 done；**从未见过的给一个有界等待**
+     （`GEOM_SYNC_NEVER_MOUNT_FRAMES` 帧 ≈ 一个提交周期就够，超时即 done），
+     绝不无限等一个可能永远不出现的节点。 */
   let everBelowHi = false;
   let cancelled = false;
+  let neverMount = 0;
+  /* ⚠️ A-1155：绝对帧数上界计数器（见 GEOM_SYNC_HARD_LIMIT_FRAMES 的说明）。 */
+  let frameCount = 0;
   const step = (): void => {
     if (cancelled) { return; }
+    frameCount++;
     const el = measure();
     if (!el) {
       // 还没挂载（React 还没提交）→ 本帧不写样式、不计进度，等它出现；
-      // 曾经在、现在没了 = 动画对象已被卸载 → 收工，把终态交还调用方
-      if (seen) { onFrame(lastP, true); return; }
+      // 曾经在、现在没了 = 动画对象已被卸载 → 立刻收工；
+      // 一直没出现 = 有界等待后收工（否则死循环 + 临时类永久残留，见上）
+      if (seen || ++neverMount >= GEOM_SYNC_NEVER_MOUNT_FRAMES) { onFrame(lastP, true); return; }
+      /* ⚠️ A-1155：对象一直没挂上时同样受绝对上界约束（与下面的正常路径同一条保险）。 */
+      if (frameCount >= GEOM_SYNC_HARD_LIMIT_FRAMES) { onFrame(lastP, true); return; }
       raf = window.requestAnimationFrame(step);
       return;
     }
@@ -553,8 +635,12 @@ function runGeometrySyncFade(
     //   ① 宽度累计位移 ≥ GEOM_SYNC_MIN_SHIFT（过渡真的动过）且随后连续 3 帧不再变化 → 收工；
     //   ② 或宽度**从未进入过渐变带**（everBelowHi=false，重复触发时真的没在动）
     //      且稳定 GEOM_SYNC_NO_MOVE_FRAMES(8) 帧 → 快速收工（防 rAF 循环泄漏）。
+    // A-1155：③ 绝对帧数上界——两条几何判据**结构性失效**时的兜底（详见常量处的实测说明）：
+    //   "宽度从没动过（netShift 不达标）" 且 "宽度落在渐变带内（everBelowHi=true）"
+    //   会同时让 ① 和 ② 都不成立 ⇒ 永不收工。这条正交的帧数上界兜住它，且不误伤正常过渡。
     const done = ((netShift >= GEOM_SYNC_MIN_SHIFT && stable >= GEOM_SYNC_STABLE_FRAMES)
-      || (!everBelowHi && w >= hi - 0.5 && stable >= GEOM_SYNC_NO_MOVE_FRAMES));
+      || (!everBelowHi && w >= hi - 0.5 && stable >= GEOM_SYNC_NO_MOVE_FRAMES)
+      || frameCount >= GEOM_SYNC_HARD_LIMIT_FRAMES);
     onFrame(lastP, done);
     if (done) { return; }
     raf = window.requestAnimationFrame(step);
@@ -614,9 +700,14 @@ export default function App(): JSX.Element {
    *  A-980-R27：阶段推进不再靠 setTimeout 计时（旧的 300ms / 320ms / 40ms+340ms 三段相位机
    *  已全部删除）——改由几何同步 rAF 的 done（窗口真的缩/长到位）来推进，见 startFloatGeometryFade。 */
   const [floatAnim, setFloatAnim] = React.useState<"idle" | "out" | "in" | "closing">("idle");
-  /** A-980-R25：唤出悬浮窗前右栏的宽度——收起浮窗时归还，让右栏平滑滑回、
-   *  中间聊天栏随之"长出来"（否则右栏固定在占满宽度，聊天一次性弹到 380px 很硬） */
-  const preFloatRightWidthRef = React.useRef<number | null>(null);
+  /* ⚠️⚠️ A-1153：这里曾有 `preFloatRightWidthRef`（"唤出前右栏宽度，退出浮层时归还"）。已删除。
+     原因：`归还`这套机制本身就是缺陷来源——
+       · 浮层铺满当时靠 `setRightWidth(innerWidth)` 实现 ⇒ 这是**持久污染**，
+         必须再靠一次**异步动画回调**把它改回来；
+       · 而那条回调挂在浮层几何 done 上，浮层若先被卸载，done 走的是"对象没了"的短路分支
+         ⇒ 「归还」到底有没有发生取决于时序 ⇒ 右栏时好时坏（用户实测"要左右多次拖拽才恢复"）。
+     ⇒ 现在浮层铺满**不再改写 `rightWidth`**（只由 CSS 状态类 + 过渡期变量驱动），
+       退出时右栏自然回到它本来该有的宽度 ⇒ 无需归还，这个 ref 也就不需要了。 */
   /** A-980-R25：内联聊天区（浮层退场后回到普通布局时，按主区实测宽度几何淡入） */
   const inlineChatRef = React.useRef<HTMLDivElement | null>(null);
   const chatFadeCancelRef = React.useRef<(() => void) | null>(null);
@@ -630,6 +721,39 @@ export default function App(): JSX.Element {
   const leftFadeCancelRef = React.useRef<(() => void) | null>(null);
   const rightFadeCancelRef = React.useRef<(() => void) | null>(null);
   const floatFadeCancelRef = React.useRef<(() => void) | null>(null);
+  /** ⚠️⚠️ A-1154：浮窗几何动画的**世代号**——用来让"过期回调"失效。
+   *
+   *  真 App CDP 实测复现的 bug 链：某轮浮窗几何动画（如「收起右栏」触发的 `dismissFloat`）
+   *  的 done 因为对象已卸载而**迟迟不触发**（甚至永不触发）；此后用户又点了「窗口化」，
+   *  `handleToggleFloat` 刚 `setFloatState("float")` —— 那一轮**迟到的 done** 这时才跑完，
+   *  它无条件执行 `setFloatState("none")` ⇒ **把刚进浮层的新状态打回 none**
+   *  ⇒ 用户原话「窗口出现一次**抽搐抖动**，但对话页**不会窗口化**」；
+   *  再点一次才成功（迟到回调这次已被消耗掉）—— 实测 S4a 零响应 / S4b 才生效，完全吻合。
+   *
+   *  ⇒ 每起一轮动画自增一次世代号，回调只在"自己那一代仍是当前代"时才允许写 state。
+   *  用法：`const gen = ++floatFadeGenRef.current;` 然后在 done 里判 `gen === floatFadeGenRef.current`。
+   *  ⚠️ cancel 时也必须自增（否则"取消后迟到触发的回调"仍会被当成当前代）。 */
+  const floatFadeGenRef = React.useRef(0);
+  /** A-1153：`endChatFreeze` 的一次性兜底定时器句柄。
+   *  ⚠️ 必须**存句柄并可被清**——见 endChatFreeze 的说明（那里曾是无限递归）。 */
+  const chatFreezeFallbackRef = React.useRef(0);
+  /** ⚠️⚠️ A-1154：拖动"两阶段"里那个 **140ms 定时器**（`slime-fading` → `slime-resizing`）的句柄。
+   *
+   *  此前它是**裸 `window.setTimeout`、不存句柄** ⇒ `endChatFreeze()` 无法取消它。
+   *  真机 CDP 实测到的闪烁机制（用户原话「一拖拽，对话页就会出现闪烁问题」）：
+   *  ```
+   *    down0   : cls=slime-dragging slime-fading   opacity=0.85  visible
+   *    moving0 : cls=slime-dragging slime-fading   opacity=0.29  visible
+   *    up0     : cls=""                            opacity=0.45  visible  ← 松手已开始淡回
+   *    settle0 : cls=slime-resizing                opacity=0     hidden   ← 定时器**迟到**才挂上
+   *  ```
+   *  ⇒ 用户**短促拖拽**（< 140ms）时：松手已把类摘了、opacity 正往回涨，
+   *    而那条 140ms 定时器到点后又把 `slime-resizing`（`opacity:0` + `content-visibility:hidden`）
+   *    **重新挂上** —— 且**没有任何人会再摘它**（`endChatFreeze` 已经跑过了）
+   *    ⇒ 观感 = 聊天区 `1 → 0.29 →(涨)→ 0 → 隐藏` 来回抖动 = **闪烁**；
+   *      并且松手后聊天区**残留隐藏**（这正是"手在前面、后面的内容才跟上"的观感来源）。
+   *  ⇒ 句柄必须存下来，`endChatFreeze()` 里 `clearTimeout`，绝不越过"拖动结束"这条边界。 */
+  const dragPhaseTimerRef = React.useRef(0);
   /** A-980-R21：直接操纵 aside / 右栏 wrapper 的 DOM style 控制透明度过渡 */
   const leftSidebarRef = React.useRef<HTMLElement | null>(null);
   const rightWrapperRef = React.useRef<HTMLDivElement | null>(null);
@@ -642,11 +766,193 @@ export default function App(): JSX.Element {
   /** A-980-R17：最小化图标「拖动 vs 点击」区分——拖动超过阈值后松手的 click 不触发还原 */
   const floatDragMovedRef = React.useRef(false);
   /** A-980-R15：悬浮窗尺寸/位置（标题栏可拖动、右下角可调大小；按会话记忆） */
-  const [floatSize, setFloatSize] = React.useState<{ w: number; h: number }>(() => clampFloatSize(480, 540));
+  /* ⚠️⚠️ A-1152：初始浮窗尺寸必须**跟着窗口算**，不能硬编码。
+   用户实测（并给了正确方向）：「界面缩放时各个页面似乎不会等比自适应保持大小比例，
+   而是会固定一定的大小」—— **属实**，就在这里：
+   ·窗口默认宽 = `workArea.width × 0.78`（下限 1040 ⇒ 1080p 上约 1560，大屏可到 2560）；
+   · 而浮窗初始是**写死的 480×540**（`clampFloatSize(480, 540)`）。
+   ⇒ 窗口越大，浮窗占比越小；里面的内容（消息 + 产物卡 + 输入框）需要更宽
+   ⇒ 被浮窗的 `overflow: hidden` **裁掉右缘**（用户图2 里那道竖直切痕）。
+   ⇒ 改成按窗口比例给（并走 `clampFloatSize` 夹取，规则仍在同一处）。
+   ⚠️ 只改**初始值**，且**顺带纠正一个不存在的说法**：我原以为"用户拖过的浮窗尺寸由会话记忆恢复，
+      改了会覆盖它"—— 查证后发现**根本没有这个持久化**（`floatSize` 全仓无 localStorage /
+      session 存取点），所以这条改动是**纯改进**，不存在"覆盖用户已记住尺寸"的副作用。
+      （A-980-R16 只做了拖动中改DOM + 松手落 state，state 不跨会话。） */
+  const [floatSize, setFloatSize] = React.useState<{ w: number; h: number }>(() => clampFloatSize(
+    Math.round(window.innerWidth * FLOAT_RATIO.w),
+    Math.round(window.innerHeight * FLOAT_RATIO.h),
+  ));
   const [floatPos, setFloatPos] = React.useState<{ x: number; y: number } | null>(null);
   const floatRef = React.useRef<HTMLDivElement | null>(null);
   const floatSizeRef = React.useRef(floatSize);
   floatSizeRef.current = floatSize;
+  /* A-1152：**窗口尺寸变化时把浮层重新夹回窗口内**。
+     用户实测的一串问题都源于此：`clampFloatSize` 只在**初始化**跑一次 ⇒ 窗口从"小"变成"大"时
+     浮层还是那个旧尺寸（不算 bug），但反过来（**大 → 小**，例如窗口化后把 slime 最大化/还原、
+     或拖拽右栏）就可能**超出窗口** ⇒ 你看到的"折叠的对话窗口被强行展开、里面暂时显示空白"。
+     ⚠️ 必须**同时**夹位置（`clampFloatPos`）—— 只夹尺寸的话，浮层可能停在窗口外，
+     拖右栏时被挤出来的空白就在视口里，看着像"窗口内有空白"。
+     ⚠️ 只在浮层态夹：普通态没有浮层，白改 state 会引起无谓重渲染。 */
+  React.useEffect(() => {
+    if (floatState === "none") { return; }
+    /* ⚠️⚠️ A-1152：**必须 rAF 节流**。窗口最大化/还原会连发几十次 `resize`，
+       而 `setFloatPos`（函数式 setState）**每次返回新对象就触发一次整棵长会话重渲染**
+       ⇒ 用户报「窗口化那一下卡顿依旧严重」。同一窗口拖动边沿时同理。
+       ⇒ 只保留**每个动画帧最多一次**；并且位置没变时**返回原对象**（identity 相同 ⇒
+         React 直接 bail out，一次重渲染都不发生）。
+       ⚠️ 尺寸与位置要**一起**算完再写 state：分两次 setState 会产生两次渲染。 */
+    let rafId = 0;
+    const onWinResize = (): void => {
+      if (rafId) { return; }
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        const cur = floatSizeRef.current;
+        /* A-1152：窗口缩放时，浮窗**按比例同步**（而不是只在超出边界时夹一次）。
+           此前只做 `clampFloatSize(cur)` —— 那是"越界才夹"，窗口**变大**时浮窗**原地不动**
+           ⇒ 用户实测「窗口最大化后对话页被强行拉开 / 浮窗内被裁切」：
+           内容按新窗口排版、浮窗还是旧尺寸 ⇒ 不匹配。
+           ⚠️ 什么时候该按比例、什么时候该夹边界：
+             · 窗口变大 ⇒ 按比例**一起长**（用户看到的是"浮窗随窗口等比放大"）；
+             · 窗口变小 ⇒ 夹到边界（`clampFloatSize` 内部对上下限负责）。
+           实现上"变大就按比例、变小就夹"都落在下面这一句：取 `min(按比例值, 上限)`。 */
+        const ratioW = Math.round(window.innerWidth * FLOAT_RATIO.w);
+        const ratioH = Math.round(window.innerHeight * FLOAT_RATIO.h);
+        const next = clampFloatSize(
+          cur.w < ratioW ? ratioW : cur.w,
+          cur.h < ratioH ? ratioH : cur.h,
+        );
+        if (next.w !== cur.w || next.h !== cur.h) { setFloatSize(next); }
+        setFloatPos((p) => { const q = clampFloatPos(p?.x ?? 0, p?.y ?? 0); return (p && p.x === q.x && p.y === q.y) ? p : q; });
+        /* ⚠️⚠️ A-1155-R7：**浮层态下把 `--left-w` 同步到左栏的新实宽**。
+           左栏宽是 `vw×17.5%`（`index.css` 的 `--sidebar-w`）⇒ 窗口 resize 它就变；
+           而浮层稳态 wrapper 宽 = `calc(100% - var(--left-w))` ⇒ 变量不同步的话，
+           窗口一变宽/变窄，右栏就会**又越窗或又留空**（＝用户现象 ①④ 在新分辨率下复发）。
+           ⚠️ 判据用 `floatStateRef`（真状态），不用 `mainIsFloatLayout` 派生量（铁律 11）。 */
+        if (floatStateRef.current !== "none") {
+          const lw = leftSidebarRef.current?.getBoundingClientRect().width ?? 0;
+          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(lw)}px`);
+        }
+      });
+    };
+    window.addEventListener("resize", onWinResize);
+    return () => { window.removeEventListener("resize", onWinResize); if (rafId) { window.cancelAnimationFrame(rafId); } };
+    /* ⚠️ 窗口缩放期间（几百 ms 到几秒）聊天区也在**每帧重排**（容器宽度每帧都变）——
+       与"窗口化过渡"同源。但这里**不能**挂 `slime-freezing` 的钉宽：那套钉的是 `floatSize`，
+       而缩放期间我们恰恰要让它跟着窗口变。所以用**另一个**类：过渡期间内容让位，
+       缩放结束（150ms 无 resize）自动摘掉。
+       ⚠️ 用"连续无事件 150ms"判定结束，比固定时长可靠（拖边沿时事件持续不断）。 */
+  }, [floatState]);
+
+  /* ⚠️⚠️⚠️ A-1156：浮层稳态 wrapper 宽 = `calc(100% - var(--left-w))`，
+     而 `--left-w` **必须始终**等于左栏实宽 —— 它失同步时用户看到的正是
+     「右栏部分位置被挤压到屏幕外」（现象④）。
+     此前它只有**三个主动写点**（唤出 / 窗口 resize / 左栏动画逐帧），本轮实测证明**不够**：
+     真 App CDP 轨迹（`probe-a1155-cdp.mjs` 的 `--left-w` 逐帧轨迹，1332px 窗口）：
+       点「展开左侧边栏」后 —— 0/134/258/382/507ms 左栏实测都是 **1px**（React 尚未提交
+       `.collapsed` 摘除的那一段），**631ms 才真的跳到 240px**；
+       而左栏动画的逐帧同步在 1px 上就判定「宽度稳定」并收工 ⇒ `--left-w` 永久停在 **1px**
+       ⇒ 浮层稳态 wrapper 宽 = `calc(100% - 1px)` = 1331、左缘 x=240
+       ⇒ `rw.r = 1571 > vw = 1332`，**越窗 239px**（真机实测 `overflowRight=[1571]`）。
+     ⇒ 这不是"动画还没跑完"，而是**拿动画的节奏去同步一个它无权保证的事实**
+       （提交时机、过渡是否触发，都不由这段代码决定）。
+     ⇒ 改由 `ResizeObserver` 观察左栏**实测宽度**：浏览器在宽度**真的**变了的那一刻通知，
+       覆盖全部来源（动画 / 拖拽 / 窗口缩放 / React 提交后的补跳），且不依赖任何收尾回调。
+     ⚠️ 这是**兜底**而不是"第四个产地"：上面三处主动写点保留（它们让"浮层第一帧就正确"，
+        不必等 RO 的首次通知），RO 保证的是"此后每一次宽度变化都不会漏"。
+     ⚠️ 判据用 `floatStateRef`（真状态），不用 `mainIsFloatLayout` 派生量（铁律 11）。
+
+     ⚠️⚠️ **必须用「回调 ref」而不是 `useEffect(..., [])`** —— 这一条是实测踩出来的：
+       App 首帧可能还停在**启动门**里（`splashVisible` 门，此时 `.sidebar` 尚未挂载），
+       于是空依赖 effect 跑的时候 `leftSidebarRef.current === null` ⇒ 直接 return
+       ⇒ **观察器永远装不上**（第一版就是这么写的，实测 `--left-w` 仍然停在 1px、越窗照旧）。
+       回调 ref 在**节点真正挂上的那一刻**装，无论那一刻是第几帧。
+     ⚠️ 必须 `useCallback([])`：身份每次渲染都变的话，React 会在每次渲染时
+       先 detach 再 attach（观察者反复重建，且回调里那句 disconnect 会打断正在进行的同步）。 */
+  const leftWidthObserverRef = React.useRef<ResizeObserver | null>(null);
+  const attachLeftWidthObserver = React.useCallback((el: HTMLElement | null): void => {
+    leftSidebarRef.current = el;
+    leftWidthObserverRef.current?.disconnect();
+    leftWidthObserverRef.current = null;
+    if (!el || typeof ResizeObserver === "undefined") { return; }
+    const sync = (): void => {
+      if (floatStateRef.current === "none") { return; }
+      rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(el.getBoundingClientRect().width)}px`);
+    };
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    sync();
+    leftWidthObserverRef.current = ro;
+  }, []);
+
+  /* ⚠️⚠️ A-1154：**窗口尺寸变化时把持久化的右栏 px 宽度钳回当前合法上限**。
+     背景（真机 CDP 实测 `probe-drag-robust.mjs` 抓到的第 1 轮 `宽 712 → 712` 无响应）：
+       `localStorage.slime_rightbar_w` 记的是**上次窗口尺寸下**用户拖出来的 px 值
+       （实测 712 = 当时 `min(innerWidth-48, innerWidth-左栏-380)` 的上限）。
+       窗口尺寸一变，那个 px 值就可能**超出新的合法上限**：
+         · 窗口**变窄** → 712 超过新上限 ⇒ 右栏被布局压到上限，而 `rightWidth` state 仍是 712
+           ⇒ `startWidth`（当时读 state）与 DOM 实宽错位 ⇒ 拖动基准错、向右拖无响应
+             （用户原话「要尝试左右多次拖拽才会恢复正常」）；
+         · 窗口**变宽** → 712 远低于新上限 ⇒ 右栏显得很窄且**不再随窗口比例自适应**
+           （用户原话「对话页自适应窗口调整失效」）。
+     ⇒ 正解：resize 时把 state 钳到 `[minW, maxW]`——`rightCustom` 的语义（"按 px 记住"）
+       因此只在**合法区间内**保留用户偏好，越界部分自动收敛到边界（既不溢出、也不失配）。
+     ⚠️ 只钳**越界值**（相等则返回原对象 ⇒ React bail out，长会话零重渲染）。
+     ⚠️ 必须覆盖**所有**宽度来源：`rightCustom` 为真才走 px（为假时右栏走 CSS 比例，不受影响）。 */
+  React.useEffect(() => {
+    if (!rightCustom) { return; }
+    let rafId = 0;
+    const onWinResize = (): void => {
+      if (rafId) { return; }
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        const minW = rightSidebarMinW();
+        const maxW = rightSidebarMaxW();
+        const clamped = Math.round(Math.max(minW, Math.min(maxW, rightWidthRef.current)));
+        if (clamped !== rightWidthRef.current) {
+          setRightWidth(clamped);
+          localStorage.setItem('slime_rightbar_w', String(clamped));
+        }
+      });
+    };
+    window.addEventListener("resize", onWinResize);
+    // 挂载时也跑一次：上次会话遗留的越界值应在首帧就收敛（否则用户一起手就撞上错位）
+    onWinResize();
+    return () => { window.removeEventListener("resize", onWinResize); if (rafId) { window.cancelAnimationFrame(rafId); } };
+  }, [rightCustom]);
+
+  /* A-1152：窗口缩放期间让聊天区让位（结束后自动恢复）。 */
+  React.useEffect(() => {
+    if (floatState === "none") { return; }
+    let t = 0;
+    /* A-1152：淡出 → 跳过布局 → 恢复，三段各自的定时器（t=淡出，t2=恢复） */
+    let t2 = 0;
+    const mark = (): void => {
+      /* ⚠️ A-1152：**同样必须两阶段**（与拖动路径同一个坑）。
+         缩放期间容器宽度每帧都在变 ⇒ 聊天区每帧重排 ⇒ 要`content-visibility: hidden`；
+         但**不能与淡出同帧挂** —— 那会让元素立刻跳过渲染 ⇒ 过渡永不播放（用户实测
+         「我要的渐出消失衔接动画没有」）。
+         ⇒ 先只挂 fading，等淡出走完（或150ms 兜底）再挂 resizing。 */
+      window.clearTimeout(t);
+      if (!document.body.classList.contains("slime-resizing")) {
+        document.body.classList.add("slime-fading");
+      }
+      t = window.setTimeout(() => {
+        document.body.classList.remove("slime-fading");
+        document.body.classList.add("slime-resizing");
+        clearTimeout(t2);
+        t2 = window.setTimeout(() => {
+          document.body.classList.remove("slime-resizing");
+        }, 160);
+      }, 150);
+    };
+    window.addEventListener("resize", mark);
+    return () => {
+      window.removeEventListener("resize", mark);
+      window.clearTimeout(t);
+      window.clearTimeout(t2);
+      endChatFreeze();
+    };
+  }, [floatState]);
   const floatPosRef = React.useRef(floatPos);
   floatPosRef.current = floatPos;
   /** A-980-R24：悬浮窗内容层（渐隐渐显由几何同步 rAF 驱动，见 runGeometrySyncFade） */
@@ -701,10 +1007,17 @@ export default function App(): JSX.Element {
         rightFadeCancelRef.current = null;
         floatFadeCancelRef.current?.();
         floatFadeCancelRef.current = null;
+        /* A-1154：取消后自增世代 ⇒ 那轮的任何迟到回调失效（否则它会用**旧会话的**收尾
+           去写新会话的 floatState，第 843 行那段注释描述的"旧动画覆盖新会话状态"的残余路径）。 */
+        floatFadeGenRef.current++;
+        /* A-1152：几何动画被取消时**必须**摘掉 `slime-freezing` —— 它是"过渡期间"的临时类，
+           残留会让聊天区长期停在"跳过屏幕外渲染"的降级形态（长会话里滚出去的消息不渲染）。
+           这就是"能用几何 done 就不用固定时长"的另一个理由：done 里有地方摘类。 */
+        document.body.classList.remove("slime-freezing");
+        document.body.style.removeProperty("--slime-freeze-w");
         // A-980-R25：内联聊天区的几何淡入也要取消（否则切会话后它还在给新会话写 opacity）
         chatFadeCancelRef.current?.();
         chatFadeCancelRef.current = null;
-        preFloatRightWidthRef.current = null;
         floatClosingRef.current = false;
         // 还原侧栏 DOM opacity/transition（切会话时侧栏不动画，防残留态）
         // A-1016-F3：一并摘掉宽度动画期间的 webview 钉子——这条取消路径**不会**重启动画，
@@ -713,7 +1026,14 @@ export default function App(): JSX.Element {
         const le = leftSidebarRef.current;
         if (le) { le.style.transition = ""; le.style.opacity = ""; }
         const rw = rightWrapperRef.current;
-        if (rw) { rw.style.transition = ""; rw.style.opacity = ""; }
+        if (rw) {
+          rw.style.transition = ""; rw.style.opacity = "";
+          /* A-1153：**取消路径也要成对清过渡期变量** —— 上面那句 `rightFadeCancelRef.current?.()`
+             只停表、不触发几何 done，所以 done 里的 removeProperty 走不到。
+             不清就会把上一次的超宽目标留给下一次展开（过渡方向错乱）。 */
+          rw.style.removeProperty("--right-target-w");
+          rw.style.removeProperty("--right-body-pin");
+        }
         const fi = floatInnerRef.current;
         if (fi) { fi.style.opacity = ""; }
         const ic = inlineChatRef.current;
@@ -1269,7 +1589,11 @@ export default function App(): JSX.Element {
     await loadSessions();
   }
 
-  const currentModel = agentConfig[selectedAgentId ?? ""]?.model_choice ?? "inherit";
+  /* A-1131：**本会话的模型选择优先于 Agent 默认值**（口径与主进程 `effectiveModelChoice` 一致：
+     会话显式选过就用它，否则跟随 Agent）。此前这里只读 Agent ⇒ 切了会话看到的还是同一个模型，
+     而写下去又会把 Agent 的记录改掉（就是用户报的"改一个会话、另一个会话跟着变"）。 */
+  const currentModel = (selectedSession?.modelChoice ?? "").trim()
+    || (agentConfig[selectedAgentId ?? ""]?.model_choice ?? "inherit");
   const currentMode = agentConfig[selectedAgentId ?? ""]?.mode ?? "build";
   const currentReasoning = agentConfig[selectedAgentId ?? ""]?.reasoning_effort ?? "none";
   const currentThinking = agentConfig[selectedAgentId ?? ""]?.show_thinking !== "0";
@@ -1349,7 +1673,16 @@ export default function App(): JSX.Element {
       localModels={localModels}
       agents={agents}
       onAgentSwitch={(agentId) => { void switchSessionAgent(agentId); }}
-      onModelChange={(v) => updateAgentConfig({ model_choice: v })}
+      /* A-1131：切模型 = **改本会话** + 把 Agent 上的值更新为"最近选择"（供新建会话继承）。
+         ⚠️ 两件事都必须做：
+           · 只写会话 ⇒ 新建的会话会继承一个**很久以前的**陈旧模型；
+           · 只写 Agent ⇒ 就回到了用户报的那个 bug（同 Agent 全会话共用）。
+         已有会话各自的覆盖不受影响 ⇒ 「在不同会话用不同模型」成立。 */
+      onModelChange={(v) => {
+        setSessions((prev) => prev.map((s) => (s.sessionId === selectedSession.sessionId ? { ...s, modelChoice: v } : s)));
+        void apiSetSessionModel(selectedSession.sessionId, v);
+        void updateAgentConfig({ model_choice: v });
+      }}
       onModeChange={(v) => updateAgentConfig({ mode: v })}
       onReasoningChange={(v) => updateAgentConfig({ reasoning_effort: v })}
       onThinkingChange={(v) => updateAgentConfig({ show_thinking: v ? "1" : "0" })}
@@ -1384,7 +1717,40 @@ export default function App(): JSX.Element {
    * 否则 main 保留 380px 保底，右栏自动让位给聊天区。
    */
   const mainIsFloatLayout = rightOpen && floatState !== "none"
-    && rightWidth >= Math.max(560, window.innerWidth - 340);
+  /* A-1152：**右栏被收起 ⇒ 浮层无处挂载 ⇒ 让状态自愈**。
+     用户实测：「窗口化之后…拖拽拉大对话窗口占比后，窗口化的对话窗就会消失，还原为中间页面的窗口，
+     但是**对话页面窗口化的按钮就会失效**，怎么点击都没有用，而且对话页会变得极其不稳定」。
+     根因就是这个布尔式：`rightOpen` 一旦变 false（拖右栏到最窄会自动收起，见 A-980-R29），
+     `mainIsFloatLayout` 变假 ⇒ `<main>`换回**内联渲染** ⇒ 浮层凭空消失，
+     **但 `floatState` 仍是 `float`** ⇒ 按钮永远走 `dismissFloat()` 分支（"点了没反应"），
+     同时布局在两种模式间反复重建 ⇒ 各种不稳定。
+     ⇒ 右栏收起时把 `floatState` 一起复位成 `none`（用户已经看得见聊天区了，语义正确），
+       按钮下一次点击就是"唤出"，回到可预期的那条路。 */
+  /* ⚠️ 这一段原本还有一个 `&& rightWidth >= Math.max(560, window.innerWidth - 340)`（A-980-R29 加的
+     "浮层期间右栏别掉到 innerWidth-340 以下，否则浮层被卸载"）。**已删除**（A-1152）：
+     它是**用"布局推导"来保护浮层**，反而制造了用户实测的那串问题 ——
+     窗口从"小"变"大"时 `innerWidth` 跟着涨，这个阈值**自动变假** ⇒ 浮层被静默卸载、
+     而 `floatState` 还停在 `float` ⇒ 按钮"点了没反应" + 布局在两种模式间反复重建。
+     现在浮层的存活**只**取决于 `rightOpen`（真状态，见上面的自愈 effect），
+     窗口尺寸变化不再能把它拽下来。 */
+  ;
+
+  /* A-1152：浮层态给 `body` 挂 `float-layout` ⇒ 右栏 `width:100%` 铺满整窗。
+     ⚠️ 这是**状态类**（不是 `slime-resizing` / `slime-freezing` 那种"过渡期间"的临时类），
+       所以判据取**唯一真状态** `mainIsFloatLayout`，与 `<main>` 的卸载、浮层的挂载同源。
+     ⚠️ 用户截图实测的1400px 空白根因：`.right-sidebar { width: var(--right-sidebar-w) }`
+       而该变量是 `clamp(260px, 21.5vw, 720px)` ⇒ 宽窗口下右栏永远只有 720px。
+     ⚠️ 挂body 而不是给右栏加类：右栏在 `RightSidebar.tsx` 里，多穿一层 prop 会多一份
+       需要同步的判据；body 类由这一处真状态统一驱动。 */
+  React.useEffect(() => {
+    if (mainIsFloatLayout) { document.body.classList.add("float-layout"); }
+    else { document.body.classList.remove("float-layout"); }
+    return () => { document.body.classList.remove("float-layout"); };
+  }, [mainIsFloatLayout]);
+
+  React.useEffect(() => {
+    if (floatState !== "none" && !rightOpen) { setFloatState("none"); }
+  }, [rightOpen, floatState]);
 
   /**
    * A-1039 启动门判据（**唯一出处**，守卫按此断言）。
@@ -1501,7 +1867,12 @@ export default function App(): JSX.Element {
         {/* 左侧导航侧栏 —— A-946：侧栏不参与整体挤压（flexShrink:0），展开态最小 140px，防止变窄时按钮/文本被吞；
             A-980-R21：opacity 过渡由 leftSidebarRef 的 DOM style 控制（收起先淡出/展开延后淡入，无残留闪烁） */}
         <aside
-          ref={leftSidebarRef}
+          /* ⚠️⚠️ A-1156：这里是**回调 ref**而不是 `ref={leftSidebarRef}` ——
+             它同时做两件事：① 仍然把节点交给 `leftSidebarRef`（拖拽/动画全靠它实测）；
+             ② 顺带装上「左栏宽度变化」的 ResizeObserver（现象④ 的自愈同步，
+             详见 attachLeftWidthObserver 的说明：为什么不能用 useEffect + 空依赖）。
+             ⚠️ 两者别拆成两个 ref：拆了就多一份"谁在维护 leftSidebarRef.current"的判断。 */
+          ref={attachLeftWidthObserver}
           className={`sidebar${sidebarOpen ? "" : " collapsed"}${leftMin0 ? " sidebar-no-min" : ""}`}
           /* A-1018：未手动拖过时**不下发内联宽度** → 由 CSS 的
              `--sidebar-w: clamp(240px, 17.5%, 520px)` 随窗口比例自适应（拖动过则用 px 覆盖） */
@@ -1694,100 +2065,97 @@ export default function App(): JSX.Element {
             不参与挤压（fixed 浮层）；A-980-R17：最小化=内容渐出+窗口同步缩小为可拖动图标，
             标题栏只留 最小化 / 恢复窗口 两按钮，状态按会话记忆 */}
         <main className={`main${mainIsFloatLayout ? " main-float" : ""}`}>
-          {(() => {
-            // A-980-R25：与上面的 mainIsFloatLayout **同一条件**（浮层真在渲染才切浮层布局）
-            const fs: "none" | "float" | "min" = mainIsFloatLayout ? floatState : "none";
-            if (fs !== "none") {
-              const minIcon = fs === "min";
-              const animOut = floatAnim === "out";
-              // A-980-R25：退场阶段窗口收缩到 0（内容已按几何淡完），边框/阴影一并去掉，
-              // 否则 0×0 的盒子仍会留下一个 2px 的边框点
-              const closing = floatAnim === "closing";
-              const w = closing ? 0 : (minIcon || animOut ? FLOAT_ICON_SIZE : floatSize.w);
-              const h = closing ? 0 : (minIcon || animOut ? FLOAT_ICON_SIZE : floatSize.h);
-              // A-980-R24：内容区的渐隐渐显**改由几何同步 rAF 驱动**（startFloatGeometryFade），
-              // 不再用固定延时的 opacity 过渡——旧实现 0.08s 就淡完，观感"刚点就没了"且与窗口
-              // 收缩不同拍（用户反馈"出现时机太早、生硬"；且固定时长在不同分辨率下表现不一致）。
-              // 内容区最小化期间**常驻挂载但隐藏**（不卸载 ChatPanel——保留会话现场、不打断进行中的流）
-              // A-980-R19：默认出现位置也整体钳制在窗口内（不再可能出现即越界）
-              const defaultPos = fitFloatRect((sidebarOpen ? sidebarWidth : 0) + 12, 42, floatSize.w, floatSize.h);
-              return (
-                <div ref={floatRef} style={{
-                  position: "fixed",
-                  // A-980-R15：定位在**左栏右侧**（不再依赖 rightWidth——右栏占满时 rightWidth+10 会把
-                  // 悬浮窗推到屏幕外，用户实测"初始出现大小异常"）；标题栏可拖动后按记忆位置显示
-                  left: floatPos ? floatPos.x : defaultPos.x,
-                  top: floatPos ? floatPos.y : defaultPos.y,
-                  width: w,
-                  height: h,
-                  zIndex: 1000, display: "flex", flexDirection: "column",
-                  borderRadius: 10,
-                  border: closing ? "none" : "1px solid var(--border)",
-                  background: "var(--bg)",
-                  boxShadow: closing ? "none" : "0 10px 40px rgba(0,0,0,0.4)",
-                  overflow: "hidden",
-                  // A-980-R25：退场期间不吃鼠标事件（窗口正在缩到 0，避免挡住下面的聊天区）
-                  pointerEvents: closing ? "none" : "auto",
-                  // A-980-R17：悬浮窗拖到与程序标题栏（-webkit-app-region: drag 区域）重叠时，
-                  // 必须 no-drag 才能收到鼠标事件，否则按到的是整窗拖拽（用户实测"顶边框重叠后拖不动"）；
-                  // no-drag 由 index.css .float-window 类提供（内联 WebkitAppRegion 有 TS 类型限制）。
-                  // 宽高常驻过渡供最小化/还原动画使用；拖拽调大小期间由 startFloatResize 临时禁用
-                  transition: FLOAT_TRANSITION,
-                }} className="float-window">
-                  {/* 内容区（标题栏 + 聊天）：最小化期间隐藏挂载；opacity 由 startFloatGeometryFade
-                      的 rAF 按外框实测尺寸逐帧写入（结束态 0=最小化 / 1=还原，与 JSX 稳态一致） */}
-                  <div ref={floatInnerRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
-                    opacity: minIcon ? 0 : 1,
-                    pointerEvents: minIcon ? "none" : "auto" }}>
-                    {/* 悬浮窗标题栏：拖住空白处移动 + 会话标题 + 最小化 / 恢复窗口 */}
-                    <div style={{
-                      display: "flex", alignItems: "center", gap: 4, flexShrink: 0,
-                      height: 36, padding: "0 6px 0 10px",
-                      background: "var(--sidebar-bg, #1e1e2e)",
-                      borderBottom: "1px solid var(--border)",
-                      cursor: "grab",
-                    }} onPointerDown={startFloatDrag}>
-                      <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {selectedSession?.title || "对话"}
-                      </span>
-                      <button className="titlebar-btn" title="最小化（缩小为图标）" onClick={(e) => { e.stopPropagation(); minimizeFloat(); }}>─</button>
-                      <button className="titlebar-btn" title="收起悬浮窗（恢复普通布局：聊天回到中间）" onClick={(e) => { e.stopPropagation(); dismissFloat(); }}>▢</button>
-                    </div>
-                    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
-                      {chatPanelJsx}
-                      {/* A-980-R16：右缘/底缘/右下角三重调大小（zIndex 200+ 须高于 ChatPanel 输入区 zIndex 30，
-                          否则手柄被输入区遮挡既看不见也点不到——A-980-R15 实测"无法调节尺寸"根因；
-                          右缘条 4px/底缘条 6px 尽量不遮消息区滚动条与输入区按钮） */}
-                      <div onMouseDown={(e) => startFloatResize(e, "e")} title="拖动调整宽度"
-                        style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 4, cursor: "ew-resize", zIndex: 200, userSelect: "none" }} />
-                      <div onMouseDown={(e) => startFloatResize(e, "s")} title="拖动调整高度"
-                        style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 6, cursor: "ns-resize", zIndex: 200, userSelect: "none" }} />
-                      <div onMouseDown={(e) => startFloatResize(e, "se")} title="拖动调整大小"
-                        style={{ position: "absolute", right: 0, bottom: 0, width: 24, height: 24, cursor: "nwse-resize", zIndex: 201, display: "flex", alignItems: "flex-end", justifyContent: "flex-end", color: "var(--text-dim)", fontSize: 12, userSelect: "none" }}>⤡</div>
-                    </div>
-                  </div>
-                  {/* A-980-R17：最小化图标层——动画末尾渐入；最小化后覆盖全窗，可点击还原、可拖动
-                      A-980-R27：还原走 startFloatDrag 的 onTap（原地松手=点击），不再用 onClick——
-                      pointerdown 的 preventDefault 会掐掉 click，导致"只能变小、不能恢复" */}
-                  <div onPointerDown={(e) => startFloatDrag(e, restoreFloat)}
-                    title="点击还原悬浮窗（可拖动）"
-                    style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                      background: "var(--bg-secondary)", borderRadius: 10, cursor: "grab",
-                      opacity: minIcon || animOut ? 1 : 0,
-                      pointerEvents: minIcon ? "auto" : "none",
-                      transition: "opacity 0.18s ease 0.12s" }}>
-                    <img src={floatIconUrl} alt="slime" draggable={false} style={{ width: 26, height: 26 }} />
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <div ref={inlineChatRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {/* A-1152：浮层态下 `<main>` **不渲染**（中间页彻底不挂载、拉不出来）。
+              浮层是 `.body` 直属的独立元素（见下方），所以卸载它不会连带干掉浮层。
+              ⚠️ 已尝试过的替代方案（**回退原因**）：把 `<main>` 改成聊天区的唯一宿主、
+              浮层态用内联 `position: fixed` —— 理论上能消除"换父节点导致的整树重建"，
+              但实测引入了可见回归（左栏收起异常 / 右栏不铺满），
+              且收益（卡顿）在本环境无法验证 ⇒ 回退，不在坏状态上继续叠。 */}
+          {mainIsFloatLayout ? null : (
+          <div ref={inlineChatRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                 {chatPanelJsx}
               </div>
-            );
-          })()}
+          )}
         </main>
+
+        {/* A-1152：悬浮窗（.float-window）—— `position: fixed`，挂在 `.body` 直属。
+            ⚠️ `floatRef` 在这个元素上（几何动画按它实测），不要挪到 `<main>`。 */}
+        {mainIsFloatLayout ? (() => {
+          const minIcon = floatState === "min";
+          const animOut = floatAnim === "out";
+          /* ⚠️⚠️ A-1154：**`closing` 必须同时认 `"closing"`**。
+             真 App CDP 实测复现：`dismissFloat()` 设的是 `setFloatAnim("closing")`（退场，窗口收到 0），
+             而这里此前写成 `const closing = animOut`（只认 `"out"`，最小化态）⇒
+             `closing` 恒为 false ⇒ `w/h` 取 `floatSize`（实测 666，**根本没在收**）⇒
+             `startFloatGeometryFade` 量到的宽度全程不变 ⇒ 几何 done 永不触发 ⇒
+             `slime-freezing` / `--slime-freeze-w` 永久残留 + rAF 泄漏
+             ⇒ 后续「窗口化」被脏状态打回（用户原话「窗口出现一次抽搐抖动，但对话页不会窗口化」）。
+             ⚠️ 两者目标尺寸**不同**，不能合并成一个布尔：最小化收到图标（44），退场收到 0。
+                · `animOut`（最小化）→ `FLOAT_ICON_SIZE`
+                · `closing`（退场）→ `0`（下面这条 CSS 通道也要能表达 0） */
+          const closing = floatAnim === "closing";
+          const w = closing ? 0 : (minIcon || animOut ? FLOAT_ICON_SIZE : floatSize.w);
+          const h = closing ? 0 : (minIcon || animOut ? FLOAT_ICON_SIZE : floatSize.h);
+          const defaultPos = fitFloatRect((sidebarOpen ? sidebarWidth : 0) + 12, 42, floatSize.w, floatSize.h);
+          return (
+            <div ref={floatRef} style={{
+              position: "fixed",
+              left: floatPos ? floatPos.x : defaultPos.x,
+              top: floatPos ? floatPos.y : defaultPos.y,
+              width: w,
+              height: h,
+              zIndex: 1000, display: "flex", flexDirection: "column",
+              borderRadius: 10,
+              border: closing ? "none" : "1px solid var(--border)",
+              background: "var(--bg)",
+              boxShadow: closing ? "none" : "0 10px 40px rgba(0,0,0,0.4)",
+              overflow: "hidden",
+              pointerEvents: closing ? "none" : "auto",
+              transition: FLOAT_TRANSITION,
+            }} className="float-window">
+              <div ref={floatInnerRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+                opacity: minIcon ? 0 : 1,
+                pointerEvents: minIcon ? "none" : "auto" }}>
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 4, flexShrink: 0,
+                  height: 36, padding: "0 6px 0 10px",
+                  background: "var(--sidebar-bg, #1e1e2e)",
+                  borderBottom: "1px solid var(--border)",
+                  cursor: "grab",
+                }} onPointerDown={startFloatDrag}>
+                  <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {selectedSession?.title || "对话"}
+                  </span>
+                  <button className="titlebar-btn" title="最小化（缩小为图标）" onClick={(e) => { e.stopPropagation(); minimizeFloat(); }}>─</button>
+                  <button className="titlebar-btn" title="收起悬浮窗（恢复普通布局：聊天回到中间）" onClick={(e) => { e.stopPropagation(); dismissFloat(); }}>▢</button>
+                </div>
+                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
+                  {chatPanelJsx}
+                  {/* A-1152：浮窗 resize 手柄（右缘 e / 底缘 s / 右下角 se）。用户要求恢复：
+                      「我要求窗口化的聊天页面的自主拖拽控制大小的功能可以恢复一下」。 */}
+                  <div onMouseDown={(e) => startFloatResize(e, "e")} title="拖动调整宽度"
+                    style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 4, cursor: "ew-resize", zIndex: 200, userSelect: "none" }} />
+                  <div onMouseDown={(e) => startFloatResize(e, "s")} title="拖动调整高度"
+                    style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 6, cursor: "ns-resize", zIndex: 200, userSelect: "none" }} />
+                  <div onMouseDown={(e) => startFloatResize(e, "se")} title="拖动调整大小"
+                    style={{ position: "absolute", right: 0, bottom: 0, width: 14, height: 14, cursor: "nwse-resize", zIndex: 201, userSelect: "none" }} />
+                </div>
+              </div>
+              {mainIsFloatLayout && (
+                <div onPointerDown={(e) => startFloatDrag(e, restoreFloat)}
+                  title="点击还原悬浮窗（可拖动）"
+                  style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                    background: "var(--bg-secondary)", borderRadius: 10, cursor: "grab",
+                    opacity: minIcon || animOut ? 1 : 0,
+                    pointerEvents: minIcon ? "auto" : "none",
+                    transition: "opacity 0.18s ease 0.12s" }}>
+                  <img src={floatIconUrl} alt="slime" draggable={false} style={{ width: 26, height: 26 }} />
+                </div>
+              )}
+            </div>
+          );
+        })() : null}
+
 
         {/* 右侧栏（工作树 / 任务 / 终端 / 浏览器）——A-980-R24：外层 wrapper 承载几何同步渐隐渐显
             （opacity 逐帧 = smoothstep(实测宽/展开宽)，与 .right-sidebar 的 width 过渡同拍；无固定时间点）。
@@ -1796,8 +2164,79 @@ export default function App(): JSX.Element {
             这样窗口变窄时右栏会先让位，而不是把聊天区挤没 */}
         <div
           ref={rightWrapperRef}
-          className={`right-wrapper${rightMin0 ? " right-wrapper-no-min" : ""}`}
-          style={{ display: "flex", flexShrink: 1, minWidth: 0 }}
+          /* ⚠️ A-1152：`right-wrapper-anim` 与 `right-wrapper-no-min` **同时**挂（同一条件）。
+             过渡期间用它解除"浮层态铺满整窗"的 `width:100% !important`
+             —— 否则 `rightWidth` 的逐帧变化被 CSS 吃掉 ⇒ 过渡无对象；
+             且旧宽度会先闪一下 ⇒ 用户看到「右栏跑到左边然后往右合」（探针实测 wrap.w恒 431）。
+             ⚠️ 两个类共用一个条件，不要拆成两个 state（同铁律 11）。 */
+          className={`right-wrapper${rightMin0 ? " right-wrapper-no-min" : ""}${rightMin0 ? " right-wrapper-anim" : ""}`}
+          /* ⚠️⚠️ A-1152：`marginLeft: "auto"` —— **把右栏顶到窗口右缘**。
+             用户实测：「右侧边栏的最右侧又出现空白区域了」（截图里右缘一条空带）。
+             根因：`.body` 是 `[.sidebar][.main][.right-wrapper]` 一行 flex，而本wrapper 是
+             `flexShrink: 1`（可收缩）⇒ 窗口宽度**大于** `rightWidth`（写死的 px）时，
+             余量留在**右边** ⇒ 右栏停在 `right.r = 1201` 而窗口是 1601 ⇒ 空 400px。
+             ⚠️ 为什么不用 `flex: 1`：那会把右栏**拉宽**（内容被拉伸，不是"贴边"），
+             而右栏内部的子面板都是固定宽 ⇒ 拉宽只会在最右侧留一条空带（正是用户看到的）。
+             ⚠️ 为什么不用 `width: 100%`：同上，会与内部固定宽冲突。
+             ⇒ `margin-left: auto` 是**唯一**"贴边但不变宽"的办法（auto margin 吃掉全部余量）。
+             ⚠️ 动之前的后果：`.main` 归零后（上一轮）**再没有别的盒子吃余量**了，
+             所以这条空白才会露出来 —— 两处改动是配套的。
+             ⚠️ `alignSelf: "stretch"`（A-1152）：右栏**必须撑满整高**。用户选定方案是
+             「右栏铺满整窗、浮窗叠在上面」⇒ 浮窗下方那片区域由右栏的底色承担；
+             若 wrapper 高度不足，下方会露出 `.app` 根底色 = 用户截图里那条"空白"。 */
+          /* ⚠️⚠️ A-1155：`flexShrink` 判据从 `&& !rightMin0` 改为**只看 `mainIsFloatLayout`**。
+             原因同上面 `width` 那条：过渡期（`rightMin0=true`）若放开收缩，
+             在 `[左栏240][main 0][wrapper 目标1332]` 超窗时 wrapper 会被压到 287px
+             ⇒ `.right-sidebar` 的 `max-width:100%` 跟着压 ⇒ 宽度不变 ⇒ done 死锁。
+             浮层态 `<main>` 已不占位，wrapper 是唯一需要宽度的一方，
+             **它不该收缩**（收缩权交给左栏/overflow 兜底）。 */
+          style={{ display: "flex", flexShrink: mainIsFloatLayout ? 0 : 1, minWidth: 0, marginLeft: "auto", alignSelf: "stretch",
+            /* ⚠️⚠️ A-1152：浮层态**宽度给到 wrapper**（`100%`）—— 上一轮我错把`width:100%`
+               写在 `.right-sidebar` 上，而 wrapper 的宽度是 `auto`（=0）⇒ 百分比参照 0
+               ⇒ **右栏整个塌成 0、用户报「右侧边栏直接没了」**（用户截图实测）。
+               ⇒ 正确分工：**wrapper 给宽度、右栏填满 wrapper**（下面的 CSS）。
+               ⚠️ 非浮层态不给宽度：保持 `auto`，右栏自己用 `--right-sidebar-w`（含 720px 上限）。
+               ⚠️⚠️ **`&& !rightMin0`**（A-1152）：**过渡期间不给宽度**。
+                 探针实测（`probe-float-transition.cjs`）浮层态下`wrap.w`恒为 431、
+                 8 帧宽度请求完全无响应 ⇒ 过渡没有过渡对象；且 `rightWidth` 的旧内联值
+                 会先闪一下 ⇒ 用户看到「右栏跑到左边然后往右合」。
+                 ⚠️ 关键：这条是**内联**样式，CSS 的 `!important` 盖不住它
+                 ⇒ 必须在内联这一层就让位（`right-wrapper-anim` 那条 CSS 是必要的另一半）。
+               ⚠️⚠️ 同期还必须把 `flexShrink` 放开（见 style）：浮层态 `<main>` 已卸载
+                 （`display:none`，对布局零贡献）⇒ 唯一在 flex 行里的兄弟就是 wrapper，
+                 `flex-shrink: 1` 会让它**收缩到内容宽度**（探针实测恒 431px），
+                 宽度请求完全无效 ⇒ 「过渡无对象 + 旧值先闪」。
+               ⚠️⚠️⚠️ A-1155：**过渡期不能真的"不给宽度"——要给 `--right-target-w`**。
+                 上面那条 `&& !rightMin0 ⇒ undefined` 造出一个**死锁**（真 App CDP 实测）：
+                   `rightMin0=true` ⇒ 内联 width=undefined ⇒ wrapper 回 `auto`
+                   ⇒ 宽度 = 内容宽（`.right-sidebar` 被 `max-width:100%` 压到 wrapper 的
+                     收缩结果 287px）⇒ **宽度从头到尾不变**
+                   ⇒ `runGeometrySyncFade` 两条几何判据同时失效（`netShift` 不达标；
+                     `hi = 0.42×1332 ≈ 559 > 287` ⇒ `everBelowHi=true` 关掉判据②）
+                   ⇒ done 永不触发 ⇒ `rightMin0` **摘不掉** ⇒ 死锁自锁。
+                 实测症状：`bodyCls="float-layout"` 且 `rwCls` 带 `right-wrapper-anim`
+                 ⇒ 铺满规则 `:not(.right-wrapper-anim)` 被永久排除
+                 ⇒ 右栏算不出整窗宽（287px ≠ 1332px）= 用户截图「内容自适应失效、只有一段」。
+                 ⇒ 正解：过渡期**同样给宽度**，但来源换成 `--right-target-w`
+                   （App 在过渡起点写、几何 done 时摘）。这与"不锁死 rightWidth"并不冲突：
+                   浮层支本来就不走 rightWidth 逐帧，它只有一个目标值。
+                 ⚠️ `var()` 故意**不写 fallback**：变量未定义 ⇒ 该声明 IACVT ⇒ 回落 `auto`
+                   ⇒ **普通展开的行为逐字不变**（普通展开不写这个变量，宽度仍由 rightWidth 驱动）。
+               ⚠️⚠️⚠️ A-1155-R7：**稳态宽度不是 `100%`，是 `100% − 左栏实宽`**。
+                 真 App CDP 实测（本轮，最关键的一条）：
+                   `.body` 是 `[.sidebar 240][main 0][wrapper]`，而 **`.body` 自身宽 = 1332 = 整窗**；
+                   wrapper 给 `100%` ⇒ 参照 `.body` = 1332 ⇒ 而它左缘在 x=240
+                   ⇒ **右缘 = 240 + 1332 = 1572，越窗 240px**（实测 `overflowRight=[1572]`，
+                     且 `.right-body` 右缘 1216 是安全的 ⇒ 越窗的是 wrapper 的空白底，
+                     但用户看到的正是「右侧边栏部分位置被挤压到屏幕外」）。
+                 ⇒ 浮层要铺满的是「**`.body` 减左栏**」，不是「`.body`」。
+                   用 `calc(100% - var(--left-w))`（`--left-w` 由 App 在浮层存续期写入左栏实宽）。
+                 ⚠️ 为什么不直接写死 px：窗口 resize 时左栏是 `vw×17.5%` 会变
+                   ⇒ 必须由**变量**驱动，与 `--right-target-w` 同源同寿命（成对写、成对摘）。
+                 ⚠️ `var(--left-w)` 未定义 ⇒ 整条 `calc` IACVT ⇒ 回落 `auto`
+                   ⇒ 与上面 `--right-target-w` 同一套"未定义即让位"语义，普通展开不受影响。 */
+            width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"
+              : (mainIsFloatLayout ? "var(--right-target-w)" : "auto") }}
         >
         <RightSidebar
           open={rightOpen}
@@ -1816,6 +2255,10 @@ export default function App(): JSX.Element {
           dl={dl}
           width={rightCustom ? rightWidth : undefined}
           onResize={handleRightbarResize}
+          /* A-1152：浮层态（右栏接管整宽、中间页已卸载）⇒ 右栏**不挂拖拽手柄**，
+             宽度只由「窗口化」往返与 `rightSidebarMaxW()` 决定（用户要求：
+             「改成只能点窗口化收起」）。传的是 `mainIsFloatLayout` —— 与"中间页是否卸载"同一份真状态。 */
+          floatLayout={mainIsFloatLayout}
         />
         </div>
       </div>
@@ -1854,6 +2297,26 @@ export default function App(): JSX.Element {
     </div>
   );
 
+  /**
+   * A-1131：会话级模型落盘（切模型下拉触发）。
+   *
+   * ⚠️ 走 `conversations.setModelChoice`（只改本会话），**不是** `agents.update`。
+   *    用户原话：「同一个 Agent 似乎不能在不同会话使用不同模型……之前那个会话里面的 agent
+   *    模型直接变成 deepseek 模型了」——写 Agent 就会连坐同 Agent 的所有会话。
+   * ⚠️ 落盘失败**不吞**：主进程已 console 出声；这里再 alert 会让"切个模型弹个框"变噪音，
+   *    所以只在失败时把已写入的乐观值回滚为落盘真值（下次切会话自然以盘为准）。
+   */
+  async function apiSetSessionModel(sessionId: string, modelChoice: string): Promise<void> {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!api?.conversations?.setModelChoice) { return; }
+    try {
+      await api.conversations.setModelChoice(sessionId, modelChoice);
+    } catch (e) {
+      console.error("[slime] 会话模型落盘失败:", e);
+      await loadSessions(); // 回滚乐观值：以落盘为准
+    }
+  }
+
   /** 会话重命名（ChatPanel 工具栏触发） */
   async function apiUpdateSessionTitle(sessionId: string, title: string): Promise<void> {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
@@ -1868,27 +2331,111 @@ export default function App(): JSX.Element {
    *  事件被送进 guest 进程，renderer 收不到 mouseup → onUp 不执行 → `body.slime-resizing`
    *  残留、拖拽脱离鼠标自己跟着走（用户实测"拖拽变窄卡住、强行拉动还会拽动左侧边栏"）。
    *  指针捕获后事件一律回到本元素，不再被 guest 截走；blur / pointercancel 仍是兜底。 */
+
+  /* A-1152：**渐入恢复** —— 拖动/缩放结束时不能硬摘类（内容会瞬间跳回 100% 不透明）。
+     ⚠️ 三段时序：摘 `slime-resizing`（恢复渲染 + 允许 opacity 过渡）→ 下一帧摘 `slime-fading`
+     （触发 opacity 0→1 的过渡）⇒ 内容**淡入**回来。
+     ⚠️ 必须"下一帧"：`slime-resizing` 挂着时CSS 写死 `opacity: 0`（见 index.css），
+       同一帧摘两个类 ⇒ 浏览器看不到 opacity 从 0 变化 ⇒ 过渡不播（又是白跳）。
+     ⚠️ 兜底 200ms：若 rAF 没来（页面隐藏等），至少保证类被摘干净、不残留。 */
+  /* ⚠️⚠️ A-1153：这里**曾是一个无限递归** —— 末尾写着
+     `window.setTimeout(() => { endChatFreeze(); }, 200);`（无条件调自己）。
+     后果：每次拖动结束都排一条**永不停止**的 200ms 定时器链，每 200ms 摘一次
+     `slime-fading` —— 与随后任何一次"挂类淡出"互相踩
+     ⇒ 用户实测「一拖拽，对话页就会出现闪烁」；拖几次就有几条链并发，抖动加剧。
+     ⚠️ 守卫当时只断言"含 setTimeout("（形状），没断言"定时器里不许再调自己"
+     ⇒ 纵容了这个 bug。**已同步改守卫**（a1152 ⑫）锚这条不变量。
+     ⇒ 现在：兜底定时器是**一次性的**、句柄存 ref 可被下一次调用清掉（不叠加）。 */
+  function endChatFreeze(): void {
+    document.body.classList.remove("slime-resizing");
+    // A-1153：拖动期的"禁宽度过渡"标志也在这里摘（它与 resizing 同生命周期）
+    document.body.classList.remove("slime-dragging");
+    /* ⚠️⚠️ A-1154：**必须先取消那条 140ms 的阶段定时器**，否则它在松手后才把
+       `slime-resizing` 挂上（且再没人摘）⇒ 聊天区闪烁 + 残留隐藏（见 dragPhaseTimerRef 注释）。
+       取消之后本函数自己按"已是拖动结束"的语义摘两类 —— 顺序不变。 */
+    window.clearTimeout(dragPhaseTimerRef.current);
+    dragPhaseTimerRef.current = 0;
+    requestAnimationFrame(() => {
+      document.body.classList.remove("slime-fading");
+    });
+    // 兜底：rAF 不来时（页面隐藏等）保证 fading 也被摘掉，绝不把类留在 body 上
+    window.clearTimeout(chatFreezeFallbackRef.current);
+    chatFreezeFallbackRef.current = window.setTimeout(() => {
+      document.body.classList.remove("slime-fading");
+    }, 200);
+  }
+
   function handleSidebarResize(e: React.PointerEvent): void {
     e.preventDefault();
     setSidebarCustom(true); // A-1018：一旦用户手动拖过，就按 px 记住（不再走 CSS 比例自适应）
+    /* ⚠️⚠️ A-1153：**拖动第一帧就禁掉宽度过渡**，否则不跟手。
+       此前 `transition: none` 只由 `slime-resizing` 提供，而那个类是 **140ms 之后**才挂的
+       （两阶段设计要求"先 fading 后 resizing"，见下面注释）⇒ **拖动头 140ms 内**
+       宽度仍然走 `.sidebar` 的 `transition: width 0.5s` —— 鼠标已经走了、面板还在慢慢追
+       ⇒ 用户实测「拖拽极其不跟手，手在前面，后面的拖拽内容才跟上」。
+       ⇒ 新增 `slime-dragging`：只管"拖动期禁宽度过渡"，与淡出的两阶段**互不干扰**
+         （它只作用于 `.sidebar` / `.right-sidebar` 的 width，不碰 `.chat-scroll` 的 opacity 过渡）。
+       ⚠️ 摘除统一在 `endChatFreeze()`（松手/取消/失焦三条路都走它）。 */
+    document.body.classList.add("slime-dragging");
     const captureEl = e.currentTarget as HTMLElement;
     try { captureEl.setPointerCapture(e.pointerId); } catch { /* 指针 id 已失效则忽略 */ }
-    document.body.classList.add("slime-resizing");
+    /* A-1152：聊天区淡出**必须分两阶段**（用户实测「我要的对话文本渐出消失衔接动画没有」）。
+       ⚠️⚠️ 上一轮写错了时序：`slime-resizing` 与 `slime-fading` **同一帧**挂上，
+         而 `slime-resizing` 带 `content-visibility: hidden` ⇒ **元素立刻跳过渲染**
+         ⇒ opacity 过渡**根本不会执行**（没有任何一帧被绘制）⇒ 观感就是"啪地消失"。
+       ⇒ 正确顺序：**先只挂 fading**（此时 `content-visibility` 仍为 visible，过渡能播）
+         → 过渡结束后**再挂 resizing**（跳过布局；此时已看不见，跳过不改变观感）。
+       ⚠️ `slime-resizing` 里还有拖动期必需的 `transition: none`（跟手），
+         所以它不能提前挂—— 提前挂会把淡出过渡也一起关掉。 */
+    document.body.classList.add("slime-fading");
+    /* 兜底：transitionend 可能不来（元素被 display 影响 / 用户极快松手）。
+       140ms 后无论如何进入第二阶段，绝不卡在"半透明 + 还在重排"的中间态。
+       ⚠️⚠️ A-1154：句柄必须存进 ref 并在 `endChatFreeze()` 里取消 —— 否则**短促拖拽**
+         松手后它才到点，把 `slime-resizing` 挂上且再没人摘 ⇒ 闪烁 + 聊天区残留隐藏。 */
+    window.clearTimeout(dragPhaseTimerRef.current);
+    dragPhaseTimerRef.current = window.setTimeout(() => {
+      dragPhaseTimerRef.current = 0;
+      /* ⚠️ 到点时若这一轮拖动已经结束（`slime-dragging` 已被 endChatFreeze 摘掉）⇒ 本阶段作废。
+         这条是"定时器与结束边界竞争"的守卫：没有它，上面那个 clearTimeout 一旦被
+         某条未覆盖的路径绕过（如 renderer 卡顿导致的延迟回调），延迟回调仍会污染。 */
+      if (!document.body.classList.contains("slime-dragging")) { return; }
+      document.body.classList.remove("slime-fading");
+      document.body.classList.add("slime-resizing");
+    }, 140);
     const startX = e.clientX;
-    const startWidth = sidebarWidthRef.current;
+    /* ⚠️⚠️ A-1154：与右栏同一处修复 —— 基准取 **DOM 实测宽度**，不取 `sidebarWidthRef.current`（state）。
+       `.sidebar` 有 `max-width: 520px` 与 `min-width: 240px`，且窗口变窄时会被 flex 压缩
+       ⇒ state 与实宽的错位会和右栏一样表现为"不跟手 / 到上限后完全无响应"。 */
+    const asideEl = leftSidebarRef.current;
+    const startWidth = asideEl ? asideEl.getBoundingClientRect().width : sidebarWidthRef.current;
     let lastW = startWidth;
+    /* A-1152：**拖动期间直接改 DOM 的 style.width，零 React 重渲染**；松手才 setSidebarWidth 落 state。
+       为什么必须这样（实测，用户报「左侧边栏拖拽依旧卡顿严重」）：
+         · 此前每个 `pointermove` 都 `setSidebarWidth(lastW)` ⇒ **每个鼠标移动触发一次
+           整个长会话的 React 重渲染**（ChatPanel 全文 + 右栏 + 工具栏全重渲）⇒
+           在 166Hz（帧预算 6ms）下必然掉帧；
+         · 纯 CSS 手段（`content-visibility` 跳过布局）**只压掉了"重排"这一半**，
+           压不掉 React 本身的工作量 ⇒ 用户体感"依旧卡"（这条是被实测否掉的中间方案，见
+           `.chat-scroll` 那节的更正注释）。
+       ⚠️ 这套做法在**右栏拖动上早已存在**（见 `handleRightSidebarResize` 的同名注释：
+       "零 React 重渲染…松开才 setRightWidth 落 state"）—— 左栏现在与它对齐，
+       两个 resizer 的行为口径一致。
+       ⚠️ 收尾必须清掉内联 width：否则 React 认为 prop 未变而不再写回，会留下脏内联值
+       （与右栏 `onUp`/`onCancel` 里那两处 `asideEl.style.width = ""` 同理）。 */
     const onMove = (ev: PointerEvent): void => {
       // 左栏：鼠标向右 → 变宽（范围 240–520，**不给占满全屏**）
       lastW = Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, ev.clientX - startX + startWidth));
-      setSidebarWidth(lastW);
+      if (asideEl) { asideEl.style.width = `${lastW}px`; }
     };
     const onUp = (): void => {
-      document.body.classList.remove("slime-resizing");
+      endChatFreeze();
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
       document.removeEventListener('pointercancel', onCancel);
       window.removeEventListener('blur', onCancel);
       try { captureEl.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
+      // 清掉拖动期写下的内联 width：否则 React 认为 prop 未变而不再写回，会留下脏内联值
+      if (asideEl) { asideEl.style.width = ""; }
       // A-980-R27：只有**真拖到几何下限**（240 + 吸附带）才收起。旧的 `<= 300` 是绝对像素，
       // 把「刚比下限宽一点」的整段区间都算成"拖到底"——左栏默认宽才 262，于是收起后重新
       // 拉宽，宽度一从下限起步就又触发收起，观感就是"左栏拉不开"。
@@ -1897,24 +2444,27 @@ export default function App(): JSX.Element {
         // 若拖之前本来就贴着下限（没有可留念的宽度），回落到按屏幕比例算的默认宽——
         // 保证下次展开出来的宽度一定在吸附带之外，不会一展开就又被自己"拖到底"。
         const fallback = Math.round(window.innerWidth * SIDEBAR_RATIO.left);
-        const restoreW = Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W,
-          startWidth > SIDEBAR_MIN_W + SIDEBAR_SNAP_W ? startWidth : fallback));
+        const restoreW = Math.round(Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W,
+          startWidth > SIDEBAR_MIN_W + SIDEBAR_SNAP_W ? startWidth : fallback)));
         setSidebarWidth(restoreW);
         localStorage.setItem('slime_sidebar_w', String(restoreW));
         // 走与按钮完全同一条几何同步淡出（此前是 setSidebarOpen(false) 裸切状态，内容直接消失）
         animateLeftSidebar(false);
         return;
       }
-      const w = Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, lastW));
+      const w = Math.round(Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, lastW)));
       setSidebarWidth(w);
       localStorage.setItem('slime_sidebar_w', String(w));
     };
     const onCancel = (): void => {
-      document.body.classList.remove("slime-resizing");
+      endChatFreeze();
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
       document.removeEventListener('pointercancel', onCancel);
       window.removeEventListener('blur', onCancel);
+      // 失焦/指针作废：用户并没有"松手"，不判吸附收起；但当前几何必须落 state 并清掉内联 width
+      if (asideEl) { asideEl.style.width = ""; }
+      setSidebarWidth(Math.round(Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, lastW))));
     };
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
@@ -1926,18 +2476,52 @@ export default function App(): JSX.Element {
   function handleRightbarResize(e: React.PointerEvent): void {
     e.preventDefault();
     setRightCustom(true); // A-1018：同左栏——拖过就按 px 记住
+    /* ⚠️⚠️ A-1153：与左栏同一处修复 —— 拖动第一帧就禁宽度过渡（见 handleSidebarResize 的说明）。
+       右栏同样把 `transition: none` 延迟到 140ms 后的 `slime-resizing`，导致拖动头段不跟手。 */
+    document.body.classList.add("slime-dragging");
     const captureEl = e.currentTarget as HTMLElement;
     // A-980-R27：与左栏同一套——指针捕获，避免指针划过 `<webview>`（OOPIF）时
     // mousemove/mouseup 被 guest 进程吃掉 → 拖拽卡死且 slime-resizing 残留
     try { captureEl.setPointerCapture(e.pointerId); } catch { /* 指针 id 已失效则忽略 */ }
-    document.body.classList.add("slime-resizing");
+    /* A-1152：聊天区淡出**必须分两阶段**（用户实测「我要的对话文本渐出消失衔接动画没有」）。
+       ⚠️⚠️ 上一轮写错了时序：`slime-resizing` 与 `slime-fading` **同一帧**挂上，
+         而 `slime-resizing` 带 `content-visibility: hidden` ⇒ **元素立刻跳过渲染**
+         ⇒ opacity 过渡**根本不会执行**（没有任何一帧被绘制）⇒ 观感就是"啪地消失"。
+       ⇒ 正确顺序：**先只挂 fading**（此时 `content-visibility` 仍为 visible，过渡能播）
+         → 过渡结束后**再挂 resizing**（跳过布局；此时已看不见，跳过不改变观感）。
+       ⚠️ `slime-resizing` 里还有拖动期必需的 `transition: none`（跟手），
+         所以它不能提前挂—— 提前挂会把淡出过渡也一起关掉。 */
+    document.body.classList.add("slime-fading");
+    /* 兜底：transitionend 可能不来（元素被 display 影响 / 用户极快松手）。
+       140ms 后无论如何进入第二阶段，绝不卡在"半透明 + 还在重排"的中间态。
+       ⚠️⚠️ A-1154：与左栏同一处修复 —— 句柄存 ref、`endChatFreeze()` 里取消，
+         并在到点时校验"本轮拖动是否已结束"（见 dragPhaseTimerRef 的详细说明）。 */
+    window.clearTimeout(dragPhaseTimerRef.current);
+    dragPhaseTimerRef.current = window.setTimeout(() => {
+      dragPhaseTimerRef.current = 0;
+      if (!document.body.classList.contains("slime-dragging")) { return; }
+      document.body.classList.remove("slime-fading");
+      document.body.classList.add("slime-resizing");
+    }, 140);
     const startX = e.clientX;
-    const startWidth = rightWidthRef.current;
+    /* ⚠️⚠️ A-1154：`startWidth` 必须取 **DOM 实测宽度**，不能取 `rightWidthRef.current`（state）。
+       真机 CDP 实测（`probe-drag-robust.mjs`，可见窗口 + 真实输入）抓到一条确定性失败：
+         第 1 轮拖动 `宽 712 → 712`（**完全无响应**），而同页第 2 轮起全部正常。
+       根因：`rightWidth` state 是**请求值**，而右栏实宽还会被两层几何压缩：
+         · `.right-sidebar { max-width: 100% }`（wrapper 被 flex 压窄时跟随收缩）；
+         · `.right-sidebar { min-width: 260px }` 与 `rightSidebarMaxW()` 的夹取。
+       ⇒ state 与实宽可能相差几百 px。此时 `lastW = startX - clientX + startWidth` 从**错的基准**起算：
+         · 实宽 > state：鼠标已移动很多，实宽还没到 state ⇒ 观感"手在前面、面板在后面"；
+         · 实宽 == maxW（如本次 712 == `min(1284, 712)`）：向右拖算出 >maxW ⇒ 被钳回原值
+           ⇒ **完全无响应**，用户实测「要尝试左右多次拖拽才会恢复正常」
+（先向左拖一次把宽度降到上限以下，才腾出拖动空间）。
+       ⇒ 基准取实测宽后，"鼠标位移 → 宽度变化"在**任何** state/实宽错位下都严格 1:1。 */
+    const asideEl = document.querySelector<HTMLElement>(".right-sidebar");
+    const startWidth = asideEl ? asideEl.getBoundingClientRect().width : rightWidthRef.current;
     let lastW = startWidth;
     // A-918++ 修复「拖动卡死 + 宽度不更新」：此前 onMove → rAF → setRightWidth 每帧触发 App 整树
     // 重渲染（ChatPanel/RightSidebar/设置面板全重渲）→ 主线程阻塞 → 鼠标卡死、宽度跟不上。
     // 现在拖动期间直接改右栏 DOM 的 style.width（零 React 重渲染），松开才 setRightWidth 落 state。
-    const asideEl = document.querySelector<HTMLElement>(".right-sidebar");
     // A-1016-F3：上限收敛到 `rightSidebarMaxW()`——与展开动画的钉宽**共用同一份实现**，
     // 避免"同一约束两处各写一遍 → 两个默认值"（此前这里的公式是内联的）。
     // ⚠️ 浮层已唤出时例外：此时主区是 fixed 浮层（`.main-float` min-width:0），不需要给它留位，
@@ -1951,16 +2535,20 @@ export default function App(): JSX.Element {
     const minW = rightSidebarMinW();
     const onMove = (ev: PointerEvent): void => {
       // 右栏：鼠标向左 → 变宽。下限 = 最窄宽度（截图比例），拖拽中始终跟手、且不会比最窄更窄
+      /* ⚠️ A-1154：`startWidth` 现在是 `getBoundingClientRect().width`（浮点，如 286.375）
+         ⇒ `lastW` 也是浮点。拖动中的**内联 width 保留浮点**（比取整更跟手，
+         且与实测基准同精度，不会累积 0.5px 的漂移）；
+         落 state / localStorage 时再 `Math.round`（见 onUp / onCancel）。 */
       lastW = Math.max(minW, Math.min(maxW, startX - ev.clientX + startWidth));
       if (asideEl) { asideEl.style.width = `${lastW}px`; }
     };
     const onUp = (): void => {
-      document.body.classList.remove("slime-resizing");
+      endChatFreeze();
       document.body.style.cursor = "";
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
       document.removeEventListener("pointercancel", onCancel);
-      window.removeEventListener("blur", onCancel);
+      window.removeEventListener('blur', onCancel);
       try { captureEl.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
       // 原地点击（没拖动）＝什么都不做：别让"点一下手柄"把宽度按上限重新夹一次
       if (lastW === startWidth) { return; }
@@ -1973,7 +2561,7 @@ export default function App(): JSX.Element {
         // 清掉拖拽期写下的内联 width：否则 React 认为 prop 未变而不再写回，会留下脏内联值。
         if (asideEl) { asideEl.style.width = ""; }
         // 下次展开宽度 = 拖拽前的宽度（不低于最窄宽度），保证它落在吸附带之外
-        const restoreW = Math.max(minW, Math.min(maxW, startWidth));
+        const restoreW = Math.max(minW, Math.min(maxW, Math.round(startWidth)));
         setRightWidth(restoreW);
         localStorage.setItem('slime_rightbar_w', String(restoreW));
         animateRightSidebar(false);
@@ -1983,12 +2571,13 @@ export default function App(): JSX.Element {
       if (w >= maxW - 80) {
         w = maxW;
       }
+      w = Math.round(w);
       localStorage.setItem('slime_rightbar_w', String(w));
       // 松开才触发一次 React 重渲染，最终宽度落 state（供下次拖动起点 + 持久化一致）
       setRightWidth(w);
     };
     const onCancel = (): void => {
-      document.body.classList.remove("slime-resizing");
+      endChatFreeze();
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
       document.removeEventListener("pointercancel", onCancel);
@@ -1996,7 +2585,7 @@ export default function App(): JSX.Element {
       // 失焦/指针作废：用户并没有"松手"，所以不判吸附收起；但当前几何必须落成 state 并清掉
       // 拖拽期的内联 width，否则 React 认为 prop 未变而不再写回，会留下脏内联值
       if (asideEl) { asideEl.style.width = ""; }
-      setRightWidth(Math.max(minW, Math.min(maxW, lastW)));
+      setRightWidth(Math.round(Math.max(minW, Math.min(maxW, lastW))));
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
@@ -2031,6 +2620,18 @@ export default function App(): JSX.Element {
         const node = leftSidebarRef.current;
         if (!node) { return; }
         node.style.opacity = done ? "" : String(p);
+        /* ⚠️⚠️ A-1155-R7：**浮层态下左栏宽度变化必须同步给 `--left-w`**。
+           用户明确要求「浮层时左栏保持可见，但不影响用户能手动折叠」——
+           左栏一折（240→0 或 0→240），浮层稳态的 `calc(100% - var(--left-w))` 就得跟着变，
+           否则折叠后右栏**少铺满 240px**（右侧留一条空白）、展开后又**多出 240px**（右缘越窗）。
+           ⚠️ 逐帧写（不是在 done 里写）：左栏宽度是**动画量**，
+              只在 done 写会让整个过渡期间 `calc` 用旧值 ⇒ 右栏与左栏**不同步**（观感是抽搐）。
+              `--left-w` 只喂宽度计算、不触发额外合成（wrapper 自己的 width 过渡负责平滑）。
+           ⚠️ `node.style.opacity` 的 done 复位仍走原路，这里只多写一个变量。 */
+        if (floatStateRef.current !== "none") {
+          const lw = node.getBoundingClientRect().width;
+          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(lw)}px`);
+        }
       },
       // A-980-R34：左栏用专属提前窗 [0.40,0.95]——渐出从 95% 宽就开始、渐入从 40% 宽就启动，
       // 比右栏 [0.45,0.90] 时机更早（带宽 55% 也更宽，窄栏下依然明显）
@@ -2113,9 +2714,30 @@ export default function App(): JSX.Element {
    *  这里的 opacity 只在**过渡期间**存在（动画结束立刻清空为 CSS 常态 1），不构成永久合成条件。
    *  A-980-R27：原注释里的"1s 硬兜底保证复位"已随几何化内核删除——复位靠"宽度停住即 done"这条
    *  必然成立的判据（过渡跑完宽度一定停）；唯一的"取消但不重启"路径是切会话，那里会显式清空 opacity。 */
-  function animateRightSidebar(nextOpen: boolean, nextWidth?: number): void {
+  function animateRightSidebar(nextOpen: boolean, nextWidth?: number, isFloat?: boolean): void {
     rightFadeCancelRef.current?.();
     rightFadeCancelRef.current = null;
+    /* ⚠️⚠️ A-1155：**取消上一次过渡 = 它的 done 回调永远不会跑** ⇒ 必须在这里补做清理**。
+       `runGeometrySyncFade` 的 `onFrame(_, true)` 是**上一次过渡结束时**才执行清理的唯一时机；
+       而本行刚把上一次 cancel 掉（切会话/连点/普通展开都会走到）⇒ 那次 done 被丢掉
+       ⇒ `right-wrapper-anim` / `right-wrapper-no-min`（`rightMin0`）与
+       `--right-body-pin` / `--right-target-w` **永久残留**。
+       实测（真 App CDP 探针）：点窗口化 → 切页 → 恢复窗口化后，
+       `rwAnim=true rwNoMin=true --right-body-pin=441px` 一直挂到稳态，
+       叠加出「右栏不铺满（`:not(.right-wrapper-anim)` 把它排除）+ `.right-body` 被钉在 441px
+       冲出窗口（`rb.r=1487 > vw=1332`）」——正是用户截图里的那条窄带。
+       ⇒ **清理的责任归"过渡起点"**，不再赌上一次的 done 会不会跑到（铁律 11：写/摘必须成对）。
+       ⚠️ 这里只做"复位到干净起点"，本轮该挂的类/变量由下面按 `nextOpen` 重新决定。 */
+    setRightMin0(false);
+    const rwReset = rightWrapperRef.current;
+    if (rwReset) {
+      rwReset.style.removeProperty("--right-body-pin");
+      rwReset.style.removeProperty("--right-target-w");
+      /* ⚠️ A-1155-R7：`--left-w` 只在**浮层稳态**有意义（喂 `calc(100% - var(--left-w))`）。
+         本轮若不是浮层，它必须被摘掉 —— 否则「浮层态残留的数学」会跟到普通展开里。
+         （普通展开的 width 走 `auto` 不吃它，但留着就是铁律 11 意义上的"写/摘不成对"。） */
+      if (!isFloat) { rwReset.style.removeProperty("--left-w"); }
+    }
     // A-1016-F3：上一轮被打断时钉子可能还挂着 → 先摘，再按本轮重新决定（避免脏 pin 叠加）
     setRightWebviewPin(null);
     const el = rightWrapperRef.current;
@@ -2128,32 +2750,143 @@ export default function App(): JSX.Element {
       : (document.querySelector<HTMLElement>(".right-sidebar")?.getBoundingClientRect().width ?? 0);
     if (pinTarget > 1) { setRightWebviewPin(pinTarget); }
     if (nextOpen) {
-      if (nextWidth !== undefined) { setRightWidth(nextWidth); }
+      /* ⚠️⚠️ A-1153：**浮层铺满（`nextWidth` 接近整窗）不许落 `rightWidth` state**。
+         它是持久副作用：退出浮层后右栏会一直按这个 px 值渲染 ⇒ 挤压 `.main`
+         （用户实测「对话内容被挤压到屏幕外」）；而且它**只能靠一次异步动画回调归还**，
+         归还与否取决于时序 ⇒ 时好时坏。
+         ⇒ 铺满宽度只写进**过渡期专用变量** `--right-target-w`（CSS 在
+           `body.float-layout .right-wrapper-anim .right-sidebar` 里读它驱动过渡），
+           稳定态由 `width: 100% !important` 接管、`rightWidth` 保持原值不动。
+         ⚠️ 非铺满的显式宽度请求（目前无调用点）仍走 state —— 语义不变。 */
+      /* ⚠️⚠️ A-1155：浮层支的判据从「宽度 > 0.8 × innerWidth」**改成显式入参 `isFloatExpand`**。
+         旧阈值是"猜"：它假设浮层目标宽必然接近整窗。而 A-1155 把目标改成
+         `innerWidth − 左栏实宽` 后，在**极宽窗口**（左栏满档 520px）下会
+         `innerWidth − 520 < 0.8 × innerWidth`（解得 `innerWidth > 2600`）
+         ⇒ 浮层被**误判成普通展开** ⇒ 走 `setRightWidth`（持久副作用回来了）+ 不挂 `float-layout`
+         ⇒ 又一轮"右栏不铺满 + 挤压 .main"的回归。
+         ⇒ 判据必须与**真状态**同源，不再用派生猜测量（铁律 11：同一事实一个产地）。
+         默认值 `undefined` ⇒ 走旧阈值（保持对历史调用点的行为不变）。 */
+      const isFloatExpand = isFloat !== undefined
+        ? isFloat
+        : (nextWidth !== undefined && nextWidth > window.innerWidth * 0.8);
+      if (nextWidth !== undefined && !isFloatExpand) { setRightWidth(nextWidth); }
+      if (el && isFloatExpand) { el.style.setProperty("--right-target-w", `${Math.round(nextWidth!)}px`); }
       if (el) { el.style.opacity = "0"; }
       // A-980-R34：展开期间临时解除内部 .right-sidebar 的 min-width（CSS: .right-wrapper-no-min .right-sidebar
       // { min-width: 0 }）——否则 260px 下限把展开钳在下限之上，渐变带 [0.45,0.90]×full 进不去，
       // 窄栏展开看不到渐入。done 后复位。
       setRightOpen(true);
       setRightMin0(true);
+      /* A-1152：过渡**开始**时同帧挂 `float-layout`（不等 useEffect）——
+         否则它要等下一次 render/effect 才生效 ⇒ 展开的第一帧仍按"非浮层"算宽度
+         ⇒ 右栏从旧宽硬跳到整窗宽（用户反馈「过渡帧直接没了」）。
+         ⚠️ 与上面那个 useEffect **不冲突**：那边负责"稳定态持续挂着"，
+            这里负责"过渡起点立刻生效"，摘除交给 useEffect 的 cleanup。 */
+      /* ⚠️⚠️ A-1152 **回归修复**：只在"窗口化"这一支同帧挂 `float-layout`；
+         其余情况（普通展开右栏）**必须摘掉**。
+         原因：`body.float-layout .right-sidebar { width: 100% !important }` 是给浮层态的，
+         而这里此前**无条件**挂类 ⇒ 普通展开也挂上，且 React 那个 useEffect 的依赖是
+         `mainIsFloatLayout`（不变就不重跑）⇒ **类永久残留**
+         ⇒ 用户实测「**右侧**边栏的收起出故障了，自适应功能更是没有了」
+            （收不起来 = `width:100%!important` 盖过收起宽度；不自适应 = 同样盖过按比例的宽度）。
+         ⇒ 判据用"本次请求宽是否接近整窗"（与透明度带那一支同一个条件，不另造状态）。
+         ⚠️ A-1155：改为复用上面算好的 `isFloatExpand`（显式入参优先）——
+         这里**原本又算了一遍同一个阈值**，两处必须同源，否则"类挂了但变量没写"这类半挂状态
+         会再次出现（铁律 11）。 */
+      if (isFloatExpand) {
+        document.body.classList.add("float-layout");
+      } else {
+        document.body.classList.remove("float-layout");
+      }
+      /* ⚠️⚠️ A-1152：过渡期**钉住右栏内容宽度**（消灭逐帧重排 = 用户的"很卡顿"）。
+         必须在这里一次性算好写入 —— 不能交给 CSS 用百分比：百分比会跟着正在动画的
+         `.right-sidebar` 一起变 ⇒ 又变成每帧重排。（A-1156：钉的**值**见下。） */
+      if (el) {
+        /* ⚠️⚠️ A-1156：目标宽与**稳态规则**同源。
+         *  · 浮层支：直接用 `nextWidth`（= 整窗 − 左栏实宽，由 handleToggleFloat 算出）。
+         *    此前还要过一道 `rightSidebarMaxW()`，但此刻 `floatStateRef.current` 仍是 "none"
+         *    （handleToggleFloat 是「先调本函数、后 setFloatState("float")」）⇒ 它走**非浮层**分支
+         *    = `min(innerWidth−48, innerWidth−左栏−380)`，实测把 1092 夹回 712 ——
+         *    用**派生猜测**代替真状态，正是 A-1155 修掉的同一类错（铁律 11）。
+         *  · 钉宽必须与稳态 `max-width` 同式（`min(RIGHT_CONTENT_MAX_W, 目标宽)`），
+         *    否则过渡结束那一帧内容宽度会从 pin 值突跳到稳态值（用户可见的一跳）。
+         *    旧式 `min(620, targetW × 0.62)` 随 A-1156 的封顶调整一并作废。 */
+        const targetW = isFloatExpand
+          ? (nextWidth ?? rightWidth)
+          : Math.min(nextWidth ?? rightWidth, rightSidebarMaxW());
+        el.style.setProperty("--right-body-pin", `${Math.round(Math.min(RIGHT_CONTENT_MAX_W, targetW))}px`);
+      }
       rightFadeCancelRef.current = runGeometrySyncFade(
         () => rightWrapperRef.current,
         (p, done) => {
-          if (done) { setRightMin0(false); setRightWebviewPin(null); }
+          if (done) {
+            setRightMin0(false);
+            setRightWebviewPin(null);
+            /* A-1152：钉宽变量只在过渡期有意义 ⇒ 与 `right-wrapper-anim` 同时摘掉，
+               否则稳定态会一直钉着旧值（窗口 resize 后内容不跟随）。
+               A-1153：`--right-target-w` 同理（成对写/摘，铁律 11）——残留会让下一次
+               普通展开误用上一次的超宽目标 ⇒ 过渡方向错乱。 */
+            const rw = rightWrapperRef.current;
+            rw?.style.removeProperty("--right-body-pin");
+            rw?.style.removeProperty("--right-target-w");
+          }
           const node = rightWrapperRef.current;
           if (!node) { return; }
           node.style.opacity = done ? "" : String(p);
         },
-        { min: 0, full: nextWidth ?? rightWidth },
+        /* ⚠️⚠️ A-1152：**窗口化（大幅展开）时透明度带要更早**（用户反馈「衔接动画也做得
+           乱七八糟」）。默认带是 `[0.45, 0.90] × full`，而窗口化时 `full = 整窗宽`
+           ⇒ 要涨到 90%×1388≈1250px 才完全不透明 ⇒ **绝大部分过渡时间右栏都是半透明的**
+           ⇒ 观感"乱七八糟"（内容半透明地漂着进来）。
+           ⇒ 与左栏 A-980-R34 同一个思路：**变化幅度越大，可见窗口越靠近起点**
+             （loRatio/hiRatio 收窄到 0.06/0.42：宽度到 42%×目标宽就完全显示）。
+           ⚠️ 只对"浮层态展开"这一支生效；普通展开（右栏回到 720px 档）仍用默认带，
+             否则普通展开会"刚动一下就全显示"，失去渐入感。
+           ⚠️ A-1155：判据同源改为 `isFloatExpand`（上面那处已算好，不再重复阈值判断）。 */
+        isFloatExpand
+          ? { min: 0, full: nextWidth ?? rightWidth, loRatio: 0.06, hiRatio: 0.42 }
+          : { min: 0, full: nextWidth ?? rightWidth },
       );
     } else {
       // 右栏占满时聊天悬浮窗一并退出浮层（恢复普通布局）
       // A-980-R25：必须走退场动画（此前 setFloatState("none") 直接卸载 → 聊天瞬间消失/瞬间出现）
       dismissFloat();
       setRightOpen(false);
+      /* ⚠️⚠️ A-1155：**与展开支严格对称地清理过渡期状态**。
+         此前这个 else 支只摘了 `--right-target-w`，漏掉三样 ⇒ 它们**永久残留**：
+           · `setRightMin0(false)` —— 摘 `right-wrapper-anim` / `right-wrapper-no-min`；
+           · `--right-body-pin` —— 钉住 `.right-body` 的内容宽；
+           · `opacity` 的收尾。
+         实测（真 App CDP 探针 `probe-a1155-cdp.mjs`，点窗口化→切页→恢复窗口化）：
+         恢复后 `body.float-layout` 已摘，但 `rwAnim=true rwNoMin=true --right-body-pin=441px`
+         **一直挂到稳态**，三者叠加出的可见故障：
+           ① `.right-sidebar` 的铺满规则是
+              `body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar`
+              —— `anim` 残留 ⇒ **`:not()` 永久把它排除** ⇒ 右栏算不出整窗宽（实测 287px ≠ 1332px）；
+           ② `--right-body-pin:441px` 把 `.right-body` 钉在 441px，而 wrapper 只有 287px
+              ⇒ 内容右缘冲到 `rb.r=1487 > vw=1332`（**越窗 155px**，用户截图「内容只有一段」/「被挤压到屏幕外」）。
+         为什么"点几次会好"：残留只在下一次**展开支**的 done 回调里被清（那里有三样里的两样），
+         而 done 的触发取决于那一次过渡是否被 cancel —— 时序赌博，所以时好时坏。
+         ⇒ 修法：**清理由"过渡起点"无条件负责，而不是靠上一次的 done 回调**（铁律 11：写/摘成对）。
+         ⚠️ 与展开支同帧、同在 `runGeometrySyncFade` 之前：先复位到干净态，再让本轮过渡重新钉值。 */
+      setRightMin0(false);
+      const rwEl0 = rightWrapperRef.current;
+      if (rwEl0) {
+        rwEl0.style.removeProperty("--right-body-pin");
+        rwEl0.style.removeProperty("--right-target-w");
+      }
       rightFadeCancelRef.current = runGeometrySyncFade(
         () => rightWrapperRef.current,
         (p, done) => {
-          if (done) { setRightWebviewPin(null); }
+          if (done) {
+            setRightWebviewPin(null);
+            // A-1153：与上面展开支对称 —— 过渡期变量成对摘除，绝不留残值
+            rightWrapperRef.current?.style.removeProperty("--right-target-w");
+            /* ⚠️ A-1155：done 时**再摘一次** `--right-body-pin`。
+               起点那次摘是为了"本轮不被上一次的残值污染"；这次摘是为了"本轮自己钉的值
+               在过渡结束后也归零"（否则本次 runGeometrySyncFade 期间若有人写它就会残留）。 */
+            rightWrapperRef.current?.style.removeProperty("--right-body-pin");
+          }
           const node = rightWrapperRef.current;
           if (!node) { return; }
           node.style.opacity = done ? "" : String(p);
@@ -2171,12 +2904,70 @@ export default function App(): JSX.Element {
   function handleToggleFloat(): void {
     if (floatStateRef.current === "min") { restoreFloat(); return; }
     if (floatStateRef.current === "float") { dismissFloat(); return; }
-    // A-980-R25：记住唤出前的右栏宽度——收起浮窗时归还，右栏平滑滑回原宽，
-    // 中间聊天栏随之"长出来"（而不是一次性弹到最小宽度）
-    preFloatRightWidthRef.current = rightWidth;
-    // A-1149：唤出即请求**整窗宽**（原 `innerWidth - 48` 会让那 48px 变成 .main 的实宽，
-    // 在收起后的左栏位置留下一条空白 —— 见 rightSidebarMaxW 上方的几何说明）
-    animateRightSidebar(true, Math.max(560, window.innerWidth));
+    /* A-1152：**进浮层态前先确保右栏是打开的**。
+       用户实测的一串问题（按钮"怎么点都没用" + 极不稳定）根因在
+       `mainIsFloatLayout = rightOpen && floatState !== "none"`（App.tsx:1426）：
+       浮层**只在这个条件为真时才真正挂载**。若此刻右栏是收的（`rightOpen === false`，
+       例如先前拖右栏把它拖到最窄触发了自动收起），点按钮会 `setFloatState("float")`——
+       **状态变了但什么都没挂载**，用户看到的就是"点了没反应"；再点又走 `dismissFloat()`
+       ⇒ 彻底错乱（这正是"怎么点击都没有用"）。
+       ⇒ 唤出时先 `setRightOpen(true)`（并走右栏展开动画），保证浮层真的有地方挂。
+       ⚠️ 只在 `none → float` 这一支做；`min`/`float` 两支各自的语义不动（A-980-R30）。 */
+    /* ⚠️⚠️ A-1153：唤出前只确保右栏"是开的"，**动画只由下面那一次调用承担**。
+       此前这里先调用了一次**无参数**的 `animateRightSidebar(true)`，紧接着（同一事件里）
+       又调用 `animateRightSidebar(true, 整窗宽)` —— 第二次开头 `rightFadeCancelRef.current?.()`
+       会把第一次的几何动画 cancel 掉，而 cancel **只停表、不复位样式**
+       ⇒ 两次动画的副作用叠加（opacity / min0 / pin 各写一遍）⇒
+       用户实测「再次点击窗口化，窗口出现一次**抽搐抖动**，但对话页没有窗口化」。
+       ⇒ 合并为一次（下面这次调用自己会 `setRightOpen(true)`）。 */
+    if (!rightOpen) { setRightOpen(true); }
+    /* ⚠️⚠️ A-1153：**不再写 `setRightCustom(true)` / `setRightWidth(innerWidth)`**。
+       旧实现用"把右栏宽度设成整窗宽"来实现浮层铺满，代价有两个（都是用户实测到的）：
+         · `rightCustom` 一旦置真就**再没有复位点**（全仓只有 3 处 `set(true)`、0 处 `set(false)`）
+           ⇒ 右栏永久失去 CSS 的比例自适应（用户原话「对话页自适应窗口调整失效」）；
+         · `rightWidth` 被写成整窗宽，且**只能靠一次异步动画回调归还**
+           ⇒ 未归还时"展开右栏"会把 `.main` 压到 `min-width: 380px`
+             = 用户截图里的「对话内容被挤压到屏幕外、被切割」，
+             而"左右拖几次就恢复"正是因为拖拽会 `setRightWidth(真实值)`。
+       ⇒ 铺满改由**两条纯 CSS 通道**承担（`rightWidth` / `rightCustom` 一概不碰）：
+         · **稳定态**：`body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar
+                       { width: 100% !important }`（已有，见 index.css）；
+         · **过渡期**：`--right-target-w`（由 animateRightSidebar 在过渡起点写入，done 时摘除）。
+       这样退出浮层时右栏自然回到它本来的宽度（`.right-sidebar` 自带 `transition: width 0.5s`，
+       回退是平滑的），不再需要任何"归还"。 */
+    // A-1149：唤出即请求**整窗宽**（该值现在只作**过渡几何驱动**，不再落 rightWidth state；
+    // 原 `innerWidth - 48` 会让那 48px 变成 .main 的实宽 —— 见 rightSidebarMaxW 的几何说明）
+    /* ⚠️⚠️ A-1155：**目标宽 = `.body` 宽 − 左栏实宽**，不是 `innerWidth`。
+       用户明确（本轮确认）：「左栏保持可见，但不影响用户能手动折叠」。
+       而 `.body` 是 `[.sidebar][.main][.right-wrapper]` 一行 flex ——
+       浮层态 `<main>` 已不占位（`width:0`），所以右栏能用的宽度就是 `.body` 减左栏。
+       此前传 `innerWidth` ⇒ 目标 1332 + 左栏 240 = 1572 > 1332 ⇒
+       **结构性超窗 240px**：wrapper 被压到 287px，`.right-sidebar` 的 `max-width:100%`
+       跟着被压 ⇒ 宽度不动 ⇒ `runGeometrySyncFade` 两条判据同时失效 ⇒ done 死锁
+       ⇒ `right-wrapper-anim` 摘不掉 ⇒ 铺满规则被 `:not()` 永久排除
+       ⇒ 用户截图「右栏内容自适应失效、只有一段」+「部分位置被挤压到屏幕外」。
+       实测（真 App CDP）：`rw.w=287`，而 `rb.r=1487 > vw=1332`（越窗 155px）。
+       ⇒ 取左栏**实测宽**（`getBoundingClientRect`，与 A-1154 拖拽基准同源），
+         左栏收起时自然为 0 ⇒ 右栏铺满整窗（语义与"左栏可手动折叠"自洽）。
+       ⚠️ 下限仍保 `560`（避免极窄窗口下目标小于可用宽度导致过渡方向反向）。 */
+    const leftWNow = leftSidebarRef.current?.getBoundingClientRect().width ?? 0;
+    const floatTargetW = Math.max(560, Math.round(window.innerWidth - leftWNow));
+    /* ⚠️⚠️⚠️ A-1155-R7：**稳态宽度变量** `--left-w`（`calc(100% - var(--left-w))` 的另一半）。
+       为什么需要它：浮层稳态的 wrapper 宽度必须是「`.body` 减左栏」，
+       而左栏是 `vw×17.5%`（窗口 resize 会变）⇒ 只能由变量驱动、不能写死 px。
+       寿命完全与浮层对齐：这里（唤出）写，`dismissFloat`（退出）摘。
+       ⚠️ 与 `--right-target-w` 的区别：那条是**过渡期**（done 即摘），
+          这条是**稳态**（整个浮层存续期都在）。两者都由几何 done 之后的稳态读值兜底。 */
+    const rwFloat = rightWrapperRef.current;
+    if (rwFloat) { rwFloat.style.setProperty("--left-w", `${Math.round(leftWNow)}px`); }
+    /* ⚠️⚠️ A-1155-R6：第三参 `isFloat` **必须显式传 true**。
+       `animateRightSidebar` 的浮层判据原本靠 `nextWidth > innerWidth × 0.8` 猜，
+       而现在 `floatTargetW = innerWidth − 左栏实宽` **恰好落在 0.8 倍边界下游**
+       （左栏 240px 时 1332−240=1092 < 1066? 不 —— 1092 > 1332×0.8=1065.6，仅高 26px）
+       ⇒ 左栏一旦变宽（或窗口变窄），阈值立刻判假 ⇒ 浮层被误判成**普通展开**
+       ⇒ 走 `setRightWidth`（持久副作用回来了）+ 不挂 `float-layout` ⇒ 右栏不铺满、挤压 .main
+       （铁律 11：同一事实一个产地 —— 判据必须与**真状态**同源，不用派生猜测量）。 */
+    animateRightSidebar(true, floatTargetW, true);
     setFloatState("float");
   }
 
@@ -2207,24 +2998,79 @@ export default function App(): JSX.Element {
       el.style.top = `${cy}px`;
     }
     setFloatAnim("closing");
+    /* ⚠️⚠️ A-1155：**退浮层必须对称摘掉"唤出"那一支挂上的全部过渡期状态**。
+       唤出走 `animateRightSidebar(true, 整窗宽)`（展开支），它挂了四样：
+         · `rightMin0 = true` ⇒ `right-wrapper-anim` + `right-wrapper-no-min` 两个类；
+         · `--right-target-w`（过渡期目标宽）；
+         · `--right-body-pin`（钉住 `.right-body` 的内容宽）；
+         · wrapper 的 `opacity`。
+       而**退出这条路由 `dismissFloat` 独占**（窗口化按钮的 `floatState === "float"` 分支），
+       **根本不经过 `animateRightSidebar` 的 else 支** —— 那条只服务标题栏的右栏开关。
+       ⇒ 此前退出浮层时四样**一个都没摘**（我曾在 else 支补过清理，对这条路径完全无效）。
+       实测（真 App CDP 探针 `probe-a1155-cdp.mjs`）点窗口化→切页→恢复窗口化后，
+       `rwAnim=true rwNoMin=true --right-body-pin=441px --right-target-w=1332px`
+       **一直挂到稳态**，三者叠加出的可见故障：
+         ① 铺满规则 `body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar`
+            因 `anim` 残留被 `:not()` **永久排除** ⇒ 右栏算不出整窗宽（实测 287px ≠ 1332px）
+            = 用户截图「右侧边栏内容自适应失效、只有一段」；
+         ② `--right-body-pin:441px` 把 `.right-body` 钉在 441px，而 wrapper 只有 287px
+            ⇒ 内容右缘冲到 `rb.r=1487 > vw=1332`（**越窗 155px**）
+            = 用户截图「右侧边栏部分位置被挤压到屏幕外」；
+         ③ 残留只在下一次**展开支的 done 回调**里被清（那里只清了两样），
+            而 done 是否跑到取决于那次过渡有没有被 cancel ⇒ **时序赌博**，
+            这正是"切几次页/点几次就恢复正常"的机制。
+       ⇒ 修法：**清理归"退场的起点"无条件负责**，不赌任何异步回调（铁律 11：写/摘必须成对）。
+       ⚠️ 放在 `setFloatAnim("closing")` 之后、几何淡出之前：先复位到干净起点，
+          让下面按**真实 `rightWidth`** 重新走退场几何（右栏平滑滑回自己的宽度）。 */
+    setRightMin0(false);
+    const rwExit = rightWrapperRef.current;
+    if (rwExit) {
+      rwExit.style.removeProperty("--right-body-pin");
+      rwExit.style.removeProperty("--right-target-w");
+      /* ⚠️ A-1155-R7：`--left-w` 是**稳态**变量（浮层存续期用于 `calc(100% - var(--left-w))`），
+         退场同样必须摘 —— 否则下次**普通展开**时它还在，虽然普通支的 width 走 `auto`
+         不受影响，但留着脏变量会让"谁在写谁在摘"不可审计（铁律 11）。 */
+      rwExit.style.removeProperty("--left-w");
+      /* ⚠️⚠️ A-1155-R8：**顺手摘掉 `.right-sidebar` 的内联宽残留**。
+         真 App CDP 实测：浮层稳态下 `rsInlineW="287px"` —— 那是**上一轮普通展开**
+         （`animateRightSidebar(_, nextWidth)` 的 `setRightWidth`）写下的内联宽，
+         浮层支不写它、但**也没有任何地方摘它** ⇒ 越窗排查时它会持续误导判读
+         （`.right-sidebar` 的 CSS `!important` 在浮层态盖过它，所以暂时不显形；
+          一旦某条路径摘掉那个 `!important`，287px 就会立刻显形 = 静默地雷）。
+         ⇒ 退浮层时一并清成 CSS 常态（普通展开路径自己会在展开起点重写）。 */
+      const rsExit = rwExit.querySelector(".right-sidebar");
+      if (rsExit instanceof HTMLElement && rsExit.style.width) { rsExit.style.width = ""; }
+    }
     // 内容淡出：量外框宽度、min=0（窗口收到 0 宽）；退场收尾挂在几何 done 上
-    startFloatGeometryFade(0, () => {
-      // 期间被最小化/还原打断（那两条路会复位本标记）→ 这次退场作废，别把 state 落成 none
-      if (!floatClosingRef.current) { return; }
-      floatClosingRef.current = false;
+    startFloatGeometryFade(0, (genOk) => {
+      /* ⚠️⚠️ A-1154：**先复位动画态，再判世代**。
+         `setFloatAnim("idle")` 必须无条件执行：渲染层的 `closing` 由它决定，
+         卡在 `"closing"` 会让浮窗 `w/h=0`（真机实测「进了浮层但浮窗不可见」）。
+         而 `setFloatState("none")` 是**业务状态回写**，只在"本轮退场仍是当前那一轮"时才允许 ——
+         否则一个**迟到的 done** 会把用户刚点出来的新浮层打回 none
+         （用户原话「窗口出现一次抽搐抖动，但对话页不会窗口化」，实测 S4a 零响应 / S4b 才生效）。 */
       setFloatAnim("idle");
+      // 期间被最小化/还原打断（那两条路会复位本标记）→ 这次退场作废，别把 state 落成 none
+      if (!floatClosingRef.current || !genOk) { return; }
+      floatClosingRef.current = false;
       setFloatState("none");
+      /* ⚠️ A-1155：done 时**再确认一次**过渡期状态已清（与上面起点那次构成"起点 + 收尾"双保险）。
+         若本轮期间有别的路径（如标题栏先把右栏展开动画起了）又写回这些值，这里兜住。
+         成对摘除是铁律 11 的硬要求：写的地方每多一处，摘的地方必须跟上。 */
+      setRightMin0(false);
+      rightWrapperRef.current?.style.removeProperty("--right-body-pin");
+      rightWrapperRef.current?.style.removeProperty("--right-target-w");
+      rightWrapperRef.current?.style.removeProperty("--left-w");
       const e2 = floatRef.current;
       if (e2) { e2.style.transition = FLOAT_TRANSITION; }
-      // 归还右栏宽度（若曾记录）：右栏 width 过渡 0.25s → 主区宽度逐步长开 →
-      // 内联聊天区的几何淡入才有几何可依（否则会一次性弹满）
-      const back = preFloatRightWidthRef.current;
-      preFloatRightWidthRef.current = null;
-      if (back !== null && Number.isFinite(back)) { setRightWidth(back); }
-      // A-980-R33：主区目标宽度 = 窗口宽 − 实测左栏宽 − 归还后的右栏宽——
+      /* ⚠️ A-1153：这里原本"归还右栏宽度"（`setRightWidth(back)`）——已删除。
+         浮层铺满现在**不改写 `rightWidth`** ⇒ 退出浮层时右栏本来就还是它自己的宽度
+         （`.right-sidebar` 常驻 `transition: width 0.5s`，`float-layout` 一摘就平滑滑回）。
+         ⚠️ 主区目标宽度改用**当前** `rightWidth`（= 退出后右栏将要占的宽，语义等价且无需归还）。 */
+      // A-980-R33：主区目标宽度 = 窗口宽 − 实测左栏宽 − 右栏宽——
       // 聊天区淡入窗口按它换算成比例（与侧栏/悬浮窗同一套 FADE_VISIBLE_LO/HI），自适应界面。
       const leftW = leftSidebarRef.current?.getBoundingClientRect().width ?? 0;
-      const targetRight = Number.isFinite(back) ? (back as number) : rightWidthRef.current;
+      const targetRight = rightWidthRef.current;
       const mainW = Math.max(CHAT_MIN_W, window.innerWidth - leftW - targetRight);
       // 等 React 提交内联聊天区后再起几何淡入（两帧：避开 commit 边界）
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => startInlineChatRevealFade(mainW)));
@@ -2345,11 +3191,13 @@ export default function App(): JSX.Element {
     // A-980-R24：内容透明度由**几何同步**驱动（量外框宽度，最小 = 图标 44px）——
     // 内容恰好在窗口缩到图标尺寸的同一帧消失，不再"刚点就没了"
     // A-980-R27：收尾（落 min 态）挂在几何 done 上，替代原来的 300ms 计时器
-    startFloatGeometryFade(FLOAT_ICON_SIZE, () => {
+    startFloatGeometryFade(FLOAT_ICON_SIZE, (genOk) => {
       const e2 = floatRef.current;
       if (e2) { e2.style.transition = FLOAT_TRANSITION; } // 动画结束：恢复基础过渡（拖拽跟手）
-      setFloatState("min");
+      /* A-1154：动画态无条件复位；`setFloatState` 是业务回写，只在仍是当前轮时写。 */
       setFloatAnim("idle");
+      if (!genOk) { return; }
+      setFloatState("min");
     });
   }
 
@@ -2382,8 +3230,10 @@ export default function App(): JSX.Element {
     // A-980-R24：还原同样走几何同步——内容 opacity 从"窗口多大"长出来，与展开几何严格同步
     // A-980-R27：结束（落 idle、恢复基础过渡）挂在几何 done 上，替代原来的 40ms+340ms 两段计时器。
     // 那两段计时器只是"猜"窗口什么时候长完，猜错就会把内容 opacity 留在中途或让拖拽带着 top/left 过渡。
-    startFloatGeometryFade(FLOAT_ICON_SIZE, () => {
+    startFloatGeometryFade(FLOAT_ICON_SIZE, (genOk) => {
+      /* A-1154：动画态无条件复位（否则浮窗卡在 closing ⇒ 0×0 不可见）；业务回写判世代。 */
       setFloatAnim("idle");
+      if (!genOk) { return; }
       const e2 = floatRef.current;
       if (e2) { e2.style.transition = FLOAT_TRANSITION; }
     });
@@ -2395,10 +3245,50 @@ export default function App(): JSX.Element {
    *  @param minW 收缩下限：最小化/还原传图标尺寸；「收起」退场传 0（窗口收到 0 宽）
    *  @param onDone 几何动画跑完（外框宽度停住）时的收尾——A-980-R27 用它替掉了
    *                最小化/还原/退场三处的固定时长计时器（300ms / 320ms / 40+340ms）：
-   *                "窗口真的缩到位/长到位了"才是下一阶段的开始，而不是"猜过了多久"。 */
-  function startFloatGeometryFade(minW: number = FLOAT_ICON_SIZE, onDone?: () => void): void {
+   *                "窗口真的缩到位/长到位了"才是下一阶段的开始，而不是"猜过了多久"。
+   *                ⚠️ A-1154：入参多一个 `genOk`（本轮回调是否仍是**当前**那一轮）。
+   *                   调用点里"业务状态回写"（`setFloatState`）必须先判 `genOk`，
+   *                   而"动画态复位"（`setFloatAnim("idle")`）必须无条件执行 —— 两者责任不同，
+   *                   见 `dismissFloat` 的详细说明。 */
+  function startFloatGeometryFade(minW: number = FLOAT_ICON_SIZE, onDone?: (genOk: boolean) => void): void {
     floatFadeCancelRef.current?.();
     floatFadeCancelRef.current = null;
+    /* A-1154：起新一轮 ⇒ 世代号自增 ⇒ 上一轮任何"迟到回调"立即过期（见 floatFadeGenRef 注释）。
+       ⚠️ 必须在 cancel 之后自增：cancel 只是停 rAF，但**回调可能已经排进了当前帧的微任务**。 */
+    const gen = ++floatFadeGenRef.current;
+    /* ⚠️⚠️ A-1154：被打断的那一轮**必须自己把临时类与变量摘干净**。
+       此前这里只 `?.()` cancel（rAF 停表），不摘 `slime-freezing` / `--slime-freeze-w` ——
+       而摘除只写在**本轮的几何 done** 里 ⇒ 一旦本轮 done 永不触发（见
+       `GEOM_SYNC_NEVER_MOUNT_FRAMES` 那节记录的"对象从未挂载"路径），
+       类与变量就**永久残留**（真 App CDP 实测 > 3.7s），把聊天区钉死在旧宽。
+       放这里（新周期开始**之前**）与 `animateRightSidebar` 的 cancel 分支同构 ——
+       铁律 11：临时态成对写/摘，谁挂谁负责摘。 */
+    document.body.classList.remove("slime-freezing");
+    document.body.style.removeProperty("--slime-freeze-w");
+    /* A-1152：过渡期间给 `body` 挂 `slime-freezing` ⇒ 聊天区切 `content-visibility: auto`
+       （保留可见区、跳过屏幕外），并在几何 done 时摘掉。
+       用户报「聊天页窗口化那一个瞬间，每次必然卡顿掉帧」—— 根因是外框宽高**每帧都在变**
+       ⇒ 里面整段会话每帧重排（与拖动侧栏同一个根因，只是这里不能 `hidden`：
+       浮层正要显示这段内容，藏起来用户会看到一片空白）。
+       挂在这个函数里是因为它是**最小化 / 还原 / 退场三条路径的共同入口**
+       （A-980-R27 已把三处的固定时长计时器都换成了几何 done）⇒ 一处覆盖全部。
+       ⚠️ 摘类必须放在几何 done，不能用固定时长（过渡被打断时会残留）。 */
+    document.body.classList.add("slime-freezing");
+    /* A-1152：把**目标宽度**写进 CSS 变量，聊天区据此钉住宽度（`width: var(--slime-freeze-w) !important`
+       + `flex: 0 0 auto`，见 index.css）⇒ 过渡期间内容**零重排**，只被祖先 `overflow: hidden` 裁切。
+       与右栏 `.right-wrapper-pin`（A-1016-F3）**同构** —— 那套是"钉住 webview 的 guest 宽度"，
+       这里是"钉住聊天区的宽度"，目的是同一个：**不让内容跟着容器宽度一起重排**。
+       ⚠️ 必须写 `floatSizeRef.current.w`（**目标**宽）而不是当前实测宽：
+       钉当前宽的话，还原方向上容器长大时内容仍要跟着重排 ⇒ 白钉。
+       ⚠️ 变量与 class 必须**成对**写/清：只写 class 会让 `var()` 落空 → 声明退化为 `auto`
+       → 等于没钉（右栏 pin 那节的注释已记过同一个坑）。 */
+    {
+      /* ⚠️ 读**最新**的 floatSize，不是 ref 的旧值：上面那个 resize effect 可能在同一时刻
+         把尺寸夹小（窗口变小），此时若还钉旧宽，聊天区会比窗口还宽 ⇒ 视口里出现空白
+         （用户实测："窗口化后…折叠的窗口内会暂时显示空白"）。 */
+      const targetW = Math.round(floatSizeRef.current.w);
+      if (targetW > 1) { document.body.style.setProperty("--slime-freeze-w", `${targetW}px`); }
+    }
     // A-980-R30：不再无条件置 0——最小化/退场方向首帧宽度是展开宽（p=1），先置 0 再写 1
     // 会闪一下全显示；还原方向的预置 0 由 restoreFloat 自己负责（唯一需要"从透明起步"的方向）。
     floatFadeCancelRef.current = runGeometrySyncFade(
@@ -2411,7 +3301,25 @@ export default function App(): JSX.Element {
           // 旧实现混了时间兜底，还原方向可能在外框还很窄时就被判 done 而把 opacity 钉死在 0。
           node.style.opacity = String(done ? (p < 0.5 ? 0 : 1) : p);
         }
-        if (done) { onDone?.(); }
+        if (done) {
+          /* ⚠️ A-1154：这里**不**做世代校验 —— 世代校验必须放在**回调内部**、且只挡
+             "业务状态回写"（`setFloatState`）。理由：`onDone` 里还承担**动画态复位**
+             （`setFloatAnim("idle")`）。若在这里就 return，那么"本轮已被新一轮取代"时
+             动画态就没人复位 ⇒ 渲染层 `closing` 恒真 ⇒ **浮窗永远 0×0 不可见**
+             （真机实测：S4a 进了浮层但 `fw=[252,42,0,0]`）。
+             ⇒ 拆开责任：本函数只负责"摘临时类/清变量"，世代判定交给各调用点的 onDone。 */
+          document.body.classList.remove("slime-freezing");
+          /* ⚠️⚠️ 变量必须**成对**清：只清class 会让下一轮过渡的第一帧就退回「没钉」
+             （= 又开始逐帧重排）；更糟的是若两处都漏，变量会**长期残留**，
+             聊天区一直被钉在某个旧宽度 ⇒ 用户看到「窗口内空白」（A-1152 实测）。
+             ⚠️ 这行曾被我在改写本段时漏掉，被守卫 `a1152-float-stability` 的
+             "两处都要 removeProperty" 抓到 —— 形状断言在这种静默失效上是有效的。 */
+          document.body.style.removeProperty("--slime-freeze-w");
+          /* ⚠️ A-1154：把"本轮回调是否仍是当前那一轮"作为**参数**交给调用点 ——
+             各调用点自己决定"哪些写操作要挡、哪些必须无条件做"（见 dismissFloat 的说明）。
+             `gen` 是本轮起动画时取的世代号，`floatFadeGenRef.current` 是最新世代。 */
+          onDone?.(gen === floatFadeGenRef.current);
+        }
       },
       { min: minW, full: floatSizeRef.current.w },
     );
@@ -2419,7 +3327,12 @@ export default function App(): JSX.Element {
 
   /** A-980-R16：悬浮窗拖拽调尺寸（右缘 e=宽 / 底缘 s=高 / 右下角 se=两者；
    *  拖拽中直接改 DOM，松手落 state 按会话记忆；尺寸钳制在窗口内）。
-   *  A-980-R17/R19：拖拽期间临时禁用宽高过渡（否则 0.3s 过渡让尺寸追不上鼠标），松手恢复基础过渡 */
+   *  A-980-R17/R19：拖拽期间临时禁用宽高过渡（否则 0.3s 过渡让尺寸追不上鼠标），松手恢复基础过渡。
+   *  ⚠️ A-1152：**当前无调用点** —— 浮窗那三个 resize 手柄已按用户要求删除
+   *  （「不仅有空白，还能手动拖拽强行拉开」）。函数**故意保留**：删手柄只是不想让用户拖，
+   *  实现本身没问题；若改主意要恢复手柄，直接接回即可。
+   *  ⚠️ 无调用点会被 `noUnusedLocals` 报 TS6133 ⇒ 函数下方有一行 `void startFloatResize;`，
+   *  那是「刻意保留」的可执行声明，删掉它 tsc 就红。 */
   function startFloatResize(e: React.MouseEvent, dir: "se" | "e" | "s" = "se"): void {
     if (e.button !== 0) { return; }
     e.preventDefault();

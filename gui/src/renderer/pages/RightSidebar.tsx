@@ -11,9 +11,9 @@ import {
   ChevronIcon, TaskIcon, GlobeIcon,
   GitIcon, PlusIcon, DashboardIcon,
   CheckboxIcon, CirclePlusIcon, LoadingCircleIcon,
-  TerminalIcon, FolderIcon, ArrowLeftIcon, ArrowRightIcon2,
+  TerminalIcon, FolderIcon, ArrowLeftIcon, SearchIcon,
   CloseIcon, RefreshIcon, CheckIcon, RepeatIcon, PaperclipIcon, EditIcon, WarningIcon,
-  DoneIcon, type IconProps,
+  FileTypeIcon, DoneIcon, type IconProps,
 } from "../components/Icon.js";
 import { alertAsync, confirmAsync } from "../dialog.js";
 import { SIDEBAR_OPEN_EVENT, requestSidebarOpen, type SidebarOpenPayload } from "./Markdown.js";
@@ -26,13 +26,38 @@ import { failTitle, failHint, failCodeName } from "./browserErrors.js";
 import TopicRail, { type RailEntry } from "./TopicRail.js";
 import { loadRailParams, onRailParams, type RailParams } from "./railParams.js";
 import BrainstormPanel from "./BrainstormPanel.js";
-import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT, resolveToolLabel } from "./ChatPanel.js";
+import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT, resolveToolLabel, readSessionProducts } from "./ChatPanel.js";
 // A-990：在途快照的读写已从 ChatPanel 拆到 liveMonitor.ts —— 纯内存取样不该依赖整个组件
 import { readLiveMonitor } from "./liveMonitor.js";
+/* A-1146：会话产物 diff 的查找（**纯函数**，可单测；数据源仍是 ChatPanel 那个唯一的 localStorage 产地）。 */
+import { findSessionFileDiff, type SessionFileDiff } from "./chatProducts.js";
 import { trackResizerGlint, clearResizerGlint } from "../resizerGlint.js";
 import { setBrowserHost, registerWebview, unregisterWebview, executeBrowserCommand, isWebNavUrl, normalizeBrowserUrl } from "./browserBridge.js";
+/* A-1133：工作文档判据（唯一产地）—— 决定「这个文件该抽文本还是直读」。 */
+import { classifyFile } from "../../../../core-ts/src/office/fileKinds.js";
+/* ⚠️ 阶段 C：判断"这个文件要经过 LibreOffice 才能保真预览"的**唯一产地**（与主进程 `planRender` 同一份）。
+   渲染层**不许**自己按扩展名拼判断 —— 那会变成第二个产地，且必然与主进程漂。 */
+import { needsLibreOffice } from "../../../../core-ts/src/office/renderPlan.js";
+/* A-1133：文档文本 → 结构化块（真表格 / 分页卡片 / 段落）—— 零依赖的「路线一」。 */
+import { buildDocView, docViewToHtml, DOC_CELL_MIN_EM } from "./docView.js";
+/* A-1139：内置终端。
+   · `ansi.js` = ANSI 转义解析（**零依赖**的纯叶子模块，与 ChatPanel 引 `context_compress` 同手法 ——
+     它是叶子，不会把主进程图谱拖进浏览器包）；
+   · shell 清单的类型只**借形状**（`import type`，编译后擦除）；判据全在主进程。 */
+import { parseAnsi, stripAnsi, type AnsiSpan } from "../../../../core-ts/src/terminal/ansi.js";
+/* A-1142：右栏请求的**会话归属判据**（唯一产地，纯函数）—— 挡住"上一个会话的 Agent 把页开到
+   当前会话"。渲染层不许自己再写一个「要不要收」的判断。 */
+import { sidebarOpenMatchesSession } from "../../../../core-ts/src/sidebarOpen.js";
+import type { TermProfile } from "../../shared/ipc.js";
+/* A-1137：右栏搜索页 —— 交付信息（URL + guest preload）+ 右栏视图的唯一产地（对话侧状态条读它）。 */
+import {
+  getSearchPageDelivery, publishSidebarTab, connectSidebarSearch,
+  type SearchPageDelivery, type SidebarTabView,
+} from "./sidebarSearch.js";
+/** 右栏页签类型（`SidebarTabView["kind"]` 是它的**超集**：多一个 `none`＝"一个页签都没有"）。 */
+type SidebarTabKind = SidebarTabView["kind"];
 // A-1106b：webview 导航统一走唯一安全出口（接住 loadURL 的异步 reject，-3 不算错）
-import { safeLoadURL } from "./webviewNav.js";
+import { safeLoadURL, navAutoLoadAllowed, noteNavFailure, clearNavFailure, type NavFailureBook } from "./webviewNav.js";
 // A-990：会话总账的币种与金额格式统一取共享层 —— 右栏不允许再出现硬编码汇率
 // （旧实现是 `costUsd * 7.25`，与共享层 USD_CNY_RATE=7.2 不一致 → 同一笔账两处显示不同数）
 import { pricingDisplayCurrency, formatUsdAs, type PriceCurrency } from "../../../../shared/gen/model-capabilities.js";
@@ -72,7 +97,7 @@ interface TabInstance {
   /** A-173：绝对路径（聊天消息内打开的文件） */
   fileAbs?: string;
   fileContent?: string;
-  fileMime?: "text" | "image" | "binary" | "pdf" | "office";
+  fileMime?: "text" | "docText" | "image" | "binary" | "pdf" | "office";
   fileError?: string;
   /**
    * A-1120：**降级说明**（不是错误）—— 例如「本想用浏览器渲染这个 .html，但起服务失败，已按源码显示」。
@@ -158,15 +183,56 @@ interface TaskEvent {
  * （只在控制台留一条 "Received `true` for a non-boolean attribute" 警告）→ 属性从没落到元素上 →
  * 站点 window.open / target=_blank 被 Chromium 直接丢弃，主进程 setWindowOpenHandler 连机会都没有
  * → "带跳转性质的按钮不会自动新建页"（用户实测）。这也正是历史上一度要注入脚本兜底的原因。 */
-const WebviewTag = React.forwardRef<HTMLElement, { src: string; style: CSSProperties; partition?: string; allowpopups?: boolean | string }>((props, ref) =>
-  React.createElement("webview", { ...props, allowpopups: props.allowpopups ? "true" : undefined, ref }),
+/* ⚠️⚠️ `plugins` 同理必须是**字符串** "true"（React 会丢弃值为 true 的未知布尔属性）。
+ *
+ * ## 这条是**防守性**的，**不是**某个 bug 的修复（2026-09-30 实测澄清）
+ * 起因是我查到 Electron 官方 `<webview>` 文档原文：「**Plugins are disabled by default.**」，
+ * 而 Chromium 的 PDF 查看器在 Electron 里是以插件形式实现的 ⇒ 推断"不开就空白"。
+ * **但实测否掉了这个推断**：`gui/scripts/probe-pdf-webview.mjs` 用**两个独立 Electron 进程**
+ * 做 A/B（开/不开 `plugins`），同一份真 PDF 的"白纸占比"**都是 0.641**（差 0.0 个百分点）
+ * ⇒ **这版 Electron（35）开不开都能渲染 PDF**。
+ * ⇒ 保留它的理由只有一条：官方文档明写默认关闭，**开着成本为零**、且能挡住"某些环境/某些
+ *    直接打开 `.pdf` 的路径"上的差异。**但不要再声称它是"否则空白"的原因** —— 那已被证伪。
+ * ⚠️ 查过文档确认：`plugins` **不在**那条"安全关键偏好"清单
+ * （`contextIsolation` / `javascript` / `nodeIntegration` / `sandbox` / `nodeIntegrationInSubFrames` / `enableWebSQL`）里
+ * ⇒ 放宽它**不会**让 guest 比宿主更不安全；且本 guest 仍保持 `sandbox:true` + `contextIsolation:true` + 无 nodeIntegration。
+ * ⚠️ Electron 要求 webview 属性在**首次导航前**生效 ⇒ 这里**固定开启**，不做"按 URL 动态切换"
+ * （动态切对已 attach 的 guest 无效，只会造成"有的 PDF 能看、有的不能"这种最难查的间歇故障）。 */
+/* A-1137：guest preload —— 右栏浏览器页的「宿主桥」来源（`<webview preload="file://…">`）。
+ *
+ * ## 为什么必须有，且为什么**每个**浏览器页都要带
+ * 用户自制搜索页把联网检索交给宿主，而右栏是 `<webview>`（独立顶层 frame）⇒ 页面里的
+ * `window.parent === window` ⇒ 它原设计的 `postMessage` 通道**只能听到自己发的消息**（已实测证伪）。
+ * 唯一通路就是 preload + `contextBridge`：让 guest 里出现 `window.SlimeBrowserHost`。
+ *
+ * ⚠️ **preload 的执行时机是「每次导航都会跑」，且它在文档创建那一刻自己判断要不要 expose**
+ *   （`gui/src/preload/searchHost.cjs::isLocalDocument()`：只在本机文档里 expose）。
+ *   ⇒ 所以挂在**所有**浏览器页上是**安全且必要**的：用户可能把搜索页开在任意一个页签里。
+ *   ⚠️ 别在这里按 URL 动态决定"给不给 preload" —— Electron 要求 webview 属性在**首次导航前**生效，
+ *   对已 attach 的 guest 改它无效（那会变成"有的页能搜有的不能"的间歇故障，同 `plugins` 那条注释）。
+ *
+ * ⚠️⚠️ **preload 必须在 webview 首次挂载时就是最终值**。所以渲染层**等交付信息回来才挂浏览器页**
+ *   （见 `RightSidebar` 的 `searchDelivery`）：否则会先挂一个**没有桥**的页面 —— 用户能看见搜索页、
+ *   却搜不动，而且**没有任何报错**（这类"能看但功能静默失效"是最坏的形态）。 */
+const WebviewTag = React.forwardRef<HTMLElement, { src: string; style: CSSProperties; partition?: string; allowpopups?: boolean | string; plugins?: boolean | string; preload?: string }>((props, ref) =>
+  React.createElement("webview", {
+    ...props,
+    allowpopups: props.allowpopups ? "true" : undefined,
+    plugins: props.plugins ? "true" : undefined,
+    ref,
+  }),
 );
 WebviewTag.displayName = "WebviewTag";
 
-/* ── 终端行 ── */
+/* ── 终端行 ──
+   A-1139：`spans` = ANSI 解析后的带样式片段（由 `core-ts/src/terminal/ansi.ts` 的**纯函数**产出，
+   渲染层不自己认转义序列 —— 那会变成第二个产地）。
+   ⚠️ 只有 `out`/`err` 带 spans：`cmd`/`info`/`notice` 的样式由 UI 决定，不该被 shell 的
+   转义序列影响（否则 `echo -e '\x1b[31m'` 能把我们的提示行染红）。`text` 保留 = 无 spans 时的回退。 */
 interface TermLine {
-  kind: "cmd" | "out" | "err" | "info";
+  kind: "cmd" | "out" | "err" | "info" | "notice";
   text: string;
+  spans?: AnsiSpan[];
 }
 
 /* ── Git 数据类型 ── */
@@ -208,6 +274,10 @@ export default function RightSidebar(props: {
   dl: Record<string, DownloadProgressInfo>;
   width?: number;
   onResize?: (e: React.PointerEvent) => void;
+  /** A-1152：**浮层态**（中间聊天页已卸载、右栏接管整宽）。
+   *  此刻**不挂拖拽手柄** —— 浮层里唯一能改变宽度的方式是「窗口化」往返。
+   *  ⚠️ 由 App 注入 `mainIsFloatLayout`，与"中间页是否卸载"是**同一份真状态**，不另造判据。 */
+  floatLayout?: boolean;
   /** A-949：群聊（brainstorm）默认不新建「任务」页——配套侧页另行设计；仍可手动新建文件/终端等页 */
   sessionType?: "normal" | "brainstorm";
   /** A-954：群聊成员 id 列表（含组长=agentId；BrainstormPanel 建群即预填成员卡） */
@@ -226,10 +296,47 @@ export default function RightSidebar(props: {
   const [activeId, setActiveId] = React.useState<string | undefined>(() =>
     props.sessionType === "brainstorm" ? undefined : "tasks",
   );
+  /* ══════════ A-1137：搜索页交付信息（右栏浏览器页的默认首页 + guest preload） ══════════
+   * 用户要求「以后点击新建浏览器页就直接是这个搜索引擎」。
+   *
+   * ⚠️ 为什么要有 `null` 这一态（而不是直接给个空字符串默认值）：`preload` 只有在 webview
+   *   **首次挂载**时生效，晚到的 preload 会得到一个「能看但搜不动」的页面（且无任何报错）。
+   *   ⇒ 拿不准就先**别挂**（返回 `null` 表示"还没问到"），问回来了再挂。
+   *   ⚠️ 失败（`error` 非空）**也要挂**（否则用户连普通浏览器都用不了）—— 但要把原因显示出来，
+   *   不能让"新建浏览器页是空白"变成一件没有解释的事。 */
+  const [searchDelivery, setSearchDelivery] = React.useState<SearchPageDelivery | null>(null);
+  React.useEffect(() => {
+    let alive = true;
+    void getSearchPageDelivery().then((d) => { if (alive) { setSearchDelivery(d); } });
+    return () => { alive = false; };
+  }, []);
+  /* 对话侧状态条的数据源在渲染层的一半：**右栏此刻开着什么**。
+   * ⚠️ 只在这里发布（唯一产地）—— 别让 ChatPanel 自己去猜右栏状态（那是第二个产地，必然漂）。
+   * ⚠️ 发布的是**有效 URL**（`tab.url || 搜索页地址`）：空白浏览器页显示搜索页时 `tab.url` 仍是空串
+   *   （我们**故意不回写**，为了保住 `openBrowserTab` 里"复空白页"的三段兜底判据）。 */
+  const searchHomeUrl = searchDelivery?.url ?? "";
+  React.useEffect(() => {
+    const t = tabs.find((x) => x.id === activeId) ?? null;
+    const kind: SidebarTabKind = t?.type ?? "none";
+    const raw = t?.type === "browser" ? (t.url ?? "").trim() : "";
+    publishSidebarTab(
+      { kind, url: raw || (kind === "browser" ? searchHomeUrl : ""), title: (t?.title ?? "").trim() },
+      searchHomeUrl,
+    );
+  }, [tabs, activeId, searchHomeUrl]);
+  /* 订阅 guest 上报（经主进程转发的搜索视图）—— 与上面的本地页签状态汇合到同一份快照里。 */
+  React.useEffect(() => connectSidebarSearch(), []);
   // A-920：每会话一套「完全独立」的右侧边栏——切换会话时把 tabs（已打开的浏览器/文件/Git 页）+ 活动页
   // 快照进 per-session 槽位，切回时原样还原；配合任务区按 sessionId 隔离（A-919），多会话绝不串联
   const sidebarSnapRef = React.useRef<Record<string, { tabs: TabInstance[]; activeId?: string }>>({});
   const prevSidRef = React.useRef<string | null>(null);
+  /* A-1142：不归当前会话的右栏请求按**会话号**暂存（见下面主进程订阅处的注释）。
+     键 = 请求自带的 `sessionId`（只有它非空时才会进这个表）。 */
+  const pendingOpenRef = React.useRef<Record<string, SidebarOpenPayload[]>>({});
+  /* ⚠️ 必须是 ref：主进程订阅那个 effect 的依赖是 `[]`，闭包里的 `props.sessionId`
+     会永远停在首次挂载那一刻 —— 用它做归属判断等于没有隔离。 */
+  const sessionIdRef = React.useRef<string>(props.sessionId ?? "");
+  sessionIdRef.current = props.sessionId ?? "";
   React.useEffect(() => {
     const sid = props.sessionId ?? "";
     if (prevSidRef.current !== null && prevSidRef.current !== sid) {
@@ -246,6 +353,20 @@ export default function RightSidebar(props: {
         const fresh = props.sessionType === "brainstorm" ? [] : [createTab("tasks")];
         setTabs(fresh);
         setActiveId(props.sessionType === "brainstorm" ? undefined : "tasks");
+      }
+      /* A-1142：**补投**这个会话"不在前台时"攒下的打开请求 —— 那个 Agent 早就把页开好了，
+         只是当时界面显示的不是它的会话。不补投 = 工具回执说"已打开"而用户永远看不到。
+         ⚠️ 必须**下一个宏任务**才发：本 effect 里 `setTabs` 刚排完队，同步派发的话
+         接住事件的是**上一次渲染**注册的监听器（闭包里还是上一个会话的 tabs）⇒ 会复用到错的页签。
+         等一个宏任务，React 已经重渲染并按新 tabs 重注册了监听器。 */
+      const pend = pendingOpenRef.current[sid] ?? [];
+      if (pend.length > 0) {
+        pendingOpenRef.current[sid] = [];
+        setTimeout(() => {
+          for (const p of pend) {
+            requestSidebarOpen({ ...p, from: p.from === "site" ? "site" : "user" });
+          }
+        }, 0);
       }
     }
     prevSidRef.current = sid || null;
@@ -466,6 +587,42 @@ export default function RightSidebar(props: {
           updateTab(tab.id, { fileAbs: undefined, fileContent: undefined, browseRoot: resolved.path, title: fname });
           return;
         }
+        /* ══ A-1133：工作文档**不能**当文本直读 ══════════════════════════════════════════
+           旧路径对任何文件都调 `readFileAbs`（按 utf-8 读）⇒ .docx/.xlsx/.pdf 拿到的是二进制乱码。
+           乱码比报错更坏：用户会以为"文档坏了"，模型会把乱码当真去回答。
+           ⇒ 走文档通道抽文本（`slime:docs:read`，判据在 core-ts 的 `office/*` 与 `doc_text.ts`），
+             并用 `fileNotice` 如实说明"这是**文本预览**，不是原排版"（`fileNotice` 的语义正是
+             "内容在，但不是用户点这一下所期望的形态"）。 */
+        const kindInfo = classifyFile(resolved.path);
+        /* ⚠️ A-1133 修正：**PDF 不在这里拦** —— `readFileAbs` 返回的 `mime:"pdf"` 会走右侧栏既有的
+           **内嵌 Chromium PDF 查看器**（`<embed>`），那比"抽成纯文本"体面得多。上一轮我一律走文本，
+           等于把更好的路径覆盖掉了（用户当轮反馈"稍微有点不和我心意"，这里纠正）。
+           ⚠️ 同理：`mime:"office"` 分支原本有「图标 + 用系统应用打开」，也不该被文本形态取代 ——
+           所以 office 文档走**新的 `docText` 形态**：既有文本可读，也保留系统打开的出口。 */
+        if (kindInfo.office && kindInfo.kind !== "pdf") {
+          const dr = await api?.docs?.read?.(resolved.path).catch(() => null) as
+            { ok?: boolean; text?: string; error?: string; truncated?: boolean } | null | undefined;
+          if (dr?.ok) {
+            /* ⚠️ 阶段 C：老格式**多一句实话** —— 它其实可以保真预览，只是缺 LibreOffice。
+               不说这句的话，用户会以为"老文件天生就只能看文本"（能装一个软件解决的事被当成限制）。
+               判据单一产地：`needsLibreOffice()`（与 `renderPage` 内部用的是同一条规则）。 */
+            const loNote = needsLibreOffice(resolved.path)
+              ? "（装好 LibreOffice 后可点上方「网页渲染」查看原版式）"
+              : "";
+            updateTab(tab.id, {
+              fileContent: dr.text ?? "", fileMime: "docText", fileAbs: resolved.path, fileError: undefined,
+              fileNotice: `已转成**结构化文本**预览（.${kindInfo.ext} 的原排版仍需系统程序）${dr.truncated ? "；内容较长已截断" : ""}。${loNote}`,
+            });
+            return;
+          }
+          /* 抽不出文本（加密 PDF / 扫描件 / 老版二进制…）⇒ 退回 `office` 形态：图标 +
+             「用系统应用打开」，并**如实说明原因**（既不静默，也不显示乱码）。 */
+          updateTab(tab.id, {
+            fileContent: undefined, fileMime: "office", fileAbs: resolved.path, fileError: undefined,
+            fileNotice: `没能抽出文本：${dr?.error ?? "未知原因"}`,
+          });
+          return;
+        }
         const res = await api?.workspace?.readFileAbs?.(resolved.path).catch(() => null) as WorkspaceReadFileResult | null | undefined;
         if (res?.ok) {
           updateTab(tab.id, { fileContent: res.content ?? "", fileMime: res.mime, fileAbs: res.path ?? resolved.path, fileError: undefined });
@@ -571,6 +728,83 @@ export default function RightSidebar(props: {
   };
 
   /**
+   * A-1133 + A-1136：**文档 → 网页**。两条路线，**优先保真**：
+   *
+   * 1. **A-1136 保真渲染**（首选）：把原文件字节交给真渲染库（pptx-preview / docx-preview / SheetJS）
+   *    ⇒ 字体/字号/颜色/位置/图片都按原样还原 = 用户要的「像图片一样」。
+   * 2. **A-1133 结构化重排**（兜底）：抽文本 → 纸张壳 HTML。**不是保真**，但老格式/未知类型能看。
+   *
+   * ⚠️ 无论走哪条，**`docs.read` 抽文本都不撤** —— 那是 Agent 理解文件内容的唯一入口
+   *    （用户明确要求：「不要到时候只能用户看，Agent 什么都做不了」）。
+   *
+   * ⚠️ 任何一环失败都**退回文件页并说明原因** —— 静默退回等于让用户以为功能没做
+   *    （这正是上一轮"文档文本"形态被拍的原因：他没看出那是渲染结果还是源码）。
+   */
+  const openDocPreviewPage = (path: string, name?: string): void => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    void (async () => {
+      const label = (name ?? "").trim() || path.split(/[\\/]/).pop() || "文档";
+
+      /* A-1136：**先试保真渲染**（人看要的是"像图片一样"，不是抽文本重排）。
+         能保真的类型（pptx/docx/xlsx）直接成功；
+         阶段 C 起**老格式（.doc/.xls/.ppt）也走这条**（内部先用本机 LibreOffice 转 PDF）；
+         老格式若本机没装 LibreOffice ⇒ 返回 `needs:"libreoffice"` + `hint` ⇒ 这里**如实告知**后再退回文本。
+         ⚠️ 两条通道**都要在**：保真渲染给人看，`docs.read` 抽文本给 Agent 读（用户明确要求，不许回退）。 */
+      const rp = await api?.docs?.renderPage?.({ path, name: label }).catch(() => null) as
+        { ok?: boolean; dir?: string; name?: string; error?: string; degrade?: boolean;
+          needs?: string; hint?: string; reason?: string; transient?: boolean } | null | undefined;
+      /* ⚠️⚠️ **保真路线的「任何**一种没成功**都要有话说**（2026-09-30 用户实测「怎么变成 md 样式了」）：
+         旧实现只覆盖 `reason === "no-libreoffice"` 与 `"failed"` 两种 —— 下面三种情形**完全静默**：
+           ① `rp` 为 `null`/`undefined`（IPC 未接通 / 主进程处理时抛了）；
+           ② `rp.ok===false` 但是**别的**原因（例如主进程版本旧、`.ppt` 被当成"不支持保真"）；
+           ③ `rp.ok===true` 却 **serve / URL 失败**。
+         静默的后果 = 用户只看到"样式变了个样"，既不知道**为什么**、也不知道**怎么办**（A-1133 的老教训）。
+         ⇒ 现在**每一条**都拼成 `routeNote`，写进结构化页面的**可见提示条**里。 */
+      let routeNote = "";
+      if (rp?.ok && rp.dir) {
+        const served = await api?.http?.serve?.({ dir: rp.dir }).catch(() => null) as
+          { ok?: boolean; urls?: string[]; error?: string } | null | undefined;
+        const url = served?.ok ? buildPreviewUrl(served.urls, rp.name ?? "index.html") : null;
+        if (url) { openBrowserTab(url, label); return; }
+        routeNote = `保真渲染页已生成，但本地服务没起来或没返回可用地址（${served?.error ?? "未知原因"}）。`
+          + "当前按文本结构重排显示，不是原版式。";
+      } else if (rp && rp.ok === false) {
+        routeNote = (rp.needs === "libreoffice" && rp.reason === "no-libreoffice")
+          ? `${rp.hint ?? "需要本机安装 LibreOffice。"}（当前按文本结构重排显示，不是原版式）`
+          : (rp.needs === "libreoffice" && rp.reason === "failed")
+            ? `LibreOffice 转换失败：${rp.error ?? "未知原因"}（当前按文本结构重排显示，不是原版式）`
+            : `保真渲染不可用：${rp.error ?? "未知原因"}（当前按文本结构重排显示，不是原版式）`;
+      } else {
+        /* `rp` 为 null/undefined：IPC 没接通、或主进程在处理时抛了异常。
+           ⚠️ **主进程改动必须重启应用才生效** —— 这句提示就是给"更新后没重启"这种最常见的坑准备的。 */
+        routeNote = "保真渲染通道没有响应（若应用刚更新过，请**重启应用**后再试）。"
+          + "当前按文本结构重排显示，不是原版式。";
+      }
+
+      const dr = await api?.docs?.read?.(path).catch(() => null) as
+        { ok?: boolean; text?: string; error?: string } | null | undefined;
+      if (!dr?.ok) {
+        openFileAbs(path, label, `${routeNote}\n（另外，文本提取也没成功：${dr?.error ?? "未知原因"}）`);
+        return;
+      }
+      /* 保真路线没成功 ⇒ **结构化重排**（纸张壳 + 段落/表格/分页结构），并挂上上面那段**可见**提示。 */
+      const html = docViewToHtml(
+        buildDocView(classifyFile(path).kind, dr.text ?? ""),
+        { title: label, source: path, notice: routeNote },
+      );
+      const written = await api?.docs?.htmlPreview?.({ name: label, html }).catch(() => null) as
+        { ok?: boolean; dir?: string; name?: string; error?: string } | null | undefined;
+      if (!written?.ok || !written.dir) { openFileAbs(path, label, `生成预览页失败：${written?.error ?? "未知原因"}`); return; }
+      const served = await api?.http?.serve?.({ dir: written.dir }).catch(() => null) as
+        { ok?: boolean; urls?: string[]; error?: string } | null | undefined;
+      if (!served?.ok) { openFileAbs(path, label, `启动本地服务失败（${served?.error ?? "未知原因"}）。`); return; }
+      const url = buildPreviewUrl(served.urls, written.name ?? label);
+      if (!url) { openFileAbs(path, label, "本地服务没有返回可用地址，已按文本显示。"); return; }
+      openBrowserTab(url, label);
+    })();
+  };
+
+  /**
    * A-1121（②）：终端页 —— 复用**已有**终端页（终端是有状态的：历史、运行中的命令，
    * 多开只会让用户不知道自己在哪个终端里），没有才新建；每次打开都刷新 `termNonce`
    * 以便同一个命令被再次预填时也能生效。
@@ -627,7 +861,10 @@ export default function RightSidebar(props: {
         }
         recentPopupRef.current = [...recent, now];
       }
-      if (d.kind === "file" && d.rel) {
+      if (d.kind === "doc" && d.rel) {
+        /* A-1133：文档 → HTML 网页渲染（用户要的“变换成 HTML”落地在这里）。 */
+        openDocPreviewPage(d.rel, d.name);
+      } else if (d.kind === "file" && d.rel) {
         /* A-1120（①）：**产物按类型分流**在这里落地（不能在 `ProductPanel` 做：`ProductItem`
            只有 rel/name，没有绝对路径；侧栏才有 workspace + openTarget + `http.serve`）。
            `.html/.htm/.xhtml` → 浏览器跑真页面；其余（含 `.md`、`.ts`…）仍走文件页源码。
@@ -676,6 +913,20 @@ export default function RightSidebar(props: {
     const w = window as unknown as { slimeAPI?: { onSidebarOpen?: (cb: (p: SidebarOpenPayload) => void) => () => void } };
     const off = w.slimeAPI?.onSidebarOpen?.((p) => {
       if (!p) { return; }
+      /* A-1142：**归属校验**。右栏视图是全局单例，而 Agent 是异步的 ——
+         用户在会话 A 派活、切到会话 B 之后 A 的 Agent 才跑完工具 ⇒ 这条请求若就地打开，
+         就会变成"上一个会话的页开到了这个会话里"（用户实测复现）。
+         ⇒ 不归当前会话的请求**暂存**进它自己那个会话的队列，等切回时补投（不是丢弃：
+         丢弃 = 工具回执说"已打开"、而用户在自己会话里永远看不到）。
+         ⚠️ `sessionIdRef` 而不是 `props.sessionId`：这个 effect 的依赖是 `[]`，
+         闭包里的 props 会永远停在首次挂载那一刻（实测踩过同类坑）。 */
+      const owner = p.sessionId ?? "";
+      if (!sidebarOpenMatchesSession(owner, sessionIdRef.current)) {
+        const q = pendingOpenRef.current[owner] ?? [];
+        q.push(p);
+        pendingOpenRef.current[owner] = q;
+        return;
+      }
       // A-975-R4：来源透传——主进程 setWindowOpenHandler（站点弹窗）会带 from:"site"，
       // 走弹窗风暴限流；Agent 的工具调用不带（属于用户意图，不限流）。
       requestSidebarOpen({
@@ -751,7 +1002,14 @@ export default function RightSidebar(props: {
           （上一版写「6px → 10px」而 CSS 里是 8px，两处漂移成假陈述）。
           `--rz-y` 的驱动与左栏**共用同一个实现**（`resizerGlint.ts`，两栏各写一份 =
           流光位置有第二个定义）。 */}
-      {props.open && (
+      {props.open && !props.floatLayout && (
+        /* ⚠️⚠️ A-1152（用户原话：「取消中间聊天部分的可以手动拖拽左右侧边栏宽度，被挤压卸载的功能，
+           **改成只能点窗口化收起**」）：**浮层态下不挂拖拽手柄**。
+           此前 resizer 只看 `props.open` ⇒ 浮层态（右栏展开着）手柄仍在 ⇒ 用户能直接拖它
+           ⇒ 拖动会把右栏拉窄/拉宽，而 `.main` 已归零 ⇒ 观感就是"中间被强行拉开/出现空白"。
+           ⇒ 浮层态只保留「窗口化按钮」这一个入口（右栏宽度由 `rightSidebarMaxW()` 统管）。
+           ⚠️ `floatLayout` 由 App 注入（`mainIsFloatLayout`），是"此刻中间页已卸载"的**同一份真状态**
+           —— 不用另造判据，避免第二份事实。 */
         <div className="right-sidebar-resizer" onPointerDown={props.onResize}
           onMouseMove={trackResizerGlint} onMouseLeave={clearResizerGlint} />
       )}
@@ -980,12 +1238,22 @@ export default function RightSidebar(props: {
           // Agent 切回/操作时重挂载 about:blank 并中断原加载（抖音等反爬站点重载即白屏，用户实测"右侧白屏开不了"）。
           // 资源占用改由「失活显式 setBackgroundThrottling(true)」控制（非激活页动画/定时器/合成降速），
           // 状态不丢、不重载、不白屏；N 个重 tab 叠加的占用是 Chromium 固有成本。
+          //
+          // A-1137：**交付信息没回来之前不挂浏览器页**。`preload` 只在 webview 首次挂载那一刻生效，
+          // 晚到的 preload 会得到一个「能看见搜索页、却搜不动且不报错」的页面 —— 比不显示更坏。
+          // （正常情况下这是一瞬间：主进程在注册 IPC 时就已经预热了搜索页。）
+          if (searchDelivery === null) { return null; }
           return (
             <div
               key={t.id}
               style={{ display: isActive ? "flex" : "none", flexDirection: "column", height: "100%", minHeight: 0 }}
             >
               <BrowserTabInstance tabId={t.id} url={t.url ?? ""} active={isActive}
+                /* A-1137：每个浏览器页都拿 preload（是否真正 expose 由 preload 自己按"本机文档"判，
+                   见 `searchHost.cjs`）；空白页的默认首页 = 搜索页。 */
+                preload={searchDelivery.preload}
+                homeUrl={searchDelivery.url}
+                homeError={searchDelivery.error}
                 onUrlChange={(url) => updateTab(t.id, { url })}
                 onTitleChange={(title) => updateTab(t.id, { title })} />
             </div>
@@ -997,6 +1265,8 @@ export default function RightSidebar(props: {
         {activeTab && activeTab.type === "file" && (
           <FileTab tab={activeTab} workspace={props.workspace}
             onBrowseRootChange={(root) => updateTab(activeTab.id, { browseRoot: root })}
+            agentId={props.agentId}
+            sessionId={props.sessionId}
             onBack={() => {
               const gitIdx = tabs.findIndex((t) => t.type === "git");
               if (gitIdx >= 0) { setActiveId(tabs[gitIdx].id); }
@@ -1749,7 +2019,10 @@ function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: st
                       </div>
                     )}
                     {diff && diff.hunks.length > 0 && (
-                      <div style={{ maxHeight: 280, overflow: "auto", background: "var(--bg)" }}>
+                      /* A-1130：与工具卡/思考历程的 diff 用**同一套类**（`think-diff-body` 只负责
+                         滚动与底色，`diff-rows-fit` 负责"行行同宽、底色铺到最右"）——
+                         此前这里是手抄的一份内联样式，等于同一个事实两个产地，改一处必漏一处。 */
+                      <div className="think-diff-body diff-rows-fit">
                         {diff.hunks.map((h, i) => (
                           <div key={i}>
                             <div style={{ padding: "2px 10px", background: "rgba(56,139,253,0.12)", color: "var(--accent-hover, #58a6ff)", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11 }}>{h.header}</div>
@@ -1913,14 +2186,16 @@ const ARCHIVE_NAMES = {
 interface FSActionState {
   rel: string;
   name: string;
-  mime: "text" | "image" | "binary" | "pdf" | "office";
+  mime: "text" | "docText" | "image" | "binary" | "pdf" | "office";
   content: string;   // 文本原义；图片/二进制为 base64
   size: number;
   truncated?: boolean;
   error?: string;
 }
 
-function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => void; onBrowseRootChange?: (root: string) => void }): JSX.Element {
+function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => void; onBrowseRootChange?: (root: string) => void;
+  /* A-1146：会话产物 diff 需要「哪个会话」的产物 —— 由主组件透传（子组件自己不持有全局状态）。 */
+  agentId?: string | null; sessionId?: string }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
   const workspaceRoot = props.workspace?.trim() || "";
 
@@ -2062,11 +2337,36 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
    * 压根不该走 Git 对比，本次改动的 before/after 正躺在聊天区的工具卡里。
    */
   const [diffErrorCode, setDiffErrorCode] = React.useState<"" | "not-repo" | "no-head" | "not-found">("");
+  /* A-1146：右栏「对比」的**第二个数据源** —— 本次会话的产物改动。
+     用户原话：「右侧边栏的对比功能还是限定死了在 Git 仓库，我觉得应该可以像对话里面的一样，展现此次变动。」
+     现实是大量文件根本不在 Git 仓库里（新项目 / 临时脚本 / Agent 现生成的文件）⇒ 以前只会得到一句
+     "不在 Git 仓库内…请用聊天区工具卡查看" ⇒ 等于没有这个功能。
+     ⚠️ 优先级 = **会话产物优先**：它正是"此次变动"（用户要的），Git HEAD 退为兜底（看历史差异）。 */
+  const [sessionDiff, setSessionDiff] = React.useState<SessionFileDiff | null>(null);
+  const [diffSource, setDiffSource] = React.useState<"session" | "git">("git");
   // A-918++：切换查看的文件时重置 diff（避免把上一个文件的 HEAD 版本误贴到新文件）
   React.useEffect(() => { setDiffMode(false); setDiffHead(null); setDiffError(""); setDiffErrorCode(""); }, [preview?.rel]);
   /** 左右分栏：左侧文件列表宽度占比（%） */
   const [split, setSplit] = React.useState(40);
   const splitRef = React.useRef<HTMLDivElement>(null);
+  /**
+   * A-1133：**左栏收起**（用户原话：「文件查看页的左侧文件列表无法收起……总是因为这个列表而无法
+   * 完全显示文件内容」）。收起后左栏宽度归 0，内容区独占整宽。
+   *
+   * 为什么做成**可持久化**：看长文档是连续行为 —— 每开一个文件都要再点一次收起，
+   * 等于把"用户已经表达过的偏好"丢掉（NN/g 第 3 条：用户应当有控制权且状态可预期）。
+   * ⚠️ 与 `split` 分开存：收起不该覆盖用户拖过的分栏比例，展开时要回到他上次的宽度。
+   */
+  const [listCollapsed, setListCollapsed] = React.useState<boolean>(() => {
+    try { return localStorage.getItem("slime.fileTab.listCollapsed") === "1"; } catch { return false; }
+  });
+  const toggleListCollapsed = React.useCallback((): void => {
+    setListCollapsed((v) => {
+      const next = !v;
+      try { localStorage.setItem("slime.fileTab.listCollapsed", next ? "1" : "0"); } catch { /* 隐私模式等忽略 */ }
+      return next;
+    });
+  }, []);
 
   /** 拖动分隔条，动态调整列表/预览分栏宽度 */
   const startResize = (e: React.MouseEvent): void => {
@@ -2284,6 +2584,74 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
         </div>
       );
     }
+    /* ══ A-1133：工作文档的**结构化文本**形态 ═══════════════════════════════════════════
+       为什么不复用 `text` 分支：那一支是**源码视图**（等宽、不折行、按语言高亮），文档正文恰恰相反 ——
+       要按段落排版、要折行、要能看表格/分页标记。
+       为什么用 `pre-wrap` 而不是 Markdown 渲染：抽取出来的正文**没有 Markdown 语法**，而
+       Markdown 会把"单换行"合并成一段（docx 的段落正是按单换行分隔的）⇒ 段落结构会被吃掉。
+       `pre-wrap` + `break-word` 才是"所见即抽取结果"，且**长行不再无限右溢**（用户报的正是在这里）。
+       ⚠️ 这里刻意不写 `whiteSpace: "pre"`（那正是"单行无限往右延伸"的根因）。 */
+    if (preview.mime === "docText") {
+      const blocks = buildDocView(classifyFile(preview.name).kind, preview.content);
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, flexShrink: 0 }}>
+            <FileTypeIcon filename={preview.name} size={14} />
+            <span style={{ color: "var(--text-secondary)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 1 }}>{preview.name}</span>
+            <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>文档文本</span>
+            <span style={{ flex: 1 }} />
+            {/* 用户要求：把「这里只能看」讲清楚，旁边给一个**只说「跳转」**的按钮（按钮内不放长文案）。 */}
+            <span style={{ color: "var(--text-dim)", fontSize: 10.5, flexShrink: 0 }}>当前窗口仅供浏览，如需修改请在系统程序中打开</span>
+            {/* A-1133：主按钮 = **转成 HTML 当网页看**。用户原话：「不是说了变换成 HTML 吗，怎么还在文件查看器内？」
+                ⚠️ `FileTab` 与 `Sidebar` 是**两个组件** ⇒ 这里只能发事件，由 `Sidebar` 里那份
+                `openDocPreviewPage` 落地（"该建什么页"的判据只有一处 —— 本仓的既有约定）。 */}
+            <button className="btn primary" title="转成 HTML 并用网页方式打开（可选中 / 缩放 / 查找）"
+              style={{ padding: "3px 12px", fontSize: 11, flexShrink: 0 }}
+              onClick={() => requestSidebarOpen({ kind: "doc", rel: preview.rel ?? "", name: preview.name, from: "user" })}>网页渲染</button>
+            <button className="btn" title="用系统默认程序打开（可编辑）" style={{ padding: "3px 14px", fontSize: 11, flexShrink: 0 }} onClick={() => void openInSystem(preview)}>跳转</button>
+          </div>
+          <div className="doc-text-view" style={{
+            flex: 1, minHeight: 0, overflow: "auto", padding: "12px 16px",
+            fontSize: 12.5, lineHeight: 1.8, color: "var(--text)",
+          }}>
+            {blocks.length === 0
+              ? <div style={{ color: "var(--text-dim)" }}>（该文档没有可显示的文本内容）</div>
+              : blocks.map((b, i) => (b.type === "page" ? (
+                /* pptx：一页一张卡片（原版式仍需系统程序；这里保证"页边界"这个结构不丢） */
+                <section key={i} style={{ marginBottom: 14, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ padding: "5px 10px", background: "var(--bg-secondary)", fontSize: 11, color: "var(--text-dim)", fontWeight: 600 }}>{b.label}</div>
+                  <div style={{ padding: "10px 12px", whiteSpace: "pre-wrap", wordBreak: "break-word", overflowWrap: "anywhere" }}>{b.lines.join("\n")}</div>
+                </section>
+              ) : b.type === "table" ? (
+                /* xlsx / 旧版 xls：**真表格**（这是"显示正确内容"的关键 —— 网格文本读起来根本不是表） */
+                <div key={i} style={{ marginBottom: 16 }}>
+                  {b.title && <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 4, fontWeight: 600 }}>{b.title}</div>}
+                  <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+                    <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                      {b.header.length > 0 && (
+                        <thead><tr>{b.header.map((h, j) => (
+                          <th key={j} style={{ border: "1px solid var(--border)", padding: "4px 10px", background: "var(--bg-secondary)", color: "var(--text-muted)", fontWeight: 600, textAlign: "left", whiteSpace: "nowrap", minWidth: `${DOC_CELL_MIN_EM}em` }}>{h}</th>
+                        ))}</tr></thead>
+                      )}
+                      <tbody>{b.rows.map((r, ri) => (
+                        <tr key={ri}>{r.map((c, ci) => (
+                          /* ⚠️ `minWidth` 与网页版同源（`DOC_CELL_MIN_EM`）：中文 min-content = 1 个汉字，
+                             不设下限时"旁边那列超长"会把这一列压成**竖排单字**（用户 2026-09-28 截图）。
+                             两处渲染共用同一个常量，不许各写一份（铁律 11）。 */
+                          <td key={ci} style={{ border: "1px solid var(--border)", padding: "4px 10px", minWidth: `${DOC_CELL_MIN_EM}em`, whiteSpace: "pre-wrap", wordBreak: "break-word", overflowWrap: "anywhere" }}>{c}</td>
+                        ))}</tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                /* docx / pdf / 纯文本：段落（可折行 —— ⚠️ 不许回到 `white-space: pre`） */
+                <p key={i} style={{ margin: "0 0 10px", whiteSpace: "pre-wrap", wordBreak: "break-word", overflowWrap: "anywhere" }}>{b.text}</p>
+              )))}
+          </div>
+        </div>
+      );
+    }
     // A-980-R8：Office（word/excel/ppt）——右侧栏不内置解析，提供图标 + 系统应用打开
     if (preview.mime === "office") {
       const officeIcon = OFFICE_ICONS[lowExt];
@@ -2293,9 +2661,10 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{preview.name}</div>
           <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
             Office 文档不在右侧栏内预览（格式复杂）。<br />
-            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>大小：{fmtSize(preview.size)}</span>
+            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>大小：{fmtSize(preview.size)}</span><br />
+            当前窗口仅供浏览，如需修改请在系统程序中打开。
           </div>
-          <button className="btn" style={{ marginTop: 4, padding: "7px 18px", fontSize: 12, fontWeight: 600 }} onClick={() => void openInSystem(preview)}>用系统应用打开</button>
+          <button className="btn" title="用系统默认程序打开（可编辑）" style={{ marginTop: 4, padding: "7px 22px", fontSize: 12, fontWeight: 600 }} onClick={() => void openInSystem(preview)}>跳转</button>
         </div>
       );
     }
@@ -2361,7 +2730,11 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
       if (diffLoading) {
         return <div style={{ flex: 1, padding: 16, color: "var(--text-dim)", fontSize: 12 }}>读取 Git HEAD 版本…</div>;
       }
-      if (diffHead === null) {
+      /* A-1146：两个数据源在这里合流 —— 会话产物（"此次变动"）优先，Git HEAD 兜底。
+         ⚠️ 变量而不是复制渲染块：两份 diff 视图一旦各写一份，样式与统计口径迟早漂。 */
+      const sd = diffSource === "session" ? sessionDiff : null;
+      const useSession = !!sd && !sd.trimmed;
+      if (!useSession && diffHead === null) {
         /* A-1029：按**失败种类**分色。
            "不是 Git 仓库"是**信息**而不是错误——这个目录本来就没有历史版本，用户没做错什么，
            真正有用的信息是"去哪看这次改动"。全屏红字 `fatal: not a git repository` 只会让人
@@ -2374,12 +2747,17 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
               <span style={{ flex: 1 }}>{diffError || "（此文件未纳入 Git / HEAD 无此版本）"}</span>
             </div>
             <div>
+              {/* A-1146：两条路都拿不到时，把"各自为什么不行"说清楚 —— 尤其"这次改过但详情没存下来"
+                  这一种，静默只给 Git 的提示会让用户以为"这次没改过"。 */}
+              {sessionDiff?.trimmed && (
+                <div style={{ color: "var(--text-dim)" }}>提示：本次会话确实改过这个文件，但改动过大，详情未随会话记录保存（可在对话产物卡里看完整版）。</div>
+              )}
               <button className="btn" style={{ padding: "4px 12px", fontSize: 12 }} onClick={() => void toggleDiff()}>返回原文件</button>
             </div>
           </div>
         );
       }
-      const dRows = diffLinesFn(diffHead, preview.content);
+      const dRows = diffLinesFn(useSession && sd ? sd.old : (diffHead ?? ""), useSession && sd ? sd.new : preview.content);
       let addN = 0, delN = 0;
       for (const r of dRows) { if (r.op === "+") addN++; else if (r.op === "-") delN++; }
       return (
@@ -2387,11 +2765,14 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, flexShrink: 0 }}>
             <span style={{ color: "var(--success)", fontWeight: 600 }}>+{addN}</span>
             <span style={{ color: "var(--danger)", fontWeight: 600 }}>−{delN}</span>
-            <span style={{ color: "var(--text-dim)" }}>Git HEAD → 当前</span>
+            <span style={{ color: "var(--text-dim)" }}>{useSession && sd ? `本次会话的改动（${sd.name}）` : "Git HEAD → 当前"}</span>
             <span style={{ flex: 1 }} />
             <button className="btn" style={{ padding: "2px 10px", fontSize: 11 }} onClick={() => void toggleDiff()}>返回原文件</button>
           </div>
-          <div style={{ flex: 1, minHeight: 0, overflow: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.6, background: "var(--bg)" }}>
+          {/* A-1130：`diff-rows-fit` 让所有行同宽 ⇒ 底色铺到最右（判据见 index.css）。
+              ⚠️ 这个容器自己的 `flex:1/minHeight:0` 是布局需要，故保留内联样式，
+                 只把"行行同宽"这条**判据**交给唯一产地（类）。 */}
+          <div className="diff-rows-fit" style={{ flex: 1, minHeight: 0, overflow: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.6, background: "var(--bg)" }}>
             {dRows.map((r, i) => (
               <div key={i} className={`think-diff-row diff-${r.op === "=" ? "eq" : r.op === "+" ? "add" : "del"}`} style={{ display: "flex", padding: "0 10px" }}>
                 <span className="think-diff-mark" style={{ width: 18, flexShrink: 0, userSelect: "none", fontWeight: 700, color: r.op === "+" ? "var(--diff-add)" : r.op === "-" ? "var(--diff-del)" : "var(--text-dim)" }}>{r.op === "=" ? " " : r.op === "+" ? "+" : "−"}</span>
@@ -2403,7 +2784,10 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
       );
     }
     return (
-      <pre style={{ flex: 1, margin: 0, padding: "12px 14px", fontSize: 13, fontFamily: "Consolas, 'Courier New', monospace", lineHeight: 1.6, color: "var(--text)", overflow: "auto", whiteSpace: "pre", tabSize: 2 }}>
+      /* A-1133：**代码**保留不折行（等宽 + 横向滚动是它的正确形态），但**纯文本**必须折行 ——
+         否则一篇长文就是"单行无限往右延伸"（用户报的正是这个）。判据用"有没有识别出语言"：
+         认出语言 = 代码（`highlightCode` 会处理）；没认出 = 普通文本 ⇒ 折行。 */
+      <pre style={{ flex: 1, margin: 0, padding: "12px 14px", fontSize: 13, fontFamily: "Consolas, 'Courier New', monospace", lineHeight: 1.6, color: "var(--text)", overflow: "auto", whiteSpace: lang ? "pre" : "pre-wrap", wordBreak: lang ? "normal" : "break-word", overflowWrap: lang ? "normal" : "anywhere", tabSize: 2 }}>
         {lang ? highlightCode(preview.content, lang) : preview.content}
       </pre>
     );
@@ -2416,6 +2800,19 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
   const toggleDiff = async (): Promise<void> => {
     if (!preview || preview.mime !== "text") { return; }
     if (diffMode) { setDiffMode(false); return; }
+    /* A-1146：先问「本次会话有没有改过这个文件」—— 有就直接看它（不依赖 Git 仓库）。
+       ⚠️ 两条路都拿不到时，**说明白两条路各自为什么不行**（不静默降级）。 */
+    const sid = props.sessionId ?? "";
+    const aid = props.agentId ?? "";
+    const hit = aid && sid
+      ? findSessionFileDiff(readSessionProducts(aid, sid), preview.rel || preview.name || "")
+      : null;
+    if (hit && !hit.trimmed) {
+      setSessionDiff(hit); setDiffSource("session");
+      setDiffMode(true); setDiffLoading(false); setDiffError(""); setDiffErrorCode("");
+      return;
+    }
+    setSessionDiff(hit); setDiffSource("git");
     if (!workspaceRoot) { setDiffMode(true); setDiffError("未设置工作目录，无法对比 Git HEAD"); setDiffErrorCode("not-repo"); setDiffHead(null); return; }
     setDiffMode(true); setDiffLoading(true); setDiffError(""); setDiffErrorCode(""); setDiffHead(null);
     try {
@@ -2445,17 +2842,23 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
       {/* 顶栏：← 返回上级 + 路径 + 打开文件夹 */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
         <button onClick={goBack} title={canGoUp ? "返回上一级" : "返回 Git 仓库"} disabled={!canGoUp} style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: canGoUp ? "pointer" : "not-allowed", color: canGoUp ? "var(--text-secondary)" : "var(--text-dim)", fontSize: 12, opacity: canGoUp ? 1 : 0.5 }}><ArrowLeftIcon size={14} /></button>
+        {/* A-1133：左栏收起/展开（唯一开关）。收起后内容区独占整宽 —— 长文档不再被列表挤窄。 */}
+        <button onClick={toggleListCollapsed}
+          title={listCollapsed ? "展开左侧文件列表" : "收起左侧文件列表（让内容占满宽度）"}
+          style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: listCollapsed ? "var(--accent-hover)" : "var(--text-secondary)", fontSize: 12, flexShrink: 0, display: "inline-flex", alignItems: "center" }}>
+          <ChevronIcon size={13} rotate={listCollapsed ? 0 : 180} />
+        </button>
         <span style={{ fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 3 }} title={crumbPath}><FolderIcon size={11} style={{ flexShrink: 0 }} />{crumbPath}</span>
         <button onClick={() => void handlePickFolder()} disabled={pickingFolder} title="打开系统文件夹（可访问任意位置）" style={{ background: "transparent", border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: "var(--text-secondary)", fontSize: 11, flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 3 }}>{pickingFolder ? "选择中…" : <><FolderIcon size={12} /> 打开文件夹</>}</button>
         {preview && preview.mime === "text" && preview.rel && (
-          <button onClick={() => void toggleDiff()} title="对比当前文件与 Git HEAD 的改动（红绿 diff）" style={{ background: "transparent", border: `1px solid ${diffMode ? "var(--accent)" : "var(--border)"}`, borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: diffMode ? "var(--accent-hover)" : "var(--text-secondary)", fontSize: 11, flexShrink: 0 }}>{diffMode ? "✓ 对比中" : "对比改动"}</button>
+          <button onClick={() => void toggleDiff()} title="对比改动：优先看**本次会话**对这个文件的改动，没有再对比 Git HEAD（红绿 diff）" style={{ background: "transparent", border: `1px solid ${diffMode ? "var(--accent)" : "var(--border)"}`, borderRadius: 4, padding: "2px 7px", cursor: "pointer", color: diffMode ? "var(--accent-hover)" : "var(--text-secondary)", fontSize: 11, flexShrink: 0 }}>{diffMode ? "✓ 对比中" : "对比改动"}</button>
         )}
       </div>
 
       {/* 左右分栏容器 */}
       <div ref={splitRef} style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
-        {/* 左：文件列表 */}
-        <div style={{ width: `${split}%`, minWidth: 120, maxWidth: "75%", display: "flex", flexDirection: "column", overflow: "hidden", borderRight: "1px solid var(--border)" }}>
+        {/* 左：文件列表（A-1133 可收起：宽度归 0 + 去掉分隔线，内容区独占整宽） */}
+        <div style={{ width: listCollapsed ? 0 : `${split}%`, minWidth: listCollapsed ? 0 : 120, maxWidth: listCollapsed ? 0 : "75%", display: "flex", flexDirection: "column", overflow: "hidden", borderRight: listCollapsed ? "none" : "1px solid var(--border)" }}>
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
             {dirError && (
               <div style={{ padding: "8px 12px", color: "var(--danger)", fontSize: 12, background: "rgba(248,81,73,0.08)", borderBottom: "1px solid var(--border)" }}>⚠ {dirError}</div>
@@ -3938,17 +4341,140 @@ function fmtMsSmart(ms: number): string {
 
 /* ═══════════════ 终端 ═══════════════ */
 
+/* ═══════════════ 终端（A-1139 全面重写） ═══════════════
+ *
+ * ## 用户实测反馈（2026-10-01）
+ * 「内置终端体验很差……**我本地部分代码都无法适配**，你给我全面优化一下，**适配现在终端的所有
+ *   样式**，可以在使用时**自适应直接接入主机本地终端的各个组件**」—— 对标 VS Code 的终端下拉
+ *   （PowerShell 7 / Windows PowerShell / 命令提示符 / WSL 发行版 / Developer Command Prompt for VS /
+ *   Developer PowerShell for VS / Git Bash）。
+ *
+ * ## 三个根因与对应修法
+ *  ① **永远是 cmd**：旧实现是主进程 `exec(cmd)` —— 平台默认 shell，用户装的是 PowerShell 7、
+ *    WSL、Git Bash，一个都用不上 ⇒ 现在下拉选（探测 + 判据全在主进程）。
+ *  ② **中文乱码**：`exec` 把输出按 UTF-8 解，而中文 Windows 控制台是 CP936(GBK) ⇒
+ *    主进程改用 `decodeBytes`（严格 UTF-8 试起，失败退 GB18030）。
+ *  ③ **满屏转义垃圾 / 进度条刷屏**：旧实现把 `\x1b[32m`、`\x1b[K` 原样打印 ⇒ 现在按
+ *    `parseAnsi` 渲染颜色，剥掉光标控制序列（我们不是终端模拟器，留着只会显示成垃圾字符）。
+ *
+ * ## cwd：**主进程定事实，渲染层只存缓存**
+ * 一次性进程模型下 shell 记不住 cwd（`cd src` 然后 `ls` 会跑在原目录）。现在主进程从每条命令
+ * 推导"下一条该在哪儿"（`resolveCd` + 存在性校验），并经 `TermResult.cwd` 回带 ——
+ * 渲染层拿到什么就存什么，**不做任何推导**（算错的 cwd 会让命令静默跑错目录，比不延续更糟）。
+ *
+ * ## 降级必须看得见（铁律 31）
+ * 超时 / 输出截断 / 编码兜底 / 工作目录被拒 —— 全部经 `TermResult.notice` 显示成一行
+ * `notice`。旧实现超时返回 `ok:true` + 部分输出 ⇒ 用户以为命令正常结束了，这是最坑的一条。
+ */
+
+/** 终端输出 → 带样式的行（**纯函数**，可被守卫直接断言，不必驱动组件渲染）。 */
+function termOutputLines(raw: string, kind: "out" | "err"): TermLine[] {
+  const parts = String(raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  /* 末尾换行会切出一个空元素 —— 它表示"输出到此为止"，不是"一行空行"。 */
+  if (parts.length > 0 && parts[parts.length - 1] === "") { parts.pop(); }
+  const out: TermLine[] = [];
+  for (const line of parts) {
+    const spans = parseAnsi(line);
+    /* 纯控制序列行（进度条的擦除/光标移动帧）⇒ `parseAnsi` 给空数组 ⇒ **跳过**。
+       ⚠️ 与"真正的空行"区分：空行 strip 后也是空串，但**原串本身为空** ⇒ 空行要保留
+       （输出里的空行是排版信息，全丢掉会很挤）。 */
+    if (spans.length === 0 && line.length > 0) { continue; }
+    out.push({ kind, text: stripAnsi(line), spans });
+  }
+  return out;
+}
+
+/** ANSI 片段 → 内联样式。色值来自 `ansi.js` 的标准 16 色 / 256 色表（不在渲染层另立一份）。 */
+function ansiSpanStyle(s: AnsiSpan): CSSProperties {
+  const st: CSSProperties = {};
+  if (s.fg) { st.color = s.fg; }
+  if (s.bg) { st.background = s.bg; }
+  if (s.bold) { st.fontWeight = 700; }
+  if (s.dim) { st.opacity = 0.62; }
+  if (s.italic) { st.fontStyle = "italic"; }
+  if (s.underline) { st.textDecoration = "underline"; }
+  return st;
+}
+
+const TERM_PROFILE_KEY = "slime.term.profileId";
+
 function TerminalTab(props: { workspace: string; initialCmd?: string; nonce?: number }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-  const [lines, setLines] = React.useState<TermLine[]>([{ kind: "info", text: "slime 终端（命令运行器）— 输出直接回显；↑/↓ 切换历史。cwd 默认工作目录。" }]);
+  const [lines, setLines] = React.useState<TermLine[]>([
+    { kind: "info", text: "slime 终端 —— 直接跑在主机本地的 shell 上；↑/↓ 历史、Ctrl+L 清屏。" },
+  ]);
   const [input, setInput] = React.useState("");
   const [history, setHistory] = React.useState<string[]>([]);
   const [histIdx, setHistIdx] = React.useState(-1);
   const [running, setRunning] = React.useState(false);
+  /** A-1139：主机本地终端组件清单（下拉数据源；**主进程是唯一产地**）。 */
+  const [profiles, setProfiles] = React.useState<TermProfile[]>([]);
+  const [profilesErr, setProfilesErr] = React.useState("");
+  const [profileId, setProfileId] = React.useState("");
+  /** A-1139：当前工作目录。**只是缓存** —— 真值由主进程经 `TermResult.cwd` 回带。 */
+  const [cwd, setCwd] = React.useState(props.workspace ?? "");
+  /** 最近一次输出的编码（非 utf-8 时在标题栏显示一个提示芯片）。 */
+  const [encHint, setEncHint] = React.useState<{ encoding: string; loose: boolean } | null>(null);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => { const el = scrollRef.current; if (el) { el.scrollTop = el.scrollHeight; } }, [lines]);
+
+  /* 探测主机本地终端组件。⚠️ `alive` 令牌：异步回来时组件可能已卸载（切走终端页）。 */
+  React.useEffect(() => {
+    let alive = true;
+    void (async () => {
+      let res: { ok?: boolean; profiles?: TermProfile[]; defaultId?: string | null; error?: string } | undefined;
+      try { res = await api?.term?.profiles?.(); } catch (e) {
+        if (alive) { setProfilesErr(`终端配置探测失败：${e instanceof Error ? e.message : String(e)}`); }
+        return;
+      }
+      if (!alive) { return; }
+      if (!res || res.ok !== true) {
+        /* 判别联合的失败分支必须显示 —— 静默空列表会被读成"这台机器没有终端"。 */
+        setProfilesErr(res?.error || "无法获取终端配置（终端桥不可用）");
+        return;
+      }
+      const list = res.profiles ?? [];
+      setProfiles(list);
+      setProfilesErr("");
+      let saved = "";
+      try { saved = localStorage.getItem(TERM_PROFILE_KEY) ?? ""; } catch { /* 隐私模式等忽略 */ }
+      /* 上次选的 shell 可能已经不在了（换机器 / 卸载了 PowerShell 7）⇒ 退到默认，
+         但**用户看得见**：标题栏显示的就是当前 profile 名。 */
+      const hit = list.some((p) => p.id === saved);
+      const id = hit ? saved : (res.defaultId ?? list[0]?.id ?? "");
+      setProfileId(id);
+      const cur = list.find((p) => p.id === id);
+      if (cur) {
+        const extra = list.length > 1 ? `（可用 ${list.length} 个）` : "";
+        setLines((prev) => [...prev, { kind: "info", text: `当前 shell：${cur.label}${extra}` }]);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  /* 切换 shell：写回偏好 + 明确回显（否则用户点了下拉却看不出变化 —— 命令跑在哪个 shell 里
+     唯一的可见证据就是这一行）。
+     ⚠️ 用 ref 跳过"首次自动选中"那一次：它不是用户动作，不该打印一行提示。 */
+  const profileInitRef = React.useRef(true);
+  React.useEffect(() => {
+    if (!profileId) { return; }
+    try { localStorage.setItem(TERM_PROFILE_KEY, profileId); } catch { /* 忽略 */ }
+    if (profileInitRef.current) { profileInitRef.current = false; return; }
+    const p = profiles.find((x) => x.id === profileId);
+    if (!p) { return; }
+    setLines((prev) => [...prev, { kind: "info", text: `已切换到 ${p.label}${p.detail ? "（" + p.detail + "）" : ""}` }]);
+  }, [profileId, profiles]);
+
+  /* 工作区变了 ⇒ cwd 回到工作区（否则会停在上一个工作区的目录里）。 */
+  const wsRef = React.useRef(props.workspace ?? "");
+  React.useEffect(() => {
+    const ws = props.workspace ?? "";
+    if (ws === wsRef.current) { return; }
+    wsRef.current = ws;
+    setCwd(ws);
+  }, [props.workspace]);
 
   /* A-1121（②）：Agent 让「打开终端并预填某条命令」。按 **nonce** 而不是命令文本触发 ——
      同一条命令被再次要求预填时（用户刚清空输入框），只比文本的话这里会毫无反应。
@@ -3972,13 +4498,35 @@ function TerminalTab(props: { workspace: string; initialCmd?: string; nonce?: nu
     setHistIdx(-1);
     setRunning(true);
     try {
-      const res = await api?.term?.exec(cmd, props.workspace?.trim() || undefined);
-      if (res?.stdout) { setLines((prev) => [...prev, ...res.stdout.replace(/\r\n/g, "\n").split("\n").filter((l: string) => l.length > 0 || res.stdout === "\n").map((l: string) => ({ kind: "out" as const, text: l }))]); }
-      if (res?.stderr) { setLines((prev) => [...prev, ...res.stderr.replace(/\r\n/g, "\n").split("\n").filter((l: string) => l.length > 0).map((l: string) => ({ kind: "err" as const, text: l }))]); }
-      if (res && res.stdout === "" && res.stderr === "") { setLines((prev) => [...prev, { kind: "info", text: `（无输出，退出码 ${res.code ?? "?"}）` }]); }
-      if (res && res.error) { setLines((prev) => [...prev, { kind: "err", text: `错误：${res.error}` }]); }
-    } catch (e) { setLines((prev) => [...prev, { kind: "err", text: `执行异常：${e instanceof Error ? e.message : String(e)}` }]); }
-    finally { setRunning(false); inputRef.current?.focus(); }
+      const res = await api?.term?.exec(cmd, cwd?.trim() || undefined, profileId || undefined);
+      if (!res) {
+        setLines((prev) => [...prev, { kind: "err", text: "终端桥不可用，命令未执行。" }]);
+        return;
+      }
+      const outLines = termOutputLines(res.stdout ?? "", "out");
+      const errLines = termOutputLines(res.stderr ?? "", "err");
+      const extra: TermLine[] = [];
+      if (res.error) { extra.push({ kind: "err", text: `错误：${res.error}` }); }
+      /* ⚠️ 非致命说明必须显示（超时 / 截断 / 编码兜底 / cwd 被拒）——见组件头部注释的第 4 条。 */
+      if (res.notice) { extra.push({ kind: "notice", text: res.notice }); }
+      if (typeof res.code === "number" && res.code !== 0) { extra.push({ kind: "info", text: `退出码 ${res.code}` }); }
+      if (outLines.length === 0 && errLines.length === 0 && extra.length === 0) {
+        extra.push({ kind: "info", text: `（无输出，退出码 ${res.code ?? "?"}）` });
+      }
+      setLines((prev) => [...prev, ...outLines, ...errLines, ...extra]);
+      /* cwd 以**主进程回带值**为准（它可能因 `cd` 而变，也可能被校验拒掉）。 */
+      setCwd(res.cwd ?? (props.workspace ?? ""));
+      if (res.encoding && res.encoding !== "utf-8") {
+        setEncHint({ encoding: res.encoding, loose: res.looseEncoding === true });
+      } else {
+        setEncHint(null);
+      }
+    } catch (e) {
+      setLines((prev) => [...prev, { kind: "err", text: `执行异常：${e instanceof Error ? e.message : String(e)}` }]);
+    } finally {
+      setRunning(false);
+      inputRef.current?.focus();
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
@@ -3988,26 +4536,75 @@ function TerminalTab(props: { workspace: string; initialCmd?: string; nonce?: nu
     else if (e.key === "l" && e.ctrlKey) { e.preventDefault(); setLines([]); }
   };
 
+  const activeProfile = profiles.find((p) => p.id === profileId);
+  const lineColor = (k: TermLine["kind"]): string =>
+    k === "err" ? "#f85149" : k === "cmd" ? "#7ee787" : k === "notice" ? "#d29922" : k === "info" ? "#8b949e" : "#c9d1d9";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0d1117", color: "#c9d1d9", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 13 }}>
-      <div style={{ display: "flex", alignItems: "center", padding: "6px 10px", borderBottom: "1px solid #30363d", background: "#161b22", fontSize: 12, color: "#8b949e", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", padding: "5px 10px", borderBottom: "1px solid #30363d", background: "#161b22", fontSize: 12, color: "#8b949e", gap: 8, flexWrap: "wrap" }}>
         <span style={{ color: "#58a6ff", fontWeight: 600 }}>终端</span>
+        {/* A-1139：主机本地终端组件下拉（对齐 VS Code 的终端下拉）。 */}
+        {profiles.length > 0 ? (
+          <select
+            value={profileId}
+            onChange={(e) => setProfileId(e.target.value)}
+            title="选择在哪一个本地 shell 里运行命令"
+            style={{ background: "#0d1117", color: "#c9d1d9", border: "1px solid #30363d", borderRadius: 4, fontSize: 12, padding: "1px 4px", maxWidth: 210 }}
+          >
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}{p.detail ? " · " + p.detail : ""}</option>
+            ))}
+          </select>
+        ) : (
+          <span style={{ color: profilesErr ? "#f85149" : "#8b949e" }} title={profilesErr || "正在探测主机本地终端组件"}>
+            {profilesErr ? "终端配置不可用" : "正在探测…"}
+          </span>
+        )}
         <span style={{ color: "#30363d" }}>|</span>
-        <span style={{ opacity: 0.7 }} title={props.workspace || "（未设置工作目录）"}>cwd: {props.workspace || "（未设置）"}</span>
+        <span
+          style={{ opacity: 0.75, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          title={cwd || "（未设置工作目录）"}
+        >cwd: {cwd || "（默认）"}</span>
+        {encHint && (
+          <span
+            title={encHint.loose
+              ? `输出编码未能确认，已按 ${encHint.encoding} 兜底解码（如需精确，请让命令自身输出 UTF-8，例如 PowerShell 的 [Console]::OutputEncoding）`
+              : `输出按 ${encHint.encoding} 解码`}
+            style={{ color: "#d29922", border: "1px solid #3d3117", background: "#2a2413", borderRadius: 4, padding: "0 5px", cursor: "help" }}
+          >{encHint.encoding}{encHint.loose ? "（兜底）" : ""}</span>
+        )}
         <span style={{ flex: 1 }} />
         <button title="清屏（Ctrl+L）" onClick={() => setLines([])} style={{ background: "transparent", border: "none", color: "#8b949e", cursor: "pointer", padding: "2px 6px", borderRadius: 4, fontSize: 12 }}
           onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#30363d"; }}
           onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}>清空</button>
       </div>
-      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "8px 12px", lineHeight: 1.5 }}>
+      {/* 探测失败/无 shell 时必须说出来 —— 否则"终端打不开"会变成一件没有解释的事。 */}
+      {profilesErr && (
+        <div style={{ padding: "5px 10px", background: "#2d1618", color: "#f85149", fontSize: 12, borderBottom: "1px solid #30363d" }}>{profilesErr}</div>
+      )}
+      {!profilesErr && profiles.length === 0 && (
+        <div style={{ padding: "5px 10px", background: "#2a2413", color: "#d29922", fontSize: 12, borderBottom: "1px solid #30363d" }}>
+          未探测到任何本地 shell（需要 cmd / PowerShell / bash 之一）。
+        </div>
+      )}
+      <div ref={scrollRef} className="term-scroll" style={{ flex: 1, overflowY: "auto", padding: "8px 12px", lineHeight: 1.5 }}>
         {lines.map((l, i) => (
-          <div key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", color: l.kind === "err" ? "#f85149" : l.kind === "out" ? "#c9d1d9" : l.kind === "cmd" ? "#7ee787" : "#8b949e" }}>{l.text}</div>
+          <div key={i} style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", color: lineColor(l.kind), minHeight: "1.35em" }}>
+            {l.spans && l.spans.length > 0
+              ? l.spans.map((s, j) => (<span key={j} style={ansiSpanStyle(s)}>{s.text}</span>))
+              : l.text}
+          </div>
         ))}
         {running && <div style={{ color: "#8b949e", fontStyle: "italic", opacity: 0.7 }}>… 执行中</div>}
       </div>
       <div style={{ display: "flex", alignItems: "center", padding: "6px 12px", borderTop: "1px solid #30363d", background: "#0d1117" }}>
-        <span style={{ color: "#7ee787", marginRight: 6, fontWeight: "bold" }}>$</span>
-        <input ref={inputRef} value={input} disabled={running} placeholder={running ? "命令执行中…" : "输入命令，回车执行（↑/↓ 历史）"} onChange={(e) => setInput(e.target.value)} onKeyDown={onKeyDown}
+        <span style={{ color: "#7ee787", marginRight: 6, fontWeight: "bold" }} title={activeProfile ? `在 ${activeProfile.label} 里运行` : undefined}>
+          {activeProfile?.kind === "cmd" || activeProfile?.kind === "vsdevcmd" ? ">" : "$"}
+        </span>
+        <input ref={inputRef} value={input} disabled={running}
+          placeholder={running ? "命令执行中…" : `输入命令，回车执行（${activeProfile ? activeProfile.label : "默认 shell"}）`}
+          onChange={(e) => setInput(e.target.value)} onKeyDown={onKeyDown}
           style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#c9d1d9", fontFamily: "inherit", fontSize: "inherit", caretColor: "#58a6ff" }} autoFocus />
         <button title="执行" disabled={running} onClick={() => void run(input)} style={{ background: running ? "#21262d" : "#238636", border: "none", color: "#fff", cursor: running ? "not-allowed" : "pointer", padding: "3px 10px", borderRadius: 4, fontSize: 12, marginLeft: 6 }}>▶</button>
       </div>
@@ -4034,7 +4631,23 @@ function TerminalTab(props: { workspace: string; initialCmd?: string; nonce?: nu
  * 接住并派发 `slime:sidebar:open` → 右栏新建浏览器页。这是 Electron 的官方机制，且完全在宿主侧，
  * 站点与我们互不干扰；webview 的 `new-window` 监听只用于**非 Web 协议**的确认/诊断。 */
 
-function BrowserTabInstance(props: { tabId: string; url: string; active?: boolean; onUrlChange: (url: string) => void; onTitleChange?: (title: string) => void }): JSX.Element {
+function BrowserTabInstance(props: {
+  tabId: string;
+  url: string;
+  active?: boolean;
+  /**
+   * A-1137：**空白页的默认首页**（搜索页地址）。只在 `url` 为空时生效。
+   * ⚠️ **不回写** `tab.url` —— 回写会让 `openBrowserTab` 的「复用空白页」判据（`!t.url`）
+   * 永远找不到空白页，于是每打开一个链接就多一个页签（那是全仓多处共用的兜底逻辑，不能为了这一处改掉）。
+   */
+  homeUrl?: string;
+  /** A-1137：guest preload 的 `file://` 路径（搜索页宿主桥）。空串 = 没有桥（页面会"能看但搜不动"）。 */
+  preload?: string;
+  /** A-1137：搜索页**交付失败**的原因（非空 = 首页用不了，必须让用户看见，不能静默空白）。 */
+  homeError?: string;
+  onUrlChange: (url: string) => void;
+  onTitleChange?: (title: string) => void;
+}): JSX.Element {
   const webviewRef = React.useRef<HTMLElement | null>(null);
   /** A-975-R5：guest 崩溃是否已自动救过一次（防止"崩溃→重载→再崩溃"死循环） */
   const goneHandledRef = React.useRef(false);
@@ -4048,6 +4661,13 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
   const [active, setActive] = React.useState(false);
   /** A-980-R3：加载失败提示（did-fail-load）——不再白屏无反馈（如 http://127.0.0.1:8081 连不上） */
   const [failInfo, setFailInfo] = React.useState<{ url: string; code: number } | null>(null);
+  /* A-1137：空白页本该自动显示搜索页。**没显示成**时要如实说明 ——
+     否则"新建浏览器页是一片空白"就变成一件没有解释的事（静默降级 = 用户以为功能没做）。
+     ⚠️ 刻意**提到组件顶部**（不在 JSX 里现算）：占位页那段 JSX 的形状被 A-1045 守卫锚着
+     （它要求 `!active && !failInfo` 就是紧挨 `<div className="browser-blank">` 的条件），
+     在 JSX 里塞一个 IIFE 会让那段锚取不到条件 —— 保持形状，改派生值的位置。
+     ⚠️ 判据是"这一页没有自己的 url 且有交付错误"：用户自己输了网址进来时，这条提示与他无关。 */
+  const homeFailed = !!props.homeError && !(props.url ?? "").trim();
 
   // A-979：非激活浏览器页显式开启后台节流（display:none 时 Chromium 的动画/定时器/合成降速，
   // 避免后台页持续全速吃 GPU/CPU；卸载时随 webview 销毁自动清理）
@@ -4063,9 +4683,13 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
   // A-173 / A-976：外部（聊天链接、自动打开、多页切换）修改 url 后自动导航。
   // 以前只在 props.url 为真值时同步 → 新建的空浏览器页会残留上一页的 navUrl（"两页绑定"的另一半原因）。
   // 现在按"设置 or 清空"双向同步；且每个浏览器页是独立组件实例（渲染处已加 key），互不干扰。
+  /* A-1137：**有效目标 = 页签自己的 url，没有就用默认首页（搜索页）**。
+     ⚠️ `homeUrl` 是异步来的（要问主进程）⇒ 它**必须**进依赖数组，否则"问回来了但没导航"。
+     ⚠️ 这里读的是 `props.homeUrl`，**从不写回** `tabs[].url`（见 `props.homeUrl` 的注释）。 */
+  const effectiveUrl = (props.url ?? "").trim() || (props.homeUrl ?? "").trim();
   React.useEffect(() => {
     // A-980-R6：统一归一 URL（裸地址补 http://）——与 go()/onOpen 一致，杜绝无 scheme 进 src
-    const next = normalizeBrowserUrl(props.url ?? "");
+    const next = normalizeBrowserUrl(effectiveUrl);
     // A-979-R2：忽略空值与 about:blank 占位——webview 初始 src=about:blank 的 did-navigate
     // 会把 tabs 里的 url 污染成 about:blank（再经本 effect 把 navUrl 拉回 → 真实导航被顶掉 → 白屏）
     if (!next || next === "about:blank") { return; }
@@ -4075,7 +4699,7 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
     setInputUrl(next);
     setNavUrl(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.url]);
+  }, [effectiveUrl]);
 
   /* A-980-R7：**命令式导航**（不再受控 src）——Electron 官方文档明确 webview 基于 Chromium OOPIF、
    * 渲染与导航存在已知不稳定问题，`src` 属性写入才触发导航；而 React 受控 src 在「新建页首次挂载
@@ -4086,6 +4710,10 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
    * 所有导航（链接点击 / 地址栏 go() / props.url 同步）统一由 navUrl → forceNav() 落地。 */
   const navUrlRef = React.useRef("");
   React.useEffect(() => { navUrlRef.current = navUrl; }, [navUrl]);
+  /* A-1133：**导航失败账本 + attach 标记** —— 「无休止报错」的结构性闸门（判据在 webviewNav.ts）。
+     事故：拖入 .docx ⇒ 目标地址注定加载失败 ⇒ 安全网/地址写回每 300ms 重发一次，永远刷屏。 */
+  const navFailBookRef = React.useRef<NavFailureBook>(new Map());
+  const wvAttachedRef = React.useRef(false);
   const forceNav = React.useCallback((): void => {
     const wv = webviewRef.current as unknown as Electron.WebviewTag | null;
     const next = navUrlRef.current;
@@ -4094,6 +4722,8 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
       // 已是目标地址则跳过（防与 did-navigate 写回互相循环触发）
       const cur = typeof wv.getURL === "function" ? wv.getURL() : "";
       if (cur === next) { return; }
+      /* A-1133：**判死的地址不再自动重发**（唯一判据）。少问这一句，就是这次的"无休止刷屏"。 */
+      if (!navAutoLoadAllowed(navFailBookRef.current, next, "url-change", wvAttachedRef.current)) { return; }
       /* A-1106b：换成唯一安全出口 —— 旧写法 `wv.loadURL(next)` 的异步 reject 接不住，
          Electron 会把它当未捕获异常打印（调试面板反复刷 GUEST_VIEW_MANAGER_CALL / ERR_ABORTED）。 */
       safeLoadURL(wv, next);
@@ -4138,6 +4768,10 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
       try {
         const cur = typeof wv.getURL === "function" ? wv.getURL() : "";
         if (cur && cur !== "about:blank") { return; }
+        /* A-1133：安全网**也必须**问锁存 —— 它是"无休止刷屏"的第二条通路。
+           判据里还包含「guest 已 attach 就不再由安全网发」（那已越过它的职责窗口：它只服务
+           首帧 attach 竞态）。这两条合起来才把"永远失败、永远重发"关掉。 */
+        if (!navAutoLoadAllowed(navFailBookRef.current, next, "net", wvAttachedRef.current)) { return; }
         /* A-1106b：安全网每 300ms 会重发 —— 若不接住 reject，-3 会被漏成「反复刷屏」的主产地 */
         safeLoadURL(wv, next);
       } catch { /* 未 attach → 下一轮再试 */ }
@@ -4165,7 +4799,8 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
     };
     // A-980-R7：guest 进程 attach 完成（webview 就绪）→ 若此时已有期望地址（新建页链接），
     // 命令式 loadURL 兜底（受控 src 的首次挂载竞态用 did-attach 保证必导航）
-    const onAttach = (): void => { forceNav(); };
+    // A-1133：attach 是**一次性时序标志** —— 安全网据此停手（它只服务 attach 前的首帧竞态）
+    const onAttach = (): void => { wvAttachedRef.current = true; forceNav(); };
     const onInPage = (e: Electron.DidNavigateInPageEvent): void => {
       if (!e.url || e.url === "about:blank") { return; }
       setInputUrl(e.url);
@@ -4208,6 +4843,10 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
       const url = e?.validatedURL ?? "";
       // about:blank 占位导航、以及 -3(ERR_ABORTED，重定向/主动 abort) 属正常噪声，不上错误页
       if (!url || url === "about:blank" || e?.errorCode === -3) { return; }
+      /* A-1133：**把失败记进账本** —— 自动通路（安全网 / 地址写回 / attach 兜底）据此不再重发。
+         这是"无休止报错"的终点。记的是**目标地址**（navUrl）而不是失败地址：
+         重发是由"目标与当前不一致"驱动的，判死也必须判在那个键上。 */
+      noteNavFailure(navFailBookRef.current, navUrlRef.current || url, e?.errorCode ?? 0);
       setFailInfo({ url, code: e?.errorCode ?? 0 });
       setLoading(false);
       setCanBack(wv.canGoBack()); setCanFwd(wv.canGoForward());
@@ -4334,7 +4973,9 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
         <button className="right-mini-btn" title="前进" disabled={!canFwd} onClick={() => { wv?.goForward(); }}><ChevronIcon size={12} rotate={0} /></button>
         <button className="right-mini-btn" title="刷新" disabled={!active} onClick={() => { wv?.reload(); }}><RefreshIcon size={12} /></button>
         <input className="term-input browser-url" value={inputUrl} placeholder="输入网址，回车访问" onChange={(e) => setInputUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { go(); } }} />
-        <button className="right-mini-btn" title="访问" onClick={go}><ArrowRightIcon2 size={12} /></button>
+        {/* A-1151：用户报「访问按钮是个黄图标」⇒ 换成与「浏览器」菜单同款的放大镜（`SearchIcon`）。
+            同一动作在别处都是放大镜，这里用箭头属于"同一个功能两套图标"，容易看错。 */}
+        <button className="right-mini-btn" title="访问" onClick={go}><SearchIcon size={13} /></button>
       </div>
       <div className="browser-stage">
         {loading && active && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--accent, #58a6ff)", zIndex: 10 }} />}
@@ -4350,8 +4991,12 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
         {!active && !failInfo && (
           <div className="browser-blank">
             <div className="browser-blank-mark"><GlobeIcon size={34} /></div>
-            <div className="browser-blank-title">在上方输入网址开始浏览</div>
-            <div className="browser-blank-hint">也可以直接在对话里让 slime 打开网页，它会在这个面板内操作；操作期间面板边框会呼吸提示。</div>
+            <div className="browser-blank-title">{homeFailed ? "搜索页没能交付" : "在上方输入网址开始浏览"}</div>
+            <div className="browser-blank-hint">
+              {homeFailed
+                ? `${props.homeError}（可以直接在上方输入网址继续浏览）`
+                : "也可以直接在对话里让 slime 打开网页，它会在这个面板内操作；操作期间面板边框会呼吸提示。"}
+            </div>
           </div>
         )}
         {/* A-1018：加载失败 → **整页错误页**（对标主流浏览器：原因 + 网址 + 错误标识 + 建议 + 重试）。
@@ -4369,7 +5014,7 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
             </div>
             <div className="browser-error-hint">{failHint(failInfo.code)}</div>
             <div className="browser-error-actions">
-              <button className="btn primary" onClick={() => { setFailInfo(null); try { (webviewRef.current as unknown as Electron.WebviewTag | null)?.reload(); } catch { /* 忽略 */ } }}>重试</button>
+              <button className="btn primary" onClick={() => { /* A-1133：手动重试 = 清掉该地址的失败记录（用户明确意图），否则按钮点了也不会生效 */ clearNavFailure(navFailBookRef.current, navUrlRef.current); setFailInfo(null); try { (webviewRef.current as unknown as Electron.WebviewTag | null)?.reload(); } catch { /* 忽略 */ } }}>重试</button>
               <button className="btn" onClick={() => { void navigator.clipboard?.writeText(failInfo.url).catch(() => undefined); }}>复制网址</button>
             </div>
           </div>
@@ -4383,6 +5028,13 @@ function BrowserTabInstance(props: { tabId: string; url: string; active?: boolea
           src="about:blank"
           partition="persist:slime-browser"
           allowpopups
+          /* 防守性开启（**不是**某个 bug 的修复 —— 实测这版 Electron 开不开都能渲染 PDF，
+             见 `WebviewTag` 定义处的长注释：A/B 白纸占比都是 0.641、差 0.0）。 */
+          plugins
+          /* A-1137：搜索页宿主桥。**必须在首次挂载时就给**（Electron 要求 webview 属性在首次导航前生效）
+             ⇒ 父组件等交付信息回来才渲染本组件（见 `searchDelivery === null` 那个分支）。
+             ⚠️ 它对**每次导航**都执行，是否真正 expose 由 preload 自己按"本机文档"判。 */
+          preload={props.preload || undefined}
           /* A-1045：host 底色也是硬编码 #fff 的残留 —— 改为主题变量，与容器/占位页同色。
              （guest 有真实文档后由站点自己绘制，宿主底色不再可见；它只在 guest 未绘制的那一帧露出来。） */
           style={{ flex: 1, width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
