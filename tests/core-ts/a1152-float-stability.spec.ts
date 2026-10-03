@@ -203,22 +203,30 @@ describe("A-1152 ⑦ 浮层态的 `<main>`必须**彻底脱离布局**（用户�
     expect(body).not.toMatch(/display:\s*none/);
   });
 
-  it("内联聊天区与浮层是**互斥挂载**（窗口化时中间页不挂载）", () => {
-    /* 两处都渲染同一个 `chatPanelJsx`，靠 `if (fs !== "none") return ...` 互斥。
-       若哪天有人把两处都渲染，就会同时挂两份 ChatPanel（双倍重渲染 + 两份状态）。 */
-    /* ⚠️ A-1152：`{chatPanelJsx}` 恰好 2 处（浮层 1 + 内联 1），靠 `mainIsFloatLayout` 互斥。
-       ⚠️ 试过并回退：合成 1 处（让 `<main>` 兼作浮窗）确实能消除"换父节点重建"，
-          但引入可见回归 ⇒ 见 ⑦#1 的回归记录。 */
+  it("内联聊天区与浮层是**同一个宿主**（A-1158：唯一宿主，切换只换样式不换节点）", () => {
+    /* ⚠️⚠️ **A-1158 改判据**：本条原来断言「`{chatPanelJsx}` 恰好 2 处，靠 `mainIsFloatLayout`
+       互斥挂载」—— 那正是"换父节点 ⇒ React 整树重建"的成因，实测把窗口化过渡的第 3 帧
+       拖成 **80ms 的一帧**（`LoAF{start:35ms dur:80ms renderStart:77ms scripts:[]}`、
+       `longtask=[]` ⇒ 卡在"帧开始 → 浏览器开始渲染"之间）。
+       并发提交只降到 55ms ⇒ 剩下的必须从结构上根除：**只挂载一份**。
+       ⇒ 现在判据反过来：`{chatPanelJsx}` 在 App.tsx 里**恰好 1 处**，
+         宿主元素在两种模式下**只换 style / class**，
+         且它的子元素结构两种模式**逐字相同**（标题栏 / resize 手柄 / 最小化浮层都常驻，
+         只切 display/opacity）—— 一旦按下标增删，React 会因位置对不上重建整棵 ChatPanel，
+         这次改造的收益就全部还回去。 */
     const occurrences = (APP_CODE.match(/\{chatPanelJsx\}/g) || []).length;
-    expect(occurrences).toBe(2);
-    /* A-1152 重构后 `fs` 局部变量已删（浮层与 <main> 都改成在 `.body` 直属按
-       `mainIsFloatLayout` 条件渲染）。互斥性现在由**那一个条件**保证：
-       `<main>` 是 `cond ? null : 内联`，浮层是 `cond ? 浮层 : null` —— 同一条件、互为否定。 */
-    /* `<main>` 浮层态渲染 null；浮层是 `.body` 直属的独立元素（在 `</main>` 之后）。 */
-    expect(APP_CODE).toMatch(/mainIsFloatLayout\s*\?\s*null/);
-    const floatAt2 = APP_CODE.indexOf("ref={floatRef}");
-    expect(floatAt2, "找不到浮层挂载点").toBeGreaterThan(-1);
-    expect(floatAt2).toBeGreaterThan(APP_CODE.indexOf("</main>"));
+    expect(occurrences, "`{chatPanelJsx}` 应当只剩 1 处（唯一宿主）；≥2 处说明又变回互斥挂载").toBe(1);
+    /* ⚠️ 宿主必须是 `<main>` 的**子元素**（不能把 `position:fixed` 直接写在 `<main>` 上）：
+       `.main.main-float` 有 `width:0 !important`（"浮层态 `.main` 必须零宽"），
+       两者对打就是 A-1152 那次「左栏收起异常 / 右栏不铺满」回归的真正原因。
+       放在内层 ⇒ `<main>` 几何与改造前逐字相同（仍是 0×0 占位），右栏铺满那套一行不用动。 */
+    const hostAt = APP_CODE.indexOf('className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}');
+    expect(hostAt, "找不到唯一宿主的 className").toBeGreaterThan(-1);
+    expect(hostAt, "宿主必须在 <main> 内部（不能把 fixed 写在 <main> 上）")
+      .toBeGreaterThan(APP_CODE.indexOf("<main className="));
+    expect(hostAt, "宿主必须在 </main> 之前").toBeLessThan(APP_CODE.indexOf("</main>"));
+    /* ⚠️ 三个 ref（宿主主 ref / floatRef / inlineChatRef）必须是**同一个节点** ⇒ 走回调 ref */
+    expect(APP_CODE).toMatch(/ref=\{\(el\)\s*=>\s*\{[^}]*chatHostRef\.current\s*=\s*el[^}]*floatRef\.current\s*=\s*el[^}]*inlineChatRef\.current\s*=\s*el/);
   });
 });
 
@@ -242,16 +250,13 @@ describe("A-1152 ⑧ 右栏必须**贴到窗口右缘**（用户第七轮：「�
   });
 });
 describe("A-1152 ⑨ 用户新要求：浮层态**彻底卸载中间页 + 不许拖拽 + 右栏贴缘**", () => {
-  it("浮层态 `<main>` 渲染成 `null`（真正不挂载）", () => {
-    /* ⚠️ 历史（别再翻）：曾改成"始终挂载 + position: fixed"（想消除整树重建），
-       实测引入可见回归（左栏收起异常 / 右栏不铺满）⇒ 回退到"渲染 null"。 */
-    expect(APP_CODE).toMatch(/mainIsFloatLayout\s*\?\s*null\s*:/);
-  });
-
-  it("浮层 `.float-window` 是**独立元素**、在 `</main>` 之后（`.body` 直属）", () => {
-    /* ⚠️ 回退记录：曾把它合并到 `<main>` 上（`main-float float-window`）⇒ 引入回归，
-       已恢复为独立元素。`.float-window` 类名提供 `-webkit-app-region: no-drag`。 */
-    expect(APP_CODE).toMatch(/className="float-window"/);
+  it("浮层外框 = 唯一宿主**自己**（不是 `<main>`；`.float-window` 类名仍提供 no-drag）", () => {
+    /* ⚠️⚠️ **A-1158 改判据**：曾断言「浮层是 `</main>` 之后的 `.body` 直属独立元素」
+       （那是 A-1152 回退方案）。现在浮层外框就是**唯一宿主自己**——但**仍然在 `<main>` 内部**
+       （理由见上一条：`.main.main-float` 的 `width:0 !important` 会和 fixed 打架）。
+       `.float-window` 类名在浮层态挂上，`-webkit-app-region: no-drag` 照旧生效。 */
+    expect(APP_CODE).toMatch(/className=\{mainIsFloatLayout \? "float-window" : "inline-chat-host"\}/);
+    expect(APP_CODE).not.toMatch(/<main className=\{`main\$\{mainIsFloatLayout \? " main-float float-window" : ""\}\}/);
     expect(CSS_CODE).toMatch(/\.float-window\s*\{[^}]*-webkit-app-region:\s*no-drag/);
   });
 

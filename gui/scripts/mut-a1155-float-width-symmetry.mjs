@@ -256,6 +256,18 @@ const MUTATIONS = [
     file: F_APP,
     mutate: (t) => sub(t, '    setRightExitAnim(true);\n', ""),
   },
+  {
+    /* ⚠️ A-1158：唯一宿主必须**按模式换类**（浮层态挂 `float-window` 拿 fixed 外框样式）。
+       不换 ⇒ 浮层态里它仍是内联盒子（`flex:1`，被 `.main.main-float` 压成 0）
+       ⇒ 浮窗根本没有外框。 */
+    name: "M20 唯一宿主不按模式换类（浮层态拿不到 fixed 外框 ⇒ 浮窗不可见）",
+    file: F_APP,
+    mutate: (t) => sub(
+      t,
+      'className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}',
+      'className="inline-chat-host"',
+    ),
+  },
 ];
 
 const abs = (rel) => join(ROOT, rel);

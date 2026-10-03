@@ -708,8 +708,14 @@ export default function App(): JSX.Element {
          ⇒ 「归还」到底有没有发生取决于时序 ⇒ 右栏时好时坏（用户实测"要左右多次拖拽才恢复"）。
      ⇒ 现在浮层铺满**不再改写 `rightWidth`**（只由 CSS 状态类 + 过渡期变量驱动），
        退出时右栏自然回到它本来该有的宽度 ⇒ 无需归还，这个 ref 也就不需要了。 */
-  /** A-980-R25：内联聊天区（浮层退场后回到普通布局时，按主区实测宽度几何淡入） */
+  /** A-980-R25：内联聊天区（浮层退场后回到普通布局时，按主区实测宽度几何淡入）
+   *  ⚠️ A-1158：它与 `floatRef` 现在指向**同一个元素**（聊天面板的唯一宿主）——
+   *     两条路径的测量对象合为一个，几何参数仍各按各的语义取，不复用数值。 */
   const inlineChatRef = React.useRef<HTMLDivElement | null>(null);
+  /** A-1158：唯一宿主的**主** ref（`floatRef` / `inlineChatRef` 是它的两个别名）。
+   *  ⚠️ 之所以要一个主 ref：JSX 的 `ref` 只能接一个回调，回调里要把同一个节点
+   *     分发给三个 ref，否则只能靠"三处各自 querySelector"（同一事实多个产地，铁律 11）。 */
+  const chatHostRef = React.useRef<HTMLDivElement | null>(null);
   const chatFadeCancelRef = React.useRef<(() => void) | null>(null);
   /** A-980-R25：悬浮窗退场进行中标记——state 要等退场几何跑完才落 "none"，
    *  期间重复点收起（或右栏收起联动）不能二次启动退场动画
@@ -1762,6 +1768,48 @@ export default function App(): JSX.Element {
     if (floatState !== "none" && !rightOpen) { setFloatState("none"); }
   }, [rightOpen, floatState]);
 
+  /* ⚠️⚠️ A-1158：浮窗外框的**几何与外观**，从 JSX 里**提出来**算。
+     为什么必须提到渲染主体之外：唯一宿主在两种模式下是**同一个元素**，
+     而它的 style/子元素的 display 都要读这些值 ⇒ 放在 JSX 里就得在两处重复算一遍
+     （标题栏一次、浮层浮层块一次）—— 同一事实两个产地，必漂（铁律 11）。
+     ⚠️⚠️ `closing` 必须同时认 `"closing"`（A-1154）：
+        真 App CDP 实测复现：`dismissFloat()` 设的是 `setFloatAnim("closing")`（退场，窗口收到 0），
+        而此前这里曾写成 `const closing = animOut`（只认 `"out"`，最小化态）⇒
+        `closing` 恒为 false ⇒ `w/h` 取 `floatSize`（实测 666，**根本没在收**）⇒
+        `startFloatGeometryFade` 量到的宽度全程不变 ⇒ 几何 done 永不触发 ⇒
+        `slime-freezing` / `--slime-freeze-w` 永久残留 + rAF 泄漏
+        ⇒ 后续「窗口化」被脏状态打回（用户原话「窗口出现一次抽搐抖动，但对话页不会窗口化」）。
+     ⚠️ 两个方向的目标尺寸**不同**，不能合并成一个布尔：最小化收到图标（44），退场收到 0。 */
+  const floatMinIcon = floatState === "min";
+  const floatAnimOut = floatAnim === "out";
+  const floatClosing = floatAnim === "closing";
+  const floatBoxW = floatClosing ? 0 : (floatMinIcon || floatAnimOut ? FLOAT_ICON_SIZE : floatSize.w);
+  const floatBoxH = floatClosing ? 0 : (floatMinIcon || floatAnimOut ? FLOAT_ICON_SIZE : floatSize.h);
+  const floatBoxDefaultPos = fitFloatRect((sidebarOpen ? sidebarWidth : 0) + 12, 42, floatSize.w, floatSize.h);
+  /** 唯一宿主在**浮层态**下的外框样式（普通态用 `.inline-chat-host` 类，见 index.css）。 */
+  const floatBoxStyle: React.CSSProperties = {
+    position: "fixed",
+    left: floatPos ? floatPos.x : floatBoxDefaultPos.x,
+    top: floatPos ? floatPos.y : floatBoxDefaultPos.y,
+    width: floatBoxW,
+    height: floatBoxH,
+    zIndex: 1000, display: "flex", flexDirection: "column",
+    borderRadius: 10,
+    border: floatClosing ? "none" : "1px solid var(--border)",
+    background: "var(--bg)",
+    boxShadow: floatClosing ? "none" : "0 10px 40px rgba(0,0,0,0.4)",
+    overflow: "hidden",
+    pointerEvents: floatClosing ? "none" : "auto",
+    transition: FLOAT_TRANSITION,
+  };
+  /** 唯一宿主在**普通态**下的样式：`flex:1` + 竖排 flex 容器（与改造前 `inlineChatRef` 那层一致）。 */
+  const inlineChatHostStyle: React.CSSProperties = {
+    flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+    /* ⚠️ 普通态**不**给 `position/left/top/width/height`：浮层态那些内联值必须被清掉，
+       否则退出浮层后这个元素会**残留** `position:fixed` 与旧坐标（React 只写它给过的属性，
+       不写就不会清）—— 那是"从浮窗拽不回来"的经典成因。 */
+  };
+
   /**
    * A-1039 启动门判据（**唯一出处**，守卫按此断言）。
    *
@@ -2074,97 +2122,100 @@ export default function App(): JSX.Element {
         {/* 主内容区（对话面板常驻）。A-980-R14：右栏占满窗口时聊天主区变**悬浮窗**——
             不参与挤压（fixed 浮层）；A-980-R17：最小化=内容渐出+窗口同步缩小为可拖动图标，
             标题栏只留 最小化 / 恢复窗口 两按钮，状态按会话记忆 */}
+        {/* ⚠️⚠️⚠️ A-1158：聊天面板的**唯一宿主**（single host）——本轮结构性改造。
+            实测依据（真 App CDP + LoAF 归因，1332px 窗口）：切换浮层态会让 React
+            **卸载整棵 `<main>`（含 ChatPanel）、再在浮窗里挂载另一棵**（换父 ⇒ 整树重建，
+            两棵树都不复用），实测把过渡的第 3 帧拖成 **80ms 的一帧**
+            （`LoAF{start:35ms dur:80ms renderStart:77ms scripts:[]}`、`longtask=[]`
+             ⇒ 卡在"帧开始 → 浏览器开始渲染"之间）；并发提交后降到 55ms，**没消除**。
+
+            ⇒ 改造：让**同一个 DOM 元素**在两种模式下只是**换样式**：
+              · 普通态：`<main>` 里的 flex 容器（`flex:1`，占满主区）
+              · 浮层态：它自己变成 `position: fixed` 的浮窗外框
+                        （`<main>` 仍收成 0×0 占位，靠 `.main.main-float` 那组规则）
+            React **不卸载、不重建** ChatPanel ⇒ 55ms 那一下从根上消失。
+
+            ⚠️⚠️⚠️ **为什么必须放在 `<main>` 里面、而不是把 `position:fixed` 写在 `<main>` 上**：
+              ① `.main.main-float` 有 `width:0 !important / height:0 !important`
+                 （A-1149/A-1152 立的"浮层态 `.main` 必须零宽"），
+                 它会**压过**我们想给的浮窗宽高 —— **A-1152 当年的"左栏收起异常 / 右栏不铺满"
+                 就是这么来的**（把 fixed 写在 `<main>` 上，与它自己的折叠规则对打）。
+              ② `<main>` 的 `position: relative` / `overflow: hidden`
+                 **不会**裁剪 `position: fixed` 子元素
+                 （只有 transform / filter / contain / will-change / backdrop-filter 才会
+                  建立包含块并裁剪 —— 这条链上已逐个确认没有）⇒ 内层宿主安全出流。
+              ⇒ 现在 `<main>` 几何与改造前**逐字相同**（仍是 0×0 占位），所以
+                 右栏铺满 / 左栏收起那套几何**一行都不用动**。 */}
         <main className={`main${mainIsFloatLayout ? " main-float" : ""}`}>
-          {/* A-1152：浮层态下 `<main>` **不渲染**（中间页彻底不挂载、拉不出来）。
-              浮层是 `.body` 直属的独立元素（见下方），所以卸载它不会连带干掉浮层。
-              ⚠️ 已尝试过的替代方案（**回退原因**）：把 `<main>` 改成聊天区的唯一宿主、
-              浮层态用内联 `position: fixed` —— 理论上能消除"换父节点导致的整树重建"，
-              但实测引入了可见回归（左栏收起异常 / 右栏不铺满），
-              且收益（卡顿）在本环境无法验证 ⇒ 回退，不在坏状态上继续叠。 */}
-          {mainIsFloatLayout ? null : (
-          <div ref={inlineChatRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-                {chatPanelJsx}
-              </div>
-          )}
+          <div
+            /* ⚠️ 三个 ref 指向**同一个元素**：它既是浮窗外框（`floatRef`）、
+               又是内联聊天区容器（`inlineChatRef`）。
+               ⚠️ 用 callback ref 而不是 `ref={a}` 形式：React 的 `ref` 属性只能接一个对象，
+               要让三个 ref 都拿到同一个节点就只能走回调（项目里 `attachLeftWidthObserver`
+               已是同一手法）。 */
+            ref={(el) => {
+              chatHostRef.current = el;
+              floatRef.current = el;
+              inlineChatRef.current = el;
+            }}
+            className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}
+            style={mainIsFloatLayout ? floatBoxStyle : inlineChatHostStyle}
+          >
+            {/* ⚠️⚠️ **子元素结构在两种模式下必须逐字相同**（下面三层都常驻，
+               只按模式切 display/opacity）。
+               一旦按下标增删，React 会因"位置对不上"**重建整棵 ChatPanel**，
+               这次改造的收益（那 55ms）就全部还回去了 —— 这是本条最容易踩的坑。
+               ⚠️ 这层内包裹**不是多余的**：它是 `floatInnerRef` 的落点，
+                 最小化/还原的几何渐隐（`startFloatGeometryFade` 的 onFrame）
+                 写的就是它的 `opacity`；删掉它 ⇒ 最小化不再淡出、渐隐直接失效。
+                 ⚠️ 它也**不能**和宿主合并成一个元素：`inlineChatRef`（退浮层后内联淡入）
+                 写的是**宿主**的 opacity，两条淡入淡出写同一个节点会互相覆盖。 */}
+            <div ref={floatInnerRef} style={{
+              flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+              opacity: floatMinIcon ? 0 : 1,
+              pointerEvents: floatMinIcon ? "none" : "auto",
+            }}>
+            {/* 浮窗标题栏：普通态隐藏 */}
+            <div style={{
+              display: mainIsFloatLayout ? "flex" : "none",
+              alignItems: "center", gap: 4, flexShrink: 0,
+              height: 36, padding: "0 6px 0 10px",
+              background: "var(--sidebar-bg, #1e1e2e)",
+              borderBottom: "1px solid var(--border)",
+              cursor: "grab",
+            }} onPointerDown={startFloatDrag}>
+              <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {selectedSession?.title || "对话"}
+              </span>
+              <button className="titlebar-btn" title="最小化（缩小为图标）" onClick={(e) => { e.stopPropagation(); minimizeFloat(); }}>─</button>
+              <button className="titlebar-btn" title="收起悬浮窗（恢复普通布局：聊天回到中间）" onClick={(e) => { e.stopPropagation(); dismissFloat(); }}>▢</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
+              {chatPanelJsx}
+              {/* ⚠️ A-1152：浮窗 resize 手柄（右缘 e / 底缘 s / 右下角 se）。用户要求恢复：
+                  「我要求窗口化的聊天页面的自主拖拽控制大小的功能可以恢复一下」。
+                  ⚠️ 普通态必须 `display:none` —— 否则这三条热区会盖在聊天区右缘上。 */}
+              <div onMouseDown={(e) => startFloatResize(e, "e")} title="拖动调整宽度"
+                style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 4, cursor: "ew-resize", zIndex: 200, userSelect: "none", display: mainIsFloatLayout ? "block" : "none" }} />
+              <div onMouseDown={(e) => startFloatResize(e, "s")} title="拖动调整高度"
+                style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 6, cursor: "ns-resize", zIndex: 200, userSelect: "none", display: mainIsFloatLayout ? "block" : "none" }} />
+              <div onMouseDown={(e) => startFloatResize(e, "se")} title="拖动调整大小"
+                style={{ position: "absolute", right: 0, bottom: 0, width: 14, height: 14, cursor: "nwse-resize", zIndex: 201, userSelect: "none", display: mainIsFloatLayout ? "block" : "none" }} />
+            </div>
+            </div>
+            {/* 最小化浮层（图标）：普通态隐藏 */}
+            <div onPointerDown={(e) => startFloatDrag(e, restoreFloat)}
+              title="点击还原悬浮窗（可拖动）"
+              style={{ position: "absolute", inset: 0, display: mainIsFloatLayout ? "flex" : "none", alignItems: "center", justifyContent: "center",
+                background: "var(--bg-secondary)", borderRadius: 10, cursor: "grab",
+                opacity: floatMinIcon || floatAnimOut ? 1 : 0,
+                pointerEvents: floatMinIcon ? "auto" : "none",
+                transition: "opacity 0.18s ease 0.12s" }}>
+              <img src={floatIconUrl} alt="slime" draggable={false} style={{ width: 26, height: 26 }} />
+            </div>
+          </div>
         </main>
 
-        {/* A-1152：悬浮窗（.float-window）—— `position: fixed`，挂在 `.body` 直属。
-            ⚠️ `floatRef` 在这个元素上（几何动画按它实测），不要挪到 `<main>`。 */}
-        {mainIsFloatLayout ? (() => {
-          const minIcon = floatState === "min";
-          const animOut = floatAnim === "out";
-          /* ⚠️⚠️ A-1154：**`closing` 必须同时认 `"closing"`**。
-             真 App CDP 实测复现：`dismissFloat()` 设的是 `setFloatAnim("closing")`（退场，窗口收到 0），
-             而这里此前写成 `const closing = animOut`（只认 `"out"`，最小化态）⇒
-             `closing` 恒为 false ⇒ `w/h` 取 `floatSize`（实测 666，**根本没在收**）⇒
-             `startFloatGeometryFade` 量到的宽度全程不变 ⇒ 几何 done 永不触发 ⇒
-             `slime-freezing` / `--slime-freeze-w` 永久残留 + rAF 泄漏
-             ⇒ 后续「窗口化」被脏状态打回（用户原话「窗口出现一次抽搐抖动，但对话页不会窗口化」）。
-             ⚠️ 两者目标尺寸**不同**，不能合并成一个布尔：最小化收到图标（44），退场收到 0。
-                · `animOut`（最小化）→ `FLOAT_ICON_SIZE`
-                · `closing`（退场）→ `0`（下面这条 CSS 通道也要能表达 0） */
-          const closing = floatAnim === "closing";
-          const w = closing ? 0 : (minIcon || animOut ? FLOAT_ICON_SIZE : floatSize.w);
-          const h = closing ? 0 : (minIcon || animOut ? FLOAT_ICON_SIZE : floatSize.h);
-          const defaultPos = fitFloatRect((sidebarOpen ? sidebarWidth : 0) + 12, 42, floatSize.w, floatSize.h);
-          return (
-            <div ref={floatRef} style={{
-              position: "fixed",
-              left: floatPos ? floatPos.x : defaultPos.x,
-              top: floatPos ? floatPos.y : defaultPos.y,
-              width: w,
-              height: h,
-              zIndex: 1000, display: "flex", flexDirection: "column",
-              borderRadius: 10,
-              border: closing ? "none" : "1px solid var(--border)",
-              background: "var(--bg)",
-              boxShadow: closing ? "none" : "0 10px 40px rgba(0,0,0,0.4)",
-              overflow: "hidden",
-              pointerEvents: closing ? "none" : "auto",
-              transition: FLOAT_TRANSITION,
-            }} className="float-window">
-              <div ref={floatInnerRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
-                opacity: minIcon ? 0 : 1,
-                pointerEvents: minIcon ? "none" : "auto" }}>
-                <div style={{
-                  display: "flex", alignItems: "center", gap: 4, flexShrink: 0,
-                  height: 36, padding: "0 6px 0 10px",
-                  background: "var(--sidebar-bg, #1e1e2e)",
-                  borderBottom: "1px solid var(--border)",
-                  cursor: "grab",
-                }} onPointerDown={startFloatDrag}>
-                  <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {selectedSession?.title || "对话"}
-                  </span>
-                  <button className="titlebar-btn" title="最小化（缩小为图标）" onClick={(e) => { e.stopPropagation(); minimizeFloat(); }}>─</button>
-                  <button className="titlebar-btn" title="收起悬浮窗（恢复普通布局：聊天回到中间）" onClick={(e) => { e.stopPropagation(); dismissFloat(); }}>▢</button>
-                </div>
-                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
-                  {chatPanelJsx}
-                  {/* A-1152：浮窗 resize 手柄（右缘 e / 底缘 s / 右下角 se）。用户要求恢复：
-                      「我要求窗口化的聊天页面的自主拖拽控制大小的功能可以恢复一下」。 */}
-                  <div onMouseDown={(e) => startFloatResize(e, "e")} title="拖动调整宽度"
-                    style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: 4, cursor: "ew-resize", zIndex: 200, userSelect: "none" }} />
-                  <div onMouseDown={(e) => startFloatResize(e, "s")} title="拖动调整高度"
-                    style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 6, cursor: "ns-resize", zIndex: 200, userSelect: "none" }} />
-                  <div onMouseDown={(e) => startFloatResize(e, "se")} title="拖动调整大小"
-                    style={{ position: "absolute", right: 0, bottom: 0, width: 14, height: 14, cursor: "nwse-resize", zIndex: 201, userSelect: "none" }} />
-                </div>
-              </div>
-              {mainIsFloatLayout && (
-                <div onPointerDown={(e) => startFloatDrag(e, restoreFloat)}
-                  title="点击还原悬浮窗（可拖动）"
-                  style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                    background: "var(--bg-secondary)", borderRadius: 10, cursor: "grab",
-                    opacity: minIcon || animOut ? 1 : 0,
-                    pointerEvents: minIcon ? "auto" : "none",
-                    transition: "opacity 0.18s ease 0.12s" }}>
-                  <img src={floatIconUrl} alt="slime" draggable={false} style={{ width: 26, height: 26 }} />
-                </div>
-              )}
-            </div>
-          );
-        })() : null}
 
 
         {/* 右侧栏（工作树 / 任务 / 终端 / 浏览器）——A-980-R24：外层 wrapper 承载几何同步渐隐渐显

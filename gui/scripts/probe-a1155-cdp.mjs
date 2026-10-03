@@ -681,6 +681,47 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
   await snap("S6 恢复窗口化后");
   await shot("s6-float-restored");
 
+  /* ══ ⑥ 最小化 → 还原（单宿主改造后，这条路径的几何 fade 目标换了节点）══════════
+     A-1158 把"浮窗外框"和"内联聊天区"合并成**同一个元素**，而最小化/还原的几何渐隐
+     写的是 `floatInnerRef`（内层包裹层）、退浮层的内联淡入写的是**宿主** ——
+     两个 ref 现在指向不同节点，但如果哪天有人把它们并成一个，两条淡入淡出会互相覆盖。
+     ⇒ 必须实测一遍"最小化 → 还原"仍是好的。 */
+  say("\n═══ ⑥ 最小化 → 还原 ═══");
+  await cdp.eval(CLICK_FLOAT);
+  await new Promise((r) => setTimeout(r, 1200));
+  await snap("S10 再次窗口化（准备最小化）");
+  say("点最小化=" + (await cdp.eval(`(() => {
+    const b = Array.from(document.querySelectorAll(".float-window button"))
+      .find((x) => (x.getAttribute("title") || "").includes("最小化"));
+    if (!b) { return "NO-MIN-BTN"; }
+    b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    return "OK";
+  })()`)));
+  await new Promise((r) => setTimeout(r, 1400));
+  await snap("S11 最小化后");
+  await shot("s11-minimized");
+  say("点还原=" + (await cdp.eval(`(() => {
+    /* ⚠️⚠️ 事件必须发在**最小化浮层**（宿主最后一个子元素）上，不是宿主。
+       onPointerDown={startFloatDrag(e, restoreFloat)} 挂在浮层；
+       React 虽在 root 上监听并模拟传播，但那只对**实际冒泡经过**该节点的事件生效
+       —— 派发在父元素（宿主）上，子元素的处理器根本不会被调用。
+       实测两次踩坑：① 只发 click ⇒ tap 分支不跑；② 改成 pointerdown/up 但仍发在宿主上
+       ⇒ 同样不触发，两次都表现为「还原后截图与最小化后逐字节相同」。 */
+    const host = document.querySelector(".float-window");
+    if (!host) { return "NO-FLOAT"; }
+    const overlay = host.lastElementChild;
+    if (!overlay) { return "NO-OVERLAY"; }
+    const b = overlay.getBoundingClientRect();
+    const opts = { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true,
+                   clientX: Math.round(b.left + 8), clientY: Math.round(b.top + 8) };
+    overlay.dispatchEvent(new PointerEvent("pointerdown", opts));
+    overlay.dispatchEvent(new PointerEvent("pointerup", opts));
+    return "OK(overlay pointerdown+pointerup)";
+  })()`)));
+  await new Promise((r) => setTimeout(r, 1600));
+  await snap("S12 还原后");
+  await shot("s12-restored");
+
   await new Promise((r) => setTimeout(r, 1800));
   await snap("S7 稳态 (+1.8s)");
   await shot("s7-steady");
