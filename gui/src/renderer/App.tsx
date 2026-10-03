@@ -2839,7 +2839,12 @@ export default function App(): JSX.Element {
         : (nextWidth !== undefined && nextWidth > window.innerWidth * 0.8);
       if (nextWidth !== undefined && !isFloatExpand) { setRightWidth(nextWidth); }
       if (el && isFloatExpand) { el.style.setProperty("--right-target-w", `${Math.round(nextWidth!)}px`); }
-      if (el) { el.style.opacity = "0"; }
+      /* ⚠️⚠️⚠️ A-1164：**删掉**原本这里的 `el.style.opacity = "0"`。
+         它把整个右栏砸成全透明，再由几何进度拉回来 ⇒ 实拍录像里过渡中右栏内容区
+         p95 只有 10.0（静止态是 133.0）⇒ 一整块面板在平移的同时由黑变亮 = "抽搐"。
+         ⚠️ 必须**连同 onFrame 里的 opacity 写入一起删**：只删这一处的话，收工时
+         没有任何代码去恢复，**右栏会永久停在 opacity 0**（比抽搐更糟）。
+         两处成对删除，正是铁律 11 的"写/摘成对"反过来用：此处原本就是一处**只写不摘**。 */
       // A-980-R34：展开期间临时解除内部 .right-sidebar 的 min-width（CSS: .right-wrapper-no-min .right-sidebar
       // { min-width: 0 }）——否则 260px 下限把展开钳在下限之上，渐变带 [0.45,0.90]×full 进不去，
       // 窄栏展开看不到渐入。done 后复位。
@@ -2895,7 +2900,7 @@ export default function App(): JSX.Element {
            ⇒ 改量真正在动的那个盒子：淡入淡出重新跟随真实的宽度运动。
            ⚠️ `querySelector` 每次一帧跑一次，开销可忽略（单层子树、无通配符）。 */
         () => rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null,
-        (p, done) => {
+        (_p, done) => {
           if (done) {
             setRightMin0(false);
             setRightWebviewPin(null);
@@ -2909,7 +2914,23 @@ export default function App(): JSX.Element {
           }
           const node = rightWrapperRef.current;
           if (!node) { return; }
-          node.style.opacity = done ? "" : String(p);
+          /* ⚠️⚠️⚠️ A-1164：**右栏不再有进场淡入淡出** —— 全程保持不透明。
+             证据（用户实拍录像逐帧取证，2560×1600）：
+               · 静止态   右栏内容区 mean=28.6 / p95=133.0
+               · 过渡中   右栏内容区 mean=10.9 / p95=**10.0**
+             p95 从 133 掉到 10 ⇒ 不是"变暗"，是**亮字整个消失** ⇒ 过渡期间整个右栏
+             几乎是全黑的，收工瞬间又变亮。
+             源头是本回调里原本那句 `node.style.opacity = done ? "" : String(p)`，
+             配合 `animateRightSidebar` 里的 `el.style.opacity = "0"`：
+             把**整个右栏**压到全透明，再用几何进度拉回来。
+             ⚠️ 为什么当初写错了：那段注释自己就记着「绝大部分过渡时间右栏都是半透明
+                ⇒ 观感乱七八糟」，却把它当成**要往前调的参数**（把可见窗口提前），
+                而没有质疑"右栏**根本不该淡**"。
+                右栏有**不透明背景**，它是在自己家的矩形里平移，不存在"淡入才不突兀"；
+                淡入只会让一整块面板**在滑动的同时由黑变亮** —— 而这正是"抽搐/闪烁"。
+             ⚠️ 为什么我的探针四轮都没发现：`opacity` 0→1 是**单调**的，
+                "方向反转"检测完全看不到它 —— 我测到的"单调"恰恰是它看起来正常的原因。 */
+          if (done) { node.style.removeProperty("opacity"); }
         },
         /* ⚠️⚠️ A-1152：**窗口化（大幅展开）时透明度带要更早**（用户反馈「衔接动画也做得
            乱七八糟」）。默认带是 `[0.45, 0.90] × full`，而窗口化时 `full = 整窗宽`
@@ -2955,7 +2976,7 @@ export default function App(): JSX.Element {
       rightFadeCancelRef.current = runGeometrySyncFade(
         /* A-1157：与展开支同源 —— 量真正在动的 `.right-sidebar`（wrapper 是硬跳的）。 */
         () => rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null,
-        (p, done) => {
+        (_p, done) => {
           if (done) {
             setRightWebviewPin(null);
             // A-1153：与上面展开支对称 —— 过渡期变量成对摘除，绝不留残值
@@ -2967,7 +2988,11 @@ export default function App(): JSX.Element {
           }
           const node = rightWrapperRef.current;
           if (!node) { return; }
-          node.style.opacity = done ? "" : String(p);
+          /* ⚠️ A-1164：收起方向**同样**不淡出（与展开方向同一条理由、同一条证据：
+             实拍录像里过渡中的右栏内容区 p95=10.0，而静止态是 133.0 —— 整块面板
+             在滑动的同时由黑变亮/由亮变黑，观感就是"抽搐"。右栏有不透明背景，
+             平移本身不需要淡入淡出。） */
+          if (done) { node.style.removeProperty("opacity"); }
         },
         { min: 0, full: rightWidth },
       );
