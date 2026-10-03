@@ -244,3 +244,29 @@ describe("A-1160 浮窗**不许有进场动画**（进场动效本身就是病�
     expect(r![2], "浮窗必须显式写死 opacity: 1").toMatch(/opacity:\s*1\s*;/);
   });
 });
+
+/* ⚠️⚠️ A-1161：`.chat-scroll` 必须**预留滚动条槽位**（`scrollbar-gutter: stable`）。
+   用户报「窗口化那一瞬边界剧烈左右抖动，右栏恢复与展开左右摇摆闪烁」。
+   机制：聊天区的 `::-webkit-scrollbar-*` 在 Chromium 121+ **全部失效**（本文件里记着：
+   标准属性优先 ⇒ 连全局那条 5px 都失效）⇒ 用的是**平台默认滚动条**，它**随内容高度
+   出现/消失**。窗口化/恢复时会话内容重新挂载、内容高度逐帧变化 ⇒ 滚动条一出现/消失，
+   **内容区宽度就变一格**（Windows 默认 ~17px）⇒ 聊天区内所有东西左右跳一格
+   ⇒ 观感就是浮窗右缘那条边界在"剧烈左右抖动"。
+   ⚠️ 为什么不用 `overflow-y: scroll` 强制常驻：那会让**从不溢出的会话也留一条空槽**，
+      右边永久让掉 17px；`stable` 只在**需要时**预留。
+   ⚠️ 为什么这条能绕开 webkit 失效：`scrollbar-gutter` 是**独立属性**，不受影响。
+   ⚠️ 诚实边界：**因果链未在真机闭环验证** —— 探针在**空会话**里测到槽宽恒为 0
+      （复现不出用户的条件：他的会话有长消息、会溢出）。改动本身零风险。 */
+describe("A-1161 聊天区预留滚动条槽位（平台默认滚动条的出现/消失会让内容左右跳）", () => {
+  const rule = /(^|\n)\.chat-scroll\s*\{([^}]*)\}/.exec(CSS_CODE);
+  it("`.chat-scroll` 声明 `scrollbar-gutter: stable`", () => {
+    expect(rule, "找不到裸 `.chat-scroll` 规则").toBeTruthy();
+    expect(rule![2], "必须预留滚动条槽位，否则内容区宽度随滚动条出现/消失而变").toMatch(
+      /scrollbar-gutter:\s*stable/,
+    );
+  });
+
+  it("**不许**改回 `overflow-y: scroll`（强制常驻会让不溢出的会话也空掉一条槽）", () => {
+    expect(rule![2], "强制常驻滚动条 = 右边永久让掉 17px").not.toMatch(/overflow-y:\s*scroll/);
+  });
+});

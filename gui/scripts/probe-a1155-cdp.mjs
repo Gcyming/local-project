@@ -363,6 +363,11 @@ const CLICK_FLOAT_TRACE = `(() => {
     rb: document.querySelector(".right-body"),
     tabbar: document.querySelector(".right-tabbar"),
   });
+  /* ⚠️⚠️ 绝不要把下面这个 .chat-scroll 放进上面的 boxes() 里：
+     boxes() 的每个键占**两个**索引（left/width），多一个键就把后面所有列
+     （opacity / 探针点 / 滚动条槽宽）**整体顶歪一格**。实测踩过：槽宽读数 100
+     ——那是 opacity 的值，而报告还打印出「✓ 槽宽恒定」的**假绿**。 */
+  const cs = document.querySelector(".chat-scroll");
   const M = boxes();
   const HOST = M.host;
   /* 固定探针点：浮窗下方空白、右栏可见区、浮窗右侧空白、左栏与浮窗之间 —— 四个
@@ -402,6 +407,23 @@ const CLICK_FLOAT_TRACE = `(() => {
         const c = el.className;
         return (typeof c === "string" && c) ? el.tagName.toLowerCase() + "." + c.trim().split(/\s+/).slice(0, 2).join(".") : el.tagName.toLowerCase();
       }).join("|") : null);
+      /* ⚠️⚠️ A-1161：用户截的那条**波浪竖线**极可能是**胶囊滚动条**（聊天区右侧）。
+         滚动条出现/消失会让**内容区宽度变一格（~15px）** ⇒ 内部所有东西左右跳一格
+         ⇒ 观感就是「那条边界剧烈左右抖动」+「空白一大一小」。
+         ⚠️ 而且 index.css 里记着：聊天区的 ::webkit-scrollbar-* 在 Chromium 121+
+            **全部失效**（标准属性优先）⇒ 实际是**平台默认滚动条**，宽且会随内容高度
+            出现/消失。⇒ 这里逐帧记滚动条槽宽 + 是否溢出 + overflow-y。 */
+      const csEl = cs;
+      if (csEl) {
+        row.push(
+          csEl.offsetWidth - csEl.clientWidth,                                /* 滚动条槽宽 */
+          csEl.scrollHeight > csEl.clientHeight ? 1 : 0,                      /* 是否溢出 */
+          getComputedStyle(csEl).overflowY,
+          Math.round(csEl.clientWidth),                                       /* 内容区实际宽 */
+        );
+      } else {
+        row.push(null, null, null, null);
+      }
       tr.rows.push(row);
     }
     tr.raf = requestAnimationFrame(tick);
@@ -651,6 +673,29 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
             + (at.length ? ` · 变于 ${at.join("/")}` : ""));
       }
     }
+  /* ⚠️⚠️ A-1161：**聊天区滚动条槽宽**逐帧变化 —— 这就是"边界左右抖动"的候选实体。
+         槽宽一变，内容区宽度就变一格，聊天区内所有东西**跟着左右跳**。 */
+    const sb = [];
+    for (const r of rows) {
+      const g = r[15];
+      if (g === undefined || g === null) { continue; }
+      if (!sb.length || sb[sb.length - 1][1] !== g || sb[sb.length - 1][2] !== r[16] || sb[sb.length - 1][3] !== r[17]) {
+        sb.push([r[0], g, r[16], r[17], r[18]]);
+      }
+    }
+    say("  📜 聊天区滚动条槽宽/溢出/overflowY/内容宽（变化点）：" + JSON.stringify(sb));
+    say("     ⇒ 槽宽取值 " + JSON.stringify([...new Set(sb.map((x) => x[1]))])
+      + (new Set(sb.map((x) => x[1])).size > 1 ? " ⚠️ **槽宽在变 ⇒ 内容左右跳**" : " ✓ 槽宽恒定"));
+    /* ⚠️⚠️ **列位自检** —— 防止"索引错位读出别的列"却还打印 ✓ 的假绿（实测踩过：
+       多塞一个盒子进 `boxes()`，后面所有列整体偏一格，槽宽读数变成 opacity=100，
+       报告照样打「✓ 槽宽恒定」）。这里拿**已知真值**当标尺：
+       浮窗不透明 ⇒ r[13] 必须落在 0..100；overflowY 必须是 scroll/auto/hidden 之一。 */
+    const bad = [];
+    for (const r of rows) {
+      if (typeof r[13] !== "number" || r[13] < 0 || r[13] > 100) { bad.push("opacity@" + r[0] + "=" + r[13]); }
+      if (typeof r[17] !== "string" || !/^(scroll|auto|hidden|visible)$/.test(r[17])) { bad.push("overflowY@" + r[0] + "=" + r[17]); }
+    }
+    say("  🧷 列位自检：" + (bad.length ? "❌ 列位错位 → " + bad.slice(0, 4).join(", ") : "✓ 各列读数与其语义相符"));
   }   /* ← 抖动分析块的收尾 */
   await snap("S1 点窗口化后（收敛后）");
   await shot("s1-float-settled");
