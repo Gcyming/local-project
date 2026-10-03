@@ -1731,6 +1731,36 @@ body.float-layout .right-wrapper-anim .right-sidebar {
   -webkit-app-region: no-drag;
 }
 
+/* ⚠️⚠️ A-1159：浮窗**与右栏同一条时间轴**淡入（用户报「点击窗口化时各个栏目的衔接动画
+   抖动、抽搐异常明显」）。
+
+   实测（真 App CDP 逐帧，1332px 窗口）证明那不是"某一栏在抖"，而是**三者不同步**：
+     t=11ms  host=240/380（还是中间页的盒子）  rs=620/712
+     t=20ms  host=252/666（浮窗已到最终位）     rs=597/735
+     …280ms  host 一动不动                      rs 一路平滑挤到 240/1092
+   ⇒ 逐栏几何**单调、零反转**（探针抖动分析：rs/rb/tabbar 均 0 次方向反转），
+     真正刺眼的是：**右栏在滑、浮窗"啪"地出现、中间页"啪"地消失**。
+
+   ⇒ 修法：浮窗外框**淡入 + 极轻微放大**，时长与缓动**逐字对齐**右栏那条过渡
+     （`body.float-layout .right-wrapper-anim .right-sidebar` 的
+      0.28s cubic-bezier(0.22, 0.61, 0.36, 1)）⇒ 观感上三者同时发生。
+   ⚠️ 为什么用 CSS animation 而不是 JS 加类再摘：一次性动画 `both` 会停在 to 状态，
+     不需要"加类/摘类"配对（铁律 11），也不会在退场/拖动时留残留。
+   ⚠️ 为什么它只会在"每次进入浮层态"播一次：宿主是**同一个元素、只换 className**
+     （A-1158），class 切走时动画停止、切回时重新开始 ⇒ 唤出播一次；
+     而**最小化 → 还原**时 `float-layout` 类不变 ⇒ **不会**重播，
+     还原仍走它自己的几何渐隐（`startFloatGeometryFade`），两者不打架。
+   ⚠️ `scale` 取 0.985（不是 0.9 之类）：这里要的是"跟着长出来"的暗示，
+     幅度一大就变成"弹一下"，反而更像抽搐。
+   ⚠️ **不动** left/top/width/height：那些是几何，一动就又与右栏的滑动**不同步**了。 */
+@keyframes float-enter-a1159 {
+  from { opacity: 0; transform: scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+body.float-layout .float-window {
+  animation: float-enter-a1159 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
 /* ── 聊天消息区滚动条：A-1113 起**不再自带**任何滚动条样式 ──
    历史：这里曾同时写 `scrollbar-color`（本意给 Firefox）与 `::-webkit-scrollbar-thumb`（给 Chromium）。
    实测结论：Chromium 121+ 下标准属性优先 ⇒ 该元素的 `::-webkit-scrollbar-*` 全部被忽略

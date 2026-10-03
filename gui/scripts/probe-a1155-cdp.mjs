@@ -330,17 +330,12 @@ const ARM_FLOAT_TRACE = `(() => {
     const now = performance.now();
     if (prev) { tr.dt.push([Math.round(now - tr.t0), Math.round(now - prev)]); }
     prev = now;
-    if (!noSample) {
-      const sr = side.getBoundingClientRect();
-      const wr = wrap.getBoundingClientRect();
-      tr.rows.push([
-        Math.round(now - tr.t0),
-        Math.round(sr.width), Math.round(sr.left), Math.round(sr.right),
-        Math.round(wr.width),
-        Math.round(Number(getComputedStyle(wrap).opacity) * 100),
-        wrap.classList.contains("right-wrapper-anim"),
-      ]);
-    }
+    /* ⚠️⚠️ ARM 这一段**只记时间戳，不推几何行**。
+       几何采样由「点击」那次的 tick 负责（CLICK_FLOAT_TRACE 里那六个盒子）。
+       两段都推行 ⇒ 行里会混进**两种不同形状**（本段是右栏/wrapper 的，
+       那段是六栏的）⇒ 逐栏分析读到错位的列，会凭空报出"310 次方向反转"这种假抖动。
+       （实测踩过：out/_r27-jitter.txt 里 sb/main/host 全报 310 次反转，
+         实际是形状错位，不是界面在抽。） */
     tr.raf = requestAnimationFrame(tick);
   };
   tr.t0 = performance.now();
@@ -353,11 +348,77 @@ const CLICK_FLOAT_TRACE = `(() => {
   if (!img) { return "NO-FLOAT-BTN"; }
   const b = img.closest("button") || img.parentElement;
   const tr = window.__ftArm || (window.__ftArm = { t0: performance.now(), rows: [], dt: [], longTasks: [], loaf: [] });
-  /* ⚠️ 点击与 t0 **同一个 eval**：跨 eval 的往返会把"点击时刻"记歪。 */
+  /* ⚠️⚠️ 用户本轮报：「窗口化时各个栏目的衔接动画**抖动、抽搐**异常明显」。
+     「抖动」是可量化的：**每一栏的几何在过渡中途反向移动**（先往右又往左）。
+     ⇒ 这里逐帧记录**五个盒子**的 left/width，最后由 Node 侧做单调性分析，
+        精确定位是哪一栏在抽，而不是"看着别扭就改 CSS"。
+     ⚠️⚠️ 读这些盒子（getBoundingClientRect）是**强制同步布局**，每帧读会自己制造停顿
+        （上一版实测探针采样贡献 7~11ms）。这里在 rAF 里**一次性批量读**六个盒子，
+        并保留 NO_SAMPLE 对照开关复核两者差异。 */
+  const boxes = () => ({
+    sb: document.querySelector(".sidebar"),
+    main: document.querySelector(".main"),
+    host: document.querySelector(".float-window, .inline-chat-host"),
+    rs: document.querySelector(".right-sidebar"),
+    rb: document.querySelector(".right-body"),
+    tabbar: document.querySelector(".right-tabbar"),
+  });
+  const M = boxes();
+  const HOST = M.host;
+  let prev = 0;
+  const tick = () => {
+    const now = performance.now();
+    if (prev) { tr.dt.push([Math.round(now - tr.t0), Math.round(now - prev)]); }
+    prev = now;
+    if (!window.__probeNoSample) {
+      const row = [Math.round(now - tr.t0)];
+      for (const k of Object.keys(M)) {
+        const e = M[k];
+        if (!e) { row.push(null); continue; }
+        const r = e.getBoundingClientRect();
+        row.push(Math.round(r.left), Math.round(r.width));
+      }
+      /* ⚠️ A-1159：浮窗**透明度**与右栏宽度的时间轴是否同步 —— 这才是"抽搐"的判据
+         （几何单调不代表观感同步：浮窗可能瞬间到位而右栏还在滑）。 */
+      row.push(HOST ? Math.round(Number(getComputedStyle(HOST).opacity) * 100) : null);
+      tr.rows.push(row);
+    }
+    tr.raf = requestAnimationFrame(tick);
+  };
   tr.t0 = performance.now();
+  tr.raf = requestAnimationFrame(tick);
   b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
   return "CLICKED(traced)";
 })()`;
+
+/** 单调性分析：把某一栏的 left/width 序列切成"变化点"，标出方向反转 */
+const analyzeJitter = (rows, keys) => {
+  /* rows: [t, ...每盒 [left,width] 或 null] */
+  const out = [];
+  for (let i = 0; i < keys.length; i++) {
+    const off = 1 + i * 2;
+    const last = [];
+    const marks = [];
+    for (const r of rows) {
+      const l = r[off], w = r[off + 1];
+      if (l === undefined || l === null) { continue; }
+      if (last[0] !== l || last[1] !== w) { marks.push([r[0], l, w]); last[0] = l; last[1] = w; }
+    }
+    if (marks.length < 3) { continue; }
+    /* 方向反转：去掉 <2px 的抖动后，相邻变化的方向必须一致 */
+    let dir = 0, reversals = 0, backtracks = 0, revAt = [];
+    for (let k = 1; k < marks.length; k++) {
+      const d = (marks[k][1] - marks[k - 1][1]) + (marks[k][2] - marks[k - 1][2]);
+      if (Math.abs(d) < 2) { continue; }
+      const nd = Math.sign(d);
+      if (dir !== 0 && nd !== dir) { reversals++; revAt.push(marks[k][0]); }
+      dir = nd;
+    }
+    out.push({ key: keys[i], points: marks.length, reversals, revAtMs: revAt.slice(0, 8),
+               first: marks[0], last: marks[marks.length - 1] });
+  }
+  return out;
+};
 
 const READ_FLOAT_TRACE = `JSON.stringify((() => {
   const tr = window.__ftArm;
@@ -369,14 +430,14 @@ const READ_FLOAT_TRACE = `JSON.stringify((() => {
   let last = "";
   for (const r of tr.rows) {
     const k = r.slice(1).join("|");
-    if (k !== last) { marks.push(\`\${r[0]}ms 右栏=\${r[1]}px @\${r[2]}..\${r[3]} wrapper=\${r[4]}px 不透明=\${r[5]}% anim=\${r[6]}\`); last = k; }
+    if (k !== last) { marks.push("t=" + r[0] + "ms sb=" + r[1] + "/" + r[2] + " main=" + r[3] + "/" + r[4] + " host=" + r[5] + "/" + r[6] + " rs=" + r[7] + "/" + r[8] + " rb=" + r[9] + "/" + r[10]); last = k; }
   }
   /* 停顿：相邻两帧几何完全相同且间隔 > 40ms —— 「抽搐」的可测形态 */
   const stalls = [];
   for (let i = 1; i < tr.rows.length; i++) {
     const a = tr.rows[i - 1], b2 = tr.rows[i];
     const gap = b2[0] - a[0];
-    if (gap > 40 && a[1] === b2[1]) { stalls.push(\`\${a[0]}ms→\${b2[0]}ms 卡 \${gap}ms（宽度停在 \${a[1]}px）\`); }
+    if (gap > 40 && String(a.slice(1)) === String(b2.slice(1))) { stalls.push("t=" + a[0] + "→" + b2[0] + "ms 卡 " + gap + "ms（几何完全没动）"); }
   }
   const dt = tr.dt.map((d) => d[1]);
   const sorted = [...dt].sort((x, y) => x - y);
@@ -392,6 +453,7 @@ const READ_FLOAT_TRACE = `JSON.stringify((() => {
     dtMax: Math.max(0, ...dt),
     dtP95: sorted[Math.floor(sorted.length * 0.95)] ?? 0,
     slowFrames: tr.dt.filter((d) => d[1] > 40).slice(0, 12),
+    raw: tr.rows,
   };
 })())`;
 
@@ -482,6 +544,7 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
     dtMax: Math.max(0, ...dt),
     longTasks: tr.longTasks,
     loaf: tr.loaf,
+    raw: tr.rows,
   };
 })())`;
 
@@ -522,7 +585,31 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
   say(`  ⏱ 帧间隔：p95=${ft.dtP95}ms max=${ft.dtMax}ms；>40ms 的慢帧=${JSON.stringify(ft.slowFrames)}`);
   say(`  ⏱ 长任务（>50ms）=${JSON.stringify(ft.longTasks)}${ft.longTaskErr ? " 观察器失败:" + ft.longTaskErr : ""}`);
   say(`  ⏱ **几何停顿**（宽度不变但帧间隔 >40ms）=${ft.stalls.length ? ft.stalls.join(" | ") : "无"}`);
-  say(`  🧩 LoAF（>50ms 的动画帧，浏览器自己归因）=${JSON.stringify(ft.loaf)}${ft.loafErr ? " 观察器失败:" + ft.loafErr : ""}`);
+  say(`  🧾 LoAF（>50ms 的动画帧，浏览器自己归因）=${JSON.stringify(ft.loaf)}${ft.loafErr ? " 观察器失败:" + ft.loafErr : ""}`);
+  /* ⚠️⚠️ 抖动分析：逐栏看几何在过渡中途有没有**反向移动**（真正的"抽搐"）。 */
+  {
+    const BOXES = ["sb", "main", "host", "rs", "rb", "tabbar"];
+    const jitter = analyzeJitter(ft.raw || [], BOXES);
+    say(`  📐 逐栏抖动分析（方向反转次数 / 采样点）：`);
+    for (const j of jitter) {
+      const flag = j.reversals > 0 ? "⚠️ 反转" : "单调";
+          say(`      ${j.key.padEnd(7)} ${String(j.reversals).padStart(3)} 次 ${flag}`
+        + ` · ${j.points} 点 · ${JSON.stringify(j.first)} → ${JSON.stringify(j.last)}`
+        + (j.revAtMs.length ? ` · 反转于 ${j.revAtMs.join("/")}ms` : ""));
+    }
+    /* ⚠️ A-1159：**时间轴对齐**判据 —— 浮窗透明度 0→100 的区间 vs 右栏宽度变化的区间。 */
+    const rows = ft.raw || [];
+    const op = [];
+    for (const r of rows) { const o = r[13]; if (o !== undefined && o !== null) { if (!op.length || op[op.length - 1][1] !== o) { op.push([r[0], o]); } } }
+    const rsW = [];
+    for (const r of rows) { const w = r[8]; if (w !== undefined && w !== null) { if (!rsW.length || rsW[rsW.length - 1][1] !== w) { rsW.push([r[0], w]); } } }
+    const opSpan = op.length ? [op[0][0], op[op.length - 1][0]] : null;
+    const rsSpan = rsW.length ? [rsW[0][0], rsW[rsW.length - 1][0]] : null;
+    say(`  ⏱ 时间轴对齐：浮窗透明度 ${JSON.stringify(op)}`);
+    say(`             右栏宽度   ${JSON.stringify(rsW.slice(0, 3))} … ${JSON.stringify(rsW.slice(-2))}`);
+    say(`             ⇒ 浮窗淡入区间 ${JSON.stringify(opSpan)} vs 右栏滑动区间 ${JSON.stringify(rsSpan)}`
+      + (opSpan && rsSpan && Math.abs(opSpan[1] - rsSpan[1]) <= 60 ? " ✓ 收尾基本同步" : " ⚠️ 不同步"));
+  }
   await snap("S1 点窗口化后（收敛后）");
   await shot("s1-float-settled");
 

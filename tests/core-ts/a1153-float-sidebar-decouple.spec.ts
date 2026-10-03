@@ -199,3 +199,57 @@ describe("A-1153 ⑤ 恢复方向也必须有过渡（摘类时 transition 声�
     ).not.toMatch(/endChatFreeze\s*\(/);
   });
 });
+
+/* ⚠️⚠️ A-1159：浮窗淡入动画必须**逐字沿用**右栏那条过渡的时长与缓动。
+   用户报「点击窗口化时各个栏目的衔接动画抖动、抽搐异常明显」。
+   实测（真 App CDP 逐帧）证明那**不是**"某一栏在抖"：逐栏几何全部单调、零方向反转，
+   真正刺眼的是**三者不同步** —— 右栏在滑 280ms，浮窗却在第 1 帧就"啪"地出现在最终位置、
+   中间页同帧硬切消失（`t=11ms host=240/380` → `t=20ms host=252/666`，此后 host 一动不动）。
+   ⇒ 这两条锁住"浮窗与右栏同一条时间轴"这个事实本身。 */
+describe("A-1159 浮窗与右栏**同一条时间轴**（衔接动画不抽搐）", () => {
+  it("浮窗淡入动画与右栏过渡**同一时长、同一缓动**", () => {
+    const animRule = /body\.float-layout \.float-window\s*\{([^}]*)\}/.exec(CSS_CODE);
+    expect(animRule, "找不到 body.float-layout .float-window 的动画声明").toBeTruthy();
+    const animM = /animation:\s*float-enter-a1159\s+([^;]+);/.exec(animRule![1]);
+    expect(animM, "`.float-window` 必须声明 float-enter-a1159 动画").toBeTruthy();
+    /* 右栏那条过渡（唯一真相源，A-1153 立的）—— 从**同一份 CSS 文本**里取，
+       两边同源比较，才不会因为"抄错一个数字"而假绿。 */
+    const rightRule = /body\.float-layout \.right-wrapper-anim \.right-sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
+    expect(rightRule![1]).toMatch(/transition:\s*width\s+([0-9.]+m?s)\s+([^;]+);/);
+    const rightDur = rightRule![1].match(/transition:\s*width\s+([0-9.]+m?s)\s+([^;]+);/)!;
+    /* ⚠️ 必须一致：浮窗动画是**唯一**能让三者同拍的机制，
+       时长/缓动一漂，浮窗就会先于（或晚于）右栏收尾 ⇒ 又退回"一个动、另外两个不动"。 */
+    /* ⚠️ 不能用 `split(/\s+/)` 取"前两个记号"：`cubic-bezier(0.22, 0.61, 0.36, 1)`
+       **本身含空格**，按空白切会把它切成四段（实测踩过：拼成 `0.28s cubic-bezier(0.22,`）。
+       ⇒ 改成"去掉末尾的填充模式"再整体比较。 */
+    const animFull = animM![1].trim();
+    expect(animFull.endsWith(" both"), "动画必须带 fill-mode（both），否则播完会掉回初始透明度").toBe(true);
+    const animTiming = animFull.replace(/\s+both$/, "");
+    expect(animTiming, "浮窗动画的时长/缓动必须与右栏过渡逐字相同")
+      .toBe(`${rightDur[1]} ${rightDur[2]}`.trim());
+  });
+
+  it("浮窗淡入只碰 opacity/transform，且缩放**极轻微**", () => {
+    const kf = /@keyframes float-enter-a1159\s*\{([\s\S]*?)\n\}/.exec(CSS_CODE);
+    expect(kf, "找不到 @keyframes float-enter-a1159").toBeTruthy();
+    const from = kf![1];
+    expect(from).toMatch(/from\s*\{[^}]*opacity:\s*0/);
+    const scale = /from\s*\{[^}]*scale\(([0-9.]+)\)/.exec(from);
+    expect(scale, "from 必须带 scale（否则浮窗是硬切出现，没有『跟着长出来』的暗示）").toBeTruthy();
+    expect(Number(scale![1]), "起始缩放应在 0.97~0.99（0.9 之类会变成『弹一下』，反而更像抽搐）")
+      .toBeGreaterThanOrEqual(0.97);
+    expect(Number(scale![1])).toBeLessThanOrEqual(0.99);
+    /* ⚠️ 只允许碰 opacity/transform：碰几何（left/top/width/height）就又与右栏的滑动不同步 ——
+       那正是本组要根除的病症。 */
+    const props = from
+      /* ⚠️ 必须先剥掉 `from {` / `to {` **选择器**，否则切出来的第一个"属性"是
+         "from  opacity" 这种把选择器和声明粘在一起的东西。 */
+      .replace(/(^|[\s{}])(from|to)\s*\{/g, " ")
+      .replace(/[{}]/g, "")
+      .split(";").map((s) => s.split(":")[0].trim()).filter(Boolean);
+    expect(props.length, "keyframes 解析为空 ⇒ 守卫自己失效了").toBeGreaterThan(0);
+    for (const p of props) {
+      expect(["opacity", "transform"], `keyframes 里不该出现属性 ${p}`).toContain(p);
+    }
+  });
+});
