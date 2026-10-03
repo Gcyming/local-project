@@ -1514,7 +1514,22 @@ code,
    反过来（只给右栏 `width:100%`、wrapper 仍是 `auto`）⇒百分比参照 0
    ⇒ **整个右栏消失**（用户实测「右侧边栏直接没了」）。
    ⚠️ 不写 `100vw`：wrapper 已是整窗宽，100vw 在有滚动条时会溢出。 */
-body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar {
+/* ⚠️⚠️⚠️ A-1157-R2：多排除一个 `right-wrapper-exit` —— 退浮层期间的**专用**过渡标志，
+   它只做一件事：**让下面这条铺满规则失效**，让右栏能从浮层满宽**过渡回**自然宽度。
+
+   为什么不能复用 `right-wrapper-anim`（实测逼出来的，走了两轮弯路）：
+     `right-wrapper-anim` 那条声明是 `width: var(--right-target-w) !important`，
+     而退场**刻意不写** `--right-target-w` ⇒ `var()` 按 **IACVT** 处理
+     ⇒ **`width` 变成它的初始值 `auto`**（注意：不是"回落到下一条声明"！），
+     而 `!important` 仍然**压过内联样式** ⇒ 于是退场时即便给右栏写过渡起点宽
+     （实测内联 `1092px` 确实写进去了、且跨了两帧），计算宽度**当场就是自然宽 431**
+     ⇒ `transition: width` 没有"旧计算值"可插值 ⇒ 退场全程（实测 400+ms）纹丝不动，
+     随后 wrapper 一收就整块跳、右缘再向左退（右边空 92px）= 用户本轮报的那条。
+
+   ⇒ 退场只需要"**别铺满**"，不需要过渡期宽度通道，所以另立一个类，两条通道互不干扰。
+   ⚠️ `right-wrapper-anim` / `right-wrapper-no-min` 仍然共用 `rightMin0` 一个条件
+     （a1152 ⑭ 的守卫原样有效），这里**没有**给它们加第三个来源。 */
+body.float-layout .right-wrapper:not(.right-wrapper-anim):not(.right-wrapper-exit) .right-sidebar {
   width: 100% !important;
 }
 /* ⚠️⚠️ A-1152：右栏铺满整窗时，**内容列要有舒适上限且居中**（用户实测：

@@ -24,6 +24,19 @@ import { join } from "node:path";
 import { PROJECT_ROOT } from "../../core-ts/src/paths.js";
 
 const read = (rel: string): string => readFileSync(join(PROJECT_ROOT, rel), "utf8");
+/** ⚠️ 取某个具名函数**从声明到下一个顶层 `\n  }` 之间的函数体**（花括号配平）。
+ *  a1153 那边有同名 helper，这里独立一份，避免两份实现漂移后互相掩盖。 */
+const fnBody2 = (src: string, name: string): string => {
+  const at = src.search(new RegExp(`function\\s+${name}\\s*\\(`));
+  if (at < 0) { return ""; }
+  let i = src.indexOf("{", at);
+  let depth = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === "{") { depth++; }
+    else if (src[i] === "}") { depth--; if (depth === 0) { return src.slice(at, i + 1); } }
+  }
+  return src.slice(at);
+};
 const APP = read("gui/src/renderer/App.tsx");
 const CSS = read("gui/src/renderer/index.css");
 const PANEL = read("gui/src/renderer/pages/ChatPanel.tsx");
@@ -308,8 +321,12 @@ describe("A-1152 ⑩ 浮层态右栏必须**铺满整窗**（用户截图实测�
   it("CSS 里有浮层态铺满规则（排除过渡期）", () => {
     /* ⚠️ A-1152 ⑬ 更新：原先锚的是**无条件**铺满，那正是"过渡期宽度被锁死"的成因。
        现在铺满**排除过渡期**（`:not(.right-wrapper-anim)`）—— 见 ⑬ 组。
+       ⚠️⚠️ A-1157-R2 再加一个排除项 `:not(.right-wrapper-exit)`：
+         退浮层期间也必须让铺满失效，右栏才能从满宽**过渡回**自然宽度。
+         实测（真 App CDP 逐帧）：不排除时退场是 `1ms 1092@240..1332` →
+         `411ms 完全不动` → `431@901..1332` → `…339@901..1240`（右缘向左退、右边空 92px）。
        本条仍守"稳定态铺满整窗"这个意图（用户截图实测：右缘 1400px 是根底色）。 */
-    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/);
+    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\):not\(\.right-wrapper-exit\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/);
   });
 
   it("`float-layout` 类由 `mainIsFloatLayout` 驱动（唯一真状态，与卸载同源）", () => {
@@ -343,7 +360,7 @@ describe("A-1152 ⑪ 浮层态右栏铺满：**wrapper 给宽度 + 右栏填满*
   });
 
   it("CSS 里右栏填满 wrapper 的规则仍在（`body.float-layout .right-sidebar`）", () => {
-    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/);
+    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\):not\(\.right-wrapper-exit\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/);
   });
 
   it("两条**同时**存在才算修好（任缺一条 ⇒ 右栏塌 0 或只到 720px）", () => {
@@ -352,7 +369,7 @@ describe("A-1152 ⑪ 浮层态右栏铺满：**wrapper 给宽度 + 右栏填满*
        所以两条都要锚，且真正兜底的是 `assert-float-gap.cjs` 的几何（走真实 CSS 路径）。
        ⚠️ A-1155：wrapper 那条已随实测改为 `calc(100% - var(--left-w, 0px))`，见上。 */
     const hasWrapper = /width:\s*\(?\s*mainIsFloatLayout\s*&&\s*!rightMin0\s*\)?\s*\?\s*"calc\(100% - var\(--left-w,\s*0px\)\)"\s*:\s*\(?\s*mainIsFloatLayout\s*\?\s*"var\(--right-target-w\)"\s*:\s*"auto"/.test(APP_CODE);
-    const hasSidebar = /body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/.test(CSS_CODE);
+    const hasSidebar = /body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\):not\(\.right-wrapper-exit\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/.test(CSS_CODE);
     expect(hasWrapper && hasSidebar).toBe(true);
   });
 });
@@ -446,15 +463,57 @@ describe("A-1152 ⑬ 窗口化过渡：右栏必须**逐帧响应**、抽屉式�
     /* ⚠️ 这条修的是「右栏跑到左边然后往右合」：浮层态的 `width:100% !important`
        若在过渡期也生效，右栏宽度被**锁死** ⇒ 探针实测 wrap.w 恒 431、8 帧请求零响应
        ⇒ 过渡没有过渡对象，且 `rightWidth` 的旧内联值先闪一下 ⇒ 观感正是用户看到的。 */
-    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%/);
+    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\):not\(\.right-wrapper-exit\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%/);
     /* ⚠️ 不能出现"无条件铺满"的那条（否则上面这条形同虚设） */
     expect(CSS_CODE).not.toMatch(/body\.float-layout\s+\.right-sidebar\s*\{[^}]*width:\s*100%/);
   });
 
-  it("过渡期标志 `right-wrapper-anim` 与 `right-wrapper-no-min` **同一条件**", () => {
-    /* ⚠️ 两个类共用一个条件（`rightMin0`）——拆成两个 state 就多一份要同步的判据（铁律 11）。 */
+  it("退场标志 `right-wrapper-exit` 挂在**独立**的 state 上（不复用 `rightMin0`）", () => {
+    /* ⚠️⚠️ 为什么不复用 `right-wrapper-anim`：它那条声明是
+       `width: var(--right-target-w) !important`，而退场**刻意不写**该变量
+       ⇒ `var()` 按 **IACVT** 处理 ⇒ `width` 取**初始值 `auto`**
+       （不是"回落到下一条声明"！）且 `!important` 仍压过内联样式
+       ⇒ 实测：内联起点宽 `1092px` 明明写进去了（还跨了两帧），计算宽度**当场就是 431**，
+         `transition: width` 根本没有旧计算值可插值 ⇒ 退场全程纹丝不动（走了两轮弯路才定位）。
+       ⇒ 退场只需要"别铺满"，另立一个只做这件事的类。 */
+    const m = /className=\{`right-wrapper\$\{rightMin0 \? " right-wrapper-no-min" : ""\}\$\{rightMin0 \? " right-wrapper-anim" : ""\}\$\{rightExitAnim \? " right-wrapper-exit" : ""\}`\}/.exec(APP_CODE);
+    expect(m, "right-wrapper-exit 没挂在 rightExitAnim 上").toBeTruthy();
+  });
+
+  it("`rightExitAnim` 必须**成对**：退场起点置真、退场几何 done 置假、唤出入口复位", () => {
+    /* ⚠️⚠️ 三处缺一不可（变异测试实测：只校验 className 的绑定、不校验"有没有被置真"，
+       两条变异都能存活 —— 守卫看着齐了，实际什么也没守住）：
+       ① `dismissFloat` 起点 `setRightExitAnim(true)`：不置真 ⇒ 铺满规则在退场期仍生效
+          ⇒ 右栏被钉死在满宽（实测 `1ms 1092@240..1332` → **411ms 完全不动** → 整块右跳）。
+       ② `dismissFloat` 的几何 done `setRightExitAnim(false)`：不摘 ⇒ 类**永久残留**
+          ⇒ 下次唤出时铺满规则从第一帧就失效 ⇒ 右栏起手就是自然宽（铁律 11：谁挂谁摘）。
+       ③ `handleToggleFloat` 复位：退场被打断、done 没能跑到时的兜底（对称于 ②）。 */
+    const dismiss = fnBody2(APP_CODE, "dismissFloat");
+    expect(dismiss, "dismissFloat 里没有 setRightExitAnim(true)").toMatch(/setRightExitAnim\(true\)/);
+    expect(dismiss, "dismissFloat 里没有成对摘除 setRightExitAnim(false)").toMatch(/setRightExitAnim\(false\)/);
+    expect(APP_CODE).toMatch(/function handleToggleFloat[\s\S]{0,4000}?setRightExitAnim\(false\)/);
+  });
+
+  it("退场起点**先清内联残值、再挂 `exit` 类**（顺序反了右栏会跳到残值）", () => {
+    /* ⚠️ 顺序是行为的一部分，不是风格：
+       · 先清：此刻铺满规则仍在生效，内联残值被它压住 ⇒ 清除**没有视觉变化**；
+       · 再挂类：铺满失效 ⇒ 计算宽度由 1092（满宽）变成自然宽 ⇒ 过渡有旧值可插值。
+       · 若把"清"挪到挂类之后：内联残值（实测上一次普通展开留的是 287px）**突然生效**
+         ⇒ 右栏直接跳到 287，而不是从浮层满宽平滑收下来。 */
+    const dismiss = fnBody2(APP_CODE, "dismissFloat");
+    const clearAt = dismiss.search(/rsExit\.style\.width = ""/);
+    const setAt = dismiss.search(/setRightExitAnim\(true\)/);
+    expect(clearAt, "dismissFloat 里找不到清理内联残值的那行").toBeGreaterThan(-1);
+    expect(setAt, "dismissFloat 里找不到 setRightExitAnim(true)").toBeGreaterThan(-1);
+    expect(clearAt, "清理残值必须排在 setRightExitAnim(true) 之前（否则残值会突然生效）").toBeLessThan(setAt);
+  });
+
+  it("过渡期标志 `right-wrapper-anim` 与 `right-wrapper-no-min` **仍同一条件**（铁律 11 未被破坏）", () => {
+    /* ⚠️ 两个类共用一个条件（`rightMin0`）——拆成两个 state 就多一份要同步的判据（铁律 11）。
+       ⚠️ A-1157-R2 只给**排除路径**加了 `rightExitAnim`，`anim` 本身**仍**由 `rightMin0` 驱动
+       ⇒ 这条守卫原样有效，不许为了退场把它改成三态混用。 */
     expect(APP_CODE).toMatch(/right-wrapper-no-min[^`]*right-wrapper-anim/);
-    const m = /className=\{`right-wrapper\$\{rightMin0 \? " right-wrapper-no-min" : ""\}\$\{rightMin0 \? " right-wrapper-anim" : ""\}`\}/.exec(APP_CODE);
+    const m = /className=\{`right-wrapper\$\{rightMin0 \? " right-wrapper-no-min" : ""\}\$\{rightMin0 \? " right-wrapper-anim" : ""\}/.exec(APP_CODE);
     expect(m, "两个类没挂同一个条件").toBeTruthy();
   });
 
@@ -646,7 +705,7 @@ describe("A-1152 ⑱ `float-layout` 命令式挂类必须**条件式**（回归�
   });
 
   it("铺满整窗的规则带 `body.float-layout` 前缀（不挂类就不生效）", () => {
-    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\)\s+\.right-sidebar/);
+    expect(CSS_CODE).toMatch(/body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\):not\(\.right-wrapper-exit\)\s+\.right-sidebar/);
   });
 });
 

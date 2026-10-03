@@ -395,6 +395,96 @@ const READ_FLOAT_TRACE = `JSON.stringify((() => {
   };
 })())`;
 
+/* ⚠️ 用户本轮报：窗口化**恢复**时右栏「从左向右闭合、右边凭空空白」⇒ 与唤出相反的方向问题。
+   ⚠️⚠️ 必须**页内采样**（同唤出那条）：CDP 的截图/eval 有几百毫秒往返，
+   放在点击与轮询之间会把整条时间轴后移 —— 上版「点击后 90ms」那一采
+   其实发生在 ~500ms 时，量出的「收敛 2ms、右栏已到位」全是假的。 */
+const ARM_EXIT_TRACE = `(() => {
+  const wrap = document.querySelector(".right-wrapper");
+  const side = document.querySelector(".right-sidebar");
+  window.__ftArm = { t0: 0, rows: [], dt: [], longTasks: [], loaf: [] };
+  const tr = window.__ftArm;
+  try {
+    const po = new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) { tr.longTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }
+    });
+    po.observe({ entryTypes: ["longtask"] });
+    tr.po = po;
+  } catch (e) { tr.longTaskErr = String(e); }
+  try {
+    const lo = new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) {
+        tr.loaf.push({
+          start: Math.round(e.startTime - tr.t0),
+          dur: Math.round(e.duration),
+          blocking: Math.round(e.blockingDuration || 0),
+          renderStart: e.renderStart === undefined ? null : Math.round(e.renderStart - e.startTime),
+          scripts: (e.scripts || []).map((s) => ({ n: (s.sourceURL || "").split("/").pop().slice(0, 40), dur: Math.round(s.duration || 0) })),
+        });
+      }
+    });
+    lo.observe({ type: "long-animation-frame" });
+    tr.lo = lo;
+  } catch (e) { tr.loafErr = String(e); }
+  let prev = 0;
+  const tick = () => {
+    const now = performance.now();
+    if (prev) { tr.dt.push([Math.round(now - tr.t0), Math.round(now - prev)]); }
+    prev = now;
+    const sr = side.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    tr.rows.push([
+      Math.round(now - tr.t0),
+      Math.round(sr.width), Math.round(sr.left), Math.round(sr.right),
+      Math.round(wr.width), Math.round(wr.left), Math.round(wr.right),
+      Math.round(Number(getComputedStyle(wrap).opacity) * 100),
+      wrap.classList.contains("right-wrapper-anim"),
+      side.style.width || "(none)",
+    ]);
+    tr.raf = requestAnimationFrame(tick);
+  };
+  tr.t0 = performance.now();
+  tr.raf = requestAnimationFrame(tick);
+  return "ARMED";
+})()`;
+
+const CLICK_EXIT_TRACE = `(() => {
+  const b = document.querySelector('button[title*="恢复普通布局"]')
+         || Array.from(document.querySelectorAll(".float-window button")).find((x) => x.textContent === "▢");
+  if (!b) { return "NO-RESTORE-BTN"; }
+  const tr = window.__ftArm || (window.__ftArm = { t0: performance.now(), rows: [], dt: [], longTasks: [], loaf: [] });
+  tr.t0 = performance.now();
+  b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  return "CLICKED(exit traced)";
+})()`;
+
+const READ_EXIT_TRACE = `JSON.stringify((() => {
+  const tr = window.__ftArm;
+  cancelAnimationFrame(tr.raf);
+  tr.po && tr.po.disconnect();
+  tr.lo && tr.lo.disconnect();
+  const marks = [];
+  let last = "";
+  for (const r of tr.rows) {
+    const k = r.slice(1).join("|");
+    if (k !== last) {
+      marks.push(\`\${r[0]}ms 右栏=\${r[1]}px @\${r[2]}..\${r[3]} wrapper=\${r[4]}px @\${r[5]}..\${r[6]} 不透明=\${r[7]}% anim=\${r[8]}\`);
+      last = k;
+    }
+  }
+  const dt = tr.dt.map((d) => d[1]);
+  return {
+    total: tr.rows.length,
+    dur: tr.rows.length ? tr.rows[tr.rows.length - 1][0] : 0,
+    marks: marks.slice(0, 26),
+    head: tr.rows.slice(0, 12).map((r) => [r[0], r[1], r[9], r[8]]),
+    slowFrames: tr.dt.filter((d) => d[1] > 40).slice(0, 8),
+    dtMax: Math.max(0, ...dt),
+    longTasks: tr.longTasks,
+    loaf: tr.loaf,
+  };
+})())`;
+
 /* ══ ⓪ **冷启动后的首次**左栏收起→展开 ══════════════════════════════════
      ④/⑤ 都是"已经动过几轮之后"的展开；用户抱怨的是"**现在**展开要等半天"，
      可能对应的是**刚打开应用后的第一次**（此时会话树/搜索索引/首屏都还没热）。
@@ -576,9 +666,18 @@ const READ_FLOAT_TRACE = `JSON.stringify((() => {
   await shot("s5-left-expanded");
 
   say("\n═══ ④c 恢复窗口化（点浮窗按钮退回中间页） ═══");
-  say("点击=" + (await cdp.eval(CLICK_FLOAT)));
+  /* ⚠️ 用户本轮报：**恢复**时右栏「从左向右闭合、右边凭空空白」⇒ 与唤出相反的方向问题。
+     必须页内逐帧采样（理由同 ①）。 */
+  say("装采样器=" + (await cdp.eval(ARM_EXIT_TRACE)));
+  say("点击=" + (await cdp.eval(CLICK_EXIT_TRACE)));
   await waitSettle("④退浮层过渡");
-  await new Promise((r) => setTimeout(r, 600));
+  await new Promise((r) => setTimeout(r, 900));
+  const ex = JSON.parse(await cdp.eval(READ_EXIT_TRACE));
+  say(`  🎞 退浮层过渡曲线（页内采样，共 ${ex.total} 帧 / ${ex.dur}ms）：`);
+  for (const m of ex.marks) { say(`      ${m}`); }
+  say(`  🧾 退场前 12 帧逐帧（时间/右栏宽/内联宽/anim）=${JSON.stringify(ex.head)}`);
+  say(`  ⏱ 帧间隔 max=${ex.dtMax}ms；>40ms 慢帧=${JSON.stringify(ex.slowFrames)}；长任务=${JSON.stringify(ex.longTasks)}`);
+  say(`  🧩 LoAF=${JSON.stringify(ex.loaf)}`);
   await snap("S6 恢复窗口化后");
   await shot("s6-float-restored");
 

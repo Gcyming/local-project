@@ -46,7 +46,17 @@ import { fileURLToPath } from "node:url";
 import { sub } from "./_mut-eol.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const SPECS = ["tests/core-ts/a1155-float-width-symmetry.spec.ts"];
+/* ⚠️⚠️ A-1157-R2：守卫清单必须**包含 a1152**。
+   退场相关的断言（`right-wrapper-exit` 成对性、"先清残值再挂类"的顺序）落在
+   `a1152-float-stability.spec.ts` 里 —— 本脚本原先只跑 a1155 自己那份，
+   于是 M18/M19 实测"存活"，而手动把 a1152 一起跑就是红的：
+     `--apply 19` + 只跑 a1155 ⇒ 绿；`--apply 19` + 跑 a1152 ⇒ 红 2 条。
+   ⇒ 这正是"变异脚本的守卫清单必须与实际断言同源"的一条：清单漏一份，
+      变异就"存活"却不报错，比没有守卫更危险（它会让人误以为守住了）。 */
+const SPECS = [
+  "tests/core-ts/a1155-float-width-symmetry.spec.ts",
+  "tests/core-ts/a1152-float-stability.spec.ts",
+];
 
 const F_APP = "gui/src/renderer/App.tsx";
 const TARGETS = [F_APP];
@@ -55,10 +65,12 @@ const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1155");
 
 /* ── 供 mutate 复用的锚点片段（**逐字**取自源码，改源码必须同步改这里） ── */
 
-/* dismissFloat 的起点清理块（三条摘除 + setRightMin0） */
+/* dismissFloat 的起点清理块（三条摘除 + setRightMin0）
+   ⚠️⚠️ A-1157-R2 同步锚点：退场起点被重排过（"先量/清残值 → 挂 exit 类 → 摘变量"），
+     锚点必须跟着改，否则 `sub()` 找不到 ⇒ **变异静默失效**（实测 M1/M2/M4 三条一起
+     "锚点未命中"，而脚本只报"存活 3"，很容易被当成"守卫不够严"而去加错的断言）。 */
 const D_EXIT_BLOCK = [
-  "    setRightMin0(false);",
-  "    const rwExit = rightWrapperRef.current;",
+  "    const rwExit = rwExitPre;",
   "    if (rwExit) {",
   '      rwExit.style.removeProperty("--right-body-pin");',
   '      rwExit.style.removeProperty("--right-target-w");',
@@ -89,8 +101,8 @@ const MUTATIONS = [
     file: F_APP,
     mutate: (t) => sub(
       t,
-      '    setRightMin0(false);\n    const rwExit = rightWrapperRef.current;',
-      '    const rwExit = rightWrapperRef.current;',
+      "    setRightMin0(false);\n    /* ⚠️⚠️ A-1157-R2：退场**保持**",
+      "    /* ⚠️⚠️ A-1157-R2：退场**保持**",
     ),
   },
   {
@@ -112,10 +124,12 @@ const MUTATIONS = [
   {
     name: "M4 dismissFloat 的 done 少一次摘除（起点 + 收尾双保险破缺）",
     file: F_APP,
+    /* ⚠️ A-1157-R2 同步锚点：done 里现在先摘的是 `rightExitAnim`（退场专用标志），
+       后面才是三条 removeProperty；锚点跟着新形状改。 */
     mutate: (t) => sub(
       t,
-      '      setRightMin0(false);\n      rightWrapperRef.current?.style.removeProperty("--right-body-pin");',
-      '      rightWrapperRef.current?.style.removeProperty("--right-body-pin");',
+      '      setRightExitAnim(false);\n      /* ⚠️ A-1157-R2：退场起点写进去的**过渡起点宽**',
+      '      /* ⚠️ A-1157-R2：退场起点写进去的**过渡起点宽**',
     ),
   },
 
@@ -220,13 +234,27 @@ const MUTATIONS = [
 
   /* ── R8：内联宽残留 ── */
   {
+    /* ⚠️⚠️ A-1157-R2 同步锚点：原先锚的那三行已被重构（退场要"先清残值、再挂 exit 类"，
+       顺序不能换 —— 先清残值时铺满规则仍在生效，所以清除没有视觉变化；
+       留到挂类之后才清的话，残值会突然生效，右栏直接跳到 287 而不是从满宽过渡下来）。
+       新形状：残值清理提到 `rwExitPre` 之后、挂类之前，兜底那次留在 `rwExit` 块里。
+       ⚠️ 这条变异守的仍是同一个缺陷：不清 ⇒ 内联残值留在 DOM 上，
+         一旦某条路径摘掉浮层态那条 `width:100% !important`，残值立刻显形（静默地雷）。 */
     name: "M18 dismissFloat 不清 .right-sidebar 内联宽（287px 静默残留）",
     file: F_APP,
     mutate: (t) => sub(
       t,
-      '      const rsExit = rwExit.querySelector(".right-sidebar");\n      if (rsExit instanceof HTMLElement && rsExit.style.width) { rsExit.style.width = ""; }',
+      'if (rsExit instanceof HTMLElement) { rsExit.style.width = ""; }',
       "",
     ),
+  },
+  {
+    /* ⚠️ A-1157-R2：退场专用类 `right-wrapper-exit`。少了它 ⇒ 浮层态那条铺满规则在退场期间
+       仍然生效 ⇒ 右栏被钉死在满宽（实测 `1ms 1092@240..1332` → **411ms 完全不动**
+       → `431@901..1332` → 右缘向左退到 1240、右边空 92px）。 */
+    name: "M19 退场不挂 right-wrapper-exit（铺满规则在退场期仍生效 ⇒ 右栏先冻结再整块跳）",
+    file: F_APP,
+    mutate: (t) => sub(t, '    setRightExitAnim(true);\n', ""),
   },
 ];
 

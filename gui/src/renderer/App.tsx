@@ -763,6 +763,16 @@ export default function App(): JSX.Element {
    *  渐入永远看不到。动画 done 后复位。 */
   const [leftMin0, setLeftMin0] = React.useState(false);
   const [rightMin0, setRightMin0] = React.useState(false);
+  /* ⚠️⚠️ A-1157-R2：**退场专用**过渡标志 `right-wrapper-exit`（只排除铺满规则）。
+     为什么必须另立一个类、而不能复用 `right-wrapper-anim`（实测走了两轮弯路）：
+       `right-wrapper-anim` 那条声明是 `width: var(--right-target-w) !important`，
+       退场刻意**不写**该变量 ⇒ `var()` 按 **IACVT** 处理 ⇒ `width` 取**初始值 `auto`**
+       （不是"回落到下一条声明"），而 `!important` 仍然压过内联样式
+       ⇒ 实测：内联起点宽 `1092px` 明明写进去了、还跨了两帧，计算宽度**当场就是 431**
+       ⇒ `transition: width` 没有旧计算值可插值 ⇒ 退场全程（实测 400+ms）纹丝不动。
+     ⇒ 退场只需要"别铺满"，不需要过渡期宽度通道 ⇒ 另立一个只做这件事的类。
+     ⚠️ 摘除点在 `dismissFloat` 的几何 done（与 `setRightMin0(false)` 并排）；铁律 11：谁挂谁摘。 */
+  const [rightExitAnim, setRightExitAnim] = React.useState(false);
   /** A-980-R17：最小化图标「拖动 vs 点击」区分——拖动超过阈值后松手的 click 不触发还原 */
   const floatDragMovedRef = React.useRef(false);
   /** A-980-R15：悬浮窗尺寸/位置（标题栏可拖动、右下角可调大小；按会话记忆） */
@@ -2168,8 +2178,36 @@ export default function App(): JSX.Element {
              过渡期间用它解除"浮层态铺满整窗"的 `width:100% !important`
              —— 否则 `rightWidth` 的逐帧变化被 CSS 吃掉 ⇒ 过渡无对象；
              且旧宽度会先闪一下 ⇒ 用户看到「右栏跑到左边然后往右合」（探针实测 wrap.w恒 431）。
-             ⚠️ 两个类共用一个条件，不要拆成两个 state（同铁律 11）。 */
-          className={`right-wrapper${rightMin0 ? " right-wrapper-no-min" : ""}${rightMin0 ? " right-wrapper-anim" : ""}`}
+             ⚠️ 两个类共用一个条件，不要拆成两个 state（同铁律 11）。
+             ⚠️⚠️ **A-1157-R2 例外：`right-wrapper-anim` 现在多一个来源 `rightExitAnim`**，
+             这是**实测逼出来的**，不是图省事：
+               退浮层（`dismissFloat`）此前在**起点**就把 `rightMin0` 置回 false ⇒
+               `anim` 立刻消失 ⇒ 那条铺满规则
+               「`body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar`
+                 的 `width:100% !important`」**重新生效**，
+               把右栏**钉死在 1092px** 直到浮层类被摘。
+               真 App CDP 逐帧实测（1332px 窗口）退场轨迹：
+                 `1ms 右栏=1092@240..1332` → `412ms 右栏=431@901..1332` → `…339@901..1240`
+               ⇒ **整整 411ms 右栏纹丝不动**（用户观感＝"点了没反应"），
+                 随后**整块向右跳**（左缘 240→901），再**右缘开始向左退**（1332→1240，
+                 右边空出 92px）＝ 用户本轮报的「右边突然出现空白，然后侧边栏向右合上」。
+               ⇒ 根因就是那条铺满声明**在退场期仍然生效**，
+                 右栏拿不到自己的目标宽度、`transition: width` 也就没有插值对象。
+               ⇒ 修：退场期间**保持 `anim` 类**（但 `rightMin0` 必须仍为 false ——
+                 它还管着 wrapper 的宽度分支与 `no-min`，混在一起会让 wrapper 跟着跳）。
+                 所以只能给 `anim` 单独一个来源 `rightExitAnim`；这是**第二个产地**，
+                 故此处明确记下唯一产地与摘除点（铁律 11：谁挂谁摘）。
+               ⚠️ 退出时**不写** `--right-target-w`：不写 → `var()` 按 IACVT 让那条声明失效
+                 ⇒ 右栏回落到它的正常宽度（`var(--right-sidebar-w)`，CSS 单源，不在 JS 里复刻公式），
+                 而 `.right-sidebar` 常驻的 `transition: width .5s` 这时**才有插值对象**
+                 ⇒ 1092 平滑收到 286，右缘由 `margin-left:auto` 钉在窗口右缘不动。
+             ⚠️ 本注释是 **JSX 属性位置**的裸块注释（不是花括号包裹的 JSX 表达式注释）：
+               ① 所以里面可以出现 `{}`；② 但**结尾不许多写一个右花括号** ——
+               写这条注释时在结尾手滑留了一个，`tsc` 立刻在标签闭合处报
+               TS1382/TS1005/TS1128 连成一串，指着离真凶十万八千里的地方；
+               ③ 同理**正文里也不能出现块注释的结束符**，否则注释提前结束、
+               后半段全被当成代码解析（这次连报四个错，根因只有这一个）。 */
+          className={`right-wrapper${rightMin0 ? " right-wrapper-no-min" : ""}${rightMin0 ? " right-wrapper-anim" : ""}${rightExitAnim ? " right-wrapper-exit" : ""}`}
           /* ⚠️⚠️ A-1152：`marginLeft: "auto"` —— **把右栏顶到窗口右缘**。
              用户实测：「右侧边栏的最右侧又出现空白区域了」（截图里右缘一条空带）。
              根因：`.body` 是 `[.sidebar][.main][.right-wrapper]` 一行 flex，而本wrapper 是
@@ -2943,6 +2981,10 @@ export default function App(): JSX.Element {
        用户实测「再次点击窗口化，窗口出现一次**抽搐抖动**，但对话页没有窗口化」。
        ⇒ 合并为一次（下面这次调用自己会 `setRightOpen(true)`）。 */
     if (!rightOpen) { setRightOpen(true); }
+    /* ⚠️ A-1157-R2：唤出前复位退场标志（对称于 `dismissFloat` 摘除点）。
+       正常路径它已在退场 done 摘干净；这里防的是"退场被打断、done 没跑到"的残留
+       —— 残留会让唤出时 `anim` 一开始就挂着，A-1153 的过渡期宽度声明立刻生效。 */
+    setRightExitAnim(false);
     /* ⚠️⚠️ A-1153：**不再写 `setRightCustom(true)` / `setRightWidth(innerWidth)`**。
        旧实现用"把右栏宽度设成整窗宽"来实现浮层铺满，代价有两个（都是用户实测到的）：
          · `rightCustom` 一旦置真就**再没有复位点**（全仓只有 3 处 `set(true)`、0 处 `set(false)`）
@@ -3060,7 +3102,37 @@ export default function App(): JSX.Element {
        ⚠️ 放在 `setFloatAnim("closing")` 之后、几何淡出之前：先复位到干净起点，
           让下面按**真实 `rightWidth`** 重新走退场几何（右栏平滑滑回自己的宽度）。 */
     setRightMin0(false);
-    const rwExit = rightWrapperRef.current;
+    /* ⚠️⚠️ A-1157-R2：退场**保持** `right-wrapper-anim`（本行的 `setRightMin0(false)` 摘的是
+       `no-min` 与"宽度分支"，不能顺带把 `anim` 也摘掉）。
+       实测（真 App CDP 逐帧，1332px 窗口）摘掉 `anim` 之后退场变成：
+         `1ms 右栏=1092@240..1332` →（**411ms 完全不动**）→ `412ms 右栏=431@901..1332` → `…339@901..1240`
+       根因：`anim` 一摘，`body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar
+       { width:100% !important }` 立刻重新生效，把右栏**钉死在浮层满宽**直到浮层类被摘
+       ⇒ 右栏没有目标宽度、`transition: width` 没有插值对象 ⇒ 先冻结、再整块右跳、
+       最后右缘向左退（右边空 92px）＝ 用户本轮报的「右边突然出现空白，然后侧边栏向右合上」。
+       ⚠️ 这里**不写** `--right-target-w`：不写才会让那条 `var()` 声明按 IACVT 失效，
+         右栏回落到 `var(--right-sidebar-w)`（CSS 单源）并被 `.right-sidebar` 的常驻过渡接住。
+       ⚠️ 摘除点在下面的几何 done（与 `setRightMin0(false)` 并排），不在这里。 */
+    /* ⚠️⚠️⚠️ A-1157-R2：**先量后写、再挂 `anim`，顺序不能换**。
+       退场要��右栏一个**显式的过渡起点**（浮层满宽），下一帧再放开 ⇒ 满宽平滑收到自然宽。
+       为什么必须"先量"：`setRightExitAnim(true)` 是**离散事件的同步 flush** ——
+       它一执行，铺满规则就失效、右栏**当刻**掉到自然宽（实测退场第一帧就是 431px）
+       ⇒ 再去量就量到错的起点。这正是第一版"延后一帧清理"仍然失败的原因：
+       `6ms 右栏=431px @901..1332`，`transition` 没有起点 ⇒ 退场全程（400+ms）纹丝不动。
+       为什么"延后清理"本身也不够：此时 `.right-sidebar` 的内联宽是**上一次普通展开的残值**
+       （A-1155-R8 记过，实测 287px），**不是**浮层满宽 ⇒ 留着也只是留了个错的起点。 */
+    const rwExitPre = rightWrapperRef.current;
+    const rsExit = rwExitPre?.querySelector(".right-sidebar") ?? null;
+    /* ⚠️⚠️ A-1157-R2：**先清残值、再挂 `exit` 类**，顺序不能换。
+       · 先清：此刻铺满规则仍在生效（内联残值被它压住），所以清除**没有视觉变化**；
+         而如果留到挂类之后才清，内联残值会**突然生效**（实测上一次普通展开留的是 287px）
+         ⇒ 右栏直接跳到 287，而不是从浮层满宽过渡下来。
+       · 再挂：铺满规则失效 ⇒ 右栏的计算宽度由 `1092`（满宽）变成自然宽
+         ⇒ `.right-sidebar` 常驻的 `transition: width .5s` **有旧计算值可插值**
+         ⇒ 平滑收窄，右缘由 `margin-left:auto` 钉在窗口右缘不动。 */
+    if (rsExit instanceof HTMLElement) { rsExit.style.width = ""; }
+    setRightExitAnim(true);
+    const rwExit = rwExitPre;
     if (rwExit) {
       rwExit.style.removeProperty("--right-body-pin");
       rwExit.style.removeProperty("--right-target-w");
@@ -3075,8 +3147,10 @@ export default function App(): JSX.Element {
          （`.right-sidebar` 的 CSS `!important` 在浮层态盖过它，所以暂时不显形；
           一旦某条路径摘掉那个 `!important`，287px 就会立刻显形 = 静默地雷）。
          ⇒ 退浮层时一并清成 CSS 常态（普通展开路径自己会在展开起点重写）。 */
-      const rsExit = rwExit.querySelector(".right-sidebar");
-      if (rsExit instanceof HTMLElement && rsExit.style.width) { rsExit.style.width = ""; }
+      const rsExitDup = rwExit.querySelector(".right-sidebar");
+      /* ⚠️ A-1157-R2：残值已在上面清过；这里保留一次兜底摘除
+         （退场被打断、几何 done 没能跑到时的最后一道）。 */
+      if (rsExitDup instanceof HTMLElement) { rsExitDup.style.width = ""; }
     }
     // 内容淡出：量外框宽度、min=0（窗口收到 0 宽）；退场收尾挂在几何 done 上
     startFloatGeometryFade(0, (genOk) => {
@@ -3095,6 +3169,16 @@ export default function App(): JSX.Element {
          若本轮期间有别的路径（如标题栏先把右栏展开动画起了）又写回这些值，这里兜住。
          成对摘除是铁律 11 的硬要求：写的地方每多一处，摘的地方必须跟上。 */
       setRightMin0(false);
+      /* ⚠️ A-1157-R2：退场过渡的 `anim` 标志**成对摘除**（挂在 `dismissFloat` 起点）。
+         ⚠️ 必须与 `setFloatState("none")` 同一个 done：几何收敛早于浮层类被摘，
+         若提前摘 `anim`，铺满规则会在"右栏已收窄、浮层类还在"的窗口里重新生效
+         ⇒ 又变成一次"钉死 → 跳变"。 */
+      setRightExitAnim(false);
+      /* ⚠️ A-1157-R2：退场起点写进去的**过渡起点宽**，在这里成对摘掉
+         （起点的 rAF 只负责"放开"过渡，正常路径它早就跑完了；
+         这里再摘一次是兜底：退场被打断时那一行可能没执行到）。 */
+      const rsDone = rightWrapperRef.current?.querySelector(".right-sidebar");
+      if (rsDone instanceof HTMLElement) { rsDone.style.width = ""; }
       rightWrapperRef.current?.style.removeProperty("--right-body-pin");
       rightWrapperRef.current?.style.removeProperty("--right-target-w");
       rightWrapperRef.current?.style.removeProperty("--left-w");
