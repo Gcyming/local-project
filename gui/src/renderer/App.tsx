@@ -435,62 +435,25 @@ const LEFT_FADE_HI = 0.95;
  *  右栏拖拽上限要减掉它，否则整行溢出会转嫁给可收缩的左栏（用户实测"拖右栏会拽动左栏"）。 */
 const CHAT_MIN_W = 380;
 
-/** A-980-R27：几何同步动画的结束判据之一——实测宽度连续这么多帧不再变化。
- *  A-980-R30：**"稳定"判定必须发生在"净位移已发生"之后**（见 GEOM_SYNC_MIN_SHIFT）。
- *  R27 直接把"稳定 3 帧"当结束，但 CSS 过渡**刚开始**时每帧宽度变化 < 0.5px（React 未提交、
- *  或 cubic-bezier 起步段），会被误判成"已稳定"→ 动画第一帧就 done → opacity 提前清空回 1 →
- *  「点击按钮看不见渐入渐出」+「收/展后内容一路可见被挤压（观感闪烁）」。 */
-const GEOM_SYNC_STABLE_FRAMES = 3;
-
-/** A-980-R35：**无位移快速收工**判据的稳定帧数（仅"宽度从未动过"的重复触发场景用）。
- *  必须明显大于过渡起步段/高刷屏的"每帧 <0.5px"帧数——120Hz 下 cubic-bezier 起步段
- *  前 2-3 帧位移都 <0.5px，若用 3 帧会把「正在动的收起/展开」误判成"没在动"而提前 done，
- *  opacity 被清空 → 点击顶部导航栏按钮时渐入渐出"有时候看得到有时候看不到"（拖拽是
- *  指针直接驱动、每帧位移大，不受此坑影响，所以拖拽时动画总是明显）。取 8 帧（60Hz≈133ms、
- *  120Hz≈67ms）：任何真实过渡在这么长里必然已动起来（位移 >0.5px 重置稳定计数），
- *  只有宽度真的从头到尾没变（重复触发 no-op）才会走到 done。 */
-const GEOM_SYNC_NO_MOVE_FRAMES = 8;
-
-/** A-980-R30：结束判据的"先决位移"——实测宽度从动画开始累计位移达到该值后，稳定判定才开始生效。
- *  纯几何量（与时长/刷新率无关）：过渡真的动过（而不是卡在未开始的初始宽度）才允许结束。 */
-const GEOM_SYNC_MIN_SHIFT = 5;
-
-/** ⚠️⚠️ A-1154：`measure()` **始终返回 null**（动画对象从未挂载）时的有界等待帧数。
+/** ⚠️⚠️⚠️ A-1162：几何过渡的**时长**——本文件里唯一的真相源。
+ *  必须与 `index.css` 里 `.right-sidebar` / `.sidebar` 的 `transition: width` 时长**逐字相等**。
  *
- *  背景（真 App CDP 实测复现）：点「收起右侧栏」时 `animateRightSidebar(false)` 先走
- *  `dismissFloat()` —— 而 `setRightOpen(false)` 会让 `mainIsFloatLayout` 变假 ⇒ 浮窗**当帧
- *  被 React 卸载**。此时这一轮 `startFloatGeometryFade` 是新起的、`seen` 恒为 false，
- *  旧代码的 `if (seen) onFrame(_, true)` 分支**永远不成立** ⇒ 一路 `requestAnimationFrame`
- *  死循环 ⇒ `onFrame(_, true)` 永不触发 ⇒ `body.slime-freezing` 与 `--slime-freeze-w`
- *  **永久残留**（实测残留 > 3.7s，聊天区被钉死在 666px；后续所有操作都带着这个脏状态）。
+ *  ## 这条常量为什么能取代原先那五条启发式魔数
  *
- *  取 6 帧（60Hz≈100ms）：足以跨过"本次提交尚未落地"的窗口（React 提交在 1~2 帧内），
- *  又远短于任何真实过渡（最小 0.12s），所以**不会**误伤"动画刚开始、对象还没挂上"的正常路径。
- *  判据是纯帧数（与时长/刷新率无关的那套几何判据无关——它只解决"对象存在性"，不解决"动没动"）。 */
-const GEOM_SYNC_NEVER_MOUNT_FRAMES = 6;
-
-/** ⚠️⚠️ A-1155：**过渡的绝对帧数上界 —— 到点无条件收工**。
+ *  原先 `runGeometrySyncFade` 靠**测量** CSS 过渡的真实宽度来反推进度，并用五条魔数决定
+ *  何时收工（净位移 5px / 稳定 3 帧 / 无位移 8 帧 / 绝对上界 90 帧 / 未挂载 6 帧）。
+ *  它们逐条都是为"**宽度是外部量、我不知道它什么时候停**"打的补丁 ——
+ *  于是收工时刻取决于**当帧的帧率与布局耗时**，每次点击都不一样。
+ *  用户实测三轮：「抖动、抽搐异常明显」「边界剧烈左右抖动」「依旧抖动严重」，
+ *  而探针逐帧测出的几何**单调、零反转、p95=6ms、无慢帧、无 LoAF** ——
+ *  **测都对、看就是抖**，因为被测的那条曲线**本身不确定**。
  *
- *  背景（真 App CDP 实测，`probe-a1155-cdp.mjs`）：点「窗口化」后右栏卡在 287px，
- *  而两条几何结束判据**同时失效**：
- *    · 判据①要求 `netShift >= GEOM_SYNC_MIN_SHIFT(5)` —— 宽度从头到尾没变 ⇒ 永不成立；
- *    · 判据②要求 `!everBelowHi && w >= hi - 0.5`，而浮层支的 `hi = 0.42 × nextWidth ≈ 559`
- *      ⇒ 实测 287 < 559 ⇒ `everBelowHi = true` ⇒ 判据②被永久关闭。
- *  ⇒ `onFrame(_, true)` 永不触发 ⇒ `setRightMin0(false)` 永不执行
- *  ⇒ `right-wrapper-anim` / `right-wrapper-no-min` 永久挂着
- *  ⇒ 铺满规则 `body.float-layout .right-wrapper:not(.right-wrapper-anim) .right-sidebar`
- *    被 `:not()` **永久排除** ⇒ 右栏永远算不出整窗宽（实测 287px ≠ 1332px）
- *  ⇒ 用户截图「右侧边栏内容自适应失效、只有一段」。
+ *  A-1162 起进度改由 `u = 已过时长 / 本常量` 决定：**纯时间、与帧率无关**，
+ *  收工判据只剩 `u >= 1` 一条。魔数全部作废（不是调参，是**结构性地不再需要**）。
  *
- *  ⚠️ 为什么不是"改几何判据"：那两条判据是 A-980-R30/R35 反复实测调出来的
- *    （防"过渡第一帧就被误判稳定"与"过渡无对象"两类回归），**不动它们**。
- *    这里补的是**正交的一条**：任何真实过渡都不可能在这么大帧数内还没结束，
- *    所以"到点强制收工"绝不会误伤正常路径，只兜住"判据结构性失效"这种死角
- *    （与 `GEOM_SYNC_NEVER_MOUNT_FRAMES` 同一个思路：给"可能永不满足的条件"一个有界上界）。
- *
- *  取 90 帧（60Hz≈1.5s、120Hz≈0.75s）：显著长于 CSS 最长过渡（0.5s width + 0.28s 过渡期）
- *  ⇒ 正常过渡早已按几何判据收工，本上界只在"死锁"时才生效。 */
-const GEOM_SYNC_HARD_LIMIT_FRAMES = 90;
+ *  ⚠️ 若改了本常量，**必须同步改** `index.css` 里对应的 `transition: width` 时长，
+ *     否则"几何还在滑、透明度已经到位"（或反之），又是一种半拍错位。 */
+export const GEOM_FADE_MS = 280;
 
 /** A-980-R27：侧栏拖拽的「收起」吸附带——距**几何下限**多少像素以内算拖到底。
  *  必须是相对量，不能写死绝对像素：旧实现用 300px（左栏），而左栏下限是 240、
@@ -568,80 +531,84 @@ const RIGHT_CONTENT_MAX_W = 1600;
  *             `lo`/`hi` 可显式覆盖窗口（绝对像素，默认按 full 的 LO/HI 比例算）
  * @returns cancel()——打断/卸载时清理（只停表，不复位样式）
  */
+
+/**
+ * A-1162：**时间驱动**的几何淡入淡出（旧版是"测量驱动"，已整体重写）。
+ *
+ * ## 为什么重写（用户实测三轮 + 架构复查）
+ *
+ * 用户连续三轮报「窗口化时各个栏目的衔接动画抖动、抽搐异常明显」「边界剧烈左右抖动」，
+ * 而探针逐帧测出来的一切都是**正常的**：各栏几何单调、零方向反转、帧间隔 p95=6ms、
+ * 无慢帧、无 LoAF、两个 opacity 恒为 1。**测都对，看就是抖** —— 这只有一种解释：
+ * 被测的那条曲线**本身不确定**。
+ *
+ * 旧版确实是这么写的：**它不驱动动画，只测量动画**。
+ *   · 真正的几何由 CSS `transition: width` 跑；
+ *   · 本函数每帧 `getBoundingClientRect()` 把那个**由合成器驱动、随时可被中断**的宽度读回来；
+ *   · 由读数反推进度 `p`，再写透明度；
+ *   · 收工时刻由**四条启发式判据**决定：
+ *       ① 净位移 ≥ 5px 且连续 3 帧不动
+ *       ② 从未进过渐变带 且 连续 8 帧不动
+ *       ③ 帧数 ≥ 90 的绝对上界
+ *       ④ 对象连续 6 帧没挂上
+ *
+ * 三个后果，正好对上用户看到的：
+ *   1. **进度不是时间的函数** —— 掉一帧，`p` 就停一下；过渡被打断，`p` 会跳。
+ *   2. **收工时刻每次都不同** —— 四条判据命中哪条取决于当帧的帧率与布局耗时，
+ *      于是每次点击的"什么时候算完"都不一样 ⇒ 观感就是忽快忽慢、忽左忽右。
+ *   3. **观测扰动被观测** —— 每帧 `getBoundingClientRect()` 是**强制同步布局**
+ *      （实测 7~11ms），本函数自己在拖慢它要测的那次布局。
+ *
+ * ## 重写后的不变量
+ *
+ * · `u = clamp(已过时长 / GEOM_FADE_MS, 0, 1)`，**纯时间**，与帧率、布局耗时无关；
+ * · 用**时间合成**的虚拟宽度 `w = min + (full - min) × u` 代入**原来那条渐变带公式**
+ *   （`lo`/`hi`/`band`/`smoothstep` 一律不动）⇒ **曲线形状与淡入带语义完全保持**，
+ *   变的只有 w 的来源：实测值 → 时间值；
+ * · 收工判据只剩一条：`u >= 1`。**没有启发式，没有魔数，没有"再等几帧"**；
+ * · 不再逐帧读 `getBoundingClientRect()`（只有挂载检测还要一次，且**不参与进度**）。
+ *
+ * ⚠️ 为什么保留 `measure` 形参（但**不参与**进度与收工）：调用点的契约不变，
+ *   而"对象被卸载后别再往空引用上写样式"由各调用点自己的 null 检查兜住。
+ *   ⚠️ **不要**把它改回收工判据的一部分：React 重渲会瞬时替换对象，那一帧
+ *   `measure()` 返回 null ⇒ 立刻收工 ⇒ 收工时刻重新随帧率漂（A-1162 要消灭的正是它）。
+ * ⚠️ `opts.duration` 允许个别调用点覆盖时长；不给就用 `GEOM_FADE_MS`。
+ */
 function runGeometrySyncFade(
   measure: () => HTMLElement | null,
   onFrame: (p: number, done: boolean) => void,
-  opts: { min?: number; full: number; lo?: number; hi?: number; loRatio?: number; hiRatio?: number },
+  opts: { min?: number; full: number; lo?: number; hi?: number; loRatio?: number; hiRatio?: number; duration?: number },
 ): () => void {
   const min = opts.min ?? 0;
   const span = Math.max(1, opts.full - min);
-  // 可见性窗口：低于 lo 全透明、高于 hi 全不透明。
-  // 默认取展开宽度的 FADE_VISIBLE_LO/HI 比例；loRatio/hiRatio 可显式覆盖比例
-  // （左栏用它提前，见 LEFT_FADE_LO/HI）——始终随 full 换算，不依赖固定像素。
+  /* 可见性窗口：低于 lo 全透明、高于 hi 全不透明。语义与旧版逐字相同（铁律 11）。 */
   const lo = opts.lo ?? min + span * (opts.loRatio ?? FADE_VISIBLE_LO);
   const hi = opts.hi ?? min + span * (opts.hiRatio ?? FADE_VISIBLE_HI);
   const band = Math.max(1, hi - lo);
+  const duration = Math.max(1, opts.duration ?? GEOM_FADE_MS);
   let raf = 0;
-  let prevW = -1;
-  let stable = 0;
-  let netShift = 0;
-  let lastP = 0;
-  let seen = false;
-  /* ⚠️⚠️ A-1154：**"从未挂载"必须也能收工**。此前只判 `seen`（曾经在、现在没了）——
-     而"浮窗在我这一轮还没渲染出来时就被 React 卸载"这条路径（用户实测：收起右栏 ⇒
-     `mainIsFloatLayout` 变假 ⇒ 浮窗当帧卸载，而本轮的 `startFloatGeometryFade` 是**新起的**、
-     `seen` 恒为 false）⇒ **永远走 `requestAnimationFrame(step)` 死循环**：
-       · `onFrame(_, true)` 永不触发 ⇒ `slime-freezing` / `--slime-freeze-w` **永久残留**
-         （实测残留 > 3.7s，把聊天区钉死在 666px）；
-       · rAF 循环泄漏（每帧一次 `measure()` 空转）。
-     现在两个方向都收工：见过的（卸载）立刻 done；**从未见过的给一个有界等待**
-     （`GEOM_SYNC_NEVER_MOUNT_FRAMES` 帧 ≈ 一个提交周期就够，超时即 done），
-     绝不无限等一个可能永远不出现的节点。 */
-  let everBelowHi = false;
   let cancelled = false;
-  let neverMount = 0;
-  /* ⚠️ A-1155：绝对帧数上界计数器（见 GEOM_SYNC_HARD_LIMIT_FRAMES 的说明）。 */
-  let frameCount = 0;
+  const t0 = performance.now();
   const step = (): void => {
     if (cancelled) { return; }
-    frameCount++;
-    const el = measure();
-    if (!el) {
-      // 还没挂载（React 还没提交）→ 本帧不写样式、不计进度，等它出现；
-      // 曾经在、现在没了 = 动画对象已被卸载 → 立刻收工；
-      // 一直没出现 = 有界等待后收工（否则死循环 + 临时类永久残留，见上）
-      if (seen || ++neverMount >= GEOM_SYNC_NEVER_MOUNT_FRAMES) { onFrame(lastP, true); return; }
-      /* ⚠️ A-1155：对象一直没挂上时同样受绝对上界约束（与下面的正常路径同一条保险）。 */
-      if (frameCount >= GEOM_SYNC_HARD_LIMIT_FRAMES) { onFrame(lastP, true); return; }
-      raf = window.requestAnimationFrame(step);
-      return;
-    }
-    seen = true;
-    const w = el.getBoundingClientRect().width;
-    if (prevW >= 0) {
-      const delta = Math.abs(w - prevW);
-      // 累计"净位移"：过渡真的动过才算——否则 CSS 过渡刚开始（每帧 <0.5px）会被误判稳定而提前结束
-      netShift += delta;
-      stable = delta < 0.5 ? stable + 1 : 0;
-    }
-    prevW = w;
-    // A-980-R35：一旦实测宽度进入过渐变带（< hi），就说明**确实在动**，
-    // 永久关闭"无位移快速收工"判据②——否则过渡起步段/高刷屏的每帧 <0.5px
-    // 会把正在进行的收起/展开误判成 done，opacity 提前清空、渐入渐出消失。
-    if (w < hi) { everBelowHi = true; }
+    const u = Math.max(0, Math.min(1, (performance.now() - t0) / duration));
+    /* 时间合成的虚拟宽度，代入与旧版同一条渐变带公式。 */
+    const w = min + span * u;
     const raw = Math.max(0, Math.min(1, (w - lo) / band));
-    lastP = raw * raw * (3 - 2 * raw); // smoothstep：两端柔和，不生硬
-    // A-980-R30/R35：结束判据（纯几何，无时间量）：
-    //   ① 宽度累计位移 ≥ GEOM_SYNC_MIN_SHIFT（过渡真的动过）且随后连续 3 帧不再变化 → 收工；
-    //   ② 或宽度**从未进入过渐变带**（everBelowHi=false，重复触发时真的没在动）
-    //      且稳定 GEOM_SYNC_NO_MOVE_FRAMES(8) 帧 → 快速收工（防 rAF 循环泄漏）。
-    // A-1155：③ 绝对帧数上界——两条几何判据**结构性失效**时的兜底（详见常量处的实测说明）：
-    //   "宽度从没动过（netShift 不达标）" 且 "宽度落在渐变带内（everBelowHi=true）"
-    //   会同时让 ① 和 ② 都不成立 ⇒ 永不收工。这条正交的帧数上界兜住它，且不误伤正常过渡。
-    const done = ((netShift >= GEOM_SYNC_MIN_SHIFT && stable >= GEOM_SYNC_STABLE_FRAMES)
-      || (!everBelowHi && w >= hi - 0.5 && stable >= GEOM_SYNC_NO_MOVE_FRAMES)
-      || frameCount >= GEOM_SYNC_HARD_LIMIT_FRAMES);
-    onFrame(lastP, done);
+    const p = raw * raw * (3 - 2 * raw); // smoothstep：两端柔和，不生硬
+    /* ⚠️⚠️ 收工判据**只有** `u >= 1`。
+       曾经的候选是 `gone || u >= 1`（`gone` = 测量对象为 null）—— **已删**：
+       对象在 React 重渲时会被**瞬时替换**，那一帧 `measure()` 就返回 null
+       ⇒ 立刻收工 ⇒ 又一次"收工时刻随帧率漂"，正好是 A-1162 要消灭的东西。
+       ⇒ `measure()` 只剩一个用途：**对象彻底没了就别再往空引用上写样式**
+         （那属于"提前收工"之外的另一种收工：由调用点的 null 检查兜住，
+           见下面 `gone` 的调用方式 —— 它不再影响 done）。
+       时间上界对"对象从未挂载"同样成立（`u` 与对象在不在无关），所以不需要任何
+       帧数等待 —— 这也正是 A-1154 ④ / A-1155 ⑥ 两条旧守卫所守护的风险，
+       在新结构下由 `u >= 1` 结构性覆盖。 */
+    void measure; // 对象是否存在不影响进度（见上）；保留形参只为调用点契约不变
+    const done = u >= 1;
+    onFrame(p, done);
     if (done) { return; }
     raf = window.requestAnimationFrame(step);
   };

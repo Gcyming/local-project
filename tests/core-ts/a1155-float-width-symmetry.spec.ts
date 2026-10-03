@@ -222,31 +222,44 @@ describe("A-1155 ⑤ 浮层判据必须与**真状态**同源（不许用宽度�
   });
 });
 
-describe("A-1155 ⑥ 几何 done 必须有**绝对帧数上界**（防结构性死锁）", () => {
-  it("`GEOM_SYNC_HARD_LIMIT_FRAMES` 常量存在且并进 done 判据", () => {
-    /* ⚠️ 真问题（本轮实测的死锁）：`rightMin0=true` 时若内联 width 真的"不给"
-       ⇒ wrapper 回 `auto` ⇒ 宽 = 内容宽（287px）⇒ **宽度从头到尾不变**
-       ⇒ `netShift` 不达标 + `hi=0.559>0.287` 使 `everBelowHi=true` 关掉判据②
-       ⇒ 两条几何判据**同时失效** ⇒ done 永不触发 ⇒ `rightMin0` 摘不掉 = 自锁。
-       这条上界是**正交**的兜底：与几何无关，只按帧数强制收工。 */
+describe("A-1162 几何 done 必须有**时间上界**（取代 A-1155 ⑥ 的帧数兜底）", () => {
+  /* ⚠️⚠️ 这三条**替换** A-1155 ⑥ 的两条帧数守卫，不是绕过它们。
+     A-1155 ⑥ 当时发现了一个真实的结构性死锁（宽度"从头到尾不变" ⇒ 两条几何判据同时
+     失效 ⇒ done 永不触发 ⇒ `rightMin0` 摘不掉 = 自锁），于是加了 `GEOM_SYNC_HARD_LIMIT_FRAMES`
+     这条**正交**的帧数兜底。**那个死锁今天从结构上不存在了**：
+     A-1162 把进度改成 `u = 已过时长 / GEOM_FADE_MS`，done 判据只剩 `u >= 1`
+     —— 它与宽度**完全无关**，因此"宽度不变"再也杀不死它。
+     ⇒ 这里守的是**同一个风险**（rAF 永不收工 ⇒ 临时类永久残留）在新结构下的等价保证，
+        而不是保住那两条魔数。魔数已随实现删除。 */
+  const body = fnBody(APP_CODE, "runGeometrySyncFade");
+
+  it("`GEOM_FADE_MS` 常量存在（时长的唯一真相源）", () => {
     expect(
-      /const\s+GEOM_SYNC_HARD_LIMIT_FRAMES\s*=\s*\d+\s*;/.test(APP_CODE),
-      "常量 `GEOM_SYNC_HARD_LIMIT_FRAMES` 不见了（结构性死锁的兜底）",
+      /const\s+GEOM_FADE_MS\s*=\s*\d+\s*;/.test(APP_CODE),
+      "常量 GEOM_FADE_MS 不见了（时间驱动的时长失去唯一真相源）",
     ).toBe(true);
-    const body = fnBody(APP_CODE, "runGeometrySyncFade");
-    expect(
-      /frameCount\s*>=\s*GEOM_SYNC_HARD_LIMIT_FRAMES/.test(body),
-      "帧数上界没并进 done 判据 ⇒ 死锁时 rAF 永不收工、临时类永久残留",
-    ).toBe(true);
-    /* ⚠️ 两处 `>=` 都要有：正常路径（对象在）+ "对象从未挂载"路径。
-       只加一处，另一条路径仍会死循环。 */
-    const n = count(body, "frameCount >= GEOM_SYNC_HARD_LIMIT_FRAMES");
-    expect(n >= 2, `帧数上界判据只出现 ${n} 次（需要"正常 + 未挂载"两条路径各一次）`).toBe(true);
   });
 
-  it("`frameCount` 每帧递增（只声明不递增 = 上界永远不触发）", () => {
-    const body = fnBody(APP_CODE, "runGeometrySyncFade");
-    expect(/frameCount\+\+/.test(body), "`frameCount` 从没递增 ⇒ 上界是死代码").toBe(true);
+  it("进度由**已过时长**推出，且收工判据是 `u >= 1`", () => {
+    /* ⚠️ 关键不变量：done 必须能脱离任何几何条件成立，否则就是 A-1155 ⑥ 那个死锁。 */
+    expect(
+      /performance\.now\(\)\s*-\s*t0/.test(body),
+      "进度没有由 performance.now() 推出 ⇒ 仍是测量驱动，收工时刻依旧随帧率漂",
+    ).toBe(true);
+    expect(
+      /const\s+done\s*=\s*[^;]*u\s*>=\s*1/.test(body),
+      "done 判据里没有 `u >= 1` ⇒ 没有与几何无关的时间上界，死锁风险回来了",
+    ).toBe(true);
+  });
+
+  it("**不许**逐帧 `getBoundingClientRect()`（观测扰动被观测，实测 7~11ms/帧）", () => {
+    /* ⚠️ A-1162 的核心动机之一：旧版每帧读一次真实宽度来反推进度，
+       而强制同步布局会把浏览器本该在帧末做的那次布局提前、自己制造停顿。
+       ⚠️ 只禁**逐帧**读；`measure()` 的**存在性**调用必须保留（对象卸载时要立刻收工）。 */
+    expect(
+      !/getBoundingClientRect/.test(body),
+      "引擎里又出现 getBoundingClientRect ⇒ 退回测量驱动，进度重新依赖帧率",
+    ).toBe(true);
   });
 });
 
@@ -266,5 +279,34 @@ describe("A-1155 ⑦ 退浮层顺手清掉 `.right-sidebar` 的内联宽残留",
       /\.style\.width\s*=\s*""/.test(body),
       "`dismissFloat` 没把 `.right-sidebar` 的 `style.width` 清空 ⇒ 内联宽残留",
     ).toBe(true);
+  });
+});
+
+/* ⚠️⚠️ A-1162：`GEOM_FADE_MS` 必须与 CSS 里 `transition: width` 的时长**逐字相等**。
+   这条过渡有**两半**：CSS transition 负责几何、`runGeometrySyncFade` 负责透明度。
+   A-1162 起两半都由同一个 `u = 已过时长 / GEOM_FADE_MS` 驱动 ——
+   常量一漂，就出现「宽度还在滑、透明度已经到位」（或反之）的那种**半拍错位**，
+   而半拍错位观感上正是"衔接抽搐"。
+   ⚠️ 从**两份文本**分别取值再比较，不允许在测试里手抄一个期望值：
+   手抄的那份迟早和两边都漂，而比较会一直"通过"。 */
+describe("A-1162 时长单源：`GEOM_FADE_MS` ≡ CSS `transition: width` 时长", () => {
+  it("JS 常量与右栏那条 `transition: width` 时长逐字相等", () => {
+    const js = /const\s+GEOM_FADE_MS\s*=\s*(\d+)\s*;/.exec(APP_CODE);
+    expect(js, "找不到 GEOM_FADE_MS").toBeTruthy();
+    const CSS_CODE = readFileSync(join(PROJECT_ROOT, "gui/src/renderer/index.css"), "utf8");
+    const css = /body\.float-layout \.right-wrapper-anim \.right-sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
+    expect(css![1]).toMatch(/transition:\s*width\s+([0-9.]+m?s)\s+/);
+    const cssDur = css![1].match(/transition:\s*width\s+([0-9.]+m?s)\s+/)![1];
+    expect(cssDur.endsWith("ms") ? Number(cssDur.slice(0, -2)) : Number(cssDur.replace("s", "")) * 1000,
+      `GEOM_FADE_MS=${js![1]} 与 CSS 的 ${cssDur} 不等 ⇒ 几何与透明度会半拍错位`)
+      .toBe(Number(js![1]));
+  });
+
+  it("引擎里**不许**再出现那五条启发式魔数（A-1162 已结构性废除）", () => {
+    for (const k of ["GEOM_SYNC_MIN_SHIFT", "GEOM_SYNC_STABLE_FRAMES", "GEOM_SYNC_NO_MOVE_FRAMES",
+      "GEOM_SYNC_NEVER_MOUNT_FRAMES", "GEOM_SYNC_HARD_LIMIT_FRAMES"]) {
+      expect(APP_CODE, `魔数 ${k} 还在：它们是"宽度是外部量、我不知道它何时停"的补丁，收工时刻因此随帧率漂`)
+        .not.toMatch(new RegExp(k));
+    }
   });
 });

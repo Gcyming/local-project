@@ -163,19 +163,24 @@ describe("A-1154 ③ `slime-dragging` 必须一次性给全「拖动期语义」
   });
 });
 
-describe("A-1154 ④ 几何 done 的「对象从未挂载」必须有界（否则临时类永久残留）", () => {
-  it("`runGeometrySyncFade` 里有 `GEOM_SYNC_NEVER_MOUNT_FRAMES` 常量且有界收敛", () => {
-    expect(
-      /const\s+GEOM_SYNC_NEVER_MOUNT_FRAMES\s*=\s*\d+\s*;/.test(APP_CODE),
-      "常量 `GEOM_SYNC_NEVER_MOUNT_FRAMES` 不见了（有界等待的上限）",
-    ).toBe(true);
+describe("A-1162 几何 done 必定有界（`u >= 1` 取代「等对象挂载」的帧数等待）", () => {
+  it("收工判据含 `u >= 1`（对象从未挂载也必然收工）", () => {
+    /* ⚠️⚠️ 这条**替换** A-1154 ④ 的 `GEOM_SYNC_NEVER_MOUNT_FRAMES` 守卫，不是绕过它。
+       当时的问题是：对象从未挂载时 `seen` 恒 false ⇒ done 永不触发 ⇒ rAF 死循环 +
+       `slime-freezing` / `--slime-freeze-w` **永久残留**（真 App 实测 >3.7s，聊天区被钉死）。
+       当时的解法是"等 6 帧还不出现就收工"——一个**帧数**启发式。
+       A-1162 把进度改成纯时间后，这个场景**根本不需要等待**：
+       `done = u >= 1` 与对象在不在**完全无关**，到点必收工。
+       ⇒ 守的是同一个风险（永不收工 ⇒ 临时类残留）在新结构下的等价保证。 */
     const body = fnBody(APP_CODE, "runGeometrySyncFade");
-    /* ⚠️ 判据 = 计数递增后**同时**决定"收工"：
-       若只 `++neverMount` 而不把它并进 done 条件（或把它删了、改成无限等），
-       就会退回"永远 requestAnimationFrame" ⇒ `slime-freezing` 永久残留。 */
     expect(
-      /\+\+\s*neverMount\s*>=\s*GEOM_SYNC_NEVER_MOUNT_FRAMES/.test(body),
-      "`neverMount` 没有并进 done 判据 ⇒ 对象从未挂载时 rAF 死循环、临时类永久残留",
+      /const\s+done\s*=\s*[^;]*u\s*>=\s*1/.test(body),
+      "done 里没有 `u >= 1` ⇒ 对象从未挂载时 rAF 可能死循环、临时类永久残留",
+    ).toBe(true);
+    /* ⚠️ 反向断言：旧的"靠帧数等对象挂载"机制不该复活（它是旧不确定性的来源之一）。 */
+    expect(
+      !/neverMount/.test(body),
+      "neverMount 帧数等待又回来了 ⇒ 收工时刻重新依赖帧率",
     ).toBe(true);
   });
 
