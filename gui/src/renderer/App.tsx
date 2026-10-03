@@ -3036,6 +3036,17 @@ export default function App(): JSX.Element {
        正常路径它已在退场 done 摘干净；这里防的是"退场被打断、done 没跑到"的残留
        —— 残留会让唤出时 `anim` 一开始就挂着，A-1153 的过渡期宽度声明立刻生效。 */
     setRightExitAnim(false);
+    /* ⚠️⚠️ A-1158-R：唤出前同样**复位内层包裹层的 opacity**（与退场 done 摘除点对称）。
+       A-1158 把"浮窗外框"和"内联聊天区"合并成同一个宿主之后，这层**常驻**了 ——
+       而它的 `opacity` 会被几何渐隐（最小化 / 退场）命令式写成 0。
+       若上一次退场被打断、done 没跑到，残留的 0 会让**唤出后的浮窗内容也全透明**
+       （与「恢复后中间一片黑」同一个病根，只是发生在另一侧）。
+       ⚠️ JSX 里的 `opacity: floatMinIcon ? 0 : 1` 救不了：React 只在该 prop **变化**时
+          重写 style，而 inline/常规浮层态它恒为 1 ⇒ 不重写 ⇒ 命令式的 0 会留存。 */
+    {
+      const fiEnter = floatInnerRef.current;
+      if (fiEnter) { fiEnter.style.opacity = ""; }
+    }
     /* ⚠️⚠️ A-1153：**不再写 `setRightCustom(true)` / `setRightWidth(innerWidth)`**。
        旧实现用"把右栏宽度设成整窗宽"来实现浮层铺满，代价有两个（都是用户实测到的）：
          · `rightCustom` 一旦置真就**再没有复位点**（全仓只有 3 处 `set(true)`、0 处 `set(false)`）
@@ -3225,6 +3236,18 @@ export default function App(): JSX.Element {
          若提前摘 `anim`，铺满规则会在"右栏已收窄、浮层类还在"的窗口里重新生效
          ⇒ 又变成一次"钉死 → 跳变"。 */
       setRightExitAnim(false);
+      /* ⚠️⚠️ A-1158-R：**必须清掉内层包裹层的 opacity 残留**（用户实测回归：
+         「恢复窗口化之后中间一片黑」）。
+         机制：几何渐隐（`startFloatGeometryFade` 的 onFrame）在退场终点把
+         `floatInnerRef.current.style.opacity` 写成 ≈0（窗口收到 0 宽 ⇒ 比例 p→0）。
+         **改造前**这层住在浮窗里、随浮层卸载 ⇒ 残留无害；
+         **改造后（A-1158 唯一宿主）它常驻** ⇒ 那句 `opacity: 0` 就一直作用在
+         **普通布局的聊天区**上 ⇒ 中间整块透明（探针实测 `innerOpacity: "0"`）。
+         ⚠️ 为什么 JSX 里的 `opacity: floatMinIcon ? 0 : 1` 救不了：React 只在**该属性
+            的 prop 变化**时重写 style，inline 模式下它恒为 1 ⇒ 不重写 ⇒ 命令式的 0 留存。
+         ⇒ 清除点必须与「浮层态结束」同处（铁律 11：谁写谁摘）。 */
+      const fiExit = floatInnerRef.current;
+      if (fiExit) { fiExit.style.opacity = ""; }
       /* ⚠️ A-1157-R2：退场起点写进去的**过渡起点宽**，在这里成对摘掉
          （起点的 rAF 只负责"放开"过渡，正常路径它早就跑完了；
          这里再摘一次是兜底：退场被打断时那一行可能没执行到）。 */

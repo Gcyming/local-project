@@ -499,6 +499,20 @@ describe("A-1152 ⑬ 窗口化过渡：右栏必须**逐帧响应**、抽屉式�
     expect(APP_CODE).toMatch(/function handleToggleFloat[\s\S]{0,4000}?setRightExitAnim\(false\)/);
   });
 
+  /* ⚠️⚠️ A-1158-R：退场 done 必须**清掉内层包裹层的 opacity 残留**。
+   用户实测回归：「恢复窗口化之后中间一片黑」。
+   机制：A-1158 把"浮窗外框"与"内联聊天区"合并成同一个宿主，`floatInnerRef` 那层
+   因此**常驻**；而几何渐隐在退场终点把它 `style.opacity` 写成 ≈0
+   ⇒ 残留的 0 一直作用在**普通布局的聊天区**上。
+   ⚠️ 退场后几何量（宿主 w/h、`bodyCls`、`overflowRight`）全都是"正常"的
+   ⇒ **只有这条断言能抓住它**，端到端探针也是靠 opacity 才暴露（几何量看不出来）。 */
+  it("退场 done 清内层 opacity；唤出入口也复位（对称，成对）", () => {
+    const dismiss = fnBody2(APP_CODE, "dismissFloat");
+    expect(dismiss, "dismissFloat 里没有清 floatInnerRef 的 opacity")
+      .toMatch(/floatInnerRef\.current[\s\S]{0,120}?\.style\.opacity\s*=\s*""/);
+    expect(APP_CODE).toMatch(/function handleToggleFloat[\s\S]{0,4000}?floatInnerRef\.current[\s\S]{0,120}?\.style\.opacity\s*=\s*""/);
+  });
+
   it("退场起点**先清内联残值、再挂 `exit` 类**（顺序反了右栏会跳到残值）", () => {
     /* ⚠️ 顺序是行为的一部分，不是风格：
        · 先清：此刻铺满规则仍在生效，内联残值被它压住 ⇒ 清除**没有视觉变化**；

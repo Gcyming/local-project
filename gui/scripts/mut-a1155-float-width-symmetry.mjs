@@ -128,8 +128,8 @@ const MUTATIONS = [
        后面才是三条 removeProperty；锚点跟着新形状改。 */
     mutate: (t) => sub(
       t,
-      '      setRightExitAnim(false);\n      /* ⚠️ A-1157-R2：退场起点写进去的**过渡起点宽**',
-      '      /* ⚠️ A-1157-R2：退场起点写进去的**过渡起点宽**',
+      '      setRightExitAnim(false);\n      /* ⚠️⚠️ A-1158-R：**必须清掉内层包裹层的 opacity 残留**',
+      '      /* ⚠️⚠️ A-1158-R：**必须清掉内层包裹层的 opacity 残留**',
     ),
   },
 
@@ -266,6 +266,23 @@ const MUTATIONS = [
       t,
       'className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}',
       'className="inline-chat-host"',
+    ),
+  },
+  {
+    /* ⚠️⚠️ A-1158-R：**最关键的一条**。A-1158 把"浮窗外框"和"内联聊天区"合并成同一个宿主，
+       `floatInnerRef` 那一层因此**常驻**了；而几何渐隐（退场终点）会把它
+       `style.opacity` 写成 ≈0 ⇒ 残留把**普通布局下的聊天区整块变透明**
+       （用户实测：恢复窗口化之后中间一片黑）。
+       ⚠️ 为什么不能只靠 JSX 的 `opacity: floatMinIcon ? 0 : 1` 兜住：
+         React 只在该 prop **变化**时重写 style，inline 态它恒为 1 ⇒ 不重写 ⇒ 命令式的 0 留存。
+       ⚠️ 为什么不容易被别的断言发现：退场后几何量（宿主 w/h、bodyCls、overflowRight）
+         全都是"正常"的，**只有 opacity 暴露问题**。 */
+    name: "M21 退场 done 不清内层 opacity（普通布局聊天区被残留透明化 ⇒ 中间一片黑）",
+    file: F_APP,
+    mutate: (t) => sub(
+      t,
+      '      const fiExit = floatInnerRef.current;\n      if (fiExit) { fiExit.style.opacity = ""; }\n',
+      "",
     ),
   },
 ];

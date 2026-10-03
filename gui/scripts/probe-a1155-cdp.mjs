@@ -678,6 +678,63 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
   say(`  🧾 退场前 12 帧逐帧（时间/右栏宽/内联宽/anim）=${JSON.stringify(ex.head)}`);
   say(`  ⏱ 帧间隔 max=${ex.dtMax}ms；>40ms 慢帧=${JSON.stringify(ex.slowFrames)}；长任务=${JSON.stringify(ex.longTasks)}`);
   say(`  🧩 LoAF=${JSON.stringify(ex.loaf)}`);
+  const hostInfo = JSON.parse(await cdp.eval(`(() => {
+    const h = document.querySelector(".float-window, .inline-chat-host");
+    if (!h) { return JSON.stringify({ missing: true }); }
+    const r = h.getBoundingClientRect();
+    const cs = getComputedStyle(h);
+    const inner = h.firstElementChild;
+    return JSON.stringify({
+      cls: h.className,
+      w: Math.round(r.width), h: Math.round(r.height),
+      l: Math.round(r.left), t: Math.round(r.top),
+      pos: cs.position, opacity: Number(cs.opacity), vis: cs.visibility,
+      innerOpacity: inner ? Number(getComputedStyle(inner).opacity) : null,
+    });
+  })()`));
+  say(`  🪟 浮窗宿主几何=${JSON.stringify(hostInfo)}`);
+  /* ⚠️⚠️ **A-1158-R 的回归钉子**：退出浮层后，普通布局的聊天区**必须可见**。
+     A-1158 把"浮窗外框"与"内联聊天区"合并成同一个宿主之后，`floatInnerRef` 那一层
+     **常驻**了；而几何渐隐在退场终点会把它 `style.opacity` 写成 ≈0 ⇒ 残留把
+     **普通布局的聊天区整块变透明**（用户实测：恢复后中间一片黑）。
+     ⚠️ 这条断言是那次的**唯一**自动发现手段：几何量（w/h/bodyCls）全是"正常"的，
+     只有 opacity 暴露了问题 —— 截图不比对哈希就看不出来。 */
+  if (!hostInfo.missing && (hostInfo.opacity < 0.99 || (hostInfo.innerOpacity !== null && hostInfo.innerOpacity < 0.99))) {
+    say(`  ❌❌❌ **宿主被透明化**：外层 opacity=${hostInfo.opacity} 内层 opacity=${hostInfo.innerOpacity}`
+      + ` ⇒ 普通布局下聊天区不可见（A-1158-R 回归）`);
+  }
+  /* ⚠️⚠️ **复现用户最可能的那条路径**：退场动画还没结束就再点一次「窗口化」。
+     用户这几轮的描述反复出现「点了没反应 / 等不及又点一下」，而 A-1154 的世代号机制
+     正是为「被打断的退场」设计的 —— 这里必须实测它**会不会把状态卡住**
+     （卡住的表现 = 浮窗 w/h 停在 0：`.floatAnim` 停在 `"closing"`、
+       几何 done 没跑 ⇒ `setFloatAnim("idle")` / `setFloatState("none")` 都没执行）。 */
+  say("\n═══ ④d 退场未结束就再点一次「窗口化」（打断路径） ═══");
+  say("装采样器=" + (await cdp.eval(ARM_EXIT_TRACE)));
+  say("第一次恢复=" + (await cdp.eval(CLICK_EXIT_TRACE)));
+  await new Promise((r) => setTimeout(r, 180));
+  say(`  ⏱ 打断前宿主=${await cdp.eval(`(() => {
+    const h = document.querySelector(".float-window, .inline-chat-host");
+    if (!h) { return "n/a"; }
+    const r = h.getBoundingClientRect();
+    return \`w=\${Math.round(r.width)} h=\${Math.round(r.height)}\`;
+  })()`)}`);
+  say("立刻再点窗口化=" + (await cdp.eval(CLICK_FLOAT_TRACE)));
+  await new Promise((r) => setTimeout(r, 2600));
+  say(`  🪟 打断后宿主=${await cdp.eval(`(() => {
+    const h = document.querySelector(".float-window, .inline-chat-host");
+    if (!h) { return "（宿主不存在）"; }
+    const r = h.getBoundingClientRect();
+    const cs = getComputedStyle(h);
+    return JSON.stringify({
+      cls: h.className, w: Math.round(r.width), h: Math.round(r.height),
+      pos: cs.position, opacity: cs.opacity,
+      inlineW: h.style.width || "(none)", inlinePos: h.style.position || "(none)",
+      bodyFloat: document.body.classList.contains("float-layout"),
+    });
+  })()`)}`);
+  await shot("s4d-interrupt");
+  await new Promise((r) => setTimeout(r, 400));
+  await snap("S4d 打断后（等 3s 稳态）");
   await snap("S6 恢复窗口化后");
   await shot("s6-float-restored");
 
