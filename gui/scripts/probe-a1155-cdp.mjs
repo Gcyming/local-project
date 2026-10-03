@@ -272,10 +272,64 @@ const isLeftCollapsed = (cdp) =>
   await shot("s0-initial");
   say("左栏会话项：" + (await cdp.eval(LIST_SESSIONS)));
 
-  say("\n═══ ① 点「窗口化」 ═══");
-  say("点击=" + (await cdp.eval(CLICK_FLOAT)));
+  /* ⚠️⚠️ 用户本轮报过渡**方向**反了（右栏从左往右合、右边凭空出现空白）。
+   ⚠️⚠️ 取样必须**页内**进行：`Page.captureScreenshot` 与 `Runtime.evaluate` 都有
+   几十到几百毫秒往返，放在点击与轮询之间会把时间轴整体后移 —— 实测「点击后 90ms」
+   那一采其实发生在 ~500ms 时，量出来的 `anim=false / 收敛 2ms` 全是假的。
+   ⇒ 采样器与点击**同一个 eval** 起，动画结束后再一次性读回。 */
+const CLICK_FLOAT_TRACE = `(() => {
+  const img = document.querySelector('img[alt="唤起悬浮窗"]');
+  if (!img) { return "NO-FLOAT-BTN"; }
+  const wrap = document.querySelector(".right-wrapper");
+  const side = document.querySelector(".right-sidebar");
+  const b = img.closest("button") || img.parentElement;
+  const tr = { t0: 0, rows: [] };
+  const tick = () => {
+    const now = performance.now();
+    const sr = side.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    tr.rows.push([
+      Math.round(now - tr.t0),
+      Math.round(sr.width), Math.round(sr.left), Math.round(sr.right),
+      Math.round(wr.width),
+      Math.round(Number(getComputedStyle(wrap).opacity) * 100),
+      wrap.classList.contains("right-wrapper-anim"),
+    ]);
+    tr.raf = requestAnimationFrame(tick);
+  };
+  tr.t0 = performance.now();
+  tr.raf = requestAnimationFrame(tick);
+  window.__ft = tr;
+  b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  return "CLICKED(traced)";
+})()`;
+
+const READ_FLOAT_TRACE = `JSON.stringify((() => {
+  const tr = window.__ft;
+  cancelAnimationFrame(tr.raf);
+  const rows = tr.rows;
+  /* 只保留「宽度/位置/透明度/anim 类」发生变化的那几帧 */
+  const marks = [];
+  let last = "";
+  for (const r of rows) {
+    const k = r.slice(1).join("|");
+    if (k !== last) { marks.push(\`\${r[0]}ms 右栏=\${r[1]}px @\${r[2]}..\${r[3]} wrapper=\${r[4]}px 不透明=\${r[5]}% anim=\${r[6]}\`); last = k; }
+  }
+  return { total: rows.length, dur: rows.length ? rows[rows.length - 1][0] : 0, marks: marks.slice(0, 20) };
+})())`;
+
+say("\n═══ ① 点「窗口化」 ═══");
+  say("点击=" + (await cdp.eval(CLICK_FLOAT_TRACE)));
+  /* ⚠️ 截图夹在点击与轮询之间**会污染 CDP 时钟**，但页内采样器不受影响（见 CLICK_FLOAT_TRACE 注释）。 */
+  await new Promise((r) => setTimeout(r, 90));
+  await shot("s1a-mid-090ms");
+  await new Promise((r) => setTimeout(r, 120));
+  await shot("s1b-mid-210ms");
   await waitSettle("①窗口化过渡");
   await new Promise((r) => setTimeout(r, 600));
+  const ft = JSON.parse(await cdp.eval(READ_FLOAT_TRACE));
+  say(`  🎞 窗口化过渡曲线（页内采样，共 ${ft.total} 帧 / ${ft.dur}ms）：`);
+  for (const m of ft.marks) { say(`      ${m}`); }
   await snap("S1 点窗口化后（收敛后）");
   await shot("s1-float-settled");
 
@@ -309,23 +363,108 @@ const isLeftCollapsed = (cdp) =>
   await shot("s4-left-collapsed");
 
   say("\n═══ ④b 左侧边栏展开（用户原文的动作） ═══");
-  /* ⚠️ 逐帧盯 `--left-w`：它一旦与左栏实宽失同步，浮层稳态的
-     `calc(100% - var(--left-w))` 就会让右栏右缘越窗（用户现象④「被挤压到屏幕外」）。
-     ⇒ 这里不是"等 1.5s 再看一眼"，而是把整条轨迹记下来。 */
-  const traceLeftW = async (label, ms = 1800) => {
-    const t0 = Date.now();
-    const tr = [];
-    while (Date.now() - t0 < ms) {
-      const o = JSON.parse(await cdp.eval(`JSON.stringify(window.__snap())`));
-      tr.push(`${Date.now() - t0}ms sb.w=${o.sb ? o.sb.w : "-"} left-w=${o.leftWVar} rw.w=${o.rw ? o.rw.w : "-"} rw.r=${o.rw ? o.rw.r : "-"}`);
-      await new Promise((r) => setTimeout(r, 120));
+  /* ⚠️⚠️ 用户本轮报：「左栏展开要等半天，经常以为没展开、点半天没反应」。
+     ⇒ 量三件事，且**点击时间戳必须与点击同在一个 eval 里取**：
+       ① commitMs = 点击 → React 真的把 `.collapsed` 摘掉；
+       ② 帧间隔分布（主线程有没有被占住）；
+       ③ 长任务。
+     ⚠️⚠️ 第一版把「装探针」和「点按钮」拆成两次 eval，于是 commitMs 量的是
+       **装完探针之后**才发生的提交（多算了几百毫秒，结论会被带偏）。
+     ⚠️ 逐帧 rAF 采样会自己占主线程，间隔分布只作参考；判据以 commitMs 为主。 */
+  const clickAndTraceLeft = async (label, ms = 2400) => {
+    const res = await cdp.eval(`(() => {
+      const btn = Array.from(document.querySelectorAll("header.titlebar button, .titlebar button"))
+        .find((b) => /侧栏|侧边栏/.test(b.getAttribute("title") || ""));
+      const sb = document.querySelector(".sidebar");
+      if (!btn || !sb) { return JSON.stringify({ err: "NO-BTN" }); }
+      const trace = { frames: [], samples: [], longTasks: [], flipAt: null, flipClass: null };
+      const mo = new MutationObserver(() => {
+        if (trace.flipAt === null && !sb.classList.contains("collapsed")) {
+          trace.flipAt = Math.round(performance.now() - trace.t0);
+          trace.flipClass = sb.className;
+        }
+      });
+      mo.observe(sb, { attributes: true, attributeFilter: ["class"] });
+      try {
+        const po = new PerformanceObserver((l) => {
+          for (const e of l.getEntries()) { trace.longTasks.push(Math.round(e.duration)); }
+        });
+        po.observe({ entryTypes: ["longtask"] });
+        trace.po = po;
+      } catch (e) { trace.longTaskErr = String(e); }
+      let prev = performance.now();
+      const tick = () => {
+        const now = performance.now();
+        const dt = Math.round(now - prev);
+        prev = now;
+        /* ⚠️⚠️ 必须**每帧**记「宽度 + 不透明度 + 右栏位置」：用户说的是
+           「以为没展开、点半天没反应」—— 这是**看见的**问题，不是提交慢的问题。
+           提交耗时（commitMs）已经在上一版量过：2ms，完全正常。
+           真正要回答的是：内容从点击到"看得见"过了多久、期间面板在不在动。 */
+        const b = sb.getBoundingClientRect();
+        const cs = getComputedStyle(sb);
+        trace.frames.push(dt);
+        trace.samples.push([
+          Math.round(now - trace.t0),
+          Math.round(b.width),
+          Math.round(Number(cs.opacity) * 100),
+          cs.visibility,
+        ]);
+        trace.raf = requestAnimationFrame(tick);
+      };
+      trace.raf = requestAnimationFrame(tick);
+      /* ⚠️ 点击与 t0 同帧取：这是上一版结论被带偏的根因。 */
+      trace.t0 = performance.now();
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      trace.handlerReturnedAt = Math.round(performance.now() - trace.t0);
+      window.__lt = trace;
+      window.__ltStop = () => {
+        cancelAnimationFrame(trace.raf);
+        mo.disconnect();
+        trace.po && trace.po.disconnect();
+      };
+      return JSON.stringify({ armed: true, handlerReturnedAt: trace.handlerReturnedAt });
+    })()`);
+    say(`  ▶ ${label} 点击派发：${res}`);
+    await new Promise((r) => setTimeout(r, ms));
+    const o = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+      window.__ltStop();
+      const t = window.__lt;
+      const sb = document.querySelector(".sidebar");
+      const fr = t.frames.slice(2);
+      const sorted = [...fr].sort((a, b) => a - b);
+      return {
+        handlerReturnedAt: t.handlerReturnedAt,
+        flipAt: t.flipAt,
+        flipClass: t.flipClass,
+        frameCount: fr.length,
+        maxFrame: Math.max(0, ...fr),
+        p95: sorted[Math.floor(sorted.length * 0.95)] ?? 0,
+        longTasks: t.longTasks,
+        longTaskErr: t.longTaskErr || null,
+        samples: t.samples || [],
+        sbW: sb ? Math.round(sb.getBoundingClientRect().width) : -1,
+        sbInline: sb ? sb.style.width || "(none)" : null,
+        bodyCls: document.body.className,
+      };
+    })())`));
+    const s = JSON.parse(await cdp.eval(`JSON.stringify(window.__snap())`));
+    say(`  📈 ${label}：handler 返回=${o.handlerReturnedAt}ms · **提交(摘 collapsed)=${o.flipAt}ms** · 帧数=${o.frameCount} p95=${o.p95}ms max=${o.maxFrame}ms · 长任务=${JSON.stringify(o.longTasks)}${o.longTaskErr ? "(观察器失败:" + o.longTaskErr + ")" : ""}`);
+    say(`      末态：sb.w=${o.sbW} inline=${o.sbInline} class="${o.sb ? o.sb.className : "-"}" left-w="${s.leftWVar}" body="${o.bodyCls}"`);
+    /* ⚠️ 可见性时间线（每帧的 宽/不透明度/可见性），压缩成「变化点」便于人眼读 */
+    const sm = o.samples;
+    const marks = [];
+    let last = "";
+    for (const [t, w, op, vis] of sm) {
+      const k = `${w}|${op}|${vis}`;
+      if (k !== last) { marks.push(`${t}ms 宽=${w} 不透明=${op}% ${vis}`); last = k; }
     }
-    say(`  📈 ${label}：${tr.join(" | ")}`);
+    say(`      可见性时间线（共 ${sm.length} 帧）：${marks.slice(0, 26).join(" → ")}`);
+    return o;
   };
   for (let i = 0; i < 3; i++) {
     if (!(await isLeftCollapsed(cdp))) { say("  已是展开态，不点"); break; }
-    say("  点击左栏按钮=" + (await cdp.eval(CLICK_LEFT_TOGGLE)));
-    await traceLeftW(`左栏展开轨迹 #${i + 1}`);
+    await clickAndTraceLeft(`左栏展开轨迹 #${i + 1}`);
   }
   await snap("S5 左栏展开后");
   await shot("s5-left-expanded");
@@ -340,6 +479,21 @@ const isLeftCollapsed = (cdp) =>
   await new Promise((r) => setTimeout(r, 1800));
   await snap("S7 稳态 (+1.8s)");
   await shot("s7-steady");
+
+  /* ══ ⑤ 非浮层态下的左栏收起/展开（用户日常最常走的那条路）═════════════
+     ④ 的样本里主区在浮层态是 **null**（聊天页没挂载）⇒ 布局成本比日常低一截。
+     而用户报「展开要等半天」时多半**不在浮层态** —— 那一侧挂着**整条会话**，
+     左栏每帧变宽都会让聊天列重排 ⇒ 必须单独量一次，否则等于用最轻的场景去解释最重的抱怨。 */
+  say("\n═══ ⑤ 非浮层态：左栏收起 → 展开 ═══");
+  if (!(await isLeftCollapsed(cdp))) {
+    say("  点击左栏按钮（收起）=" + (await cdp.eval(CLICK_LEFT_TOGGLE)));
+    await new Promise((r) => setTimeout(r, 1400));
+  }
+  await snap("S8 非浮层·左栏收起后");
+  await shot("s8-inline-left-collapsed");
+  await clickAndTraceLeft("⑤ 非浮层 左栏展开");
+  await snap("S9 非浮层·左栏展开后");
+  await shot("s9-inline-left-expanded");
 
   say("\n=== 完成 ===");
   process.exit(0);

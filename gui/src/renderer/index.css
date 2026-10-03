@@ -1573,6 +1573,29 @@ body.float-layout .right-sidebar > *:is([data-fullwidth], .right-tabbar, .webvie
      **过渡结束（几何 done）后才恢复"铺满整窗"**。
    ⚠️ 为什么不用新造一个类：`rightMin0` 已经在 `animateRightSidebar` 的 done 里被置回，
      新类会多一份需要同步的判据（同铁律11：同一事实写 N 处必漂）。 */
+/* ⚠️⚠️⚠️ A-1157：浮层态右栏必须**贴住窗口右缘**，不能贴 wrapper 的左缘。
+   用户本轮实测（截图截的是**过渡中段**）：「右侧边栏总是从左向右闭合，就是右边突然出现
+   空白，然后侧边栏向右合上」—— 方向整个反了。
+
+   根因（一句话）：`--right-target-w` 那个宽度声明**被内联的 `width` 吃掉了**。
+   React 给 `<aside>` 写的是内联 `width: 712px`（`width={rightCustom ? rightWidth : undefined}`），
+   内联样式压过**一切**没有 `!important` 的选择器规则 ⇒ 过渡期右栏一直停在 712px，
+   而 wrapper 已经在同一帧从 712 跳到 1092（它的内联宽是 `var(--right-target-w)`）。
+   于是：**右缘先空出 380px（用户看到的「凭空空白」）**，等 `done` 之后 `width:100% !important`
+   才接管，再把右栏从 wrapper 左缘**向右**拉到右缘 ⇒「向右合上」。
+
+   ⇒ 两条一起改，缺一不可：
+     ① 下面那条过渡期规则加 `!important`：让过渡**真的有对象**（712 → 1092 的插值）。
+     ② 本条 `margin-left: auto`：`.right-sidebar` 是 `.right-wrapper`（`display:flex`）的 flex item，
+        auto 外边距把它**顶到右缘** ⇒ 宽度变化时**右缘不动、左缘向左推**
+        —— 这就是用户要的「从右向左被挤开」。
+   ⚠️ 为什么稳态看不出问题：稳态右栏是 `width:100%`，与 wrapper 等宽，auto 外边距没有余量可吃。
+     所以这条只在**过渡中段**（右栏比 wrapper 窄）才起作用，正是出问题的那一段。
+   ⚠️ 为什么不能改成给 wrapper 加 `transition: width`：wrapper 的旧值是 `auto`，
+     而 **`auto` 不能参与插值** ⇒ 过渡不会启动（这正是当初它"硬跳"的原因）。 */
+body.float-layout .right-sidebar {
+  margin-left: auto;
+}
 body.float-layout .right-wrapper-anim .right-sidebar {
   /* ⚠️⚠️ A-1153：过渡期的宽度来源 = **JS 在过渡起点写入的 `--right-target-w`**。
      浮层铺满不再改写 `rightWidth` state（那会让退出后右栏永久停在整窗宽 ⇒ 挤压 `.main`，
@@ -1582,15 +1605,20 @@ body.float-layout .right-wrapper-anim .right-sidebar {
      ⇒ 宽度回落到"内联 `rightWidth` / CSS 类"那一层 ⇒ **完全保持"非浮层展开"的原行为**
      （普通展开根本不写这个变量，宽度仍由内联 rightWidth 逐帧驱动）。
      若图省事写 `var(--right-target-w, 100%)` 之类兜底，普通展开就会误用兜底值
-     ⇒ 又一次静默回归。 */
-  width: var(--right-target-w);
+     ⇒ 又一次静默回归。
+     ⚠️⚠️⚠️ A-1157：**必须 `!important`** —— 上面那条就是原因：内联 `width` 会吃掉这条。
+     没有它，这条规则只是"看着在、实际不生效"，过渡期右栏纹丝不动（实测 90ms 时
+     `sidebar=240..1239`，右缘离窗口右缘还差 93px 且**正在往右长**）。 */
+  width: var(--right-target-w) !important;
   /*过渡期：宽度交回内联 `rightWidth` / CSS 变量驱动（那才是逐帧变化的对象）。
      ⚠️ 这里**不能**写 `width: auto` —— 那会让右栏退回 `--right-sidebar-w`（含 720px 上限），
        宽度请求又被压住。要的是"别锁死"，交给上层给具体宽度。
      ⚠️⚠️ A-1152：**不要写 `transition: none`**（我曾这么写，用户反馈「过渡帧直接没了，
        还是衔接一点过渡吧」）。过渡期同样需要 width 过渡，否则几何同步写多少宽度都是硬跳。
        ⚠️ 时长取 0.28s：略短于 `runGeometrySyncFade` 的几何收敛时间（几何一停，
-         CSS 过渡也基本走完 ⇒ 不会有"几何结束了但过渡还在跑"的拖尾）。 */
+         CSS 过渡也基本走完 ⇒ 不会有"几何结束了但过渡还在跑"的拖尾）。
+     ⚠️ A-1157：这次过渡**真的跑起来了**（上面加了 !important 之后），
+       方向由同级的 `margin-left:auto` 决定（右缘钉住、左缘向左）。 */
   transition: width 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 .right-sidebar {

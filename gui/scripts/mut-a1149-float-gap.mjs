@@ -8,20 +8,25 @@
  * | 组 | 缺陷 | 用户看到什么 |
  * |---|---|---|
  * | 取值 | `rightSidebarMaxW` 悬浮分支仍减 48 | 那 48px 变成 `.main` 的实宽（左边缘空白） |
- * | 入口 | `handleToggleFloat` 仍请求 `innerWidth - 48` | 点「窗口化」立刻复现同一条空白 |
+ * | 入口 | `handleToggleFloat` 请求**整窗宽**（A-1155 实测：越窗 240px） | 右栏右缘被挤出窗口外 |
  * | 上限 | CSS `max-width: min(100%, calc(100vw - 48px))` | 即使请求整窗宽也够不到 → 缺口跑到右边 |
  * | 前提 | `.main.main-float { min-width: 0 }` 被删 | 悬浮态主区不让位 → 右栏被挤 / 溢出 |
- * | 前提 | 右栏 wrapper 不再 `flexShrink: 1` | 左栏展开时右栏不让位 → 整行溢出 |
+ * | 前提 | 右栏 wrapper 不再按浮层态让位 | 左栏展开时右栏不让位 → 整行溢出 |
  * | 回归 | `.sidebar.collapsed` 不再 0 宽 | 收起的左栏又占位（用户最初报的那条） |
  *
  * ## 覆盖的六条
  *
  *   1     `rightSidebarMaxW` 悬浮分支退回 `innerWidth - 48`
- *   2     `handleToggleFloat` 退回 `Math.max(560, innerWidth - 48)`
+ *   2     `handleToggleFloat` 退回**整窗宽**（A-1155 推翻的旧解，越窗 240px）
  *   3     `.right-sidebar` 的 max-width 退回 `min(100%, calc(100vw - 48px))`
  *   4     `.main.main-float` 的 `min-width: 0` 退回非零
- *   5     right-wrapper 内联样式 `flexShrink: 1` → 0（不再让位）
+ *   5     right-wrapper 内联样式 `flexShrink` 退化成常量 0（不再让位）
  *   6     `.sidebar.collapsed` 的 `width: 0 !important` 退回比例宽
+ *
+ * ⚠️ **A-1155 修正了本文件的判据基准**：A-1149 当初把"整窗宽"当成正确目标
+ *    （为消掉 `.main` 吃掉 48px 造成的左边缘空白），而真机实测表明
+ *    `.body` 自身就是整窗 ⇒ 请求整窗宽会让右栏右缘**越窗 240px**。
+ *    ⇒ 正确目标是 `innerWidth − 左栏实宽`。详见 `tests/core-ts/a1149-float-gap.spec.ts` ①。
  *
  * ⚠️ 快照/还原一律走**字节**；还原后比 sha256，且带 SIGINT 保险（_mut-eol 提供）。
  * ⚠️ 锚点用 `sub()`（行尾无关）——本仓行尾是混的，裸 `\n` 多行锚点会静默失效。
@@ -61,12 +66,21 @@ const MUTATIONS = [
     ),
   },
   {
-    name: "2 handleToggleFloat 退回 innerWidth - 48（点「窗口化」就复现同一条空白）",
+    /* ⚠️⚠️ A-1155 同步锚点（本轮真机 CDP 实测推翻原判据）：
+       原变异是"退回 `innerWidth - 48`"（A-1149 当初的缺陷形态）。
+       但本轮实测发现**"整窗宽"本身在新几何下也会越窗 240px**：
+       `.body` = `[左栏240][main 0][wrapper]`，而 `.body` 自身宽 = 整窗 1332
+       ⇒ 请求 1332 ⇒ wrapper 右缘 = 240 + 1332 = 1572 > 1332（实测 `overflowRight=[1572]`）。
+       ⇒ 正确目标是 `Math.max(560, innerWidth − 左栏实宽)`（= `floatTargetW`）。
+       ⇒ 本变异体改回**`Math.max(560, window.innerWidth)`**（即"整窗宽"这个被推翻的旧解），
+         它才是今天真正该被守卫抓住的形态；同时顺带把第三参 `isFloat` 去掉，
+         复现"浮层被误判成普通展开"（与 A-1155 ⑤ 的守卫互补）。 */
+    name: "2 handleToggleFloat 退回整窗宽（越窗 240px）+ 不传 isFloat（浮层被误判）",
     file: F_APP,
     mutate: (t) => sub(
       t,
-      "    animateRightSidebar(true, Math.max(560, window.innerWidth));",
-      "    animateRightSidebar(true, Math.max(560, window.innerWidth - 48));",
+      "    const leftWNow = leftSidebarRef.current?.getBoundingClientRect().width ?? 0;\n    const floatTargetW = Math.max(560, Math.round(window.innerWidth - leftWNow));",
+      "    const leftWNow = leftSidebarRef.current?.getBoundingClientRect().width ?? 0;\n    const floatTargetW = Math.max(560, window.innerWidth);",
     ),
   },
 
@@ -83,22 +97,36 @@ const MUTATIONS = [
 
   /* ── ③ 几何前提：三条支撑（去掉任一条，取值对了也白搭）────────── */
   {
-    name: "4 .main.main-float 不再允许收成 0（主区不让位 ⇒ 右栏被挤 / 溢出）",
+    /* ⚠️ A-1153 同步：旧变异体改的是 `flex` / `width` 两行，而 a1149 ③#1 断言的是
+       **`.main.main-float { min-width: 0 }`** —— 变异体把 min-width 原样留着
+       ⇒ 断言照样绿、这条变异**永远"存活"**（典型的"变异点与被断言的不变量不重合"）。
+       ⇒ 改为直接把那条 `min-width: 0` 破坏掉（这才是断言真正锁住的东西）。 */
+    name: "4 .main.main-float 的 min-width 退回 380（悬浮态主区不让位 ⇒ 右栏被挤出窗口）",
     file: F_CSS,
     mutate: (t) => sub(
       t,
-      ".main.main-float {\n  min-width: 0;\n}",
-      ".main.main-float {\n  min-width: 380px;\n}",
+      ".main.main-float {\n  min-width: 0;",
+      ".main.main-float {\n  min-width: 380px;",
     ),
   },
   {
-    name: "5 right-wrapper 不再 flexShrink: 1（左栏展开时右栏不让位 ⇒ 整行溢出）",
+    /* ⚠️⚠️ **A-1157 同步锚点**（本轮真机实测再次推翻了这条变异的前提）：
+       A-1155 把 wrapper 的 `flexShrink` 写成 `mainIsFloatLayout ? 0 : 1`（浮层态禁收缩），
+       理由是"请求超过可用宽度时收缩权会落到左栏头上"。A-1157 实测：那个"超出"的前提
+       在 `--right-target-w` 改成 `整窗 − 左栏实宽` 之后已经不存在，而**继续禁收缩会自锁** ——
+       左栏展开时 wrapper 按滞后一帧的 `--left-w` 占着 `100% − 1px`，总需求超出容器，
+       左栏 `flex-basis≈0` 权重≈0 ⇒ 收缩量全落在左栏 ⇒ 左栏被压回 1px ⇒ RO 读到 1px
+       ⇒ `--left-w` 保持 1px ⇒ **死循环**。实测症状：`3ms 宽=1 不透明=0% → 654ms 宽=240`
+       （654ms 内既不动也看不见 = 用户原话「展开要等半天，以为没有展开」）。
+       ⇒ 实现已改回**恒 1**，本变异体相应改为"退化成常量 0"——而它现在守的
+          **正是 A-1157 那个自锁本身**（比 A-1149 当初守的那条更硬）。 */
+    name: "5 right-wrapper 不再让位（flexShrink 退化成常量 0 ⇒ 浮层态左栏被压死、展开动画卡住）",
     file: F_APP,
-    mutate: (t) => sub(
-      t,
-      'style={{ display: "flex", flexShrink: 1, minWidth: 0 }}',
-      'style={{ display: "flex", flexShrink: 0, minWidth: 0 }}',
-    ),
+    /* ⚠️⚠️ 锚点必须带上下文：`flexShrink: 1` 在本文件里**出现两次**
+       （wrapper 与 `.sidebar` 各一），而 `.sidebar` 的 inline style 在源码里**排在前面**
+       ⇒ 单行锚会改到左栏那条（实测：这条变异因此"存活"，打错了对象还不报错）。
+       ⇒ 锚点取 wrapper 独有的 `display: "flex", flexShrink: 1`。 */
+    mutate: (t) => sub(t, 'display: "flex", flexShrink: 1', 'display: "flex", flexShrink: 0'),
   },
   {
     name: "6 .sidebar.collapsed 退回比例宽（收起的左栏又占位 —— 用户最初报的那条）",
@@ -152,7 +180,10 @@ if (mode === "apply" || mode === "restore") {
     const src = readFileSync(abs(m.file));
     writeFileSync(join(SAVE_DIR, `${basename(m.file)}.orig`), src);
     const text = src.toString("utf8");
-    const next = m.mutate(text);
+    let next;
+    try { next = m.mutate(text); }
+    catch (e) { console.error(`锚点未命中（变异体没落地）：${m.name}
+    ${e.message}`); rmSync(SAVE_DIR, { recursive: true, force: true }); process.exit(1); }
     if (next === text) { console.error(`锚点未命中：${m.name}`); rmSync(SAVE_DIR, { recursive: true, force: true }); process.exit(1); }
     writeFileSync(abs(m.file), next);
     writeFileSync(manifestPath, JSON.stringify({

@@ -91,14 +91,33 @@ describe("A-1153 ② 过渡期宽度走 `--right-target-w`，且**成对**写/�
     expect(n, `只找到 ${n} 处 removeProperty("--right-target-w")，应 ≥2（展开 done + 收起 done）`).toBeGreaterThanOrEqual(2);
   });
 
-  it("CSS：过渡期规则用 `var(--right-target-w)` 驱动宽度，**不带 fallback**", () => {
+  it("CSS：过渡期规则用 `var(--right-target-w)` 驱动宽度，**不带 fallback**、且**带 `!important`**", () => {
     const m = /body\.float-layout\s+\.right-wrapper-anim\s+\.right-sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
     expect(m, "找不到过渡期规则（守卫自己失效了）").toBeTruthy();
     const body = m![1];
-    expect(body).toMatch(/width:\s*var\(--right-target-w\)\s*;/);
+    /* ⚠️⚠️ A-1157：`!important` 从缺省变成**必需**。
+       React 给 `<aside>` 写的是内联 `width`（`width={rightCustom ? rightWidth : undefined}`），
+       而**内联样式压过一切没有 `!important` 的选择器规则** ⇒ 这条宽度声明曾经
+       "看着在、实际不生效"，右栏在过渡期纹丝不动，wrapper 却已经跳到目标宽
+       ⇒ 右缘凭空空出一段（实测 90ms 时 `sidebar=240..1239`，右缘离窗口边差 93px
+       且**正在往右长**）= 用户本轮报的「右边突然出现空白，然后侧边栏向右合上」。
+       ⇒ 缺了 `!important` 就会静默退回那个方向反了的过渡。 */
+    expect(body).toMatch(/width:\s*var\(--right-target-w\)\s*!important\s*;/);
     /* ⚠️ 不许写 fallback：普通展开（非浮层）根本不写这个变量，
        一旦有 fallback 就会误用兜底值 ⇒ 普通展开的宽度被静默改掉。 */
     expect(body, "`var(--right-target-w)` 带了 fallback ⇒ 非浮层展开会误用兜底值").not.toMatch(/var\(--right-target-w\s*,/);
+  });
+
+  it("CSS：浮层态右栏**贴住窗口右缘**（`margin-left:auto`）—— 否则过渡是「向右合」而不是「向左挤开」", () => {
+    /* ⚠️ A-1157：`.right-sidebar` 是 `.right-wrapper`（display:flex）的 flex item。
+       默认它贴的是 wrapper 的**左缘**，而 wrapper 在过渡起点就跳到目标宽 ⇒ 右栏从
+       左缘开始、**向右**长 ⇒ 用户看到的正是「向右合上」。
+       ⇒ auto 外边距把它顶到 wrapper 右缘 ⇒ 宽度变化时右缘钉住、左缘向左推。
+       ⚠️ 稳态看不出差别（那时右栏 100% 与 wrapper 等宽，auto 没有余量可吃），
+         所以这条必须写成静态断言 —— 端到端探针在稳态量不到它。 */
+    const m = /body\.float-layout\s+\.right-sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
+    expect(m, "找不到 `body.float-layout .right-sidebar` 规则").toBeTruthy();
+    expect(m![1]).toMatch(/margin-left:\s*auto/);
   });
 });
 

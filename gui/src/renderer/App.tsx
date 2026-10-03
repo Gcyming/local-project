@@ -2184,13 +2184,25 @@ export default function App(): JSX.Element {
              ⚠️ `alignSelf: "stretch"`（A-1152）：右栏**必须撑满整高**。用户选定方案是
              「右栏铺满整窗、浮窗叠在上面」⇒ 浮窗下方那片区域由右栏的底色承担；
              若 wrapper 高度不足，下方会露出 `.app` 根底色 = 用户截图里那条"空白"。 */
-          /* ⚠️⚠️ A-1155：`flexShrink` 判据从 `&& !rightMin0` 改为**只看 `mainIsFloatLayout`**。
-             原因同上面 `width` 那条：过渡期（`rightMin0=true`）若放开收缩，
-             在 `[左栏240][main 0][wrapper 目标1332]` 超窗时 wrapper 会被压到 287px
-             ⇒ `.right-sidebar` 的 `max-width:100%` 跟着压 ⇒ 宽度不变 ⇒ done 死锁。
-             浮层态 `<main>` 已不占位，wrapper 是唯一需要宽度的一方，
-             **它不该收缩**（收缩权交给左栏/overflow 兜底）。 */
-          style={{ display: "flex", flexShrink: mainIsFloatLayout ? 0 : 1, minWidth: 0, marginLeft: "auto", alignSelf: "stretch",
+          /* ⚠️⚠️ A-1157：**`flexShrink` 改回「可收缩」（恒 1）** —— A-1155 的 `? 0 : 1` 是本轮实测出的回归源。
+             A-1155 当初设成 0 的理由是「wrapper 请求了超过可用空间的宽度（`innerWidth`），
+             收缩权会落到左栏头上」—— 而那个前提在 A-1155-R7 之后**已经不成立**
+             （`--right-target-w` 现在是 `整窗 − 左栏实宽`，需求恰好等于可用空间）。
+             在这个前提下继续禁收缩，会造成一个**自锁**（真 App CDP 逐帧实测，1332px 窗口）：
+               点「展开左侧边栏」后，左栏的宽度过渡从 0 往 240 走，而 wrapper 仍按
+               `--left-w`（上一帧的值，滞后一帧）占着 `100% − 1px` ⇒ **总需求超出容器**
+               ⇒ 因为 wrapper `flex-shrink:0`、左栏 basis≈0 ⇒ **收缩量全落在左栏身上**
+               ⇒ 左栏被压回 ~1px ⇒ RO 读到 ~1px ⇒ `--left-w` 保持 ~1px ⇒ **死循环**
+               ⇒ 实测 `3ms 宽=1 不透明=0% → 654ms 宽=240 不透明=100%`：
+                  整整 654ms 里侧栏**既不动也看不见** —— 用户原话「展开要等半天，
+                  我经常以为它是没有展开，点半天没反应」（本轮实测，非推断）。
+               非浮层态同一操作**完全正常**（4ms 起逐帧 12/23/32/41/49…，85ms 开始淡入）
+               ⇒ 差异只来自浮层态 wrapper 那条 `calc(100% - var(--left-w))`。
+             ⇒ 放开收缩后，超出量按 `shrink × basis` 加权：左栏 basis≈0 权重≈0，
+               **让位的是 wrapper**（差值只有一帧的量，肉眼不可见，且 RO 下一帧就纠正）。
+             ⚠️ 守卫：`tests/core-ts/a1152-float-stability.spec.ts` ⑮（原断言要求
+               `flexShrink: mainIsFloatLayout ? 0 : 1`）已随本条改判据。 */
+          style={{ display: "flex", flexShrink: 1, minWidth: 0, marginLeft: "auto", alignSelf: "stretch",
             /* ⚠️⚠️ A-1152：浮层态**宽度给到 wrapper**（`100%`）—— 上一轮我错把`width:100%`
                写在 `.right-sidebar` 上，而 wrapper 的宽度是 `auto`（=0）⇒ 百分比参照 0
                ⇒ **右栏整个塌成 0、用户报「右侧边栏直接没了」**（用户截图实测）。
@@ -2817,7 +2829,16 @@ export default function App(): JSX.Element {
         el.style.setProperty("--right-body-pin", `${Math.round(Math.min(RIGHT_CONTENT_MAX_W, targetW))}px`);
       }
       rightFadeCancelRef.current = runGeometrySyncFade(
-        () => rightWrapperRef.current,
+        /* ⚠️⚠️ A-1157：**量 `.right-sidebar`，不是 wrapper**（两条支都一样）。
+           wrapper 的宽度是**内联**的（`var(--right-target-w)` / `calc(100% - var(--left-w))`），
+           而它的旧值是 `auto` —— **`auto` 不能参与插值** ⇒ wrapper 宽度永远是**硬跳**的
+           （实测：点击后第一帧就已经是 1092）。
+           ⇒ 量它等于量一个"不动的东西"：几何淡入淡出 ~50ms 内就判 done，
+             而真正在滑的是 `.right-sidebar`（`transition: width`）—— 观感上右栏
+             **全程满不透明**地滑过去，A-1152 特意调过的"更早的淡入带"等于白调。
+           ⇒ 改量真正在动的那个盒子：淡入淡出重新跟随真实的宽度运动。
+           ⚠️ `querySelector` 每次一帧跑一次，开销可忽略（单层子树、无通配符）。 */
+        () => rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null,
         (p, done) => {
           if (done) {
             setRightMin0(false);
@@ -2876,7 +2897,8 @@ export default function App(): JSX.Element {
         rwEl0.style.removeProperty("--right-target-w");
       }
       rightFadeCancelRef.current = runGeometrySyncFade(
-        () => rightWrapperRef.current,
+        /* A-1157：与展开支同源 —— 量真正在动的 `.right-sidebar`（wrapper 是硬跳的）。 */
+        () => rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null,
         (p, done) => {
           if (done) {
             setRightWebviewPin(null);

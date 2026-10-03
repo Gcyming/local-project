@@ -13,6 +13,8 @@
  * | ② 形状 | 落 state 前不判 `!isFloatExpand` | 铺满宽度又被写进持久 state |
  * | ② 形状 | 不写 / 漏摘 `--right-target-w` | 过渡没有宽度对象（硬跳）／残值污染下次展开 |
  * | ② 形状 | CSS 给 `var(--right-target-w)` 加 fallback | 普通展开误用兜底值 ⇒ 静默回归 |
+ * | ② 形状 | 过渡期宽度声明去掉 `!important`（A-1157） | 内联 width 吃掉它 ⇒ 过渡方向反了且**静默** |
+ * | ② 形状 | 去掉浮层态 `margin-left:auto`（A-1157） | 右栏贴 wrapper 左缘 ⇒ 「向右合」 |
  * | ③ 抖动 | `handleToggleFloat` 又调第二次 `animateRightSidebar` | 第二次 cancel 第一次、只停表不复位样式 ⇒ 抽搐 |
  * | ④ 跟手 | 拖动第一帧不挂 `slime-dragging` | 拖动头 140ms 仍走 0.5s 宽度过渡 ⇒ 手在前、面板在后 |
  * | ④ 跟手 | `endChatFreeze` 不摘 `slime-dragging` | 过渡永久为 none ⇒ 之后所有侧栏动画硬跳 |
@@ -116,13 +118,36 @@ const MUTATIONS = [
     ),
   },
   {
+    /* ⚠️ A-1157 同步锚点：过渡期那条声明现在带 `!important`（必须带 —— 内联 width 会吃掉它，
+       少了它右栏在过渡期纹丝不动、wrapper 却已跳到目标宽 ⇒ 右缘凭空空出一段，
+       正是用户本轮报的「右边突然出现空白，然后侧边栏向右合上」）。 */
     name: "7 CSS 给 var(--right-target-w) 加 fallback（普通展开误用兜底值）",
     file: F_CSS,
     mutate: (t) => sub(
       t,
-      "  width: var(--right-target-w);",
-      "  width: var(--right-target-w, 100%);",
+      "  width: var(--right-target-w) !important;",
+      "  width: var(--right-target-w, 100%) !important;",
     ),
+  },
+  {
+    /* ⚠️⚠️ A-1157 新增：把过渡期那条声明的 `!important` 去掉 —— 它会静默退回
+       "过渡方向反了"（右栏贴 wrapper 左缘、从左往右合、右缘凭空空白），
+       而**所有既有断言仍然全绿**（它们只查"有没有这条规则、有没有 !important 之外的形状"）。
+       这条就是"为什么这个变异必须存在"的答案。 */
+    name: "7b 过渡期宽度声明去掉 !important（内联 width 吃掉它 ⇒ 过渡方向反了且静默）",
+    file: F_CSS,
+    mutate: (t) => sub(
+      t,
+      "  width: var(--right-target-w) !important;",
+      "  width: var(--right-target-w);",
+    ),
+  },
+  {
+    /* ⚠️ A-1157：浮层态右栏必须贴住 wrapper 右缘（`margin-left: auto`）——
+       少了它过渡就从 wrapper 左缘起向右长，稳态量不出差别，只能靠静态断言守。 */
+    name: "7c 去掉浮层态右栏的 margin-left:auto（过渡变成「向右合」而非「向左挤开」）",
+    file: F_CSS,
+    mutate: (t) => sub(t, "  margin-left: auto;\n}\nbody.float-layout .right-wrapper-anim .right-sidebar", "}\nbody.float-layout .right-wrapper-anim .right-sidebar"),
   },
 
   /* ── ③ 抖动：第二次动画 ─────────────────────────────────────────── */
