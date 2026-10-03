@@ -160,6 +160,23 @@ const MUTATIONS = [
       "    if (!rightOpen) { setRightOpen(true); animateRightSidebar(true); }",
     ),
   },
+  {
+    /* ⚠️ A-1157：`setFloatState("float")` 必须走 `React.startTransition`。
+       这一步让 React **卸载整棵 `<main>`（含 ChatPanel）、再在浮窗里挂载另一棵**
+       （换父 ⇒ 整树重建，两棵树都不复用）。同步提交时它会把窗口化过渡的
+       第 3 帧冻成 **80~91ms 的一帧**（真 App CDP + LoAF：`start:35ms dur:80ms
+       renderStart:77ms scripts:[]`、`longtask=[]`）—— 用户原话「界面会抽搐」。
+       并发提交后同一场景降到 **55~59ms**（约 -35%）。
+       ⚠️ 注意这条**没**消除停顿，只是把它压小；剩下的部分属架构性代价
+       （A-1152 记过：改成「`<main>` 兼作浮窗、单宿主」那条路实测有可见回归）。 */
+    name: "8b setFloatState 不走 startTransition（换父重建同步提交 ⇒ 过渡被一帧冻住）",
+    file: F_APP,
+    mutate: (t) => sub(
+      t,
+      "    React.startTransition(() => {\n      setFloatState(\"float\");\n    });",
+      "    setFloatState(\"float\");",
+    ),
+  },
 
   /* ── ④ 跟手：拖动期禁过渡 ───────────────────────────────────────── */
   {

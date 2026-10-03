@@ -272,53 +272,152 @@ const isLeftCollapsed = (cdp) =>
   await shot("s0-initial");
   say("左栏会话项：" + (await cdp.eval(LIST_SESSIONS)));
 
-  /* ⚠️⚠️ 用户本轮报过渡**方向**反了（右栏从左往右合、右边凭空出现空白）。
-   ⚠️⚠️ 取样必须**页内**进行：`Page.captureScreenshot` 与 `Runtime.evaluate` 都有
+  /* ⚠️⚠️ 取样必须**页内**进行：`Page.captureScreenshot` 与 `Runtime.evaluate` 都有
    几十到几百毫秒往返，放在点击与轮询之间会把时间轴整体后移 —— 实测「点击后 90ms」
    那一采其实发生在 ~500ms 时，量出来的 `anim=false / 收敛 2ms` 全是假的。
    ⇒ 采样器与点击**同一个 eval** 起，动画结束后再一次性读回。 */
-const CLICK_FLOAT_TRACE = `(() => {
-  const img = document.querySelector('img[alt="唤起悬浮窗"]');
-  if (!img) { return "NO-FLOAT-BTN"; }
+const ARM_FLOAT_TRACE = `(() => {
   const wrap = document.querySelector(".right-wrapper");
   const side = document.querySelector(".right-sidebar");
-  const b = img.closest("button") || img.parentElement;
-  const tr = { t0: 0, rows: [] };
+  window.__ftArm = { t0: 0, rows: [], dt: [], longTasks: [], loaf: [] };
+  const tr = window.__ftArm;
+  /* ⚠️ 用户本轮报「界面会**抽搐**，而非线性平滑的左拉」⇒ 必须能回答
+     "哪一帧卡了、卡在脚本还是渲染"。所以除几何外还要记 ① 每帧间隔
+     ② longtask（>50ms 的 **JS** 占用）③ **LoAF**（>50ms 的**动画帧**，
+     浏览器自己给归因：renderStart 减 startTime 是脚本/渲染的分界，
+     blockingDuration 是它认为「该帧多阻塞了多久」）。
+     ⚠️ 「卡顿」在这三种里成因完全不同、修法也不同，不能只看帧间隔就下结论。 */
+  try {
+    const po = new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) { tr.longTasks.push([Math.round(e.startTime), Math.round(e.duration)]); }
+    });
+    po.observe({ entryTypes: ["longtask"] });
+    tr.po = po;
+  } catch (e) { tr.longTaskErr = String(e); }
+  /* ⚠️ LoAF **必须先于点击注册、且不要开 buffered** —— buffered:true 会把注册之前的
+     条目一并倒出来（实测第一版就因此报出启动期的 start:5 dur:57，差点被当成
+     「过渡期掉帧」的证据）。归因只看**点击之后**的条目。 */
+  try {
+    const lo = new PerformanceObserver((l) => {
+      for (const e of l.getEntries()) {
+        const scripts = (e.scripts || []).map((s) => ({
+          n: (s.sourceURL || "").split("/").pop().slice(0, 40),
+          dur: Math.round(s.duration || 0),
+          inv: Math.round(s.invokerTime || 0),
+        }));
+        tr.loaf.push({
+          start: Math.round(e.startTime - tr.t0),
+          dur: Math.round(e.duration),
+          blocking: Math.round(e.blockingDuration || 0),
+          renderStart: e.renderStart === undefined ? null : Math.round(e.renderStart - e.startTime),
+          scripts,
+        });
+      }
+    });
+    lo.observe({ type: "long-animation-frame" });
+    tr.lo = lo;
+  } catch (e) { tr.loafErr = String(e); }
+  let prev = 0;
+  /* ⚠️⚠️ **对照实验开关**（环境变量 SLIME_PROBE_NO_SAMPLE=1）：只记时间戳、
+     **不碰任何几何 API**。
+     理由：本采样器每帧要读两次 getBoundingClientRect() + 一次 getComputedStyle()
+     —— 这些都是**强制同步布局**，会把"浏览器本该在帧末做的那次布局"提前到帧头，
+     在刚挂载大子树的这一帧里可能自己就制造出几十毫秒的停顿。
+     ⇒ 不采样时若"慢帧"消失，就说明那 90ms 有多少是**探针自己**的，
+     不能再算到界面头上（这正是本轮吃过的两次教训的同一类）。 */
+  const noSample = !!window.__probeNoSample;
   const tick = () => {
     const now = performance.now();
-    const sr = side.getBoundingClientRect();
-    const wr = wrap.getBoundingClientRect();
-    tr.rows.push([
-      Math.round(now - tr.t0),
-      Math.round(sr.width), Math.round(sr.left), Math.round(sr.right),
-      Math.round(wr.width),
-      Math.round(Number(getComputedStyle(wrap).opacity) * 100),
-      wrap.classList.contains("right-wrapper-anim"),
-    ]);
+    if (prev) { tr.dt.push([Math.round(now - tr.t0), Math.round(now - prev)]); }
+    prev = now;
+    if (!noSample) {
+      const sr = side.getBoundingClientRect();
+      const wr = wrap.getBoundingClientRect();
+      tr.rows.push([
+        Math.round(now - tr.t0),
+        Math.round(sr.width), Math.round(sr.left), Math.round(sr.right),
+        Math.round(wr.width),
+        Math.round(Number(getComputedStyle(wrap).opacity) * 100),
+        wrap.classList.contains("right-wrapper-anim"),
+      ]);
+    }
     tr.raf = requestAnimationFrame(tick);
   };
   tr.t0 = performance.now();
   tr.raf = requestAnimationFrame(tick);
-  window.__ft = tr;
+  return "ARMED";
+})()`;
+
+const CLICK_FLOAT_TRACE = `(() => {
+  const img = document.querySelector('img[alt="唤起悬浮窗"]');
+  if (!img) { return "NO-FLOAT-BTN"; }
+  const b = img.closest("button") || img.parentElement;
+  const tr = window.__ftArm || (window.__ftArm = { t0: performance.now(), rows: [], dt: [], longTasks: [], loaf: [] });
+  /* ⚠️ 点击与 t0 **同一个 eval**：跨 eval 的往返会把"点击时刻"记歪。 */
+  tr.t0 = performance.now();
   b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
   return "CLICKED(traced)";
 })()`;
 
 const READ_FLOAT_TRACE = `JSON.stringify((() => {
-  const tr = window.__ft;
+  const tr = window.__ftArm;
   cancelAnimationFrame(tr.raf);
-  const rows = tr.rows;
-  /* 只保留「宽度/位置/透明度/anim 类」发生变化的那几帧 */
+  tr.po && tr.po.disconnect();
+  tr.lo && tr.lo.disconnect();
+  /* 只保留「几何/透明度/anim 类」发生变化的那几帧（人眼读曲线用） */
   const marks = [];
   let last = "";
-  for (const r of rows) {
+  for (const r of tr.rows) {
     const k = r.slice(1).join("|");
     if (k !== last) { marks.push(\`\${r[0]}ms 右栏=\${r[1]}px @\${r[2]}..\${r[3]} wrapper=\${r[4]}px 不透明=\${r[5]}% anim=\${r[6]}\`); last = k; }
   }
-  return { total: rows.length, dur: rows.length ? rows[rows.length - 1][0] : 0, marks: marks.slice(0, 20) };
+  /* 停顿：相邻两帧几何完全相同且间隔 > 40ms —— 「抽搐」的可测形态 */
+  const stalls = [];
+  for (let i = 1; i < tr.rows.length; i++) {
+    const a = tr.rows[i - 1], b2 = tr.rows[i];
+    const gap = b2[0] - a[0];
+    if (gap > 40 && a[1] === b2[1]) { stalls.push(\`\${a[0]}ms→\${b2[0]}ms 卡 \${gap}ms（宽度停在 \${a[1]}px）\`); }
+  }
+  const dt = tr.dt.map((d) => d[1]);
+  const sorted = [...dt].sort((x, y) => x - y);
+  return {
+    total: tr.rows.length,
+    dur: tr.rows.length ? tr.rows[tr.rows.length - 1][0] : 0,
+    marks: marks.slice(0, 24),
+    stalls,
+    longTasks: tr.longTasks,
+    longTaskErr: tr.longTaskErr || null,
+    loaf: tr.loaf,
+    loafErr: tr.loafErr || null,
+    dtMax: Math.max(0, ...dt),
+    dtP95: sorted[Math.floor(sorted.length * 0.95)] ?? 0,
+    slowFrames: tr.dt.filter((d) => d[1] > 40).slice(0, 12),
+  };
 })())`;
 
-say("\n═══ ① 点「窗口化」 ═══");
+/* ══ ⓪ **冷启动后的首次**左栏收起→展开 ══════════════════════════════════
+     ④/⑤ 都是"已经动过几轮之后"的展开；用户抱怨的是"**现在**展开要等半天"，
+     可能对应的是**刚打开应用后的第一次**（此时会话树/搜索索引/首屏都还没热）。
+     ⇒ 必须单独量一次冷态，否则等于用热态数据去解释冷态抱怨。
+     ⚠️ 位置说明：必须放在 `clickAndTraceLeft` 定义**之后** —— 它是 `const` 箭头函数，
+       放前面会在 TDZ 里抛 "Cannot access before initialization"（实测踩过）。 */
+  say("\n═══ ⓪ 冷态：左栏收起 → 展开（刚加载完就做） ═══");
+  {
+    const t0 = Date.now();
+    await cdp.eval(CLICK_LEFT_TOGGLE);
+    say(`  点击左栏按钮（收起）=OK(${Date.now() - t0}ms 内返回)`);
+    await new Promise((r) => setTimeout(r, 900));
+    await clickAndTraceLeft("⓪ 冷态 左栏展开");
+  }
+
+  say("\n═══ ① 点「窗口化」 ═══");
+  /* ⚠️ 对照实验：设置探针的"只记时间不采样"开关（读环境变量，在页面里注入一个标志）。 */
+  if (process.env.SLIME_PROBE_NO_SAMPLE) {
+    say("⚠️ 对照模式：**不**读任何几何 API（用于判断慢帧有多少是探针自己制造的）");
+    await cdp.eval(`(() => { window.__probeNoSample = true; return "NO-SAMPLE MODE"; })()`);
+  }
+  /* ⚠️ 观察器必须**先于**点击注册（LoAF 的条目按注册时刻起算）。 */
+  say("装采样器=" + (await cdp.eval(ARM_FLOAT_TRACE)));
   say("点击=" + (await cdp.eval(CLICK_FLOAT_TRACE)));
   /* ⚠️ 截图夹在点击与轮询之间**会污染 CDP 时钟**，但页内采样器不受影响（见 CLICK_FLOAT_TRACE 注释）。 */
   await new Promise((r) => setTimeout(r, 90));
@@ -330,6 +429,10 @@ say("\n═══ ① 点「窗口化」 ═══");
   const ft = JSON.parse(await cdp.eval(READ_FLOAT_TRACE));
   say(`  🎞 窗口化过渡曲线（页内采样，共 ${ft.total} 帧 / ${ft.dur}ms）：`);
   for (const m of ft.marks) { say(`      ${m}`); }
+  say(`  ⏱ 帧间隔：p95=${ft.dtP95}ms max=${ft.dtMax}ms；>40ms 的慢帧=${JSON.stringify(ft.slowFrames)}`);
+  say(`  ⏱ 长任务（>50ms）=${JSON.stringify(ft.longTasks)}${ft.longTaskErr ? " 观察器失败:" + ft.longTaskErr : ""}`);
+  say(`  ⏱ **几何停顿**（宽度不变但帧间隔 >40ms）=${ft.stalls.length ? ft.stalls.join(" | ") : "无"}`);
+  say(`  🧩 LoAF（>50ms 的动画帧，浏览器自己归因）=${JSON.stringify(ft.loaf)}${ft.loafErr ? " 观察器失败:" + ft.loafErr : ""}`);
   await snap("S1 点窗口化后（收敛后）");
   await shot("s1-float-settled");
 
@@ -371,7 +474,10 @@ say("\n═══ ① 点「窗口化」 ═══");
      ⚠️⚠️ 第一版把「装探针」和「点按钮」拆成两次 eval，于是 commitMs 量的是
        **装完探针之后**才发生的提交（多算了几百毫秒，结论会被带偏）。
      ⚠️ 逐帧 rAF 采样会自己占主线程，间隔分布只作参考；判据以 commitMs 为主。 */
-  const clickAndTraceLeft = async (label, ms = 2400) => {
+  /* ⚠️ 用**函数声明**而不是 const 箭头：冷态那一步要排在步骤 ① 之前，
+     而 const 箭头函数有 TDZ —— 排在前面会在初始化前被调用，
+     实测直接抛 "Cannot access 'clickAndTraceLeft' before initialization"。 */
+  async function clickAndTraceLeft(label, ms = 2400) {
     const res = await cdp.eval(`(() => {
       const btn = Array.from(document.querySelectorAll("header.titlebar button, .titlebar button"))
         .find((b) => /侧栏|侧边栏/.test(b.getAttribute("title") || ""));
@@ -461,7 +567,7 @@ say("\n═══ ① 点「窗口化」 ═══");
     }
     say(`      可见性时间线（共 ${sm.length} 帧）：${marks.slice(0, 26).join(" → ")}`);
     return o;
-  };
+  }
   for (let i = 0; i < 3; i++) {
     if (!(await isLeftCollapsed(cdp))) { say("  已是展开态，不点"); break; }
     await clickAndTraceLeft(`左栏展开轨迹 #${i + 1}`);

@@ -121,6 +121,31 @@ describe("A-1153 ② 过渡期宽度走 `--right-target-w`，且**成对**写/�
   });
 });
 
+describe("A-1157 ③ 唤出浮层走**并发渲染**（过渡第 3 帧被冻住 = 用户报的「抽搐」）", () => {
+  it("`setFloatState(\"float\")` 被包在 `React.startTransition` 里", () => {
+    /* ⚠️ 这一步很重：它让 React **卸载整棵 `<main>`（含 ChatPanel）、再在浮窗里
+       挂载另一棵**（换父 ⇒ 整树重建，两棵都不复用）。
+       真 App CDP + LoAF 归因（1332px 窗口，同一台机器同一场景）：
+         同步提交：`慢帧 80~91ms`、`longtask=[]`、`LoAF{start:35ms dur:80ms renderStart:77ms scripts:[]}`
+         并发提交：`慢帧 55~59ms`、`LoAF{start:25ms dur:59ms renderStart:54ms}`
+       ⇒ 掉帧不在脚本里、也不在渲染里（renderStart 已到 54~77ms），
+         卡在「帧开始 → 浏览器开始渲染」之间，与换父重建的规模吻合。
+       ⚠️ 对照实验（探针**不读任何几何 API**）量到的仍是 80ms（读几何时 87~91ms）
+         ⇒ 这不是测量误差，是界面自己的停顿。
+       ⚠️ 本条只把停顿压小约 35%，**没有消除** —— 剩下的属架构性代价
+         （A-1152 记过：改成「`<main>` 兼作浮窗、单宿主」实测有可见回归）。 */
+    expect(APP_CODE).toMatch(/React\.startTransition\(\(\)\s*=>\s*\{\s*setFloatState\("float"\);\s*\}\)/);
+  });
+
+  it("⚠️ 其余状态**不许**包进 startTransition（在驱动动画，延迟它反而更糟）", () => {
+    /* `rightMin0` 是几何动画的驱动力，必须同步提交 ⇒ 只能包 `setFloatState` 这一处。
+       若哪天有人把 `animateRightSidebar(...)` 也挪进去，动画起点会被推迟一帧以上。 */
+    const body = fnBody(APP_CODE, "handleToggleFloat");
+    const inTransition = /React\.startTransition\([\s\S]*?\}\);/.exec(body)?.[0] ?? "";
+    expect(inTransition).not.toMatch(/animateRightSidebar|setRightMin0|setRightOpen/);
+  });
+});
+
 describe("A-1153 ③ 窗口化只允许**一次**动画（双调用 = 抽搐抖动）", () => {
   it("`handleToggleFloat` 函数体里 `animateRightSidebar(` 恰好 1 次", () => {
     const body = fnBody(APP_CODE, "handleToggleFloat");

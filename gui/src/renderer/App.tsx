@@ -2990,7 +2990,22 @@ export default function App(): JSX.Element {
        ⇒ 走 `setRightWidth`（持久副作用回来了）+ 不挂 `float-layout` ⇒ 右栏不铺满、挤压 .main
        （铁律 11：同一事实一个产地 —— 判据必须与**真状态**同源，不用派生猜测量）。 */
     animateRightSidebar(true, floatTargetW, true);
-    setFloatState("float");
+    /* ⚠️⚠️ A-1157：**这一次状态翻转很重** —— 它让 React **卸载整棵 `<main>`（含 ChatPanel）、
+       再在浮窗里挂载另一棵 ChatPanel**（换父 ⇒ React 整棵重建，两棵树都没有复用）。
+       实测（真 App CDP + LoAF 归因，1332px 窗口）：
+         `慢帧 [[112, 80]]`、`longtask=[]`、`LoAF{start:35ms dur:80ms renderStart:77ms scripts:[]}`
+       ⇒ 掉帧**不在脚本里**（longtask 为空）、也不在渲染里（renderStart 已到 77ms），
+         卡在"这一帧开始 → 浏览器开始渲染"之间的那 77ms —— 与换父重建的规模吻合。
+         用户本轮原话：「窗口化时…界面会**抽搐**，而非线性平滑的左拉」。
+       ⚠️ 对照实验（探针**不读任何几何 API**）量到的仍是 80ms（读几何时 87~91ms）
+         ⇒ 这 80ms 不是探针自己制造的，别再往"测量误差"上推。
+       ⇒ 修法：让这次更新走**并发渲染**（`startTransition`），React 得以把大块工作切开、
+         在帧间让出主线程 ⇒ 右栏的宽度过渡能跑完它自己的 280ms，而不是被一帧冻住。
+       ⚠️ 只包这一处：它对应的正是"一次性大重建"；其余状态（`rightMin0` 等）是在**驱动**动画，
+         必须同步提交，包进来反而会延迟动画起点。 */
+    React.startTransition(() => {
+      setFloatState("float");
+    });
   }
 
   /**
