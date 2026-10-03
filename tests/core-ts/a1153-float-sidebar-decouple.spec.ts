@@ -200,61 +200,47 @@ describe("A-1153 ⑤ 恢复方向也必须有过渡（摘类时 transition 声�
   });
 });
 
-/* ⚠️⚠️ A-1159：浮窗淡入动画必须**逐字沿用**右栏那条过渡的时长与缓动。
-   用户报「点击窗口化时各个栏目的衔接动画抖动、抽搐异常明显」。
-   实测（真 App CDP 逐帧）证明那**不是**"某一栏在抖"：逐栏几何全部单调、零方向反转，
-   真正刺眼的是**三者不同步** —— 右栏在滑 280ms，浮窗却在第 1 帧就"啪"地出现在最终位置、
-   中间页同帧硬切消失（`t=11ms host=240/380` → `t=20ms host=252/666`，此后 host 一动不动）。
-   ⇒ 这两条锁住"浮窗与右栏同一条时间轴"这个事实本身。 */
-describe("A-1159 浮窗与右栏**同一条时间轴**（衔接动画不抽搐）", () => {
-  it("浮窗淡入动画与右栏过渡**同一时长、同一缓动**", () => {
-    const animRule = /body\.float-layout \.float-window\s*\{([^}]*)\}/.exec(CSS_CODE);
-    expect(animRule, "找不到 body.float-layout .float-window 的动画声明").toBeTruthy();
-    const animM = /animation:\s*float-enter-a1159\s+([^;]+);/.exec(animRule![1]);
-    expect(animM, "`.float-window` 必须声明 float-enter-a1159 动画").toBeTruthy();
-    /* 右栏那条过渡（唯一真相源，A-1153 立的）—— 从**同一份 CSS 文本**里取，
-       两边同源比较，才不会因为"抄错一个数字"而假绿。 */
-    const rightRule = /body\.float-layout \.right-wrapper-anim \.right-sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
-    expect(rightRule![1]).toMatch(/transition:\s*width\s+([0-9.]+m?s)\s+([^;]+);/);
-    const rightDur = rightRule![1].match(/transition:\s*width\s+([0-9.]+m?s)\s+([^;]+);/)!;
-    /* ⚠️ 必须一致：浮窗动画是**唯一**能让三者同拍的机制，
-       时长/缓动一漂，浮窗就会先于（或晚于）右栏收尾 ⇒ 又退回"一个动、另外两个不动"。 */
-    /* ⚠️ 不能用 `split(/\s+/)` 取"前两个记号"：`cubic-bezier(0.22, 0.61, 0.36, 1)`
-       **本身含空格**，按空白切会把它切成四段（实测踩过：拼成 `0.28s cubic-bezier(0.22,`）。
-       ⇒ 改成"去掉末尾的填充模式"再整体比较。 */
-    const animFull = animM![1].trim();
-    expect(animFull.endsWith(" both"), "动画必须带 fill-mode（both），否则播完会掉回初始透明度").toBe(true);
-    const animTiming = animFull.replace(/\s+both$/, "");
-    expect(animTiming, "浮窗动画的时长/缓动必须与右栏过渡逐字相同")
-      .toBe(`${rightDur[1]} ${rightDur[2]}`.trim());
+/* ⚠️⚠️⚠️ A-1160：**浮窗不许有任何"进场"动画**。
+   这条动画连着试了两种实现，**两次都被用户实拍证伪**，而且它本身制造了用户报的病症：
+
+   ① `opacity: 0→1`（A-1159）：浮窗 `position: fixed` **浮在右栏之上**，半透明 ⇒
+      下方正在滑动的右栏内容直接透出来，聊天气泡与「会话指标 / 累计tokens」
+      两张卡**叠印在同一块区域**（用户截图为证）。
+
+   ② 只留 `transform: scale(0.985)`（A-1159-R）：用户随即指出**浮窗与右栏之间那条边界
+      在窗口化那一瞬"剧烈左右抖动"**、右栏跟着摇摆闪烁。机制：`scale` 让浮窗**整条边界
+      位移**（宽 666 从 98.5% 起 ⇒ 右边缘先缩进 ~10px 再弹回）；而那条边界正是浮窗与右栏的
+      **唯一可见分界**。更糟：只要 `body.float-layout` / `.float-window` 的 class 在过渡中
+      抖一下，一次性动画就**从头重播** ⇒ 右边缘被反复拽回再弹出 = 剧烈抖动。
+      另：`transform` 还会给 `fixed` 后代**造出包含块**，与拖拽/最小化的几何渐隐互相干扰。
+
+   ⇒ 结论（比"用什么动画"更重要的一条）：**浮窗以终态瞬现，不要给它任何进场动效。**
+     真正要顺的是右栏那条过渡，它本来就顺；动浮窗只会把那条边界搅乱。
+
+   ⚠️ 下面三条判据一律写成"**整段不存在**"，而不是"某属性不允许"：
+      那两种失败模式（半透明、位移边界）分属**不同属性**，逐属性放行等于给回归留后门
+      —— 上一个版本的守卫就是"不许有 opacity、但必须有 scale"，结果 scale 恰好是②的病根。 */
+describe("A-1160 浮窗**不许有进场动画**（进场动效本身就是病症）", () => {
+  it("`@keyframes float-enter-a1159` 必须**整条不存在**", () => {
+    expect(CSS_CODE, "浮窗进场 keyframes 又回来了 ⇒ 半透明叠印 / 边界位移两症都会复发")
+      .not.toMatch(/@keyframes\s+float-enter-a1159/);
   });
 
-  /* ⚠️⚠️ A-1159-R 修订：**keyframes 里不许出现 `opacity`** —— 用户抓到的中间帧证据：
-     浮窗一旦半透明，它**下面正在滑动的右栏内容会透出来**，聊天气泡与右栏的
-     「会话指标 / 累计tokens」两张卡**叠印在同一块区域**，外加一圈"空白一大一小"。
-     浮窗是**不透明窗口**：任何淡入都会与下方内容叠印。⇒ 只允许 `scale`（纯绘制层）。 */
-  it("浮窗淡入**不许碰 opacity**（半透明浮窗会与下方右栏内容叠印）", () => {
-    const kf = /@keyframes float-enter-a1159\s*\{([\s\S]*?)\n\}/.exec(CSS_CODE);
-    expect(kf, "找不到 @keyframes float-enter-a1159").toBeTruthy();
-    expect(kf![1], "keyframes 里出现 opacity ⇒ 浮窗会半透明，右侧栏内容必然透出来叠印")
-      .not.toMatch(/opacity/);
-    const scale = /from\s*\{[^}]*scale\(([0-9.]+)\)/.exec(kf![1]);
-    expect(scale, "from 必须带 scale（否则浮窗是硬切出现，没有『跟着长出来』的暗示）").toBeTruthy();
-    /* ⚠️ 幅度必须**小**：这里要的是"跟着长出来"的暗示，
-       0.9 之类会变成"弹一下"，反而更像抽搐。 */
-    expect(Number(scale![1]), "起始缩放应在 0.97~0.99").toBeGreaterThanOrEqual(0.97);
-    expect(Number(scale![1])).toBeLessThanOrEqual(0.99);
-    /* ⚠️ 只允许 transform：碰几何（left/top/width/height）就又与右栏的滑动不同步 ——
-       那正是本组要根除的病症。 */
-    const props = kf![1]
-      /* ⚠️ 必须先剥掉 `from {` / `to {` **选择器**，否则切出来的第一个"属性"是
-         "from  transform" 这种把选择器和声明粘在一起的东西。 */
-      .replace(/(^|[\s{}])(from|to)\s*\{/g, " ")
-      .replace(/[{}]/g, "")
-      .split(";").map((s) => s.split(":")[0].trim()).filter(Boolean);
-    expect(props.length, "keyframes 解析为空 ⇒ 守卫自己失效了").toBeGreaterThan(0);
-    for (const p of props) {
-      expect(["transform"], `keyframes 里不该出现属性 ${p}`).toContain(p);
+  it("`.float-window` 上不许出现 `animation`（含 `body.float-layout` 变体）", () => {
+    /* ⚠️ 必须连 `body.float-layout .float-window` 一起查：上一版就是只挂在那个变体上的，
+       只查裸 `.float-window` 会漏。 */
+    const rules = CSS_CODE.match(/[^{}]*\.float-window[^{}]*\{[^}]*\}/g) || [];
+    expect(rules.length, "找不到 .float-window 的规则 ⇒ 守卫自己失效了").toBeGreaterThan(0);
+    for (const r of rules) {
+      expect(r, "规则里出现了 animation：" + r.slice(0, 80)).not.toMatch(/(^|[;{\s])animation(-[a-z]+)?\s*:/);
     }
+  });
+
+  /* ⚠️ A-1152/A-1160：浮窗**必须显式不透明**。它下方就是右栏，
+     "恰好继承到不透明"不等于"写明了不透明" —— 将来有人加 opacity 过渡就会叠印。 */
+  it("浮窗显式 `opacity: 1`（它的下方就是右栏，半透明必然叠印）", () => {
+    const r = /(^|\n)\.float-window\s*\{([^}]*)\}/.exec(CSS_CODE);
+    expect(r, "找不到裸 `.float-window` 规则").toBeTruthy();
+    expect(r![2], "浮窗必须显式写死 opacity: 1").toMatch(/opacity:\s*1\s*;/);
   });
 });
