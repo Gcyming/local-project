@@ -216,3 +216,6 @@ slime-search-*.tar.gz
 slime-search-*.zip
 # 随包 vendor 的第三方抽取物
 gui/vendor/
+# A-1142：strip_comments.py 产出的「去注释候选」文件（供比对后再落地，不入库）
+*.stripped
+*.bak-comments

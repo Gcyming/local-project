@@ -9,8 +9,13 @@
 
 用法：
     py temp_test_dir/strip_comments.py                      # 干跑：只报告将删多少行
-    py temp_test_dir/strip_comments.py --apply              # 实际写回（先备份 .bak-comments）
+    py temp_test_dir/strip_comments.py --apply              # 写出 <名>.stripped（**不动原文件**）
+    py temp_test_dir/strip_comments.py --apply --in-place   # 真正写回（先备份 *.bak-comments）
     py temp_test_dir/strip_comments.py --apply --docstrings # Python 连 docstring 一起删
+
+⚠️ A-1142 改动：`--apply` 不再直接覆盖原文件，只产出 `<名>.stripped` 候选。
+   理由就是本次编码事故的教训 —— 全仓覆盖一次不可逆，**先产出候选、比对后再替换**。
+   确认无误后用 `--in-place` 落地（或自行把 .stripped 移回原名）。
 
 目标扩展名：.ts .tsx .js .mjs .cjs .py
 默认目录：gui/src、core-ts/src、core、tests、temp_test_dir 之外的项目根脚本
@@ -23,6 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APPLY = "--apply" in sys.argv
+IN_PLACE = "--in-place" in sys.argv
 DOCSTRINGS = "--docstrings" in sys.argv
 
 TARGETS = [
@@ -261,11 +267,14 @@ def main() -> int:
         total_after += len(new)
         if new != raw:
             changed.append((p, len(raw), len(new)))
-            if APPLY:
+            if IN_PLACE:
                 bak = p.with_suffix(p.suffix + ".bak-comments")
                 if not bak.exists():
                     bak.write_text(raw, encoding="utf-8", newline="")
                 p.write_text(new, encoding="utf-8", newline="")
+            elif APPLY:
+                # A-1142：默认**不覆盖原文件**，只写出 `<名>.stripped` 候选。
+                p.with_name(p.name + ".stripped").write_text(new, encoding="utf-8", newline="")
 
     print(f"扫描文件: {len(files)}")
     print(f"跳过（含 U+FFFD 事故残留，请先跑 fix_index_from_bundle.py）: {len(skipped)}")
@@ -280,10 +289,17 @@ def main() -> int:
     for p, b, a in sorted(changed, key=lambda t: t[1] - t[2], reverse=True)[:20]:
         print(f"  {p.relative_to(ROOT)!s:<58} {b:>9,} → {a:>9,}")
     print()
-    if APPLY:
-        print("已写回（原文件备份为 *.bak-comments，已存在则不覆盖）")
+    if IN_PLACE:
+        print("已就地写回（原文件备份为 *.bak-comments，已存在则不覆盖）")
+    elif APPLY:
+        print("已写出 *.stripped 候选文件（**原文件未改动**）")
+        print()
+        print("下一步：")
+        print("  1. 比对原文件与 .stripped（例如 git diff --no-index 原文件 原文件.stripped）")
+        print("  2. 确认无误后落地：加 --in-place 重跑，或自行把 .stripped 移回原名")
+        print("  3. 落地后跑一次 py qa.py 与 pnpm dev 验证")
     else:
-        print("（干跑模式，未写任何文件。加 --apply 才写回）")
+        print("（干跑模式，未写任何文件。加 --apply 产出 .stripped 候选）")
     return 0
 
 
