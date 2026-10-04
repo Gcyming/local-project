@@ -1799,6 +1799,18 @@ export default function App(): JSX.Element {
   if (floatMinIcon) { floatWasMinRef.current = true; }
   if (floatState === "float") { floatWasMinRef.current = false; }
   const floatIconLike = floatMinIcon || floatAnimOut || floatWasMinRef.current;
+  /* ⚠️⚠️⚠️ A-1171：**宿主的呈现模式**，与业务状态 `mainIsFloatLayout` **解耦**。
+     为什么必须解耦：单一宿主（A-1158）在浮层态是 `position:fixed` 的浮窗、
+     在普通态是 `<main>` 里的 flex 子项 —— 两者几何**完全不同**。
+     若直接用业务状态选呈现模式，退场时 `setFloatState("none")` 先于退场动画收工到达，
+     宿主会在**动画还没走完**时一步从"40px 图标 @628"变成"598px 内联面板 @303"，
+     且是**不透明**地跳（实测 holeAtHostCenter 从浮窗变成 div.msg-row）。
+     ⇒ 只要"还在浮层、正在进场/最小化/退场"，一律按浮窗呈现；
+        退场收工（`floatAnim` 回 idle）后才切内联 —— 那时浮窗已是 0×0 且全透明。
+     ⚠️ 为什么必须**包含** `floatAnim === "in"`：进场那一瞬业务状态先到、动画后到，
+        只看 `mainIsFloatLayout` 会让宿主先以内联尺寸渲染一帧再跳成浮窗 —— 与退场同一种闪。
+     ⚠️ 为什么不能只看 `floatClosing`：最小化（`out`）期间宿主也仍是浮层呈现。 */
+  const hostIsFloat = mainIsFloatLayout || floatClosing || floatAnimOut || floatAnim === "in";
   const floatBoxW = floatClosing ? 0 : (floatIconLike ? FLOAT_ICON_SIZE : floatSize.w);
   const floatBoxH = floatClosing ? 0 : (floatIconLike ? FLOAT_ICON_SIZE : floatSize.h);
   const floatBoxDefaultPos = fitFloatRect((sidebarOpen ? sidebarWidth : 0) + 12, 42, floatSize.w, floatSize.h);
@@ -2194,7 +2206,24 @@ export default function App(): JSX.Element {
               inlineChatRef.current = el;
             }}
             className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}
-            style={mainIsFloatLayout ? floatBoxStyle : inlineChatHostStyle}
+            /* ⚠️⚠️⚠️ A-1171：**呈现模式与业务状态解耦** —— 退场动画走完前不切成内联。
+               用户自检数据（1239 帧；A-1169/A-1170 之后剩余的 14 次反转**全部**在此，
+               三次操作各命中一次：3618 / 5606 / 7461ms）。逐帧实测那个切换点：
+
+                   host.left=303  host.width=598  main.width=598
+                   holeAtHostCenter = HOLE:div.msg-row     ← 中心点是聊天内容，不是浮窗
+                   host.opacity% 100 → 100 → **0**         ← 不透明地跳了 2 帧才淡出
+
+               ⇒ A-1158 的"单一宿主"在退场时被**瞬间**切成内联聊天区：
+                  40px 图标 @628 一步跳成 598px 面板 @303，**且是可见地跳**。
+               根因：此处直接用**业务状态** `mainIsFloatLayout` 选呈现模式 ——
+               而 `dismissFloat` 里 `setFloatState("none")` 与退场动画的收工是**两次**更新，
+               业务状态先走 ⇒ 呈现模式先切 ⇒ 退场动画还在跑，宿主却已经变成内联面板。
+               ⇒ 改成 `hostIsFloat`：只要**还在浮层态、正在最小化、或正在退场/进场**，
+                  一律用浮窗呈现；直到退场真正收工（`floatAnim` 回 `idle`）才切内联。
+               ⚠️ 切换那一刻浮窗宽高已是 0（`floatClosing` 分支）且 opacity 已淡到 0
+                  ⇒ 切换**在视觉上不可见**，这正是阶段 1 要达成的唯一目标。 */
+            style={hostIsFloat ? floatBoxStyle : inlineChatHostStyle}
           >
             {/* ⚠️⚠️ **子元素结构在两种模式下必须逐字相同**（下面三层都常驻，
                只按模式切 display/opacity）。
