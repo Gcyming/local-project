@@ -129,8 +129,11 @@ def scan_unterminated(text: str):
     in_block = False
     quote = None
     template_depth = 0
+    # 正则字面量判据：`/` 前面是运算符/左括号/行首 ⇒ 它是正则；否则是除号。
+    REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>")
     for ln_no, line in enumerate(text.replace("\r\n", "\n").split("\n"), 1):
         i, n = 0, len(line)
+        prev_sig = None
         while i < n:
             ch = line[i]
             nxt = line[i + 1] if i + 1 < n else ""
@@ -156,10 +159,37 @@ def scan_unterminated(text: str):
                     in_block = True
                     i += 2
                     continue
+                # A-1141：**正则字面量**要整段跳过。
+                # 不处理的话，正则里的引号（如 `/^['"\s]+|['"\s]+$/g`）会被当成字符串开引号
+                # ⇒ 行尾判为「未闭合」⇒ 误报语法错误。实测本仓 4 处误报全部来自这一类，
+                # 而误报会让「自检」这个卖点失效（用户会以为还有语法错误）。
+                if ch == "/" and (prev_sig is None or prev_sig in REGEX_PREV):
+                    i += 1
+                    while i < n:
+                        c2 = line[i]
+                        if c2 == "\\":
+                            i += 2
+                            continue
+                        if c2 == "[":          # 字符类里的 `/` 不结束正则
+                            i += 1
+                            while i < n and line[i] != "]":
+                                i += 2 if line[i] == "\\" else 1
+                            i += 1
+                            continue
+                        if c2 == "/":
+                            i += 1
+                            break
+                        if c2 == "\n":
+                            break
+                        i += 1
+                    prev_sig = "/"
+                    continue
                 if ch in "\"'`":
                     quote = ch
                     i += 1
                     continue
+                if not ch.isspace():
+                    prev_sig = ch
                 i += 1
                 continue
             # 在字符串里
