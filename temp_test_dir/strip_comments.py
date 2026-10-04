@@ -47,6 +47,9 @@ def strip_js(text: str):
     i, n = 0, len(text)
     removed_lines = 0
     line_has_comment = False
+    # A-1142：正则字面量判据 —— `/` 前面是运算符/左括号/行首时它是正则，否则是除号。
+    REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>")
+    prev_sig = None
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
@@ -64,15 +67,47 @@ def strip_js(text: str):
         # 块注释
         if ch == "/" and nxt == "*":
             j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            seg = text[i:j]
-            # 块注释独占的行整行删掉；行内块注释只删注释体
-            if "\n" in seg:
-                removed_lines += seg.count("\n")
-                # 保留与注释内部等量的换行，避免行号漂移
-                out.append("\n" * seg.count("\n"))
-            line_has_comment = True
-            i = j
+            # A-1142 安全网：正则里也可能出现 `/*`（如 /[*]/）。若 5000 字符内找不到闭合的
+            # `*/`，它几乎不可能是块注释 —— 按块注释处理会**吞掉后面几千字符的真代码**。
+            # 宁可漏删这一处注释，也绝不删错代码。落空则往下走正则分支。
+            if j >= 0 and (j - i) <= 5000:
+                seg = text[i:j + 2]
+                # 块注释独占的行整行删掉；行内块注释只删注释体
+                if "\n" in seg:
+                    removed_lines += seg.count("\n")
+                    # 保留与注释内部等量的换行，避免行号漂移
+                    out.append("\n" * seg.count("\n"))
+                line_has_comment = True
+                i = j + 2
+                continue
+
+        # 正则字面量：**必须整段跳过**。
+        # A-1142（关键修复）：此前没有这一段，正则里的引号（如 /^['"\s]+/）会被当成
+        # 字符串开引号 ⇒ 状态机错位 ⇒ 之后**把真代码当注释删掉**。实测触发路径：
+        #     const a = /['"]/;  const b = "http://x";
+        #   `'` 开引号后一路吞到行尾换行，机器回到「代码态」时正停在 `http://x";` 上，
+        #   于是 `//x";` 被判定为行注释而**删除**。那是数据损坏，不是格式问题。
+        if ch == "/" and (prev_sig is None or prev_sig in REGEX_PREV):
+            k = i + 1
+            in_class = False
+            while k < n:
+                c = text[k]
+                if c == "\\":
+                    k += 2
+                    continue
+                if c == "\n":
+                    break
+                if c == "[":
+                    in_class = True
+                elif c == "]":
+                    in_class = False
+                elif c == "/" and not in_class:
+                    k += 1
+                    break
+                k += 1
+            out.append(text[i:k])
+            prev_sig = "/"
+            i = k
             continue
 
         # 字符串
@@ -95,6 +130,7 @@ def strip_js(text: str):
                     break
                 k += 1
             out.append("".join(buf))
+            prev_sig = q
             i = k
             continue
 
@@ -125,10 +161,13 @@ def strip_js(text: str):
                     break
                 k += 1
             out.append("".join(buf))
+            prev_sig = "`"
             i = k
             continue
 
         out.append(ch)
+        if not ch.isspace():
+            prev_sig = ch
         i += 1
 
     return "".join(out), line_has_comment
