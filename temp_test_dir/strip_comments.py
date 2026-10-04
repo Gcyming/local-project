@@ -20,8 +20,9 @@
 目标扩展名：.ts .tsx .js .mjs .cjs .py
 默认目录：gui/src、core-ts/src、core、tests、temp_test_dir 之外的项目根脚本
 
-⚠️ 含 U+FFFD（本次事故残留）的行**整行跳过**：那些行的字符串可能未闭合，
-   状态机会被带偏；先跑 fix_index_from_bundle.py 修好字符串，再跑本脚本。
+⚠️ 跳过判据 = **未闭合字符串**（A-1142 改）：含 U+FFFD 但结构完整的文件**照常处理**。
+   此前按「含 U+FFFD」跳过，导致损伤最重的 gui/src/main/index.ts 永远轮不到清注释
+   —— 而它的损伤绝大多数正好在注释里。只有真的未闭合（状态机会跑偏）才跳过。
 """
 import sys
 from pathlib import Path
@@ -236,6 +237,90 @@ def strip_py(text: str):
     return "".join(out)
 
 
+def has_unterminated(text: str) -> bool:
+    """该文件是否存在**未闭合的字符串 / 模板 / 块注释**？
+
+    A-1142：跳过判据从「含 U+FFFD」改成「有未闭合结构」。理由：
+      · U+FFFD 只是**字符级**损伤 —— 状态机只认结构，完全能安全处理它；
+      · 真正会让状态机跑偏的是**未闭合字符串**。
+    此前按 U+FFFD 跳过，导致损伤最重的 `gui/src/main/index.ts` **永远轮不到清注释**
+    ——而它的损伤绝大多数恰好就在注释里（实测 1973 行里约 1650 行是注释）。
+    改成结构判据后，该文件未闭合字符串 0 处 ⇒ 可以被安全剥离。
+    """
+    in_block = False
+    quote = None
+    template_depth = 0
+    REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>")
+    for line in text.replace("\r\n", "\n").split("\n"):
+        i, n = 0, len(line)
+        prev_sig = None
+        while i < n:
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < n else ""
+            if in_block:
+                if ch == "*" and nxt == "/":
+                    in_block = False
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if quote == "`" and ch == "$" and nxt == "{":
+                template_depth += 1
+                i += 2
+                continue
+            if quote == "`" and ch == "}" and template_depth > 0:
+                template_depth -= 1
+                i += 1
+                continue
+            if quote is None:
+                if ch == "/" and nxt == "/":
+                    break
+                if ch == "/" and nxt == "*":
+                    in_block = True
+                    i += 2
+                    continue
+                if ch == "/" and (prev_sig is None or prev_sig in REGEX_PREV):
+                    i += 1
+                    while i < n:
+                        c2 = line[i]
+                        if c2 == "\\":
+                            i += 2
+                            continue
+                        if c2 == "[":
+                            i += 1
+                            while i < n and line[i] != "]":
+                                i += 2 if line[i] == "\\" else 1
+                            i += 1
+                            continue
+                        if c2 == "/":
+                            i += 1
+                            break
+                        i += 1
+                    prev_sig = "/"
+                    continue
+                if ch in "\"'`":
+                    quote = ch
+                    i += 1
+                    continue
+                if not ch.isspace():
+                    prev_sig = ch
+                i += 1
+                continue
+            # 在字符串 / 模板里
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+                i += 1
+                continue
+            i += 1
+        # 行末：单/双引号字符串不允许跨行 —— 仍未闭合即为未闭合
+        if quote in ("'", '"'):
+            return True
+    return in_block or quote is not None
+
+
 def main() -> int:
     files = []
     for t in TARGETS:
@@ -255,8 +340,9 @@ def main() -> int:
 
     for p in sorted(files):
         raw = p.read_text(encoding="utf-8")
-        # 含事故残留的文件整份跳过 —— 字符串可能未闭合，状态机会被带偏
-        if FFFD in raw:
+        # A-1142：跳过判据 = **未闭合结构**（会让状态机跑偏的真风险），
+        # 而不是「含 U+FFFD」（那只是字符级损伤，状态机处理得了）。
+        if p.suffix != ".py" and has_unterminated(raw):
             skipped.append(p)
             continue
         if p.suffix == ".py":
@@ -277,7 +363,7 @@ def main() -> int:
                 p.with_name(p.name + ".stripped").write_text(new, encoding="utf-8", newline="")
 
     print(f"扫描文件: {len(files)}")
-    print(f"跳过（含 U+FFFD 事故残留，请先跑 fix_index_from_bundle.py）: {len(skipped)}")
+    print(f"跳过（存在未闭合字符串 ⇒ 状态机会跑偏；先跑 fix_index_from_bundle.py）: {len(skipped)}")
     for p in skipped:
         print(f"    {p.relative_to(ROOT)}")
     print()
