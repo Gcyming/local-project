@@ -1099,6 +1099,12 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                             or str(result).startswith("[错误]")
                             or str(result).startswith("[沙箱拒绝]")
                             or str(result).startswith("[工具调用后请求失败]"))
+            # A-1141：环境性拒绝（沙箱拦下 / 请求失败）不是认知收获，写入闸门要单独认它。
+            _env_rejection = (str(result).startswith("[沙箱拒绝]")
+                              or str(result).startswith("[工具调用后请求失败]"))
+            # A-1141：先保住「本次调用之前」的连续失败数 —— 下面的成功分支会把它清零，
+            # 而「反复失败后终于成功」恰恰是最该记的经验之一。
+            _prev_fail_streak = round_fail_streak
             if _tool_ok:
                 round_fail_streak = 0
             else:
@@ -1124,12 +1130,25 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                     f"tool.{tool_name}.{'success' if _tool_ok else 'fail'}",
                     "tool", f"{tool_name} 处理{args_str[:80]}", "low" if _tool_ok else "high",
                 )
-                from core.memory import load_memory
-                _mem = load_memory(agent.id)
-                _mem.add_lesson(
-                    f"用 {tool_name} 处理{args_str[:60]} 类请求{'成功' if _tool_ok else '失败'}",
-                    _tool_ok, importance=4,
+                # A-1141（写入闸门）：**工具成功不再算一条经验**。
+                # 实测病灶：此前每次工具调用都 add_lesson，累积出 11796 条记忆，而其中
+                # 只有 25 条不同内容（99.8% 重复；单条「用 file_read 处理{"path": "x"} 类请求
+                # 成功」就出现 1588 次）。那不是记忆，是日志 —— 且把真正有价值的条目淹没了。
+                # 现在只记三类真经验：
+                #   ① 失败且原因非显然   —— 负经验有价值
+                #   ② 反复失败后终于成功 —— 「这条路走通了」
+                #   ③ 环境性拒绝（沙箱拦下 / 请求失败）一律**不记**（那是环境噪声，非认知收获）
+                _worth_remembering = (
+                    (not _tool_ok and not _env_rejection)
+                    or (_tool_ok and _prev_fail_streak > 0)
                 )
+                if _worth_remembering:
+                    from core.memory import load_memory
+                    _mem = load_memory(agent.id)
+                    _mem.add_lesson(
+                        f"用 {tool_name} 处理{args_str[:60]} 类请求{'成功' if _tool_ok else '失败'}",
+                        _tool_ok, importance=4,
+                    )
             except Exception:
                 pass
 
