@@ -1406,7 +1406,7 @@ async function refreshAgentSkills(): Promise<void> {
       } catch { /* 单个 Agent 算不出目录不影响其它 */ }
     }
     const loaded = await loadAllSkills({ registry: getRegistry(), extraDirs });
-    console.info(`[gui:skills] 技能工具已就绪，可见技能 ${loaded.length} 个（额外目录 ${extraDirs.length} 个）`);
+    console.info(`[gui:skills] 技能工具已就绪，可见技能 ${loaded.length} 个（额外扫描根 ${extraDirs.length} 个）`);
   } catch (e) {
     console.warn("[gui:skills] �?能加载失败（不影响�?话，�?Agent 将无法�?索技能）:", e);
   }
@@ -1900,7 +1900,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
       // 全局子代理默认模型：恢�?上�?设置（无显式 def/委派模型时生效；继承优先级最低）
       if (subagentDefaultModels.length > 0) {
         subagents.setDefaultModels(subagentDefaultModels);
-        console.log(`[subagent] 执行模型池已应用（${subagentDefaultModels.length} 档，兜底档 ${subagentDefaultModels[0]}）：${subagentDefaultModels.join(" / ")}`);
+        console.log(`[subagent] 执行模型池已应用（${subagentDefaultModels.length} 档，兜底档=${subagentDefaultModels[0]}）：${subagentDefaultModels.join(" / ")}`);
       }
 
       // Phase 2 事件触发源：�?�� HTTP �?���?27.0.0.1:19011�?
@@ -2649,7 +2649,7 @@ async function suggestWiderChatModel(requiredTokens: number, currentCap: number)
     if (picked) {
       console.info(`[gui:main] 上下文救回建议（${picked.label ?? picked.id}，${picked.cap} tokens，本次需 ${Math.round(requiredTokens)}）→ ${picked.choice ?? picked.id}`);
     } else {
-      console.info(`[gui:main] 上下文救回：已查 ${candidates.length} 个候选，没有能装下 ${Math.round(requiredTokens)} 的更大窗口模型`);
+      console.info(`[gui:main] 上下文救回：已查 ${candidates.length} 个候选，没有能装下 ≈${Math.round(requiredTokens)} 的更大窗口模型`);
     }
     return picked;
   } catch (e) {

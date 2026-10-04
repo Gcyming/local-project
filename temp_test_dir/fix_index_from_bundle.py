@@ -26,8 +26,31 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "gui" / "src" / "main" / "index.ts"
-BUNDLE = ROOT / "gui" / "out" / "main" / "index.js"
+# A-1141：**参照物已换**。
+# 原来用 `gui/out/main/index.js`（构建产物）—— 但应用修好后每次 pnpm dev 都会重新构建，
+# 那个文件已被覆盖成「当前仍带损伤的源码」的产物，**不再是事故前的样子**。
+# 现在改用 `gui/out/_full-a1170.txt`（变异测试日志）：里面以 `+` 前缀的 diff 行含
+# **事故前 index.ts 的完整源码**，首尾均已核实（从 `import "./boot.js"` 到文件末尾）。
+BUNDLE = ROOT / "gui" / "out" / "_full-a1170.txt"
 OUT = SRC.with_name("index.ts.repaired")
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def extract_reference(text: str) -> str:
+    """从变异测试日志里抽出源码行。
+
+    日志格式：`ESC[31m+ <源码行>ESC[39m`。只取 `+` 行 —— 那是变异脚本**写入的完整源码行**；
+    `-` 行是被替换掉的旧内容、` ` 行是上下文，两者都可能混入**别的文件**的内容。
+    """
+    out = []
+    for raw in text.split("\n"):
+        s = ANSI.sub("", raw)
+        if s.startswith("+ "):
+            out.append(s[2:])
+        elif s.startswith("+"):
+            out.append(s[1:])
+    return "\n".join(out)
 
 APPLY = "--apply" in sys.argv
 FFFD = "\uFFFD"
@@ -172,6 +195,8 @@ def main() -> int:
 
     src_text = SRC.read_text(encoding="utf-8")
     bundle_text = BUNDLE.read_text(encoding="utf-8", errors="replace")
+    if BUNDLE.suffix == ".txt":
+        bundle_text = extract_reference(bundle_text)
 
     src_lines = split_keepends(src_text)
     bundle_lines = split_keepends(bundle_text)
