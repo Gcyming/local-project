@@ -1778,8 +1778,29 @@ export default function App(): JSX.Element {
   const floatMinIcon = floatState === "min";
   const floatAnimOut = floatAnim === "out";
   const floatClosing = floatAnim === "closing";
-  const floatBoxW = floatClosing ? 0 : (floatMinIcon || floatAnimOut ? FLOAT_ICON_SIZE : floatSize.w);
-  const floatBoxH = floatClosing ? 0 : (floatMinIcon || floatAnimOut ? FLOAT_ICON_SIZE : floatSize.h);
+  /* ⚠️⚠️⚠️ A-1170：**「曾处于图标态」闩锁** —— 退出路径不许回落到完整尺寸。
+     用户自检数据（1332×918，1254 帧；A-1169 之后剩余的 12 次反转全部集中在这一处，
+     三次操作各命中一次：2085 / 4675 / 7179ms），逐帧实测：
+         host.left     628 → 630 → **303**      host.width  40 → 36 → **598**
+         host.opacity% 100 → 100 → 100 → 100 → **0**
+     ⇒ 最小化的浮窗（40px 图标、停在屏幕右侧 x=628）退出时，
+        **先按完整浮窗渲染了一帧**（598px、跳到默认位置 x=303），**下一帧才淡出**。
+     为什么旧式会回落：下面那行三元是 `floatClosing ? 0 : (floatMinIcon || floatAnimOut ? ICON : floatSize.w)`
+     —— 退出流程里存在一帧，`floatClosing` 尚未置位、而 `floatMinIcon` 已经失效，
+        **三个条件同时不成立** ⇒ 落到最后的 `floatSize.w` = 完整浮窗。
+     ⇒ 闩锁保证：只要**曾经**是图标态，在真正回到 float 态之前一律按图标渲染，
+        退出路径**永远拿不到** `floatSize.w`。
+     ⚠️ 为什么闩锁要在渲染期就地翻转而不是塞进 minimizeFloat/restoreFloat：
+        退出流程有多条（`dismissFloat` 直接置 closing、先收起右栏再退出、
+        快照恢复时 state 与 anim 不同步到达），逐条加状态极易漏一条；
+        就地翻转是**由渲染结果反推**的单一判据，不会漏。
+     ⚠️ 复位只看 `floatState === "float"`：恢复（restoreFloat）走的就是这一支。 */
+  const floatWasMinRef = React.useRef(false);
+  if (floatMinIcon) { floatWasMinRef.current = true; }
+  if (floatState === "float") { floatWasMinRef.current = false; }
+  const floatIconLike = floatMinIcon || floatAnimOut || floatWasMinRef.current;
+  const floatBoxW = floatClosing ? 0 : (floatIconLike ? FLOAT_ICON_SIZE : floatSize.w);
+  const floatBoxH = floatClosing ? 0 : (floatIconLike ? FLOAT_ICON_SIZE : floatSize.h);
   const floatBoxDefaultPos = fitFloatRect((sidebarOpen ? sidebarWidth : 0) + 12, 42, floatSize.w, floatSize.h);
   /** 唯一宿主在**浮层态**下的外框样式（普通态用 `.inline-chat-host` 类，见 index.css）。 */
   const floatBoxStyle: React.CSSProperties = {
@@ -3176,8 +3197,14 @@ export default function App(): JSX.Element {
     const el = floatRef.current;
     if (el) {
       // 向展开位置中心收拢（与最小化同一语言：观感是"在原位缩回"，不是"往左上角塌"）
-      const cx = Math.round(el.offsetLeft + el.offsetWidth / 2);
-      const cy = Math.round(el.offsetTop + el.offsetHeight / 2);
+      /* ⚠️⚠️ A-1170：**已最小化时不许搬位置**。
+         最小化的浮窗是 40px 图标、停在用户拖去的任意位置（如实测的 x=628，屏幕右侧）。
+         本行原本无条件把它搬到 `offsetLeft + offsetWidth/2` 算出的中心 ——
+         对完整浮窗是"向中心收拢"，对图标则是**整块位移**（实测 628 → 303）。
+         ⇒ 已最小化时保持原地缩小消失，观感是"图标就地淡出"，与最小化语言一致。 */
+      const isIcon = el.offsetWidth <= FLOAT_ICON_SIZE + 2;
+      const cx = isIcon ? el.offsetLeft : Math.round(el.offsetLeft + el.offsetWidth / 2);
+      const cy = isIcon ? el.offsetTop : Math.round(el.offsetTop + el.offsetHeight / 2);
       el.style.transition = FLOAT_TRANSITION_FULL;
       el.style.left = `${cx}px`;
       el.style.top = `${cy}px`;
