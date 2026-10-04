@@ -246,7 +246,7 @@ def main() -> int:
 
     damaged_idx = [i for i, ln in enumerate(src_lines) if FFFD in ln]
 
-    exact, fuzzy, unmatched = [], [], []
+    exact, safe_fuzzy, fuzzy, unmatched = [], [], [], []
     for i in damaged_idx:
         body = src_lines[i].rstrip("\r\n")
         m = mask(body)
@@ -268,7 +268,20 @@ def main() -> int:
             r = difflib.SequenceMatcher(None, m, mask(b)).ratio()
             if r > best_r:
                 best, best_r = b, r
-        if best is not None and best_r >= 0.93:
+        if best is None:
+            unmatched.append((i, body, best_r))
+            continue
+        # A-1141：模糊桶此前**只报告、不应用** —— 因为短注释抹掉中文后指纹全部同形
+        # （`} catch { /* # */ }` 之流），相似度 1.000 也可能是毫不相关的内容
+        # （实测：「托盘已销毁」被匹配到「首次无目录时忽略」）。
+        # 但**长行不会撞车**。加两道闸门后可以安全应用：
+        #   ① 指纹长度 ≥ 25 —— 足够特异；
+        #   ② 相似度 ≥ 0.99 —— 长行到这个值基本就是同一行。
+        # 例：`第 ${i + 1} 项：` 那行指纹长、相似度 0.992 ⇒ 走 safe_fuzzy 被救回；
+        #     而长度约 15 的 catch 注释仍被挡在外面 ⇒ 不会写错内容。
+        if len(m) >= 25 and best_r >= 0.99:
+            safe_fuzzy.append((i, body, best, best_r))
+        elif best_r >= 0.93:
             fuzzy.append((i, body, best, best_r))
         else:
             unmatched.append((i, body, best_r))
@@ -280,19 +293,27 @@ def main() -> int:
     for ln in broken_before:
         print(f"      L{ln}: {src_lines[ln - 1].strip()[:110]}")
     print(f"  ✓ 精确匹配可修       : {len(exact)}")
-    print(f"  ~ 模糊匹配可修(≥0.93): {len(fuzzy)}")
-    print(f"  ✗ 无法匹配           : {len(unmatched)}")
+    print(f"  ✓ 长行模糊（**自动应用**）: {len(safe_fuzzy)}   ← 指纹≥25 且相似度≥0.99")
+    print(f"  ~ 短行模糊（仅报告）  : {len(fuzzy)}")
+    print(f"  ✗ 无法匹配（仅报告）  : {len(unmatched)}")
     print()
 
-    print("=== 精确匹配样例（前 12 条）===")
-    for i, bad, good in exact[:12]:
+    print("=== 精确匹配样例（前 8 条）===")
+    for i, bad, good in exact[:8]:
         print(f"  L{i+1}")
         print(f"    坏: {bad.strip()[:120]}")
         print(f"    好: {good.strip()[:120]}")
     print()
 
-    print("=== 模糊匹配样例（前 8 条，附相似度）===")
-    for i, bad, good, r in fuzzy[:8]:
+    print("=== 长行模糊样例（前 8 条，会**自动应用**）===")
+    for i, bad, good, r in safe_fuzzy[:8]:
+        print(f"  L{i+1}  (相似度 {r:.3f}，指纹 {len(mask(bad))} 字符)")
+        print(f"    坏: {bad.strip()[:120]}")
+        print(f"    好: {good.strip()[:120]}")
+    print()
+
+    print("=== 短行模糊样例（前 6 条，**不应用** —— 这里最容易匹配错）===")
+    for i, bad, good, r in fuzzy[:6]:
         print(f"  L{i+1}  (相似度 {r:.3f})")
         print(f"    坏: {bad.strip()[:120]}")
         print(f"    好: {good.strip()[:120]}")
@@ -309,26 +330,36 @@ def main() -> int:
         print("（干跑模式，未写任何文件。加 --apply 产出 index.ts.repaired）")
         return 0
 
-    # ── 应用：**只应用精确匹配**（指纹完全相同）──
+    # ── 应用：**只应用「指纹完全相同」与「长行模糊」两桶** ──
     # 为什么敢整行替换：指纹里保留了 `:`、标识符、括号等**全部结构字符**，
     # 只丢掉了引号 / '?' / 噪声字符。指纹相同 ⇒ 两侧差异只可能落在被丢掉的那几类上
     # ⇒ 替换不会抹掉源码的 TS 类型标注。（反证：若 bundle 少了类型标注，
-    #   指纹必然不同 ⇒ 落入 fuzzy ⇒ 不会被这里改。）
+    #   指纹必然不同 ⇒ 不会被这里改。）
     #
-    # 模糊匹配**默认不自动应用**：它无法区分「只是丢了个闭引号」与
-    # 「构建产物确实少了类型标注」，整行替换会静默抹掉类型。宁可留给你人工过。
+    # 短行模糊（fuzzy）**仍然不自动应用**：短注释抹掉中文后指纹全部同形 ——
+    # 实测「托盘已销毁，无事可做」被匹配到「首次无目录时忽略（下次写）」，
+    # 相似度 1.000 却是毫不相关的内容。那是**写错内容**，比乱码更难发现。
     out_lines = list(src_lines)
-    replaced = 0
-    for i, bad, good in exact:
-        eol = "\r\n" if src_lines[i].endswith("\r\n") else "\n"
+    replaced_exact = 0
+    replaced_fuzzy = 0
+
+    def _put(idx: int, bad: str, good: str) -> None:
+        eol = "\r\n" if src_lines[idx].endswith("\r\n") else "\n"
         indent = re.match(r"[ \t]*", bad).group(0)
-        out_lines[i] = indent + good.strip() + eol
-        replaced += 1
+        out_lines[idx] = indent + good.strip() + eol
+
+    for i, bad, good in exact:
+        _put(i, bad, good)
+        replaced_exact += 1
+    for i, bad, good, _r in safe_fuzzy:
+        _put(i, bad, good)
+        replaced_fuzzy += 1
 
     OUT.write_text("".join(out_lines), encoding="utf-8", newline="")
     print(f"已写出 {OUT.name}")
-    print(f"  自动替换（精确匹配）: {replaced} 行")
-    print(f"  保持原样待人工      : {len(fuzzy)} 行（模糊）+ {len(unmatched)} 行（无法匹配）")
+    print(f"  自动替换（精确匹配）  : {replaced_exact} 行")
+    print(f"  自动替换（长行模糊）  : {replaced_fuzzy} 行")
+    print(f"  保持原样待人工        : {len(fuzzy)} 行（短行模糊）+ {len(unmatched)} 行（无法匹配）")
 
     # ── 自证：修完之后还有没有未闭合字符串 ──
     broken_after = scan_unterminated("".join(out_lines))

@@ -172,7 +172,7 @@ const normalizeSubagentModelValue = (raw: string): { ok: true; value: string } |
  *  这样"保存成功"�?真的生效"才是同一件事�?*/
 const applySubagentModels = (models: unknown): void => {
   saveSubagentDefaultModels(models);                      // 模块级真�?+ 磁盘（唯�?真相源）
-  subagentsRef?.setDefaultModels(subagentDefaultModels);  // 管理器就�?���?���?���?��创建时播�?
+  subagentsRef?.setDefaultModels(subagentDefaultModels);  // 管理器就绪才推；未就绪由创建时播种
   mainWindow?.webContents.send("slime:resident:update", null);
 };
 
@@ -193,7 +193,7 @@ const setSubagentModels = (models: unknown): { ok: true; defaultModels: string[]
 };
 
 /** 旧�?�道（单值）：�?�?= **把池子整体换�?�?���?�?���?的池**�?
- *  ⚠️ 刻意不做�?�?��池�?"：那会�?�出"面板显示池�?新�?��?�池里其余档位还�?的两套真相源�?
+ *  ⚠️ 两类"本地模型"都要覆盖（配置里看不出区别）：
  *  �?UI 调它时，用户意图�?��就是"执�?档就这一�?�?*/
 const setSubagentDefaultModel = (model: unknown): { ok: true; defaultModel: string; defaultModels: string[] } | { ok: false; error: string } => {
   const r = normalizeSubagentModelValue(typeof model === "string" ? model : "");
@@ -648,7 +648,7 @@ function purgeSessionPlanning(sessionId: string): void {
  */
 function planFromToolResult(name: string, result: string, sessionId: string): Plan | null {
   if (name === "plan_create" || name === "plan_update") {
-    const idx = result.indexOf("\n"); // 工具返回形�? "[Plan 已创建] id（�?�）\n{json}"
+    const idx = result.indexOf("\n"); // 工具返回形如 "[Plan 已创建] id（…）\n{json}"
     const json = idx >= 0 ? result.slice(idx + 1) : result;
     const p = parsePlan(json);
     return p ? { ...p, source: "plan" } : null;
@@ -762,7 +762,7 @@ function scheduleTodoAutoClear(sessionId: string, todos: Array<{ status?: string
  * 用户上一�?��馈的正是后�?�没做：没做完就�?��弃的清单（模型改�?/ �?求变了）
  * 会在面板上无限期挂着 —�??原话「当会话结束，待办任务直接自动清除�?��??
  *
- * ⚠️ 三件必须做�?的事�?
+ *  ⚠️ 两类"本地模型"都要覆盖（配置里看不出区别）：
  *   �?**�?�� sessionId**，不�?cancelKey。待办文件名�?`data/todos_<sessionId>.json`�?
  *      cancelKey �?�� `sessionId ?? agentId` 的兜底，拿它去删会删错文�?/ 删不掉�??
  *   �?�?��就空 �?**不广�?*。否则每�?�?��束都推一次空列表，白白重�?��染层的完成基线�??
@@ -922,7 +922,7 @@ async function* streamGroupTalkFlow(opts: {
       role: agent.role,
       speakStream: async (prompt: string, e: StreamEmit): Promise<string> => {
         let rep = "";
-        noteUsage(agent, prompt); // �?��记账
+        noteUsage(agent, prompt); // 独立记账
         const quota = quotaOf(agent.id);
         broadcastStatus({ memberId: agent.id, name: agent.name, state: "thinking", used: quota.used, cap: quota.cap });
         // A-955：�?文中�?<thinking>�?/thinking> 全部拆出→�?��?�流；�?文干�?、�?��?�进右栏碰撞�?
@@ -980,7 +980,7 @@ async function* streamGroupTalkFlow(opts: {
   const emitMember = (m: { name: string; memberId: string }, payload: Record<string, unknown>): void => {
     memberEvents.push({ seq: ++seq, type: "member", data: { name: m.name, agentId: m.memberId, ...payload } });
   };
-  void broadcastStatus; // 状�?�经 slime:brainstorm:event 广播（thinking 实时�?
+  void broadcastStatus; // 状态经 slime:brainstorm:event 广播（thinking 实时）
   let flowDone = false;
   let runErr: Error | null = null;
   const flow = runGroupTalk({
@@ -1030,7 +1030,7 @@ async function* streamGroupTalkFlow(opts: {
         ...(l.failed ? { failed: true } : {}),
       }));
       const body = formatSpeakerBlob(turns);
-      await appendHistory(opts.members[0].id, (opts.topic ?? "").trim() || "（群聊�?题）", body, true, opts.sessionId, undefined, Date.now() - started, turns);
+      await appendHistory(opts.members[0].id, (opts.topic ?? "").trim() || "（群聊议题）", body, true, opts.sessionId, undefined, Date.now() - started, turns);
     } catch (e) {
       console.warn(`[grouptalk] 群聊历史落库失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -1238,9 +1238,9 @@ function resolveTermCwd(
   try {
     const dir = resolve(p);
     if (statSync(dir).isDirectory()) { return { dir }; }
-    return { rejected: `工作�?�� ${dir} 不存在或不是�?��，本条命令已改用默�?�?��` };
+    return { rejected: `工作目录 ${dir} 不存在或不是目录，本条命令已改用默认目录` };
   } catch {
-    return { rejected: `工作�?�� ${p} 不可�?���?��命令已改用默认目录` };
+    return { rejected: `工作目录 ${p} 不可用，本条命令已改用默认目录` };
   }
 }
 
@@ -1371,13 +1371,13 @@ function normalizeInputPath(p?: string): string {
 /** 归一�?git �?��：绝对化 + 存在性校验；不存在时告知上层（可�?�� mkdir�?*/
 function gitPathOf(p?: string): { path: string; exists: true } | { path: string; exists: false } | { error: string } {
   const clean = normalizeInputPath(p);
-  if (!clean) { return { error: "仓库�?��为空" }; }
+  if (!clean) { return { error: "仓库路径为空" }; }
   try {
     const root = resolve(clean);
     if (!existsSync(root)) { return { path: root, exists: false }; }
     return { path: root, exists: true };
   } catch {
-    return { error: "�?��非法" };
+    return { error: "路径非法" };
   }
 }
 
@@ -1712,11 +1712,11 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         writeFileSync(join(dir, `schedule-${job.name}-${stamp}.md`), reply, "utf8");
-        persistState(); // Phase 3：运行�?�落盘，进程重启后从�?���?��恢�?
+        persistState(); // Phase 3：运行态落盘，进程重启后从断点快照恢复
       });
       for (const d of schedDefs as Array<{ id?: string; name?: string; cron?: string; prompt?: string; agentId?: string }>) {
         if (!d.cron || !d.prompt) { continue; }
-        if (d.id && scheduler.get(d.id)) { continue; } // 已从�?��恢�?的定义不重�?注册
+        if (d.id && scheduler.get(d.id)) { continue; } // 已从快照恢复的定义不重复注册
         try {
           scheduler.add({ id: d.id, name: d.name ?? d.id ?? "task", cron: d.cron, prompt: d.prompt, agentId: d.agentId });
         } catch (e) {
@@ -1790,7 +1790,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         }
         // done �?��达（异常/提前跳出）时用累�??量兜底；引擎的中�?��位文案不算产�?
         const aborted = ctx?.signal.aborted === true;
-        if (!reply || reply.trim() === "（生成已�?���?��") { reply = acc.join(""); }
+        if (!reply || reply.trim() === "（生成已被中断）") { reply = acc.join(""); }
         const dir = join(INSTALL_ROOT, "data", "generated");
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -2203,7 +2203,7 @@ export function refreshLancedbComponent(): LancedbComponentStatus {
   console.log(
     lancedbComponentCache.ok
       ? `[gui:lancedb] 组件已就位：${lancedbComponentCache.dir}`
-      : `[gui:lancedb] 组件�?��位：${lancedbComponentCache.error}`,
+      : `[gui:lancedb] 组件未就位：${lancedbComponentCache.error}`,
   );
   return lancedbComponentCache;
 }
@@ -2251,7 +2251,7 @@ const LEGACY_APPROVAL_MAP: Record<string, ApprovalMode> = { strict: "manual", co
 
 function sandboxConfigFromOverride(ov: Record<string, unknown>): SandboxConfig {
   const cfg = defaultSandboxConfig();
-  // 会话�?���?���??批档位时，回�?**设置里的全局默�?**（�?前硬编码 "auto"�?
+  // 会话未单独配置审批档位时，回退**设置里的全局默认**（此前硬编码 "auto"，
   // 于是「�?�?�?权限 �?全局默�?审批模式」�?没有 override �?Agent 形同虚�?�?
   // 它们拿的�?sandbox 内置默�?（write/terminal/network 全部逐�?询问），
   // 用户在�?�?��选�?�无�?」也不会生效）�??
@@ -2294,7 +2294,7 @@ function sandboxConfigFromOverride(ov: Record<string, unknown>): SandboxConfig {
 /** 把�?��?�?�?权限」的全局审批默�?下发�?*�?�?* Agent 的沙箱配�?���?���?+ 设置变更时）�?
  *
  *  此前�?�� `a.sandbox_override` 存在时才下发，无 override �?Agent �?直吃 sandbox 内置默�?
- *  （`auto_approve_levels=[0,1]`、`require_approval_levels=[2,3,4]`）�?��??
+ *  （`auto_approve_levels=[0,1]`、`require_approval_levels=[2,3,4]`）——
  *  结果「全�?默�?审批模式」只对少数会话生效，用户在�?�?��选�?�无�?」也照样�?���?*/
 function applyGlobalSandboxDefaults(): void {
   if (!sandbox || !agentRegistry) { return; }
@@ -2332,8 +2332,8 @@ function buildPermOptions(req: {
   const riskHint =
     maxLevel <= 1 ? "只读，风险较低"
     : maxLevel === 2 ? "将写�?�?��文件，可能有改动"
-    : maxLevel === 3 ? "将执行终�?��令，�?��影响系统"
-    : maxLevel >= 4 ? "将�?�?��络或执�?高权限操作，风险较高"
+    : maxLevel === 3 ? "将执行终端命令，可能影响系统"
+    : maxLevel >= 4 ? "将访问网络或执行高权限操作，风险较高"
     : "有一定风险";
 
   const actionLabel = first ? `${first.action} → ${first.target || "…"}` : "此操作";
@@ -2414,7 +2414,7 @@ async function ensureDefaultAgent(): Promise<void> {
     if (reg.loadedAgents.length > 0) { return; }
     const a = buildAgentState(
       "助手",
-      "通用 AI 助手，负责回答问题�?�编写代码�?�整理信�?��日常协作",
+      "通用 AI 助手，负责回答问题、编写代码、整理信息与日常协作",
       null,
       { mode: "default", skills: [], mcp: [] },
     );
@@ -2442,7 +2442,7 @@ async function forkAgent(parent: AgentState, name: string, role: string): Promis
 }
 
 /**
- * �?次流式�?求的�?���?��正文 / 模型 / 耗时 / timings）�??
+ * 一次流式请求的累积器（正文 / 模型 / 耗时 / timings）。
  *
  * ⚠️ A-1008：`fullReply` **�?���?��会话 Agent �?��的�?�?*（`type === "chunk"`）�??
  *
@@ -2454,7 +2454,7 @@ async function forkAgent(parent: AgentState, name: string, role: string): Promis
  * 渲染�?onDone 见到非空 `reply` 就追加一�?assistant 气泡（没�?agentName/agentId）→ 头部�?�?
  * **会话归属 Agent** 的名字�?�也没有「成员�?�徽标�??*这就�?��户历时很久的**
  * 「在它们说完话，总是有一�?Agent 出来总结重�?�?遍所有内容�?��?��?�它不是引擎多跑了一�?��
- * 而是这条 done 回�??污染的假回�?。同�?根因的另�?半（重启后成员气泡全�?��在落库形状，
+ * 而是这条 done 回退污染的假回复。同一根因的另一半（重启后成员气泡全丢）在落库形状，
  * �?core-ts/src/services/grouptalkTranscript.ts 的文件头�?
  *
  * `reasoning` 事件同样不�?入（思�?�不�??文，界面上另有折叠卡）；`member` 事件�?*�?���?*发言�?
@@ -2496,12 +2496,12 @@ function createStreamSession() {
  *    �?provider 规格 `context_window` —�??远�?模型
  *  任何�?步都不再回落到�?族能力表�?
  *
- *  ⚠️ 两类"�?��模型"都�?覆盖（配�?��看不出区�?���?
+ *  ⚠️ 两类"本地模型"都要覆盖（配置里看不出区别）：
  *    (a) slime 托�?�?llama-server —�??�?���?ModelServerManager 拿，�?*校验在服务的模型�?��**
  *        （一次只服务�?�?��型；�?A 的窗口回�?B 就是�?��位置重演同一�?bug）；
  *    (b) 指向�?��的普�?provider（�? `api_base = http://127.0.0.1:8800/v1`）�?��??用户�?��拉的进程�?
- *        slime 的启动�?录里没有它，�?��判据就是发�?求�??
- *  详�? `gui/src/main/localServerProbe.ts`�?
+ *        slime 的启动记录里没有它，唯一判据就是发请求。
+ *  详见 `gui/src/main/localServerProbe.ts`。
  *
  *  解析失败仍返�?undefined（渲染层有自己的兜底�?��，不阻断 done 下发）�??*/
 async function resolveSessionWindowCap(agentId: string, modelId: string): Promise<number | undefined> {
@@ -2585,7 +2585,7 @@ async function resolveSessionWindowCap(agentId: string, modelId: string): Promis
  * A-158 降级链，却从�?��两�?�接起来）�?�用户在"�?么都发不出去"的�?境里�?要的�?*出路**�?
  * 不是原则。这里就把出�?��出来（判�?���?���?`pickRescueModel`）�??
  *
- * ## ⚠️ 性能约束：这函数跑在"用户刚点发�??的路径上
+ * ## ⚠️ 性能约束：这函数跑在"用户刚点发送"的路径上
  *
  * 候�?�可能上百个（供应商模型清单上限 200），逐个 `resolveSessionWindowCap` �?*�?��务器**�?
  * 每�?几十~上百 ms �?用户会�?�?点发送卡住了"。所以：
@@ -2593,7 +2593,7 @@ async function resolveSessionWindowCap(agentId: string, modelId: string): Promis
  *   · �?���?��模型（数量少）在 spec �?`ctx_len` 时才去问�?次（有缓存）�?
  *   · 拿不到窗口的�?�?*跳过**（不�?—�??猜出来的建�?会把用户带到另一�?��里）�?
  *
- * 拿不到任何�?��?�时返回 null，调用方�??**如实�?没有"**（`formatRescueHint`）�??
+ * 拿不到任何候选时返回 null，调用方据此**如实说"没有"**（`formatRescueHint`）。
  *
  * ## A-1090：返回�??*三�??*，且候�?�自带�?�可直接写入的�?�择串�??
  *
@@ -2602,7 +2602,7 @@ async function resolveSessionWindowCap(agentId: string, modelId: string): Promis
  *     �?*假陈�?* —�??用户会因此放弃一条本�?��走得通的出路（`formatRescueHint` 三�?�）�?
  *   · `null` —�??查过�?�?���?��没有能�?下的更大窗口模型�?
  *   · 对象 —�??查到了，且带 `choice`�?*�?��接写�?`model_choice` 的�?�择�?*
- *     （`api:<供应商key>:<模型id>` / `local:<模型id>`，与渲染层模型�?�择器同源）�?
+ *     （`api:<供应商key>:<模型id>` / `local:<模型id>`，与渲染层模型选择器同源）。
  *     ⚠️ �?���?��数知道这条�?��?�来�?���?��应商 —�??�?model id **拼不�?*�?��选择�?
  *     （同�?�?id �?��同时挂在多个供应商下），�?以由这里算好回带，渲染层�??原样写入�?
  */
@@ -2628,7 +2628,7 @@ async function suggestWiderChatModel(requiredTokens: number, currentCap: number)
     // �?�?��模型：spec �?ctx_len 直接�?��缺了才问�?次服务（数量少�?�有缓存�?
     for (const m of listLocalModels()) {
       const label = String(m.label ?? "").trim() || m.id;
-      const choice = `local:${m.id}`; // 与渲染层模型选择器同源（`ChatPanel` 用的就是 local:<id>�?
+      const choice = `local:${m.id}`; // 与渲染层模型选择器同源（`ChatPanel` 用的就是 local:<id>）
       if (typeof m.ctx_len === "number" && m.ctx_len > 0) {
         add(m.id, label, m.ctx_len, choice);
       } else {
@@ -2691,12 +2691,12 @@ function agentNameForNotify(agentId: string | undefined): string {
   return agentId || "Agent";
 }
 
-/** A-980-R24：为�?条流创建「chunk 发�?�合批器」�??
+/** A-980-R24：为一条流创建「chunk 发送合批器」。
  *
  *  上游每吐�?�?token 就回调一�?�?此前主进�?*逐条** `webContents.send("slime:chat:chunk")`�?
  *  高�?�率模型下变成每秒数百条 IPC。Electron �?send 没有背压，渲染进程（同时还在�?Markdown
  *  全量重解析）�?旦跟不上，消�?��列只增不�?�?渲染进程 OOM（`data/logs/renderer-crash.log`
- *  已�?录过 `oom`，用户侧表现就是"用着用着 slime 直接崩了、任务中�?）�??
+ *  已记录过 `oom`，用户侧表现就是"用着用着 slime 直接崩了、任务中断"）。
  *
  *  这里把�?�同�?条流 + 同类型�?�的�?���??量按 40ms 窗口合并成一条再发（�?5 �?秒，观感无损），
  *  IPC 消息数下�?1~2 �?��量级�?*�?��发�?�侧**：`session.pushChunk()` 仍按原�? chunk 记录�?
@@ -2716,8 +2716,8 @@ function createChunkSender(): StreamChunkBatcher {
  *  关键兼�?：后�?`done` 事件会把 `prompt_tokens` / `completion_tokens` 放在 chunk **�?外层**�?
  *  `timings` 对象�?���?A-098 全链�??�时（不�?���?token 字�?）�??
  *  渲染�?`ChatPanel.ContextRing` �??�?`m.timings.promptTokens`�?
- *  �?以这里必须把 token 统�? **同�?注入 timings**，才能�?右上�?上下文占�?真�?跳动�?
- *  也�?任务页�?�用量分析�?�有 prompt/completion/cache-read 等累计数�?���?
+ *  所以这里必须把 token 统计 **同步注入 timings**，才能让右上角"上下文占比"真正跳动，
+ *  也让任务页「用量分析」有 prompt/completion/cache-read 等累计数据源。
  */
 function toStreamChunk(ev: { seq: number; type: string; data: unknown }, sessionId?: string): StreamChunk {
   const d = (ev.data ?? {}) as Record<string, unknown>;
@@ -2752,7 +2752,7 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
       mergedTimings.cacheCreationTokens = (d as any).cacheCreationTokens;
     }
   }
-  // reasoning tokens：按 timings �?��见键兜底 0（DeepSeek / o1 系列引擎会回�?��
+  // reasoning tokens：按 timings 中常见键兜底 0（DeepSeek / o1 系列引擎会回填）
   if (typeof mergedTimings.reasoningTokens !== "number") {
     if (typeof (d as any).reasoning_tokens === "number") {
       mergedTimings.reasoningTokens = (d as any).reasoning_tokens;
@@ -2760,7 +2760,7 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
       mergedTimings.reasoningTokens = 0;
     }
   }
-  // A-974-R7：窗口占用口径（「最近一�??�输入侧 token；仅工具�?���?��下发）�?��??
+  // A-974-R7：窗口占用口径（「最近一轮」输入侧 token；仅工具循环路径下发）——
   // 工具�?��每轮全量重发历史，�?�?prompt_tokens �?���?��计（计费口径）；
   // 直接拿它当窗口占用会 N �?���?�?GUI 上下文环/右栏爆表（用户实测�?文输出后爆到 1.1M）�??
   {
@@ -2769,7 +2769,7 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
     if (typeof wpt === "number") { mergedTimings.windowPromptTokens = wpt; }
     if (typeof wcr === "number") { mergedTimings.windowCacheReadTokens = wcr; }
   }
-  // A-974-R8：协�??义标记（OpenAI 兼�?=true=prompt 已含缓存命中 / Anthropic=false）�?��??
+  // A-974-R8：协议语义标记（OpenAI 兼容=true=prompt 已含缓存命中 / Anthropic=false）——
   // 渲染层窗口占用公式据此决定是�?+cacheRead，避�?OpenAI 兼�?系重复�?缓存导致窗口虚高�?
   // timings �?number �?��布尔编码�?1/0，渲染层�?`=== 1` 判定�?
   {
@@ -2790,7 +2790,7 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
       steerId: typeof d.steerId === "string" ? d.steerId : undefined,
       /** A-957：member 事件归属 Agent id 必须透传—�?��?前�?白名单滤�?�?群聊成员消息 agentId=undefined �?多人发言全�?并进�?��条（名字全显�?���?��员） */
       agentId: typeof d.agentId === "string" ? d.agentId : undefined,
-      // A-162: 工具参数与结果�?�传（tool 事件前�?提取网址/文件�?��展示细节行）
+      // A-162: 工具参数与结果透传（tool 事件前端提取网址/文件路径展示细节行）
       args: typeof d.args === "string" ? d.args : undefined,
       result: typeof d.result === "string" ? d.result : undefined,
       model: typeof d.model === "string" ? d.model : undefined,
@@ -2805,7 +2805,7 @@ function toStreamChunk(ev: { seq: number; type: string; data: unknown }, session
   };
 }
 
-/* A-1017：`isLocalModelReady(agent)` 已删除�??
+/* A-1017：`isLocalModelReady(agent)` 已删除。
  * 它做的事�?调用方自己再查一次就�?���?—�?�先另�?�?�?providers 表拿�?spec.path，再拿路径去
  * `mgr.isChatReady(path)` �?*裸字符串比较**；只要这�?��径与"管理器里实际加载�?model_path"有出�?
  * （引擎用的是它构造时�?providers �?��，本文件读的�?��时盘上文件），就**永久判否** �?
@@ -2827,23 +2827,23 @@ const WIN_STATE_PATH = resolveExtra("../config/winstate.json");
  *    · 聊天主区 `.main`     min-width 380px�? App �?CHAT_MIN_W，保底可读）
  *    · 右栏 `.right-sidebar` min-width 260px
  *  合�? 880px。窗口再窄时：右�?wrapper 会�? flex 压缩，�?�内�?`.right-sidebar` �?
- *  min-width 260 顶着不�?，于�?��**超出 wrapper 并�? `overflow:hidden` 裁掉** —�??
+ *  min-width 260 顶着不让，于是它**超出 wrapper 并被 `overflow:hidden` 裁掉** ——
  *  右栏**右上角的展开/折叠按钮正好�??到�?野�?**（用户原话："右侧边栏的展�?折叠按钮消失�?
  *  同时聊天栏目的内容跑到屏幕�?"）�?�所以最小�?度必�?�?三栏下限之和�?
  *  880 + 边�?/滚动条余�?�?**900**�?
  *
- *  ⚠️ 改这三个 min-width �?��意一�?��这里必须同�?重算（否则又会挤出上面那两个症状）�??
+ *  ⚠️ 改这三个 min-width 中任意一个，这里必须同步重算（否则又会挤出上面那两个症状）。
  *     高度 560 保持原�?�：纵向没有这类"三栏并列"的硬约束�?*/
 const WIN_MIN = { width: 900, height: 560 };
 
-/* �?�? 主�?持久化（A-1019）─�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?
+/* ── 主题持久化（A-1019）────────────────────────────────────────────────────────
  * 为什么主进程要自己存�?份主题：
  *   渲染层的主�?存在 localStorage 里，**主进程�?不到**；�??`titleBarOverlay.color`
  *   必须�?*创建窗口�?*就已经�?�?��否则会先显示�?帧错�?���?—�??alpha 主�?�?
  *   那三�?��统按�?���?小化/还原/关闭）背后会�?��块比标�?栏更深的色块
  *   （用户原话：「这三个按钮有个明显的色块背�?��给我去了」）�?
  *   A-1018 �?��了�?�切�?��题�?�这条路径，�?���?��仍是写�? beta �?�?残留�?
- *   现在：窗口创建时读本文件；渲染层挂载后调 `slime:theme:set` 会把它写回来�?
+ *   现在：窗口创建时读本文件；渲染层挂载后调 `slime:theme:set` 会把它写回来。
  * 文件位置沿用既有约定（每�?��能一�?config/*.json：notifications / winstate / mind …）�?*/
 const THEME_CFG_PATH = join(PROJECT_ROOT, "config", "theme.json");
 
@@ -2868,8 +2868,8 @@ function writePersistedTheme(theme: string): void {
 }
 
 /** 标�?栏系统按�?overlay 配色：`color` 必须等于标�?栏的**实际合成�?*，否则按�?��面就�?��块色块�??
- *  · alpha：`.titlebar { background: var(--bg-secondary) }` = `#1e293b`（不透明�?
- *  · beta ：`--bg-secondary: rgba(15,22,40,.6)` 叠在 `--bg: #05070e` �?
+ *  · alpha：`.titlebar { background: var(--bg-secondary) }` = `#1e293b`（不透明）
+ *  · beta ：`--bg-secondary: rgba(15,22,40,.6)` 叠在 `--bg: #05070e` 上
  *           = 0.6×(15,22,40) + 0.4×(5,7,14) = (11,16,30) = `#0b101e`
  *  改主题配色时�?-bg-secondary / --bg �?�?��这里必须同�?重算�?*/
 function titleBarColors(theme: string): { color: string; symbolColor: string } {
@@ -2928,7 +2928,7 @@ function schedulePersistWindowState(): void {
 }
 
 function createWindow(): void {
-  // A-980-R26：�?�知模块注入主窗口获取器 + 设置 Windows AppUserModelID（�?�知归属，须早于任何弹窗�?
+  // A-980-R26：通知模块注入主窗口获取器 + 设置 Windows AppUserModelID（通知归属，须早于任何弹窗）
   initNotify({ getWindow: () => mainWindow });
   // A-980-R24：每次启动都按屏幕比例定尺�? + 居中（位�?��选�?忆，�?loadWindowPos�?
   const st = defaultWindowState();
@@ -2936,17 +2936,17 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: st.width, height: st.height, x: pos.x, y: pos.y,
     minWidth: WIN_MIN.width, minHeight: WIN_MIN.height, show: false,
-    // A-1092：传 nativeImage（�?尺�?�?次交给系统）而非�?��字�?串，任务栏按 DPI 精确取尺寸�??
+    // A-1092：传 nativeImage（多尺寸一次交给系统）而非路径字符串，任务栏按 DPI 精确取尺寸。
     icon: resolveAppIconImage(),
     // Campanula 式自绘标题栏：隐藏系统标题栏，Windows overlay 渲染窗口按钮
     titleBarStyle: "hidden",
     // A-1018/A-1019：初值必须等�?*当前持久化主�?*的标题栏合成色，否则�?���?��那三�?
-    // 系统按钮背后会闪�?块比标�?栏更�?��更暗的色块�?��?处�? config/theme.json（�? titleBarColors）�??
+    // 系统按钮背后会闪一块比标题栏更亮或更暗的色块。此处读 config/theme.json（见 titleBarColors）。
     titleBarOverlay: { ...titleBarColors(readPersistedTheme()), height: 40 },
     webPreferences: {
       contextIsolation: true, sandbox: true, nodeIntegration: false,
       nodeIntegrationInSubFrames: false,
-      // 聊天/IDE 场景不需要拼写�?查，关掉�?��下拼写词典加载与内存（Electron 官方性能清单�?
+      // 聊天/IDE 场景不需要拼写检查，关掉可省下拼写词典加载与内存（Electron 官方性能清单）
       spellcheck: false,
       // 右侧栏�?�浏览器」标签页使用 <webview> 内嵌网页（仅加载用户指定�?URL�?
       webviewTag: true,
@@ -2958,7 +2958,7 @@ function createWindow(): void {
   mainWindow.on("resize", () => schedulePersistWindowState());
   mainWindow.on("move", () => schedulePersistWindowState());
   mainWindow.on("close", () => persistWindowState());
-  // GPU 崩溃保护：ready-to-show �?��发时（�? GPU exit_code=-1），兜底主动 show
+  // GPU 崩溃保护：ready-to-show 未触发时（如 GPU exit_code=-1），兜底主动 show
   setTimeout(() => { if (mainWindow && !mainWindow.isVisible()) mainWindow.show(); }, 3000);
   // A-975：渲染进程崩溃自愈（DeepSeek 长时间生成实测白�?+ 终�?无限 error 的根因一半在此）—�??
   // 渲染进程�?旦崩溃（OOM/长任�?�?��），主进程仍在持�?send �?每条对已�?�?webContents 报错 �?"无限 error"�?
@@ -2970,7 +2970,7 @@ function createWindow(): void {
       writeFileSync(join(dir, "renderer-crash.log"), `${new Date().toISOString()}\t${details.reason} (exit=${details.exitCode})\n`, { flag: "a" });
       console.error("[gui:main] 渲染进程已崩溃，原因:", details.reason, "(将自动重载恢复)");
     } catch { /* ignore */ }
-    // A-980-R26：意外终�?�?系统通知（用户可能�?在别的窗口，页面白屏他看不到�?
+    // A-980-R26：重新生成出错同样通知
     notifyUser({
       kind: "aborted",
       title: "slime 意外终止",
@@ -2985,7 +2985,7 @@ function createWindow(): void {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "renderer-unresponsive.log"), `${new Date().toISOString()}\n`, { flag: "a" });
     } catch { /* ignore */ }
-    // A-980-R26：界面卡死（主线程�?�?��/巨长任务）也�?意�?终�?"体验—�?��?�知提醒用户
+    // A-980-R26：界面卡死（主线程死循环/巨长任务）也属"意外终止"体验——通知提醒用户
     notifyUser({
       kind: "aborted",
       title: "slime 界面无响应",
@@ -3002,7 +3002,7 @@ function createWindow(): void {
     }
   });
   mainWindow.on("closed", () => { mainWindow = null; });
-  // A-1055：托盘提示�?跟随窗口�??性（show/hide/minimize 三条�?��要能同�?，否则托盘上写着
+  // A-1055：托盘提示语跟随窗口可见性（show/hide/minimize 三条路都要能同步，否则托盘上写着
   // "已最小化到托�?而窗口其实开�? —�??又是�?处会�??人的静默失配�?
   mainWindow.on("show", syncTrayTooltip);
   mainWindow.on("hide", syncTrayTooltip);
@@ -3026,7 +3026,7 @@ function binarySniff(buf: Buffer): boolean {
 }
 
 function registerIpcHandlers(): void {
-  // �?��状�?�查�?��渲染层启动加载面板：错过 push 事件时拉取当前状态）
+  // 启动状态查询（渲染层启动加载面板：错过 push 事件时拉取当前状态）
   ipcMain.handle("slime:boot:status", () => bootQuery ?? { phase: "starting", backendReady: false, message: "正在初始化…" });
   // A-1039：应用版�?��（启动面板副标�?）�?�用 app.getVersion() 而非读文�?—�??打包�?
   // package.json �?asar 内，�?electron-builder 会把 version 注入 app 元数�?��这是权威来源�?
@@ -3147,7 +3147,7 @@ function registerIpcHandlers(): void {
     return foldSessionHistory(raw, meta);
   }
 
-  /* �?�? 异�?对话框（A-151）：渲染层不再用 window.confirm/alert（Electron 同�?阻�?渲染进程 JS�?
+  /* ── 异步对话框（A-151）：渲染层不再用 window.confirm/alert（Electron 同步阻塞渲染进程 JS，
    *  对话框显示异常时整个 UI 冻结、所有输入�?失灵）�?�改走主进程原生异�?对话框，永不阻�?渲染层�??�?�? */
   handleTrusted<{ message: string; detail?: string }>("slime:dialog:confirm", async (_event, payload) => {
     const win = BrowserWindow.getAllWindows()[0];
@@ -3156,7 +3156,7 @@ function registerIpcHandlers(): void {
     }
     const r = await dialog.showMessageBox(win, {
       type: "question",
-      buttons: ["取消", "�?��"],
+      buttons: ["取消", "确定"],
       defaultId: 1,
       cancelId: 0,
       title: "确认操作",
@@ -3188,7 +3188,7 @@ function registerIpcHandlers(): void {
     try {
     await ensureServices();
     // A-1035：每�?��始前刷新�?次技能可见集 —�??上一�?��知识引擎�?��生成的技能，
-    // 下一�?��能�? skill_search �?索到（不必重�?���?���?
+    // 下一轮就能被 skill_search 检索到（不必重启应用）。
     await refreshAgentSkills();
     const agentId = resolveAgentId(input.agentId);
     // A-1017：�?��?在加载本地模型�?�面�?*不再在这里�?�?*�?
@@ -3201,7 +3201,7 @@ function registerIpcHandlers(): void {
     const cancelKey = input.sessionId ?? agentId;
     const controller = new AbortController();
     activeChats.set(cancelKey, controller);
-    agentStreamSessionMap.set(input.agentId, cancelKey); // 授权/提问请求按当前流打会话标�?
+    agentStreamSessionMap.set(input.agentId, cancelKey); // 授权/提问请求按当前流打会话标签
     lastChatCancelKey = cancelKey;
     let history = input.history ? (input.history as any) : [];
     // 会话上下文注入：无显�?history 时按 session_id 加载
@@ -3234,7 +3234,7 @@ function registerIpcHandlers(): void {
       modelChoice: brainMeta?.modelChoice,
     };
     const session = createStreamSession();
-    // A-980-R24：chunk 下发合批（�? createChunkSender 注释�?
+    // A-980-R24：chunk 下发合批（见 createChunkSender 注释）
     const chunkSender = createChunkSender();
     // 干净正文：优先取 chatService done 事件里全�?extractThinkingFromReply 清洗后的 reply
     // （流式�??chunk 剥�?对细粒度 chunk �?��漏掉裸�?��?�，�?���?fullReply 不代表最终�?文）
@@ -3356,11 +3356,11 @@ function registerIpcHandlers(): void {
         } catch { /* ignore */ }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
-        hadError = true; // A-1066：本�?��出错收场（判�?��流结束�?如实报因�?
+        hadError = true; // A-1066：本轮以出错收场（判据在流结束处如实报因）
         console.error("[gui:main] chat stream error:", msg);
         // A-980-R24：错�?��把已生成的待发文�?��出去（用户应看到�?��前已产出的内容）
         chunkSender.flush();
-        // A-918++：中�?��错�?落盘（data/logs/chat-errors.log），便于事后归因"刚�?�?始就�?��"
+        // A-918++：中断类错误落盘（data/logs/chat-errors.log），便于事后归因"刚要开始就中断"
         try {
           const logDir = resolveExtra("../data/logs");
           mkdirSync(logDir, { recursive: true });
@@ -3368,7 +3368,7 @@ function registerIpcHandlers(): void {
         } catch { /* 落盘失败不影响主流程 */ }
         mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: cancelKey });
         mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: cancelKey });
-        // A-980-R26：出�?�?系统通知（用户常在生成中切走做别的事，回来才发现整轮标红�?
+        // A-980-R26：重新生成出错同样通知
         notifyUser({
           kind: "error",
           title: `${agentNameForNotify(input.agentId)} 出错`,
@@ -3379,7 +3379,7 @@ function registerIpcHandlers(): void {
         traceStoreSet(cancelKey, failedTrace);
         mainWindow?.webContents.send("slime:trace:update", { sessionId: cancelKey, trace: failedTrace });
       } finally {
-        // A-980-R24：合批器收尾（flush 幂等；�?后新帧一律丢弃，避免流结束后仍向渲染层发僵尸帧）
+        // A-980-R24：合批器收尾（flush 幂等；此后新帧一律丢弃，避免流结束后仍向渲染层发僵尸帧）
         chunkSender.dispose();
         /* A-1060�?*流一结束就清掉未消费的引�?*（成�?/ 出错 / 用户取消三条�?��都走这里）�??
            为什么必须清：没�?��费的残留若留到下�?次运行，会在那一�?���??边界�?���?
@@ -3388,14 +3388,14 @@ function registerIpcHandlers(): void {
         clearSteers(cancelKey);
         /* A-1066�?*�?��跑完 �?清空该会话待�?*（用户明�??求：「当会话结束，待办任务直接自动清除�?�）�?
            放在 finally 的收尾�? = 正常完成 / 出错 / 用户�?��**三条�?��共用同一�?���?*�?
-           口径统一（判�?? `shouldClearTodosOnTurnEnd`，含"已�?新一�?��管就不清"的竞态防护）�?
+           口径统一（判据见 `shouldClearTodosOnTurnEnd`，含"已被新一轮接管就不清"的竞态防护）。
 
            ⚠️ `superseded` 必须�?`activeChats.delete(cancelKey)` **之前**算：
               新一�?��已把这条 key 下的 controller 顶掉，旧流的这份清单就不属于�?���?—�??
               此时清空会把用户刚�?划好的新�?�?��单抹掉（"刚�?划好就没�?）�??*/
         const superseded = activeChats.get(cancelKey) !== controller;
         activeChats.delete(cancelKey);
-        // 会话标�?竞�?�防护（A-151）：仅当映射�?��值仍�?��流注册的 cancelKey 时才删除—�??
+        // 会话标签竞态防护（A-151）：仅当映射中的值仍是本流注册的 cancelKey 时才删除——
         // �?Agent 多会话并发时，本�?finally �?��晚于「新会话流已 set」执行，
         // 无条�?delete 会把新流的会话标签一并删�?�?新流 perm/ask 请求�?sessionId
         // �?渲染层无条件弹�?�择题替换输入�?（切会话后输入�?卡�?的根因链）�??
@@ -3403,7 +3403,7 @@ function registerIpcHandlers(): void {
           agentStreamSessionMap.delete(input.agentId);
         }
         // A-1017：面板显隐由管理器状态广�?���?��这里�?*兜底**—�?�取消发生在 ensure 之前�?
-        // 不会产生任何状�?�迁移，广播也就不来，必须在流结束时无条件收口（渲染层置 false �?��等的）�??
+        // 不会产生任何状态迁移，广播也就不来，必须在流结束时无条件收口（渲染层置 false 是幂等的）。
         mainWindow?.webContents.send("slime:model:loading", { loading: false });
         /* A-1066：本�?��结束 �?清空该会话待办（判据�?��出�? `shouldClearTodosOnTurnEnd`）�??
            �?�� `input.sessionId`（待办文件名�?sessionId 命名），不是 cancelKey�?*/
@@ -3422,12 +3422,12 @@ function registerIpcHandlers(): void {
     return { ok: true };
     } catch (e: unknown) {
       // �?���?入参阶�?失败（服务未就绪、Agent 解析失败等）：同样走 error 通道�?
-      // 渲染层自动重连机制才能接管（否则 invoke 直接 reject，未处理回调会把重连链路切断�?
+      // 渲染层自动重连机制才能接管（否则 invoke 直接 reject，未处理回调会把重连链路切断）
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[gui:main] chat stream setup error:", msg);
       mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: input.sessionId });
       mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: input.sessionId });
-      // A-980-R26：发送阶段就失败（服务未就绪 / Agent 解析失败）同样�?�知
+      // A-980-R26：发送阶段就失败（服务未就绪 / Agent 解析失败）同样通知
       notifyUser({
         kind: "error",
         title: "请求未能开始",
@@ -3441,7 +3441,7 @@ function registerIpcHandlers(): void {
   handleTrusted<{ key?: string }>("slime:chat:cancel", async (_event, payload) => {
     const active = activeChats.get(payload.key ?? "");
     if (!active) {
-      return { ok: false, error: "无进行中的�?话可取消", active: activeChats.size };
+      return { ok: false, error: "无进行中的对话可取消", active: activeChats.size };
     }
     active.abort();
     // A-985：用户主动中�?= 没人在干活了 �?把�?会话停在"进�?�?的项降级为待办�??
@@ -3481,9 +3481,9 @@ function registerIpcHandlers(): void {
    * 用户实测 bug：�?�两�?��导都�?��点了**取消�?*后的情况，结果后面都传上去了」�??
    * 缺口：`slime:chat:steer` 把这条推进了 `steerBus`，�?�渲染层�?`✕` �?��了自己那份卡�?
    * �?缓冲里的残留会在�?��的轮次边界�?�或下一次运行时�?���?�?**取消了却照样发出**�?
-   * `clearSteers` �?��流结束时全清，�?盖不�?流还在跑时用户取�?�?
+   * `clearSteers` 只在流结束时全清，覆盖不到"流还在跑时用户取消"。
    *
-   * ⚠️ 返回 `dropped: false` 有两种含义，界面不必区分但日志�?能看出：
+   * ⚠️ 返回 `dropped: false` 有两种含义，界面不必区分但日志要能看出：
    * �?缓冲里本来就没有（从�?`steer` 过，�?��待发卡片）�?��??正常�?
    * �?已�?工具�?��消费掉（真进上下文了）�?��??那时撤销已无意义�?
    */
@@ -3526,7 +3526,7 @@ function registerIpcHandlers(): void {
   /** A-969 上下文自动压缩：把指定会话历史压缩为摘�?并写回会�?meta（后�?loadSessionHistory �?��注入摘�?�?+
    *  �?�?K �?��不再全量重发）�??
    *
-   *  �?�? A-1082 重写要点（�?应�?�压缩并非真压缩」的四条根因）─�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?
+   *  ── A-1082 重写要点（对应「压缩并非真压缩」的四条根因）────────────────────────────
    *
    *  �?`force`（反应式触发）：上游已报「上下文超限」时**越过阈�?�判�?*直接压�??
    *     旧实现只有渲染层 `force` 越过**渲染�?*那条 `used < cap*ratio`，主进程这里仍会
@@ -3545,7 +3545,7 @@ function registerIpcHandlers(): void {
       if (!meta) { return { ok: false, error: "会话不存在" }; }
       const force = p?.force === true;
       const agent = await agentRegistry!.findAgent(meta.agentId).catch(() => null);
-      /* A-1131：压缩判定必须用**�?��话实际�?用的模型**（会话�?盖优先）—�??
+      /* A-1131：压缩判定必须用**本会话实际要用的模型**（会话覆盖优先）——
          否则用户在本会话选了小窗口模型，压缩却按 Agent 默�?的大窗口�?�?贴着旧阈值照发�?��?上游拒�??*/
       const capRaw = await resolveSessionWindowCap(meta.agentId, effectiveModelChoice(meta.modelChoice, agent?.model_choice)).catch(() => undefined);
       const cap = capRaw ?? (agent?.max_context ?? 0);
@@ -3582,8 +3582,8 @@ function registerIpcHandlers(): void {
       // ⚠️ A-1106：判�?��须用**原�?全量**长度 —�??折叠视图�?≈K*2+2，用它判等于恒真（�?上，P0①）�?
       // ⚠️ `force`（上游已报超限）�?*必须越过**这条：否则就�??�上游�?�?�� �?我们�?么都不做 �?原样重发」�??
       const noRoomToCut = historyAll.length <= DEFAULT_TAIL_KEEP * 2 + 2;
-      /* ══ A-1083：判�?��口到**�?��出�?** `planSend`（发送前预算�?�� ══
-         旧实现把三档散成两条 `!force &&` 判断（阈值档 + 空转护栏），于是�?
+      /* ══ A-1083：判据收口到**唯一出处** `planSend`（发送前预算门） ══
+         旧实现把三档散成两条 `!force &&` 判断（阈值档 + 空转护栏），于是：
            �?「发出去才知道超」�?��??输入�?��已超窗口时也照发，然后靠 300s 超时 + N 次重连来"发现"
               （用户原话：「连接半天还�?��连�?�）�?
            �?`force` 必须记得�?*每一�?*都越�?—�??A-1082 就是漏了这条，�?反应式压缩一次都没发生�??
@@ -3609,7 +3609,7 @@ function registerIpcHandlers(): void {
         return {
           ok: true, skipped: true, used, cap, stillOverflow: true, cannotFit: true,
           rescueHint: formatRescueHint(rescue),
-          // A-1090：有候�?�时**额�?**回带结构化�?录（渲染层据此渲�?�?�?���?按钮）�??
+          // A-1090：有候选时**额外**回带结构化记录（渲染层据此渲染"一键切换"按钮）。
           // `undefined`/`null` 都不回带 —�??没有�?��的东西，回带空�?象只会�?渲染层�?�?堆判空�??
           ...(rescue ? { rescueModel: rescue } : {}),
           reason: formatCannotFit(plan, rescue),
@@ -3630,7 +3630,7 @@ function registerIpcHandlers(): void {
       const startGen = meta.summaryGeneration ?? 0;
       const keep = DEFAULT_TAIL_KEEP;
       // 摘�?�??算按**该模型窗�?*解析（旧实现�?��死的 9000，CJK 下只�?~9k 汉字 �?真实会话必然放弃摘�?）�??
-      // 窗口�?��（cap=0）时取保守�?�：`buildSummaryInput` �?��**摘录**、永不放弃，�?以保守�?�不会�?摘�?缺失�?
+      // 窗口未知（cap=0）时取保守值：`buildSummaryInput` 只会**摘录**、永不放弃，所以保守值不会让摘要缺失。
       const budget = cap > 0 ? Math.max(2048, Math.min(SUMMARIZE_INPUT_CAP, Math.floor(cap * 0.5))) : 8000;
       let summaryText: string | null = null;
       let comprehend: string | null = null;
@@ -3643,14 +3643,14 @@ function registerIpcHandlers(): void {
           summaryElided = s.elided;
           summaryTruncated = s.truncated;
           // A-1106：摘要素材不完整必须**出声** —�??此前 elided 与截�?��静默通过�?
-          // 两条�?��的�?�丢记忆」路径：`elided>0` = 受输入�?算所限�?丢弃的中段消�?
+          // 两条独立的「丢记忆」路径：`elided>0` = 受输入预算所限被丢弃的中段消息
           // �?*从未进入摘�?**，�?�它�?��时也不在保留尾巴�?�?真的没了）；
           // `truncated` = 触达输出上限�?��斩�?�二者都意味�?"压缩�?Agent 看到的不�?��部历�?�?
           // 摘�?仍然写入（半�?��强于全无），�?*必须留痕**，不许安静地�???
           if (s.elided > 0 || s.truncated) {
             console.warn(
-              `[gui:main] 摘�?不完整（丢�?忆�?险）：elided=${s.elided} 条中段消�?��进摘要�?�` +
-              `truncated=${s.truncated}（输出�?腰斩）�?�摘要仍会写入，但早期细节可能缺失�?�`,
+              `[gui:main] 摘要不完整（丢记忆风险）：elided=${s.elided} 条中段消息未进摘要、` +
+              `truncated=${s.truncated}（输出被腰斩）。摘要仍会写入，但早期细节可能缺失。`,
             );
           }
           // ⑤�?�理解�?�结」环：压缩后**恰好�?�?*�??回�?（有界）。失败重�?1 次，再失�?�?非阻塞降级�??
@@ -3682,8 +3682,8 @@ function registerIpcHandlers(): void {
       const tokensAfter = estimateHistoryTokens(after) + fixedOverhead;
       // A-1106：熔�?���?��须含 `realShrink` —�??否则「压�?��了�?�体�?��乎没降�?�的**假压�?*
       // 每一次都�??�?*成功**，熔�?��永不�?�?�?同一段历史反复触发�?�反复白花一次摘�?
-      // 加一次理解调�?��而用户看到的永远�??�已压缩 N �??�却怎么都发不出去�??
-      // 判据：`!realShrink` 与�?�摘要失败�?��?�产物非法�?�同�?这�?压缩没解决问�?，一起�?入失败�??
+      // 加一次理解调用，而用户看到的永远是「已压缩 N 轮」却怎么都发不出去。
+      // 判据：`!realShrink` 与「摘要失败」「产物非法」同属"这次压缩没解决问题"，一起计入失败。
       const realShrink = isRealShrink(used, tokensAfter);
       compressBreaker = nextBreakerState(compressBreaker, {
         ok: summaryText !== null && validation.ok && realShrink,
@@ -3744,10 +3744,10 @@ function registerIpcHandlers(): void {
   /**
    * A-1122（③）：**文件回滚** —�??回滚�?条消�?��把�?盘上的改动也还原�?
    *
-   * 为什么必须有这条通路：`rollbackTo` 此前�?��前�? `messages` + �?�� `history.jsonl`�?
+   * 为什么必须有这条通路：`rollbackTo` 此前只改前端 `messages` + 截断 `history.jsonl`，
    * **磁盘上的文件�?�?��没动** �?用户以为回滚干净了，实际 Agent 改过的文件还�?��过的�?
    *
-   * `mode` 两个值走**同一份�?�择实现**（`selectUndo`）：
+   * `mode` 两个值走**同一份选择实现**（`selectUndo`）：
    *  · `plan`  �?�??，供渲染层先给�?�将还原 N �?��件�?�确认；
    *  · `apply` �?真�?还原。两处各写一�?�?��算数"必然分�?（界面�? 3 �??�实际动 2 �?���?
    *
@@ -3803,11 +3803,11 @@ function registerIpcHandlers(): void {
     const session = createStreamSession();
     // A-980-R24：重试流同样�?chunk 合批（�?前与正常发�?�路径一样是�?token �?�?IPC�?
     const chunkSender = createChunkSender();
-    // 授权/提问请求按当前流打会话标签（retry 流的会话 = payload.sessionId�?
+    // 授权/提问请求按当前流打会话标签（retry 流的会话 = payload.sessionId）
     const retryCancelKey = payload.sessionId ?? agentId;
     agentStreamSessionMap.set(agentId, retryCancelKey);
-    lastChatCancelKey = retryCancelKey; // A-1017：供加载面板的�?�取消加载�?�中�?��次加�?
-    // 干净正文：优先取 chatService done 事件全量清洗后的 reply（同 slime:chat:stream�?
+    lastChatCancelKey = retryCancelKey; // A-1017：供加载面板的「取消加载」中断本次加载
+    // 干净正文：优先取 chatService done 事件全量清洗后的 reply（同 slime:chat:stream）
     let cleanReply: string | undefined;
     // A-939 上下文分桶（�?done 事件透传给渲染层分桶托盘�?
     let ctxBuckets: CtxBuckets | undefined;
@@ -3840,7 +3840,7 @@ function registerIpcHandlers(): void {
             ctxBuckets,
           });
           mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: payload.sessionId }); // A-918
-          // A-980-R26：重新生成完�?�?系统通知
+          // A-980-R26：重新生成出错同样通知
           notifyUser({
             kind: "done",
             title: `${agentNameForNotify(agentId)} 已完成`,
@@ -3853,10 +3853,10 @@ function registerIpcHandlers(): void {
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           console.error("[gui:main] chat retry error:", msg);
-          chunkSender.flush(); // A-980-R24：中�?��已产出的内�?照常放出�?
+          chunkSender.flush(); // A-980-R24：中断前已产出的内容照常放出去
           mainWindow?.webContents.send("slime:chat:error", { message: msg, sessionId: payload.sessionId });
           mainWindow?.webContents.send("slime:chat:streamEnded", { sessionId: payload.sessionId }); // A-918
-          // A-980-R26：重新生成出错同样�?�知
+          // A-980-R26：重新生成出错同样通知
           notifyUser({
             kind: "error",
             title: `${agentNameForNotify(agentId)} 出错`,
@@ -3867,7 +3867,7 @@ function registerIpcHandlers(): void {
           mainWindow?.webContents.send("slime:trace:update", { sessionId: retryCancelKey, trace: failedTrace });
           resolve({ ok: false, error: msg });
         } finally {
-          chunkSender.dispose(); // A-980-R24：合批器收尾（flush 幂等�?
+          chunkSender.dispose(); // A-980-R24：合批器收尾（flush 幂等）
           // 值匹配才删（A-151 竞�?�防护，�?slime:chat:stream�?
           if (agentStreamSessionMap.get(agentId) === retryCancelKey) {
             agentStreamSessionMap.delete(agentId);
@@ -3884,9 +3884,9 @@ function registerIpcHandlers(): void {
   /** 会话列表：sessions.json 元数�?�?history 记录（按 session_id 聚合�?*/
   handleTrusted<void>("slime:sessions:list", async () => {
     // A-1043�?*这里就是"�?��后左栏空�?的病�?*。原�?�� `await ensureServices()`�?
-    // �?�?��读操作（列元数据 + 历史聚合）�?整条重初始化链（SILAM python sidecar / engine /
-    // sandbox / ChatService / 调度�?��挡住，启动成�?��因为无去重�?并发跑两遍；
-    // 渲染�?8s 兜底门一放�?，用户看到的就是"暂无会话、跟刚下载一�?�?
+    // 一个纯读操作（列元数据 + 历史聚合）被整条重初始化链（SILAM python sidecar / engine /
+    // sandbox / ChatService / 调度器）挡住，启动成本还因为无去重被并发跑两遍；
+    // 挡住，8s 兜底门一放行就是"左栏空白、跟刚下载一样"。现在首屏只等轻量注册表
     // 会话列表真�?�?要的�?��两样：Agent 名字�?+ 落盘元数�?历史�?
     await ensureRegistry();
     const [metas, records] = await Promise.all([
@@ -3938,7 +3938,7 @@ function registerIpcHandlers(): void {
         // �?�?��定不存在 Agent �?*幽灵会话**：模型一�?��选不了（引擎 findAgent 返回 undefined
         // �?404「Agent 不存在�?�），�?�且删掉之后下一次列表刷新又照原样建回来�?
         // 孤儿 agent_id 的现实来源：测试漏注�?history store 把夹具写进了真实 history.jsonl
-        // （测试侧已修 + 有守�?��，以及历史上�?��除的 Agent�?
+        // （测试侧已修 + 有守卫），以及历史上被删除的 Agent。
         if (!names.has(agentId)) {
           console.warn(
             `[gui:main] 跳过孤儿历史的会话迁移：Agent「${agentId}」不存在（${agg.count} 条记录，跳过会话）`,
@@ -3971,7 +3971,7 @@ function registerIpcHandlers(): void {
   handleTrusted<{ agentId?: string; title?: string; workspace?: string | null; memberIds?: MemberEntry[]; leaderModel?: string; type?: "normal" | "brainstorm" }>("slime:sessions:create", async (_event, payload) => {
     await ensureServices();
     let aid = payload.agentId;
-    // 1) �?�� agentId：优先�?�一�?�� Agent（无 parent_id），否则选列表�?�?�?
+    // 1) 未传 agentId：优先选一个根 Agent（无 parent_id），否则选列表第一个
     if (!aid) {
       const roots = agentRegistry!.loadedAgents.filter((a) => !a.parent_id);
       const fallback = roots[0] ?? agentRegistry!.loadedAgents[0];
@@ -3979,9 +3979,9 @@ function registerIpcHandlers(): void {
         aid = fallback.id;
       } else {
         // 2) 无任�?Agent：创建默认�?�助手�?�Agent（�?�用 AI 助手角色�?
-        const def = await createAgent("助手", "通用 AI 助手，负责回答问题�?�编写代码�?�整理信�?��日常协作");
+        const def = await createAgent("助手", "通用 AI 助手，负责回答问题、编写代码、整理信息与日常协作");
         aid = def.id;
-        console.info(`[gui:main] 兜底创建默�? Agent: ${def.id} name=${def.name}`);
+        console.info(`[gui:main] 兜底创建默认 Agent: ${def.id} name=${def.name}`);
       }
     }
     const agent = await agentRegistry!.findAgent(aid);
@@ -4077,7 +4077,7 @@ function registerIpcHandlers(): void {
     groupNames?: ReadonlySet<string>,
   ): ExpandedMessage[] => expandHistoryRecord(r, groupNames);
 
-  /** 群聊会话的成员名集合（用于判�?��条�?录�?不�?按发�?块展�?；undefined = 非群聊会话） */
+  /** 群聊会话的成员名集合（用于判断某条记录该不该按发言块展开；undefined = 非群聊会话） */
   const groupNamesOf = async (meta: { id?: string; type?: string; members?: unknown }): Promise<ReadonlySet<string> | undefined> => {
     if (meta.type !== "brainstorm") { return undefined; }
     try {
@@ -4149,7 +4149,7 @@ function registerIpcHandlers(): void {
     return { ok: true };
   });
 
-  /** 会话级配�?��审批模式（Agent 级）+ 工作�?��（会话级优先�?
+  /** 会话级配置：审批模式（Agent 级）+ 工作目录（会话级优先）
    *  - approval：写 Agent sandbox_override.approval（�?批属�?Agent 能力，跨会话生效�?
    *  - workspace：有 sessionId �?写会�?meta.workspace�?以文件夹为主"）；�?sessionId �?回�??�?Agent sandbox_override（旧�?��兼�?�?
    */
@@ -4220,7 +4220,7 @@ function registerIpcHandlers(): void {
 
   /** 团队会话成员更新（组�?会话当前 agentId；空数组 = �?回单人会话）
    *  - 成员名单持久化到会话元数�?��引擎层将成员注入组长系统提示（团队协作�?则）
-   *  - 成员发言�?member"流事件冒泡到渲染层（群聊展示），并并入组长整合回复持久化 */
+   *  - 成员发言以"member"流事件冒泡到渲染层（群聊展示），并并入组长整合回复持久化 */
   handleTrusted<{ sessionId: string; memberIds: string[] }>("slime:sessions:setMembers", async (_event, payload) => {
     await ensureServices();
     const updated = await setSessionMembers(payload.sessionId, payload.memberIds);
@@ -4255,7 +4255,7 @@ function registerIpcHandlers(): void {
     await ensureServices();
     const updated = await setSessionMemberEffort(payload.sessionId, payload.memberId, payload.effort ?? null);
     if (!updated) { throw new Error("会话不存在或该成员不在群聊中"); }
-    const eff = payload.effort ? payload.effort : "(默�? high)";
+    const eff = payload.effort ? payload.effort : "(默认 high)";
     console.info(`[gui:main] 群聊成员推理强度: session=${payload.sessionId} member=${payload.memberId} → ${eff}`);
     return { ok: true, memberEfforts: memberEffortsOf(updated.members), leaderEffort: updated.leaderEffort };
   });
@@ -4292,7 +4292,7 @@ function registerIpcHandlers(): void {
     // �?`todos_` + "" + `.json` = `data/todos_.json` —�??那�?好是�??前遗留�?儿文件的文件名，
     // 于是"会话加载途中就把上一次的旧待办显示出来了"（用户实测）�?
     // 这类兜底必须放在主进程：渲染层任何一处忘了守�?��不�?能把孤儿文件读出来�??
-    // （A-980-R29：`todoStore.todoPath` 对空 sessionId 返回 null，双重保险�?�）
+    // （A-980-R29：`todoStore.todoPath` 对空 sessionId 返回 null，双重保险。）
     const sid = typeof payload?.sessionId === "string" ? payload.sessionId.trim() : "";
     if (!sid) {
       console.warn("[gui:main] loadTodos 收到空 sessionId，已拒绝（避免读到 todos_.json 这类孤儿文件）");
@@ -4348,11 +4348,11 @@ function registerIpcHandlers(): void {
    */
   handleTrusted<{ sessionId?: string; todos?: unknown[] }>("slime:tasks:saveTodos", async (_event, payload) => {
     const sid = typeof payload?.sessionId === "string" ? payload.sessionId.trim() : "";
-    if (!sid) { return { ok: false, error: "会话�?���?��无法保存待办" }; }
+    if (!sid) { return { ok: false, error: "会话未就绪，无法保存待办" }; }
     if (!Array.isArray(payload?.todos)) { return { ok: false, error: "todos 必须是数组" }; }
     // 归一�?+ 落盘统一�?todoStore（与工具同一份实现，规则�?���?处）
     const saved = writeTodos(sid, payload.todos as Parameters<typeof writeTodos>[1]);
-    if (!saved) { return { ok: false, error: "写入失败（路径不�?��或会话无效）" }; }
+    if (!saved) { return { ok: false, error: "写入失败（路径不可写或会话无效）" }; }
     // 写盘后立刻广�?��界面与�?盘�?齐，并顺带触�?全部完成 �?�?��清空"判定
     broadcastTodos(sid);
     return { ok: true, todos: saved };
@@ -4361,8 +4361,8 @@ function registerIpcHandlers(): void {
   /**
    * A-986：整张清空（删文�?+ 广播空列�?���?
    *
-   * A-980-R32 曾以"�?��清空已�?�?为由删掉手动清空入口。实践证�?���?��清空�??�?
-   * **全部 completed** 这一种终态；清单里混�?�?��有的任务"（模型写�??�旧会话串味�?
+   * A-980-R32 曾以"自动清空已覆盖"为由删掉手动清空入口。实践证伪：自动清空只覆盖
+   * **全部 completed** 这一种终态；清单里混进"莫须有的任务"（模型写歪、旧会话串味、
    * 手滑加错）时，用户既删不掉（行尾 �?也�?删了）也清不�?—�??�?��看着它一直挂在那儿�??
    * 用户的诉求很直接�?你给我彻底优化这�?��办任务的清除逻辑"。故恢�?该入口�??
    */
@@ -4393,7 +4393,7 @@ function registerIpcHandlers(): void {
     await ensureServices();
     const agentId = payload.agentId;
     // A-980-R29�?*先�?�?*�?Agent 的会�?id —�??`removeSessionsForAgent` �?��回数量，
-    // 删完就再也查不到这些 sessionId，待办文件（data/todos_<sid>.json）会永远留在磁盘上�??
+    // 删完就再也查不到这些 sessionId，待办文件（data/todos_<sid>.json）会永远留在磁盘上。
     const doomed = (await listSessions()).filter((s) => s.agentId === agentId).map((s) => s.id);
     await removeSessionsForAgent(agentId);
     await removeAgentHistory(agentId);
@@ -4409,7 +4409,7 @@ function registerIpcHandlers(): void {
     const removed = await removeSessionsForWorkspace(workspace);
     for (const s of removed) {
       try { await clearSessionHistory(s.agentId, s.sessionId); } catch { /* 忽略单条历史清理失败 */ }
-      // A-980-R29：待办文件与 Plan �?并清理（与上�?���?��除入口口径一致）
+      // A-980-R29：待办文件与 Plan 一并清理（与上面两个删除入口口径一致）
       purgeSessionPlanning(s.sessionId);
     }
     // A-1017：涉及到�?Agent 若已**再无任何会话**，连它没�?session_id 的遗留历史一起清 —�??
@@ -4508,14 +4508,14 @@ function registerIpcHandlers(): void {
     return { ok: true };
   });
 
-  /** MCP 服务器状态列�?���??禁用的，供�?�MCP 接入」专栏恢复） */
+  /** MCP 服务器状态列表（含被禁用的，供「MCP 接入」专栏恢复） */
   handleTrusted<void>("slime:extras:mcpList", async () => {
     await ensureServices();
     const { listMcpServers } = await import("./config_files.js");
     return listMcpServers();
   });
 
-  /** �?��/禁用 MCP 服务�?��注释/取消注释 [[mcp_servers]] 块） */
+  /** 启用/禁用 MCP 服务器（注释/取消注释 [[mcp_servers]] 块） */
   handleTrusted<{ name: string; enabled: boolean }>("slime:extras:mcpToggle", async (_event, p) => {
     const res = setMcpEnabled(p.name, p.enabled);
     return res;
@@ -4549,7 +4549,7 @@ function registerIpcHandlers(): void {
     return deleteSkill(p.name);
   });
 
-  /** 打开�?能根�?��（config/skills，系统文件�?理器）�?��?�空列表时引导用户把�?能放进来 */
+  /** 打开技能根目录（config/skills，系统文件管理器）——空列表时引导用户把技能放进来 */
   handleTrusted<void>("slime:extras:skillsRootOpen", async () => {
     const dir = resolve(PROJECT_ROOT, "config", "skills");
     if (!existsSync(dir)) {
@@ -4573,7 +4573,7 @@ function registerIpcHandlers(): void {
     return { ok: !err, error: err || undefined };
   });
 
-  /** 删除 MCP 服务�?���?slime.toml 移除块） */
+  /** 打开 MCP 配置所在目录（slime.toml 所在项目根） */
   handleTrusted<{ name: string }>("slime:extras:mcpDelete", async (_event, p) => {
     return deleteMcp(p.name);
   });
@@ -4654,7 +4654,7 @@ function registerIpcHandlers(): void {
     };
     const items: Array<{ kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string; action?: { label: string; kind: string; url?: string; path?: string; target?: string } }> = [];
     try {
-      // Node（Electron 内嵌�?
+      // Node（Electron 内嵌）
       items.push({ kind: "node", label: "Node.js", version: `v${process.versions.node}`, ok: true, source: "bundled", note: "GUI �?Electron 内嵌 Node 驱动" });
       // Python venv（随包）—�??随包依赖，必须走 resolveBundled（开发模式在项目根，不在 gui/�?
       const pyExe = process.platform === "win32"
@@ -4674,7 +4674,7 @@ function registerIpcHandlers(): void {
           resolveP();
         });
       });
-      // llama.cpp（随包二进制�?
+      // llama.cpp（随包二进制）
       const llamaExe = process.platform === "win32"
         ? resolveBundled("llama.cpp/build/bin/llama-server.exe")
         : resolveBundled("llama.cpp/build/bin/llama-server");
@@ -4700,13 +4700,13 @@ function registerIpcHandlers(): void {
       } catch { /* 忽略 */ }
       if (ggufFiles.length > 0) {
         items.push({
-          kind: "models", label: "�?��模型", path: modelRoot,
-          version: `${ggufFiles.length} �?��件`, sizeText: ggufFiles[0] ? fileSize(ggufFiles[0].p) : undefined,
+          kind: "models", label: "本地模型", path: modelRoot,
+          version: `${ggufFiles.length} 个文件`, sizeText: ggufFiles[0] ? fileSize(ggufFiles[0].p) : undefined,
           ok: true, source: ggufFiles[0]?.n.includes("bge") ? "bundled" : "download",
           note: ggufFiles.map((f) => f.n).join("、").slice(0, 120),
         });
       } else {
-        items.push({ kind: "models", label: "�?��模型", path: modelRoot, ok: false, source: "download", note: "暂无模型文件—�?��?次使用本地推理时�?��下载" });
+        items.push({ kind: "models", label: "本地模型", path: modelRoot, ok: false, source: "download", note: "暂无模型文件——首次使用本地推理时自动下载" });
       }
       // A-918++：ADB（Android 调试桥）—�??�?测安装情况（缺失给下载动作，就绪给启动服务动作）
       try {
@@ -4731,7 +4731,7 @@ function registerIpcHandlers(): void {
       for (const it of items) {
         if (it.kind !== "adb") { continue; }
         if (!it.ok) { it.action = { label: "下载 platform-tools", kind: "adbDownload" }; }
-        else { it.action = { label: "�?�� ADB 服务", kind: "adbStart" }; }
+        else { it.action = { label: "启动 ADB 服务", kind: "adbStart" }; }
       }
       return { ok: true, items };
     } catch (e) {
@@ -4798,7 +4798,7 @@ function registerIpcHandlers(): void {
     },
   );
 
-  /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD �?��rel 相�?仓库根） */
+  /** A-918++：git show <ref>:<rel>（FileTab diff 模式对比 Git HEAD 用；rel 相对仓库根） */
   handleTrusted<{ rel: string; workspace: string; ref?: string }>(
     "slime:git:showFile",
     async (_event, p): Promise<{ ok: boolean; content?: string; error?: string; code?: "not-repo" | "no-head" | "not-found" }> => {
@@ -4815,7 +4815,7 @@ function registerIpcHandlers(): void {
        * 用户看到这句�?��认为"功能坏了"，既不知�?*原因**（这�?��录本来就不是仓库），
        * 也不知道**还能怎么�?*（其实本次改动的 before/after 就内嵌在聊天区的工具卡里）�??
        *
-       * 现有的三�??错分�?��exists on disk / did not match any file / unknown revision�?
+       * 现有的三个容错分支（exists on disk / did not match any file / unknown revision）
        * 漏掉的�?�?��常�?的那�?类�?�故这里显式探测，并�?下一步去�?��"写进文�?�?
        */
       const inside = await runGit(["rev-parse", "--is-inside-work-tree"], ws);
@@ -4878,9 +4878,9 @@ function registerIpcHandlers(): void {
         console.log(`[slime] HTTP 静态服务恢复：成功 ${r.restored}，失败 ${r.failed}`);
       }
     }).catch(() => { /* 恢�?失败不影响启�?*/ });
-  } catch { /* userData 不可用时�?化为不持久化 */ }
+  } catch { /* userData 不可用时退化为不持久化 */ }
 
-  /** A-918++ / A-1121（②）：右栏打开器的装配点�??
+  /** A-918++ / A-1121（②）：右栏打开器的装配点。
    *  opener �?**payload �?*（`{kind:"url"|"terminal"|"files"}`），字�?串入参仍�?url 处理
    *  �?任何�?��步更新的调用点都不会静默失效；归�?�?core-ts 的纯函数（判�?��有一份）�?
    *  ⚠️ 归一返回 null = **这�?请求不成�?*（�? url 为空）→ 主进程不发事件，
@@ -4895,7 +4895,7 @@ function registerIpcHandlers(): void {
    *  收下后按 `sessionId` 存住，`ChatService` 每轮把它拼进系统提示
    *  （依�?MCP Apps 的两条硬原则：界�?��给用户看的东西必须同时�?模型�??、用户交互�?回�?�上下文）�??
    *  ⚠️ 这里**�?��不做判据**：�?�哪�?类页签�?�得挂载」的�?��判据在渲染层
-   *     （`describeSidebarSnapshot`），在这里再写一份就�??二个产地（必然与界面漂）�?
+   *     （`describeSidebarSnapshot`），在这里再写一份就是第二个产地（必然与界面漂）。
    *  ⚠️ 空载�?= **清空**（右栏空了就撤下），否则模型会一直拿�?�?份过期的右栏�?*/
   ipcMain.on("slime:sidebar:mount", (_e, payload: { sessionId?: string; text?: string } | null) => {
     setSidebarMount(payload && payload.sessionId
@@ -4915,7 +4915,7 @@ function registerIpcHandlers(): void {
         ? img.resize({ width: maxWidth, quality: "good" })
         : img;
       let finalImg = out;
-      // A-975：在缩放后的位图上叠加标�?��BGRA 逐像素绘制，零新依赖�?
+      // A-975：在缩放后的位图上叠加标注（BGRA 逐像素绘制，零新依赖）
       if (annotate && (annotate.grid || (annotate.marks && annotate.marks.length > 0))) {
         try {
           const fs = out.getSize();
@@ -4943,10 +4943,10 @@ function registerIpcHandlers(): void {
 
   /** ①�??A-1123�?*画面�?��度量** —�??命中校验的判�?��源（nativeImage 逐像素比，零新依赖）�?
    *
-   * 为什么需要：动作回执里的 detail �?��述�?�输入已注入」（"已在 (x,y) 左键单击"），
+   * 为什么需要：动作回执里的 detail 只陈述「输入已注入」（"已在 (x,y) 左键单击"），
    * 而点�?/ �?���?���?/ 窗口没聚�?/ 元素还没渲染 —�??四�?情形与成�?*逐字同形**�?
-   * controller 现在会在动作前后各取�?张图，用这里算出的差异率判定"画面有没有可见变�?�?
-   * �?���?��会自动重试一次�?�core-ts 不�? import electron，所以这里与 setImageOptimizer 同�?注入�?
+   * controller 现在会在动作前后各取一张图，用这里算出的差异率判定"画面有没有可见变化"，
+   * 未命中还会自动重试一次。core-ts 不许 import electron，所以这里与 setImageOptimizer 同款注入。
    *
    * 判据�?��（三态，缺一不可）：
    *  · 尺�?不一�?�?返回 **1**（画面整体变了，显然�?有变�?），**不是** null�?
@@ -4988,9 +4988,9 @@ function registerIpcHandlers(): void {
   setScreenController(screenCtl);
 
   /** A-1044：图形动作的「开�?/ 结束」转发给渲染�?�?呼吸�?���?+ �?��提示�?
-   *  订阅点�?�在 controller：它�?��有图形动作的�?��咽喉（串行链 + 坐标换算 + 能力校验都在那）�?
-   *  �?处�?阅即覆盖「操作我的主机�?�（desktop）与「操作安卓�?备�?�（android）两条路径�??
-   *  fire-and-forget：窗口未就绪／渲染层没�?�??化时静默降级，绝不影响动作本�?
+   *  订阅点选在 controller：它是所有图形动作的唯一咽喉（串行链 + 坐标换算 + 能力校验都在那），
+   *  一处订阅即覆盖「操作我的主机」（desktop）与「操作安卓设备」（android）两条路径。
+   *  fire-and-forget：窗口未就绪／渲染层没装可视化时静默降级，绝不影响动作本身
    *  （`emitFocus` 内已吞异常，这里再兜�?层是因为 webContents.send �?��撞上窗口�?毁中）�??*/
   screenCtl.onOperationFocus = (e): void => {
     try { mainWindow?.webContents.send("slime:screen:opFocus", e); } catch { /* 无窗�?�?无可视化 */ }
@@ -5015,7 +5015,7 @@ function registerIpcHandlers(): void {
   setToolCategoryGate((tool, args) => gateToolCall({
     tool,
     riskKind: tool.effectiveRiskKind(),
-    // �?��取�?�口径与沙�?/分类器共用同�?实现（含终�?类的 command/cmd 字�?�?
+    // 目标取值口径与沙箱/分类器共用同一实现（含终端类的 command/cmd 字段）
     target: targetFromArgs(args),
     switches: permSwitches(getPermissions()),
   }));
@@ -5023,7 +5023,7 @@ function registerIpcHandlers(): void {
   /** A-918++：HTTP —�??把本地目录作为静态服务启�?��默�? 0.0.0.0，�?口自动�?�） */
   handleTrusted<{ dir: string; port?: number; host?: string; spa?: boolean }>("slime:http:serve", async (_event, p): Promise<{ ok: boolean; id?: string; port?: number; host?: string; urls?: string[]; error?: string }> => {
     const r = await httpServer.serve({ dir: p?.dir ?? "", port: p?.port, host: p?.host, spa: p?.spa });
-    // A-1069：新起的服务要立刻出现在「后台进程�?�面板里（不等下�?次开面板�?
+    // A-1069：新起的服务要立刻出现在「后台进程」面板里（不等下一次开面板）
     if (r?.ok) { broadcastAgentProcs(); }
     return r;
   });
@@ -5054,11 +5054,11 @@ function registerIpcHandlers(): void {
    *
    * ⚠️ 实测结�?（`gui/scripts/probe-search-host.mjs`�?2/12）：右栏浏�?器页�?`<webview>`
    *   （独立顶�?frame）⇒ 页面里的 `window.parent === window` �?它原设�?�?
-   *   `postMessage` 通道**�?���?���?��发的消息**，�?主永远收不到�?
+   *   `postMessage` 通道**只能听到自己发的消息**，宿主永远收不到。
    *   �?接入必须�?guest preload + `contextBridge` + IPC（`gui/src/preload/searchHost.cjs`）�??
    *
    * ⚠️ 这一�?*不走 `handleTrusted`**：sender �?guest，不�?��窗口。白名单�?
-   *   `searchBridge.ts::isTrustedSearchUrl()`（只认我�?��的搜索页 origin / file: / about:blank）�??
+   *   `searchBridge.ts::isTrustedSearchUrl()`（只认我们起的搜索页 origin / file: / about:blank）。
    *
    * 搜索页的交付形�?�：构建�?`?raw` 把页面�?文内联进主进程产�?�?运�?时幂等落盘到
    * `userData/slime-search/page` �?**复用既有�?`slime:http:serve`** 起本地服务（带同�?��复用）�??
@@ -5071,7 +5071,7 @@ function registerIpcHandlers(): void {
     // 主程序主题存的是 alpha/beta，搜索页懂的�?dark/light/auto �?翻译�?���?处（shared/searchTheme.ts�?
     getTheme: (): string => searchThemeOf(readPersistedTheme()),
     getWindow: (): Electron.BrowserWindow | null => mainWindow,
-    // 「是不是主窗口发来的」只有一处定义（就是上面那个 isTrustedSender），不在这里再抄�?�?
+    // 「是不是主窗口发来的」只有一处定义（就是上面那个 isTrustedSender），不在这里再抄一遍
     isMainSender: (sender: Electron.WebContents): boolean => isTrustedSender(sender),
     serve: (opts: { dir: string; port?: number; host?: string; spa?: boolean; origin?: "agent" | "restored" | "builtin" }) => httpServer.serve(opts),
   };
@@ -5083,7 +5083,7 @@ function registerIpcHandlers(): void {
   /* ══════════════ A-1138：自建全网索引服务（**已写�?slime**，不�?spawn Python）═══════════�?
    *
    * 用户原话：�?�你直接把这些进程写�?slime，�?�非接线」�?��?�爬�?/ 索引 / 服务现在都在�?��程内
-   * （引擎在 `core-ts/src/websearch/`），�?�?��停�?�状态可见�?�崩溃有归因�?
+   * （引擎在 `core-ts/src/websearch/`），一键启停、状态可见、崩溃有归因。
    * 对搜索页**零改�?*：仍监听 `127.0.0.1:8600`，路由与回包形状逐字对齐�?`server.py`�?
    *
    * ⚠️ �?��失败**不影响启�?*（�?口�?�?��占了 / userData 不可写）�?
@@ -5095,10 +5095,10 @@ function registerIpcHandlers(): void {
   });
   void startSearchIndexService({ userData: app.getPath("userData") })
     .then((r) => {
-      if (!r.ok) { console.warn("[gui:search-index] �?��索引服务�?���?��" + String(r.error)); }
+      if (!r.ok) { console.warn("[gui:search-index] 自建索引服务未启动：" + String(r.error)); }
       else { console.info("[gui:search-index] 搜索索引服务已就绪（127.0.0.1:" + String(r.port) + "）"); }
     })
-    .catch(() => { /* 见上：不影响�?�� */ });
+    .catch(() => { /* 见上：不影响启动 */ });
 
   /* ══════════════ A-1069�?226）：Agent �?��的后台资源面�?══════════════
    *
@@ -5109,13 +5109,13 @@ function registerIpcHandlers(): void {
    *   **�?���?Agent 运�?的脚�??��?�?*」⇒ �?��板只�?`screen-host`（Agent 起的常驻脚本宿主�?
    *   �?`http-server`（Agent 起的监听�?���?*两类**�?*后台子代理已从本面板移出** —�??
    *   它是"�?�?Agent"，有�?��的坞（`SubAgentExpandButton`）与详情弹窗�?
-   *   在两�?��方都列等于同�?件事两个产地。判�?�� `agentProcs.ts`，守�?��住它�?
+   *   在两个地方都列等于同一件事两个产地。判据在 `agentProcs.ts`，守卫锁住它。
    *
-   * ⚠️ 这一组是**取数 + 执�?**，不�?��何判�?��
+   * ⚠️ 这一组是**取数 + 执行**，不含任何判据：
    *   · 取什么？两类真源（图形控制常驻�?�?/ http_serve 的服务）�?
    *     **应用�?��服务不取** —�??Python 后�?、llama-server、MCP、情感脑 sidecar 都由应用
    *     生命周期管理，不�?Agent 的工具起的；把它�?��进这�?��板，用户会以�?关掉�?��停个任务"�?
-   *     实际�?��应用拆了。这条范围决策在 `isAgentStartedKind()` 里落成可�?���?��住的事实�?
+   *     实际是把应用拆了。这条范围决策在 `isAgentStartedKind()` 里落成可被守卫锁住的事实。
    *   · 怎么显示？`buildAgentProcView()` —�??�?��数，**每�?现算**而不�?��护注册表�?
    *     注册表有�?整类"某出口忘了注�? �?阴魂条目永驻"的结构�?��?险（�?��已为此付过代价）�?
    *     现算从结构上消除它（真源里没有了，面板里就没有了）�??
@@ -5146,7 +5146,7 @@ function registerIpcHandlers(): void {
       const view = buildAgentProcView(await collectAgentProcSources(), Date.now());
       return { ok: true, view };
     } catch (e) {
-      /* ⚠️ 失败必须�?�?分开：空列表的含义是"没有后台资源"�?
+      /* ⚠️ 失败必须与"空"分开：空列表的含义是"没有后台资源"，
          查�?失败却给空列表会让用户以为没东西在跑（这�?��仓反复强调的静默失败）�??*/
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -5162,13 +5162,13 @@ function registerIpcHandlers(): void {
           break;
         case "stop-http-server": {
           const r = await httpServer.stop(plan.id);
-          if (!r?.ok) { return { ok: false, error: r?.error ?? `停�?服务 ${plan.id} 失败（未知原因）` }; }
+          if (!r?.ok) { return { ok: false, error: r?.error ?? `停止服务 ${plan.id} 失败（未知原因）` }; }
           break;
         }
         default:
           /* 结构上不�?��（纯判据�?��出上�?��种动作）。留这个出口�?���?�?��加了新类�?��忘了
              在这里接�?不会变成**静默�?么都不做** —�??那�?�?��仓反复强调的那类失效�?*/
-          return { ok: false, error: `暂不�?��停�?该类�?��${String((plan as { action?: string }).action ?? "")}` };
+          return { ok: false, error: `暂不支持停止该类别：${String((plan as { action?: string }).action ?? "")}` };
       }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -5416,7 +5416,7 @@ function registerIpcHandlers(): void {
     return (await statsService!.snapshot()) as unknown as StatsSnapshot;
   });
 
-  // �?�? 使用统�?（Settings「使用统计�?�面板） �?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?
+  // ── 使用统计（Settings「使用统计」面板） ────────────────
   handleTrusted<{ sinceIso?: string; untilIso?: string; limit?: number }>("slime:usage:snapshot", async (_e, payload) => {
     // �?��时区偏移（分钟；东八�?+480）�?��??�?Date.getTimezoneOffset 的反�?
     const tzOffsetMin = -new Date().getTimezoneOffset();
@@ -5463,20 +5463,20 @@ function registerIpcHandlers(): void {
   registerTraceHandlers();
   registerPlanHandlers();
 
-  // �?�? 心智�?�� IPC �?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?
+  // ── 心智中枢 IPC ────────────────────────────────────────
 
   /** 配置读取：向量工�?/ 记忆位置 / 依赖状�?�（模型文件不在 git 仓库，换设�?�?手动就位�?*/
   handleTrusted<{ agentId?: string } | undefined>("slime:mind:configGet", async (_event, payload) => {
     // 收尾归位：downloads/ 下已完成的文件自动放到配�?��径（�?llama_bin �?��改写�?
-    // A-1038：tryRelocateDownloads 改为 async（内部解压走 async �?��）→ 必须 await�?
-    // 否则这个 IPC 会在解压还没跑完时就返回，紧接着读到的依赖状态仍�?缺失"�?
+    // A-1038：tryRelocateDownloads 改为 async（内部解压走 async 路径）→ 必须 await，
+    // 否则这个 IPC 会在解压还没跑完时就返回，紧接着读到的依赖状态仍是"缺失"。
     try {
       await tryRelocateDownloads();
     } catch (e) {
       console.warn(`[gui:mind] 归位收尾异常: ${e}`);
     }
     const cfg = loadMindConfig();
-    // 记忆存储位置：按�?�� Agent 推�?**真实绝�?�?��**（唯�?实现 resolveMemoryPaths）�??
+    // 记忆存储位置：按目标 Agent 推导**真实绝对路径**（唯一实现 resolveMemoryPaths）。
     // 此前返回的是字�?串模�?`data/<agentId>/lancedb`（字�?`<agentId>`）�?��??�?���?���?���?
     // 也永不随"存储位置"变化，于�?��面出�?改了根目录只�?memory.json 那�?�?的�?感�??
     const agentId = typeof payload?.agentId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(payload.agentId)
@@ -5497,7 +5497,7 @@ function registerIpcHandlers(): void {
   /** 配置保存：向量工具（bge=真实 BGE-M3 嵌入 / basic=哈希占位�? 记忆根路径（重启生效�?
    *
    *  ⚠️ �?��**显式给出**的字段放�?patch：`saveMindConfig` �?`{...旧�?? ...patch}`�?
-   *  若这里传 `memoryRoot: undefined`（渲染层�?��改向量工具时就是这个形状），
+   *  若这里传 `memoryRoot: undefined`（渲染层只想改向量工具时就是这个形状），
    *  JSON.stringify 会把该键整个丢掉 �?下一次�?�?`""` �?**用户设的�?��义根�?���?��默清�?*�?
    *  �?以改�?给了才写"（`""` �?��法�?�，表示"恢�?默�?位置"）�??*/
   handleTrusted<{ vectorTool?: string; memoryRoot?: string }>("slime:mind:configSet", async (_event, payload) => {
@@ -5513,7 +5513,7 @@ function registerIpcHandlers(): void {
     return { ok: true, vectorTool: cfg.vectorTool, memoryRoot: cfg.memoryRoot };
   });
 
-  /** 依赖定位：auto=项目文件夹内�?���?�?��pick=手动选择文件/�?��。命�?��写入 slime.toml */
+  /** 依赖定位：auto=项目文件夹内自动检索；pick=手动选择文件/目录。命中即写入 slime.toml */
   handleTrusted<{ mode: "auto" | "pick"; key: "llama_bin" | "model_path" | "models_dir" }>(
     "slime:mind:locateDep",
     async (_event, payload) => {
@@ -5521,7 +5521,7 @@ function registerIpcHandlers(): void {
       if (payload.mode === "pick") {
         const isDir = payload.key === "models_dir";
         const opts: Electron.OpenDialogOptions = isDir
-          ? { title: "选择�?��聊天模型�?��", properties: ["openDirectory"] }
+          ? { title: "选择本地聊天模型目录", properties: ["openDirectory"] }
           : {
               title: payload.key === "llama_bin" ? "选择 llama-server.exe" : "选择嵌入模型 GGUF 文件",
               properties: ["openFile"],
@@ -5624,7 +5624,7 @@ function registerIpcHandlers(): void {
     if (target !== "llama" && target !== "bge") {
       return { ok: false, error: "�?��下载�?��" };
     }
-    await ensureServices(); // �?��进度 listener 已注册（否则下载进度事件丢失，进度条不实时）
+    await ensureServices(); // 确保进度 listener 已注册（否则下载进度事件丢失，进度条不实时）
     return startDownload(target);
   });
 
@@ -5658,7 +5658,7 @@ function registerIpcHandlers(): void {
             const snap = await svc.snapshot();
             mainWindow?.webContents.send("slime:stats:update", snap);
           } catch (e) {
-            console.warn("[gui:main] statsPoll snapshot 失败（本�?��过）:", e);
+            console.warn("[gui:main] statsPoll snapshot 失败（本轮跳过）:", e);
           }
         })();
       }, 3000);
@@ -5750,13 +5750,13 @@ function registerIpcHandlers(): void {
       selectedAgentId = null;
     }
     console.info(`[gui:main] 已删�?Agent 子树: ${deleted.join(", ")}`);
-    // A-1106：删除后**必须**把�?删的 Agent 从可派发清单里摘掉�?�否则清单里会留�?�?�?
+    // A-1106：删除后**必须**把被删的 Agent 从可派发清单里摘掉。否则清单里会留着一个
     // 已经不存在的名字：模型点名派�?�?`delegate()` 找不到可执�? Agent �?每�?派发都失败�??
     syncDispatchableSubagents();
     return { ok: true, deleted };
   });
 
-  /** 属�?�面板：返回 Agent 完整状�?�（model_choice/role/reasoning_effort 等） */
+  /** 属性面板：返回 Agent 完整状态（model_choice/role/reasoning_effort 等） */
   handleTrusted<{ agentId: string }>("slime:agents:detail", async (_event, payload) => {
     await ensureServices();
     const a = await agentRegistry!.findAgent(payload.agentId);
@@ -5830,7 +5830,7 @@ function registerIpcHandlers(): void {
     if (res.ok) {
       // 注册表已�?importAgent 落盘改动，重载内存�?�并通知渲染层刷�?
       await agentRegistry!.load();
-      // A-1106：�?入进来的 Agent 也�?立刻进清单（否则"导入成功"却在派发侧不�??）�??
+      // A-1106：导入进来的 Agent 也要立刻进清单（否则"导入成功"却在派发侧不可见）。
       syncDispatchableSubagents();
       mainWindow?.webContents.send("slime:agents:selected", res.agentId ?? null);
       console.info(`[gui:main] 导入成功: agent=${res.agentId} (${res.agentName})`);
@@ -5877,9 +5877,9 @@ function registerIpcHandlers(): void {
   handleTrusted<void>("slime:providers:list", async (): Promise<ProviderSummary[]> => listProviders());
 
   handleTrusted<{ baseUrl: string; apiKey: string; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto" }>("slime:providers:fetchModels", async (_event, p) =>
-    // A-918+：探测即 enrich �?��元数�?��context_window/max_output/vision/think/pricing），
+    // A-918+：探测即 enrich 填充元数据（context_window/max_output/vision/think/pricing），
     // 让�?�探测成功�?�一步到位，渲染层拿到完�?model spec 而非�?ID�?
-    // api_format 穿�?�：用户显式指定 anthropic 时用 x-api-key 探测，auto 时双鉴权兜底�?
+    // api_format 穿透：用户显式指定 anthropic 时用 x-api-key 探测，auto 时双鉴权兜底。
     enrichModels(p.baseUrl, p.apiKey, p.api_format ?? "auto"),
   );
 
@@ -6014,7 +6014,7 @@ function registerIpcHandlers(): void {
   handleTrusted<{ path: string }>("slime:workspace:getParent", (_event, p): { ok: boolean; parent?: string | null; diskRoot?: boolean; error?: string } => {
     try {
       const cur = resolve(p.path || "");
-      if (!cur) { return { ok: false, error: "�?��为空" }; }
+      if (!cur) { return { ok: false, error: "路径为空" }; }
       const parent = dirname(cur);
       if (parent === cur) { return { ok: true, parent: null, diskRoot: true }; }
       return { ok: true, parent };
@@ -6072,7 +6072,7 @@ function registerIpcHandlers(): void {
    *  右侧栏翻却能打开。根因不�?��件不�?��而是**解析基准不�?**：点击来源五花八门�?��??
    *  工具回传�?path �?���??�相对会话工作目录�?��?�相对项�?��」�?�带项目名前�?」�?�带 `:�?列` 后缀」，
    *  甚至�??备内�?��（adb �?/sdcard/...）；而渲染层手里那个 workspace �?��还没加载完或压根没绑定�??
-   *  旧实现只试两种（workspace 相�? + 当绝对），于�?��量明明存在的文件�?��"不存�?�?
+   *  旧实现只试两种（workspace 相对 + 当绝对），于是大量明明存在的文件被判"不存在"。
    *
    *  这里把所�?*合理候�??*按优先级列出来�?�个试，并且把试过的�?��原样回给界面�?
    *  找不到时用户/�?发�?�看到的�?我按这些�?��找过"，�?�不�?��句黑箱错�???
@@ -6092,7 +6092,7 @@ function registerIpcHandlers(): void {
         resolve, basename, dirname,
       );
       if (candidates.length === 0) {
-        return { ok: false, error: `缺少文件�?��（原始�?�："${typeof p?.rel === "string" ? p.rel : ""}"）`, tried: [] };
+        return { ok: false, error: `缺少文件路径（原始值："${typeof p?.rel === "string" ? p.rel : ""}"）`, tried: [] };
       }
       for (const c of candidates) {
         try {
@@ -6120,15 +6120,15 @@ function registerIpcHandlers(): void {
         return { ok: false, error: `工作�?��不存�?��${root}` };
       }
       const rel = (p.rel ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
-      if (!rel) { return { ok: false, error: "缺少文件�?��" }; }
+      if (!rel) { return { ok: false, error: "缺少文件路径" }; }
       const filePath = resolve(root, ...rel.split("/"));
       const fileRootNorm = root.endsWith(sep) ? root : root + sep;
       if (!filePath.startsWith(fileRootNorm)) {
         return { ok: false, error: "�?��越界：仅允�?访问当前�?��内部" };
       }
-      if (!existsSync(filePath)) { return { ok: false, error: `文件不存�?��${filePath}` }; }
+      if (!existsSync(filePath)) { return { ok: false, error: `文件不存在：${filePath}` }; }
       const st = statSync(filePath);
-      if (st.isDirectory()) { return { ok: false, error: `不是文件（是�?��）：${filePath}` }; }
+      if (st.isDirectory()) { return { ok: false, error: `不是文件（是目录）：${filePath}` }; }
       // 图片优先：常�?PNG/JPG/GIF/WebP/BMP/SVG
       const IMG_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
       const ext = "." + filePath.split(".").pop()!.toLowerCase();
@@ -6137,7 +6137,7 @@ function registerIpcHandlers(): void {
         return { ok: true, path: filePath, name: rel, mime: "image", content: buf.toString("base64") };
       }
       // A-980-R8：PDF / Office（word/excel/ppt）专�?mime—�?�pdf 由右侧栏内嵌预�?�?
-      // office 右侧栏只读二进制（�?杂格式不外挂解析库），交给系统默认应用打�?�?
+      // office 右侧栏只读二进制（复杂格式不外挂解析库），交给系统默认应用打开。
       // 注意要在 ARCHIVE_BINARY_EXT 判定**之前**�?pdf 原在该集合里�?binary）�??
       const OFFICE_EXT = new Set([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
       if (ext === ".pdf") {
@@ -6148,7 +6148,7 @@ function registerIpcHandlers(): void {
         const buf = readFileSync(filePath);
         return { ok: true, path: filePath, name: rel, mime: "office", content: buf.toString("base64") };
       }
-      // 先�?原�?字节，再判定二进制：readFileSync(path, "utf-8") 在二进制上不会抛错（会静默按替换符解码）�?
+      // 先读原始字节，再判定二进制：readFileSync(path, "utf-8") 在二进制上不会抛错（会静默按替换符解码），
       // 若直接当文本返回会得到乱�?超长字�?串，渲染时拖�?��至崩溃整�?��用�??
       const buf = readFileSync(filePath);
       const hasNul = binarySniff(buf);
@@ -6180,7 +6180,7 @@ function registerIpcHandlers(): void {
       if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
       if (!existsSync(abs)) { return { ok: false, error: `文件不存�?��${abs}` }; }
       const st = statSync(abs);
-      if (st.isDirectory()) { return { ok: false, error: `不是文件（是�?��）：${abs}` }; }
+      if (st.isDirectory()) { return { ok: false, error: `不是文件（是目录）：${abs}` }; }
       const IMG_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
       const ext = "." + abs.split(".").pop()!.toLowerCase();
       const name = abs.split(/[\\/]/).pop() ?? abs;
@@ -6229,16 +6229,16 @@ function registerIpcHandlers(): void {
   });
 
   /* ══ A-1133：工作文档�?�道（�?�?/ 生成�?══════════════════════════════════════════════
-     为什么必须有它：`.docx/.xlsx/.pptx` **不是** Chromium 能渲染的类型（交给浏览器页只�?
+     为什么必须有它：`.docx/.xlsx/.pptx` **不是** Chromium 能渲染的类型（交给浏览器页只会
      `ERR_FAILED`，就�?��次事故），�??`file_read` 把它�?�� utf-8 读出来的�?��码�??
      �?统一�?`core-ts/src/office/*` 抽文�?/ 生成文件；主进程�?��「路径校�?+ �?��」�??
      ⚠️ �?��允�?�?���??的（用户拖进来的文件常在 Downloads/桌面）�?��??这是**用户显式意图**
-        （他刚把文件拖到界面上），与 `file_read` 工具�?默�?锁项�?��"�?���?���???
+        （他刚把文件拖到界面上），与 `file_read` 工具的"默认锁项目根"是两个场景。
         但只接受**绝�?�?��**：相对路径的�?��取决于工作目录，静默解析会变成�?二个产地�?*/
   handleTrusted<{ path: string }>("slime:docs:read", async (_event, p) => {
     const abs = (typeof p?.path === "string" ? p.path : "").trim().replace(/^["']|["']$/g, "");
     if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
-    if (!isAbsolutePath(abs)) { return { ok: false, error: `�?要绝对路径：${abs}` }; }
+    if (!isAbsolutePath(abs)) { return { ok: false, error: `需要绝对路径：${abs}` }; }
     if (!existsSync(abs)) { return { ok: false, error: `文件不存�?��${abs}` }; }
     try {
       const ext = (abs.slice(abs.lastIndexOf(".")) || "").toLowerCase();
@@ -6259,7 +6259,7 @@ function registerIpcHandlers(): void {
         return { ok: true, kind: "text", text: (await readFile(abs, "utf8")).slice(0, 200_000), truncated: false };
       }
       /* �?其余�?*明确说清**而不�?��读成乱码。判�?`classifyFile` 单一产地�?
-         ⚠️ PDF 已由 `extractPdfText` �?��（`docKindFromExt(".pdf") === "pdf"`），�?以走到这�?
+         ⚠️ PDF 已由 `extractPdfText` 支持（`docKindFromExt(".pdf") === "pdf"`），所以走到这里
             的不�?PDF；真的落到这里（�?��类型）就如实报错 + 给可操作出路�?*/
       return { ok: false, error: nonNavigableReason(abs) };
     } catch (e) {
@@ -6268,20 +6268,20 @@ function registerIpcHandlers(): void {
   });
 
   /**
-   * A-1133：把**渲染用的 HTML** 落到磁盘，供应用内静态服务在右栏浏�?器页里打�?�?
+   * A-1133：把**渲染用的 HTML** 落到磁盘，供应用内静态服务在右栏浏览器页里打开。
    *
    * 为什么必须落盘再�?页（而不�?data: URL 或直接�? webview）：
    *   · Chromium **禁�?顶层导航�?`data:` URL**�?Not allowed to navigate top frame to data URL"）⇒ 不可行；
    *   · 直接�? webview �?HTML 会绕�?应用统一的�?览�?�道（下�?�?��面又得重造一遍）�?
-   * 落盘 + 既有 `http.serve` + 右栏浏�?器页 = 复用**已经存在**的网页�?览链�?���?处产地）�?
+   * 落盘 + 既有 `http.serve` + 右栏浏览器页 = 复用**已经存在**的网页预览链路（一处产地）。
    *
-   * ⚠️ 文件名用**内�?哈希**，�?止时间戳/�??序号（否则每看一次就多一�?��件�?�目录无限膨�?）�??
+   * ⚠️ 文件名用**内容哈希**，禁止时间戳/自增序号（否则每看一次就多一个文件、目录无限膨胀）。
    *    同一份内容重复�?览会命中同一�?��件，天然幂等�?
    * ⚠️ �?���?*�?��程生成的**内�?（渲染层传入），不�?任意磁盘�?�� —�??这里不是通用文件写入口�??
    */
   handleTrusted<{ name?: string; html?: string }>("slime:docs:htmlPreview", async (_event, p) => {
     const html = typeof p?.html === "string" ? p.html : "";
-    if (!html.trim()) { return { ok: false, error: "没有�?��染的内�?" }; }
+    if (!html.trim()) { return { ok: false, error: "没有可渲染的内容" }; }
     try {
       const dir = join(app.getPath("userData"), "doc-preview");
       mkdirSync(dir, { recursive: true });
@@ -6301,9 +6301,9 @@ function registerIpcHandlers(): void {
    *
    * 为什么单�?���?�?IPC（�?�不�?? `renderPage` �?��内部探测）：
    * �?渲染层�?�?*用户点击�?*就把"这台机器能不能看老文�?讲清楚（例�?按钮文�?/提示），
-   *    那时还没有具体文件，`renderPage` 无从调用�?
+   *    那时还没有具体文件，`renderPage` 无从调用；
    * �?探测结果要能�??�?��/�?��页�?�?��「缺依赖」不�?���?��件的属�?�，�?*机器**的属性）�?
-   * ⚠️ 判据�?���?处（`core-ts/src/office/libreoffice.ts` + `libreofficeConvert.ts`），
+   * ⚠️ 判据只有一处（`core-ts/src/office/libreoffice.ts` + `libreofficeConvert.ts`），
    *    渲染�?*不�?**�?��拼路径判�?—�??「同�?事实写在两�?必然漂�?�（�?��铁律 11）�??
    */
   handleTrusted<{ force?: boolean }>("slime:office:libreofficeProbe", async (_event, p) => {
@@ -6334,7 +6334,7 @@ function registerIpcHandlers(): void {
   handleTrusted<{ path?: string; name?: string; open?: boolean }>("slime:docs:renderPage", async (_event, p) => {
     const abs = (typeof p?.path === "string" ? p.path : "").trim();
     if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
-    if (!isAbsolutePath(abs)) { return { ok: false, error: `�?要绝对路径：${abs}` }; }
+    if (!isAbsolutePath(abs)) { return { ok: false, error: `需要绝对路径：${abs}` }; }
     const plan = planRender(abs);
     /* ⚠️⚠️ **HTML 文件：服务它�?在目录�?�直接打�?它本�?*�?026-09-30 用户实测「HTML 反�?�无法显示�?�）�?
        它本来就�?���?�?拷进 `doc-render` 再服务会**丢掉同目录的兄弟资源**（css/js/图片）⇒ 页面残缺�?
@@ -6399,12 +6399,12 @@ function registerIpcHandlers(): void {
          �?若传 `conv.dir`，渲染层要去**临时�?��**取页�?��而我�?��面紧接着就把临时�?��删了
          �?`http.serve` 报�?�目录不存在」⇒ 用户看到「保真渲染页已生成，但本地服务没起来」，�?��重排�?
          ⚠️ **旧代码一直传的就�?`conv.dir`，它"能用"仅仅因为那个临时�?��从来没人�?* —�??
-            换句话�?它是**靠泄漏在�?��**；把泄漏�?��就等于把它抽空了（本 bug 的来历）�?
+            换句话说它是**靠泄漏在续命**；把泄漏修掉就等于把它抽空了（本 bug 的来历）。
          �?与另�?�?���?��`writeRenderPage`）保持一致：都写�?`userData/doc-render`�?*/
       const built = writePdfViewerPage(pageRoot, conv.pdfPath, abs, title);
       /* ⚠️⚠️ 临时�?���?��（含影子 profile�?*在这里删干净**�?
          `writePdfViewerPage` 内部�?`copyFileSync` �?PDF �?*复制**进持久的 `doc-render/<sub>/`�?
-         �?以�?刻删临时�?��不影响页�?��上面那条 `rootDir` 的约束�?�?��成立的前提）�?
+         所以此刻删临时目录不影响页面（上面那条 `rootDir` 的约束正是它成立的前提）。
          ⚠️ 之前的写法把�?`return` 给渲染层"让渲染层�?�?*但渲染层的类型里根本没声�?`convertDir`**
             �?从不消费 �?每转�?次在 `%TEMP%` 留一�?`slime-lo-XXXX`�?*违反用户定的「每次转�?��不留文件�?*�?
             教�?：把生命周期责任「交出去」时，必须确�?*真的有人接住**（否则就�?��手即漏）�?
@@ -6413,7 +6413,7 @@ function registerIpcHandlers(): void {
       if (!built.ok) {
         return { ok: false, error: built.error };
       }
-      /* ⚠️ 交给 `http.serve` 的必须是**持久**�?��（`doc-render`）：
+      /* ⚠️ 交给 `http.serve` 的必须是**持久**目录（`doc-render`）：
          临时�?���?��机名，每�?��次�?�?�?�?��态服务，而且�?��就�?删了�?*/
       return { ok: true, dir: built.dir, name: built.name, transient: true };
     }
@@ -6431,11 +6431,11 @@ function registerIpcHandlers(): void {
     const spec = p?.spec;
     const abs = (typeof spec?.path === "string" ? spec.path : "").trim();
     if (!abs) { return { ok: false, error: "缺少输出�?��" }; }
-    if (!isAbsolutePath(abs)) { return { ok: false, error: `�?要绝对路径：${abs}` }; }
+    if (!isAbsolutePath(abs)) { return { ok: false, error: `需要绝对路径：${abs}` }; }
     return await writeDocument({ path: abs, format: spec.format as DocFormat, title: spec.title, body: spec.body ?? "" });
   });
 
-  /** 工作树右�?��单：在主进程构建菜单模板，渲染层触发 popup */
+  /** 工作树右键菜单：在主进程构建菜单模板，渲染层触发 popup */
   handleTrusted<{ root: string; params: import("../shared/ipc.js").WorkspaceContextMenuParams }>(
     "slime:workspace:contextmenu",
     (_event, p) => {
@@ -6444,8 +6444,8 @@ function registerIpcHandlers(): void {
       const params = p.params;
       const items: Array<{ label?: string; action?: string; accelerator?: string; enabled?: boolean; type?: "separator" }> = [];
       if (params.isDir) {
-        items.push({ label: "在新标�?打开", action: "open_in_tab", enabled: true });
-        items.push({ label: "复制�?��", action: "copy_path" });
+        items.push({ label: "在新标签打开", action: "open_in_tab", enabled: true });
+        items.push({ label: "复制路径", action: "copy_path" });
         items.push({ type: "separator" as const });
         items.push({ label: "新建文件…", action: "new_file" });
         items.push({ label: "新建文件夹…", action: "new_folder" });
@@ -6453,8 +6453,8 @@ function registerIpcHandlers(): void {
         items.push({ label: "重命名…", action: "rename" });
         items.push({ label: "删除", action: "delete" });
       } else {
-        items.push({ label: "在新标�?打开", action: "open_in_tab", accelerator: "Enter" });
-        items.push({ label: "复制�?��", action: "copy_path", accelerator: "Ctrl+C" });
+        items.push({ label: "在新标签打开", action: "open_in_tab", accelerator: "Enter" });
+        items.push({ label: "复制路径", action: "copy_path", accelerator: "Ctrl+C" });
         items.push({ type: "separator" as const });
         items.push({ label: "重命名…", action: "rename" });
         items.push({ label: "删除", action: "delete" });
@@ -6510,9 +6510,9 @@ function registerIpcHandlers(): void {
 
   /** 右侧栏�?�终�??�：命令运�?�?���?PTY；限时执行，cwd 默�?工作�?���?
    *
-   * A-1139 重写。两�?���?��不在这里�?
+   * A-1139 重写。两个判据都不在这里：
    *   · **用哪�?shell** �?`resolveProfile`（`profileId` 失配时�??默�?，不报错 —�??
-   *     用户�?��机器 / 卸了 PowerShell 7 之后那个 id 就不存在了，此时正确的�?为是
+   *     用户换了机器 / 卸了 PowerShell 7 之后那个 id 就不存在了，此时正确的行为是
    *     "用默�?shell 照常工作"，但渲染层会显示当前 profile �?�?�?到了�?���?��得�?的）�?
    *   · **怎么起它** �?`shellInvocation`（cmd �?`/d /s /c`、VS �?`call ... &&`�?
    *     WSL �?`--cd` 等都在那儿，�?��数可单测）�??
@@ -6563,7 +6563,7 @@ function registerIpcHandlers(): void {
     };
   });
 
-  /** 右侧栏�?�Git 仓库」：初�?化仓库（�?��不存在可�?�� mkdir；已�?��库直接成功） */
+  /** 右侧栏「Git 仓库」：初始化仓库（目录不存在可自动 mkdir；已是仓库直接成功） */
   handleTrusted<{ path?: string }>("slime:git:init", async (_event, p): Promise<GitAction> => {
     const norm = gitPathOf(p?.path);
     if ("error" in norm) { return { ok: false, error: norm.error }; }
@@ -6719,7 +6719,7 @@ function registerIpcHandlers(): void {
       const parent = open.filePaths[0];
       const name = url.split("/").pop()?.replace(/\.git$/i, "") || "repo";
       const target = join(parent, name);
-      if (existsSync(target)) { return { ok: false, error: `�?��已存�?��${target}` }; }
+      if (existsSync(target)) { return { ok: false, error: `目标已存在：${target}` }; }
       const cl = await runGit(["clone", url, target], parent);
       if (cl.code !== 0) { return { ok: false, error: cl.stderr.trim() || "git clone 失败" }; }
       return { ok: true, path: target };
@@ -6736,7 +6736,7 @@ function registerIpcHandlers(): void {
       if ("error" in norm) { return { ok: false, error: norm.error }; }
       const dir = norm.path;
       const relFile = (p?.file ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
-      if (!relFile) { return { ok: false, error: "缺少文件�?��" }; }
+      if (!relFile) { return { ok: false, error: "缺少文件路径" }; }
       const inside = await runGit(["rev-parse", "--is-inside-work-tree"], dir);
       if (inside.code !== 0 || inside.stdout.trim() !== "true") {
         return { ok: false, error: "不是 Git 仓库" };
@@ -6869,7 +6869,7 @@ function registerIpcHandlers(): void {
       const soundOpts = {
         title: "选择提示音音频",
         properties: ["openFile"] as Array<"openFile">,
-        filters: [{ name: "音�?文件", extensions: ["mp3", "wav", "ogg", "m4a", "aac", "flac", "webm", "opus"] }],
+        filters: [{ name: "音频文件", extensions: ["mp3", "wav", "ogg", "m4a", "aac", "flac", "webm", "opus"] }],
       };
       const r = mainWindow && !mainWindow.isDestroyed()
         ? await dialog.showOpenDialog(mainWindow, soundOpts)
@@ -6895,7 +6895,7 @@ function registerIpcHandlers(): void {
   handleTrusted<void>("slime:notify:test", async () => {
     notifyUser({
       kind: "test",
-      // A-1021：标题是**事件文�?**（�? notifyIdentity.ts 的分工�?明）�?
+      // A-1021：标题是**事件文案**（见 notifyIdentity.ts 的分工说明）。
       // 用户要核对的「头部那行应用名」由 ensureNotificationIdentity() 注册�?DisplayName 决定�?
       // 不是这个字�? —�??�?以�?文里把�?看的地方点名说出来�??
       title: "通知测试",
@@ -7012,7 +7012,7 @@ function registerIpcHandlers(): void {
   /** 重置�?��数据：清�?Provider / Agent / 会话与历史（记忆文件保留）�?�渲染层�?先确�?*/
   handleTrusted<void>("slime:data:reset", async (): Promise<{ ok: boolean; error?: string }> => {
     try {
-      // 安全护栏：只允�?清空 PROJECT_ROOT/config/ 下的应用数据文件，绝不触碰其他目�?
+      // 安全护栏：只允许清空 PROJECT_ROOT/config/ 下的应用数据文件，绝不触碰其他目录
       const cfgDir = resolve(PROJECT_ROOT, "config");
       const root = resolve(PROJECT_ROOT);
       if (!root || root === resolve(sep) || root === process.env.USERPROFILE || root === process.env.HOME) {
@@ -7031,7 +7031,7 @@ function registerIpcHandlers(): void {
         return rp.startsWith(cfgDir + sep) || rp === cfgDir;
       };
       if (!underConfig(SESSIONS_PATH)) {
-        return { ok: false, error: `会话文件�?��不在应用数据�?��内（${SESSIONS_PATH}），已中止重置` };
+        return { ok: false, error: `会话文件路径不在应用数据目录内（${SESSIONS_PATH}），已中止重置` };
       }
       // 1) Agent：清历史 + 注销 A2A + 清空注册表并落盘
       const oldAgents = [...agentRegistry!.loadedAgents];
@@ -7042,13 +7042,13 @@ function registerIpcHandlers(): void {
       agentRegistry!.loadedAgents.length = 0;
       await agentRegistry!.save();
       selectedAgentId = null;
-      // 2) Provider 与本地模型注册：写空�?
+      // 2) Provider 与本地模型注册：写空表
       const pr = clearAllProviders();
       if (!pr.ok && pr.error) { return { ok: false, error: pr.error }; }
       engine?.refreshProviders();
-      // 3) 会话（仅删除 config/sessions.json 单文件，�?��已校验在 config/ 内）
+      // 3) 会话（仅删除 config/sessions.json 单文件，路径已校验在 config/ 内）
       try { if (existsSync(SESSIONS_PATH)) { rmSync(SESSIONS_PATH, { force: true }); } } catch { /* 忽略 */ }
-      console.info(`[gui:main] �?��数据已重�?��仅限 ${cfgDir} 下：providers.enc.json / agents.json / history.jsonl / sessions.json）`);
+      console.info(`[gui:main] 本地数据已重置（仅限 ${cfgDir} 下：providers.enc.json / agents.json / history.jsonl / sessions.json）`);
       return { ok: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -7062,7 +7062,7 @@ function registerIpcHandlers(): void {
  * 安全基线（官方清�?#18）：slime:// �?��义协�?���?file://�?
  * - registerSchemesAsPrivileged 必须�?app ready 之前调用（standard/secure 才能正确解析相�? URL�?
  * - protocol.handle �?Electron 25+ 正式 API（registerFileProtocol 已废弃）
- * - 解析后校验路径仍落在 rendererDir 内，防目录�?��??
+ * - 解析后校验路径仍落在 rendererDir 内，防目录逃逸
  */
 function registerSchemePrivileges(): void {
   protocol.registerSchemesAsPrivileged([
@@ -7070,7 +7070,7 @@ function registerSchemePrivileges(): void {
   ]);
 }
 
-/** A-980：主进程协�?安全白名单�?��?�非 Web 协�?（bitbrowser://、mailto:…）�?律拦�?��
+/** A-980：主进程协议安全白名单——非 Web 协议（bitbrowser://、mailto:…）一律拦截，
  *  防�? Chromium 把未�?scheme 交给系统协�?分发触发 Windows「获取打�?此链接的应用」弹窗�??
  *  slime:// 仅主窗口使用，单�?��行�??*/
 function isWebSafeUrl(url: string): boolean {
@@ -7120,7 +7120,7 @@ function localPathOfFileUrl(url: string): string | null {
     if (!url || !url.toLowerCase().startsWith("file:")) { return null; }
     const p = fileURLToPath(url);
     if (!p) { return null; }
-    // �?��受绝对路径（Windows `D:\�? / UNC / POSIX `/�?）�?��?�相对路径不该出现在 file: URL �?
+    // 只接受绝对路径（Windows `D:\…` / UNC / POSIX `/…`）——相对路径不该出现在 file: URL 里
     return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\") || p.startsWith("/") ? p : null;
   } catch { return null; }
 }
@@ -7128,7 +7128,7 @@ function localPathOfFileUrl(url: string): string | null {
 /**
  * A-1133�?*下载闸门**（唯�?产地）�?��??绝不�?Chromium �?�?��文件"默默写进用户磁盘�?
  *
- * 事故里那半句「�?应文件夹�?��生成无效文件」就�?��里漏出来的：**slime 全仓没有任何
+ * 事故里那半句「对应文件夹疯狂生成无效文件」就是这里漏出来的：**slime 全仓没有任何
  * `will-download` 处理�?* �?�?Electron 默�?行为 �?把文�?*直接写进下载�?��**�?
  * 重名�?��加序号�?�不询问。�??把不能渲染的�?��文件当下�?恰恰�?Chromium �?`.docx`
  * 这类类型的默认�?�?�?每�?重试都落�?�?��成品文件�?
@@ -7154,13 +7154,13 @@ function guardLocalFileDownloads(sess: Electron.Session): void {
 /** A-980-R3�?*�?���?*打开外部链接通道—�?�先探测系统�?��注册了�?协�?处理�?��
  *  已注册（装了对应客户�?���?`shell.openExternal` 交给系统应用**真�?打开**�?
  *  �?���?�?返回诊断（绝�?openExternal，避�?Windows「获取打�?此链接的应用」系统�?）�??
- *  A-980-R4：浏览器类协�?��bitbrowser:// 等）**永远返回失败**—�?�即使系统注册了对应浏�?器也
+ *  A-980-R4：浏览器类协议（bitbrowser:// 等）**永远返回失败**——即使系统注册了对应浏览器也
  *  不唤起：这类链接的目的是把另�?款浏览器拉起来加载页�?云控指令，BitBrowser 收到
- *  `bitbrowser://cc` 这类指令�?��打不�?，会在界面顶部弹黄色�?��报错（用户痛批的丑弹窗）�?
+ *  `bitbrowser://cc` 这类指令自己打不开，会在界面顶部弹黄色横幅报错（用户痛批的丑弹窗）。
  *  �?有�?部打�?（webview 深链�?�� / slime:http:open IPC / iframe 深链）都必须走这里�??*/
 async function openExternalSafe(url: string): Promise<{ ok: boolean; handler?: string; reason?: string }> {
   /* ⚠️⚠️ **Chromium 内部协�?�?律拒�?*，绝不去�?��统�?�更�?`openExternal`�?
-     `chrome-extension://`（PDF 查看器等内置扩展）�?�`devtools://`、`view-source:` 在操作系统里
+     `chrome-extension://`（PDF 查看器等内置扩展）、`devtools://`、`view-source:` 在操作系统里
      **永远没有处理�?*；调�?`openExternal` �?���?Electron �?
      「无法打�? �?链接—�?�系统未注册该协�??�的系统框（2026-09-30 用户实测�?��）�??
      ⚠️ 这条�?`isWebSafeUrl` 放�? `chrome-extension` �?*�?�?*：那边�?它别�?���?
@@ -7197,7 +7197,7 @@ function registerProtocolHandler(): void {
     // A-980：任�?webContents（含 <webview> 客页、授权子窗口）�?�?重定向到**�?Web 协�?**
     // （bitbrowser://、mailto: 等）�?�?preventDefault—�?�这�?renderer �?will-navigate 守卫
     // �?*�?���?*：renderer 脚本�?旦漏拦，Chromium 会把�?�� scheme 交给系统协�?分发 �?
-    // Windows 弹�?�获取打�?�?xxx'链接的应用�?��?�主进程兜底保证弹窗绝不�?��出现�?
+    // Windows 弹「获取打开此'xxx'链接的应用」。主进程兜底保证弹窗绝不可能出现。
     webContents.on("will-navigate", (e, url) => {
       // A-980-R12：slime://open?u=�?�?��染层"新建页跳�?桥（站点按钮 window.open/target=_blank �?
       // 注入钩子�?��），**必须放�?**�?renderer �?will-navigate 守卫拦截并新建右栏页；�?�?preventDefault
@@ -7208,7 +7208,7 @@ function registerProtocolHandler(): void {
          代码里没有这�?URL 字�?串），�??.docx 不是它能渲染的类�?�?`ERR_FAILED (-2)`
          �?重试通道（安全网/地址写回）反复重�?�?无休止刷�?+ 界面�?�� + 文件垃圾�?
          这里�?��外层兜底：即使某条入口漏了（右栏地址栏�?�Agent 工具、拖放落�?guest 上）�?
-         也不允�?�?Chromium 画不出来的本地文�?交给它加载�??
+         也不允许把"Chromium 画不出来的本地文件"交给它加载。
          ⚠️ 拦下之后**必须给用户交�?*（�?�知渲染层走文档通道），不�?静默 preventDefault —�??
          静默的表现就�?拖进来没反应"，�?�?��户最初报的症状�??*/
       const localPath = localPathOfFileUrl(url);
@@ -7237,7 +7237,7 @@ function registerProtocolHandler(): void {
     // A-980-R3�?*frame �?*深链拦截—�?�will-navigate/will-redirect �??盖顶层�?�?��站点�?
     // "打开客户�?逻辑常放�?iframe 或脚�?��态创建的链接内（�?frame 导航到�?部协�?��会触�?
     // will-navigate �?Chromium 直接交系统分�?�?�?��册就弹系统�?）�?�will-frame-navigate 覆盖
-    // 任意 frame：非 Web 协�? preventDefault 后经 openExternalSafe 真实打开（确认是否�?了�?户�?）�??
+    // 任意 frame：非 Web 协议 preventDefault 后经 openExternalSafe 真实打开（确认是否装了客户端）。
     webContents.on("will-frame-navigate", (details) => {
       const url = details?.url ?? "";
       if (isWebSafeUrl(url)) { return; }
@@ -7252,16 +7252,16 @@ function registerProtocolHandler(): void {
       });
     });
     webContents.setWindowOpenHandler(({ url }) => {
-      // A-980-R11：站�?新建页跳�?（window.open / target=_blank）不再静默失败�?��??
+      // A-980-R11：站点"新建页跳转"（window.open / target=_blank）不再静默失败——
       // webview 已加 allowpopups，guest 的开窗�?求会到达�?handler。web URL �?律在
       // slime 右栏**新浏览器�?*打开（send slime:sidebar:open �?renderer 新建/复用 tab）；
       // �?Web 协�?保持拒绝 + 通知（renderer 协�?�??�?/ 缺应用诊�?��。窗口本�?*绝不
       // 真实创建**（return deny）�?��?�防站点弹系统新窗抢焦点、阻�?Agent 工具�?��
-      // （A-980-R 用户实测「中途弹出的登录弹窗，不关就得卡死�?�）�?
+      // （A-980-R 用户实测「中途弹出的登录弹窗，不关就得卡死」）。
       try {
         if (url.startsWith("slime://open?u=")) {
-          // 旧注入钩子（slime://open 桥）的兼容分�?��解析出真实网�?再开页�??
-          // A-975-R3 起钩子已整体撤除，这里只作历史兜底保留�??
+          // 旧注入钩子（slime://open 桥）的兼容分支：解析出真实网址再开页。
+          // A-975-R3 起钩子已整体撤除，这里只作历史兜底保留。
           try {
             const u = new URL(url).searchParams.get("u");
             if (u && /^https?:\/\//i.test(u)) {
@@ -7272,7 +7272,7 @@ function registerProtocolHandler(): void {
         }
         if (isWebSafeUrl(url)) {
           // ⚠️ A-975-R4：站点弹窗必须带 from:"site" —�??渲染层据此做**弹窗风暴限流**�?
-          // 站点广告会在计时器里连续 window.open，�?�右栏浏览器页是常驻挂载（webview 不卸载）�?
+          // 站点广告会在计时器里连续 window.open，而右栏浏览器页是常驻挂载（webview 不卸载），
           // 每弹�?�?��多一�?��驻重页面 �?内存暴涨、渲染进程卡死（用户实测"浏�?器什么都点不�?）�??
           mainWindow?.webContents.send("slime:sidebar:open", { kind: "url", url, name: "", from: "site" });
         } else {
@@ -7283,7 +7283,7 @@ function registerProtocolHandler(): void {
     });
   });
 
-  // A-980-R2：深度链接�?�真实打�?」�?��?�拦�?�� bitbrowser:// 等非 Web 协�?时，**不再屏蔽**�?
+  // A-980-R2：深度链接「真实打开」——拦截到 bitbrowser:// 等非 Web 协议时，**不再屏蔽**，
   // 而是先探测系统是否注册了该协�??理器：已注册（用户安�?BitBrowser 等�?户�?后自动注册）�?
   // 调系统协�?���?*真�?打开链接**（弹窗报错消失�?�链接意图达成）；未注册 �?返回明确诊断
   // 「需要安�?xxx 客户�??�，由渲染层提示用户，绝不弹系统对话框�?�绝不静默卡住�??
@@ -7291,9 +7291,9 @@ function registerProtocolHandler(): void {
     const url = typeof raw === "string" ? raw.trim() : "";
     if (!url) { return { ok: false, reason: "空链接" }; }
     const scheme = (url.split(":")[0] || "").toLowerCase();
-    // Web 链接不走系统协�?分发（应由浏览器页�?�?��，防止�?滥用为�?部打�?
+    // Web 链接不走系统协议分发（应由浏览器页导航），防止被滥用为外部打开
     if (isWebSafeUrl(url)) { return { ok: false, reason: "web" }; }
-    const r = await openExternalSafe(url); // A-980-R3：统�?走�?�探测→已注册才打开」�?�道
+    const r = await openExternalSafe(url); // A-980-R3：统一走「探测→已注册才打开」通道
     return r.ok ? { ok: true, url, scheme, handler: r.handler } : { ok: false, url, scheme, reason: r.reason ?? "空链接" };
   });
 }
@@ -7313,7 +7313,7 @@ function main(): void {
   app.commandLine.appendSwitch("v8-cache-options", "code");
 
   // A-980-R：�?�?Chromium �?ExternalProtocolDialog 特�?��?��??*系统级绝�?**�?
-  // 即便�?��某条导航绕过全部 will-navigate/will-redirect 守卫抵达系统协�?分发�?
+  // 即便未来某条导航绕过全部 will-navigate/will-redirect 守卫抵达系统协议分发，
   // �?��协�?（bitbrowser:// 等）�?*不会再弹** Windows「获取打�?此链接的应用」�?话�?
   // （无注册应用则静默失败不打扰）�?�与既有守卫构成双脚架：守卫�?导航到达 OS 层之�?
   // 拦掉，�?�?关保�?即使漏网�?OS 层也绝不弹窗"�?
@@ -7327,21 +7327,21 @@ function main(): void {
   // 方向写反了�?��?�用户一旦开 Clash 全局代理，�?行会�?127.0.0.1:8081 的�?求强行丢进代�?�?白屏�?
   // 正确做法 = �?么都不做（默认即直连）�?�若�?���?显式兜底，应写普通条�?127.0.0.1;localhost，不要用尖括号�?法�??
 
-  // A-980-R5（GPU 白屏根治）：**默�?不再禁用 GPU**。实弹�?照验证（同机 Electron 35 webview 加载
+  // A-980-R5（GPU 白屏根治）：**默认不再禁用 GPU**。实弹对照验证（同机 Electron 35 webview 加载
   // 127.0.0.1:8081）：disable-gpu + disable-gpu-sandbox �?capturePage 返回 **0 字节、整窗无像素**
   // （webview 网络导航全部成功但内容完全不绘制 �?白屏无错�?��；克 GPU 时页面�?常绘制�??
-  // 此前"部分机器 GPU 崩溃 exit_code=-1"的�?避本�?��部分�??制�?�了持续白屏（含 Agent 打开
+  // 此前"部分机器 GPU 崩溃 exit_code=-1"的规避本身在部分环境制造了持续白屏（含 Agent 打开
   // �?�� HTTP 服务"其他浏�?器能�?、slime 白屏"的经典症状）。改为默认启�?GPU，保留�?�生�?��
-  // �??变量 SLIME_DISABLE_GPU=1 时仍回�??�?��染（仅个�?��溃机器需要）�?
+  // 环境变量 SLIME_DISABLE_GPU=1 时仍回退软渲染（仅个别崩溃机器需要）。
   if (process.env.SLIME_DISABLE_GPU === "1") {
     app.commandLine.appendSwitch("disable-gpu");
     app.commandLine.appendSwitch("disable-gpu-sandbox");
   }
 
   // 统一应用名：安�?器写 HKCU Run 值名 "Slime"，�??setLoginItemSettings �?app.getName()
-  // 作�?�名（默认取 package.json name = "slime-gui"）�?��?�不同名会�?致�?�?��关与安�?勾�?�不同�?�?
+  // 作值名（默认取 package.json name = "slime-gui"）——不同名会导致设置开关与安装勾选不同步。
   // 注意：boot.ts 已在模块加载时用 app.getPath("userData") 解析数据根（%APPDATA%\slime-gui），
-  // 此�? setName 不会改变已解析的 userData �?���?
+  // 此处 setName 不会改变已解析的 userData 路径。
   app.setName("Slime");
 
   /**
@@ -7383,14 +7383,14 @@ function main(): void {
     }
   });
 
-  // CDP 远程调试�?��（仅�?发环境开�?��便于 agent-browser �?��化接入）�?
-  // 安全：以 app.isPackaged 判定—�?�构建产物中 process.env.NODE_ENV 不做静�?�替�?��运�?时未设置�?
+  // CDP 远程调试端口（仅开发环境开启，便于 agent-browser 自动化接入）。
+  // 安全：以 app.isPackaged 判定——构建产物中 process.env.NODE_ENV 不做静态替换且运行时未设置，
   // 旧判定会让�?式包默�?�?�?9222，本机任意进程可附到渲染层执行任�?JS、�?取全�?IPC 流量�?
   // ⚠️ A-1110：�?�?*不再�?���?9222**。Chromium �?devtools http server **不会�?��换�?�?*�?
   //   9222 �?��（上�?�?dev 实例没�??干净 / 另一�?userData �?��的实�?/ agent-browser 之类�?
-  //   工具�?���?�? 9222）时�?�� bind 失败，在调试面板刷出那两�?
+  //   工具自己开着 9222）时只会 bind 失败，在调试面板刷出那两条
   //   `�?ind() returned an error�?0x2740)` + `Cannot start http server for devtools`�?
-  //   并�?整�? CDP 能力**静默消失**（verify-packaged / agent-browser 全哑）�??
+  //   并让整套 CDP 能力**静默消失**（verify-packaged / agent-browser 全哑）。
   // 选择逻辑（env 覆盖 �?占用顺延 �?临时�?�� �?落盘发布）全�?`devtoolsPort.ts`（唯�?出�?）�??
   // ⚠️ 必须在这里（`ready` 之前）appendSwitch —�??ready 之后再调�?*不生�?*�?
   //   而那正是「探针必须同步�?�的原因（�?该模块文件头）�??
@@ -7411,7 +7411,7 @@ function main(): void {
 
   app.whenReady()
     .then(async () => {
-      // 先建窗口立即出�?屏，后�? sidecar 并�?�?��（渲染层�?��加载面板展示进度�?
+      // 先建窗口立即出首屏，后端 sidecar 并行启动（渲染层启动加载面板展示进度）
       registerProtocolHandler();
       // A-980-R13：给 webview �?�� session（persist:slime-browser）注�?slime:// 处理器�?��??
       // app �?protocol.handle 对独�?partition **不生�?*，用户实�?webview 导航 slime:// 仍弹
@@ -7427,7 +7427,7 @@ function main(): void {
       createWindow();
       // A-1110�?*发布实际 CDP �?��**。�?口现在会变（占用顺延），而�?部工具（verify-packaged /
       // agent-browser）历史上都写�?9222 �?不发布就等于把它�?��悄弄坏�??
-      // `port === 0` 时真值由 Chromium 写在 `<userData>/DevToolsActivePort`，所以轮询几帧再落盘�?
+      // `port === 0` 时真值由 Chromium 写在 `<userData>/DevToolsActivePort`，所以轮询几帧再落盘。
       // ⚠️ 落盘与上面的日志�?*两条�?��的发现路�?*（日志给坐在终�?前的人，文件给脚�?���?
       if (devtoolsDecision) {
         void (async () => {
@@ -7448,7 +7448,7 @@ function main(): void {
       // A-1055：托盘常�?—�??应用�?起来就出现在系统托盘栏（用户要求"�?? slime 打开就直接出现图�?）�??
       // 不再依赖"关闭窗口时是否后台模�?这个条件（那正是"要的时�?�没�?的根因）�?
       ensureTray();
-      // A-984：主进程卡�?看门狗（用户实测过一�?界面点按�?��反应"，当时只能从
+      // A-984：主进程卡死看门狗（用户实测过一次"界面点按钮没反应"，当时只能从
       // audit.jsonl 停�?写入反推主进程�?�?�� —�??没有日志就无法归因，故补这个探针�?
       startMainWatchdog();
       markMainActivity("app ready");
@@ -7470,12 +7470,12 @@ function main(): void {
          更�?规则�?`config/adblock/*.txt`（EasyList 派生的域名形态即�?��。�?�?adblock.ts 头注释�??*/
       installAdBlocker(session.fromPartition("persist:slime-browser"), PROJECT_ROOT);
       registerIpcHandlers();
-      // A-1049：�?�?�� Agent 时�?�?��认�?�助手�?�，让�?迎页输入框�?�快捷按�??�Agent 选择器全部可�?
+      // A-1049：首启无 Agent 时预置默认「助手」，让欢迎页输入框、快捷按钮、Agent 选择器全部可用
       void ensureDefaultAgent();
-      registerUpdaterHandlers(); // 注册�?��更新 IPC handler
-      // 更新状�?�推送到渲染进程（StatusPanel 监听 slime:update:status�?
+      registerUpdaterHandlers(); // 注册自动更新 IPC handler
+      // 更新状态推送到渲染进程（StatusPanel 监听 slime:update:status）
       setStatusSink((s) => mainWindow?.webContents.send("slime:update:status", s));
-      initUpdater();             // 延迟�?查更新（不阻塞�?屏）
+      initUpdater();             // 延迟检查更新（不阻塞首屏）
       // �?��状�?�推送到渲染进程（启动加载面�?slime:boot:event�?
       setBootSink((s) => mainWindow?.webContents.send("slime:boot:event", s));
       // A-1043：重初�?化改�?*�?��期后台�?�?*�?
@@ -7486,17 +7486,17 @@ function main(): void {
       void ensureServices().catch((e) => {
         console.warn("[gui:main] 后台预热失败（�?屏不受影响，对话时会按需重试�?", e);
       });
-      void startPythonBackend(); // 并�?�?��，不阻�?窗口
+      void startPythonBackend(); // 并行启动，不阻塞窗口
       // LLM 网关�?���?��：配�?enabled 时随应用�?��（auth token �?���?�� fallback，网关�?点用�?�� key�?
       void (async () => {
         try {
           const cfg = readLlmGatewayConfig();
           if (cfg.enabled) {
             const r = await getLlmGatewayManager().start();
-            if (!r.ok) { console.warn("[gui:main] LLM 网关�?��失败:", r.error); }
+            if (!r.ok) { console.warn("[gui:main] LLM 网关启动失败:", r.error); }
           }
         } catch (e) {
-          console.warn("[gui:main] LLM 网关�?���?��异常:", e);
+          console.warn("[gui:main] LLM 网关自动启动异常:", e);
         }
       })();
       // dev 模式优先�?electron-vite dev server（渲染层�?��新实时生效）�?
@@ -7514,7 +7514,7 @@ function main(): void {
         });
       }
     })
-       .catch((e) => { console.error("[gui:main] �?��失败:", e); process.exit(1); });
+       .catch((e) => { console.error("[gui:main] 启动失败:", e); process.exit(1); });
 
   // A-975：主进程兜底—�?�渲染进程崩�?主进程未知异常全部落盘（不�??出�?�静默�?错）�?
   // 便于用户�?data/logs/main-errors.log 里�?�?�?error 贴出来精�?��位（DeepSeek 白屏调查�?��）�??
@@ -7544,7 +7544,7 @@ function main(): void {
     silamBrain?.close();
     silamBrain = null;
     void terminateModelServer();
-    void getLlmGatewayManager().stop(); // 停�? LLM 网关，释放�?�?
+    void getLlmGatewayManager().stop(); // 停止 LLM 网关，释放端口
     // A-918++：�??出前清理�?�?HTTP 静�?�服务，释放�?��
     try { httpServer.stopAll(); } catch { /* 忽略清理异常 */ }
   });
@@ -7560,7 +7560,7 @@ let pythonBackend: ChildProcess | null = null;
 const SLIME_PORT = process.env.SLIME_PORT || "19000";
 
 /** A-965 core-ts↔server 通报：SILAM 情绪/成长�?�?slime_server /agents/{id}/evolve 驱动人格演化�?
- *  fire-and-forget：token 缺失 / 请求失败�?律静默（server �?��、鉴权失败均不阻塞�?话）�?
+ *  fire-and-forget：token 缺失 / 请求失败一律静默（server 未起、鉴权失败均不阻塞对话）。
  *  节流：同 agent 5 分钟内至多�?�报�?次（�?engine persistSilamAffect 节流对齐）�??*/
 const silamEvolveThrottle = new Map<string, number>();
 function notifySilamEvolve(agentId: string, state: SilamAffectState): void {
@@ -7623,7 +7623,7 @@ function resolveExtra(subpath: string): string {
 }
 
 /**
- * 随包资源根：`llama.cpp/`、`runtime/venv/`、`models/`、`slime_server.py`、`requirements.txt`�?
+ * 随包资源根：`llama.cpp/`、`runtime/venv/`、`models/`、`slime_server.py`、`requirements.txt`。
  *
  * ⚠️ �?`resolveExtra` �?*两个不同的根**，混用就�?运�?�??怎么都�?测不�?的根因：
  * 打包模式下两者相等（extraFiles 都落到安装根），但开发模式下随包依赖留在**项目�?*
@@ -7639,7 +7639,7 @@ function resolveBundled(subpath: string): string {
 
 async function startPythonBackend(): Promise<void> {
   emitBoot({ phase: "backend", backendReady: false, message: "正在启动本地后端服务…" });
-  // 定位 Python venv（Windows: Scripts/python.exe，Linux/macOS: bin/python�?
+  // 定位 Python venv（Windows: Scripts/python.exe，Linux/macOS: bin/python）
   const venvSub = process.platform === "win32" ? "Scripts" : "bin";
   const venvPyName = process.platform === "win32" ? "python.exe" : "python";
   const venvPython = resolveBundled(join("runtime", "venv", venvSub, venvPyName));
@@ -7656,7 +7656,7 @@ async function startPythonBackend(): Promise<void> {
     SLIME_PORT,
     /* A-1101：把 python 管道编码**显式钉成 UTF-8**，与下面 `data.toString()` 的解码口�?*成�?**�?
      * ⚠️ 诚实记录（本机实测）：这台机器的系统已启用�?�Beta: UTF-8」⇒ venv 解释�?3.12.9)�?管道
-     * 写的**�?��就是 utf-8**（`sys.stdout.encoding = utf-8`）⇒ �?�� cmd 里看到的乱码**不是**这一层，
+     * 写的**本来就是 utf-8**（`sys.stdout.encoding = utf-8`）⇒ 本机 cmd 里看到的乱码**不是**这一层，
      * 而是**终�?渲染�?*（控制台代码�?CP936 收到 UTF-8 字节）�?��??那一层归
      * `gui/scripts/dev-utf8.mjs` �?`chcp 65001` 管�??
      * 那这两个变量还�?不�?？�? —�??这是**部署面加�?*：默认编码跟解释器版�?��系统设置�?
@@ -7667,13 +7667,13 @@ async function startPythonBackend(): Promise<void> {
     PYTHONIOENCODING: "utf-8",
   };
   if (process.platform !== "win32") {
-    // Linux/macOS：llama-server 动�?�库加载（随包布�?：资源根/llama.cpp/build/bin�?
+    // Linux/macOS：llama-server 动态库加载（随包布局：资源根/llama.cpp/build/bin）
     const libDir = resolveBundled(join("llama.cpp", "build", "bin"));
     env.LD_LIBRARY_PATH = libDir + (env.LD_LIBRARY_PATH ? `:${env.LD_LIBRARY_PATH}` : "");
   }
   // �?detached：�? python sidecar 随主进程生命周期结束（否则主程序�?�?崩溃后其
   // 僵尸进程仍占�?SLIME_PORT(19000)，下次启动报 [Errno 10048] 绑定失败，且就绪
-  // �?测会�??旧僵尸服务的 /health 而假�?已就�?）�??
+  // 检测会误读旧僵尸服务的 /health 而假报"已就绪"）。
   pythonBackend = spawn(venvPython, [serverScript], {
     env,
     windowsHide: true,
@@ -7700,7 +7700,7 @@ async function startPythonBackend(): Promise<void> {
   }
   // A-1048�?0 秒没就绪**不等�?*起不�?—�??Windows �?Python 首�?导入（tools/skills/a2a
   // �?�?import + �?能扫描）经常超过 10 秒�?�旧实现在这里直接判 degraded **且不再重�?*�?
-  // 于是 12 秒才就绪的后�??永久标�?�?�?��性受�?（用户看到降级提示，后�?其实好着�?���?
+  // 于是 12 秒才就绪的后端被永久标记为"可用性受限"（用户看到降级提示，后端其实好着呢）。
   // 现在：先�?仍在�?��"，后台继�?���?�?50 秒，就绪即把状�?�升�?ready；真起不来才�?degraded�?
   console.warn("[gui:backend] slime_server.py 启动较慢（>10秒），后台继续等待就绪…");
   emitBoot({ phase: "backend", backendReady: false, message: "后端服务仍在启动（首次导入较慢）…" });
@@ -7743,12 +7743,12 @@ function initModelServerManager(): void {
       embedding: cfg.embedding,
       chat: cfg.chat,
     }, {
-      // A-1017：�?��?在加载本地模型�?�面板的�?��驱动源�??
+      // A-1017：「正在加载本地模型」面板的唯一驱动源。
       // 此前�?��条�?话开始前由本文件预判"这�?要加载吗"（另读一�?providers �?+ 裸路径比较）—�??
-      // 与引擎实际加载的 model_path �?旦不�?致就永久判否，于�?��型已就绪也每�?���?次全屏面板�??
+      // 与引擎实际加载的 model_path 一旦不一致就永久判否，于是模型已就绪也每轮弹一次全屏面板。
       // 现在�?��管理�?*真的**进入 loading 时才弹，进入 ready/idle 即刻收（不再等整�?��答结束）�?
       onChatState: (ev) => {
-        /* S4-D：状态一有迁移就作废能力缓存�?
+        /* S4-D：状态一有迁移就作废能力缓存。
            为什么不能只�?2s TTL：`probeManagedChatCapability()` �?`getLocalCapability()`
            �?*不传 alias**，于�?���?key �?���?�� —�??而模型切�?重载**恰好发生在同�?�??口上**�?
            不清缓存，切换后�?�?2s 内会�?*上一�?���?*�?n_ctx 去回答，
@@ -7785,5 +7785,5 @@ async function terminateModelServer(): Promise<void> {
   if (mgr) {
     await mgr.shutdown().catch((e) => console.warn("[gui:main] 模型服务器关�?���?", e));
   }
-  setModelServer(new ModelServerManager({})); // 重置单例引用（防重�? shutdown�?
+  setModelServer(new ModelServerManager({})); // 重置单例引用（防重复 shutdown）
 }
