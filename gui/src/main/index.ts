@@ -4768,7 +4768,7 @@ function registerIpcHandlers(): void {
           err ? rejectP(err) : resolveP();
         });
       });
-      log.push("�?venv 重建完成");
+      log.push("✅ venv 重建完成");
       return { ok: true, log: log.join("\n").slice(-4000) };
     } catch (e) {
       log.push(`安装失败：${e instanceof Error ? e.message : String(e)}`);
@@ -5235,7 +5235,7 @@ function registerIpcHandlers(): void {
       if (r.reason === "browser-scheme") {
         return { ok: false, error: `已拦截浏览器唤起链接 ${(url.split(":")[0] || "").toLowerCase()}:// ——不唤醒外部浏览器` };
       }
-      return { ok: false, error: `链接 ${(url.split(":")[0] || "").toLowerCase()}:// �?要安装�?应�?户�?才能打开（系统未注册该协�?��` };
+      return { ok: false, error: `链接 ${(url.split(":")[0] || "").toLowerCase()}:// 需要安装对应客户端才能打开（系统未注册该协议）` };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -5749,7 +5749,7 @@ function registerIpcHandlers(): void {
     if (selectedAgentId && deleted.includes(selectedAgentId)) {
       selectedAgentId = null;
     }
-    console.info(`[gui:main] 已删�?Agent 子树: ${deleted.join(", ")}`);
+    console.info(`[gui:main] 已删除 Agent 子树: ${deleted.join(", ")}`);
     // A-1106：删除后**必须**把被删的 Agent 从可派发清单里摘掉。否则清单里会留着一个
     // 已经不存在的名字：模型点名派�?�?`delegate()` 找不到可执�? Agent �?每�?派发都失败�??
     syncDispatchableSubagents();
@@ -6829,14 +6829,14 @@ function registerIpcHandlers(): void {
       const exePath = app.getPath("exe");
       const uninstaller = join(dirname(exePath), "Uninstall Slime.exe");
       if (!existsSync(uninstaller)) {
-        return { ok: false, error: `�?��到卸载程序（${uninstaller}）�?��?到�?�控制面�?�?程序」或安�?�?���?��行卸载器。` };
+        return { ok: false, error: `未找到卸载程序（${uninstaller}）。请到「控制面板 → 程序」或安装目录中运行卸载器。` };
       }
       spawn(uninstaller, [], { detached: true, stdio: "ignore" }).unref();
       app.quit();
       return { ok: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("[gui:main] �?��卸载器失�?", e);
+      console.error("[gui:main] 启动卸载器失败:", e);
       return { ok: false, error: msg };
     }
   });
@@ -7484,7 +7484,7 @@ function main(): void {
       // （`slime:agents:list` / `slime:sessions:list` �?`ensureRegistry()`），重活在这里并行跑�?
       // 单�?保证�?���?遍�?��?�?��败不影响首屏（�?话时会按�?重试）�??
       void ensureServices().catch((e) => {
-        console.warn("[gui:main] 后台预热失败（�?屏不受影响，对话时会按需重试�?", e);
+        console.warn("[gui:main] 后台预热失败（首屏不受影响，对话时会按需重试）:", e);
       });
       void startPythonBackend(); // 并行启动，不阻塞窗口
       // LLM 网关�?���?��：配�?enabled 时随应用�?��（auth token �?���?�� fallback，网关�?点用�?�� key�?
@@ -7710,14 +7710,14 @@ async function startPythonBackend(): Promise<void> {
       try {
         const res = await fetch(`http://localhost:${SLIME_PORT}/health`, { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
-          console.info(`[gui:backend] slime_server.py 已就�?���?��耗时�?${10 + (i + 1) * 0.5} 秒）`);
+          console.info(`[gui:backend] slime_server.py 已就绪（启动耗时约 ${10 + (i + 1) * 0.5} 秒）`);
           emitBoot({ phase: "ready", backendReady: true, message: "后端服务已就绪" });
           return;
         }
       } catch { /* 继续重试 */ }
     }
-    console.error("[gui:backend] slime_server.py �?��超时�?0秒）");
-    emitBoot({ phase: "degraded", backendReady: false, message: "后�?服务�?��超时（可用�?�受限）" });
+    console.error("[gui:backend] slime_server.py 启动超时（60秒）");
+    emitBoot({ phase: "degraded", backendReady: false, message: "后端服务启动超时（可用性受限）" });
   })().catch(() => { /* 后台探测失败不影响主流程 */ });
 }
 
@@ -7764,17 +7764,17 @@ function initModelServerManager(): void {
             message: `正在加载本地模型「${ev.modelName || basename(ev.modelPath)}」——首次加载可能需要数十秒`,
             key: lastChatCancelKey ?? undefined,
           });
-          console.info(`[gui:main] �?��模型�?始加�? ${ev.modelName} (${ev.modelPath})`);
+          console.info(`[gui:main] 本地模型开始加载: ${ev.modelName} (${ev.modelPath})`);
         } else {
           w.webContents.send("slime:model:loading", { loading: false });
-          if (ev.state === "ready") { console.info(`[gui:main] �?��模型已就�? ${ev.modelName}`); }
+          if (ev.state === "ready") { console.info(`[gui:main] 本地模型已就绪: ${ev.modelName}`); }
           else if (ev.error) { console.warn(`[gui:main] �?��模型�?���?${ev.state}): ${ev.modelName} �?${ev.error}`); }
         }
       },
     });
     setModelServer(mgr);
     void mgr.startup(); // 后台预加载常�?BGE 嵌入实例（不阻�?主窗口）
-    console.info("[gui:main] ModelServerManager 已初始化", { llama_bin: cfg.llama_bin ?? "(�?���?" });
+    console.info("[gui:main] ModelServerManager 已初始化", { llama_bin: cfg.llama_bin ?? "(未配置)" });
   } catch (e) {
     console.error("[gui:main] 初�?�?ModelServerManager 失败:", e);
   }
@@ -7783,7 +7783,7 @@ function initModelServerManager(): void {
 async function terminateModelServer(): Promise<void> {
   const mgr = getModelServer();
   if (mgr) {
-    await mgr.shutdown().catch((e) => console.warn("[gui:main] 模型服务器关�?���?", e));
+    await mgr.shutdown().catch((e) => console.warn("[gui:main] 模型服务器关闭失败:", e));
   }
   setModelServer(new ModelServerManager({})); // 重置单例引用（防重复 shutdown）
 }
