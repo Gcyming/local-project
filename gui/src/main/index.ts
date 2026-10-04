@@ -2863,7 +2863,7 @@ function writePersistedTheme(theme: string): void {
     writeFileSync(THEME_CFG_PATH, JSON.stringify({ theme: theme === "alpha" ? "alpha" : "beta" }, null, 2), "utf8");
   } catch (e) {
     /* 持久化失败不影响�??运�?，只�?��次启�?overlay 初�?�可能不�?*/
-    console.warn("[gui:main] 写入主�?配置失败:", e instanceof Error ? e.message : String(e));
+    console.warn("[gui:main] 写入主机配置失败:", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -4420,7 +4420,7 @@ function registerIpcHandlers(): void {
       try {
         const purged = await clearLegacySessionHistory(aid);
         if (purged > 0) {
-          console.info(`[gui:main] 工作文件夹删除时清理遗留历史（无 session_id�? agent=${aid} 条数=${purged}`);
+          console.info(`[gui:main] 工作文件夹删除时清理遗留历史（无 session_id）: agent=${aid} 条数=${purged}`);
         }
       } catch { /* 忽略单条历史清理失败 */ }
     }
@@ -7776,7 +7776,7 @@ function initModelServerManager(): void {
     void mgr.startup(); // 后台预加载常�?BGE 嵌入实例（不阻�?主窗口）
     console.info("[gui:main] ModelServerManager 已初始化", { llama_bin: cfg.llama_bin ?? "(未配置)" });
   } catch (e) {
-    console.error("[gui:main] 初�?�?ModelServerManager 失败:", e);
+    console.error("[gui:main] 初始化 ModelServerManager 失败:", e);
   }
 }
 
