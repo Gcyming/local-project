@@ -73,7 +73,7 @@ var contextBridge = electron.contextBridge;
 var ipcRenderer = electron.ipcRenderer;
 
 
-var CH =  null;
+var CH = /*__SLIME_CHANNELS__*/ null;
 
 
 var HOST_NAME = "slime 浏览器内核";

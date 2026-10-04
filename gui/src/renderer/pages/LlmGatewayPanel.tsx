@@ -404,7 +404,7 @@ curl -X POST http://127.0.0.1:${cfg.port}/v1/chat/completions \\
 # 强制指定供应商（provider:model 语法）
   -d '{"model":"anthropic:claude-sonnet-4-20250514", ...}'`}</pre>
         <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.5 }}>
-          在 Cherry Studio 等第三方客户端里，把 API 地址填 <code>http:
+          在 Cherry Studio 等第三方客户端里，把 API 地址填 <code>http://127.0.0.1:{cfg.port}/v1</code>、Key 填上方的独立 Key（或 slime 全局 token），即可复用 slime 已配置的全部上游模型。
         </div>
       </div>
 

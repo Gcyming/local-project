@@ -345,7 +345,7 @@ export default function SearchIndexPanel(): JSX.Element {
           </span>
           {running && (
             <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
-              监听 <code>http:
+              监听 <code>http://127.0.0.1:{st?.port ?? 8600}</code>
             </span>
           )}
           <span style={{ flex: 1 }} />
