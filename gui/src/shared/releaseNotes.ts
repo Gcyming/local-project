@@ -231,7 +231,7 @@ function parseInlineInto(
 
 export function safeHref(url: string): string {
   const u = url.trim();
-  return /^https?:\/\
+  return /^https?:\/\//i.test(u) ? u : "";
 }
 
 function isTableSeparator(line: string): boolean {
