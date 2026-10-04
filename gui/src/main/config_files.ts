@@ -511,6 +511,25 @@ export function addMcp(input: {
   }
 }
 
+/**
+ * A-1140：往 SKILL.md 的 frontmatter 里注入一个字段（**已存在则不覆盖**）。
+ *
+ * 用途：给「官方市场下载来的技能」打上 `origin: market` —— 插件页的来源维度靠它分类。
+ * 为什么不直接拼字符串：下载来的 SKILL.md **自带 frontmatter**（name/description/许可等），
+ * 整块重写会把上游字段丢掉；这里只做「在闭合 `---` 之前插一行」。
+ * 没有 frontmatter 时补一个最小块（否则该字段读不到，来源会显示「未声明」）。
+ */
+function injectFrontmatterField(text: string, key: string, value: string): string {
+  const m = /^\uFEFF?---\r?\n([\s\S]*?)(?:\r?\n---)/.exec(text);
+  if (!m) {
+    return `---\n${key}: ${value}\n---\n\n${text}`;
+  }
+  if (new RegExp(`^\\s*${key}\\s*:`, "m").test(m[1])) {
+    return text;                       // 上游已声明该字段，尊重原文
+  }
+  return `---\n${m[1]}\n${key}: ${value}` + text.slice(m.index + m[0].length);
+}
+
 /** 新增技能（生成 config/skills/<name>/SKILL.md，含 frontmatter；GUI 表单直达，小白无需手动建目录）。
  *  A-918++：此前技能只能手动放文件夹；现提供表单创建。 */
 export function addSkill(input: { name: string; description: string; content?: string }): { ok: boolean; error?: string; name?: string } {
@@ -522,7 +541,8 @@ export function addSkill(input: { name: string; description: string; content?: s
   const dir = join(base, name);
   if (existsSync(dir)) { return { ok: false, error: `已存在同名技能「${name}」` }; }
   const body = (input.content ?? "").trim() || `# ${name}\n\n${desc}\n`;
-  const md = `---\nname: ${name}\ndescription: ${desc}\n---\n\n${body}\n`;
+  // A-1140：声明来源为「用户自备」—— 插件页的来源维度靠它分类，不写就显示「未声明」
+  const md = `---\nname: ${name}\ndescription: ${desc}\norigin: user\n---\n\n${body}\n`;
   const manifest = `name: ${name}\nversion: "1.0"\ndescription: ${desc}\n`;
   try {
     mkdirSync(dir, { recursive: true });
@@ -644,7 +664,8 @@ export async function installSkillFromMarket(name: string): Promise<{ ok: boolea
     if (!rawRes.ok) { return { ok: false, error: `下载 SKILL.md 失败（HTTP ${rawRes.status}）` }; }
     const text = await rawRes.text();
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "SKILL.md"), text, "utf8");
+    // A-1140：打上「官方市场」来源（注入而非重写，保留上游 frontmatter 全部字段）
+    writeFileSync(join(dir, "SKILL.md"), injectFrontmatterField(text, "origin", "market"), "utf8");
     const desc = extractFrontmatterDescription(text) || safeName;
     writeFileSync(join(dir, "manifest.yaml"), `name: ${safeName}\nversion: "1.0"\ndescription: ${desc}\n`, "utf8");
     return { ok: true, name: safeName };
