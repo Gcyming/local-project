@@ -75,7 +75,7 @@ function classifyPermissions(actions: Array<{ action: string; target: string }>)
     // �?�?��册工具：不猜、不放�?，交给用户�?批（fail-closed�?
     if (!tool) {
       allAuto = false;
-      reasons.push(`${name}: �?��册工具，�?用户�??（fail-closed）`);
+      reasons.push(`${name}: 未注册工具，需用户确认（fail-closed）`);
       continue;
     }
 
@@ -1564,10 +1564,10 @@ const ensureServicesOnce = singleFlight<void>(async () => {
       silamBrain = await SilamBrainClient.start(silamCfg);
       console.info(`[gui:silam] 绝对大脑兑底 ${silamBrain.enabled ? "已就绪（无模型时由 SILAM 应答）" : "不可用（回落默认提示）"}`);
     } else {
-      console.info(`[gui:silam] 兑底�?���?��enabled=${silamCfg.enabled} as_brain=${silamCfg.asBrain}）`);
+      console.info(`[gui:silam] 兑底未开启（enabled=${silamCfg.enabled} as_brain=${silamCfg.asBrain}）`);
     }
   } catch (e) {
-    console.warn(`[gui:silam] 大脑�?��跳过: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[gui:silam] 大脑启动跳过: ${e instanceof Error ? e.message : String(e)}`);
   }
   engine = createEngine({
     registry,
@@ -1921,7 +1921,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         res.statusCode = 404;
         res.end(JSON.stringify({ ok: false, error: "not found" }));
       }).listen(19011, "127.0.0.1").on("error", (e) => {
-        console.warn(`[agent-http] 事件�?��监听失败: ${e instanceof Error ? e.message : String(e)}`);
+        console.warn(`[agent-http] 事件端点监听失败: ${e instanceof Error ? e.message : String(e)}`);
       });
 
       // A-910：�?�?��「后台任务�?�IPC —�??定时任务增删/暂停恢�?/立即触发、子代理派发、整体快�?
@@ -2079,14 +2079,14 @@ const ensureServicesOnce = singleFlight<void>(async () => {
     const mgr = getModelServer();
     if (!mgr) return;
     void mgr.startEmbedding().then((r) => {
-      console.log(`[gui:main] bge 下载完成，自动拉�?embedding: ${r.ok ? "成功" : r.error}`);
+      console.log(`[gui:main] bge 下载完成，自动拉起 embedding: ${r.ok ? "成功" : r.error}`);
       if (r.ok) {
         void statsService?.snapshot().then((snap) => {
           mainWindow?.webContents.send("slime:stats:update", snap);
         }).catch(() => {});
       }
     }).catch((e) => {
-      console.warn("[gui:main] �?��拉起 embedding 失败（不阻断，可在状态面板手动重试）:", e);
+      console.warn("[gui:main] 自动拉起 embedding 失败（不阻断，可在状态面板手动重试）:", e);
     });
   });
   console.info("[gui:main] core-ts 服务已加载（ChatService/StatsService + SandboxManager）");
@@ -2305,7 +2305,7 @@ function applyGlobalSandboxDefaults(): void {
         : {};
       sandbox.setAgentConfig(a.id, sandboxConfigFromOverride(ov));
     } catch (e) {
-      console.warn(`[gui:main] 下发全局沙�?默�?失败 ${a.id}:`, e);
+      console.warn(`[gui:main] 下发全局沙箱默认失败 ${a.id}:`, e);
     }
   }
 }
@@ -2420,9 +2420,9 @@ async function ensureDefaultAgent(): Promise<void> {
     );
     reg.loadedAgents.push(a);
     await reg.save();
-    console.info(`[gui:main] 首�?�?��：已创建默�? Agent ${a.id}`);
+    console.info(`[gui:main] 首次启动：已创建默认 Agent ${a.id}`);
   } catch (e) {
-    console.warn("[gui:main] 创建默�? Agent 失败（不影响�?���?", e instanceof Error ? e.message : String(e));
+    console.warn("[gui:main] 创建默认 Agent 失败（不影响启动）:", e instanceof Error ? e.message : String(e));
   }
 }
 
