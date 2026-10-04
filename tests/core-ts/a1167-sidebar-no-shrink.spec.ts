@@ -32,11 +32,22 @@ const CSS_CODE = readFileSync(join(PROJECT_ROOT, "gui/src/renderer/index.css"), 
       写目标值而不是写动画中间值），但**不是本问题的成因**。 */
 describe("A-1167 左栏不参与 flex 压缩（瞬时溢出会把左栏挤一下再弹回）", () => {
   const rule = /(^|\n)\.sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
+  /* ⚠️⚠️ A-1169：真正生效的是 App.tsx:1932 的**内联** `flexShrink` ——
+     内联样式压过不带 !important 的 CSS 规则。实测内联全程 `flex-shrink: 1`，
+     把 A-1167 写在 index.css 的 `flex-shrink: 0` 压得**一次都没生效**
+     （八列反转 40 次，加与不加一字不差）。⇒ 守卫必须盯内联。 */
+  const APP_CODE = readFileSync(join(PROJECT_ROOT, "gui/src/renderer/App.tsx"), "utf8");
 
-  it("`.sidebar` 声明 `flex-shrink: 0`", () => {
+  it("**内联** `flexShrink` 是 0（这一条才是真正生效的）", () => {
+    const aside = /<aside[\s\S]{0,6000}?flexShrink:\s*(\d)/.exec(APP_CODE);
+    expect(aside, "找不到左栏 <aside> 的内联 flexShrink —— 守卫失效，需按新结构重写").toBeTruthy();
+    expect(aside![1], "左栏内联 flexShrink 必须是 0：内联压过 CSS，A-1167 写在 index.css 的那条")
+      .toBe("0");
+  });
+
+  it("`.sidebar` 的 CSS 里 `flex-shrink: 0` 仍在（内联缺失时的兜底）", () => {
     expect(rule, "找不到裸 `.sidebar` 规则").toBeTruthy();
-    expect(rule![2], "左栏必须 flex-shrink: 0 —— 否则瞬时溢出会把它挤一下再弹回（= 抽搐）")
-      .toMatch(/flex-shrink:\s*0/);
+    expect(rule![2], "CSS 兜底层不能删").toMatch(/flex-shrink:\s*0/);
   });
 
   it("`min-width` 仍然保留（不可压缩不等于可以无视下限）", () => {

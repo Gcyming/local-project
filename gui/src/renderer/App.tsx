@@ -1929,7 +1929,26 @@ export default function App(): JSX.Element {
           className={`sidebar${sidebarOpen ? "" : " collapsed"}${leftMin0 ? " sidebar-no-min" : ""}`}
           /* A-1018：未手动拖过时**不下发内联宽度** → 由 CSS 的
              `--sidebar-w: clamp(240px, 17.5%, 520px)` 随窗口比例自适应（拖动过则用 px 覆盖） */
-          style={{ width: sidebarCustom ? sidebarWidth : undefined, flexShrink: 1, minWidth: sidebarOpen ? SIDEBAR_MIN_W : 0 }}
+          /* ⚠️⚠️⚠️ A-1169：`flexShrink` 改 **0** —— 左栏是**固定轨**，永不参与压缩。
+             六轮抖动的真正根因。逐帧实测（用户自检数据，1332×918，1211 帧）：
+               · 内联 style 全程恒为  `width: 303px; flex-shrink: 1; min-width: 240px;`
+               · className 全程恒为    `sidebar`（既没 collapsed 也没 sidebar-no-min）
+               · **计算宽度 303px × 1203 帧，但 246.948px × 3 帧**（还有 302.5 / 292.5 / 284.2 各 1~2 帧）
+             内联写着 303px、计算值却是 246.948px —— 这**只可能是 flex 收缩**：
+             容器装不下时 flex 收缩**压过 `width` 属性**。
+             机制：窗口化那一瞬，`.main` 还没塌到 0 而右栏已就位 ⇒ 三栏总需求 > 容器宽
+             ⇒ 收缩量**全落在左栏身上**（`.main` 已 `min-width:0`、右栏有 `min-width:260` 兜底）
+             ⇒ 左栏短一帧；约束一解除，靠常驻的 `transition: width 0.5s` 平滑弹回
+             ⇒ **"挤一下再弹回"就是用户看到的抽搐**（303→247→303）。
+             ⚠️⚠️ **为什么 A-1167 加在 index.css 的 `flex-shrink: 0` 一点用都没有**：
+                **内联样式压过不带 `!important` 的 CSS 规则**。实测内联 style 全程就是
+                `flex-shrink: 1` ⇒ 我改的那条 CSS 从头到尾被它压着，一次都没生效
+                （这正是「八列反转合计 40 次，与加之前一字不差」的原因）。
+                ⇒ 修复必须落在**这条内联样式**上，不是 CSS。
+             ⚠️ 与 A-1156/A-1157 那段注释的关系：那里为了让收缩量**落在右栏**而把
+                右栏 wrapper 改成可收缩，并写明「收缩量全落在左栏身上」是**已知风险**。
+                本条是在窗口化这条路径上把左栏彻底排除出压缩。 */
+          style={{ width: sidebarCustom ? sidebarWidth : undefined, flexShrink: 0, minWidth: sidebarOpen ? SIDEBAR_MIN_W : 0 }}
         >
           {/* A-1106（问题 4）→ A-1109：分隔条 —— 命中区与流光的**唯一出处是 index.css**
               （`.sidebar-resizer` 的 width）。此处**不再重复数值** —— 上一版这里写「10px」、
