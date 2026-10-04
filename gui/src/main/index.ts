@@ -2968,7 +2968,7 @@ function createWindow(): void {
       const dir = resolveExtra("../data/logs");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "renderer-crash.log"), `${new Date().toISOString()}\t${details.reason} (exit=${details.exitCode})\n`, { flag: "a" });
-      console.error("[gui:main] 渲染进程已崩溃，原因:", details.reason, "(将自动重载恢�?");
+      console.error("[gui:main] 渲染进程已崩溃，原因:", details.reason, "(将自动重载恢复)");
     } catch { /* ignore */ }
     // A-980-R26：意外终�?�?系统通知（用户可能�?在别的窗口，页面白屏他看不到�?
     notifyUser({
@@ -3112,7 +3112,7 @@ function registerIpcHandlers(): void {
       ]);
       return { raw, meta };
     } catch (e) {
-      console.warn("[gui:main] 会话原�?历史加载失败:", e);
+      console.warn("[gui:main] 会话原始历史加载失败:", e);
       return { raw: [], meta: null };
     }
   }
@@ -3674,7 +3674,7 @@ function registerIpcHandlers(): void {
       // �?旦哪天构造�?�辑回归（�?切口改回按条数硬切），这里会立刻留下�?��的证�???
       const validation = validateHistory(after);
       if (!validation.ok) {
-        console.error("[gui:main] 压缩产物�?���?��变量校验（I1/I3�?", validation.violations);
+        console.error("[gui:main] 压缩产物未过硬不变量校验（I1/I3）:", validation.violations);
       }
       // 固定�?�? = 实测输入侧占�?�?历史估算（系统提�?记忆/�?�?工具定义/工作区注入）�?
       // tokensAfter �?`used` **同口�?*（历�?+ 固定�?�?），渲染层可直接用它替换占用镜像�?
@@ -3764,12 +3764,12 @@ function registerIpcHandlers(): void {
       if (payload.mode === "plan") {
         const plan = await svc.planFileUndo(payload.agentId, payload.sessionId, payload.userMsg);
         if (plan.count || plan.dirs || plan.blocked.length) {
-          console.info(`[gui:main] 回滚预演：还�?${plan.count} �?���?/ 重建 ${plan.dirs} �?���?/ ${plan.blocked.length} 处不�?��原`);
+          console.info(`[gui:main] 回滚预演：还原 ${plan.count} 个文件 / 重建 ${plan.dirs} 个目录 / ${plan.blocked.length} 处不可还原`);
         }
         return plan;
       }
       const res = await svc.applyFileUndo(payload.agentId, payload.sessionId, payload.userMsg);
-      console.info(`[gui:main] 回滚文件：还�?${res.restored} / 删除 ${res.deleted} / 重建�?�� ${res.dirs} / 失败 ${res.failed.length} / 不可还原 ${res.blocked.length}`);
+      console.info(`[gui:main] 回滚文件：还原 ${res.restored} / 删除 ${res.deleted} / 重建目录 ${res.dirs} / 失败 ${res.failed.length} / 不可还原 ${res.blocked.length}`);
       return res;
     });
 
@@ -4054,7 +4054,7 @@ function registerIpcHandlers(): void {
     // A-980-R29：会话删了，它的 Plan（内�?Map）与待办文件（data/todos_<sid>.json）也要一起走�?
     // 此前两条都只增不�?�?内存常驻 + data/ �?��无限堆积�?
     purgeSessionPlanning(payload.sessionId);
-    console.info(`[gui:main] 会话已删�? session=${payload.sessionId}`);
+    console.info(`[gui:main] 会话已删除: session=${payload.sessionId}`);
     return { ok: removed };
   });
 
@@ -4145,7 +4145,7 @@ function registerIpcHandlers(): void {
     const meta = await getSession(payload.sessionId);
     if (!meta) { return { ok: false }; }
     await clearSessionHistory(meta.agentId, meta.id);
-    console.info(`[gui:main] 会话已清�? session=${payload.sessionId}`);
+    console.info(`[gui:main] 会话已清空: session=${payload.sessionId}`);
     return { ok: true };
   });
 
@@ -4214,7 +4214,7 @@ function registerIpcHandlers(): void {
     if (!agent) { throw new Error("Agent 不存在"); }
     const updated = await setSessionAgent(payload.sessionId, payload.agentId);
     if (!updated) { throw new Error("会话不存在"); }
-    console.info(`[gui:main] 会话切换 Agent: session=${payload.sessionId} ${meta.agentId} �?${payload.agentId}`);
+    console.info(`[gui:main] 会话切换 Agent: session=${payload.sessionId} ${meta.agentId} → ${payload.agentId}`);
     return { ok: true };
   });
 
@@ -4256,7 +4256,7 @@ function registerIpcHandlers(): void {
     const updated = await setSessionMemberEffort(payload.sessionId, payload.memberId, payload.effort ?? null);
     if (!updated) { throw new Error("会话不存在或该成员不在群聊中"); }
     const eff = payload.effort ? payload.effort : "(默�? high)";
-    console.info(`[gui:main] 群聊成员推理强度: session=${payload.sessionId} member=${payload.memberId} �?${eff}`);
+    console.info(`[gui:main] 群聊成员推理强度: session=${payload.sessionId} member=${payload.memberId} → ${eff}`);
     return { ok: true, memberEfforts: memberEffortsOf(updated.members), leaderEffort: updated.leaderEffort };
   });
 
@@ -4265,7 +4265,7 @@ function registerIpcHandlers(): void {
     await ensureServices();
     const updated = await setSessionWorkspace(payload.sessionId, payload.workspace);
     if (!updated) { throw new Error("会话不存在"); }
-    console.info(`[gui:main] 会话工作�?��更新: session=${payload.sessionId} �?${updated.workspace ?? "(�?���?"}`);
+    console.info(`[gui:main] 会话工作目录更新: session=${payload.sessionId} → ${updated.workspace ?? "(未绑定)"}`);
     return { ok: true, workspace: updated.workspace };
   });
 
