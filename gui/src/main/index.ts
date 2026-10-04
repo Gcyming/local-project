@@ -254,7 +254,7 @@ const resolveAppIcon = (): string => {
     if (!nativeImage.createFromPath(preferred).isEmpty()) { return preferred; }
   } catch { /* 解码抛错 �?走回�?*/ }
   const fallback = join(INSTALL_ROOT, "build", "icon.png");
-  console.warn(`[gui:main] 应用图标 ${preferred} 读不出来，回�?${fallback}`);
+  console.warn(`[gui:main] 应用图标 ${preferred} 读不出来，回落 ${fallback}`);
   return fallback;
 };
 
@@ -474,7 +474,7 @@ import { runGroupTalk, parseMentions, type GroupTalkParticipant, type StreamEmit
 // 全局兜底：任何未捕获�?Promise rejection 不得终�?主进程�?��?�Node 默�? throw 模式会�?
 // 整个应用直接�?出（用户感知�?�?���?��关了"）�?��?录后继续运�?；具体�?�辑错�?仍由各调用点 try/catch 处理�?
 process.on("unhandledRejection", (reason) => {
-  console.error("[gui:main] �?��获的 Promise rejection（已拦截，主进程继续运�?�?", reason);
+  console.error("[gui:main] 未捕获的 Promise rejection（已拦截，主进程继续运行）:", reason);
 });
 
 // �?�? D：全链路�??测（引擎 stream 真实事件�?�?trace spans �?渲染�?TraceViewer�?�?�?
@@ -1328,9 +1328,9 @@ function runShellCommand(inv: ShellInvocation, prof: TermProfile, spawnCwd: stri
       const looseEncoding = so.loose || se.loose;
 
       const notes: string[] = [];
-      if (timedOut) { notes.push(`命令超过 ${TERM_TIMEOUT_MS / 1000} 秒未结束，已终�?进程树`); }
-      if (truncated) { notes.push(`输出超过 ${TERM_MAX_BYTES / 1024 / 1024} MB，已�?��`); }
-      if (looseEncoding) { notes.push(`输出编码�?���??，已�?${encoding} 兜底解码`); }
+      if (timedOut) { notes.push(`命令超过 ${TERM_TIMEOUT_MS / 1000} 秒未结束，已终止进程树`); }
+      if (truncated) { notes.push(`输出超过 ${TERM_MAX_BYTES / 1024 / 1024} MB，已截断`); }
+      if (looseEncoding) { notes.push(`输出编码未能确认，已按 ${encoding} 兜底解码`); }
       if (spawnErr) { notes.push(`进程异常：${spawnErr.message}`); }
       else if (signal && !timedOut) { notes.push(`进程�?���?${signal} 终�?`); }
 
@@ -1408,7 +1408,7 @@ async function refreshAgentSkills(): Promise<void> {
     const loaded = await loadAllSkills({ registry: getRegistry(), extraDirs });
     console.info(`[gui:skills] 技能工具已就绪，可见技能 ${loaded.length} 个（额外扫描根 ${extraDirs.length} 个）`);
   } catch (e) {
-    console.warn("[gui:skills] �?能加载失败（不影响�?话，�?Agent 将无法�?索技能）:", e);
+    console.warn("[gui:skills] 技能加载失败（不影响对话，但 Agent 将无法检索技能）:", e);
   }
 }
 
@@ -1592,13 +1592,13 @@ const ensureServicesOnce = singleFlight<void>(async () => {
           const behavior = BehaviorStore.fromDict(a?.behavior ?? {});
           segs.push(...buildMindSegments(emotion, behavior));
         } catch (e) {
-          console.warn(`[gui:mind] 心智固定段注入失�? ${e}`);
+          console.warn(`[gui:mind] 心智固定段注入失败: ${e}`);
         }
         // A-980-R30：可用子代理清单（模型据此决定�?派给�?/ 点名谁）
         try {
           segs.push(...subagentCatalogSegment());
         } catch (e) {
-          console.warn(`[gui:subagent] 子代理清单注入失�? ${e}`);
+          console.warn(`[gui:subagent] 子代理清单注入失败: ${e}`);
         }
         return segs;
       },
@@ -1614,7 +1614,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
           const seg = formatMemoryItems(res.items);
           return seg ? [seg] : [];
         } catch (e) {
-          console.warn(`[gui:mind] 记忆�?索失败（静默降级为空�? ${e}`);
+          console.warn(`[gui:mind] 记忆检索失败（静默降级为空）: ${e}`);
           return [];
         }
       },
