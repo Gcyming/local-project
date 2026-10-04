@@ -154,6 +154,33 @@ function sample(): void {
   row.push(...VARS.map((v) => bw.style.getPropertyValue(v).trim() || "-"));
   row.push(animators());
 
+  /* ⚠️⚠️ A-1168：左栏的「**是谁在动它**」取证。
+     背景：六轮修复全部落空，A-1167 的 `flex-shrink: 0` 加上去后**反转次数一字未变**
+     （40 次，与加之前完全相同）⇒ 那条模型是错的。
+     而实测 `sb.width` 只取 247 / 287 / 293 / 303 四个值，**247 不是任何代码里的常量**
+     ⇒ 不是 flex 压缩的产物（压缩量取决于容器余量，不会每次都精确落在同一个数）。
+     ⇒ 剩下的可能只有两类，而单看宽度**分不开**：
+        (a) 左栏被换/加了类（`collapsed` / `sidebar-no-min`，见 App.tsx:1929）⇒ CSS 改了宽度；
+        (b) 左栏的 `width` 属性被内联改写（state 或 --sidebar-w）。
+     ⇒ 这里把 className、**内联 style 原文**、以及 flex/width 全套计算样式逐帧记下来：
+        className 一变就能立刻区分 (a) 与 (b)，不用再猜。
+     ⚠️ 内联 style 原文可能很长，截断到 120 字符够用（宽度相关属性都在头部）。 */
+  {
+    const sbEl = document.querySelector<HTMLElement>(".sidebar");
+    if (!sbEl) { row.push("-", "-", "-", "-", "-", "-", "-"); }
+    else {
+      const cs = getComputedStyle(sbEl);
+      row.push(
+        sbEl.className || "-",
+        (sbEl.getAttribute("style") || "-").slice(0, 120),
+        cs.flexShrink, cs.flexGrow, cs.flexBasis,
+        cs.width, cs.minWidth,
+      );
+    }
+    const bd = document.querySelector<HTMLElement>(".body");
+    row.push(bd ? bd.scrollWidth : null, bd ? bd.clientWidth : null);
+  }
+
   rows.push(row);
 }
 
@@ -221,6 +248,22 @@ function buildSummary(): string {
   L.push("浮窗 opacity 取值：" + JSON.stringify(opVals.slice(0, 12)));
   const bodyCls = [...new Set(rows.map((r) => r[holeCol + 1]))];
   L.push("body.className 取值：" + JSON.stringify(bodyCls));
+
+  /* ⚠️ A-1168：左栏「被谁改动」的当场判定 —— 宽度反转出现时，看它是被换类还是被改宽度。
+     ⚠️ 阈值 1px：CSS 过渡的中间值每帧都在变，但**类**和**内联 width** 只在真正被改时变。 */
+  const sbBase = 1 + BOXES.length * 2 + 1 + 3 + 4 + 1 + 1 + VARS.length + 1;
+  const cls = new Map<string, number>();
+  const inl = new Map<string, number>();
+  for (const r of rows) {
+    cls.set(r[sbBase] as string, (cls.get(r[sbBase] as string) ?? 0) + 1);
+    inl.set(r[sbBase + 1] as string, (inl.get(r[sbBase + 1] as string) ?? 0) + 1);
+  }
+  L.push("左栏 className 取值：" + JSON.stringify([...cls.entries()]));
+  L.push("左栏 内联style 取值：" + JSON.stringify([...inl.entries()].map(([k, n]) => [k.slice(0, 70), n])));
+  L.push("左栏 flexShrink/basis/width 取值：" + JSON.stringify([
+    ...new Set(rows.map((r) => [r[sbBase + 2], r[sbBase + 4], r[sbBase + 5]]).map((x) => x.join("/"))),
+  ].slice(0, 10)));
+  L.push(".body scrollW/clientW 取值：" + JSON.stringify([...new Set(rows.map((r) => r[sbBase + 7] + "/" + r[sbBase + 8]))].slice(0, 10)));
   L.push("（完整逐帧原始数据在同目录下载的 JSON 里）");
   return L.join("\n");
 }
@@ -243,7 +286,9 @@ function stop(reason = "手动收工"): void {
       cols: ["t", ...BOXES.flatMap(([k]) => [k + ".left", k + ".width"]),
         "host.opacity%", "host.transform", "host.transitionProp", "host.transitionDur",
         "chat.clientW", "chat.gutter", "chat.overflow", "chat.scrollTop",
-        "holeAtHostCenter", "body.className", ...VARS, "animators"],
+        "holeAtHostCenter", "body.className", ...VARS, "animators",
+        "sb.className", "sb.inlineStyle", "sb.flexShrink", "sb.flexGrow", "sb.flexBasis",
+        "sb.width", "sb.minWidth", "body.scrollW", "body.clientW"],
       rows,
     });
     const blob = new Blob([payload], { type: "application/json" });
