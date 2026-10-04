@@ -1,13 +1,13 @@
-/**
- * tests/gui/request-owner.spec.ts — 请求归属判定与「丢弃留痕」（A-1047 / Task #156）。
- *
- * 锁三类事实：
- *   ① 判定表：与改写前那行 `sessionId !== undefined ? sessionId : streamSid` **逐档一致**
- *      （`null` 必须按"已标注"处理 —— 放行它就会让旧会话的选择题占住输入框，A-151 前科）。
- *   ② 丢弃决策：`skipped: true` / `approved: false`，且**绝不** `alwaysAllow`。
- *   ③ 接线：ChatPanel 的**两个**订阅点（权限 + ask_user）都走了这个判据，
- *      且丢弃时**真的回了一个决策**（只写 console.warn 而不回决策 = 半修，主进程照样干等 300s）。
- */
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -103,16 +103,16 @@ describe("A-1047 ③ 接线：两个订阅点都走判据，且丢弃时真的�
 
   it("丢弃分支留了可 grep 的痕（REQUEST_DROP_MARKER）", () => {
     expect(REQUEST_DROP_MARKER, "前缀本身要稳定（它是全站翻丢弃记录的 grep 锚）").toBe("[slime:req-drop]");
-    // 源码里是模板插值 `${REQUEST_DROP_MARKER}`，两处丢弃都必须带上它
+    
     const uses = (src.match(/\$\{REQUEST_DROP_MARKER\}/g) ?? []).length;
     expect(uses, "两处丢弃都要带统一前缀（写死字符串会与常量漂移）").toBe(2);
   });
 
   it("丢弃后**真的回传决策**（只 console.warn 不回决策 = 主进程照样干等 300s）", () => {
-    // ask_user 分支
+    
     const askBranch = src.slice(src.indexOf("ask_user 提问 ${req.requestId} 被丢弃") - 400, src.indexOf("ask_user 提问 ${req.requestId} 被丢弃") + 300);
     expect(askBranch).toMatch(/askUser\?\.resolve\?\.\(buildAskDismissDecision\(/);
-    // 权限分支
+    
     const permBranch = src.slice(src.indexOf("权限请求 ${req.requestId} 被丢弃") - 400, src.indexOf("权限请求 ${req.requestId} 被丢弃") + 300);
     expect(permBranch).toMatch(/perm\?\.resolve\?\.\(buildPermDismissDecision\(/);
   });

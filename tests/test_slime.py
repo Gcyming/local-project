@@ -5,19 +5,19 @@ from rich.text import Text
 console = Console()
 
 SLIME_PIXEL_GRID = [
-    # 椭圆主体(宽16×高7) + 右侧3只分裂小史莱姆（形成向右凸出的弧线）
-    # 渐变：天蓝(a) → 青蓝(b) → 淡紫(c)，黑眼(e)，白眼珠(p)，微笑(m)
-    # 小史莱姆弧线：小1(右上，4格)→小2(右中，6格最远)→小3(右下，4格) → 形成柔和右凸弧度
-    "                                        ",  #  0
-    "                                        ",  #  1
-    "    aaaaaaaaaaaaaaaa    aa              ",  #  2 顶+小1(右上，4格间距)
-    "    aaaeeeeaaaaaaeeaaa                  ",  #  3 眼
-    "    aaaeppeaaaaaaeppeaaa      bbb       ",  #  4 珠+小2(右中，6格间距，弧度顶点)
-    "    aaaaaaaammmmaaaaaa                  ",  #  5 嘴
-    "    aaabbbbbbbbbbbbbba    aa            ",  #  6 过渡+小3(右下，4格间距)
-    "    aaaccccbbbbbbcccca                  ",  #  7 渐变
-    "    aaaaaaaaaaaaaaaaaa                  ",  #  8 底
-    "                                        ",  #  9
+    
+    
+    
+    "                                        ",  
+    "                                        ",  
+    "    aaaaaaaaaaaaaaaa    aa              ",  
+    "    aaaeeeeaaaaaaeeaaa                  ",  
+    "    aaaeppeaaaaaaeppeaaa      bbb       ",  
+    "    aaaaaaaammmmaaaaaa                  ",  
+    "    aaabbbbbbbbbbbbbba    aa            ",  
+    "    aaaccccbbbbbbcccca                  ",  
+    "    aaaaaaaaaaaaaaaaaa                  ",  
+    "                                        ",  
 ]
 
 SLIME_STYLE_MAP = {
@@ -41,7 +41,7 @@ for row in SLIME_PIXEL_GRID:
     console.print(text)
 
 
-# ── A-015: Swarm 分析回复解析（显式降级标记） ─────────────────
+
 
 
 class TestSwarmAnalysisParsing:

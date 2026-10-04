@@ -1,39 +1,39 @@
-/**
- * core-ts/src/memory/store.ts — Agent 成长型记忆存储。
- * 语义移植自 core/memory.py（BUG-003/005/006/007/008/009/011/014、A-027、H3、N11-P2-8/9/10 对照）。
- *
- * - 只存"学到了什么"，不存原始对话（对话走 history，成长摘要走 memory.json）
- * - JSON 持久化 + LanceDB 可选向量层（spike 定案：@lancedb/lancedb）
- * - 去重（同 category 相似度 >75% 计 repeated）+ 双向链接（tags 重叠/内容相似自动关联）
- * - 艾宾浩斯遗忘因子（半衰期 5 天 × 重要性加权）
- * - 嵌入执行经 sidecar /embeddings（Python 优点面），失败回退哈希占位
- *
- * 线程模型：TS 单线程事件循环内同步段天然原子（对齐 Python per-agent 锁语义，注释标注）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { createHash, randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { PROJECT_ROOT } from "../paths.js";
 import { resolve, dirname, join } from "node:path";
-// A-966 / A-1041：LanceDB 原生 .node 无法进 electron-vite 的 rollup bundle（`\0` 解析错），
-// 因此这里对真实包**只做类型引用 + 惰性动态加载**，真正用到向量层时才加载。
-//
-// ⚠️ **这里绝不能加 `@vite-ignore`**：`/* @vite-ignore */` 会让 vite **跳过 alias 解析**，
-// 直接把真实 `@lancedb/lancedb` 连同 297MB 原生子包解析进 bundle
-// （产物里就是 `out/main/chunks/lancedb.win32-x64-msvc-*.node`，安装包 1GB 的元凶）。
-//
-// ⚠️ 光靠 vite alias 也不够可靠（实测：顶层 `resolve.alias` 与 main target 的 `resolve.alias`
-// 都写了，产物里仍内联真实包）。所以桌面端走**注入式加载器**：`setLancedbModuleLoader()`
-// 由 GUI 主进程注入"按内嵌组件目录 require"（见 gui/src/main/__stubs/lancedb-stub.ts），
-// bundle 里因此不再出现 `@lancedb/lancedb` 这个裸 specifier，297MB 无从进入。
+
+
+
+
+
+
+
+
+
+
+
 type Table = import("@lancedb/lancedb").Table;
 
-/** 真实 LanceDB 模块的最小契约（注入方按此实现） */
+
 export interface LancedbModuleLike {
   connect: (uri: string) => Promise<unknown>;
 }
 
-/** 模块加载器注入点（桌面端注入；未注入时退回裸包动态 import，测试/CI 行为不变） */
+
 let lancedbModuleLoader: (() => Promise<LancedbModuleLike>) | null = null;
 
 export function setLancedbModuleLoader(fn: (() => Promise<LancedbModuleLike>) | null): void {
@@ -41,17 +41,17 @@ export function setLancedbModuleLoader(fn: (() => Promise<LancedbModuleLike>) | 
 }
 
 async function defaultLanceConnect(uri: string): Promise<LanceDbLike> {
-  // 桌面端：走注入的加载器（按内嵌组件目录 require），不碰裸 specifier
+  
   if (lancedbModuleLoader) {
     const mod = await lancedbModuleLoader();
     return (await mod.connect(uri)) as unknown as LanceDbLike;
   }
-  // 未注入时（单测 / CLI / sidecar）退回真实包。
-  // ⚠️ specifier 必须**装在变量里**并配 `@vite-ignore`：写成字面量 `import("@lancedb/lancedb")`
-  // 时 rollup 能静态分析到，照样把 297MB 内联成 chunk（A-1041 实测：即使运行时分支永不走它，
-  // 产物里 `out/main/chunks/lancedb.win32-x64-msvc-*.node` 依然生成 —— 打包器不看运行时分支）。
+  
+  
+  
+  
   const spec = "@lancedb/lancedb";
-  const mod = (await import(/* @vite-ignore */ spec)) as unknown as LancedbModuleLike;
+  const mod = (await import( spec)) as unknown as LancedbModuleLike;
   return (await mod.connect(uri)) as unknown as LanceDbLike;
 }
 import { classifyLayer, migrationTarget, type MemoryLayer, type MemoryEntry, type MemoryInput } from "./three_layer.js";
@@ -62,30 +62,30 @@ export { PROJECT_ROOT };
 export const DATA_DIR = resolve(PROJECT_ROOT, "data");
 export const KNOWLEDGE_MEMORY_DIR = resolve(PROJECT_ROOT, "Knowledge", "Agent Memory");
 
-/**
- * 记忆存储位置（**唯一实现**：MemoryStore 构造 + 心智中枢面板展示都读这里）。
- *
- * 语义：自定义根目录（`memoryRoot`，对应 `opts.dataDir`）是**一个**根，管**两个**存储 ——
- *   · 默认（未设自定义根）：memory.json 落 `Knowledge/Agent Memory/<agentId>/`，
- *     LanceDB 落 `data/<agentId>/lancedb`（两处默认位置本来就是分开的）。
- *   · 设了自定义根：**两者都落在 `<根>/<agentId>/` 下**。
- *
- * ⚠️ 这里曾经是"只搬一半"：`memoryRoot` 只作用于 memory.json，LanceDB 被一行
- * `// LanceDB 保持原位` 钉死在默认 `data/` 里 —— 用户改了"存储位置"，界面上两个地址
- * 只有一个跟着变（用户原话：「自定义改地址只能改一个」）。向量库是记忆里体积最大的
- * 那一半，跟着根目录走才符合"存储位置"这一个设置项的语义。
- *
- * 把两个路径的推导收在一个纯函数里，是为了让「界面显示的路径」与「真正写入的路径」
- * 同源 —— 此前面板显示的是字符串模板 `data/<agentId>/lancedb`（字面 `<agentId>`），
- * 既不是真实路径、也永不随设置变化（假信息）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function resolveMemoryPaths(
   agentId: string,
   opts: { dataDir?: string; projectRoot?: string } = {},
 ): { memoryJson: string; lanceDir: string } {
   const root = opts.projectRoot ?? PROJECT_ROOT;
   if (opts.dataDir) {
-    const base = resolve(root, opts.dataDir);          // 自定义根：两者同根
+    const base = resolve(root, opts.dataDir);          
     return {
       memoryJson: resolve(base, agentId, "memory.json"),
       lanceDir: resolve(base, agentId, "lancedb"),
@@ -97,15 +97,15 @@ export function resolveMemoryPaths(
   };
 }
 
-/**
- * 目录搬家（向量库随自定义根目录迁移）。
- *
- * 触发条件很窄：新旧位置不同、旧位置存在、新位置还不存在。
- * 顺序：同盘 `renameSync` 原子完成（最快、无副本）；跨盘 rename 抛 EXDEV →
- * 退化为递归复制，并**保留原目录不删**（宁可留一份重复，也不静默删用户的向量库）。
- * 任何失败都留痕（console.warn）后返回，让调用方照常在新位置建库 —— 搬家失败
- * 不该让向量层整体瘫痪，但**必须出声**（静默失败是精度杀手）。
- */
+
+
+
+
+
+
+
+
+
 function migrateDirIfNeeded(oldDir: string, newDir: string): void {
   if (resolve(oldDir) === resolve(newDir)) return;
   if (!existsSync(oldDir) || existsSync(newDir)) return;
@@ -116,7 +116,7 @@ function migrateDirIfNeeded(oldDir: string, newDir: string): void {
       console.log(`[memory] 向量库已迁移: ${oldDir} → ${newDir}`);
       return;
     } catch {
-      // 跨卷（rename 不可用）→ 复制兜底（下方）；原目录保持不动
+      
     }
     cpSync(oldDir, newDir, { recursive: true });
     console.log(`[memory] 向量库已复制到新位置: ${newDir}（原目录 ${oldDir} 保留，未删除）`);
@@ -125,7 +125,7 @@ function migrateDirIfNeeded(oldDir: string, newDir: string): void {
   }
 }
 
-// A-112: agent_id 仅允许安全字符（防御路径遍历；空串放行 = global 语义）
+
 const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function validateAgentId(agentId: string): void {
@@ -134,9 +134,9 @@ export function validateAgentId(agentId: string): void {
   }
 }
 
-// ── 辅助函数（对照 memory.py 辅助） ───────────────────────
 
-/** 简单文本相似度（Jaccard 词级）。 */
+
+
 export function textSimilarity(a: string, b: string): number {
   if (!a || !b) return 0;
   const setA = new Set(a.split(/\s+/).filter(Boolean));
@@ -147,16 +147,16 @@ export function textSimilarity(a: string, b: string): number {
   return inter / (setA.size + setB.size - inter);
 }
 
-/** 记忆稳定 ID（content 哈希，幂等，用于双向链接）。 */
+
 export function memId(content: string): string {
   return "mem_" + createHash("md5").update(content, "utf8").digest("hex").slice(0, 8);
 }
 
-/** 艾宾浩斯遗忘因子：时间衰减 × 重要性加权。返回 [0,1]。 */
+
 export const EBBINGHAUS_TAU = 5.0;
 
 export function forgettingFactor(daysSinceAccess: number, importance: number): number {
-  const imp = Number.isFinite(importance) ? importance : 5; // 容错：非法重要性按默认 5
+  const imp = Number.isFinite(importance) ? importance : 5; 
   const timeDecay = Math.exp(-daysSinceAccess / EBBINGHAUS_TAU);
   const importanceWeight = Math.max(1, Math.min(10, imp)) / 10.0;
   return timeDecay * importanceWeight;
@@ -169,7 +169,7 @@ function ageInDays(iso: string | undefined): number {
   return (Date.now() - ts) / 86_400_000;
 }
 
-/** 记忆有效权重 = 遗忘因子 × (1 + 相关性)。用于 summary/检索排序。 */
+
 export function effectiveWeight(fact: MemoryFact, context = ""): number {
   const ts = fact.last_accessed ?? fact.timestamp ?? "";
   const ff = forgettingFactor(ageInDays(ts), fact.importance ?? 5);
@@ -177,7 +177,7 @@ export function effectiveWeight(fact: MemoryFact, context = ""): number {
   return ff;
 }
 
-// ── 数据结构（对照 MEMORY_TEMPLATE / BUG-005 补填语义） ────
+
 
 export interface MemoryFact {
   id: string;
@@ -191,22 +191,22 @@ export interface MemoryFact {
   backlinks: string[];
   repeated: number;
   success?: boolean;
-  /** C-记忆三层：来源派生的记忆层（working/episodic/semantic） */
+  
   layer?: MemoryLayer;
-  /** C-记忆三层：访问次数（episodic 到期沉淀语义层判据） */
+  
   access_count?: number;
-  /** C-实体图谱桥：本条记忆挂载的实体 key（如 task:123 / user:alice） */
+  
   entity_keys?: string[];
-  /** 溯源：本条记忆的来源（conversation/event/fact/preference/plan；memory_insert 可显式标注，缺省由 category 兜底） */
+  
   source?: MemoryInput["source"];
-  /** 溯源置信度 0..1（缺省 1；模型自评，供召回排序微调 / 人工纠错） */
+  
   confidence?: number;
-  /** 不可变创建时间（ISO）。与 timestamp 区分：timestamp 在 preference 更新等路径会被覆盖为「最近修改」，created_at 恒为首次写入。 */
+  
   created_at?: string;
   [extra: string]: unknown;
 }
 
-/** category → 记忆层（无显式 source 时的兜底映射；preference/fact=语义，lesson=情景，其余工作层） */
+
 export function layerForCategory(category: string): MemoryLayer {
   switch (category) {
     case "preference":
@@ -232,22 +232,22 @@ export function memoryTemplate(): MemoryData {
   return { facts: [], skills_unlocked: [], created_at: null, updated_at: null };
 }
 
-// ── 嵌入（对照 _embed/_hash_embed/_get_embed_dim） ─────────
+
 
 export interface EmbedCaller {
-  /** 嵌入执行：经 sidecar /embeddings；失败抛错由调用方降级哈希 */
+  
   embed(text: string): Promise<number[]>;
 }
 
-let embedDim = 1024; // BGE-M3 默认；由 readEmbedDim() 从 slime.toml 覆盖
+let embedDim = 1024; 
 
-/** 从 slime.toml [model_server.embedding].dim 读取向量维度（BUG-025：可配置，防维度硬编码丢表）。 */
+
 export function readEmbedDim(projectRoot = PROJECT_ROOT): number {
   try {
     const tomlPath = resolve(projectRoot, "slime.toml");
     if (existsSync(tomlPath)) {
       const text = readFileSync(tomlPath, "utf8");
-      // 简易 TOML 段解析（对齐 Python 3.11 前兼容语义）：只取 [model_server] 下 embedding.dim
+      
       let inModelServer = false;
       let inEmbedding = false;
       for (const raw of text.split(/\r?\n/)) {
@@ -264,12 +264,12 @@ export function readEmbedDim(projectRoot = PROJECT_ROOT): number {
       }
     }
   } catch {
-    /* 读取失败回退默认 */
+    
   }
   return 1024;
 }
 
-/** 字符级哈希占位向量（embedding 不可用时的降级方案）。 */
+
 export function hashEmbed(text: string, dim = embedDim): number[] {
   const out: number[] = [];
   const src = text.slice(0, dim).padEnd(dim, " ");
@@ -279,7 +279,7 @@ export function hashEmbed(text: string, dim = embedDim): number[] {
   return out;
 }
 
-// ── LanceDB 向量层（spike 定案：@lancedb/lancedb） ───────
+
 
 interface LanceRow {
   role: string;
@@ -300,24 +300,24 @@ export interface MemoryStoreOptions {
   dataDir?: string;
   projectRoot?: string;
   embed?: EmbedCaller;
-  /** 可选：注入自定义 embedding 缓存（默认共享单例 embeddingCache）。测试用临时路径注入。 */
+  
   embedCache?: EmbedCache;
   lance?: {
     connect?: (uri: string) => Promise<LanceDbLike>;
   };
 }
 
-/**
- * Agent 成长型记忆存储。
- * 线程模型：TS 同步段天然原子（对齐 Python per-agent 锁；LanceDB 原生异步不阻塞主循环）。
- */
+
+
+
+
 export class MemoryStore {
   readonly agentId: string;
   private jsonPath: string;
   private data: MemoryData = memoryTemplate();
   private lancedbEnabled: boolean;
   private lancedbUri: string;
-  /** 默认位置的向量库目录（自定义根目录生效时作为迁移来源） */
+  
   private defaultLanceUri: string;
   private lanceTable: Table | null = null;
   private embed: EmbedCaller | null;
@@ -329,13 +329,13 @@ export class MemoryStore {
     validateAgentId(agentId);
     this.agentId = agentId;
     this.projectRoot = opts.projectRoot ?? PROJECT_ROOT;
-    // 路径推导唯一实现（见 resolveMemoryPaths）：自定义根目录同时决定 memory.json 与 lancedb
+    
     const paths = resolveMemoryPaths(agentId, { dataDir: opts.dataDir, projectRoot: this.projectRoot });
     this.jsonPath = paths.memoryJson;
     this.lancedbEnabled = opts.lancedbEnabled ?? false;
     this.lancedbUri = opts.lancedbUri ?? paths.lanceDir;
-    // 默认位置的向量库（用于"自定义根目录后把旧库搬过来"）——同样从 projectRoot 推导，
-    // 保证「界面显示的路径 / 真正写入的路径 / 迁移看的旧路径」三者同源（可注入、可测）。
+    
+    
     this.defaultLanceUri = resolveMemoryPaths(agentId, { projectRoot: this.projectRoot }).lanceDir;
     this.embed = opts.embed ?? null;
     this.embedCache = opts.embedCache ?? embeddingCache;
@@ -343,12 +343,12 @@ export class MemoryStore {
     this.load();
   }
 
-  // ── JSON 存储 ──────────────────────────────────────────
+  
 
   private load(): void {
     const newPath = this.jsonPath;
     const oldPath = resolve(DATA_DIR, this.agentId, "memory.json");
-    // 迁移：旧位置有数据但新位置没有 → 移动（对齐 Python shutil.move）
+    
     if (existsSync(oldPath) && !existsSync(newPath)) {
       try {
         mkdirSync(dirname(newPath), { recursive: true });
@@ -371,11 +371,11 @@ export class MemoryStore {
     } else {
       this.data = memoryTemplate();
     }
-    // BUG-005: 老数据补填 last_accessed（fallback 到 timestamp）
+    
     for (const f of this.data.facts) {
       if (f && typeof f === "object") {
         if (!f.last_accessed) f.last_accessed = f.timestamp ?? "";
-        // 溯源补填：旧数据无 created_at → 回退 timestamp；confidence 非法 → 置 undefined
+        
         if (!f.created_at) f.created_at = f.timestamp ?? "";
         if (typeof f.confidence !== "number" || !Number.isFinite(f.confidence)) f.confidence = undefined;
       }
@@ -385,7 +385,7 @@ export class MemoryStore {
     }
   }
 
-  /** 保存记忆到 JSON（原子写入） */
+  
   private save(): void {
     this.data.updated_at = new Date().toISOString();
     mkdirSync(dirname(this.jsonPath), { recursive: true });
@@ -395,12 +395,12 @@ export class MemoryStore {
     renameSync(tmp, this.jsonPath);
   }
 
-  // ── 读写接口 ───────────────────────────────────────────
+  
 
-  /** 统一分类存储：去重 + JSON + LanceDB。同步段天然原子（对齐 per-agent 锁）。 */
+  
   storeCategorized(category: string, content: string, tags: string[] = [], importance = 5, extra: Record<string, unknown> = {}): void {
     const now = new Date().toISOString();
-    // 去重：检查同 category 内相似度 >75% 的事实（N11-P2-10）
+    
     for (const existing of this.data.facts) {
       if (existing.category !== category) continue;
       if (textSimilarity(content.toLowerCase(), (existing.content ?? "").toLowerCase()) > 0.75) {
@@ -413,15 +413,15 @@ export class MemoryStore {
     const newId = memId(content);
     const tagSet = new Set(tags);
     const links: string[] = [];
-    // C-记忆三层：层由传入 source（MemoryInput 语义）或 category 兜底得到；实体图谱桥取 entity_keys
+    
     const source = (extra as { source?: MemoryInput["source"] }).source;
     const layer = source ? classifyLayer({ source }) : layerForCategory(category);
     const entityKeys = Array.isArray(extra.entity_keys) ? (extra.entity_keys as string[]).filter((k) => typeof k === "string" && k.length > 0).slice(0, 16) : undefined;
-    // 溯源置信度：仅接受有限数值并夹到 [0,1]（非法值回退 undefined = 默认 1）
+    
     const confidence = typeof extra.confidence === "number" && Number.isFinite(extra.confidence)
       ? Math.max(0, Math.min(1, extra.confidence))
       : undefined;
-    // 自动关联：tags 重叠 OR 内容相似（BUG-011: 无 tags 时用内容相似度兜底）
+    
     for (const existing of this.data.facts) {
       if (existing.id === newId) continue;
       const existingTags = new Set(existing.tags ?? []);
@@ -435,9 +435,9 @@ export class MemoryStore {
         links.push(existing.id);
         existing.backlinks = existing.backlinks ?? [];
         if (!existing.backlinks.includes(newId)) existing.backlinks.push(newId);
-        // BUG-014: 关联访问刷新旧记忆 last_accessed（越用越熟）
+        
         existing.last_accessed = now;
-        existing.access_count = (existing.access_count ?? 0) + 1; // C-记忆三层：链接命中视为一次访问
+        existing.access_count = (existing.access_count ?? 0) + 1; 
       }
     }
 
@@ -449,15 +449,15 @@ export class MemoryStore {
       tags,
       importance: Math.max(1, Math.min(10, importance)),
       timestamp: now,
-      last_accessed: now, // 艾宾浩斯遗忘
-      links, // 主动引用的记忆 ID（BUG-003）
-      backlinks: [], // 被引用的记忆 ID（自动维护）
+      last_accessed: now, 
+      links, 
+      backlinks: [], 
       repeated: 0,
-      layer, // C-记忆三层
-      entity_keys: entityKeys, // C-实体图谱桥
-      source, // 溯源（memory_insert 显式标注 / category 兜底）
-      confidence, // 溯源置信度 [0,1]
-      created_at: now, // 不可变创建时间
+      layer, 
+      entity_keys: entityKeys, 
+      source, 
+      confidence, 
+      created_at: now, 
     });
     this.save();
     if (this.lancedbEnabled) {
@@ -465,7 +465,7 @@ export class MemoryStore {
     }
   }
 
-  /** async 版本：await 化（对齐 _store_categorized_async；同步核心不阻塞事件循环） */
+  
   async storeCategorizedAsync(category: string, content: string, tags: string[] = [], importance = 5, extra: Record<string, unknown> = {}): Promise<void> {
     this.storeCategorized(category, content, tags, importance, extra);
   }
@@ -474,7 +474,7 @@ export class MemoryStore {
     this.storeCategorized("fact", fact, [], importance);
   }
 
-  /** 添加/更新用户偏好（按 key 精确去重） */
+  
   addPreference(key: string, value: string): void {
     const content = `${key}: ${value}`;
     for (const f of this.data.facts) {
@@ -504,7 +504,7 @@ export class MemoryStore {
     return this.data.facts;
   }
 
-  /** 获取用户偏好（从统一 facts 中过滤 category=preference） */
+  
   getPreferences(): Record<string, string> {
     const prefs: Record<string, string> = {};
     for (const f of this.data.facts) {
@@ -527,14 +527,14 @@ export class MemoryStore {
     return lessons.slice(-limit);
   }
 
-  /** 命中归档条目后刷新 last_accessed（Soul-Plan 修正条 5：越用越熟）。按 content 包含前缀匹配。 */
+  
   touch(contentPrefix: string): number {
     const now = new Date().toISOString();
     let n = 0;
     for (const f of this.data.facts) {
       if ((f.tags ?? []).includes("behavior_archive") && contentPrefix && f.content?.includes(contentPrefix)) {
         f.last_accessed = now;
-        f.access_count = (f.access_count ?? 0) + 1; // C-记忆三层：命中刷新即一次访问
+        f.access_count = (f.access_count ?? 0) + 1; 
         n++;
       }
     }
@@ -542,13 +542,13 @@ export class MemoryStore {
     return n;
   }
 
-  /** C-记忆三层：按层过滤记忆条目（未标注旧数据按 category 兜底）。 */
+  
   getByLayer(layer: MemoryLayer): MemoryFact[] {
     return this.data.facts.filter((f) => (f.layer ?? layerForCategory(f.category)) === layer);
   }
 
-  /** 检索记忆（关键词/主题 + 可选分类过滤），按有效权重排序，返回格式化文本。
-   *  命中条目刷新 last_accessed（越用越熟）。供 memory_search 工具调用。 */
+  
+
   search(query = "", opts: { category?: string; limit?: number } = {}): string {
     const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
     let facts = this.data.facts.filter((f) => typeof f.content === "string");
@@ -558,15 +558,15 @@ export class MemoryStore {
     const now = new Date().toISOString();
     for (const f of selected) {
       f.last_accessed = now;
-      f.access_count = (f.access_count ?? 0) + 1; // C-记忆三层：召回即一次访问
+      f.access_count = (f.access_count ?? 0) + 1; 
     }
     if (selected.length) this.save();
     if (!selected.length) { return "[空] 未检索到匹配的记忆"; }
     return selected.map((f, i) => `${i + 1}. [${f.category ?? "fact"}] ${f.content}`).join("\n");
   }
 
-  /** 遗忘：按 id / 主题 / 时间（before，ISO）批量删除记忆，并清理其余条目对已删 id 的 links/backlinks。
-   *  三条件取并集（任一命中即删）；全缺省则不清除。返回实际删除条数（0 表示无匹配，不落盘）。 */
+  
+
   forget(opts: { ids?: string[]; topic?: string; before?: string } = {}): number {
     const ids = new Set((opts.ids ?? []).filter((x): x is string => typeof x === "string" && x.length > 0));
     const topic = (opts.topic ?? "").trim().toLowerCase();
@@ -584,7 +584,7 @@ export class MemoryStore {
     }
     if (toRemove.size === 0) { return 0; }
     this.data.facts = this.data.facts.filter((f) => !toRemove.has(f.id));
-    // 清理残余引用（links/backlinks 指向已删 id 的悬空引用）
+    
     for (const f of this.data.facts) {
       f.links = (f.links ?? []).filter((id) => !toRemove.has(id));
       f.backlinks = (f.backlinks ?? []).filter((id) => !toRemove.has(id));
@@ -593,11 +593,11 @@ export class MemoryStore {
     return toRemove.size;
   }
 
-  /**
-   * C-记忆三层：分层巩固调度（演化 consolidation 调用）。
-   * 依 migrationTarget 纯函数推进：working →（会话收尾）episodic；episodic 过期且高访问 → semantic（沉淀）；
-   * 过期且低访问 → prune（剔除）。语义层恒保留。返回迁移/剔除统计。
-   */
+  
+
+
+
+
   consolidateLayers(now = Date.now()): { moved: number; pruned: number } {
     let moved = 0;
     let pruned = 0;
@@ -631,7 +631,7 @@ export class MemoryStore {
     return { moved, pruned };
   }
 
-  // ── C-实体图谱（memory_graph.json 旁路持久化；graph.ts 纯函数 + 本层读写） ──
+  
   private graphCache: EntityGraph | null = null;
 
   private graphPath(): string {
@@ -647,7 +647,7 @@ export class MemoryStore {
     }
   }
 
-  /** 懒加载图谱（无文件/损坏 → 空图）。 */
+  
   getGraph(): EntityGraph {
     if (this.graphCache) { return this.graphCache; }
     try {
@@ -655,31 +655,31 @@ export class MemoryStore {
         const g = parseGraph(readFileSync(this.graphPath(), "utf8"));
         if (g) { this.graphCache = g; return g; }
       }
-    } catch { /* 兜底空图 */ }
+    } catch {  }
     this.graphCache = createGraph();
     return this.graphCache;
   }
 
-  /** upsert 实体并落盘。 */
+  
   upsertGraphEntity(e: Entity): void {
     this.graphCache = upsertEntity(this.getGraph(), e);
     this.saveGraph();
   }
 
-  /** 双向绑定两实体（边带方向关系）并落盘。 */
+  
   linkGraphEntities(a: Entity, b: Entity, relations: { aToB: string; bToA: string; weight?: number }): void {
     this.graphCache = linkEntities(this.getGraph(), a, b, relations);
     this.saveGraph();
   }
 
-  /** 直接加一条有向边（权重叠加）并落盘。 */
+  
   addGraphEdge(edge: { from: string; to: string; relation: string; weight?: number }): void {
     this.graphCache = addEdge(this.getGraph(), { ...edge, weight: edge.weight ?? 1 });
     this.saveGraph();
   }
 
-  /** 经图谱邻居旁路召回：给定记忆种子，返回与其实体直接相连（1 跳）的其他记忆条目。
-   *  C-多路召回：向量种子 + 双向链接 + 图谱邻居三通道汇流。 */
+  
+
   factsByGraphNeighbors(seedEntityKeys: string[], excludeIds: Set<string>, max = 8): MemoryFact[] {
     const graph = this.getGraph();
     if (graph.entities.length === 0 || !seedEntityKeys?.length) { return []; }
@@ -705,27 +705,27 @@ export class MemoryStore {
     return out;
   }
 
-  /** 生成记忆摘要（JSON 关键词 + LanceDB 语义检索 + 图谱联想，合并去重） */
+  
   async summary(context = "", maxItems = 10): Promise<string> {
     const parts: string[] = [];
-    // 过滤脏数据：只保留含 content 的条目
+    
     const facts = this.data.facts.filter((f) => typeof f.content === "string");
 
-    // 艾宾浩斯：按有效权重排序（遗忘因子 × 相关性），沉睡记忆沉底但可唤醒
+    
     const ranked = [...facts].sort((a, b) => effectiveWeight(b, context) - effectiveWeight(a, context));
     const selected = ranked.slice(0, maxItems);
     const now = new Date().toISOString();
     for (const f of selected) {
-      f.last_accessed = now; // 越用越熟
-      f.access_count = (f.access_count ?? 0) + 1; // C-记忆三层：召回即一次访问
+      f.last_accessed = now; 
+      f.access_count = (f.access_count ?? 0) + 1; 
     }
 
-    // 索引（BUG-009: 用 dict 索引替代 O(N²) 遍历）
+    
     const contentToFact = new Map(facts.map((f) => [f.content, f]));
     const idToFact = new Map(facts.filter((f) => f.id).map((f) => [f.id, f]));
     const known = new Set(facts.map((f) => f.content));
 
-    // LanceDB 语义检索（可选，补充关键词遗漏的条目）
+    
     let semanticItems: MemoryFact[] = [];
     let seeds: MemoryFact[] = [];
     if (context && this.lancedbEnabled) {
@@ -734,14 +734,14 @@ export class MemoryStore {
         semanticItems = recalled.filter((r) => !known.has(r.content ?? ""));
         seeds = recalled;
       } catch {
-        /* LanceDB 不可用时静默跳过，不影响主流程 */
+        
       }
     }
 
-    // 图谱联想（BUG-006: 不依赖 LanceDB；种子优先向量召回，fallback 到 ranked 前 3）
+    
     const graphItems: MemoryFact[] = [];
     if (context) {
-      // BUG-012: 对 seeds 按 content 去重，避免重复 content 导致索引覆盖
+      
       const uniqueSeeds: MemoryFact[] = [];
       const seenSeedContents = new Set<string>();
       for (const s of seeds) {
@@ -757,7 +757,7 @@ export class MemoryStore {
       for (const seedFact of seedFacts) {
         for (const linkId of [...(seedFact.links ?? []), ...(seedFact.backlinks ?? [])]) {
           const linked = idToFact.get(linkId);
-          // BUG-007/008: content 非空且不在已知主 facts 中
+          
           if (linked && !seen.has(linked.id ?? "") && !known.has(linked.content ?? "")) {
             seen.add(linked.id ?? "");
             graphItems.push(linked);
@@ -789,29 +789,29 @@ export class MemoryStore {
   }
 
   toDict(): MemoryData {
-    return JSON.parse(JSON.stringify(this.data)) as MemoryData; // N11-P2-9: 深拷贝，防调用方篡改内部状态
+    return JSON.parse(JSON.stringify(this.data)) as MemoryData; 
   }
 
-  // ── LanceDB 接口 ───────────────────────────────────────
+  
 
-  /** 初始化 LanceDB 连接（表已存在时 openTable，维度不匹配则重建）。返回是否可用。 */
+  
   async initLancedb(): Promise<void> {
     if (!this.lancedbEnabled) return;
     try {
       const uri = this.lancedbUri || this.defaultLanceUri;
-      // 自定义根目录生效时，把旧默认位置的向量库搬过来（否则用户改了存储位置后
-      // 既看不到旧向量、也不知道它们还在原处）。只在首次真正用到向量层时发生。
+      
+      
       migrateDirIfNeeded(this.defaultLanceUri, uri);
       const db = await this.lanceConnect(uri);
       const tableName = `memory_${this.agentId}`;
       try {
         this.lanceTable = await db.openTable(tableName);
-        // H3: 检查已有表的向量维度是否匹配当前嵌入维度（查首行探测；空表视为匹配）
+        
         const rows = await this.lanceTable.query().limit(1).toArray();
         if (rows.length) {
-          // ⚠️ 列名是 `vector`（见 LanceRow 与下方全部写入点），不是 `vec` —— 读错列名会得到
-          // undefined → dim=0 → 与 embedDim 永远不等 → **每次初始化都重建表**（向量记忆
-          // 每次重启即丢，且日志里只看到一句"维度不匹配"，看不出是读错了列）。
+          
+          
+          
           const raw = (rows[0] as Record<string, unknown>).vector;
           const dim = raw ? Array.from(raw as ArrayLike<number>).length : 0;
           if (dim !== embedDim) {
@@ -821,7 +821,7 @@ export class MemoryStore {
             return;
           }
         }
-        // V1: 检查已有表是否缺 tags 字段（旧 schema 无此列）
+        
         const schema = await this.lanceTable.schema();
         const fields: string[] = [];
         for (const f of (schema?.fields ?? [])) fields.push(f.name);
@@ -839,7 +839,7 @@ export class MemoryStore {
     }
   }
 
-  /** 写入向量（storeCategorized 内部同步调用；异步执行不阻塞主循环） */
+  
   private async syncLanceStore(category: string, content: string, tags: string[]): Promise<void> {
     try {
       if (!this.lanceTable) await this.initLancedb();
@@ -851,9 +851,9 @@ export class MemoryStore {
     }
   }
 
-  /** 经 sidecar /embeddings 嵌入；失败回退哈希（对照 _embed 降级链）。
-   *  LRU + 磁盘缓存（embed_cache.ts）：同文本跨会话/跨 Agent 重复查询时命中，跳过 HTTP 嵌入；
-   *  仅缓存真实嵌入结果，哈希降级结果不缓存。 */
+  
+
+
   async embedOrHash(text: string): Promise<number[]> {
     const cached = this.embedCache.get(text, embedDim);
     if (cached) return cached;
@@ -863,13 +863,13 @@ export class MemoryStore {
         if (vec && vec.length > 0) this.embedCache.set(text, vec);
         return vec;
       } catch {
-        /* 降级哈希 */
+        
       }
     }
     return hashEmbed(text);
   }
 
-  /** LanceDB 存储（role=category, tags=逗号分隔标签） */
+  
   async store(role: string, content: string, tags = ""): Promise<boolean> {
     if (!this.lancedbEnabled) return false;
     if (!this.lanceTable) await this.initLancedb();
@@ -884,16 +884,16 @@ export class MemoryStore {
     }
   }
 
-  /** LanceDB 语义检索（可选 category 过滤）。A-027: 新加载的 store 惰性初始化表。 */
+  
   async recall(query: string, topK = 5, categories?: string[]): Promise<MemoryFact[]> {
     if (!this.lancedbEnabled) return [];
-    if (!this.lanceTable) await this.initLancedb(); // A-027: 惰性初始化，防全链路静默失效
+    if (!this.lanceTable) await this.initLancedb(); 
     if (!this.lanceTable) return [];
     try {
       const vec = await this.embedOrHash(query);
       let q = this.lanceTable.query().nearestTo(vec);
       if (categories?.length) {
-        // 单引号转义防注入（对齐 Python .replace("'", "''")）
+        
         const safeCats = categories.map((c) => c.replace(/'/g, "''"));
         q = q.where(`role = '${safeCats.join("' OR role = '")}'`);
       }
@@ -914,14 +914,14 @@ export class MemoryStore {
             repeated: 0,
           };
         })
-        .filter((r) => r.content.trim()); // 过滤种子行
+        .filter((r) => r.content.trim()); 
     } catch (e) {
       console.warn(`[memory] LanceDB recall 失败: ${e}`);
       return [];
     }
   }
 
-  /** 将晋升产物（rule/skill/review）向量化存入 LanceDB（对照 vectorize_knowledge） */
+  
   async vectorizeKnowledge(role: string, content: string, tags = ""): Promise<boolean> {
     if (!this.lancedbEnabled) return false;
     try {
@@ -937,15 +937,15 @@ export class MemoryStore {
   }
 }
 
-/** 便捷函数：加载指定 Agent 的记忆存储 */
+
 export function loadMemory(agentId: string, opts: MemoryStoreOptions = {}): MemoryStore {
   return new MemoryStore(agentId, opts);
 }
 
-/**
- * C-记忆三层：演化 consolidation 调度入口（行为巩固同频触发）。
- * 打开 Agent 记忆存储执行分层巩固；任何失败静默降级（不阻断对话/演化主流程）。
- */
+
+
+
+
 export function consolidateMemoryNow(
   agentId: string,
   opts: { dataDir?: string } = {},

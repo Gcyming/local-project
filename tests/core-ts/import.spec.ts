@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/import.spec.ts — Agent 导入（身份移民协议 §5）+ 端到端 roundtrip。
- * 策略：临时项目根 + 真实 fs；exportAgent 生成标准包，手工构造特殊包（旧版/篡改）。
- * 覆盖：冲突策略（abort/overwrite/keep-old）、SHA-256 篡改、rebuild 注入、旧包向前兼容、unsafe 路径防御、roundtrip 一致性。
- */
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { mkdtemp, writeFile, mkdir, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,17 +14,17 @@ import { DEFAULT_REBUILD_HINTS } from "../../core-ts/src/services/export.js";
 
 const KB = ["Knowledge", "Agent Memory"];
 
-/**
- * 导入用例的「派生索引重建」**不加载真实 LanceDB**。
- *
- * 默认实现 `defaultRebuildIndexes` 会 `new MemoryStore({ lancedbEnabled: true })` →
- * `initLancedb()` → `import("@lancedb/lancedb")`，**拉起 297MB 的原生 .node**。
- * 全量并发时 120+ 个测试文件同时抢磁盘，首个用例实测跑到 5s 被 vitest 掐掉；
- * 单独跑命中 OS 文件缓存只要 663ms —— 症状就是"偶发抖动"，误导性极强。
- *
- * 本 spec 验证的是导入 / 冲突策略 / 资产落盘，不是向量重建，注入桩即可：
- * connect 抛错 → `initLancedb` 照常降级（`lancedbEnabled=false`），用例断言不受影响。
- */
+
+
+
+
+
+
+
+
+
+
+
 const NO_LANCE_REBUILD: RebuildDeps = {
   lance: {
     connect: async (): Promise<never> => {
@@ -95,7 +95,7 @@ async function rmDir(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
 }
 
-/** 重打包：读 zip → 修改入口 → 写回新包（用于构造篡改/旧版包） */
+
 async function repack(srcPack: string, outPack: string, mutate: (zip: JSZip) => unknown): Promise<void> {
   const zip = await JSZip.loadAsync(await readFile(srcPack));
   await mutate(zip);
@@ -144,7 +144,7 @@ describe("importAgent（§5）", () => {
     expect(res.ok).toBe(true);
     expect(res.agentId).toBe("agent_b1");
     const agents = await readTargetAgents(target);
-    expect(agents.find((a) => a.id === "agent_exist")).toBeDefined(); // 存量保留
+    expect(agents.find((a) => a.id === "agent_exist")).toBeDefined(); 
     expect(agents.find((a) => a.id === "agent_b1")?.identity_prompt).toBe("我是 Slime");
     const memory = JSON.parse(await readFile(join(target, ...KB, "agent_b1", "memory.json"), "utf8")) as { facts: unknown[] };
     expect(memory.facts).toHaveLength(1);
@@ -160,8 +160,8 @@ describe("importAgent（§5）", () => {
     expect(res.ok).toBe(false);
     expect(res.error).toContain("已存在");
     const agents = await readTargetAgents(target);
-    expect(agents.find((a) => a.id === "agent_b2")?.name).toBe("Old"); // 未被覆盖
-    // Knowledge 零写入
+    expect(agents.find((a) => a.id === "agent_b2")?.name).toBe("Old"); 
+    
     await expect(readFile(join(target, ...KB, "agent_b2", "memory.json"), "utf8")).rejects.toThrow();
     await rmDir(src);
     await rmDir(target);
@@ -174,9 +174,9 @@ describe("importAgent（§5）", () => {
     const res = await importAgent({ input: pack, targetRoot: target, conflictStrategy: "overwrite", rebuildDeps: NO_LANCE_REBUILD });
     expect(res.ok).toBe(true);
     const agents = await readTargetAgents(target);
-    expect(agents).toHaveLength(2); // 不新增数量（同 id 替换）
-    expect(agents.find((a) => a.id === "agent_b3")?.name).toBe("Slime"); // 已覆盖
-    expect(agents.find((a) => a.id === "agent_k")).toBeDefined(); // 其他保留
+    expect(agents).toHaveLength(2); 
+    expect(agents.find((a) => a.id === "agent_b3")?.name).toBe("Slime"); 
+    expect(agents.find((a) => a.id === "agent_k")).toBeDefined(); 
     const memory = JSON.parse(await readFile(join(target, ...KB, "agent_b3", "memory.json"), "utf8")) as { facts: unknown[] };
     expect(memory.facts).toHaveLength(1);
     await rmDir(src);
@@ -207,7 +207,7 @@ describe("importAgent（§5）", () => {
     const res = await importAgent({ input: tampered, targetRoot: target, rebuildDeps: NO_LANCE_REBUILD });
     expect(res.ok).toBe(false);
     expect(res.error).toContain("SHA-256");
-    expect(await readTargetAgents(target)).toHaveLength(0); // 零写入
+    expect(await readTargetAgents(target)).toHaveLength(0); 
     await rmDir(src);
     await rmDir(target);
   });
@@ -215,17 +215,17 @@ describe("importAgent（§5）", () => {
   it("包内不安全路径（../ 逃逸）→ import 中止 + 报错（防御 zip slip）", async () => {
     const src = await makeSrcRoot("agent_s1");
     const pack = await makePack(src, "agent_s1", join(src, "s1.slimeagent"));
-    // 注入 ../ 逃逸路径；注：JSZip 的 generateAsync 会规范化路径为 Knowledge/bad.txt
-    // 导致 manifest 声明了但实际内容被改写 → SHA-256 必然不匹配，import 在解压前中止
+    
+    
     const bad = join(src, "s1_bad.slimeagent");
     await repack(pack, bad, async (zip) => {
-      zip.file("Knowledge/../bad.txt", "evil"); // → 规范化为 Knowledge/bad.txt，与 manifest 不一致
+      zip.file("Knowledge/../bad.txt", "evil"); 
     });
     const target = await makeTargetRoot();
     const res = await importAgent({ input: bad, targetRoot: target, rebuildDeps: NO_LANCE_REBUILD });
     expect(res.ok).toBe(false);
     expect(res.error).toContain("校验失败");
-    expect(await readTargetAgents(target)).toHaveLength(0); // 零写入
+    expect(await readTargetAgents(target)).toHaveLength(0); 
     await rmDir(src);
     await rmDir(target);
   });

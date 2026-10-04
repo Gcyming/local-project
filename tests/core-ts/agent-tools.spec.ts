@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/agent-tools.spec.ts — A-980-R22：Agent 工具面白名单纯函数锚定
- * （默认推荐集 / 自定义勾选 / mcp_ 工具前缀过滤 / 系统提示技能清单）
- */
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
 import {
@@ -30,7 +30,7 @@ describe("resolveAgentToolProfile", () => {
     expect(p.mode).toBe("custom");
     expect(p.skills).toEqual(["foo", "bar"]);
     expect(p.mcp).toEqual(["git", "web"]);
-    p.skills.push("baz"); // 不污染源
+    p.skills.push("baz"); 
     expect(src.skills).toEqual(["foo", "bar"]);
   });
 
@@ -63,12 +63,12 @@ describe("agentToolsOnly", () => {
 });
 
 describe("组合：真实注册表 → Agent 工具面（A-1095③）", () => {
-  /* 为什么需要这一条：上面两个 describe 各自只锁了一半 ——「注册表里确实有 delegate_subagent」
-   * （delegate-subagent.spec）与「agentToolsOnly 保留非 mcp_ 工具」（用**合成名单**验）分别成立，
-   * 但**组合起来**（真实注册表穿过真实过滤器）没有任何断言。
-   * 组合一旦断掉：模型手里就没有委派工具 ⇒ `delegate_subagent` 永远不会被调用，
-   * 用户体感是「子代理派发好像消失了」，而 tsc / 构建 / 全部逻辑测试照样全绿。
-   * ⚠️ 必须用**真实注册表**：合成名单过不了这一关 —— 那正是本测试存在的理由。 */
+  
+
+
+
+
+
   it("delegate_subagent / subagent_result 必须穿过工具面过滤（模型据此才可能派发）", () => {
     resetRegistry();
     registerBuiltinTools();
@@ -96,19 +96,19 @@ describe("agentSkillGuide", () => {
   });
 
   it("必须下发技能目录的**绝对路径**（否则 Agent 自己猜路径 → 写成功但技能库读不到）", () => {
-    /*
-     * 事故形态：用户让 Agent「帮我装个技能」，Agent 把 SKILL.md 写进了**源码仓库**
-     * （E:\local project\slime\config\skills），而打包版读取的是用户数据目录
-     * （%APPDATA%/slime-gui/slime-data/config/skills）。
-     * 两侧都不报错 —— 文件真的写成功了，只是技能库永远看不到它。
-     * 根因：系统提示里只有相对写法 "config/skills"，没有绝对路径，模型只能自己推断。
-     */
+    
+
+
+
+
+
+
     const root = skillsRootDir();
     expect(root.endsWith(join("config", "skills"))).toBe(true);
-    // 必须是绝对路径（模型据此落盘）
+    
     expect(root).toMatch(/^[A-Za-z]:[\\/]|^\//);
 
-    // 两种分支都要带上，否则「未启用任何技能」的 Agent 依旧会去瞎猜路径
+    
     for (const profile of [
       { mode: "custom" as const, skills: [], mcp: [] },
       { mode: "custom" as const, skills: ["foo"], mcp: [] },
@@ -116,7 +116,7 @@ describe("agentSkillGuide", () => {
       const g = agentSkillGuide(profile);
       expect(g).toContain(root);
       expect(g).toContain("SKILL.md");
-      // 必须明确劝阻写到别处
+      
       expect(g).toContain("不要写到源码仓库");
     }
   });

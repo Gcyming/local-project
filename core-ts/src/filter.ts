@@ -1,8 +1,8 @@
-/**
- * core-ts/src/filter.ts — 身份铁律输出过滤（TS 版）。
- * 语义移植自 core/filter.py（规则全集 + A-039 URL/技术标识符遮蔽还原）。
- * 不暴露底层模型名；功能文本（URL / agnes-* 技术标识符）不受破坏。
- */
+
+
+
+
+
 
 export type FilterAction = "replace" | "warn" | "block";
 
@@ -188,14 +188,14 @@ export class OutputFilter {
   }
 }
 
-/**
- * StreamFilter — 跨 chunk 过滤缓冲（语义移植自 slime_server._StreamFilter，_HOLD=32）。
- * 匹配可能跨 SSE chunk 边界（如 "Qwe" + "n"），缓冲尾部字符保证规则完整匹配。
- */
+
+
+
+
 export class StreamFilter {
   private hold: number;
   private pending = "";
-  /** 累计命中的违规数（跨 push/flush 累计，供调用方统计） */
+  
   violations = 0;
 
   constructor(hold = 32) {

@@ -9,7 +9,7 @@ import copy
 import uuid
 from datetime import datetime, timezone
 
-# 艾宾浩斯衰减（行为模式同样遵循「不用就淡」）
+
 _BEHAVIOR_DECAY_DAYS = 30
 
 
@@ -27,7 +27,7 @@ class BehaviorPattern:
         self.usage_count = usage_count
         self.last_reinforced = last_reinforced
         self.source = source
-        self.decision_rationale = decision_rationale  # BUG-019: 为什么这样做（夺舍继承推理）
+        self.decision_rationale = decision_rationale  
 
     def to_dict(self) -> dict:
         return {
@@ -61,7 +61,7 @@ class BehaviorStore:
     def __init__(self, patterns: list[BehaviorPattern] | None = None):
         self.patterns: list[BehaviorPattern] = patterns or []
 
-    # ── 沉淀（L3 → L2）────────────────────────────────
+    
 
     def reinforce(self, scenario: str, steps: list[str], source: str = "",
                   rationale: str = "") -> BehaviorPattern:
@@ -73,11 +73,11 @@ class BehaviorStore:
                 p.confidence = min(1.0, p.confidence + 0.05)
                 p.last_reinforced = now
                 if steps:
-                    p.steps = steps  # 更新步骤（习惯可能微调）
+                    p.steps = steps  
                 if rationale:
                     p.decision_rationale = rationale
                 return p
-        # 新模式（初始 confidence 较低，需多次重复才稳定）
+        
         pattern = BehaviorPattern(
             pattern_id=f"pat_{uuid.uuid4().hex[:8]}",
             scenario=scenario,
@@ -148,7 +148,7 @@ class BehaviorStore:
         self.patterns.append(pattern)
         return pattern
 
-    # ── 注入 ─────────────────────────────────────────
+    
 
     def to_prompt(self, max_patterns: int = 5) -> str:
         """生成 L2 行为模式提示（只注入高置信度的稳定习惯）。BUG-019: 携带决策理由。"""
@@ -167,7 +167,7 @@ class BehaviorStore:
     def get_high_confidence(self, threshold: float = 0.5) -> list[BehaviorPattern]:
         return [p for p in self.patterns if p.confidence >= threshold]
 
-    # ── 序列化 ───────────────────────────────────────
+    
 
     def to_dict(self) -> dict:
         return {"patterns": [p.to_dict() for p in self.patterns]}

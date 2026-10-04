@@ -1,9 +1,9 @@
-/**
- * A-1136：Office「保真渲染路线」判据（`core-ts/src/office/renderPlan.ts`）。
- *
- * 用户原话（2026-09-29）：「我要的是那种**类似以图片的形式**直接用 HTML 用 Web 预览的功能，
- * 而非转成 md 文件阅读」⇒ 本判据决定"这个文件该用哪个渲染器画"，必须**保真**的那几种被正确登记。
- */
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { planRender, canFaithfullyRender, needsLibreOffice } from "../../core-ts/src/office/renderPlan.js";
 
@@ -77,8 +77,8 @@ describe("A-1136 ③ 兜底与未知类型", () => {
   it("无扩展名 → none（不硬套渲染器），且**绝不许**标成可保真", () => {
     expect(planRender("Makefile").render).toBe("none");
     expect(planRender("").render).toBe("none");
-    /* ⚠️ `faithful` 必须显式 false —— 只断言 render="none" 挡不住
-       "把 faithful 改成 true"（那样未知类型会被当成能画 ⇒ 白屏且不报错）。 */
+    
+
     expect(planRender("Makefile").faithful).toBe(false);
     expect(planRender("").faithful).toBe(false);
     expect(canFaithfullyRender("Makefile")).toBe(false);

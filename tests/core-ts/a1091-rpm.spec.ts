@@ -1,20 +1,20 @@
-/**
- * tests/core-ts/a1091-rpm.spec.ts — A-1091：上游 RPM 限流器 + 网络硬规则不再拦本地地址。
- *
- * ## 这一轮修的两件事（都有"下一个人会踩回去、而且全都不报错"的退化形态）
- *
- * ① **上游 RPM 限额没有任何客户端执行者**。Agnes 官方 2026-09-23 把免费档 RPM 从 20 下调到 10，
- *    而应用侧毫无感知 —— 用户只会看到零星的 429 / 中间断流，**不会想到是自己把限额用超了**。
- *    更糟的是设置里那个「并发上限」**全仓没有读取者**（死开关）：用户把它调低以为能避限流，
- *    实际毫无作用。现在：RPM 判据成为**被执行的**逻辑（滑动窗口 + 排队等待），
- *    声明档位落在能力表（单一出处），实测档位从响应头自动学习。
- *
- * ② **内置浏览器被自家硬规则拦死**：`assessAction` 的 network 分支把「非 HTTPS / 127.0.0.1 /
- *    内网」一律 `block`，于是 `browser_navigate` 打不开用户自己的本地服务 ——
- *    而本应用**自己的** `http_create_app` 生成单页应用后就是靠内置浏览器打开
- *    `http://127.0.0.1:<port>` 预览的。实测事故：Agent 如实回报
- *    「内置浏览器的硬规则不允许访问本地回环地址，不是我操作失误」，用户侧看起来就是"浏览器坏了"。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   RpmLimiter,
@@ -29,7 +29,7 @@ import {
 import { assessAction } from "../../core-ts/src/tools/classifier.js";
 import { hardRuleCheck } from "../../core-ts/src/tools/hard_rules.js";
 
-/** 可控时钟：now 手动推进，sleep 只记录不真等（限流判据必须能在毫秒内断言） */
+
 function fakeClock(): LimiterClock & { advance: (ms: number) => void; sleeps: number[] } {
   let t = 1_000_000;
   const sleeps: number[] = [];
@@ -41,7 +41,7 @@ function fakeClock(): LimiterClock & { advance: (ms: number) => void; sleeps: nu
   };
 }
 
-/* ───────────────────────── A 组：三层取值 ───────────────────────── */
+
 
 describe("A-1091 A 组 — 额度取值：实测 > 声明 > 未知（不发明阈值）", () => {
   it("A1 实测优先于声明（付费档实测 20 > 免费档声明 10 —— 绝不能取小）", () => {
@@ -74,7 +74,7 @@ describe("A-1091 A 组 — 额度取值：实测 > 声明 > 未知（不发明�
   });
 });
 
-/* ───────────────────────── B 组：响应头解析 ───────────────────────── */
+
 
 describe("A-1091 B 组 — 上游限流响应头解析（多厂商字段名归一）", () => {
   const h = (map: Record<string, string>) => (n: string) => map[n.toLowerCase()];
@@ -112,7 +112,7 @@ describe("A-1091 B 组 — 上游限流响应头解析（多厂商字段名归�
   });
 });
 
-/* ───────────────────────── C 组：滑动窗口判据 ───────────────────────── */
+
 
 describe("A-1091 C 组 — 滑动窗口取令牌（纯判据）", () => {
   it("C1 额度没用完 ⇒ 不等待，并把本次计入窗口", () => {
@@ -122,22 +122,22 @@ describe("A-1091 C 组 — 滑动窗口取令牌（纯判据）", () => {
   });
 
   it("C2 额度用完 ⇒ 等到**最早那次**滑出窗口（不是固定分桶，杜绝桶边界 2×rpm）", () => {
-    const hits = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]; // 10 次 = 额度 10
+    const hits = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]; 
     const p = planAcquire(10_000, hits, 10);
-    // 最早那次在 0，窗口到 60_000 + EPSILON 才滑出
+    
     expect(p.waitMs).toBe(60_000 + 250 - 10_000);
   });
 
   it("C3 窗口外的旧记录不占用额度", () => {
     const hits = [0, 1, 2];
-    const now = RPM_WINDOW_MS + 3; // 最晚的 2 也已滑出（now-2 = 60001 ≥ 60000）
+    const now = RPM_WINDOW_MS + 3; 
     const p = planAcquire(now, hits, 3);
     expect(p.waitMs).toBe(0);
     expect(p.keep).toEqual([now]);
   });
 
   it("C3b 边界：**差 1ms 就还在窗口内**的记录仍占额度（判据是 `< window` 而不是 `<=`）", () => {
-    const now = RPM_WINDOW_MS + 1; // now-2 = 59999 < 60000 ⇒ 仍在窗口
+    const now = RPM_WINDOW_MS + 1; 
     const p = planAcquire(now, [0, 1, 2], 3);
     expect(p.keep).toEqual([2, now]);
   });
@@ -148,7 +148,7 @@ describe("A-1091 C 组 — 滑动窗口取令牌（纯判据）", () => {
   });
 });
 
-/* ───────────────────────── D 组：限流器（排队而非丢弃） ───────────────────────── */
+
 
 describe("A-1091 D 组 — RpmLimiter：额度用满要**排队等待**，绝不静默丢请求", () => {
   it("D1 声明的 10 RPM 下，第 11 次请求会等到窗口滑动（不是抛错、不是丢弃）", async () => {
@@ -214,11 +214,11 @@ describe("A-1091 D 组 — RpmLimiter：额度用满要**排队等待**，绝不
     l.observe("k", { retryAfterS: 1 }, 429);
     expect(l.snapshot()[0].cooling).toBe(true);
     clock.advance(2_000);
-    expect(l.snapshot()[0].cooling).toBe(true); // 若被缩短到 1s，这里已经不再 cooling
+    expect(l.snapshot()[0].cooling).toBe(true); 
   });
 });
 
-/* ───────────────────────── E 组：网络硬规则不再拦本地地址 ───────────────────────── */
+
 
 describe("A-1091 E 组 — 内置浏览器可以打开本地服务（这条曾经把自己的功能拦死）", () => {
   it("E1 【事故本体】browser_navigate 打开 http://127.0.0.1:8800 **不再被硬规则拒绝**", () => {

@@ -23,7 +23,7 @@ SILAM_ROOT = Path(__file__).resolve().parent.parent / "_model_stage"
 if str(SILAM_ROOT) not in sys.path:
     sys.path.append(str(SILAM_ROOT))
 
-from silam_core.reply import (  # noqa: E402
+from silam_core.reply import (  
     classify_user_input,
     compose_parts,
     is_echo_recall,
@@ -52,7 +52,7 @@ class TestClassifyUserInput:
             assert classify_user_input(t) == "general", t
 
     def test_greeting_beats_capability_order(self):
-        # "你好，你会什么" 先命中问候（规则顺序：问候在前）
+        
         assert classify_user_input("你好，你会什么？") == "greeting"
 
 

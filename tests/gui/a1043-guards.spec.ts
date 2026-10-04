@@ -1,22 +1,22 @@
-/**
- * A-1043 守卫：**启动后左栏会话列表空白** + 初始化并发重入。
- *
- * **用户原话**：「每次重新启动后，slime 内的历史会话都要相当一段时间加载，每次进去第一时间
- * 左侧边栏的会话列表都是空白的，什么都没有，跟刚下载一样。」
- *
- * 根因（探针 `gui/scripts/probe-sessions-boot.cjs` 实证，同一次启动）：
- *   ① `ensureServices()` **没有在飞去重**，且 `chatService` 只在链尾赋值 →
- *      启动瞬间 agents/sessions/providers/localModels 四个首屏 list 一起打进来 =
- *      整条初始化链（SILAM python sidecar / engine / sandbox / ChatService / 调度器）**并发跑两遍**
- *      （日志实证：`core-ts 服务已加载` ×2、`Attempted to register a second handler` ×2、
- *      `EADDRINUSE 127.0.0.1:19011` ×2、skills-ready ×2）。
- *   ② `slime:sessions:list` 与 `slime:agents:list` 是**纯读**操作，却都 `await ensureServices()` →
- *      被整条重初始化挡住。渲染层 8s 的 `firstLoadGuard` 先放行 UI → 用户看到空列表。
- *
- * 本守卫分两层：
- *   A. 纯逻辑直测 `singleFlight`（`gui/src/main/singleFlight.ts`，判据的唯一实现）；
- *   B. 位置驱动扫源码：断言"首屏只读 handler 不许等重初始化"、"重初始化必须单飞"、"启动期必须预热"。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,14 +26,14 @@ const ROOT = join(__dirname, "../..");
 const MAIN = "gui/src/main/index.ts";
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再扫 —— 否则注释里提到的写法会把断言喂饱（本仓反复踩过）。 */
+
 const code = (rel: string): string =>
   read(rel).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
-/**
- * 取某个 `handleTrusted` handler 的函数体（位置驱动：从它的注册点切到**下一个** handler 注册点）。
- * 不许用 `indexOf("ensureServices")` 之类的全仓搜索 —— 那样"别处有没有"与"这里有没有"分不开。
- */
+
+
+
+
 function handlerBody(src: string, channel: string): string {
   const start = src.indexOf(`"${channel}"`);
   expect(start, `源码里找不到 handler ${channel}`).toBeGreaterThan(-1);
@@ -41,7 +41,7 @@ function handlerBody(src: string, channel: string): string {
   return src.slice(start, next === -1 ? undefined : next);
 }
 
-/** `app.whenReady()` 到 `loadURL` 之间的启动段（预热必须落在这里）。 */
+
 function whenReadyBody(src: string): string {
   const start = src.indexOf("app.whenReady()");
   expect(start, "源码里找不到 app.whenReady()").toBeGreaterThan(-1);
@@ -120,13 +120,13 @@ describe("A-1043 ②：重初始化单飞（源码层）", () => {
     const m = src.match(/async function ensureServices\(\): Promise<void> \{([\s\S]*?)\n\}/);
     expect(m, "找不到 ensureServices 定义").toBeTruthy();
     const body = m![1];
-    // ⚠️ 薄包装必须**只**做转发：一旦这里恢复成重活，等于单飞被绕过（回到"并发跑两遍"）。
+    
     expect(body.replace(/\s/g, "")).toBe("awaitensureServicesOnce();");
   });
 
   it("重活整条链住在 `singleFlight<void>(` 里（并发调用共享一份初始化）", () => {
     expect(src).toMatch(/const ensureServicesOnce = singleFlight<void>\(async \(\) => \{/);
-    // 链内必须还包含那几个"注定会撞车"的副作用，证明被包住的确实是我们以为的那条链
+    
     const seg = src.slice(
       src.indexOf("const ensureServicesOnce = singleFlight<void>"),
       src.indexOf("async function ensureServices(): Promise<void>"),
@@ -151,7 +151,7 @@ describe("A-1043 ②：重初始化单飞（源码层）", () => {
       src.indexOf("async function ensureServices(): Promise<void>"),
     );
     expect(seg).not.toContain("new AgentRegistry()");
-    // 但轻量路径里必须有它（否则注册表永远不会被加载）
+    
     expect(src).toContain("const reg = new AgentRegistry();");
   });
 });
@@ -177,9 +177,9 @@ describe("A-1043 ③：首屏只读 handler 不许等重初始化", () => {
 
   it("数量守恒：重活入口仍有大量调用点（禁「顺手全删」把功能一起删掉）", () => {
     const calls = src.match(/await ensureServices\(\);/g) ?? [];
-    // 首屏两个只读 handler 迁走后仍应有 ≥ 30 处（改前 40 处）
+    
     expect(calls.length).toBeGreaterThanOrEqual(30);
-    // 会话/Agent 列表两处是**具名豁免**
+    
     expect(handlerBody(src, "slime:sessions:list")).not.toContain("await ensureServices()");
     expect(handlerBody(src, "slime:agents:list")).not.toContain("await ensureServices()");
   });
@@ -191,7 +191,7 @@ describe("A-1043 ④：启动期必须后台预热重初始化", () => {
   it("app.whenReady() 里必须 `void ensureServices()`（否则重活只在首次对话时才发生）", () => {
     const boot = whenReadyBody(src);
     expect(boot).toContain("void ensureServices()");
-    // 必须是 fire-and-forget：用 await 会把首屏重新拖回原病灶
+    
     expect(boot).not.toMatch(/await ensureServices\(\)/);
   });
 

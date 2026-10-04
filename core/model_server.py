@@ -33,7 +33,7 @@ _REGISTRY_PATH = _PROJECT_ROOT / "data" / "model_servers.json"
 
 IS_WINDOWS = platform.system() == "Windows"
 
-# ── VRAM 监控 ──────────────────────────────────────────────
+
 
 
 class VRAMMonitor:
@@ -45,8 +45,8 @@ class VRAMMonitor:
         if not nvidia_smi:
             return None
         try:
-            # ⚠️ A-1134：一律走 `run_text`（bytes 收 + 宽容解码）——`text=True` 会让解码发生在
-            # reader 线程里，撞上非 UTF-8 字节就崩线程（Windows 中文环境实测）。
+            
+            
             result = run_text(
                 [
                     nvidia_smi,
@@ -69,7 +69,7 @@ class VRAMMonitor:
             return None
 
 
-# ── 状态模型 ────────────────────────────────────────────────
+
 
 
 class ServerState:
@@ -79,7 +79,7 @@ class ServerState:
     UNLOADING = "unloading"
 
 
-# ── ModelBackend ────────────────────────────────────────────
+
 
 
 class ModelBackend:
@@ -163,7 +163,7 @@ class ModelBackend:
         """停止自己拉起的进程。N10-M7: taskkill 前校验命令行含 llama-server，防 PID 复用误杀。"""
         if self._process is None or self._pid is None:
             return
-        # 校验 PID 对应进程确实是 llama-server
+        
         if IS_WINDOWS and not self._verify_pid_is_llama_server():
             logger.warning(f"[model_server] PID {self._pid} 非 llama-server，跳过 taskkill")
             self._process = None
@@ -237,7 +237,7 @@ class ModelBackend:
         return self.probe(self._port)
 
 
-# ── ModelServerManager ──────────────────────────────────────
+
 
 
 @dataclass
@@ -250,7 +250,7 @@ class _Instance:
     persistent: bool = False
     gpu_layers: int = 99
     ctx_len: int = 2048
-    external: bool = False  # probe 发现的已有实例
+    external: bool = False  
 
 
 class ModelServerManager:
@@ -270,15 +270,15 @@ class ModelServerManager:
         self._backends: dict[str, ModelBackend] = {}
         self._idle_tasks: dict[str, asyncio.Task] = {}
         self._startup_task: asyncio.Task | None = None
-        self._ensure_lock = asyncio.Lock()  # H2: 防止并发双启动
+        self._ensure_lock = asyncio.Lock()  
 
-    # ── 生命周期 ───────────────────────────────────────────
+    
 
     async def startup(self):
         """后台启动 persistent 实例（不阻塞 server）。失败记日志。"""
-        # H1/A-003: 启动即清空 registry —— 上次崩溃残留的 ready 条目会让外部读者
-        # （memory._embed / _local_model_reply 的 registry 回退路径）读到假就绪端口。
-        # 本进程管理的内存状态才是权威，registry 只反映当前进程的实例。
+        
+        
+        
         self._write_registry()
         if self._embed_cfg.get("persistent"):
             async def _bg_init():
@@ -308,7 +308,7 @@ class ModelServerManager:
         """确保实例就绪。已 ready → 复用；未启动 → 预算检查 + 启动 + wait_ready。"""
         cfg = self._embed_cfg if role == "embedding" else self._chat_cfg
 
-        # 1. 快速路径：已 ready → 直接复用（无锁）
+        
         inst = self._instances.get(role)
         if inst and inst.state == ServerState.READY:
             backend = self._backends.get(role)
@@ -316,9 +316,9 @@ class ModelServerManager:
                 self.touch(role)
                 return {"ok": True, "port": inst.port, "state": "reused"}
 
-        # 2. 关键段加锁（H2：防止并发双启动）
+        
         async with self._ensure_lock:
-            # 2a. 双检：锁内再查一次
+            
             inst = self._instances.get(role)
             if inst and inst.state == ServerState.READY:
                 backend = self._backends.get(role)
@@ -348,12 +348,12 @@ class ModelServerManager:
 
     async def _ensure_locked(self, role: str, model_path: str, model_name: str, cfg: dict) -> dict:
         """锁内执行的实际 ensure 逻辑。"""
-        # 1. 探测已存在的活实例（A-017：孤儿回收；外部实例复用不误杀）
+        
         live = await self._probe_live(role, cfg)
         if live:
             port, pid = live
             if pid and _is_orphan(pid) and _kill_pid(pid):
-                # 崩溃残留的孤儿 → 回收后走下方全新启动（find_free_port 会复用该端口）
+                
                 logger.info(
                     f"[model_server] 检测到崩溃残留孤儿 llama-server 已回收"
                     f" (PID {pid}, port {port})，将重新拉起"
@@ -374,13 +374,13 @@ class ModelServerManager:
                 self.touch(role)
                 return {"ok": True, "port": port, "state": "external"}
 
-        # 2. VRAM 预算检查（非 persistent 角色）
+        
         if role == "chat":
             vram = self._vram.sample()
             if vram and vram["free_gb"] - self._chat_est_gb < 1.0:
                 return {"ok": False, "error": f"显存不足（空闲 {vram['free_gb']:.1f}GB，需要 ~{self._chat_est_gb:.1f}GB，保留 1GB 余量）"}
 
-        # 3. 解析模型路径
+        
         model_path = model_path or cfg.get("model_path", "")
         if role == "chat" and not model_path:
             models_dir = Path(cfg.get("models_dir", ""))
@@ -392,9 +392,9 @@ class ModelServerManager:
         if not model_path:
             return {"ok": False, "error": f"未指定模型路径（role={role}）"}
 
-        # 4. 找空端口并启动（N10-M6: 端口冲突时重试 3 次）
-        # A-003: 角色感知端口基址 —— embedding 用固定配置端口（8999），chat 用 port_start。
-        # 修复前 embedding 也走 chat 的 port_start，导致 embedding 落在 18082 且与配置不符。
+        
+        
+        
         base_port = _base_port_for(role, cfg, self._chat_cfg)
         max_retries = 3
         for attempt in range(max_retries):
@@ -421,7 +421,7 @@ class ModelServerManager:
             self._backends[role] = backend
             self._write_registry()
 
-            # 5. 等待就绪
+            
             ready = await backend.wait_ready(self._startup_timeout)
             if ready:
                 inst.state = ServerState.READY
@@ -479,7 +479,7 @@ class ModelServerManager:
         idle_min = cfg.get("idle_unload_min", 0)
         if idle_min <= 0 or role == "embedding":
             return
-        # 取消旧计时 → 创建新计时
+        
         if role in self._idle_tasks:
             self._idle_tasks[role].cancel()
         self._idle_tasks[role] = asyncio.create_task(self._idle_timer(role, idle_min * 60))
@@ -493,7 +493,7 @@ class ModelServerManager:
         except asyncio.CancelledError:
             pass
 
-    # ── 查询 ───────────────────────────────────────────────
+    
 
     def status(self) -> list[dict]:
         """返回所有实例状态"""
@@ -518,7 +518,7 @@ class ModelServerManager:
         inst = self._instances.get(role)
         return inst.port if inst and inst.state == ServerState.READY else 0
 
-    # ── Registry ────────────────────────────────────────────
+    
 
     def _write_registry(self):
         """原子写入 registry（防多进程读半截）"""
@@ -546,7 +546,7 @@ class ModelServerManager:
         except Exception:
             return {}
 
-    # ── 内部 ───────────────────────────────────────────────
+    
 
     def _find_free_port(self, base_port: int, start_offset: int = 0) -> int:
         """从 base_port 起顺序找空闲端口（TCP 连接探测）。"""
@@ -557,8 +557,8 @@ class ModelServerManager:
             sock.settimeout(0.3)
             result = sock.connect_ex(("127.0.0.1", port))
             sock.close()
-            if result != 0:  # 连接失败 = 端口空闲
-                # 再用 HTTP 确认
+            if result != 0:  
+                
                 try:
                     import urllib.request
                     urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5)
@@ -577,7 +577,7 @@ def _base_port_for(role: str, cfg: dict, chat_cfg: dict) -> int:
     return chat_cfg.get("port_start", 18082)
 
 
-# ── A-017: 崩溃残留孤儿 llama-server 的检测与回收 ────────────
+
 
 
 def _verify_llama_server_pid(pid: int) -> bool:
@@ -601,7 +601,7 @@ def _verify_llama_server_pid(pid: int) -> bool:
                     timeout=5,
                 )
                 return "llama-server" in result.stdout
-            # wmic 缺失回退：tasklist 镜像名校验
+            
             result = run_text(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 timeout=5,
@@ -611,7 +611,7 @@ def _verify_llama_server_pid(pid: int) -> bool:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
             return "llama-server" in cmdline
     except Exception:
-        return False  # 无法确认时不杀
+        return False  
 
 
 def _pid_for_port(port: int) -> int | None:
@@ -708,7 +708,7 @@ def _kill_pid(pid: int) -> bool:
         return False
 
 
-# ── 全局单例 ────────────────────────────────────────────────
+
 
 _MODEL_SERVER: ModelServerManager | None = None
 

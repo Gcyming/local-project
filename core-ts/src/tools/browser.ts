@@ -1,15 +1,15 @@
-/**
- * core-ts/src/tools/browser.ts — 右侧栏浏览器控制工具（A-976）。
- *
- * 与 screen_*（ADB/桌面）的设计对齐：**元素优先于坐标**。
- * 推荐流程：browser_navigate 打开网址 → browser_snapshot 拿元素（带序号/文本/选择器）
- *          → browser_click({text|selector|index}) → browser_screenshot 核对。
- *
- * 依赖注入：主进程装配层用 setBrowserAdapter 注入 BrowserBridge（core-ts 不依赖 Electron）。
- */
+
+
+
+
+
+
+
+
+
 import { Tool, type ToolRegistry } from "./registry.js";
 
-/** 浏览器指令执行器（由 GUI 主进程注入） */
+
 export interface BrowserLike {
   exec(cmd: Record<string, unknown>, timeoutMs?: number): Promise<{ ok: boolean; data?: unknown; error?: string }>;
 }
@@ -37,7 +37,7 @@ async function call(cmd: Record<string, unknown>, timeoutMs?: number): Promise<{
   return b.exec(cmd, timeoutMs);
 }
 
-/** 把任意结构安全转成可读文本 */
+
 function pretty(v: unknown): string {
   try {
     return typeof v === "string" ? v : JSON.stringify(v, null, 2);
@@ -47,7 +47,7 @@ function pretty(v: unknown): string {
 }
 
 export function registerBrowserTools(registry: ToolRegistry): void {
-  /* ── 浏览标签管理 ── */
+  
 
   registry.register(new Tool({
     name: "browser_tabs",
@@ -103,7 +103,7 @@ export function registerBrowserTools(registry: ToolRegistry): void {
     riskKind: "write",
   }));
 
-  /* ── 导航 / 读取 ── */
+  
 
   registry.register(new Tool({
     name: "browser_navigate",
@@ -126,16 +126,16 @@ export function registerBrowserTools(registry: ToolRegistry): void {
       const r = await call({ kind: "navigate", url, tabId: pickTabId(args) }, 45_000);
       if (!r.ok) { return `[错误] ${r.error}`; }
       const d = r.data as { url?: string; systemOpened?: boolean; handler?: string; popupNotice?: string } | undefined;
-      // A-980-R2：系统协议链接（bitbrowser:// 等）——交给系统应用真实打开，不在浏览器页承载
+      
       if (d?.systemOpened) {
         return `[已交给系统打开] ${d.url}${d.handler ? `（${d.handler}）` : ""}——此类链接由本机客户端处理，右侧栏浏览器不打开；链接目的已达成。`;
       }
       const lines: string[] = [`[已打开] ${d?.url ?? url}`];
       if (d?.popupNotice) { lines.push(`⚠️ ${d.popupNotice}`); }
-      // A-980：「导航即观察」——navigate 返回时顺带取首屏可操作元素清单（业界共识：fba / agent-browser 的
-      // "快照即观察"，Anthropic Computer Use GA 批量动作同思路）。
-      // 模型打开页面后**不需要再单独调 browser_snapshot 看页面有什么**，直接按清单 click，省 1-2 轮模型往返
-      // （每轮 = 1-3s prefill+decode，这正是"操控墨迹半天"的主要来源）。
+      
+      
+      
+      
       const snap = await call({ kind: "snapshot", tabId: pickTabId(args) }, 10_000);
       if (snap.ok) {
         const s = snap.data as { elements?: Array<{ index: number; tag: string; text: string; selector: string }> } | undefined;
@@ -180,7 +180,7 @@ export function registerBrowserTools(registry: ToolRegistry): void {
     autoApprovable: true,
   }));
 
-  /* ── 元素快照（最稳的定位方式） ── */
+  
 
   registry.register(new Tool({
     name: "browser_snapshot",
@@ -213,7 +213,7 @@ export function registerBrowserTools(registry: ToolRegistry): void {
     autoApprovable: true,
   }));
 
-  /* ── 交互 ── */
+  
 
   registry.register(new Tool({
     name: "browser_click",
@@ -381,7 +381,7 @@ export function registerBrowserTools(registry: ToolRegistry): void {
     riskKind: "write",
   }));
 
-  /* ── 截图 / 等待 ── */
+  
 
   registry.register(new Tool({
     name: "browser_screenshot",

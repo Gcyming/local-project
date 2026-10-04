@@ -1,13 +1,13 @@
-/**
- * core-ts/src/encryption.ts — 加密配置模块。
- * 语义移植自 core/encryption.py：PBKDF2-HMAC-SHA256（600k 迭代）+ AES-256-GCM。
- *
- * - 密文格式：base64(salt(16) + nonce(12) + ciphertext + tag(16))，与 Python cryptography AESGCM 双向兼容
- * - 密钥文件：~/.slime_pass（优先）→ {project}/.slime_pass（fallback）
- * - Windows：隐藏属性 + icacls ACL 限制；Unix：chmod 0o600
- * - A-113：解密失败打 warning 不静默；passphrase 丢失但密文存在 → stderr 警告
- * - 可注入 passFile/projectRoot/iterations（测试隔离，绝不触碰真实 ~/.slime_pass）
- */
+
+
+
+
+
+
+
+
+
+
 
 import { pbkdf2Sync, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync, statSync } from "node:fs";
@@ -19,9 +19,9 @@ export { PROJECT_ROOT };
 
 export const SALT_SIZE = 16;
 export const NONCE_SIZE = 12;
-export const TAG_SIZE = 16; // AES-256-GCM 认证标签（Python AESGCM 附加在密文末尾）
+export const TAG_SIZE = 16; 
 export const PBKDF2_ITERATIONS = 600_000;
-export const KEY_SIZE = 32; // AES-256
+export const KEY_SIZE = 32; 
 
 export interface EncryptionOptions {
   passFile?: string;
@@ -50,7 +50,7 @@ function warn(msg: string): void {
   console.warn(`[encryption] ${msg}`);
 }
 
-/** Windows: 隐藏属性 + icacls ACL 限制；Unix: chmod 0o600。失败不阻塞，但打 warning。 */
+
 function hardenFile(path: string): void {
   if (process.platform === "win32") {
     try {
@@ -81,11 +81,11 @@ function hardenFile(path: string): void {
   }
 }
 
-/**
- * 确保 passphrase 存在：~/.slime_pass → {project}/.slime_pass（fallback）。
- * 不存在则生成随机 passphrase（64 hex）并硬化保存。
- * A-113: 加密配置存在但 passphrase 丢失 → 警告旧密文永久不可解密。
- */
+
+
+
+
+
 export function ensurePassphrase(opts: EncryptionOptions = {}): { passphrase: string; path: string } {
   const projectRoot = opts.projectRoot ?? PROJECT_ROOT;
   const primary = opts.passFile ?? defaultPassFile();
@@ -99,7 +99,7 @@ export function ensurePassphrase(opts: EncryptionOptions = {}): { passphrase: st
         passphrase = readFileSync(passFile, "utf8").trim();
       }
     } catch {
-      /* 不存在或不可读 → 跳过 */
+      
     }
     if (passphrase) return { passphrase, path: passFile };
     if (existsSync(passFile)) {
@@ -107,7 +107,7 @@ export function ensurePassphrase(opts: EncryptionOptions = {}): { passphrase: st
     }
   }
 
-  // passphrase 丢失但密文存在 → 旧密文永久不可解密
+  
   const encPath = resolveConfigPath("config/providers.enc.json", projectRoot);
   if (existsSync(encPath)) {
     console.error(
@@ -116,7 +116,7 @@ export function ensurePassphrase(opts: EncryptionOptions = {}): { passphrase: st
     );
   }
 
-  const passphrase = randomBytes(32).toString("hex"); // 64 hex 字符
+  const passphrase = randomBytes(32).toString("hex"); 
   let wroteTo = primary;
   try {
     const tmp = `${primary}.${randomBytes(4).toString("hex")}.tmp`;
@@ -136,7 +136,7 @@ export function ensurePassphrase(opts: EncryptionOptions = {}): { passphrase: st
   return { passphrase, path: wroteTo };
 }
 
-/** 拼接/拆分：salt + nonce + ciphertext(+tag)。返回密文（含 tag）与 tag 分离。 */
+
 function splitCombined(combined: Buffer): { salt: Buffer; nonce: Buffer; ciphertext: Buffer; tag: Buffer } {
   return {
     salt: combined.subarray(0, SALT_SIZE),
@@ -170,21 +170,21 @@ function decryptBytes(encoded: string, passphrase: string, iterations: number): 
   }
 }
 
-/** Windows 写前清除隐藏属性（attrib +h 后对已存在文件 truncate 写会 EPERM；写完再硬化）。 */
+
 function unhideFile(path: string): void {
   if (process.platform === "win32") {
     try {
       execFileSync("attrib", ["-h", path], { windowsHide: true });
     } catch {
-      /* 文件可能不存在（首次写入），忽略 */
+      
     }
   }
 }
 
-/**
- * 加密配置 dict 并写入文件，返回 base64 字符串。
- * 格式：base64(salt + nonce + ciphertext + tag)，与 Python encrypt() 双向兼容。
- */
+
+
+
+
 export function encrypt(config: Record<string, unknown>, configPath = "config/providers.enc.json", opts: EncryptionOptions = {}): string {
   const projectRoot = opts.projectRoot ?? PROJECT_ROOT;
   const path = resolveConfigPath(configPath, projectRoot);
@@ -198,10 +198,10 @@ export function encrypt(config: Record<string, unknown>, configPath = "config/pr
   return encoded;
 }
 
-/**
- * 解密配置文件，返回 dict。失败（不存在/密码错误/格式损坏）返回 null。
- * A-113: 文件存在但解密失败 → warning 不静默。
- */
+
+
+
+
 export function decrypt(configPath = "config/providers.enc.json", opts: EncryptionOptions = {}): Record<string, unknown> | null {
   const projectRoot = opts.projectRoot ?? PROJECT_ROOT;
   const path = resolveConfigPath(configPath, projectRoot);
@@ -221,7 +221,7 @@ export function decrypt(configPath = "config/providers.enc.json", opts: Encrypti
   }
 }
 
-/** 加密纯文本并写入文件（auth token 等），返回 base64 字符串。 */
+
 export function encryptRaw(plaintext: string, configPath: string, opts: EncryptionOptions = {}): string {
   const projectRoot = opts.projectRoot ?? PROJECT_ROOT;
   const path = resolveConfigPath(configPath, projectRoot);
@@ -235,7 +235,7 @@ export function encryptRaw(plaintext: string, configPath: string, opts: Encrypti
   return encoded;
 }
 
-/** 解密纯文本文件，返回原始字符串。失败返回 null（A-113 warning）。 */
+
 export function decryptRaw(configPath: string, opts: EncryptionOptions = {}): string | null {
   const projectRoot = opts.projectRoot ?? PROJECT_ROOT;
   const path = resolveConfigPath(configPath, projectRoot);

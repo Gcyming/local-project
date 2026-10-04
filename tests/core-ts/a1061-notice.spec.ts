@@ -1,16 +1,16 @@
-/**
- * A-1061④ 守卫：上游**静默重试**必须如实上报。
- *
- * 用户原话：「经常出现 agent 什么都没有，自己加载半天才输出，你给我优化一下」。
- *
- * 取证（不是猜）：本项目的上游失败是**静默重试**的 ——
- *   · `client.ts` 的 429 退避表 `[5, 15, 30, 60]`（累计最长 ≈110s）+ 瞬时错误 1/3/7s 退避；
- *   · `router.recordFallback` 静默换备用模型。
- * 这段时间界面只有一句「已发出请求，等待上游返回…」→ 用户认定卡死。
- *
- * 权威做法：Claude Code 状态栏把这类情况显示出来 ——
- * `API error · Retrying in Xs · attempt N/10`、`Rate limited · Retrying in Xs`。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -44,7 +44,7 @@ describe("A-1061④-A 文案与单槽行为（真模块）", () => {
   it("🐛 重试次数是**用户口径**（从 1 开始），且不会超过上限", () => {
     expect(formatRetryNotice({ attempt: 0, maxAttempts: 4, waitMs: 5000, status: 429 })).toContain("第 1/4 次");
     expect(formatRetryNotice({ attempt: 2, maxAttempts: 4, waitMs: 30000 })).toContain("第 3/4 次");
-    // 脏输入（下标越界）不许显示成「第 9/4 次」
+    
     expect(formatRetryNotice({ attempt: 9, maxAttempts: 4, waitMs: 30000 })).toContain("第 4/4 次");
   });
 
@@ -57,7 +57,7 @@ describe("A-1061④-A 文案与单槽行为（真模块）", () => {
     const t = formatFallbackNotice("deepseek-chat", "agnes-2.5-flash");
     expect(t).toContain("deepseek-chat");
     expect(t).toContain("agnes-2.5-flash");
-    // 没有备用名也要给出非空、不自相矛盾的文案
+    
     expect(formatFallbackNotice("deepseek-chat", "").length).toBeGreaterThan(0);
   });
 
@@ -78,7 +78,7 @@ describe("A-1061④-B 接线：谁在什么时候上报 / 透传 / 收掉", () =
     const atNet = src.indexOf('noteUpstream("retry", formatRetryNotice({ attempt, maxAttempts, waitMs: netWaitMs }));');
     expect(at429, "429 重试没有上报").toBeGreaterThan(-1);
     expect(atNet, "网络级重试没有上报").toBeGreaterThan(-1);
-    // 必须在 sleep 之前（睡完再报等于这段等待期仍然是静默的）
+    
     expect(src.indexOf("await sleep(waitMs);")).toBeGreaterThan(at429);
     expect(src.indexOf("await sleep(netWaitMs);")).toBeGreaterThan(atNet);
   });
@@ -117,9 +117,9 @@ describe("A-1061④-B 接线：谁在什么时候上报 / 透传 / 收掉", () =
     const withNotice = deriveLiveStatus({ loading: true, upstreamNotice: "被限流（429），30s 后重试（第 1/4 次）" });
     expect(withNotice?.kind).toBe("notice");
     expect(withNotice?.animated, "在等上游属于「在推进」，该播扫光").toBe(true);
-    // 停止的优先级更高（用户已经点了停止就不该再看见"在重试"）
+    
     expect(deriveLiveStatus({ loading: true, stopping: true, upstreamNotice: "x" })?.kind).toBe("stopping");
-    // 没有通知时旧路径不变
+    
     expect(deriveLiveStatus({ loading: true, replyChars: 5 })?.kind).toBe("writing");
     expect(deriveLiveStatus({ loading: true })?.kind).toBe("preparing");
   });
@@ -129,15 +129,15 @@ describe("A-1061④-B 接线：谁在什么时候上报 / 透传 / 收掉", () =
     const at = src.indexOf('if (c.type === "notice") {');
     expect(at, "onChunk 没有 notice 分支").toBeGreaterThan(-1);
     expect(src.slice(at, at + 300)).toContain("if (otherSid == null) { setUpstreamNotice(c.data?.content ?? null); }");
-    // 有真实事件就收掉（同值 setState 会被 React bail out，不额外渲染）
+    
     expect(src).toContain('if (c.type !== "heartbeat") { setUpstreamNotice(null); }');
-    // 必须真的喂给状态行
+    
     expect(src).toContain("upstreamNotice: upstreamNotice ?? undefined,");
   });
 
   it("[反例] 断言能抓住坏写法（守卫自检）", () => {
-    // 不把 notice 分支放在 loading 之前 → 空转期（loading 为 true 时）其实仍然会显示，
-    // 但若被挪到 `if (!input.loading) return null;` 之后，非 loading 场景会误显示出来。
+    
+    
     const order = (noticeFirst: boolean): boolean => noticeFirst;
     expect(order(false)).toBe(false);
     expect(order(true)).toBe(true);

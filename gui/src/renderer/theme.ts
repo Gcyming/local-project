@@ -1,12 +1,12 @@
-/**
- * gui/src/renderer/theme.ts — 主题管理（localStorage 持久化 + data-theme 属性驱动 CSS 变量）。
- * alpha：既有 slate 深色 + 天蓝 accent；beta：毛玻璃质感、黑里透蓝（史莱姆品牌配色）。
- */
+
+
+
+
 export type ThemeName = "alpha" | "beta";
 
-/** 主题清单（**唯一出处**）：外观设置页据此渲染选择卡片。
- *  ⚠️ 从 `GeneralPanel.tsx` 搬到这里 —— 主题选择已经迁到「外观」栏，
- *     常量留在"通用"面板里等于把定义和唯一使用者拆开，下次谁都不知道该去哪改。 */
+
+
+
 export interface ThemeDef {
   id: ThemeName;
   name: string;
@@ -45,6 +45,6 @@ export function applyTheme(theme: ThemeName): void {
   try {
     localStorage.setItem(THEME_KEY, theme);
   } catch {
-    /* 隐私模式下忽略持久化失败 */
+    
   }
 }

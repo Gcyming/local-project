@@ -1,11 +1,11 @@
-/**
- * session-ctx-meta.spec.ts — 会话级「思考时间线 + 窗口占用」持久化纯函数回归（A-934/A-935）。
- * 锁死三条核心语义：
- *  1. updateSessionCtxMeta：占用快照按序数合并写入，无时间线/占位时不覆盖旧值；
- *  2. attachTimelineToHistory：加载历史时按 assistant 序数（user/assistant 交错）回填交错时间线；
- *  3. restoreUsed：无持久化占用显式归 0（切会话防残留上一会话数值的根因）。
- * 环境：vitest node（无 localStorage）——测试内注入内存存储桩。
- */
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -64,7 +64,7 @@ describe("updateSessionCtxMeta（占用快照合并写入）", () => {
 
   it("无时间线/无占用时不清除旧值（占位参数 undefined 不覆盖）", () => {
     updateSessionCtxMeta(AG, SID, 1, { used: 500, cap: 32000, timeline: [{ kind: "think", text: "t" }] });
-    updateSessionCtxMeta(AG, SID, 2, {}); // 空负载（如 interrupted 无 usage）
+    updateSessionCtxMeta(AG, SID, 2, {}); 
     const meta = readSessionCtxMeta(AG, SID)!;
     expect(meta.used).toBe(500);
     expect(meta.cap).toBe(32000);
@@ -115,12 +115,12 @@ describe("attachTimelineToHistory（按 assistant 序数回填交错时间线）
       { role: "assistant", content: "a0" },
       { role: "user", content: "u1" },
       { role: "assistant", content: "a1" },
-      { role: "assistant", content: "a2" }, // 连续两条 assistant（异常但需容忍）
+      { role: "assistant", content: "a2" }, 
     ];
     const meta = mkMeta(0, 0, { 1: [{ kind: "think", text: "x" }], 3: [{ kind: "think", text: "y" }] });
     const out = attachTimelineToHistory(mixed, meta);
     expect(out[1].assistantOrdinal).toBe(1);
-    expect(out[3].assistantOrdinal).toBe(2); // 无 meta.timelineByAssistantIdx[2] → 无时间线
+    expect(out[3].assistantOrdinal).toBe(2); 
     expect(out[3].timeline).toBeUndefined();
     expect(out[4].assistantOrdinal).toBe(3);
     expect(out[4].timeline![0]).toEqual({ kind: "think", text: "y" });
@@ -142,7 +142,7 @@ describe("A-1089 · capForModel：上限是**模型属性**，不是会话属性
     ({ used: 0, cap, capModel, timelineByAssistantIdx: {} });
 
   it("🐛 模型对不上 ⇒ 返回 0（调用方据此按**当前模型**重算，而不是沿用旧上限）", () => {
-    // 这正是用户实测的症状：切了模型，环还显示上一个模型的 65K
+    
     expect(capForModel(withCap(65_536, "api:AGNES:agnes-3.0-flash"), "api:deepseek:deepseek-flash")).toBe(0);
   });
 
@@ -220,15 +220,15 @@ describe("storage key 隔离", () => {
     expect(sessionCtxStorageKey("a1", "s2")).not.toBe(sessionCtxStorageKey("a1", "s1"));
   });
 });
-/** A-1021b：A-966 的 history.jsonl 时间线此前**只写不读**。
- *
- *  线上证据（config/history.jsonl）：第 96/98 行（在当前会话里结束）带 timeline，
- *  第 97 行——elapsed_ms=349872，与用户截图"回复耗时 349.9s"完全一致——timeline 缺失，
- *  于是那条回复的思考历程只剩 reasoning 文本、塌成一个节点。
- *  原因之一是"流式期间切走会话"时 onDone 走早退分支、不落盘；
- *  但**即使落盘了，加载侧也从不读它** —— 这里锁死第二条：记录自带的 timeline 必须能被回填。 */
+
+
+
+
+
+
+
 describe("attachTimelineToHistory —— 记录自带 timeline 的兜底（A-1021b）", () => {
-  // 磁盘形态：kind 是 string（shared/ipc.ts 的 ConversationMessage.timeline），不是字面量联合
+  
   const recordTl = [
     { kind: "think", text: "先看结构" },
     { kind: "tool", name: "file_read", label: "读取 a.ts", detail: "a.ts" },

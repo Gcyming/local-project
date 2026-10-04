@@ -25,16 +25,16 @@ _BAIDU_SEARCH = "https://www.baidu.com/s"
 _MAX_RESULTS = 10
 _SNIPPET_MAX = 300
 
-# 中英文验证码特征（docs/search_engine.md 三.2 第 6 步）
+
 _CAPTCHA_KEYWORDS = (
     "安全验证", "验证码", "滑块", "人机验证",
     "verify", "captcha", "robot", "unusual traffic", "challenge",
 )
 
-# 反爬节奏（docs/search_engine.md 五）
+
 _DELAY_MIN, _DELAY_MAX = 0.5, 1.3
 _BACKOFF_MIN, _BACKOFF_MAX = 2.0, 4.0
-_BACKOFF_WINDOW = 300.0  # 5 分钟退避窗口
+_BACKOFF_WINDOW = 300.0  
 
 
 class SearchEngine:
@@ -45,7 +45,7 @@ class SearchEngine:
         self._sem = asyncio.Semaphore(5)
         self._prewarmed = False
         self._prewarm_lock = asyncio.Lock()
-        self._captcha_until = 0.0  # 验证码退避窗口截止（time.monotonic）
+        self._captcha_until = 0.0  
 
     async def search(self, query: str, max_results: int = 10) -> str:
         """搜索入口。Bing 请求级失败（非验证码）才切百度。"""
@@ -62,7 +62,7 @@ class SearchEngine:
             except FetchError:
                 return await self._search_baidu(query, max_results)
 
-    # ── 预热 / 延迟 ──────────────────────────────────────
+    
 
     async def _prewarm(self):
         """进程内首次搜索前先访问 Bing 主页（降低首次被标记概率）。只调一次。"""
@@ -71,11 +71,11 @@ class SearchEngine:
         async with self._prewarm_lock:
             if self._prewarmed:
                 return
-            self._prewarmed = True  # await 前设置，防并行 tool_calls 双重预热
+            self._prewarmed = True  
             try:
                 await self._fetcher.fetch_raw(_BING_HOME)
             except FetchError:
-                pass  # 预热失败不影响搜索
+                pass  
 
     async def _delay(self):
         """随机延迟（验证码退避窗口内加长）。"""
@@ -89,15 +89,15 @@ class SearchEngine:
     def _mark_captcha(self):
         self._captcha_until = time.monotonic() + _BACKOFF_WINDOW
 
-    # ── Bing ────────────────────────────────────────────
+    
 
     async def _search_bing(self, query: str, max_results: int) -> str:
         url = f"{_BING_SEARCH}?{urlencode({'q': query})}"
-        html = await self._fetcher.fetch_raw(url)  # FetchError → 由 search() 切百度
+        html = await self._fetcher.fetch_raw(url)  
         results = self._parse_bing(html, max_results)
         if results:
             return self._format(results)
-        # BUG-034: 无结果时才做验证码检测（真验证码页必然无结果，双保险）
+        
         if self._is_captcha(html):
             self._mark_captcha()
             return self._CAPTCHA_MSG
@@ -105,7 +105,7 @@ class SearchEngine:
 
     @staticmethod
     def _is_captcha(html: str) -> bool:
-        # BUG-034: 只检测可见文本，脚本文件名（如 powchallengesolver 含 "challenge"）不参与
+        
         text = BeautifulSoup(html, "html.parser").get_text(" ").lower()
         return any(k in text for k in _CAPTCHA_KEYWORDS)
 
@@ -128,15 +128,15 @@ class SearchEngine:
                 break
         return results
 
-    # ── 百度 ────────────────────────────────────────────
+    
 
     async def _search_baidu(self, query: str, max_results: int) -> str:
         url = f"{_BAIDU_SEARCH}?{urlencode({'wd': query})}"
-        html = await self._fetcher.fetch_raw(url)  # FetchError → 向上抛
+        html = await self._fetcher.fetch_raw(url)  
         results = self._parse_baidu(html, max_results)
         if results:
             return self._format(results)
-        # BUG-034: 无结果时才做验证码检测
+        
         if self._is_captcha(html):
             self._mark_captcha()
             return self._CAPTCHA_MSG
@@ -144,7 +144,7 @@ class SearchEngine:
 
     def _parse_baidu(self, html: str, max_results: int) -> list:
         soup = BeautifulSoup(html, "html.parser")
-        # 多选择器 fallback（百度结构频繁变动）
+        
         results = []
         seen = set()
         for h3 in soup.select("#content_left h3, h3.c-title, div.result h3"):
@@ -156,7 +156,7 @@ class SearchEngine:
             if not title or not url or url in seen:
                 continue
             seen.add(url)
-            # 百度跳转链接一般保留真实 url，无需解包
+            
             desc = ""
             parent = h3.find_parent("div") or h3.find_parent("li")
             if parent is not None:
@@ -167,7 +167,7 @@ class SearchEngine:
                 break
         return results
 
-    # ── 工具函数 ────────────────────────────────────────
+    
 
     @staticmethod
     def _unwrap_url(href: str) -> str:
@@ -192,7 +192,7 @@ class SearchEngine:
     _CAPTCHA_MSG = "[搜索引擎要求人机验证。请稍等 1 分钟后重试，或更换网络环境后再搜索。]"
 
 
-# 模块级单例（连接池 + 预热/退避状态复用）
+
 _search_engine: SearchEngine | None = None
 
 

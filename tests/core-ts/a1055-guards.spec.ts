@@ -1,33 +1,33 @@
-/**
- * tests/core-ts/a1055-guards.spec.ts — A-1055 回归守卫
- *
- * 这一轮四件事，共同点是"改回去**既不报错、类型检查也全绿**，只有用户在自己机器上试才看得见"：
- *  ① 自动更新改**用户主动**。根因：`electron-updater` 的 `autoDownload` **默认为 true**，而本
- *     项目发行版走的是 `[update].enabled = false` 分支 → 那条分支**从来没有人**把它设成 false。
- *     于是用户只是在设置里翻到「状态」页（面板挂载即 check），500MB 安装包就开始在后台下。
- *  ② 下载**实时进度**。此前主进程**压根没有** `download-progress` 监听 —— 界面拿不到任何数字，
- *     只能显示一句静态的「正在后台下载…」。用户读到的就是"它自己偷偷在下"。
- *  ③ 通知图标口径 = **安装根**。旧口径 `PROJECT_ROOT` 是**数据根**（打包版 = userData/slime-data），
- *     那里根本没有 `build/icon.png` → Electron 回落到默认图标，且**全程静默**。
- *     同时恢复写 `IconUri`（toast **头部**应用身份行的那张图）—— 只有 `Notification({icon})`
- *     只能影响正文区小图，头部永远是空的。
- *  ④ 托盘**应用一启动就常驻**。旧实现只在 `exitModeStore === "background"` 且用户关窗时才建，
- *     于是现象是反的：不要的时候（后台模式）一直显示，要的时候（窗口开着）根本没有。
- *
- * ⚠️ 为什么全是**静态源码形态**断言，而不是行为断言：
- *    `updater.ts` / `notify.ts` / `index.ts` 顶层都 `import electron`（或经 `electron-updater`
- *    转手 import），在 vitest 里拿到的是 undefined —— a1021 的文件头已经写过这是"今天绿明天红"
- *    的定时炸弹。所以**行为断言只放在不依赖 electron 的纯模块**（`notifyIdentity.ts`、
- *    `cheerPhrases.ts`），其余一律锁源码形态 + 靠变异测试兜住"锁错对象"。
- *
- * ⚠️ 断言"代码里没有 X"之前必须先**剥注释**：本轮多处"追述性注释"会合法地提到被删掉的旧写法
- *    （实测 `join(PROJECT_ROOT, "build", "icon.png")` 与「正在后台下载…」**只**存在于注释里）。
- *    把注释当实现，守卫就变成了"注释不许写历史"这种伪命题（a1054/a1056 同做法）。
- *
- * ⚠️ 每条守卫都**必须过变异测试**（见 `gui/scripts/mut-a1055.mjs`），否则"通过但锁错对象"。
- *
- * ⚠️ 中文文案里嵌套引用一律用 `「」`：ASCII 双引号会当场把 TS 字符串截断（a1054/a1056 都踩过）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释：**只在断言"代码里没有 X"时用**（追述性注释会合法地提到旧写法） */
+
 const strip = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 const UPDATER = read("gui/src/main/updater.ts");
@@ -46,8 +46,8 @@ const STATUS_PANEL = read("gui/src/renderer/pages/StatusPanel.tsx");
 const PRELOAD = read("gui/src/preload/index.ts");
 const IPC = read("gui/src/shared/ipc.ts");
 
-/** 取函数/箭头函数的体：从签名到**下一个列 0 的 `}`**。
- *  这几个目标函数内部的收尾全是缩进的（`  });` / `  } catch {`），所以不会提前截断。 */
+
+
 function bodyOf(src: string, sig: string): string {
   const at = src.indexOf(sig);
   if (at < 0) { return ""; }
@@ -55,13 +55,13 @@ function bodyOf(src: string, sig: string): string {
   return src.slice(at, end < 0 ? undefined : end);
 }
 
-/** 取某个 `autoUpdater.on("x", …)` 的处理体：从它自己到**下一个 `autoUpdater.on(` 之前**。
- *
- *  ⚠️ 这些 handler 不能走 bodyOf()：它们的收尾是**缩进的** `  });`，不是列 0 的 `}`，
- *  于是 bodyOf 会一路吃到 `initUpdater()` 的末尾，把**后面几个 handler** 的语句也算进来。
- *  首轮变异实锤了这种假绿：把进度事件里的 `broadcastStatus();` 删掉，守卫照样通过 ——
- *  因为它 `toContain` 到的是邻居（`checking-for-update` 等）那一行。
- *  断言"某段代码里有 X"时，**段的边界必须比 X 的粒度更细**，否则等于没锁。 */
+
+
+
+
+
+
+
 function handlerBody(src: string, sig: string): string {
   const at = src.indexOf(sig);
   if (at < 0) { return ""; }
@@ -69,14 +69,14 @@ function handlerBody(src: string, sig: string): string {
   return src.slice(at, next < 0 ? undefined : next);
 }
 
-/** 取 `main()` 的体。main 是文件里**倒数第二个**顶层函数，故用文件最后一个 `\n}` 作右界
- *  （多带上后面的 terminateModelServer 无害：它既不含 createWindow() 也不含 ensureTray()）。
- *  ⚠️ 不能直接 `indexOf("\n}", mainAt)` —— 需要先确认 main 体内没有列 0 的 `}`；用右界兜住更稳。 */
+
+
+
 function mainBody(): string {
   return MAIN.slice(MAIN.indexOf("function main(): void {"), MAIN.lastIndexOf("\n}"));
 }
 
-/** 从某个 interface 体里取出 `status` 字段的联合类型文本（已归一化空白） */
+
 function statusUnion(src: string, iface: string): string {
   const at = src.indexOf(`export interface ${iface} {`);
   if (at < 0) { return ""; }
@@ -100,7 +100,7 @@ describe("A-1055① 自动更新 = 用户主动（autoDownload 必须被显式�
   });
 
   it("**两条入口**都先关自动下载：configureFeed 与 initUpdater 都必须在配源/检查之前调用它", () => {
-    // 顺序就是这条修复的全部 —— checkForUpdates() 一旦发出，再关 autoDownload 就来不及了。
+    
     const feed = bodyOf(UPDATER, "function configureFeed(): void {");
     expect(feed.length, "取不到 configureFeed → 守卫失效").toBeGreaterThan(0);
     const atFeed = feed.indexOf("disableAutoDownload();");
@@ -119,7 +119,7 @@ describe("A-1055① 自动更新 = 用户主动（autoDownload 必须被显式�
     expect(UPDATER).toContain("export async function downloadUpdate(): Promise<UpdateStatus> {");
     expect(UPDATER, "没注册 IPC → 界面上那个「下载更新」按钮点了没反应").toContain('ipcMain.handle("slime:update:download"');
     expect(PRELOAD, "preload 没暴露 download → 渲染层根本调不到").toContain('download: () => ipcRenderer.invoke("slime:update:download")');
-    // 起点先置 0%：否则在首个 download-progress 到达前界面毫无反馈，用户以为点击没生效
+    
     const dl = bodyOf(UPDATER, "export async function downloadUpdate(): Promise<UpdateStatus> {");
     expect(dl.length, "取不到 downloadUpdate → 守卫失效").toBeGreaterThan(0);
     expect(dl, "下载起点不先置 0% → 点下去到第一个进度事件之间是一片死寂").toContain("percent: 0");
@@ -136,7 +136,7 @@ describe("A-1055② 下载进度真的被上报（此前主进程完全没有 do
     for (const f of ["percent", "transferred", "total", "bytesPerSecond"]) {
       expect(h, `进度事件少了字段 ${f} → 界面上那一项永远是「—」`).toContain(f);
     }
-    // 夹取：上游给过 >100 / NaN 时，进度条会溢出容器或渲染成「NaN%」
+    
     expect(h).toContain("Number.isFinite(p.percent)");
     expect(h).toContain("Math.max(0, Math.min(100, p.percent))");
     expect(h, "算了不广播 = 没算").toContain("broadcastStatus();");
@@ -148,7 +148,7 @@ describe("A-1055② 下载进度真的被上报（此前主进程完全没有 do
       .toContain("width: `${Math.max(0, Math.min(100, updateStatusSafe.percent ?? 0))}%`");
     expect(STATUS_PANEL).toContain("{fmtBytes(updateStatusSafe.transferred)} / {fmtBytes(updateStatusSafe.total)}");
     expect(STATUS_PANEL).toContain("{fmtBytes(updateStatusSafe.bytesPerSecond)}/s");
-    // 下载态是一等状态（没有它，进度条整块都不会渲染出来）
+    
     expect(STATUS_PANEL).toContain('const isDownloading = updateStatus?.status === "downloading";');
     expect(STATUS_PANEL, "「下载更新」按钮的处理器没了 → autoDownload 已关，就永远不会下载").toContain("handleDownloadUpdate");
   });
@@ -166,7 +166,7 @@ describe("A-1055② 下载进度真的被上报（此前主进程完全没有 do
     expect(seg.length, "取不到挂载副作用片段 → 守卫失效").toBeGreaterThan(0);
     expect(strip(seg), "面板一挂载就去查 GitHub → 又变成「翻到状态页就自动更新」")
       .not.toContain("update.check()");
-    // 但用户**主动**点「手动检查」必须还在（否则就是从一个极端改到另一个极端）
+    
     expect(STATUS_PANEL, "手动检查被一起删掉了 → 用户再也没有主动检查的入口")
       .toContain("await api.current?.update?.check();");
   });
@@ -174,33 +174,33 @@ describe("A-1055② 下载进度真的被上报（此前主进程完全没有 do
 
 describe("A-1055③ 通知图标口径 = 安装根（不是数据根），且真的接进身份注册", () => {
   it("notificationIconPath 走 INSTALL_ROOT；旧口径（数据根）只许留在追述性注释里", () => {
-    /* A-1067 迁移（#228）：文件名不再写死 `icon.png`，改成唯一出处 `notifyIconFileName()`。
-       原因：`build/icon.png` 951.7 KB **超过 Windows toast 的 200 KB 上限** → 图标静默不显示。
-       判据（走安装根 · 不是数据根）不变，只是文件名那一节搬进了纯模块。 */
+    
+
+
     expect(NOTIFY, "图标不再从安装根取（数据根在打包版里没有 build/ → 通知静默退回默认图标）")
       .toContain('join(INSTALL_ROOT, "build", notifyIconFileName())');
-    // ⚠️ 必须先剥注释：本函数的注释会合法地提到旧写法（「此前是 join(PROJECT_ROOT, …)」）
+    
     expect(strip(NOTIFY), "PROJECT_ROOT 是数据根，打包版那里没有 build/icon.png → 通知静默退回 Electron 默认图标")
       .not.toContain('join(PROJECT_ROOT, "build", "icon.png")');
     const b = bodyOf(NOTIFY, "export function notificationIconPath(): string | undefined {");
     expect(b.length, "取不到 notificationIconPath → 守卫失效").toBeGreaterThan(0);
-    /* A-1067 迁移：原判据是三元式 `existsSync(p) ? p : undefined`；现在改成"缺文件 / 不合规"
-       两支各自早返 —— 意图同一条：**拿不到合规文件时必须返回 undefined**（让 Electron 用应用图标
-       兜底），绝不塞一个坏路径给系统（坏路径的下场是整条通知被丢弃，比没有图标更糟）。 */
+    
+
+
     expect(b, "缺文件时必须返回 undefined（不许塞坏路径）").toMatch(/if \(!existsSync\(p\)\)[\s\S]{0,200}?return undefined;/);
     expect(b, "尺寸/体积不合规时也必须返回 undefined").toMatch(/if \(!v\.ok\)[\s\S]{0,200}?return undefined;/);
   });
 
   it("图标路径**真的被传进**身份注册，并且 toast 正文图标同源（只算出来不用 = 没接线）", () => {
-    // A-1054 W1 的教训：「定义了组件」不等于「挂上去了」。这里同理 —— 只算出路径不传下去，
-    // toast 头部还是没图标，而所有静态断言看起来都"有那段代码"。
+    
+    
     expect(NOTIFY).toContain("applyWindowsNotificationIdentity(notificationIconPath())");
     expect(NOTIFY).toContain("icon: notificationIconPath(),");
   });
 
   it("身份注册的幂等判据覆盖**全部**值（此前只比对 DisplayName → 补 IconUri 那版被短路，静默失效）", () => {
-    // v0.0.6 已把 DisplayName 写成 "slime"，于是"只比 DisplayName 就跳过"会让 IconUri 永远补不上，
-    // 而日志还报「已注册，跳过」—— 典型的"能跑但错"，没有任何测试拦得住。
+    
+    
     expect(IDENTITY).toContain("const stale = values.filter((v) => cur[v.name] !== v.value);");
     expect(IDENTITY, "退回只比对 DisplayName → IconUri 永远补不上").not.toContain('cur["DisplayName"]');
     expect(IDENTITY, "写完不回读复核 = 静默失败（注册表写没写进去只有天知道）")

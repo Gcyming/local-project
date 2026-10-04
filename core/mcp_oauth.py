@@ -31,13 +31,13 @@ import httpx
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 固定回调端口（DCR redirect_uri 与 authorize 必须完全一致，故不随机）
+
 _DEFAULT_REDIRECT_PORT = 18091
-# 浏览器授权等待上限（warmup 总时长 <300s；start_all 外壳放宽至 360s）
+
 _AUTH_WAIT_TIMEOUT = 240.0
-# token 提前失效余量（时钟偏差）
+
 _EXPIRY_SKEW = 30.0
-# OAuth 端点短请求超时（发现/DCR/token 交换）
+
 _OAUTH_HTTP_TIMEOUT = 15.0
 
 _CALLBACK_HTML = "<html><meta charset='utf-8'><body><h3>slime MCP OAuth</h3><p>{}</p></body></html>"
@@ -64,7 +64,7 @@ class TokenStore:
     Windows 隐藏 + icacls / Unix 0o600，与 auth_token.json 安全策略一致。"""
 
     def __init__(self, server_name: str):
-        # 路径 sanitize：仅保留 [A-Za-z0-9_-]，与 _save_media 规则一致（审查建议 7）
+        
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", server_name)
         self._path = _PROJECT_ROOT / "data" / "mcp" / safe / "oauth.json"
 
@@ -78,7 +78,7 @@ class TokenStore:
     def save(self, tokens: dict):
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            # 原子写：临时文件 + os.replace（与 encryption.py passphrase 一致）
+            
             tmp = self._path.with_suffix(f".{secrets.token_hex(4)}.tmp")
             tmp.write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self._path)
@@ -97,7 +97,7 @@ class TokenStore:
         """Windows：隐藏 + icacls 仅当前用户；Unix：0o600。失败不阻塞。"""
         if os.name == "nt":
             import ctypes
-            ctypes.windll.kernel32.SetFileAttributesW(str(path), 2)  # FILE_ATTRIBUTE_HIDDEN
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), 2)  
             try:
                 subprocess.run(
                     ["icacls", str(path), "/inheritance:r", "/grant:r",
@@ -105,7 +105,7 @@ class TokenStore:
                     capture_output=True, timeout=5,
                 )
             except Exception:
-                pass  # icacls 失败不阻塞（与 encryption.py 一致）
+                pass  
         else:
             path.chmod(0o600)
 
@@ -136,7 +136,7 @@ class OAuthDiscovery:
             protected = await _http_json("GET", base + "/.well-known/oauth-protected-resource")
         if protected is None:
             return None
-        # resource：RFC 9728 metadata 的 resource 字段优先，无则回退 server_url（关键决策）
+        
         resource = protected.get("resource") or base
         auth_servers = protected.get("authorization_servers")
         issuer = auth_servers[0] if isinstance(auth_servers, list) and auth_servers else None
@@ -145,7 +145,7 @@ class OAuthDiscovery:
         else:
             as_md = await _http_json("GET", base + "/.well-known/oauth-authorization-server")
         if as_md is None:
-            # OIDC Discovery fallback（RFC 8414 兼容）
+            
             oidc_base = issuer.rstrip("/") if issuer else base
             oidc = await _http_json("GET", oidc_base + "/.well-known/openid-configuration")
             if oidc:
@@ -172,10 +172,10 @@ class OAuthRegistration:
                        redirect_uri: str) -> dict | None:
         payload = {
             "client_name": client_name,
-            "application_type": "native",  # RFC 8252
+            "application_type": "native",  
             "grant_types": ["authorization_code", "refresh_token"],
             "redirect_uris": [redirect_uri],
-            "token_endpoint_auth_method": "none",  # 公共客户端 + PKCE
+            "token_endpoint_auth_method": "none",  
         }
         data = await _http_json("POST", registration_endpoint, payload=payload)
         if data and data.get("client_id"):
@@ -203,7 +203,7 @@ class OAuthFlow:
 
     @staticmethod
     def _generate_pkce() -> tuple[str, str]:
-        verifier = secrets.token_urlsafe(48)  # 64 字符 base64url，落在 43~128 区间
+        verifier = secrets.token_urlsafe(48)  
         return verifier, OAuthFlow.challenge_from(verifier)
 
     async def authorize(self, discovery: dict, client_id: str, resource: str,
@@ -218,7 +218,7 @@ class OAuthFlow:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "state": state,
-            "resource": resource,  # RFC 8707
+            "resource": resource,  
         }
         if scopes:
             params["scope"] = " ".join(scopes)
@@ -239,7 +239,7 @@ class OAuthFlow:
             except Exception:
                 opened = False
             if not opened:
-                # 无头兜底（审查建议 6）：打印 URL 让用户手动打开
+                
                 print(f"[mcp-oauth] 浏览器打开失败，请手动打开授权链接：\n{auth_url}", file=sys.stderr)
             try:
                 code = await asyncio.wait_for(code_fut, timeout=_AUTH_WAIT_TIMEOUT)
@@ -247,7 +247,7 @@ class OAuthFlow:
                 logging.warning("[mcp-oauth] 浏览器授权等待超时")
                 return None
             if code is None:
-                return None  # 用户取消或 state 不匹配
+                return None  
             return await self._exchange(discovery, client_id, code, verifier, resource)
         finally:
             server.close()
@@ -332,12 +332,12 @@ class OAuthManager:
         self._scopes = scopes
         self._client_id = client_id
         self._flow = OAuthFlow(redirect_port)
-        self._lock = asyncio.Lock()  # 单飞：并发 401 只触发一次授权
-        self._pending_auth: asyncio.Task | None = None  # 进行中的后台授权任务
+        self._lock = asyncio.Lock()  
+        self._pending_auth: asyncio.Task | None = None  
         self._tokens: dict | None = None
         self.last_error: str | None = None
 
-    # ── 公开接口 ──
+    
 
     async def warmup(self) -> bool:
         """预热授权（start() 阶段，长窗口）。有效缓存 → True；refresh；否则浏览器完整授权。"""
@@ -362,18 +362,18 @@ class OAuthManager:
             if await self._do_refresh():
                 return self._tokens["access_token"]
             self._clear_tokens()
-        # 单飞：并发 401 共享同一个后台授权任务
+        
         task = self._pending_auth
         if task is None or task.done():
             task = asyncio.create_task(self._do_authorize(www_authenticate))
             self._pending_auth = task
         try:
-            # shield：调用方（请求超时）取消不杀死授权任务，任务独立存活
+            
             await asyncio.shield(task)
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass  # 任务内部已兜底；双保险防未检索任务异常
+            pass  
         return self._tokens["access_token"] if self._token_valid() else None
 
     def get_auth_header(self) -> dict:
@@ -393,7 +393,7 @@ class OAuthManager:
             return "pending"
         return "expired" if self._tokens else "none"
 
-    # ── 内部 ──
+    
 
     def _token_valid(self) -> bool:
         t = self._tokens
@@ -409,7 +409,7 @@ class OAuthManager:
         try:
             async with self._lock:
                 if self._token_valid():
-                    return True  # 等锁期间可能已被并发任务授权
+                    return True  
                 discovery = await OAuthDiscovery().discover(self._server_url, www_authenticate)
                 if discovery is None:
                     self.last_error = "OAuth 发现失败（无 WWW-Authenticate / well-known 元数据）"
@@ -442,7 +442,7 @@ class OAuthManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            # 任务化时（_pending_auth）异常必须自吞，防 asyncio 未检索任务异常（收尾观察项 1 教训）
+            
             logging.exception(f"[mcp-oauth] {self.name}: 授权异常")
             self.last_error = str(e)
             return False
@@ -467,7 +467,7 @@ class OAuthManager:
             self._clear_tokens()
             return False
         if not payload.get("refresh_token"):
-            payload["refresh_token"] = t.get("refresh_token")  # 部分 AS 不轮换 refresh_token
+            payload["refresh_token"] = t.get("refresh_token")  
         self._persist(payload, {"token_endpoint": endpoint, "resource": t.get("resource")},
                       t.get("client_id"), t.get("client_secret"))
         return True
@@ -483,7 +483,7 @@ class OAuthManager:
             "scope": payload.get("scope"),
             "client_id": client_id,
             "redirect_uri": self._flow.redirect_uri,
-            # 方案外补充（重启后 refresh 必需）：token 端点 + resource + DCR 客户端密钥
+            
             "token_endpoint": discovery["token_endpoint"],
             "resource": discovery.get("resource"),
             "client_secret": client_secret,

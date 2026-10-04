@@ -1,5 +1,5 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+
+
 """生成 doc_text.ts 的最小 Office 回归样本（tests/fixtures/office/*.docx|pptx|xlsx）。
 
 为什么不用真实文档当样本：
@@ -80,7 +80,7 @@ XLSX_SHARED = """<?xml version="1.0" encoding="UTF-8"?>
 </sst>
 """
 
-# 注意 A1/B1 用共享串（t="s"），C1 起留空验证列跳位；第三行直接是数字
+
 XLSX_SHEET1 = """<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <sheetData>

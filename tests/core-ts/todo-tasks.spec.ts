@@ -1,20 +1,20 @@
-/**
- * tests/core-ts/todo-tasks.spec.ts — 待办任务（todo_write）回归测试。
- *
- * 背景（A-980-R27）：用户实测右侧栏「待办任务」**永远是空的**，"几乎成了摆设"。
- * 排查发现磁盘上躺着一个 `data/todos_.json`，里面是 Agent 真实规划过的三步计划——
- * 即 Agent 一直在正确调用 todo_write，只是 sessionId 从没被注入（工具读 `args.sessionId` 恒为 ""），
- * 而主进程与界面读的都是 `todos_<sessionId>.json`，两边文件名对不上。
- *
- * 本文件锁住三类东西：
- *  ① 根因回归：缺 sessionId 必须**如实报错且不落盘**，绝不生成界面看不见的"幽灵待办"；
- *  ② 状态纪律：任意时刻最多一个 in_progress；completedAt 打戳/撤销的时机；
- *  ③ 合并语义：add 按 id 合并（未提及项保留），replace 整表重写，clear 清空。
- *
- * ⚠️ 隔离策略：PROJECT_ROOT 是 core-ts 的模块级常量，测试里改不动，因此本文件
- * 用**带测试标记的 sessionId** 把文件写进真实 data/ 目录，并在 beforeEach/afterAll
- * 无条件清理自己造的文件（不依赖"测试通过"这个前提）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -26,7 +26,7 @@ import { ChatClient } from "../../core-ts/src/llm/client.js";
 import { ModelRouter } from "../../core-ts/src/router.js";
 
 const DATA_DIR = join(PROJECT_ROOT, "data");
-/** 测试专用文件名标记：用于精确识别并清理本测试造出的文件 */
+
 const MARK = "__spec_todo_";
 let sid = "";
 
@@ -34,27 +34,27 @@ function pathOf(sessionId: string): string {
   return join(DATA_DIR, `todos_${sessionId}.json`);
 }
 
-/** 载入待办项（测试侧直接读盘，不经过工具，确保断言的是落盘结果） */
+
 function readItems(sessionId: string): Array<{ id: string; content: string; status: string; completedAt?: string }> {
   return (JSON.parse(readFileSync(pathOf(sessionId), "utf8")) as { items: Array<{ id: string; content: string; status: string; completedAt?: string }> }).items;
 }
 
-/** 清理所有本测试造出的文件（含可能残留的空名/畸形名） */
+
 function cleanMarked(): void {
   let names: string[] = [];
   try { names = readdirSync(DATA_DIR); } catch { return; }
   for (const n of names) {
     if (n.includes(MARK)) {
-      try { rmSync(join(DATA_DIR, n), { force: true }); } catch { /* 清理失败不阻断 */ }
+      try { rmSync(join(DATA_DIR, n), { force: true }); } catch {  }
     }
   }
 }
 
 let reg: ToolRegistry;
-/**
- * 调用 todo_write，**模拟工具循环的行为**：把受信 sessionId 注入 args。
- * 真实链路上这一步在 `core-ts/src/tool_loop.ts` 的 runOneTool 里做（模型自己不传）。
- */
+
+
+
+
 async function call(args: Record<string, unknown>): Promise<string> {
   const t = reg.get("todo_write");
   if (!t) { throw new Error("todo_write 未注册"); }
@@ -72,13 +72,13 @@ afterAll(() => { cleanMarked(); });
 
 describe("todo_write — 根因回归：sessionId 必须由循环注入", () => {
   it("缺 sessionId → 如实报错，且不产生任何落盘文件", async () => {
-    const ghost = pathOf(""); // 即 data/todos_.json —— 正是事故现场的文件名
+    const ghost = pathOf(""); 
     const hadGhost = existsSync(ghost);
-    // 故意绕过 call() 的注入，直接调工具：模拟"循环没注入 sessionId"的历史故障状态
+    
     const out = await reg.get("todo_write")!.executeFn({ action: "add", items: [{ content: "会被丢弃的任务" }] });
     expect(out).toContain("[错误]");
     expect(out).toContain("sessionId");
-    // 关键断言：即使用户目录本来没有 todos_.json，这次调用也绝不能把它造出来
+    
     if (!hadGhost) { expect(existsSync(ghost)).toBe(false); }
     expect(readdirSync(DATA_DIR).filter((n) => n.includes(MARK))).toEqual([]);
   });
@@ -195,11 +195,11 @@ describe("todo_write — 返回值即「目标复述」", () => {
   });
 });
 
-/* ─────────────────────────────────────────────────────────────────────────
-   工具循环：sessionId 必须由循环注入（A-980-R27 根因的**直接**回归）
-   前面那些用例手写注入了 sessionId；这一组走真实 ToolLoop，验证注入确实发生在循环里，
-   且模型伪造的 sessionId 会被覆盖。
-   ───────────────────────────────────────────────────────────────────────── */
+
+
+
+
+
 
 function makeRouter(sequence: Array<{ content?: string | null; toolCalls?: Array<{ id: string; name: string; arguments: string }> }>): ModelRouter {
   let idx = 0;
@@ -240,7 +240,7 @@ describe("ToolLoop — todo_write 的 sessionId 由循环注入", () => {
       messages: [{ role: "user" as const, content: "做点事" }],
       initialToolCalls: [{ id: "t1", name: "todo_write", arguments: '{"action":"add","items":[{"id":"1","content":"循环注入的任务"}]}' }],
     });
-    // 注入生效 → 文件出现在界面读取的那个路径上
+    
     expect(existsSync(pathOf(sid))).toBe(true);
     expect(readItems(sid).map((i) => i.content)).toEqual(["循环注入的任务"]);
   });
@@ -255,8 +255,8 @@ describe("ToolLoop — todo_write 的 sessionId 由循环注入", () => {
       messages: [{ role: "user" as const, content: "x" }],
       initialToolCalls: [{ id: "t1", name: "todo_write", arguments: `{"action":"add","sessionId":"${forged}","items":[{"id":"1","content":"越权尝试"}]}` }],
     });
-    expect(existsSync(pathOf(forged))).toBe(false); // 伪造的会话没被写入
-    expect(readItems(sid)).toHaveLength(1);         // 真身会话拿到了这条
+    expect(existsSync(pathOf(forged))).toBe(false); 
+    expect(readItems(sid)).toHaveLength(1);         
   });
 
   it("循环无 sessionId（CLI/测试环境）→ 工具如实报错，不生成幽灵文件", async () => {
@@ -274,20 +274,20 @@ describe("ToolLoop — todo_write 的 sessionId 由循环注入", () => {
   });
 });
 
-/* ─────────────────────────────────────────────────────────────────────────
-   待办面板源码约定守卫（A-980-R28）
-   这一组不看运行时行为，只看源码里的两处**约定**——它们都属于"写反了不报错、
-   只有肉眼在界面上才发现"的类型，靠 tsc / 常规断言都抓不到：
-   ① ChevronIcon 基准朝右，全仓约定 `open ? 90 : 0`（展开朝下 ▾ / 收起朝右 ▸）；
-   ② 会话未就绪（sessionId 为空）时不得读/写/订阅待办 —— 空串会命中 `data/todos_.json`。
-   ───────────────────────────────────────────────────────────────────────── */
+
+
+
+
+
+
+
 
 describe("待办面板源码约定（防回归）", () => {
   const SRC_RAW = readFileSync(join(PROJECT_ROOT, "gui/src/renderer/pages/RightSidebar.tsx"), "utf8");
   const MAIN = readFileSync(join(PROJECT_ROOT, "gui/src/main/index.ts"), "utf8");
-  /** 去掉注释行后的可执行源码。
-   *  必要性：修复说明的注释里会**引用旧写法**做对照（"此前写成 xxx"），
-   *  直接全文 not.toContain 会被自己的注释判失败。 */
+  
+
+
   const SRC = SRC_RAW.split("\n")
     .filter((l) => { const t = l.trim(); return t !== "" && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*"); })
     .join("\n");
@@ -299,7 +299,7 @@ describe("待办面板源码约定（防回归）", () => {
 
   it("会话未就绪不得读待办（loadPersisted / flushPersist / 拉取三处都要有守卫）", () => {
     expect(SRC).toContain("const sessionReady = Boolean(props.sessionId)");
-    // 三处守卫都要求 agentId 与 sessionId 同时存在
+    
     expect((SRC.match(/if \(!props\.agentId \|\| !props\.sessionId\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
@@ -310,7 +310,7 @@ describe("待办面板源码约定（防回归）", () => {
 
   it("主进程兜底：空 sessionId 直接拒绝，且读取统一走 todoStore（不再手搓路径）", () => {
     expect(MAIN).toContain("loadTodos 收到空 sessionId，已拒绝");
-    // A-980-R29：主进程不再自己拼路径/解析，统一委托给 store（store 对空 id 返回 null）
+    
     expect(MAIN).toContain("readTodos(sid)");
     expect(MAIN).not.toContain("`todos_${sid}.json`");
   });
@@ -319,16 +319,16 @@ describe("待办面板源码约定（防回归）", () => {
     expect(MAIN).toContain("function purgeSessionPlanning(");
     expect(MAIN).toContain("planStore.delete(sessionId)");
     expect(MAIN).toContain("removeTodos(sessionId)");
-    // 三个删除入口都要调（会话 / Agent / 工作文件夹）
-    expect((MAIN.match(/purgeSessionPlanning\(/g) ?? []).length).toBeGreaterThanOrEqual(4); // 1 定义 + 3 调用
-    // Agent 删除必须先取会话 id —— removeSessionsForAgent 只返回数量，删完就查不到了
+    
+    expect((MAIN.match(/purgeSessionPlanning\(/g) ?? []).length).toBeGreaterThanOrEqual(4); 
+    
     expect(MAIN).toMatch(/filter\(\(s\) => s\.agentId === agentId\)/);
   });
 
   it("A-980-R29：plan_create 真 Plan 不被 todo 派生镜像顶掉", () => {
     expect(MAIN).toContain("function putPlan(");
     expect(MAIN).toContain('plan.source === "todo" && prev?.source === "plan"');
-    expect(MAIN).toContain("PLAN_STORE_MAX"); // planStore 有上限，不再无限驻留
+    expect(MAIN).toContain("PLAN_STORE_MAX"); 
   });
 
   it("「刚完成」动画基线必须带会话标识（跨会话 id 撞车会误闪）", () => {

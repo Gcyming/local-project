@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/model_server.spec.ts — 模型生命周期管理测试。
- * 对照 tests/test_model_server.py 语义逐项移植（VRAM/Backend/Manager/孤儿回收）。
- * 不依赖真实 GPU/llama-server：execFileSync 走 mock 分派；fetch 走注入 fetchImpl。
- */
+
+
+
+
+
 import { describe, expect, it, vi, beforeEach, afterAll } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +25,7 @@ import {
 const spawnMock = vi.mocked(spawn);
 const execMock = vi.mocked(execFileSync);
 
-// 测试专用高位端口（A-037 语义：避免与生产实例 8999/18082 冲突）
+
 const EMBED_PORT = 19511;
 const CHAT_PORT_START = 19521;
 
@@ -55,23 +55,23 @@ function makeCfg(tmp: string) {
   };
 }
 
-/** execFileSync 按命令分派的标准 mock（tasklist 输出需 per-test 覆盖） */
+
 function dispatchExec(impl: (cmd: string, args: string[]) => string) {
   execMock.mockImplementation(((cmd: string, args: string[]) => impl(cmd, args)) as never);
 }
 
-/** 注入的 fetchImpl：默认所有 /health 返回 ok（waitReady 消费） */
+
 function okFetch(): typeof fetch {
   return (async () => ({ status: 200, json: async () => ({ status: "ok" }) })) as unknown as typeof fetch;
 }
 
-/** S4-B：probeImpl 的返回形状从布尔变成**能力快照**（含三态 state 与服务器自述身份）。
- *  布尔把"加载中"和"什么都没有"压成同一个答案，正是重复拉起同一个模型的根因。 */
+
+
 function readyCap(alias?: string): LocalServerCapability {
   return { ...emptyCapability("ready"), effectiveCtx: 8192, alias: alias ?? null, modelPath: null };
 }
 
-/** probeImpl：指定端口视为有**就绪**实例 */
+
 function liveProbe(ports: number[]): (port: number) => Promise<LocalServerCapability> {
   return async (port) => (ports.includes(port) ? readyCap() : emptyCapability("down"));
 }
@@ -85,7 +85,7 @@ afterAll(() => {
   vi.restoreAllMocks();
 });
 
-// ── VRAMMonitor ───────────────────────────────────────────
+
 
 describe("VRAMMonitor", () => {
   it("nvidia-smi CSV 解析（有效）", () => {
@@ -110,7 +110,7 @@ describe("VRAMMonitor", () => {
   });
 });
 
-// ── ModelBackend ──────────────────────────────────────────
+
 
 describe("ModelBackend", () => {
   it("start 缺失 binary → false", () => {
@@ -143,7 +143,7 @@ describe("ModelBackend", () => {
   });
 });
 
-// ── ModelServerManager ────────────────────────────────────
+
 
 describe("ModelServerManager", () => {
   function makeManager(overrides: { registryPath?: string; fetchImpl?: typeof fetch; probeImpl?: (port: number) => Promise<LocalServerCapability> } = {}) {
@@ -198,7 +198,7 @@ describe("ModelServerManager", () => {
 
   it("startup 清空陈旧 registry（A-003/H1）", async () => {
     const { tmp, cfg } = makeManager();
-    cfg.embedding.persistent = false; // 不拉起实例，只验证清理
+    cfg.embedding.persistent = false; 
     const stale = join(tmp, "stale_registry.json");
     writeFileSync(stale, JSON.stringify({
       embedding: { model: "bge-m3", port: EMBED_PORT, pid: 13272, state: "ready" },
@@ -213,7 +213,7 @@ describe("ModelServerManager", () => {
     execMock.mockReturnValue("8192, 2048, 6144\n" as never);
     writeFileSync(join(tmp, "llama-server.exe"), "");
     writeFileSync(join(tmp, "bge.gguf"), "");
-    // 先通过 ensure 启动（spawn 已 mock；waitReady 走 okFetch）
+    
     const result = await mgr.ensure("embedding", cfg.embedding.model_path, "bge-m3");
     expect(result.ok).toBe(true);
     const items = mgr.status();
@@ -224,7 +224,7 @@ describe("ModelServerManager", () => {
   });
 });
 
-// ── 孤儿回收（A-017 语义移植） ────────────────────────────
+
 
 describe("孤儿回收（OrphanRecovery）", () => {
   it("pidForPort 解析 LISTENING 行", () => {
@@ -284,7 +284,7 @@ describe("孤儿回收（OrphanRecovery）", () => {
       });
       dispatchExec((cmd) => cmd === "netstat" ? `  TCP    127.0.0.1:${EMBED_PORT}   0.0.0.0:0    LISTENING    4242\n` : "");
       const live = await mgr.probeLive("embedding", cfg.embedding);
-      // S4-B：返回的是 {port, pid, cap}（cap 带三态与服务器自述身份），不再是 [port, pid]
+      
       expect(live?.port).toBe(EMBED_PORT);
       expect(live?.pid).toBe(4242);
       expect(live?.cap.state).toBe("ready");
@@ -314,7 +314,7 @@ describe("孤儿回收（OrphanRecovery）", () => {
       expect(result.port).toBe(EMBED_PORT);
       const inst = mgr.status()[0];
       expect(inst.external).toBe(true);
-      expect(inst.pid).toBeNull(); // 外部实例 backend 未 spawn，无 pid（Python 语义对照）
+      expect(inst.pid).toBeNull(); 
       expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -335,7 +335,7 @@ describe("孤儿回收（OrphanRecovery）", () => {
       dispatchExec((cmd, args: string[]) => {
         if (cmd === "netstat") return `  TCP    127.0.0.1:${EMBED_PORT}   0.0.0.0:0    LISTENING    4242\n`;
         if (cmd === "wmic") return "ParentProcessId\n99999\n";
-        // tasklist 按 PID 分派：查父 99999 → 已死（孤儿）；查子 4242 → llama-server（校验通过可回收）
+        
         const pidArg = args.find((a) => a.startsWith("PID eq "))?.replace("PID eq ", "");
         if (pidArg === "99999") return "INFO: No tasks are running.";
         if (pidArg === "4242") return '"llama-server.exe","4242","Console","1","2,000,000 K"\n';

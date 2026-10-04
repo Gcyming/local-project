@@ -1,28 +1,28 @@
-/**
- * core-ts/src/office/docWrite.ts — 生成**真文件**（docx/xlsx/pptx/pdf/csv/md/txt）。
- *
- * **需求来源**（真实事故）：用户把办公文档拖进 Electron 应用被当成网页加载 ⇒ `ERR_FAILED`
- * 死循环。修复的第二半除了「能读」，还要「能写」—— 让模型/用户能把一段文本落成**真能打开的**
- * .docx/.xlsx/.pptx/.pdf，而不是一个改后缀名的 txt。
- *
- * 三条硬纪律：
- * 1. **零新依赖**：ZIP 容器自己打（`writeZip`），PDF 结构自己拼。多引入一个库就多一份
- *    打包期供应链与体积风险（A-1034 已有前车之鉴）。
- * 2. **结构必须自洽**：`[Content_Types].xml` 里声明的部件必须真实存在、rels 里的 Target
- *    必须真实存在，否则 Office 会弹「文件已损坏」。宁愿部件少，也不要声明了却没有。
- * 3. **写出的文件必须能被本模块的 `extractDocumentText` 读回来**（round-trip）。这不是
- *    「自己测自己」的假守卫：它保证写侧的转义（XML 实体、PDF 字面量）与读侧的反转义
- *    是同一套语义，任何一侧改了都会立刻红。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { writeZip, type ZipFile } from "../zip.js";
 
-/** 支持的输出格式。 */
+
 export type DocFormat = "docx" | "xlsx" | "pptx" | "pdf" | "csv" | "md" | "txt";
 
-/** 写文件请求：`title` 只对 docx/pptx 生效（作为 H1/封面标题），其余格式忽略。 */
+
 export type WriteSpec = { path: string; format: DocFormat; title?: string; body: string };
 
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
@@ -35,7 +35,7 @@ const P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
-/** XML 文本/属性转义。不做这一步，正文里的 `&` `<` 会让整个部件变成非法 XML —— 文件打不开。 */
+
 function esc(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -45,7 +45,7 @@ function esc(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
-/** 0 → A、25 → Z、26 → AA。 */
+
 function colName(idx: number): string {
   let s = "";
   let n = idx + 1;
@@ -57,14 +57,14 @@ function colName(idx: number): string {
   return s;
 }
 
-/** 表格单元格引用：`A1`、`C7`。 */
+
 function cellRef(row: number, col: number): string {
   return `${colName(col)}${row + 1}`;
 }
 
-// ── docx ─────────────────────────────────────────────────
 
-/** 一行的结构前缀 → `w:pStyle`；`# `→Heading1、`## `→Heading2、`### `→Heading3、`- `→项目符号。 */
+
+
 function docxParagraph(line: string): string {
   let style = "";
   let list = false;
@@ -152,9 +152,9 @@ function buildDocx(spec: WriteSpec): Buffer {
   return writeZip(files);
 }
 
-// ── xlsx ─────────────────────────────────────────────────
 
-/** body → 单元格网格：含 `\t` 按 TSV，否则按 CSV 分列（不做引号转义，保持可预期）。 */
+
+
 function sheetGrid(body: string): string[][] {
   const sep = body.includes("\t") ? "\t" : ",";
   return body.split(/\r?\n/).map((line) => line.split(sep));
@@ -224,12 +224,12 @@ function buildXlsx(spec: WriteSpec): Buffer {
   return writeZip(files);
 }
 
-// ── pptx ─────────────────────────────────────────────────
 
-/** 一页幻灯片：标题 + 段落（bullet 决定是否项目符号）。 */
+
+
 type PptPage = { title: string; paragraphs: Array<{ text: string; bullet: boolean }> };
 
-/** body → 页：`# X` 开新页（X 为标题），`- Y` 项目符号，其余普通段落。 */
+
 function pptPages(body: string, title?: string): PptPage[] {
   const pages: PptPage[] = [];
   let current: PptPage | null = null;
@@ -250,7 +250,7 @@ function pptPages(body: string, title?: string): PptPage[] {
   return pages;
 }
 
-/** 段落 → `<a:p>`。bullet 段落带 `buChar`，读侧据此重建 `- `。 */
+
 function pptParagraph(text: string, bullet: boolean): string {
   const pPr = bullet ? '<a:pPr lvl="0"><a:buChar char="\u2022"/></a:pPr>' : "";
   const run = text.length > 0 ? `<a:r><a:t>${esc(text)}</a:t></a:r>` : "";
@@ -374,19 +374,19 @@ function buildPptx(spec: WriteSpec): Buffer {
   return writeZip(files);
 }
 
-// ── pdf ──────────────────────────────────────────────────
 
-/**
- * 文本 → PDF 字面量字符串。
- *
- * 三条必须做对的事：
- * - `(` `)` `\` 必须转义，否则字符串提前闭合、内容流语法坏掉、PDF 打不开。
- * - **非 ASCII 字节一律写成八进制 `\ooo`**：PDF 标准字体 Helvetica 用单字节编码，
- *   直接塞 UTF-8 多字节会被解析器按单字节切开。写成八进制转义后，读侧（pdfUnescape）
- *   按字节还原、再按 UTF-8 解码，中英混排才能 round-trip。
- *   代价要说清楚：**中文字符在真正的 PDF 阅读器里仍会显示为乱码**（Helvetica 无 CJK 字形），
- *   要正确显示中文需要嵌 CJK 字体与 ToUnicode 表 —— 那是远超本次范围的工作。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 function pdfLiteral(s: string): string {
   const bytes = Buffer.from(s, "utf8");
   let out = "(";
@@ -400,7 +400,7 @@ function pdfLiteral(s: string): string {
   return `${out})`;
 }
 
-/** 一页的内容流：BT/ET 之间逐行 Tj，行间距 16pt。 */
+
 function pdfPageContent(lines: readonly string[]): string {
   const ops = ["BT", "/F1 12 Tf", "72 720 Td"];
   let first = true;
@@ -415,14 +415,14 @@ function pdfPageContent(lines: readonly string[]): string {
 
 const PDF_LINES_PER_PAGE = 46;
 
-/**
- * 拼一个最小但**合规**的文本 PDF。
- *
- * 为什么 `xref` 偏移必须真实计算：`startxref` 与每条 xref 记录都是**字节偏移**，
- * 糊一个假值（比如全 0 或固定值）在宽松阅读器里可能侥幸打开，在严格阅读器（含浏览器
- * 内置的 pdf.js）里会报「文件损坏」。所以这里用「边拼边记 offset」的方式，
- * `/Length` 同理取内容流的真实字节数。
- */
+
+
+
+
+
+
+
+
 function buildPdf(spec: WriteSpec): Buffer {
   const allLines = spec.body.split(/\r?\n/);
   const pages: string[][] = [];
@@ -480,9 +480,9 @@ function buildPdf(spec: WriteSpec): Buffer {
   return Buffer.concat(chunks);
 }
 
-// ── 统一入口 ──────────────────────────────────────────────
 
-/** 建父目录并把字节落盘。ZIP/PDF 之外的格式走这里直写。 */
+
+
 function bytesFor(spec: WriteSpec): Buffer {
   switch (spec.format) {
     case "docx": return buildDocx(spec);
@@ -493,11 +493,11 @@ function bytesFor(spec: WriteSpec): Buffer {
   }
 }
 
-/**
- * 按 `format` 生成真文件并落盘。
- *
- * @returns 判别联合：成功给真实字节数；失败给原因（**不抛异常**，IPC 层可直接转提示）
- */
+
+
+
+
+
 export async function writeDocument(
   spec: WriteSpec,
 ): Promise<{ ok: true; path: string; bytes: number } | { ok: false; path: string; error: string }> {

@@ -1,26 +1,26 @@
-/**
- * tests/core-ts/adb-tools.spec.ts — ADB 工具链自愈能力回归测试。
- *
- * 背景：用户实测「模型说没有 adb_push / 无法检测模拟器 / 让用户自己去 cmd 跑命令」。
- * 根因是**本机没有 adb** 且模型缺少「下载 platform-tools / 启动 adb 服务」的工具。
- * 本测试锁死修复后的行为：
- *  - adb 未安装时 adb_devices / adb_connect 都给出「改用 adb_setup」的明确指引（而不是让用户跑命令行）
- *  - adb_devices 空列表时自动扫描常见模拟器端口（MuMu 7555/16384、雷电 5555…）
- *  - adb_setup 串起 检测 → 下载 → 启动服务 → 扫描连接 → 复读设备
- *  - adb_push / adb_pull / adb_shell / adb_screencap / adb_setup 均已注册
- */
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ToolRegistry, setToolCategoryGate } from "../../core-ts/src/tools/registry.js";
 import { registerBuiltinTools, setAdbService } from "../../core-ts/src/tools/builtin.js";
 
 interface Call { method: string; args: unknown[] }
 
-/** 可编排的假 AdbService（模拟 AdbService 的公开方法） */
+
 class FakeAdb {
   calls: Call[] = [];
   adbInstalled = true;
   devicesList: Array<{ serial: string; state: string; model?: string }> = [];
-  /** connect 时哪些端口算成功 */
+  
   connectable = new Set<string>();
   downloadOk = true;
   startOk = true;
@@ -51,7 +51,7 @@ class FakeAdb {
       this.devicesList.push({ serial: host, state: "device", model: "MuMu" });
       return { ok: true, stdout: `connected to ${host}` };
     }
-    // 真实 adb 对不存在的目标常返回 exit 0 + "failed to connect"
+    
     return { ok: true, stdout: `failed to connect to ${host}` };
   }
   async shell(_s: string, cmd: string) { this.calls.push({ method: "shell", args: [cmd] }); return { ok: true, stdout: "ok" }; }
@@ -69,7 +69,7 @@ beforeEach(() => {
   registerBuiltinTools(reg);
   adb = new FakeAdb();
   setAdbService(adb as never);
-  setToolCategoryGate(null); // 测试关注工具行为，不测类别闸门
+  setToolCategoryGate(null); 
 });
 
 afterEach(() => {
@@ -106,9 +106,9 @@ describe("adb_devices 空列表 → 自动扫描常见模拟器端口", () => {
     const out = await reg.callTool("adb_devices", {});
     expect(out).toMatch(/没有可用/);
     expect(out).toMatch(/127\.0\.0\.1:7555/);
-    expect(out).toMatch(/127\.0\.0\.1:16384/); // MuMu 12
+    expect(out).toMatch(/127\.0\.0\.1:16384/); 
     expect(out).toMatch(/adb_connect/);
-    // 确实尝试过扫描
+    
     expect(adb.calls.filter((c) => c.method === "connect").length).toBeGreaterThan(5);
   });
 

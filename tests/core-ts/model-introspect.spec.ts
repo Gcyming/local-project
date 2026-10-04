@@ -1,21 +1,21 @@
-/**
- * tests/core-ts/model-introspect.spec.ts — 本地服务「能力问询」层（计划 S1）回归守卫。
- *
- * ── 这个文件要钉住的核心事实 ──────────────────────────────────
- * ① **两个数字不能混**：`n_ctx`（本次服务的有效窗口，8192）与 `n_ctx_train`（模型训练上限，40960）
- *    必须各自独立存在。A-1018 ③ 的病灶就是拿后者当"可用余量"显示，于是界面说"还剩 480K"、
- *    上游 400 顶回 `exceeds the available context size (8192 tokens)`。
- * ② **上限的唯一来源是服务器自述**，不是家族能力表、也不是我们的配置文件推断。
- * ③ **"加载中"是一等状态**：实测三端点全部 503 + 同一个 `unavailable_error` 信封；
- *    归到 `down` 会让 UI 在加载期显示"未启动"，把用户引向"重试启动"这个错误动作。
- *
- * ── 夹具从哪来 ────────────────────────────────────────────────
- * `tests/fixtures/llama/*.json` 是**真实 llama-server 响应的逐字节副本**（含 HTTP 状态码，
- * 存在同目录 `*.status`）。抓取脚本：`gui/scripts/capture-llama-fixtures.sh`
- * （用法见脚本头；实测环境 llama.cpp b10509 / qwen3-1.7b-q8_0 / `-c 8192`）。
- *
- * ⚠️ 绝不手写"我以为的字段名"当夹具 —— 那正是 A-1018 ③ 的成因（凭推断代替问询）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,7 +36,7 @@ import {
 const FIX = fileURLToPath(new URL("../fixtures/llama", import.meta.url));
 const SRC = fileURLToPath(new URL("../../core-ts/src/model_introspect.ts", import.meta.url));
 
-/** 读**真实**夹具：响应体 + 抓取时的 HTTP 状态码（两者必须同批落盘，见抓取脚本的 SNAP） */
+
 function fixture(name: string): { body: unknown; status: number | null } {
   const raw = readFileSync(join(FIX, `${name}.json`), "utf8");
   const statusRaw = readFileSync(join(FIX, `${name}.status`), "utf8").trim();
@@ -51,7 +51,7 @@ const PROPS_LOADING = fixture("props.loading");
 const MODELS_LOADING = fixture("models.loading");
 const HEALTH_LOADING = fixture("health.loading");
 
-// ── 状态判定 ────────────────────────────────────────────────
+
 
 describe("classifyLocalServer —— 三态判定（loading 不是 down）", () => {
   it("连不上（httpStatus=null）→ down", () => {
@@ -71,7 +71,7 @@ describe("classifyLocalServer —— 三态判定（loading 不是 down）", () 
   });
 
   it("★ 信封先于状态码：200 + 错误信封不得判成 ready", () => {
-    // 防御性断言：若某版本"传输成功但内容是否定"，按 200 判 ready 会拿到 null 的 n_ctx
+    
     expect(classifyLocalServer(200, PROPS_LOADING.body)).toBe("loading");
   });
 
@@ -92,7 +92,7 @@ describe("classifyLocalServer —— 三态判定（loading 不是 down）", () 
   });
 });
 
-// ── 真实夹具的形状（防夹具本身被手写替换） ────────────────────
+
 
 describe("夹具真实性（防止有人手写一个「更好看」的夹具）", () => {
   it("props.ready 是 b10509 的真实响应（含 params.seed=4294967295 / total_slots=4 / build_info）", () => {
@@ -103,17 +103,17 @@ describe("夹具真实性（防止有人手写一个「更好看」的夹具）"
     expect(p.total_slots).toBe(4);
     expect(String(p.build_info)).toMatch(/^b\d+-[0-9a-f]+$/);
     expect(p.endpoint_slots).toBe(true);
-    /* ⚠️ 反直觉但有据：`/props` **能正常返回 200**，可它的能力开关 `endpoint_props` 却是 `false`。
-       说明这个 flag 指的不是"本端点存不存在"（它显然存在），而是**别的**东西（多半是 per-slot 的 props 路由）。
-       所以**不能**拿 `endpoint_props` 判断能不能问询 —— 判据只能是"发一次请求看状态码"。
-       这里把它断言成 false，是为了防止有人"顺手改成 true"来让语义好看。 */
+    
+
+
+
     expect(p.endpoint_props).toBe(false);
     expect(p.endpoint_metrics).toBe(false);
   });
 
   it("★ 实测事实：/props **没有** n_ctx_train —— 训练上限只能从 /v1/models 取", () => {
-    // 这条断言的作用：若将来某个版本真的把 n_ctx_train 加进 /props，这里会红，
-    // 提醒我们"可以简化取数路径了"，而不是让两份来源长期并存互相漂移。
+    
+    
     expect(JSON.stringify(PROPS_READY.body)).not.toContain("n_ctx_train");
   });
 
@@ -126,8 +126,8 @@ describe("夹具真实性（防止有人手写一个「更好看」的夹具）"
   });
 
   it("★ 实测事实：加载中三个端点的信封**完全一致**（/health 不豁免）", () => {
-    // 常见假设是 /health 会回 {"status":"loading model"}。实测不是：
-    // 它给的就是同一个 unavailable_error 信封 —— 所以"加载中"只能靠这个信封识别。
+    
+    
     expect(PROPS_LOADING.status).toBe(503);
     expect(MODELS_LOADING.status).toBe(503);
     expect(HEALTH_LOADING.status).toBe(503);
@@ -142,7 +142,7 @@ describe("夹具真实性（防止有人手写一个「更好看」的夹具）"
   });
 });
 
-// ── /props 解析 ─────────────────────────────────────────────
+
 
 describe("parsePropsPayload —— 就绪态真实夹具", () => {
   const p = parsePropsPayload(PROPS_READY.body);
@@ -184,7 +184,7 @@ describe("parsePropsPayload —— 就绪态真实夹具", () => {
       const out = parsePropsPayload(bad);
       expect(out.effectiveCtx ?? null).toBeNull();
     }
-    // n_ctx 是字符串 "8192"（某些网关会把数字序列化成字符串）→ 不收，宁可 null
+    
     expect(parsePropsPayload({ default_generation_settings: { n_ctx: "8192" } }).effectiveCtx).toBeUndefined();
   });
 
@@ -209,7 +209,7 @@ describe("parsePropsPayload —— 就绪态真实夹具", () => {
   });
 });
 
-// ── /v1/models 解析 ─────────────────────────────────────────
+
 
 describe("parseModelsPayload —— 就绪态真实夹具", () => {
   const m = parseModelsPayload(MODELS_READY.body);
@@ -270,7 +270,7 @@ describe("parseModelsPayload —— 就绪态真实夹具", () => {
   });
 });
 
-// ── 合并 ────────────────────────────────────────────────────
+
 
 describe("readLocalCapability —— 合并两端口径", () => {
   it("★ 真实就绪态：state=ready，有效 8192 / 训练 40960（两个数字都在，且不同）", () => {
@@ -349,16 +349,16 @@ describe("readLocalCapability —— 合并两端口径", () => {
   });
 });
 
-/** 去掉注释后的源码 —— 静态守卫必须盯**代码**而不是**注释**。
- *  A-1019 的实锤教训：守卫若对注释敏感，就会因为我写了一句解释性注释而误红；
- *  更糟的是有人为了让守卫变绿去删注释，而不是改代码。 */
+
+
+
 function stripComments(src: string): string {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-// ── 窗口上限决策（S1 的核心：塌缩掉 6 分支级联） ─────────────
+
 
 describe("resolveWindowCap —— 上限的唯一决策点", () => {
   const S = { effectiveCtx: 8192, trainCtx: 40960 } as Pick<LocalServerCapability, "state" | "effectiveCtx" | "trainCtx">;
@@ -382,8 +382,8 @@ describe("resolveWindowCap —— 上限的唯一决策点", () => {
   });
 
   it("★ A-1018 ③ 的反例：真实夹具下答案是 8192，而**不是**训练上限 40960", () => {
-    // 把两个真实数字喂进去，断言决策函数选的是服务器的有效窗口。
-    // 若有人把 trainCtx 接到某条分支上（"反正更大，更宽松"），这里会红。
+    
+    
     const r = resolveWindowCap({ serverCtx: S.effectiveCtx });
     expect(r.ctx).toBe(8192);
     expect(r.ctx).not.toBe(S.trainCtx);
@@ -404,16 +404,16 @@ describe("resolveWindowCap —— 上限的唯一决策点", () => {
 
   it("★ 静态守卫：本模块**不得**依赖家族能力表（S5 之后它就是死路）", () => {
     const code = stripComments(readFileSync(SRC, "utf8"));
-    // 只看代码（注释里当然要能提"家族能力表"—— 那是在解释为什么不许用它）
+    
     expect(code).not.toContain("model-capabilities");
     expect(code).not.toContain("inferModelCapabilities");
     expect(code).not.toContain("MODEL_CAPABILITIES");
-    // 524288 = qwen3 家族训练窗口。它**只能**作为测试里的对照数字出现，不许写进实现。
+    
     expect(code).not.toMatch(/524288|1048576|131072/);
   });
 });
 
-// ── 展示 ────────────────────────────────────────────────────
+
 
 describe("describeWindowCap —— 把「有效 vs 训练」两个数字讲清楚", () => {
   it("有效 ≠ 训练时两个都写出来（正面预防 A-1018 ③ 的误解）", () => {

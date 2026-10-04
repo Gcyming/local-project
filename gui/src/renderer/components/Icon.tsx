@@ -1,8 +1,8 @@
-/**
- * gui/src/renderer/components/Icon.tsx — 统一图标集（内联 SVG）。
- * 图标源：D:\下载\icon_fpbc119q3rk 图标库（iconfont 风格单色线性图标）。
- * 全部 fill=currentColor 跟随主题色（深色主题下清晰可见），默认 18px。
- */
+
+
+
+
+
 import React, { type CSSProperties, type JSX } from "react";
 
 export interface IconProps {
@@ -27,7 +27,7 @@ function Svg({ size = 18, style, className, children }: IconProps & { children: 
   );
 }
 
-/** 发送（纸飞机） */
+
 export function SendIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -36,7 +36,7 @@ export function SendIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 设置（横向调节滑杆） */
+
 export function SettingsIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -48,7 +48,7 @@ export function SettingsIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 编辑 / 重命名（铅笔） */
+
 export function EditIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -59,7 +59,7 @@ export function EditIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 搜索（放大镜） */
+
 export function SearchIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -69,10 +69,10 @@ export function SearchIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 展开 / 折叠（右箭头，旋转 90°=向下、-90°=向上）
- *  A-1015：旋转过渡改走**全局折叠节拍**（`--collapse-dur` / `--collapse-ease`，
- *  与左右侧栏宽度过渡同一条 decelerate 曲线）。此前写死 `0.15s ease` —— 比展开动作
- *  快一个数量级，箭头"先转完、内容再长"，看起来不是同一件事。 */
+
+
+
+
 export function ChevronIcon({ rotate = 0, ...props }: IconProps & { rotate?: number }): JSX.Element {
   return (
     <Svg
@@ -88,7 +88,7 @@ export function ChevronIcon({ rotate = 0, ...props }: IconProps & { rotate?: num
   );
 }
 
-/** 思考（闪电） */
+
 export function ThinkingIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -97,7 +97,7 @@ export function ThinkingIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 加号（新建） */
+
 export function PlusIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -107,7 +107,7 @@ export function PlusIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 侧栏展开（汉堡/面板） */
+
 export function MenuIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -117,7 +117,7 @@ export function MenuIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 自分裂（层级/分支图） */
+
 export function ForkIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -128,7 +128,7 @@ export function ForkIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 传唤（链接） */
+
 export function LinkIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -138,9 +138,9 @@ export function LinkIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 右侧栏图标（顶栏展开按钮 / 工作树 / 任务 / 终端 / 浏览器） ── */
 
-/** 右侧栏展开 / 收起（镜像 MenuIcon：右侧分隔线 + 左箭头） */
+
+
 export function PanelRightIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -151,12 +151,12 @@ export function PanelRightIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 侧栏展开/收起专属图标（源：icon_fpbc119q3rk 图标库） ──
- * layout-sidebar-left-expand  = 面板左侧 + 箭头朝右 → 表示【收起】（面板滑向右边缘）
- * layout-sidebar-right-expand = 面板右侧 + 箭头朝左 → 表示【展开】（面板向左展开）
- * 二者互为水平镜像，用于右侧栏顶栏/标签栏的展开-收起切换。 */
 
-/** 侧栏收起图标（面板+右箭头）：右侧栏展开时显示，点击收起 */
+
+
+
+
+
 export function SidebarLeftIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -166,7 +166,7 @@ export function SidebarLeftIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 侧栏展开图标（面板+左箭头）：右侧栏收起时显示，点击展开 */
+
 export function SidebarRightIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -176,9 +176,9 @@ export function SidebarRightIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 新增图标 ── */
 
-/** Git 分支 */
+
+
 export function GitIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -187,7 +187,7 @@ export function GitIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 文件夹 */
+
 export function FolderIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -196,7 +196,7 @@ export function FolderIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 代码 */
+
 export function CodeIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -205,7 +205,7 @@ export function CodeIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 时钟 */
+
 export function ClockIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -214,7 +214,7 @@ export function ClockIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 首页 */
+
 export function HomeIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -223,7 +223,7 @@ export function HomeIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 笔记 */
+
 export function NotesIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -232,7 +232,7 @@ export function NotesIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 消息 */
+
 export function MessageIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -241,7 +241,7 @@ export function MessageIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 列表 */
+
 export function ListIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -250,7 +250,7 @@ export function ListIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 分类 */
+
 export function CategoryIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -259,7 +259,7 @@ export function CategoryIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 拼图 */
+
 export function PuzzleIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -268,7 +268,7 @@ export function PuzzleIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 回形针 */
+
 export function PaperclipIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -277,7 +277,7 @@ export function PaperclipIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 筛选 */
+
 export function FilterIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -286,7 +286,7 @@ export function FilterIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 重复 */
+
 export function RepeatIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -295,7 +295,7 @@ export function RepeatIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 云下载 */
+
 export function CloudDownloadIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -304,7 +304,7 @@ export function CloudDownloadIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 上传（源：cloud-upload.svg——与 CloudDownloadIcon 同一套图标库的镜像件） */
+
 export function CloudUploadIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -315,7 +315,7 @@ export function CloudUploadIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 右箭头（源：arrow-right.svg——此前只画了横线缺箭头，12px 下形似减号，用户实测"访问按钮是个减号"） */
+
 export function ArrowRightIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -326,7 +326,7 @@ export function ArrowRightIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 多文件夹（TreeIcon → now uses FoldersIcon） */
+
 export function FoldersIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -335,7 +335,7 @@ export function FoldersIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** CPU（TermIcon → now uses CpuIcon） */
+
 export function CpuIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -344,7 +344,7 @@ export function CpuIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 审批·手动（张开的手掌） */
+
 export function ManualIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -353,7 +353,7 @@ export function ManualIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 审批·自动（闪电循环） */
+
 export function AutoModeIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -363,7 +363,7 @@ export function AutoModeIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 审批·无需/警示（警告感叹号） */
+
 export function WarningIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -374,7 +374,7 @@ export function WarningIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 审批·自定义（工具/扳手） */
+
 export function CustomIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -383,17 +383,17 @@ export function CustomIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 旧图标别名（向后兼容） ── */
-// TreeIcon → now uses FoldersIcon
-// TermIcon → now uses CpuIcon
-// GlobeIcon → now uses SearchIcon
+
+
+
+
 
 export function TreeIcon(props: IconProps): JSX.Element { return <FoldersIcon {...props} />; }
-/** 待办任务（勾选方框 + 对勾）
- *  A-980-R24：替换旧的 `ListIcon` 别名——旧图标本质是「一条横杠」，放右侧栏「待办任务」
- *  标签页上既不表意也不美观（用户反馈"标签图标不符合"）。
- *  造型取自 `gui/icon/icon_fpbc119q3rk/Checkbox-filled.svg`（同图标库，1024 网格、单色填充风格一致）。
- *  fillRule=evenodd：保证内部对勾稳定挖空（不依赖两条子路径的绕向，换个渲染器也不会变成实心方块）。 */
+
+
+
+
+
 export function TaskIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -407,9 +407,9 @@ export function TaskIcon(props: IconProps): JSX.Element {
 export function TermIcon(props: IconProps): JSX.Element { return <CpuIcon {...props} />; }
 export function GlobeIcon(props: IconProps): JSX.Element { return <SearchIcon {...props} />; }
 
-/* ── 第二图标库补充图标 ── */
 
-/** 关闭 / ✕ */
+
+
 export function CloseIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -418,7 +418,7 @@ export function CloseIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 刷新 / ↻ */
+
 export function RefreshIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -427,7 +427,7 @@ export function RefreshIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 勾选 / ✓ */
+
 export function CheckIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -436,7 +436,7 @@ export function CheckIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 下载 */
+
 export function DownloadIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -445,7 +445,7 @@ export function DownloadIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 历史 */
+
 export function HistoryIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -454,7 +454,7 @@ export function HistoryIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 星标（收藏） */
+
 export function StarIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -463,7 +463,7 @@ export function StarIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 闪电（执行/操作） */
+
 export function BoltIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -472,7 +472,7 @@ export function BoltIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 图表柱状 */
+
 export function ChartBarIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -481,7 +481,7 @@ export function ChartBarIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 图片（识图附件） */
+
 export function ImageIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -490,7 +490,7 @@ export function ImageIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 站点地图（树状结构） */
+
 export function SitemapIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -499,7 +499,7 @@ export function SitemapIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 播放（执行命令） */
+
 export function PlayIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -508,40 +508,40 @@ export function PlayIcon(props: IconProps): JSX.Element {
   );
 }
 
-/**
- * 停止（**只有一个圆角方块**，无外环）。
- *
- * 放进"红色圆形按钮"当停止键时，**按钮的圆底已经承担了"圆"的语义**，
- * 图标再套一个圆环就是重复造型，还会把方块挤小（见 `TerminateIcon` 的 A-1021 说明）。
- * 所以本图标去掉环、把方块放到 viewBox 的 ~51%，并按 **几何中心 512/512 精确居中**（圆角 r=64）。
- *
- * ⚠️ A-1021：原定义是 `M256 256h576v576H256z` —— 直角 + 跨 [256,832]，
- * 中心落在 **544**（不是 512）→ 3.1% 的偏右下，放进 36px 圆底后肉眼可见不居中
- * （用户实测原话："这个标也不再正中间啊"）。这里一并修正。
- *
- * 尺寸用法：放在直径 D 的圆底里时给 `size ≈ D*0.83`（方块 ≈ 0.42*D，与业界
- * "圆底 36 / 方块 15" 的停止键比例一致）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function StopIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
-      {/* x,y ∈ [250,774] → 中心 (512,512)，边长 524/1024 = 51.2% */}
+      {}
       <path d="M314 250h396a64 64 0 0 1 64 64v396a64 64 0 0 1-64 64H314a64 64 0 0 1-64-64V314a64 64 0 0 1 64-64z" />
     </Svg>
   );
 }
 
-/** 终止（圆环 + 方块）。
- *  图标源：`D:\下载\终止.svg`（用户指定用来替换聊天输入栏里那个用文字 `■` 画的停止按钮）。
- *  原文件两个 path 自带 fill="#949DA6"，这里**剥掉**，改由外层 `<svg fill="currentColor">` 统一跟随主题色。
- *
- *  ⚠️ A-1021：**不要再把这个图标塞进圆形按钮**。
- *  本项目当前的用法是「36px 红色圆底 + 本图标」，于是出现两个问题（用户实测截图放大后指出）：
- *   ① 图标里的**圆环和按钮的圆底同心重复** —— 变成"圈里套圈"，而且环内那个方块只有图标的 26%
- *      （18px 图标 → 方块仅 ~4.7px），所以看起来"标特别小"；
- *   ② 原文件的方块并非严格居中：x 跨 347.56~674.28（中心 **510.9**，不是 512），
- *      y 跨 349.54~677.9（中心 513.7）→ 放大后肉眼可见地偏左偏下。
- *  圆形按钮请改用上方的 `StopIcon`；本图标保留给"非圆形底/需要环"的场合。 */
+
+
+
+
+
+
+
+
+
+
+
 export function TerminateIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -551,21 +551,21 @@ export function TerminateIcon(props: IconProps): JSX.Element {
   );
 }
 
-/**
- * 完成（圆环 + 对勾，**单色**）。
- *
- * 图标源：`D:\下载\完成.svg`（用户指定用它替换活动记录里那个显示成「完成」的**文字**徽标 ——
- * 原话"这个『完成』出现在这里有点突兀"）。
- *
- * A-1028 改色：原实现是**双色**（`--success` 实心圆底 + 固定白色勾），在活动记录那一列里
- * 和其它行格格不入 —— 上下都是"当前色描边/填充的单色小图标"，只有它会冒出一个绿色实心斑块
- * （用户原话："保留我叫你加的图标，但是改一下图标颜色风格，要求与上面符号一致"）。
- * 现在整只图标 `currentColor`（圆的底色改为**环**，勾仍是实心），由外层槽位决定颜色 ——
- * 与 `.task-badge-icon` 里的工具图标完全同一条着色路径。
- *
- * ⚠️ 不要再给它加 `accent` / 写死 `#fff`：实心圆 + 白勾的写法会让它无法跟随行内配色
- * （且实测在浅色主题下与软底色叠成"圈里套圈"）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function DoneIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -576,7 +576,7 @@ export function DoneIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 分支（Git） */
+
 export function BranchIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -586,7 +586,7 @@ export function BranchIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 仓库 */
+
 export function RepoIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -595,9 +595,9 @@ export function RepoIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 任务规划新增图标（源：icon_fpbc119q3rk） ── */
 
-/** 待办列表（带圆点的列表行） */
+
+
 export function TodoListIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -606,7 +606,7 @@ export function TodoListIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 概览/仪表盘（四个方块 + 小柱状图） */
+
 export function DashboardIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -615,7 +615,7 @@ export function DashboardIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 复选框空（正方形，边框） */
+
 export function CheckboxIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -624,7 +624,7 @@ export function CheckboxIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 勾选框（复选已选，含 ✓） */
+
 export function CheckboxCheckedIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -633,7 +633,7 @@ export function CheckboxCheckedIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 加号圆形（新建任务按钮） */
+
 export function CirclePlusIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -642,7 +642,7 @@ export function CirclePlusIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 加载中旋转圆（小） */
+
 export function LoadingCircleIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -658,7 +658,7 @@ export function LoadingCircleIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 柱状图（指标） */
+
 export function BarChartIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -667,7 +667,7 @@ export function BarChartIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 饼图（用量分析） */
+
 export function PieChartIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -676,9 +676,9 @@ export function PieChartIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 思考过程折叠卡图标（源：D:\下载\icon_fpbc119q3rk 图标库，fill=currentColor 跟随主题） ── */
 
-/** 参考内容（file-text：文档/文件夹，表示阅读过的本地文件） */
+
+
 export function RefFileIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -689,7 +689,7 @@ export function RefFileIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 思考历程（shenjing：神经/线条交织，表示推理思考过程） */
+
 export function BrainThinkingIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -698,7 +698,7 @@ export function BrainThinkingIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 任务完成阶段（list-details：清单细目，表示各阶段/子任务与进度） */
+
 export function StageListIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -707,7 +707,7 @@ export function StageListIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 本地文件小图标（book-2：文档，参考内容列表行内用） */
+
 export function FileMiniIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -718,7 +718,7 @@ export function FileMiniIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 互联网 / 地球仪（源：D:\下载\互联网.svg） */
+
 export function InternetIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -730,7 +730,7 @@ export function InternetIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 终端（源：D:\下载\terminal.svg） */
+
 export function TerminalIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -740,7 +740,7 @@ export function TerminalIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 左箭头（返回 / 上一步） */
+
 export function ArrowLeftIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
@@ -749,12 +749,12 @@ export function ArrowLeftIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 右箭头 */
+
 export function ArrowRightIcon2(props: IconProps): JSX.Element {
   return <ArrowRightIcon {...props} />;
 }
 
-/** 复制（双文档叠放） */
+
 export function CopyIcon(props: IconProps): JSX.Element {
   const { size = 14, style, className } = props;
   return (
@@ -764,7 +764,7 @@ export function CopyIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 重试/回滚（圆形逆时针箭头，来自 rotate-clockwise.svg） */
+
 export function RotateIcon(props: IconProps): JSX.Element {
   const { size = 14, style, className } = props;
   return (
@@ -774,7 +774,7 @@ export function RotateIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** 消息事件/对话气泡（来自 message-circle.svg） */
+
 export function MessageCircleIcon(props: IconProps): JSX.Element {
   const { size = 14, style, className } = props;
   return (
@@ -785,13 +785,13 @@ export function MessageCircleIcon(props: IconProps): JSX.Element {
   );
 }
 
-/** Git 分支（源：git.svg；line 172 已有完整版本，此处跳过避免重复声明） */
 
-/** CSS 文件图标（源：gui/icon/icon_fpbc119q3rk/css.svg 简化为 # 形 + 开口 C 弧） */
+
+
 export function CssIcon(props: IconProps): JSX.Element {
   return (
     <Svg {...props}>
-      {/* # 号的两条横线 + 两条斜线（CSS # 形） */}
+      {}
       <line x1="220" y1="380" x2="800" y2="380" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
       <line x1="180" y1="620" x2="780" y2="620" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
       <line x1="320" y1="300" x2="240" y2="720" stroke="currentColor" strokeWidth="50" strokeLinecap="round" />
@@ -800,9 +800,9 @@ export function CssIcon(props: IconProps): JSX.Element {
   );
 }
 
-/* ── 文件类型图标（语言/文件后缀，VS Code 文件图标范式：彩色圆角块 + 缩写） ── */
 
-/** 文件类型 → 展示缩写 + 品牌色（按扩展名识别；未收录回退通用文件色） */
+
+
 export function resolveFileKind(filename: string): { abbr: string; color: string } {
   const name = (filename ?? "").toLowerCase();
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : name;
@@ -839,7 +839,7 @@ export function resolveFileKind(filename: string): { abbr: string; color: string
   return { abbr, color: "#8b949e" };
 }
 
-/** 文件类型彩色徽标（VS Code 文件图标范式：圆角块 + 缩写文字，非 emoji） */
+
 export function FileTypeIcon({ filename, size = 12, style }: { filename?: string; size?: number; style?: CSSProperties }): JSX.Element {
   const { abbr, color } = resolveFileKind(filename ?? "");
   return (

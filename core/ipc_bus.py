@@ -15,9 +15,9 @@ from typing import Optional
 from multiprocessing import Queue, Manager, Event
 
 
-# 历史消息上限
+
 MAX_HISTORY = 500
-# 队列超时（秒）
+
 QUEUE_TIMEOUT = 0.5
 
 
@@ -73,10 +73,10 @@ class IPCBus:
 
     def __init__(self):
         self._manager = Manager()
-        self._queues: dict[str, Queue] = {}           # agent_name -> 消息队列
-        self._history: list[dict] = self._manager.list()  # 共享消息历史
-        self._warnings: list[str] = self._manager.list()  # 共享警告
-        self._agent_names: list[str] = self._manager.list()  # 已注册 Agent 名
+        self._queues: dict[str, Queue] = {}           
+        self._history: list[dict] = self._manager.list()  
+        self._warnings: list[str] = self._manager.list()  
+        self._agent_names: list[str] = self._manager.list()  
 
     def register(self, agent_name: str):
         """注册 Agent 到总线"""
@@ -116,10 +116,10 @@ class IPCBus:
         )
         msg_dict = msg.to_dict()
 
-        # 记录历史
+        
         self._history.append(msg_dict)
         if len(self._history) > MAX_HISTORY:
-            # 截断历史（Manager list 不支持切片赋值，需要逐个删除）
+            
             overflow = len(self._history) - MAX_HISTORY
             for _ in range(overflow):
                 self._history.pop(0)
@@ -225,7 +225,7 @@ class IPCBus:
                 except Exception:
                     break
         self._queues.clear()
-        # Manager list 的 clear 需要逐个 pop
+        
         while len(self._history) > 0:
             self._history.pop()
         while len(self._warnings) > 0:

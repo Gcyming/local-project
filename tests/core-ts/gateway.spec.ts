@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/gateway.spec.ts — 网关核心逻辑（限流/认证/转发），mock sidecar 用本地 http server。
- * 服务端点契约（/chat /swarm /stats /agents）注入 Fake services 验证。
- */
+
+
+
+
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer, Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -395,7 +395,7 @@ describe("buildGateway LLM 转发网关 /v1/capabilities（第 3 层能力知识
       llmGateway: { enabled: true, projectRoot: process.cwd(), providers },
     });
     await app.ready();
-    // 用独立实时缓存隔离（注入已知快照，避免污染全局单例/其它用例）
+    
     const t0 = 2_000_000;
     const live = new LiveProbeCache({ ttlMs: 60_000, now: () => t0 });
     live.put({ provider: "agg", model: "fast-model", ts: t0, latencyMs: 80 });
@@ -407,7 +407,7 @@ describe("buildGateway LLM 转发网关 /v1/capabilities（第 3 层能力知识
 
   afterAll(async () => {
     await app.close();
-    setSharedLiveProbe(savedProbe); // 复位全局单例
+    setSharedLiveProbe(savedProbe); 
   });
 
   it("未认证 → 401", async () => {
@@ -422,14 +422,14 @@ describe("buildGateway LLM 转发网关 /v1/capabilities（第 3 层能力知识
     expect(body.object).toBe("capability_graph");
     expect(body.provider).toBe("agg");
     expect(body.nodes).toHaveLength(3);
-    // ranked：ok 档按实测延迟（fast 80ms < slow 900ms），dead 垫底
+    
     expect(body.ranked.agg).toEqual(["fast-model", "slow-model", "dead-model"]);
-    // 健康态
+    
     const byModel = Object.fromEntries(body.nodes.map((n: { model: string; health: string }) => [n.model, n.health]));
     expect(byModel["fast-model"]).toBe("ok");
     expect(byModel["slow-model"]).toBe("ok");
     expect(byModel["dead-model"]).toBe("dead");
-    // explain 行可读
+    
     expect(Array.isArray(body.explain)).toBe(true);
     expect(body.explain.some((s: string) => s.includes("[dead]"))).toBe(true);
   });

@@ -22,19 +22,19 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _KNOWLEDGE_DIR = _PROJECT_ROOT / "Knowledge" / "Agent Memory"
 _DATA_DIR = _PROJECT_ROOT / "data"
 
-# 晋升阈值
+
 PROMOTE_THRESHOLDS = {
-    "alert": 3,     # 第 3 次出现 → 升级为高风险
-    "rule": 5,      # 第 5 次出现 → 晋升为行为规则
-    "trait": 8,     # 第 8 次出现 → 晋升为 persona 特征
-    "skill": 10,    # 第 10 次成功 → 生成为可复用技能
+    "alert": 3,     
+    "rule": 5,      
+    "trait": 8,     
+    "skill": 10,    
 }
 
-# 输入校验（N10-M3）
+
 _VALID_CATEGORIES = {"task", "security", "learning", "skill", "behavior", "preference"}
 _VALID_PRIORITIES = {"low", "medium", "high", "critical"}
 _KEY_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
-# A-112: agent_id 仅允许安全字符（防御路径遍历；空串放行 = global 语义）
+
 _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -43,22 +43,22 @@ def _validate_agent_id(agent_id: str):
     if agent_id and not _AGENT_ID_RE.match(agent_id):
         raise ValueError(f"[knowledge] 非法 agent_id: {agent_id!r}")
 
-# 优先级权重
+
 PRIORITY_WEIGHTS = {"critical": 100, "high": 50, "medium": 20, "low": 5}
 
 
 @dataclass
 class PatternEntry:
     """单个 Pattern-Key 条目"""
-    key: str                    # 例: task.file-write.fail
-    category: str = ""           # task / security / learning / skill
-    priority: str = "medium"     # critical / high / medium / low
-    recurrence: int = 0          # 重复次数
-    first_seen: str = ""         # ISO timestamp
+    key: str                    
+    category: str = ""           
+    priority: str = "medium"     
+    recurrence: int = 0          
+    first_seen: str = ""         
     last_seen: str = ""
-    description: str = ""        # 人类可读描述
-    related_rules: list[str] = field(default_factory=list)   # 关联的晋升规则 ID
-    resolved: bool = False       # 是否已处理
+    description: str = ""        
+    related_rules: list[str] = field(default_factory=list)   
+    resolved: bool = False       
 
     def to_dict(self) -> dict:
         return {
@@ -88,9 +88,9 @@ class KnowledgeRule:
     """晋升后的持久规则"""
     id: str
     title: str
-    category: str               # behavior / security / skill / preference
+    category: str               
     content: str
-    source_pattern: str = ""     # 来源 Pattern-Key
+    source_pattern: str = ""     
     created_at: str = ""
     active: bool = True
 
@@ -130,17 +130,17 @@ class KnowledgeEngine:
         base = Path(data_dir) if data_dir else _KNOWLEDGE_DIR
         if not base.is_absolute():
             base = _PROJECT_ROOT / base
-        # A-011: 所有输出（knowledge.json / rules/ / generated_skills/）都锚定 base 目录，
-        # 修复此前 _write_rule_markdown/generate_skill 无视 data_dir 恒写项目目录的隔离缺陷
-        # （测试污染生产 Knowledge/ 目录的隐患）。默认无 data_dir 时行为不变。
+        
+        
+        
         self._base_dir = base
         self._json_path = base / (agent_id or "global") / "knowledge.json"
         self._load()
 
-    # ── 持久化 ──────────────────────────────────────────────
+    
 
     def _load(self):
-        # 迁移：旧 data/ 位置有数据但新位置没有 → 复制
+        
         old_path = _DATA_DIR / (self.agent_id or "global") / "knowledge.json"
         if old_path.exists() and not self._json_path.exists():
             try:
@@ -182,7 +182,7 @@ class KnowledgeEngine:
         tmp.write_text(raw, encoding="utf-8")
         os.replace(tmp, self._json_path)
 
-    # ── Pattern 追踪 ────────────────────────────────────────
+    
 
     def record_pattern(self, key: str, category: str = "task",
                        description: str = "", priority: str = "medium") -> dict:
@@ -190,7 +190,7 @@ class KnowledgeEngine:
         记录一个 Pattern 出现。返回 {action, ...} 指示触发晋升则 action 不为空。
         N10-M3: key/category/priority 白名单校验，非法输入降级为 safe defaults。
         """
-        # 输入校验
+        
         if not isinstance(key, str) or not _KEY_RE.match(key):
             logger.warning(f"[knowledge] 非法 pattern key: {key!r}")
             return {"action": None, "error": "invalid_key"}
@@ -215,7 +215,7 @@ class KnowledgeEngine:
 
         result = {"action": None, "key": key, "recurrence": p.recurrence}
 
-        # 检查晋升阈值
+        
         if p.recurrence >= PROMOTE_THRESHOLDS["alert"] and p.priority != "critical":
             _escalate = {"low": "medium", "medium": "high", "high": "critical"}
             p.priority = _escalate.get(p.priority, "high")
@@ -244,7 +244,7 @@ class KnowledgeEngine:
     def _key_to_trait_name(self, key: str) -> str:
         """从 Pattern-Key 提取 trait 名。例: task.code-review.success → 代码审查"""
         parts = key.split(".")
-        # 取倒数第二个有意义的部分
+        
         for part in reversed(parts):
             if part not in ("success", "fail", "task", "security", "learning"):
                 return part.replace("-", " ").title()
@@ -255,14 +255,14 @@ class KnowledgeEngine:
         parts = key.split(".")
         return "_".join(p.replace("-", "_") for p in parts[1:3] if p not in ("success", "fail"))
 
-    # ── 晋升管线 ────────────────────────────────────────────
+    
 
     def promote_to_rule(self, pattern: PatternEntry) -> KnowledgeRule | None:
         """将高频 Pattern 晋升为持久行为规则，写入 Knowledge/ 目录"""
         now = datetime.now(timezone.utc).isoformat()
         rule_id = f"rule_{uuid.uuid4().hex[:8]}"
 
-        # 根据 category 生成 rule 内容
+        
         templates = {
             "security": (
                 f"## 安全规则\n"
@@ -296,10 +296,10 @@ class KnowledgeEngine:
         self._rules.append(rule)
         self._save()
 
-        # 写入 Knowledge 目录（Obsidian markdown）
+        
         self._write_rule_markdown(rule)
 
-        # 向量化：存入 LanceDB 供语义召回
+        
         self._vectorize(rule)
 
         logger.info(f"[knowledge] 新规则已晋升: {rule.title}")
@@ -323,7 +323,7 @@ class KnowledgeEngine:
                 lancedb_enabled=lancedb_enabled, lancedb_uri=lancedb_uri,
             )
         except Exception:
-            pass  # 向量化失败不影响晋升主流程
+            pass  
 
     def _write_rule_markdown(self, rule: KnowledgeRule):
         """将规则写入 rules/ 目录（A-011: 锚定实例 base 目录，尊重 data_dir 隔离）"""
@@ -343,7 +343,7 @@ class KnowledgeEngine:
             return None
 
         skill_name = self._key_to_skill_name(pattern_key)
-        # A-011: 锚定实例 base 目录（尊重 data_dir 隔离）
+        
         skill_dir = self._base_dir / "generated_skills" / skill_name
         skill_dir.mkdir(parents=True, exist_ok=True)
 
@@ -379,7 +379,7 @@ class KnowledgeEngine:
         logger.info(f"[knowledge] 技能模板已生成: {skill_name} → {skill_dir}")
         return {"name": skill_name, "dir": str(skill_dir)}
 
-    # ── 审查与整理 ──────────────────────────────────────────
+    
 
     def review(self, agent_persona=None, evolution_engine=None) -> dict:
         """
@@ -396,7 +396,7 @@ class KnowledgeEngine:
             "summary": [],
         }
 
-        # 1. 检查 pattern — 超过 90 天未出现的标记为 resolved
+        
         for key, p in list(self._patterns.items()):
             result["patterns_reviewed"] += 1
             if p.last_seen:
@@ -409,7 +409,7 @@ class KnowledgeEngine:
                     result["patterns_resolved"] += 1
                     result["summary"].append(f"归档旧 Pattern: {key}（{age} 天未出现）")
 
-        # 2. 高 recurrence 的 pattern → 强化对应 trait
+        
         if agent_persona:
             for key, p in self._patterns.items():
                 if p.recurrence >= PROMOTE_THRESHOLDS["trait"] and not p.resolved:
@@ -430,7 +430,7 @@ class KnowledgeEngine:
                     result["summary"].append(f"强化 trait: {trait_name}（来自 pattern {key} ×{p.recurrence}）")
                     agent_persona._touch()
 
-        # 3. 写审查日志到 Knowledge 目录
+        
         review_md = (
             f"# Review {now.strftime('%Y-%m-%d %H:%M')}\n\n"
             + "\n".join(f"- {s}" for s in result["summary"])
@@ -442,7 +442,7 @@ class KnowledgeEngine:
             review_md, encoding="utf-8",
         )
 
-        # 向量化审查摘要（供语义召回）
+        
         self._vectorize_text("review", review_md[:500])
 
         self._save()
@@ -478,7 +478,7 @@ class KnowledgeEngine:
         }
 
 
-# ── TOML 兼容解析（N10-M1）──
+
 
 
 def _read_toml_memory_section(toml_path: Path) -> dict:
@@ -490,7 +490,7 @@ def _read_toml_memory_section(toml_path: Path) -> dict:
         return data.get("memory", {}).get("lancedb", {})
     except ImportError:
         pass
-    # 简易 line-by-line 解析
+    
     result = {}
     in_memory = False
     in_lancedb = False
@@ -517,10 +517,10 @@ def _read_toml_memory_section(toml_path: Path) -> dict:
     return result
 
 
-# ── 全局缓存（按 agent_id+data_dir 键控，非单例）──
 
-# A-970：知识引擎实例数上限（LRU 淘汰）。每实例持有 patterns/rules 字典，
-# 无界累积随 Agent 数量 / 会话数线性增长内存。
+
+
+
 _MAX_KNOWLEDGE_ENGINES = 64
 
 _knowledge_cache: dict[str, KnowledgeEngine] = {}
@@ -533,14 +533,14 @@ def _cache_key(agent_id: str, data_dir: str) -> str:
 def get_knowledge_engine(agent_id: str = "", data_dir: str = "") -> KnowledgeEngine:
     key = _cache_key(agent_id, data_dir)
     if key in _knowledge_cache:
-        # LRU：命中即移到队尾（dict 迭代序 = 插入序，Python 3.7+），队首是最久未使用
+        
         engine = _knowledge_cache.pop(key)
         _knowledge_cache[key] = engine
         return engine
     engine = KnowledgeEngine(agent_id, data_dir)
     _knowledge_cache[key] = engine
     if len(_knowledge_cache) > _MAX_KNOWLEDGE_ENGINES:
-        # 淘汰最久未使用（队首），保证内存有界
+        
         _knowledge_cache.pop(next(iter(_knowledge_cache)))
     return engine
 

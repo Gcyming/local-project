@@ -1,10 +1,10 @@
-/**
- * tests/gui/todo-panorama.spec.ts — A-980-R32：任务规划折进思考历程（纯函数层）。
- *
- * 这一层的错误全是「看着对、实际串行」——少一条、重复播报、旧卡不刷新、时间线清空后基线残留。
- * 用真实 `renderTodos` 的回执文本形态做输入（而不是手搓理想字符串），
- * 才能覆盖"解析 → 折叠 → 原地刷新"整条链路。
- */
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   parseTodoPanorama,
@@ -15,7 +15,7 @@ import {
   type TimelineStep,
 } from "../../gui/src/renderer/pages/todoPanorama.js";
 
-/** 按 core-ts todoStore.renderTodos 的真实形态拼回执（进度头 + `- [x] 内容` + 进行中标记） */
+
 function receipt(items: Array<{ content: string; done?: boolean; doing?: boolean }>): string {
   const done = items.filter((i) => i.done).length;
   const active = items.find((i) => i.doing);
@@ -67,17 +67,17 @@ describe("foldTodoWriteIntoSteps", () => {
   it("同一份计划的进度更新 → 就地刷新那张卡（不新增卡），并补「开始 / 完成」两行", () => {
     const first = parseTodoPanorama(receipt(PLAN3))!.items;
     const a = foldTodoWriteIntoSteps([], first, null);
-    // 第二项开始做
+    
     const second = parseTodoPanorama(receipt([
       { content: "梳理现有登录链路" },
       { content: "抽出鉴权中间件", doing: true },
       { content: "补回归用例" },
     ]))!.items;
     const b = foldTodoWriteIntoSteps(a.steps, second, a.items);
-    expect(b.steps.filter((s) => s.kind === "plan")).toHaveLength(1); // 仍只有一张卡
+    expect(b.steps.filter((s) => s.kind === "plan")).toHaveLength(1); 
     expect(b.steps[b.steps.length - 1]).toMatchObject({ kind: "todo", state: "start", text: "抽出鉴权中间件" });
 
-    // 第一项完成 + 第二项完成
+    
     const third = parseTodoPanorama(receipt([
       { content: "梳理现有登录链路", done: true },
       { content: "抽出鉴权中间件", done: true },
@@ -91,7 +91,7 @@ describe("foldTodoWriteIntoSteps", () => {
       "done:抽出鉴权中间件",
       "start:补回归用例",
     ]);
-    // 计划卡显示的是**当前**进度：2/3
+    
     const card = c.steps.find((s) => s.kind === "plan")!;
     expect(card.items?.filter((i) => i.status === "completed")).toHaveLength(2);
   });
@@ -116,7 +116,7 @@ describe("foldTodoWriteIntoSteps", () => {
     ]))!.items;
     const b = foldTodoWriteIntoSteps(a.steps, replan, a.items);
     expect(b.steps.filter((s) => s.kind === "plan")).toHaveLength(2);
-    expect(b.steps.filter((s) => s.kind === "todo")).toHaveLength(0); // 内容全变了，不许误判成"完成"
+    expect(b.steps.filter((s) => s.kind === "todo")).toHaveLength(0); 
   });
 
   it("空回执（清除 / 报错）→ 时间线不变，基线保持上一份", () => {
@@ -128,7 +128,7 @@ describe("foldTodoWriteIntoSteps", () => {
   });
 
   it("对齐按**内容**而非 id：两套 id 空间（序号 vs uuid）不许刷屏", () => {
-    // 模拟 loadTodos 广播来的 uuid id 全景作为基线，回执解析出的却是序号 id
+    
     const uuidBase = PLAN3.map((p, i) => ({ id: `uuid-${i}`, content: p.content, status: "pending" as const }));
     const next = parseTodoPanorama(receipt([
       { content: "梳理现有登录链路", done: true },
@@ -136,7 +136,7 @@ describe("foldTodoWriteIntoSteps", () => {
       { content: "补回归用例" },
     ]))!.items;
     const { steps } = foldTodoWriteIntoSteps([], next, uuidBase);
-    // 只有第一项是真变化；若按 id 对齐，三项都会被当成新项
+    
     expect(steps.filter((s) => s.kind === "todo")).toHaveLength(1);
     expect(steps.find((s) => s.kind === "todo")).toMatchObject({ state: "done", text: "梳理现有登录链路" });
   });
@@ -148,7 +148,7 @@ describe("lastPlanItems（对比基线与时间线同生共死）", () => {
     const a = foldTodoWriteIntoSteps([], items, null);
     expect(lastPlanItems(a.steps)).toEqual(items);
     expect(lastPlanItems([])).toBeNull();
-    // 清空后重新规划：首条不得被当成"完成"
+    
     const b = foldTodoWriteIntoSteps([], a.items, lastPlanItems([]));
     expect(b.steps.filter((s) => s.kind === "todo")).toHaveLength(0);
   });
@@ -164,7 +164,7 @@ describe("appendTimelineStep", () => {
     expect(steps.map((s) => s.kind)).toEqual(["think", "tool", "think"]);
     expect(steps[0].text).toBe("看一下");
     expect(steps[2].text).toBe("继续");
-    // 空 think 不产生空节点
+    
     expect(appendTimelineStep(steps, { kind: "think", text: "" })).toHaveLength(3);
   });
 

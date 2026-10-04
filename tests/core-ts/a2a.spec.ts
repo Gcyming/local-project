@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/a2a.spec.ts — A2A 总线 + 委托协议测试。
- * 对照 core/a2a.py 语义：注册/点对点/广播/drain/history/shared_context/协议标签解析/单例。
- */
+
+
+
+
 import { describe, expect, it, afterEach } from "vitest";
 import {
   A2ABus,
@@ -26,7 +26,7 @@ describe("A2ABus 消息总线", () => {
     expect(delivered).toBe(true);
     expect(msg.to_agent).toBe("b");
     expect(bus.drainAll("b").map((m) => m.content)).toEqual(["hello"]);
-    expect(bus.drainAll("b")).toEqual([]); // 取空
+    expect(bus.drainAll("b")).toEqual([]); 
   });
 
   it("接收方未注册 → delivered=false + warning", () => {
@@ -47,7 +47,7 @@ describe("A2ABus 消息总线", () => {
     expect(delivered).toBe(true);
     expect(bus.drainAll("b").length).toBe(1);
     expect(bus.drainAll("c").length).toBe(1);
-    expect(bus.drainAll("a")).toEqual([]); // 不投递给自己
+    expect(bus.drainAll("a")).toEqual([]); 
   });
 
   it("无其他 Agent 的广播 → delivered=false + warning", () => {
@@ -66,8 +66,8 @@ describe("A2ABus 消息总线", () => {
     bus.send("b", "a", "m2");
     bus.send("a", "broadcast", "m3");
     expect(bus.getHistory().length).toBe(3);
-    expect(bus.getHistory("b").length).toBe(3); // 收件人视角
-    expect(bus.getHistory("a").length).toBe(3); // 发件人 + 广播
+    expect(bus.getHistory("b").length).toBe(3); 
+    expect(bus.getHistory("a").length).toBe(3); 
   });
 
   it("MAX_CONTENT=100000 截断", () => {

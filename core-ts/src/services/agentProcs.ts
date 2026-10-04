@@ -1,78 +1,78 @@
-/**
- * core-ts/src/services/agentProcs.ts — 「Agent 启动的后台资源」面板的**纯判据**（唯一出处）。
- *
- * ══ 用户需求（#226）════════════════════════════════════════════════════════
- * 「请把 Agent 停下时的后台进程做一个……在输入栏上方的按钮，而且点击后可以展开」。
- * 用户并明确划定了范围：**仅 Agent 启动的进程** —— 应用自身的服务（Python 后端、
- * llama-server、MCP 常驻、情感脑 sidecar）**不算**（它们不是 Agent 干的，也不该由用户
- * 在这里随手关掉：关掉等于把应用打瘸）。
- *
- * ══ 为什么做成"纯函数派生视图"而不是"注册表对象"────────────────────────────
- * 一个 `register/unregister` 的注册表有一整类**结构性风险**：某个出口忘了 `unregister`
- * （进程崩了 / 走异常分支 / 被外部 kill）→ 面板上永远挂着一个阴魂条目，而代码、类型检查
- * 全绿。本项目已经为同族问题付出过代价（见 `ref-engineering` 关于 "mark-flag 要问所有出口
- * 都复位了吗"）。⇒ 这里改成 **每次请求时从活的真源现算**：
- *
- *     真源：屏幕控制器的常驻宿主 / httpServer.list() / subagents.list()
- *        └─→ buildAgentProcView(sources, now)   ← 纯函数，无状态、可单测
- *
- * 「忘了解注册」这一整类 bug 因此在结构上不存在 —— 真源里没有了，视图里就没有了。
- *
- * ══ 范围内的两类（就是 Agent 的工具能起、且在 Agent 停下后**仍然活着**的东西）════
- *   ① `screen-host`  桌面图形控制的**常驻 PowerShell 宿主**（`screen/backends/desktop.ts`
- *      首次 `screen_*` 时 spawn，之后一直挂着等命令 —— 用户任务都结束了它还活着）
- *   ② `http-server`  `http_serve` 起的静态服务（在进程内监听端口，跨轮次存活）
- *
- * ══ 为什么**没有** `subagent`（用户 2026-09-26 明确要求收窄）════════════════════
- *   用户原话：「为什么这个后台任务监视的是子代理？不符合要求，**只监视 Agent 运行的
- *   后台脚本、端口**」。
- *
- *   ⚠️ 这里曾经把 `delegate_subagent(background=true)` 派出的后台子代理列成第三类。
- *   那是**范围跑偏**：子代理不是"进程"也不是"端口"，它是**一个 Agent** —— 有名字、有任务
- *   描述、有成体系的运行记录与详情弹窗，属于**子代理悬浮坞**那一格的地盘
- *   （`SubAgentExpandButton` + `resident.state().subagents`）。
- *   两边都列 ⇒ 同一件事两个产地：用户在两个面板里看到同一批东西，还会以为"后台任务"
- *   这个按钮管的是人。⇒ 收窄成「脚本宿主 + 端口」两类，子代理归坞（坞里能看能进详情）。
- *
- * ⚠️ 明确**不在**范围内的（用户已划定；也写进守卫，防止将来被"顺手加进来"）：
- *   `llama-server` / 应用 Python 后端 / MCP server / 情感脑 sidecar / Electron 自身。
- *   它们由**应用生命周期**管理，不是 Agent 的工具起的；把它们混进来会让用户以为
- *   "关掉就只是停个任务"，实际是把应用的能力拆了。
- *   **`subagent` 同样不在范围内**（理由见上）—— 守卫里有一条专门锁住这件事，
- *   防止哪天又"顺手加回来"。
- *
- * 本模块**不 import electron / child_process**，因此守卫可以直接 import 断言行为
- * （而不是只能锁源码形态）。
- */
 
-/** Agent 启动的后台资源类别（唯一出处；新增一类必须同时改 `STOP_ACTIONS` 与守卫） */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export type AgentProcKind = "screen-host" | "http-server";
 
-/** 全部类别（顺序 = 面板里的分组顺序：宿主 → 服务） */
+
 export const AGENT_PROC_KINDS: readonly AgentProcKind[] = ["screen-host", "http-server"];
 
-/** 类别 → 面板上的中文名（唯一出处；组件不许自己拼） */
+
 export const AGENT_PROC_KIND_LABELS: Record<AgentProcKind, string> = {
   "screen-host": "图形控制宿主",
   "http-server": "本地服务",
 };
 
-/**
- * 该类资源**是不是"仅 Agent 启动的"**（用户划定的范围，唯一出处）。
- *
- * ⚠️ 这个函数存在的意义不是"判断"，而是把**范围决策**变成一个可被守卫锁住的事实：
- *   否则哪天有人顺手把应用服务塞进视图，改动看起来只是"多了一类"，
- *   而用户会以为关掉它只是停个任务。返回 false 的类别**根本不该产生 source**。
- */
+
+
+
+
+
+
+
 export function isAgentStartedKind(kind: string): kind is AgentProcKind {
   return (AGENT_PROC_KINDS as readonly string[]).includes(kind);
 }
 
-// ── 真源（由装配方从活对象上读取；本模块不碰它们）─────────────────────────
+
 export interface ScreenHostSource {
-  /** 常驻宿主进程 pid（拿不到时省略 —— 不影响展示） */
+  
   pid?: number;
-  /** 启动时刻（ms） */
+  
   startedAt: number;
 }
 export interface HttpServerSource {
@@ -81,62 +81,62 @@ export interface HttpServerSource {
   host?: string;
   dir: string;
   startedAt: number;
-  /** 累计请求数（有则展示，作为"确实在被访问"的证据） */
+  
   requests?: number;
-  /**
-   * 谁起的（#230 的范围修正）：
-   *   `agent`（缺省）= 本次应用运行期间由 Agent 的工具起的 → 进面板；
-   *   `restored`     = 应用**启动时**按上一次运行的持久化清单重建的（A-977）。
-   *
-   * 用户原话：「我昨天你这个项目刚落地，我第一次打开，它直接显示一个后台端口运行，
-   * 这没必要啊，我要的是 **Agent 运行途中打开的工具、脚本、端口**，其他的就没必要了啊。」
-   * ⇒ 启动时重建的服务是**应用自己**建的，不属于"Agent 运行途中打开的"，不进面板。
-   *   （A-977「重启后旧链接仍可用」的目的不受影响：服务照常运行、照常可访问。）
-   *
-   *   `builtin`       = **slime 自身功能**用来托管自己页面的服务（当前 = 右栏搜索页）。
-   *   用户原话（2026-10-01）：「现在的这个搜索引擎的自研插件**一直都是被视作后台进程**……
-   *   你把它彻底内嵌进 slime，做成 slime 的一部分。」
-   *   ⇒ 它是应用能力的一部分，不是 Agent 起了个后台资源，**同样不进面板**。
-   *   ⚠️ 与 `restored` 的区别：`restored` 是"上次运行留下的"（可能已不需要），
-   *      `builtin` 是"应用每次启动都该有的"。两者都不进面板，但语义不可互换。
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   origin?: "agent" | "restored" | "builtin";
 }
 export interface AgentProcSources {
-  /** 图形控制常驻宿主；null/undefined = 没起（绝大多数时候都没起） */
+  
   screenHost?: ScreenHostSource | null;
   httpServers?: readonly HttpServerSource[];
 }
 
-// ── 视图 ────────────────────────────────────────────────────────────────────
+
 export interface AgentProcEntry {
   kind: AgentProcKind;
-  /** 停止时要用的句柄（http 是服务 id；screen-host 为空串） */
+  
   id: string;
-  /** 面板上的类别名 */
+  
   kindLabel: string;
-  /** 主标签（进程名 / 端口 / 子代理名） */
+  
   label: string;
-  /** 次要说明（目录 / 任务 / pid） */
+  
   detail: string;
-  /** 启动时刻（ms；未知则省略） */
+  
   startedAt?: number;
-  /** 已运行时长（人类可读；`startedAt` 未知则为空串） */
+  
   elapsed: string;
-  /** 展示用状态词 */
+  
   status: string;
 }
 
 export interface AgentProcView {
-  /** 条目总数（= 按钮上的徽标数字） */
+  
   count: number;
-  /** 有没有东西可展示（false → 整个按钮不渲染，不留空壳） */
+  
   any: boolean;
   entries: AgentProcEntry[];
 }
 
-/** 毫秒 → 人类可读时长（「刚刚」/「3 秒」/「2 分 10 秒」/「1 小时 5 分」）。
- *  ⚠️ 负数（时钟回拨 / startedAt 在未来）一律按「刚刚」，绝不显示负时长。 */
+
+
 export function formatElapsed(startedAt: number | undefined, now: number): string {
   if (startedAt === undefined || !Number.isFinite(startedAt) || !Number.isFinite(now)) { return ""; }
   const ms = now - startedAt;
@@ -153,7 +153,7 @@ export function formatElapsed(startedAt: number | undefined, now: number): strin
   return restMin === 0 ? `${hr} 小时` : `${hr} 小时 ${restMin} 分`;
 }
 
-/** 路径过长时中间省略（面板只有一行位置，尾部信息更有用） */
+
 function shortenPath(p: string, max = 46): string {
   if (p.length <= max) { return p; }
   const keep = max - 1;
@@ -162,11 +162,11 @@ function shortenPath(p: string, max = 46): string {
   return `${p.slice(0, head)}…${p.slice(p.length - tail)}`;
 }
 
-/**
- * 由**活真源**派生面板视图。纯函数：不读时钟（`now` 传入）、不碰 IO。
- *
- * 排序：先按类别（`AGENT_PROC_KINDS` 的顺序），同类内按启动时间**早→晚**（先起的在上面）。
- */
+
+
+
+
+
 export function buildAgentProcView(src: AgentProcSources, now: number): AgentProcView {
   const entries: AgentProcEntry[] = [];
 
@@ -185,21 +185,21 @@ export function buildAgentProcView(src: AgentProcSources, now: number): AgentPro
   }
 
   for (const s of src.httpServers ?? []) {
-    /* #230：启动时由 `restore()` 重建的服务不进面板 —— 它不是"Agent 运行途中打开的"。
-       判据放在**纯视图**里（而不是只放在装配层过滤），是为了让守卫能直接锁住这条范围决策：
-       否则哪天有人把过滤从 index.ts 挪走/删掉，改动看起来"只是少一行"，而用户又会
-       在刚打开应用时看到一个自己从没起过的端口。
+    
 
-       A-1139：`builtin`（slime 自身功能托管的页面，当前 = 右栏搜索页）同样不进面板。
-       用户实测反馈「搜索引擎的自研插件一直被视作后台进程」 ⇒ 它是应用的一部分，
-       不是 Agent 起了个后台资源。
 
-       ⚠️ 写成**白名单**（`origin` 必须是 `undefined`/`agent` 才留下），不是黑名单：
-       黑名单（`restored || builtin` 才 continue）在"新增第四类来源"时方向是**错的** ——
-       新类别会默认泄漏到用户眼前。而这个面板的名字是「**Agent 启动的**后台资源」，
-       所以判据应当是"明确是 Agent 起的"才进，其余一律不进。
-       `undefined` 放行是给"只传 {id,port,dir,startedAt} 的调用方/测试"留的兼容位
-       （装配层 `httpServer.list()` 恒会带上 origin，缺省即 `agent`）。 */
+
+
+
+
+
+
+
+
+
+
+
+
     if (s.origin !== undefined && s.origin !== "agent") { continue; }
     entries.push({
       kind: "http-server",
@@ -223,10 +223,10 @@ export function buildAgentProcView(src: AgentProcSources, now: number): AgentPro
   return { count: entries.length, any: entries.length > 0, entries };
 }
 
-// ── 停止动作（纯判据 → 装配方执行）─────────────────────────────────────────
+
 export type AgentProcStopAction = "dispose-screen-host" | "stop-http-server";
 
-/** 停止某类资源要用哪个动作（唯一出处；组件与主进程都不许自己 switch） */
+
 export const AGENT_PROC_STOP_ACTIONS: Record<AgentProcKind, AgentProcStopAction> = {
   "screen-host": "dispose-screen-host",
   "http-server": "stop-http-server",
@@ -237,15 +237,15 @@ export type AgentProcStopPlan =
   | { ok: true; action: AgentProcStopAction; id: string }
   | { ok: false; reason: string };
 
-/**
- * 校验一次停止请求 → 给出可执行的动作。**纯函数**，把"什么样的请求是合法的"从主进程里
- * 抽出来单测（主进程要 import electron，测不了）。
- *
- * ⚠️ 未知 kind **必须拒绝**：否则一个手改的 IPC 参数会让主进程去调不存在的分支
- *   （静默什么都不做，而界面已经乐观地把那一条划掉了 —— 面板与真实状态就此分家）。
- * ⚠️ `http-server` 必须带 id：不带就"停哪个"无从谈起。`screen-host` 反之：
- *   全局只有一个宿主，**不接受** id（带了说明调用方搞错了对象，宁可拒绝）。
- */
+
+
+
+
+
+
+
+
+
 export function planAgentProcStop(req: AgentProcStopRequest): AgentProcStopPlan {
   const kind = req?.kind;
   if (!isAgentStartedKind(kind)) {

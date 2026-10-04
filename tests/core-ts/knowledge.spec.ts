@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/knowledge.spec.ts — KnowledgeEngine 语义测试。
- * 对照 tests/test_knowledge.py TestKnowledgeEngine 逐例移植。
- * 隔离：dataDir 指向临时目录，A-011 验证 rules/generated_skills 不污染项目 Knowledge/。
- */
+
+
+
+
+
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,7 +64,7 @@ describe("晋升管线阈值（对照 test_promote_pipeline_thresholds）", () =
     expect(result.trait_name).toBe("Code Review");
     const stats = ke.getStats();
     expect(stats.total_patterns).toBe(1);
-    expect(stats.total_rules).toBe(1); // 第 5 次已晋升 rule
+    expect(stats.total_rules).toBe(1); 
     const promotable = ke.getPromotableTraits();
     expect(promotable.length).toBe(1);
     expect(promotable[0].name).toBe("Code Review");
@@ -172,7 +172,7 @@ describe("全局缓存（getKnowledgeEngine / resetKnowledgeEngine）", () => {
   it("实例数超上限 → LRU 淘汰最久未使用（A-970）", () => {
     const dir = makeTmp();
     const first = getKnowledgeEngine("lru-e0", { dataDir: dir });
-    // 插入远超 64 上限的新实例，first（最旧且从未再访问）必被淘汰
+    
     for (let i = 1; i <= 80; i++) {
       getKnowledgeEngine(`lru-e${i}`, { dataDir: dir });
     }
@@ -184,7 +184,7 @@ describe("全局缓存（getKnowledgeEngine / resetKnowledgeEngine）", () => {
     const hot = getKnowledgeEngine("lru-hot", { dataDir: dir });
     for (let i = 0; i < 70; i++) {
       getKnowledgeEngine(`lru-other-${i}`, { dataDir: dir });
-      getKnowledgeEngine("lru-hot", { dataDir: dir }); // 刷新到队尾
+      getKnowledgeEngine("lru-hot", { dataDir: dir }); 
     }
     expect(getKnowledgeEngine("lru-hot", { dataDir: dir })).toBe(hot);
   });

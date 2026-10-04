@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+
 """build6.py — Slime Search v3.1.0：新增「全网」模式（对接 core/websearch/server.py）。
 
 在现有「本地 / 联网」双模式基础上接入自建全网搜索服务（BM25 倒排索引，
@@ -14,7 +14,7 @@ import sys
 SRC_DEFAULT = '/mnt/local/pilot_project/apps/local-search-engine/index.html'
 OUT_DEFAULT = '/mnt/work/websearch/index_v31.html'
 
-edits = []  # (anchor, replacement, label)
+edits = []  
 
 
 def add(anchor, repl, label, occ=None):
@@ -24,13 +24,13 @@ def add(anchor, repl, label, occ=None):
         edits.append((anchor, repl, label, occ))
 
 
-# ─────────────────────────── 1. meta description ───────────────────────────
+
 add(
     '<meta name="description" content="Slime Search：slime 程序的搜索器。本地倒排索引检索 + 接入项目浏览器内核的联网检索；搜索历史 / 热门搜索 / 联想提示 / 相关搜索一应俱全；配色随主程序切换，离线可用。">',
     '<meta name="description" content="Slime Search：slime 程序的搜索器。本地倒排索引 + 项目浏览器内核联网检索 + 自建爬虫的全网搜索（BM25 服务）；搜索历史 / 热门搜索 / 联想提示 / 相关搜索一应俱全；配色随主程序切换，离线可用。">',
     'meta description')
 
-# ─────────────────────────── 2. CSS：历史徽标全网色 + 全网提示条 ───────────────────────────
+
 add(
     '.hist-badge.online { color: var(--accent-2); border-color: var(--accent-2); }\n'
     '.hist-time { margin-left: auto;',
@@ -52,7 +52,7 @@ add(
     '.web-addr button { flex: 0 0 auto; }',
     'css web note')
 
-# ─────────────────────────── 3. HTML：模式按钮加「全网」 ───────────────────────────
+
 add(
     '''            <button type="button" id="modeOnline" aria-pressed="false">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18Z"/></svg>
@@ -68,7 +68,7 @@ add(
             </button>''',
     'mode button web')
 
-# ─────────────────────────── 4. HTML：全网模式面板 ───────────────────────────
+
 add(
     '''    <!-- 联网模式说明 -->
     <div class="online-note" id="onlineNote" hidden>
@@ -101,7 +101,7 @@ add(
     </div>''',
     'web note panel')
 
-# ─────────────────────────── 5. JS：state 常量 + web 状态对象 ───────────────────────────
+
 add(
     "  var state = { mode: 'local', query: '', page: 0, last: null, view: 'home', indexing: false, searching: false };\n"
     "  var online = { hostReady: false, engineName: '', seq: 0, hello: false, probeDone: false };",
@@ -112,7 +112,7 @@ add(
     "  var web = { base: WEB_DEFAULT, online: false, pages: 0, terms: 0, engine: 'Slime 自建全网索引', probing: false };",
     'state + web object')
 
-# ─────────────────────────── 6. JS：webSearch / probeWeb（插在联网注释块前） ───────────────────────────
+
 add(
     "  /* ══════════ 联网：接入项目浏览器内核 ══════════ */",
     '''  /* ══════════ 全网：自建爬虫 + BM25 服务 ══════════ */
@@ -164,13 +164,13 @@ add(
   /* ══════════ 联网：接入项目浏览器内核 ══════════ */''',
     'webSearch/probeWeb block')
 
-# ─────────────────────────── 7. JS：SlimeSearch.stats 加 web ───────────────────────────
+
 add(
     "    stats: function () { return { docs: engine.size(), terms: engine.termCount(), onlineHost: online.hostReady, engineName: online.engineName }; },",
     "    stats: function () { return { docs: engine.size(), terms: engine.termCount(), onlineHost: online.hostReady, engineName: online.engineName, webOnline: web.online, webPages: web.pages, webTerms: web.terms, webBase: web.base }; },",
     'SlimeSearch.stats web')
 
-# ─────────────────────────── 8. JS：renderEnginePill 三态 ───────────────────────────
+
 add(
     '''  function renderEnginePill() {
     var pill = $('enginePill'); if (!pill) { return; }
@@ -206,7 +206,7 @@ add(
   }''',
     'renderEnginePill web')
 
-# ─────────────────────────── 9. JS：init el 绑定 + 事件 ───────────────────────────
+
 add(
     "    el.localPanel = $('localPanel');\n    el.onlineNote = $('onlineNote');",
     "    el.localPanel = $('localPanel');\n    el.onlineNote = $('onlineNote');\n    el.webNote = $('webNote');",
@@ -220,7 +220,7 @@ add(
     "    $('modeWeb').addEventListener('click', function () { setMode('web'); });",
     'modeWeb listener')
 
-# web 地址输入 + 重连 + 初始探测：挂在 wireExtra 调用前（init 内 wireDrop 之前注入）
+
 add(
     "    wireDrop();\n    wireKeyboard();",
     "    var addr = $('webServerAddr');\n"
@@ -232,7 +232,7 @@ add(
     "    wireDrop();\n    wireKeyboard();",
     'web addr wiring + probe')
 
-# ─────────────────────────── 10. JS：版本号 + 就绪 toast ───────────────────────────
+
 add(
     "    showToast('搜索就绪：本地索引已载入示例语料；切到「联网」可经由项目浏览器内核检索。');\n    hostNotify('ready', { version: '3.0.0', onlineHost: online.hostReady });",
     "    showToast('搜索就绪：本地索引已载入示例语料；「联网」走浏览器内核，「全网」走自建索引服务。');\n    hostNotify('ready', { version: '3.1.0', onlineHost: online.hostReady, webOnline: web.online });",
@@ -243,7 +243,7 @@ add(
     "  window.SlimeSearch = {\n    version: '3.1.0',",
     'SlimeSearch.version')
 
-# ─────────────────────────── 11. JS：setMode 三模式 ───────────────────────────
+
 add(
     '''  function setMode(m, silent) {
     state.mode = m === 'online' ? 'online' : 'local';
@@ -283,19 +283,19 @@ add(
   }''',
     'setMode tri-mode')
 
-# ─────────────────────────── 12. JS：doSearch 分发 ───────────────────────────
+
 add(
     "  function doSearch() {\n    addHistory(state.query, state.mode);\n    if (state.mode === 'online') { runOnline(); } else { runLocal(); }\n  }",
     "  function doSearch() {\n    addHistory(state.query, state.mode);\n    if (state.mode === 'online') { runOnline(); } else if (state.mode === 'web') { runWeb(); } else { runLocal(); }\n  }",
     'doSearch dispatch')
 
-# ─────────────────────────── 13. JS：结果页 tag ───────────────────────────
+
 add(
     "      tag.textContent = state.mode === 'online' ? '联网' : '本地';",
     "      tag.textContent = state.mode === 'online' ? '联网' : (state.mode === 'web' ? '全网' : '本地');",
     'tag text')
 
-# ─────────────────────────── 14. JS：runWeb（插在 runOnline 前） ───────────────────────────
+
 add(
     "  function runOnline() {",
     '''  function runWeb() {
@@ -325,7 +325,7 @@ add(
   function runOnline() {''',
     'runWeb block')
 
-# ─────────────────────────── 15. JS：renderWebResults（插在渲染联网注释前） ───────────────────────────
+
 add(
     "  /* ══════════ 渲染：联网 ══════════ */",
     '''  /* ══════════ 渲染：全网（自建索引） ══════════ */
@@ -375,25 +375,25 @@ add(
   /* ══════════ 渲染：联网 ══════════ */''',
     'renderWebResults block')
 
-# ─────────────────────────── 16. JS：分页重渲染 kind ───────────────────────────
+
 add(
     "    if (state.last && state.last.kind === 'online') { renderOnlineResults(); } else { renderLocalResults(); }",
     "    if (state.last && state.last.kind === 'online') { renderOnlineResults(); } else if (state.last && state.last.kind === 'web') { runWeb(); return; } else { renderLocalResults(); }",
     'pager kind web')
 
-# ─────────────────────────── 17. JS：相关搜索 absorb web ───────────────────────────
+
 add(
     "      } else if (state.last && state.last.kind === 'online' && state.last.items) {\n        state.last.items.slice(0, 20).forEach(function (it) { absorb(it.title || ''); });\n      }",
     "      } else if (state.last && (state.last.kind === 'online' || state.last.kind === 'web') && state.last.items) {\n        state.last.items.slice(0, 20).forEach(function (it) { absorb(it.title || ''); });\n      }",
     'relatedTerms web')
 
-# ─────────────────────────── 18. JS：历史徽标 web ───────────────────────────
+
 add(
     "'<span class=\"hist-badge' + (h.m === 'online' ? ' online' : '') + '\">' + (h.m === 'online' ? '联网' : '本地') + '</span>' +",
     "'<span class=\"hist-badge' + (h.m === 'online' ? ' online' : (h.m === 'web' ? ' web' : '')) + '\">' + (h.m === 'online' ? '联网' : (h.m === 'web' ? '全网' : '本地')) + '</span>' +",
     'history badge web')
 
-# ─────────────────────────── 19. JS：lucky 全网分支 ───────────────────────────
+
 add(
     '''    if (state.mode === 'online') {
       showToast('手气不错：正在用浏览器内核取回首个结果…');
@@ -439,13 +439,13 @@ add(
     }''',
     'lucky web branch')
 
-# ─────────────────────────── 20. JS：结果点击上报 mode web ───────────────────────────
+
 add(
     "        if (nm.tagName === 'A') {\n          // 联网结果：点开外链 → 上报，对话侧据此\"时刻准备接受需求\"\n          hostNotify('open', { mode: 'online', query: state.query, url: nm.getAttribute('href') || '', title: (nm.textContent || '').trim(), rank: rank });\n          return;\n        }",
     "        if (nm.tagName === 'A') {\n          // 联网/全网结果：点开外链 → 上报，对话侧据此\"时刻准备接受需求\"\n          hostNotify('open', { mode: state.mode === 'web' ? 'web' : 'online', query: state.query, url: nm.getAttribute('href') || '', title: (nm.textContent || '').trim(), rank: rank });\n          return;\n        }",
     'result open hostNotify web')
 
-# ─────────────────────────── 21. JS：addHistory 支持 web ───────────────────────────
+
 add(
     "    list.unshift({ q: q, ts: Date.now(), m: mode === 'online' ? 'online' : 'local' });",
     "    list.unshift({ q: q, ts: Date.now(), m: (mode === 'online' || mode === 'web') ? mode : 'local' });",

@@ -1,19 +1,19 @@
-/**
- * tests/gui/a1133-doc-view.spec.ts — 「文档文本 → 结构化块」的守卫（A-1133）。
- *
- * 用户原话：「右侧边栏给我想办法显示正确内容，我记得网页是可以显示的吧？」
- * —— 对：业界主流是"把 Office 转成 HTML 让浏览器画"（路线一）。本仓零依赖地做同一件事：
- * 把 `doc_text.ts` 抽出的**带轻结构文本**渲染成**真表格 / 分页卡片 / 段落**。
- *
- * ⚠️ 判据必须与 `doc_text.ts` 的**实际输出形状**对齐（唯一产地）—— 所以本文件的夹具
- * 用的就是它真实产出的形状（`## 表：Sheet1` + 列字母行 + ` | ` 网格；`--- 第 N 页 ---`）。
- */
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { buildDocView, docViewToHtml } from "../../gui/src/renderer/pages/docView.js";
 
 describe("A-1133-A excel：网格文本必须变成**真表格**", () => {
   it("识别 `## 表：<sheet>` 标题、列字母行作表头、其余作数据行", () => {
-    /* 这是 `doc_text.ts` 的 xlsx 分支**实测产出**的形状（见 office-doc-write.spec.ts 的 round-trip）。 */
+    
     const src = "## 表：Sheet1\nA | B\n城市 | 人口\n北京 | 2189\n上海 | 2487";
     const blocks = buildDocView("excel", src);
     expect(blocks).toHaveLength(1);
@@ -68,9 +68,9 @@ describe("A-1133-C word / pdf / 纯文本：空行分段", () => {
     expect(blocks.map((b) => (b.type === "para" ? b.text : ""))).toEqual(["第一段", "第二段"]);
   });
 
-  /* ⚠️ A-1133 迁移（用户实测「就连能渲染的 word 都连正常换行都不会」）：
-     原先「按空行分段」会把整篇挤成**一个** `<p>`，换行只靠 `white-space: pre-wrap` 兜着。
-     现在**一行一块** ⇒ 换行是结构，不依赖任何 CSS。判据因此从「合在一起」改成「逐行分开」。 */
+  
+
+
   it("相邻非空行**各自成块**（换行是结构，不靠 CSS 的 pre-wrap 兜）", () => {
     const blocks = buildDocView("pdf", "第一行\n第二行\n\n下一段");
     expect(blocks.map((b) => (b.type === "para" ? b.text : ""))).toEqual(["第一行", "第二行", "下一段"]);
@@ -89,7 +89,7 @@ describe("A-1133-C word / pdf / 纯文本：空行分段", () => {
 
 describe("A-1133-D docx 的表格（用户截图里没变成表格的那一处）", () => {
   it("`[表格 N 个]` 提示 + 含 ` | ` 的连续行 ⇒ **真表格**，提示行不进正文", () => {
-    /* 这是 `doc_text.ts` 的 docx 分支**实测产出**的形状（用户截图里那一块）。 */
+    
     const src = [
       "[表格 1 个]",
       "阅读书籍基本信息",
@@ -103,7 +103,7 @@ describe("A-1133-D docx 的表格（用户截图里没变成表格的那一处�
     if (t.type !== "table") { return; }
     expect(t.header).toEqual(["阅读书籍名称", "《互联网思维》", "作者", "赵大伟"]);
     expect(t.rows).toEqual([["出版单位", "机械工业出版社", "阅读书籍 学分设置", "0.5分"]]);
-    /* ⚠️ `[表格 N 个]` 是结构提示，不是正文：渲染成一行莫名其妙的文字会让人以为抽取坏了。 */
+    
     expect(blocks.some((b) => b.type === "para" && b.text.includes("[表格")), "提示行不许当正文").toBe(false);
   });
 

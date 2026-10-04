@@ -13,7 +13,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 交错窗口模式（修正条 6：on17 / off17 / on16，共 50 次）
+
 _AB_WINDOWS = [("on", 17), ("off", 17), ("on", 16)]
 
 
@@ -35,7 +35,7 @@ class AbStats:
         self.window_idx = 0
         self.window_used = 0
         self.windows: list[dict] = []
-        # A-102：窗口内独立统计（on17/off17/on16 可比——非全量累计）
+        
         self._win_task_success = 0
         self._win_tool_ok = 0
         self._win_tool_total = 0
@@ -64,7 +64,7 @@ class AbStats:
         if a049:
             self.a049_triggers += 1
             self._win_a049 += 1
-        # 窗口轮转（修正条 6：17/17/16；A-102：窗口记录独立统计，非全量累计）
+        
         self.window_used += 1
         mode = self.current_mode
         if self.window_used >= _AB_WINDOWS[self.window_idx][1]:

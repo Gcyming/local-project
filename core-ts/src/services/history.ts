@@ -1,10 +1,10 @@
-/**
- * core-ts/src/services/history.ts — 对话历史持久化（core/history.py 语义移植）。
- * - config/history.jsonl JSONL 追加；记录 { agent_id, user, ai, success, timestamp }
- * - BUG-027 轮转：超 10MB 只保留最近 5000 条
- * - popLast：/retry 去重（锁内读改写；A-019 换行收尾防 "}{" 拼接行）
- * - load：按 agent 过滤，最近 limit 条按时间升序
- */
+
+
+
+
+
+
+
 
 import { randomUUID } from "node:crypto";
 import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { PROJECT_ROOT } from "../paths.js";
 
 export { PROJECT_ROOT };
-/** history 路径（支持 SLIME_HISTORY_PATH 覆盖——测试隔离注入；缺省 config/history.jsonl） */
+
 export const HISTORY_PATH = (() => {
   const env = typeof process !== "undefined" ? process.env.SLIME_HISTORY_PATH : undefined;
   if (env) { return env; }
@@ -28,25 +28,25 @@ export interface HistoryRecord {
   ai: string;
   success: boolean;
   timestamp: string;
-  /** 会话 ID（GUI 项目内独立会话；旧记录无此字段归入该 Agent 首个会话） */
+  
   session_id?: string;
-  /** 该条回复的推理/思考过程（assistant，Markdown；旧记录无此字段） */
+  
   reasoning?: string;
-  /** 该条回复的耗时（毫秒，assistant；旧记录无此字段） */
+  
   elapsed_ms?: number;
-  /** A-966：交错思考时间线（思考/工具调用顺序；结构对齐 GUI TimelineStepLite，见 gui/src/renderer/pages/sessionCtxMeta.ts）。
-   *  随历史落库，重启后思考历程可恢复「时间线」展示，不依赖 localStorage。 */
+  
+
   timeline?: Array<{ kind: string; text?: string; name?: string; label?: string; detail?: string; result?: string }>;
-  /** A-1008：群聊（brainstorm）逐成员发言。
-   *
-   *  为什么必须有这个字段：群聊此前只存「把所有发言拼成的一个大字符串」，导致
-   *  ① 读回来是一条署名会话归属 Agent 的巨长气泡 —— 看起来就像"某个 Agent 出来把大家说的
-   *     总结复述了一遍"（用户历时很久的困扰）；
-   *  ② 重启后每个成员各自的气泡全部消失，只剩那一条揉在一起的。
-   *  存了 turns，读取端才能按成员展开成多条带各自 agentName/agentId 的消息。
-   *
-   *  `ai` 字段**保持原样**（拼好的文本）：它还是模型侧的对话历史，改它等于回归整条 prompt 链路。
-   *  即「一份给人看（turns）、一份给模型看（ai）」。 */
+  
+
+
+
+
+
+
+
+
+
   turns?: Array<{ name: string; agentId?: string; content: string; failed?: boolean }>;
 }
 
@@ -59,13 +59,13 @@ async function ensureParent(): Promise<void> {
   await mkdir(dirname(HISTORY_PATH), { recursive: true });
 }
 
-/** A-968：history 读取缓存 —— 以文件 stat(mtimeMs+size) 为指纹，未变化则复用已解析的行。
- *  避免每次 loadHistory/loadHistoryForSession 都全量读盘 + 逐行 JSON.parse（对话一多 cost 线性放大）。
- *  所有写路径（append/popLast/remove/clear/truncate/rotate）都会失效本缓存。 */
+
+
+
 let cachedStat: { mtimeMs: number; size: number } | null = null;
 let cachedLines: string[] | null = null;
 
-/** 任何写路径后调用，强制下次 readLines 重新读盘。 */
+
 function invalidateHistoryCache(): void {
   cachedStat = null;
   cachedLines = null;
@@ -77,7 +77,7 @@ async function readLines(): Promise<string[]> {
     const st = await stat(HISTORY_PATH);
     s = { mtimeMs: st.mtimeMs, size: st.size };
   } catch {
-    // 文件不存在：命中空缓存则复用，否则回空并记住
+    
   }
   if (cachedStat && cachedLines && s && cachedStat.mtimeMs === s.mtimeMs && cachedStat.size === s.size) {
     return cachedLines;
@@ -97,12 +97,12 @@ async function readLines(): Promise<string[]> {
 async function atomicRewrite(lines: string[]): Promise<void> {
   await ensureParent();
   const tmp = join(dirname(HISTORY_PATH), `${randomUUID().slice(0, 8)}.tmp`);
-  await writeFile(tmp, lines.join("\n") + "\n", "utf8"); // A-019: 换行收尾
+  await writeFile(tmp, lines.join("\n") + "\n", "utf8"); 
   await rename(tmp, HISTORY_PATH);
-  invalidateHistoryCache(); // A-968：重写后失效缓存，避免读到旧内容
+  invalidateHistoryCache(); 
 }
 
-/** 进程内写锁（对齐 Python _write_lock：保护 append/popLast/removeAgent 读改写） */
+
 let writeChain: Promise<void> = Promise.resolve();
 function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = writeChain.then(fn, fn);
@@ -118,7 +118,7 @@ export async function appendHistory(
   sessionId?: string,
   reasoning?: string,
   elapsedMs?: number,
-  /** A-1008：群聊逐成员发言（可选；仅群聊路径传）。见 HistoryRecord.turns 注释。 */
+  
   turns?: Array<{ name: string; agentId?: string; content: string; failed?: boolean }>,
 ): Promise<void> {
   const record: HistoryRecord = {
@@ -130,7 +130,7 @@ export async function appendHistory(
     session_id: sessionId,
     reasoning,
     elapsed_ms: elapsedMs,
-    // 空数组不落 —— 免得每条普通记录都多一个无用字段（历史是行式 JSON，字段会线性放大文件）
+    
     ...(turns && turns.length > 0 ? { turns } : {}),
   };
   await withWriteLock(async () => {
@@ -172,7 +172,7 @@ export async function popLastHistory(agentId: string, sessionId?: string): Promi
       try {
         records.push(JSON.parse(l) as HistoryRecord);
       } catch {
-        // 损坏行跳过（对齐 Python）
+        
       }
     }
     if (records.length === 0) {
@@ -195,9 +195,9 @@ export async function popLastHistory(agentId: string, sessionId?: string): Promi
   });
 }
 
-/** A-966：为指定 Agent+会话的「最后一条 assistant 记录」回填交错时间线（渲染层 done 后调用）。
- *  使思考历程随 history.jsonl 落库——重启后恢复时间线而不依赖 localStorage 存活。
- *  幂等：重复调用覆盖同一记录的 timeline；找不到匹配记录返回 false。失败不抛错。 */
+
+
+
 export async function attachTimelineToRecord(
   agentId: string,
   sessionId: string,
@@ -227,7 +227,7 @@ export async function attachTimelineToRecord(
         break;
       }
     }
-    // 回退：session_id 未落库（旧链路）→ 附到该 agent 最近一条记录
+    
     if (target < 0 && sessionId) {
       for (let i = records.length - 1; i >= 0; i--) {
         if (records[i].agent_id === agentId) {
@@ -262,7 +262,7 @@ export async function removeAgentHistory(agentId: string): Promise<number> {
         }
         kept.push(JSON.stringify(r));
       } catch {
-        kept.push(l); // 无法解析的行保留原文
+        kept.push(l); 
       }
     }
     await atomicRewrite(kept);
@@ -270,20 +270,20 @@ export async function removeAgentHistory(agentId: string): Promise<number> {
   });
 }
 
-/**
- * 取尾部 `limit` 条；**`limit <= 0` = 不限**（返回全部）。
- *
- * ⚠️ 为什么必须把这个判断显式写出来，而不是靠 `records.slice(-limit)`：
- *    `-0 === 0` 是 JS 的隐式细节 ⇒ `slice(-0)` 恰好等于 `slice(0)`（= 全部）。
- *    语义**碰巧**对，但任何一次"顺手加固"（`Math.abs(limit)`、`limit || 默认值`）
- *    都会**静默**把它变成"一条都不返回"或"回落到默认上限" ——
- *    而压缩摘要轮依赖"不限"来覆盖全部历史（见 `loadSessionHistory` 的 `full` 选项），
- *    这种漂移在界面上完全看不出来（只会表现为"摘要似乎漏了早期内容"）。
- *
- *  ⚠️ 刻意 **export**：它是纯函数、且是 A-1085 的核心判据 ——
- *     导出后守卫能直接喂 `limit = 0 / -1 / NaN` 断言行为，而不是去读源码字面量
- *     （读源码的守卫过不了变异："改坏了但断言仍然匹配"）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function tailLimit<T>(records: T[], limit: number): T[] {
   const n = Number.isFinite(limit) ? Math.floor(limit) : 0;
   return n > 0 ? records.slice(-n) : records;
@@ -305,18 +305,18 @@ export async function loadHistory(
         }
       }
     } catch {
-      // 损坏行跳过
+      
     }
   }
   return tailLimit(records, limit);
 }
 
-/** 按会话加载（旧记录无 session_id → 归入该 Agent 的首个会话）。
- *
- *  A-1085：`limit <= 0` = **不限**（返回该会话全部记录）。
- *  ⚠️ 摘要轮（上下文压缩）**必须**用不限：否则摘要只覆盖"最后 limit 条"，
- *     更早的对话**从未进入摘要** —— 界面报"已压缩"，而早期内容既不在摘要里、
- *     也不在保留尾巴里，等于**静默丢失**（"压缩并非真压缩"的又一副面孔）。 */
+
+
+
+
+
+
 export async function loadHistoryForSession(
   agentId: string,
   sessionId: string,
@@ -335,14 +335,14 @@ export async function loadHistoryForSession(
         records.push(r);
       }
     } catch {
-      // 损坏行跳过
+      
     }
   }
   return tailLimit(records, limit);
 }
 
-/** A-980-R18：分页加载更早历史——返回 beforeTs（ISO，字典序可比）之前的最近 limit 条 + 是否还有更早。
- *  供聊天「加载更早的消息」分段胶囊使用（历史首屏只载最近 500 条，超出部分点击再载）。 */
+
+
 export async function loadHistoryForSessionBefore(
   agentId: string,
   sessionId: string,
@@ -364,21 +364,21 @@ export async function loadHistoryForSessionBefore(
         }
       }
     } catch {
-      // 损坏行跳过
+      
     }
   }
   const slice = records.slice(-limit);
   return { records: slice, hasMore: records.length > limit };
 }
 
-/** HistoryUserLoader 适配（novelty 检测注入点） */
+
 export const historyUserLoader: (
   agentId: string,
   limit: number,
 ) => Promise<Array<{ user: string }>> = (agentId, limit) =>
   loadHistory(agentId, limit).then((rs) => rs.map((r) => ({ user: r.user })));
 
-/** 历史存储接口（服务层注入点；测试可用内存实现） */
+
 export interface HistoryStore {
   append(
     agentId: string,
@@ -388,7 +388,7 @@ export interface HistoryStore {
     sessionId?: string,
     reasoning?: string,
     elapsedMs?: number,
-    /** A-1008：群聊逐成员发言（可选） */
+    
     turns?: Array<{ name: string; agentId?: string; content: string; failed?: boolean }>,
   ): Promise<void>;
   load(agentId?: string | null, limit?: number, sessionId?: string): Promise<HistoryRecord[]>;
@@ -401,7 +401,7 @@ export const fileHistoryStore: HistoryStore = {
   popLast: popLastHistory,
 };
 
-/** P0: 清空指定 agent 的全部历史 */
+
 export async function clearHistoryForAgent(agentId: string): Promise<number> {
   return withWriteLock(async () => {
     const lines = await readLines();
@@ -427,7 +427,7 @@ export async function clearHistoryForAgent(agentId: string): Promise<number> {
   });
 }
 
-/** 清空指定会话的历史（保留会话条目与其余会话） */
+
 export async function clearSessionHistory(agentId: string, sessionId: string): Promise<number> {
   return withWriteLock(async () => {
     const lines = await readLines();
@@ -453,16 +453,16 @@ export async function clearSessionHistory(agentId: string, sessionId: string): P
   });
 }
 
-/** A-1017：清空该 Agent **没有 session_id** 的遗留历史（旧格式记录，按 `::default` 聚合）。
- *
- *  为什么必须有：会话列表的「孤儿历史惰性迁移」把这类记录当成该 Agent 的一个默认会话。
- *  而删除会话走的是 `clearSessionHistory(agentId, sessionId)` —— 它要求 `session_id` **完全相等**，
- *  这些记录一条都匹配不到、原地留下 → 下一次列表刷新又按同一规则建出一个新会话
- *  （用户体感：这个会话**删不掉**，而且每次"复活"都换一个新 sessionId）。
- *
- *  调用时机 = 删除该 Agent 的**最后一个**会话时：其余会话还在的话，遗留记录尚未无人认领，
- *  不该提前销毁用户数据。
- */
+
+
+
+
+
+
+
+
+
+
 export async function clearLegacySessionHistory(agentId: string): Promise<number> {
   return withWriteLock(async () => {
     const lines = await readLines();
@@ -488,7 +488,7 @@ export async function clearLegacySessionHistory(agentId: string): Promise<number
   });
 }
 
-/** P0: 弹出最后一条记录并返回（用于 retry 重发） */
+
 export async function popLastRecordForAgent(agentId: string, sessionId?: string): Promise<HistoryRecord | null> {
   if (!(await stat(HISTORY_PATH).catch(() => null))) {
     return null;
@@ -503,7 +503,7 @@ export async function popLastRecordForAgent(agentId: string, sessionId?: string)
       try {
         records.push(JSON.parse(l) as HistoryRecord);
       } catch {
-        // 损坏行跳过
+        
       }
     }
     if (records.length === 0) {
@@ -527,19 +527,19 @@ export async function popLastRecordForAgent(agentId: string, sessionId?: string)
   });
 }
 
-/**
- * A-1122：**回滚锚点的唯一出处** —— 「这条历史记录往前切，切在哪」。
- *
- * 为什么必须抽出来：此前只有 `truncateHistoryFrom` 会做这个定位（找该 agent+session 内
- * **最后一条** `user === targetUserMsg` 的记录）。文件回滚（`file_undo.ts`）需要**同一个锚点** ——
- * 若各自再写一份"从后往前找内容相等的记录"，两份口径迟早分家，症状是
- * **对话回滚到了 A，磁盘却按 B 的边界还原**（两个产地各说各话，且都不报错）。
- *
- * 返回 `{ index, prevTimestamp }`：
- *  · `index` = 目标记录在 `records` 里的下标；`-1` = 找不到（本次回滚不成立）。
- *  · `prevTimestamp` = **同一 agent+session 在该记录之前最后一条**记录的时间戳（ms）；
- *    没有则 `0`。这是"上一轮结束的时刻" —— 文件账本用它当切分线（见 `file_undo.ts` 的说明）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function findRollbackCut(
   records: readonly HistoryRecord[],
   agentId: string,
@@ -566,14 +566,14 @@ export function findRollbackCut(
   return { index: cutIdx, prevTimestamp };
 }
 
-/**
- * A-161：截断历史到指定用户消息之前 —— 回滚（rollback）持久化一致性修复。
- * 此前 rollbackTo 只改前端 messages 与输入框，从不删除 history.jsonl 中的历史记录，
- * 重启后 loadHistoryForSession 从文件加载 → 回滚前的旧消息原样复现。
- * 语义：删除该 agent+session 中「从目标用户消息（含）往后的全部记录」，保留其前面的一切。
- * 定位：从后往前找该会话内最后一条 user 内容 === targetUserMsg 的记录；找不到返回 0。
- * 返回实际删除条数。
- */
+
+
+
+
+
+
+
+
 export async function truncateHistoryFrom(
   agentId: string,
   sessionId: string | undefined,
@@ -592,16 +592,16 @@ export async function truncateHistoryFrom(
       try {
         records.push(JSON.parse(l) as HistoryRecord);
       } catch {
-        // 损坏行跳过
+        
       }
     }
-    // A-1122：定位逻辑搬到 `findRollbackCut`（与文件回滚共用同一个锚点，不许第二份口径）
+    
     const cutIdx = findRollbackCut(records, agentId, sessionId, targetUserMsg).index;
     if (cutIdx < 0) {
       return 0;
     }
-    // 删除「该 agent+session 内」目标消息及其之后的所有记录；其他 agent/session 的记录
-    // 无论位置都保留（回滚只影响本会话，不牵连其他会话/Agent）。
+    
+    
     const kept: HistoryRecord[] = [];
     let removed = 0;
     const isTargetScope = (r: HistoryRecord): boolean =>
@@ -618,19 +618,19 @@ export async function truncateHistoryFrom(
   });
 }
 
-/** A-1122：读出全部历史记录（供文件回滚定位切分线；损坏行跳过，与 `truncateHistoryFrom` 同口径）。 */
+
 export async function readHistoryRecords(): Promise<HistoryRecord[]> {
   if (!(await stat(HISTORY_PATH).catch(() => null))) { return []; }
   const lines = await readLines();
   const out: HistoryRecord[] = [];
   for (const l of lines) {
-    try { out.push(JSON.parse(l) as HistoryRecord); } catch { /* 损坏行跳过 */ }
+    try { out.push(JSON.parse(l) as HistoryRecord); } catch {  }
   }
   return out;
 }
 
 
-/** P0: 辅助导出（主进程使用） */
+
 export { popLastRecordForAgent as popLastRecordForAgentExport };
 export { clearHistoryForAgent as clearHistoryForAgentExport };
 export { truncateHistoryFrom as truncateHistoryFromExport };

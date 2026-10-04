@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+
 """Slime Mini Web Search — 索引与检索模块（indexer.py）
 
 按 Google 式架构的第二、三环「索引 + 排序」实现：
@@ -160,17 +160,17 @@ class Searcher:
                 if eff_tf <= 0:
                     continue
                 denom = eff_tf + BM25_K1 * (1.0 - BM25_B + BM25_B * 1.0)
-                # 文档长度归一化需要 doc 长度；用 avdl 常数近似时分母如下，
-                # 精确做法在下方二次修正。
+                
+                
                 scores[doc_id] = scores.get(doc_id, 0.0) + idf * (eff_tf * (BM25_K1 + 1.0)) / denom
                 hit_terms.setdefault(doc_id, set()).add(t)
 
-        # 精确 BM25：按真实文档长度二次修正（仅对候选文档）
+        
         if scores:
             ids = ','.join(str(i) for i in scores.keys())
             for row in self.conn.execute('SELECT id, text, title FROM pages WHERE id IN (%s)' % ids):
                 doc_len = len(tokenize(row[1])) + len(tokenize(row[2])) or 1
-                # 重新计算该文档得分（精确长度）
+                
                 s = 0.0
                 for t in hit_terms[row[0]]:
                     dfr = self.conn.execute('SELECT df FROM terms WHERE term=?', (t,)).fetchone()
@@ -187,7 +187,7 @@ class Searcher:
                     s += idf * (eff_tf * (BM25_K1 + 1.0)) / denom
                 scores[row[0]] = s
 
-        # AND 优先：命中全部词的排前面；不足一页时用部分命中补足
+        
         ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
         full = [kv for kv in ranked if len(hit_terms.get(kv[0], ())) == len(terms)]
         ordered = full if len(full) >= 1 else ranked

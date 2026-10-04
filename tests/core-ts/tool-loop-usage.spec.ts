@@ -1,21 +1,21 @@
-/**
- * tests/core-ts/tool-loop-usage.spec.ts — A-974-R7：工具循环「计费口径 vs 窗口口径」回归。
- *
- * 背景（用户实测）：正文输出后 GUI 上下文环/右栏直接爆到 1.1M（实际窗口仅约 600K）。
- * 根因：工具循环**每一轮都全量重发历史**，`usage`（跨轮累计）被当成窗口占用 → N 轮叠加。
- * 修复：新增 `lastUsage`（仅最近一轮），窗口占用取它。
- *
- * 本测试锁死两条语义，防止未来把两者再次混用：
- *  1. `usage.prompt_tokens` = 各轮**累加**（计费用，各轮都付费）；
- *  2. `lastUsage.prompt_tokens` = **最后一轮**（窗口占用用，不随轮次膨胀）。
- * 全部走 fake router（零真实网络）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it, beforeEach } from "vitest";
 import { ToolLoop } from "../../core-ts/src/tool_loop.js";
 import { getRegistry, resetRegistry, Tool } from "../../core-ts/src/tools/registry.js";
 import type { ModelRouter } from "../../core-ts/src/router.js";
 
-/** 前 N 轮各要一次 ping 工具、且每轮上报增量 prompt；第 N+1 轮收尾（无工具调用） */
+
 function roundsRouter(rounds: number, perRoundPrompt: number, finalPrompt: number): ModelRouter {
   let n = 0;
   return {
@@ -68,12 +68,12 @@ describe("工具循环 usage 口径（A-974-R7）", () => {
       initialToolCalls: [],
     });
 
-    // 3 轮工具轮（各 1000）+ 1 轮收尾（3000）→ 累计 6000
+    
     expect(r.usage?.prompt_tokens).toBe(perRound * 3 + finalPrompt);
-    // 窗口占用只能取最后一轮 3000（若误用累计值，轮次越多越爆表）
+    
     expect(r.lastUsage?.prompt_tokens).toBe(finalPrompt);
     expect(r.lastUsage?.cache_read_tokens).toBe(finalPrompt);
-    // 窗口值必须严格小于累计值（这正是此前爆表的根因）
+    
     expect(r.lastUsage!.prompt_tokens!).toBeLessThan(r.usage!.prompt_tokens!);
   });
 
@@ -90,14 +90,14 @@ describe("工具循环 usage 口径（A-974-R7）", () => {
   });
 
   it("轮次上限收束：lastUsage 仍为最后一轮的值（不因收束丢失窗口口径）", async () => {
-    // 永远要工具 → 触发轮次上限收束
+    
     const loop = makeLoop(roundsRouter(Number.MAX_SAFE_INTEGER, 100, 100));
     const r = await loop.run({
       agentId: "a1",
       agentName: "A",
       messages: [{ role: "user", content: "任务" }] as never,
       initialToolCalls: [],
-      maxToolCalls: 3, // 3 次工具调用后收束
+      maxToolCalls: 3, 
     });
     expect(r.lastUsage?.prompt_tokens).toBe(100);
     expect(r.usage?.prompt_tokens).toBeGreaterThan(100);
@@ -110,7 +110,7 @@ describe("工具循环 usage 口径（A-974-R7）", () => {
       agentName: "A",
       messages: [{ role: "user", content: "任务" }] as never,
       initialToolCalls: [],
-      maxTotalTokens: 100, // 第 2 轮即触发预算收束
+      maxTotalTokens: 100, 
     });
     expect(r.budgetExhausted).toBe(true);
     expect(r.lastUsage?.prompt_tokens).toBe(1500);

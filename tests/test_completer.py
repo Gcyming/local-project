@@ -35,7 +35,7 @@ def dyn_command():
     del slime_cli._CMD_SPECS["/testskill"]
 
 
-# ── R1：菜单永不消失 ─────────────────────────────
+
 
 def test_empty_slash_lists_all():
     texts = _cand_texts("/")
@@ -48,13 +48,13 @@ def test_exact_full_name_keeps_menu():
     cands = _cands("/provider")
     assert len(cands) >= 2
     assert cands[0].text == "/provider"
-    assert cands[1].text == ""  # 装饰候选
+    assert cands[1].text == ""  
 
 
 def test_space_after_command_keeps_menu():
     cands = _cands("/provider ")
     assert len(cands) >= 2
-    assert all(c.text == "" for c in cands)  # 装饰候选，Enter 无副作用（R2）
+    assert all(c.text == "" for c in cands)  
 
 
 def test_typo_keeps_menu():
@@ -68,7 +68,7 @@ def test_typo_with_space_keeps_menu():
     assert any(c.text.startswith("/provider") for c in cands)
 
 
-# ── 前缀 / fuzzy 匹配 ────────────────────────────
+
 
 def test_prefix_match():
     texts = _cand_texts("/prov")
@@ -84,7 +84,7 @@ def test_plain_text_no_completions():
     assert _cand_texts("hello world") == []
 
 
-# ── R2：候选不破坏输入 ───────────────────────────
+
 
 def test_typo_space_fix_preserves_args():
     """拼错+空格：修正候选整行替换（start_position=-len(text)），参数拼入候选文本，
@@ -93,11 +93,11 @@ def test_typo_space_fix_preserves_args():
     cands = list(slime_cli._SlashCompleter().get_completions(doc, None))
     fix = next(c for c in cands if c.text.startswith("/provider"))
     replaced = doc.text_before_cursor[len(doc.text_before_cursor) + fix.start_position:]
-    assert replaced == "/prrovider 生图"  # 替换全部输入
-    assert fix.text == "/provider 生图"    # 应用后 = 修正命令 + 参数保留
+    assert replaced == "/prrovider 生图"  
+    assert fix.text == "/provider 生图"    
 
 
-# ── R4：动态命令纳入检索层 ───────────────────────
+
 
 def test_dynamic_command_in_completion(dyn_command):
     texts = _cand_texts("/tes")
@@ -113,7 +113,7 @@ def test_dynamic_command_in_suggest(dyn_command):
     assert sug.text == "skill"
 
 
-# ── 幽灵建议（AutoSuggest）───────────────────────
+
 
 def test_suggest_unique_prefix():
     doc = Document(text="/prov", cursor_position=len("/prov"))
@@ -126,7 +126,7 @@ def test_suggest_none_when_ambiguous():
     doc = Document(text="/p", cursor_position=len("/p"))
     buf = Buffer(completer=slime_cli._SlashCompleter())
     sug = slime_cli._SlashAutoSuggest(AutoSuggestFromHistory()).get_suggestion(buf, doc)
-    assert sug is None  # 多候选不幽灵
+    assert sug is None  
 
 
 def test_suggest_none_when_exact():
@@ -163,7 +163,7 @@ def test_suggest_ignores_space_after_cmd():
     assert sug is None or not sug.text.startswith("provider")
 
 
-# ── A-111：艾宾浩斯遗忘曲线联动排序 ──────────────────
+
 
 def _mk_usage_file(tmp_path, records):
     """构造使用记录文件：records = [(cmd, 距今秒数, 次数)]"""

@@ -1,42 +1,42 @@
-/**
- * core-ts/src/services/subagentCatalog.ts — 「哪些 Agent 可被派发为子代理」的**唯一出处**（A-1096）。
- *
- * 为什么必须单独成模块：
- *  ① 判据此前只活在 `gui/src/main/index.ts`（5000+ 行装配文件）里，**只能起 electron 才能验证**；
- *     抽成**纯模块**（无副作用；只从 `subagent.ts` 取常量与规范化函数，不碰 electron / node 内置）
- *     后可单测、可变异，也让"改坏了"能在测试里立刻显形；
- *  ② 同一语义有**两个渲染产地**（系统提示的「可用子代理」清单段 / 工具报错时的可操作提示），
- *     两处各写一遍分组与标签 ⇒ 迟早一处改了另一处没改，用户看到自相矛盾的两套说法。
- *     现在标签只有 `SUBAGENT_CATALOG_LABELS` 一处，分组只有 `groupSubagentCatalog` 一处。
- *
- * 业界依据（Anthropic《How we built our multi-agent research system》+《Building Effective Agents》）：
- *   - 协调器必须**知道能派给谁**（清单要进上下文），否则"配好了也派不到"；
- *   - description 是路由键，清单要短、要具体（占用上下文，且直接影响路由准确率）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import type { AgentState } from "./agents.js";
 import { DEFAULT_EXEC_BUDGET_MS, normalizeModelPool, type SubagentDefinition } from "./subagent.js";
 
-/**
- * 是否允许把该 Agent 派发为子代理（Agent 设置里的「同意被派发为子代理」开关）。
- *
- * 三态语义（**不许把 undefined 与 false 合并**——那会让"没设置过"被当成"明确拒绝"，
- * 新装的用户一个子代理都派不出去，症状是"功能好像没实现"）：
- *   - `undefined`（缺省，也是历史配置的样子）⇒ **允许**：开箱即可被派发；
- *   - `true`  ⇒ 允许（显式同意，语义与缺省一致）；
- *   - `false` ⇒ **拒绝**：不进候选清单、也不能被点名。
- */
+
+
+
+
+
+
+
+
+
 export function isSubagentDispatchAllowed(agent: Pick<AgentState, "subagent_dispatch">): boolean {
   return agent.subagent_dispatch !== false;
 }
 
-/**
- * 把持久 Agent 映射成子代理定义。
- * - `description` 用 `名字：角色` 作自动委派的路由键（对齐 Claude Code「description 决定何时委派」）；
- * - `systemPrompt` 用身份提示（与主对话提示解耦）；
- * - `agentId` 绑定具体持久 Agent（子代理执行时据此解析模型/工具面）；
- * - 执行预算取 `DEFAULT_EXEC_BUDGET_MS`（**唯一真源**；历史上这里的 300s 正是 A-983 记录的
- *   "把做到 4/4 步的工作掐掉"的那个值，见 subagent.ts 的常量注释——不许再散落字面量）。
- */
+
+
+
+
+
+
+
+
 export function agentToSubagentDefinition(agent: AgentState): SubagentDefinition {
   const name = agent.name;
   const role = agent.role ?? "";
@@ -51,17 +51,17 @@ export function agentToSubagentDefinition(agent: AgentState): SubagentDefinition
   };
 }
 
-/** 全部**允许派发**的 Agent → 子代理定义清单（装配层注册用）。顺序保持 registry 顺序，便于对照。 */
+
 export function dispatchableSubagentDefinitions(agents: readonly AgentState[]): SubagentDefinition[] {
   return agents.filter(isSubagentDispatchAllowed).map(agentToSubagentDefinition);
 }
 
-/** 允许派发的 Agent id 清单（设置页回显勾选态用；与注册用的是**同一个判据**）。 */
+
 export function dispatchableAgentIds(agents: readonly AgentState[]): string[] {
   return agents.filter(isSubagentDispatchAllowed).map((a) => a.id);
 }
 
-/** 子代理目录条目（与 `SubAgentManager.catalog()` 同构）。 */
+
 export interface SubagentCatalogEntry {
   name: string;
   description: string;
@@ -69,12 +69,12 @@ export interface SubagentCatalogEntry {
   model?: string;
 }
 
-/**
- * 清单分组标签的**唯一出处**。
- *
- * ⚠️ 措辞必须与"实际语义"一致：`source === "user"` 代表"用户自己的 Agent（已同意被派发）"，
- * 不再是"用户勾选的少数几个"——历史文案「用户选定的子代理」在默认全允许之后会变成**假描述**。
- */
+
+
+
+
+
+
 export const SUBAGENT_CATALOG_LABELS = {
   agents: "可派发的 Agent（优先用）",
   builtin: "内置专家子代理",
@@ -85,7 +85,7 @@ export interface GroupedSubagentCatalog {
   builtin: SubagentCatalogEntry[];
 }
 
-/** 按来源分组：自建 Agent（优先） / 内置专家。两个渲染产地共用本函数，杜绝分组口径漂移。 */
+
 export function groupSubagentCatalog(catalog: readonly SubagentCatalogEntry[]): GroupedSubagentCatalog {
   return {
     agents: catalog.filter((c) => c.source === "user"),
@@ -93,10 +93,10 @@ export function groupSubagentCatalog(catalog: readonly SubagentCatalogEntry[]): 
   };
 }
 
-/**
- * 渲染「可用子代理」清单行（**两个产地共用**：系统提示段 + 工具报错提示）。
- * 只渲染条目本身，标题/前后缀由调用方按场景补；这样措辞差异只留在场景相关的那一层。
- */
+
+
+
+
 export function renderSubagentCatalogLines(grouped: GroupedSubagentCatalog): string[] {
   const lines: string[] = [];
   if (grouped.agents.length > 0) {
@@ -110,17 +110,17 @@ export function renderSubagentCatalogLines(grouped: GroupedSubagentCatalog): str
   return lines;
 }
 
-/**
- * 渲染「子代理执行模型池」段（A-1097）。
- *
- * 为什么必须进上下文：只让用户在设置页多选模型、却不告诉模型池子里有什么，
- * 模型就只能用兜底档那一个 —— **"能设置却没人用"= 死开关**（本项目已归档的静默失效家族就此一类）。
- * 所以池子必须可被模型看见，才能在 `delegate_subagent({model})` 里点名。
- *
- * 措辞要点：① 池首是**兜底档**（不传 model 时生效，语义与旧单值配置一致）；
- * ② 其余档位是"按子任务难度分工"的候选（对齐 Anthropic 的"按复杂度伸缩"）；
- * ③ 取值必须**原样**（路由字符串由调用方逐字透传，模型自己编一个不存在的会解析失败）。
- */
+
+
+
+
+
+
+
+
+
+
+
 export function renderSubagentModelSegments(models: readonly string[]): string[] {
   const pool = normalizeModelPool(models);
   if (pool.length === 0) { return []; }
@@ -136,31 +136,31 @@ export function renderSubagentModelSegments(models: readonly string[]): string[]
   return [lines.join("\n")];
 }
 
-/**
- * 「子任务委派规范」的**唯一出处**（A-1106）。
- *
- * 为什么必须单独成常量：同一段规范此前**只有一个产地**（`ChatService.systemPromptFor`），
- * 于是另一条系统提示词产地 `Engine.buildSystem`（定时任务 / 非 ChatService 的引擎路径）
- * **完全拿不到委派引导** ⇒ 那些任务 100% 由主 Agent 单干，用户症状是
- * 「整个任务全是主 Agent 一个智能体做」。两处各写一遍同样会漂移，
- * 所以与清单标签、分组一样收成单一出处，两条产地共用。
- *
- * 措辞设计（A-1106 重平衡，依据 Anthropic《How we built our multi-agent research system》/
- * 《Building Effective Agents》的协调器范式，并用 Cognition《Don't Build Multi-Agents》
- * 的反方约束限定「不该拆」的场合）：
- *  ① 原版把「何时不委派」写成主句、把"自己做"当默认 ⇒ **实测效果就是模型全自己做完**。
- *     现在改成**默认派发**：先问"有没有能独立出去的部分"，有就派；把"自己做"收缩为
- *     四类**结构性例外**（规划 / 主干整合与门禁 / 强耦合对话 / 一次工具调用即可的活）。
- *     这也正是用户的明确要求：主 Agent 负责规划与主干，其余尽量派出去。
- *  ② 「任务分隔」是 Anthropic 实测的第一失效模式（只写一句"研究 X"⇒ 多个子代理重复劳动），
- *     所以 `task` 的 ①目标 ②输出格式 ③边界 写成硬要求。
- *  ③ 多智能体最大的失效模式是"不加核对地转述子代理结论"，所以验收要求必须留。
- *  ④ **力度预算分档**（A-1106/5b）：只有"默认派发"没有"派多少"，就是 Anthropic 记录的
- *     早期失效形态（"简单问题派 50 个子代理"）。故补上按复杂度分档的 effort budget
- *     （简单事实查找 1 个 / 直接对比 2–4 个 / 复杂研究 10+ 个）。
- *     ⚠️ 措辞必须写成**启发式上下限**而不是"预计超过 N 步才可派"那种**硬门槛** ——
- *     Anthropic 官方原话："instilling good heuristics rather than rigid rules"。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const DELEGATION_GUIDANCE =
   "子任务委派（delegate_subagent / subagent_result）——**默认派发，不要默认自己全做完**：" +
   "\n- **第一步先问自己**：这件事里有没有可以**独立出去**的部分（不需要跟我来回确认、不需要跟我共享同一份推理）？**有就派。**" +

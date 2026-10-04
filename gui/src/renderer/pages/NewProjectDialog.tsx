@@ -1,25 +1,25 @@
-/**
- * gui/src/renderer/pages/NewProjectDialog.tsx — 新建会话弹窗（A-979 渲染性能优化：自 App.tsx 抽出）。
- *
- * 为什么抽独立组件：原弹窗 350 行 JSX + 7 个草稿 state（workspace/leader/memberIds/type/members/cfgAgent/cfgProvider）
- * 全部内联在 App.tsx —— 弹窗内任何一次点击（换文件夹/切形式/选成员/选模型）都触发**整棵 App 树重渲染**
- * （左侧会话列表 + ChatPanel 历史消息 + 右侧栏全量重渲染），叠加全屏遮罩 backdrop-filter 持续合成，
- * 实测"几乎点不动、变 PPT"（A-979 用户反馈）。
- * 抽出后草稿状态内聚本组件：弹窗交互只重渲染本子树，App 不再抖动。
- */
+
+
+
+
+
+
+
+
+
 import React from "react";
 import { PlusIcon } from "../components/Icon.js";
-/*
- * A-1012：群聊席位上限（**含组长**）与其判据来自共享纯模块 —— 引擎侧组装参与名单用的是
- * 同一个模块的同一个函数（`gui/src/main/index.ts` 的 `groupParticipantIds`）。
- * 为什么必须同源：此前上限只以 `.slice(0, 5)` 的形式活在引擎里，界面毫不知情 →
- * 用户能邀请 7 个 Agent 进群，第 6 位起卡片照常显示、照样能点「思考·X」，引擎却从不读。
- * 本弹窗是**唯一**的加人入口（渲染层没有任何地方调用 `sessions.setMembers`），
- * 所以在这里拦住就等于从源头堵住。
- */
+
+
+
+
+
+
+
+
 import { GROUP_MAX_PARTICIPANTS, isGroupRosterFull } from "../../../../shared/gen/groupRoster.js";
-// 上下文窗口的唯一 token 格式化（进制按上限自适应）：这里此前直接打印裸 token 数，`524288 ctx`
-// 读起来就是「524K」—— 与右栏「512K」对不上（用户原话：「没有 524K 容量的上下文，只有 512K」）。
+
+
 import { fmtTokens } from "./contextMath.js";
 
 export interface DraftProvider {
@@ -31,7 +31,7 @@ export interface DraftProvider {
 
 export interface NewProjectDialogProps {
   open: boolean;
-  /** 打开时预填的工作文件夹（null=不绑定；""=显式跳过绑定） */
+  
   prefillWorkspace: string | null;
   agents: Array<{ id: string; name: string; role?: string }>;
   agentConfig: Record<string, { model_choice?: string }>;
@@ -40,11 +40,11 @@ export interface NewProjectDialogProps {
   currentSessionSvg: string;
   teamSvg: string;
   onClose(): void;
-  /** 会话创建成功回调（App：切换会话 + 关弹窗 + 刷新列表） */
+  
   onCreated(sessionId: string): Promise<void>;
-  /** 「管理 Agent →」按钮（App：关弹窗 + 打开设置 agents 页） */
+  
   onManageAgents(): void;
-  /** 弹窗打开时的副作用（App：刷新 SILAM 可用性 + 刷新 Agent 列表） */
+  
   onOpen(): void;
 }
 
@@ -55,7 +55,7 @@ const EMPTY_CFG: Record<string, { model_choice?: string }> = {};
 export default function NewProjectDialog(props: NewProjectDialogProps): React.ReactElement | null {
   const { open, prefillWorkspace } = props;
 
-  /* ── 草稿状态（A-979：内聚本组件，App 不因弹窗交互重渲染） ── */
+  
   const [workspace, setWorkspace] = React.useState<string | null>(null);
   const [leader, setLeader] = React.useState<string | null>(null);
   const [memberIds, setMemberIds] = React.useState<string[]>([]);
@@ -67,7 +67,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
   const prevOpen = React.useRef(false);
   React.useEffect(() => {
     if (open && !prevOpen.current) {
-      // A-954：弹窗重开清空入群草稿，避免残留上个群聊的成员/模型
+      
       setWorkspace(prefillWorkspace === undefined ? null : prefillWorkspace);
       setLeader(null);
       setMemberIds([]);
@@ -78,35 +78,35 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
       props.onOpen();
     }
     prevOpen.current = open;
-    // 仅在开/关翻转时初始化一次
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
+    
   }, [open, prefillWorkspace]);
 
   const agents = props.agents ?? [];
   const agentConfig = props.agentConfig ?? EMPTY_CFG;
   const draftProviders = props.draftProviders ?? [];
 
-  /* ── 群聊成员入群/退群/换模特方（model 选定的瞬间即正式入群；第一个入群者 = 组长/会话归属） ── */
-  /**
-   * A-1012：群聊是否已满员（**含组长**）。满员后只允许对**已入群**成员换模型，
-   * 不允许再拉人进来 —— 这正是引擎 `GROUP_MAX_PARTICIPANTS` 的席位口径（相同纯模块）。
-   */
+  
+  
+
+
+
   const groupFull = isGroupRosterFull(members.length);
-  /**
-   * A-1012：右侧配置面板正停在一位「因满员而无法入群」的候选上。
-   * 这条路径只在"先展开某候选的配置面板、随后别处入群致满"时出现；
-   * 不特判的话用户选模型会**毫无反应**（入口守卫静默丢弃），看起来像程序坏了。
-   */
+  
+
+
+
+
   const cfgBlocked = groupFull && Boolean(cfgAgent) && !members.some((m) => m.id === cfgAgent);
 
   const joinDraftMember = React.useCallback((a: { id: string; name: string }, model: string): void => {
     setMembers((prev) => {
       const idx = prev.findIndex((m) => m.id === a.id);
       const entry = { id: a.id, name: a.name, model };
-      // 已在群里 = 换模型，永远允许（不受上限约束）
+      
       if (idx >= 0) { return prev.map((m, i) => (i === idx ? entry : m)); }
-      // A-1012：**新增**成员受席位上限约束。这里是唯一入群入口，界面已禁用超限候选，
-      // 此守卫是兜底（防将来新增调用点绕过界面）—— 超限静默丢弃，不改动原数组。
+      
+      
       if (isGroupRosterFull(prev.length)) { return prev; }
       return [...prev, entry];
     });
@@ -116,7 +116,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
     if (cfgAgent === id) { setCfgAgent(null); setCfgProvider(null); }
   }, [cfgAgent]);
 
-  /** A-968：把成员「已保存的 model_choice」解析成 draftProviders 里可入群的具体模型值（null=无/不可解析） */
+  
   const resolveSavedModel = React.useCallback((agentId: string): string | null => {
     const choice = agentConfig[agentId]?.model_choice;
     if (!choice) { return null; }
@@ -140,7 +140,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
     return null;
   }, [agentConfig, draftProviders, props.silamOk]);
 
-  /** 选择目标工作文件夹（新建会话第一步；以文件夹为主的会话模型） */
+  
   async function pickNewFolder(): Promise<void> {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api?.conversations?.pickFolder) { return; }
@@ -151,7 +151,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
     if (res?.ok && res.path) { setWorkspace(res.path); }
   }
 
-  /** 新建项目：选文件夹（①）+ 群聊成员三步入群（②，各带模型）+ 聊天形式 → 建团队/单人会话并切换 */
+  
   async function handleCreate(
     agentId: string,
     memberIdsArg: Array<string | { id: string; model?: string }> = [],
@@ -177,15 +177,15 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
 
   const openManage = (): void => props.onManageAgents();
 
-  // ⚠️ A-979-R：条件 return 必须在**所有 hooks 之后**（此前在 useCallback 之前 → open 翻转时
-  // Hook 数量不一致 → React "Rendered more hooks than during the previous render"）
+  
+  
   if (!open) { return null; }
 
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 100,
-      // A-979：遮罩去 backdrop-filter——全屏 blur(14px) 是"点不动 PPT"的持续 GPU 合成元凶之一。
-      // 层级区分由半透明深底 + 面板近实底承担（A-955 磨砂观感保留在面板自身）。
+      
+      
       background: "rgba(2, 6, 23, 0.74)",
       display: "flex", alignItems: "center", justifyContent: "center",
     }}
@@ -194,17 +194,17 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
         width: 480, maxWidth: "92vw", maxHeight: "76vh",
         display: "flex", flexDirection: "column",
         animation: "fadeIn 0.18s ease",
-        // A-1098：原为 inline `background: var(--bg-card, rgba(22,30,56,0.96))`——那个 0.96 兜底
-        // **被 beta 主题的 `--bg-card`（rgba(20,28,52,0.5)）击穿**，弹窗在 beta 下是半透明的
-        // （兜底值只在变量缺失时生效，主题一旦定义了变量就轮不到它）。实底统一交给 `.modal-card`
-        // 的 `--float-surface`，此处不再自带背景（也就不会再有第二个真相源）。
+        
+        
+        
+        
       }}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
           <PlusIcon size={16} style={{ color: "var(--accent)", marginRight: 8, flexShrink: 0 }} />
           <h3 style={{ margin: 0, flex: 1 }}>新建会话</h3>
           <button className="titlebar-btn" onClick={() => props.onClose()}></button>
         </div>
-        {/* 第一步：选择目标工作文件夹 */}
+        {}
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700 }}>
           ① 目标工作文件夹（Agent 的读写将限定在此目录内）
         </div>
@@ -235,7 +235,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
             </button>
           </div>
         )}
-        {/* 聊天形式选择（普通对话 ⇔ 群聊头脑风暴；群聊为独立聊天形式） */}
+        {}
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700, marginTop: 10 }}>
           聊天形式
         </div>
@@ -274,7 +274,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
             </span>
           </button>
         </div>
-        {/* 第二步：普通 = 选择对话 Agent；群聊 = 成员三步入群（成员 → 供应商 → 模型，A-954） */}
+        {}
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6, fontWeight: 700 }}>
           {type === "brainstorm"
             ? `② 群成员三步入群（点成员 → 选供应商 → 选模型即入群，第一个入群者为组长；已入群 ≥2 可创建，最多 ${GROUP_MAX_PARTICIPANTS} 人）`
@@ -282,13 +282,13 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
         </div>
         {type === "brainstorm" ? (
           <div style={{ display: "flex", gap: 10 }}>
-            {/* 左列：成员候选（点击展开右侧配置面板；已入群显示模型徽章） */}
+            {}
             <div style={{ flex: 1, minWidth: 0, maxHeight: 214, overflowY: "auto" }}>
               {agents.map((a) => {
                 const joined = members.find((m) => m.id === a.id);
                 const cfg = cfgAgent === a.id;
-                // A-1012：满员后「未入群」的候选直接禁止操作（已入群者仍可点开换模型）。
-                // 禁用而不是"点了没反应"——这正是本项目「不给假旋钮」的同一条原则。
+                
+                
                 const blocked = groupFull && !joined;
                 return (
                   <button key={a.id}
@@ -353,7 +353,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
                 </div>
               )}
             </div>
-            {/* 右列：供应商 → 模型 两步配置面板 */}
+            {}
             <div style={{
               flex: 1, minWidth: 0, maxHeight: 214, overflowY: "auto",
               border: "1px solid var(--border)", borderRadius: 8, padding: 8, background: "var(--bg-input)",
@@ -500,7 +500,7 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
             )}
           </div>
         )}
-        {/* 创建按钮 */}
+        {}
         <div style={{ marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <button className="btn" style={{ fontSize: 12.5, whiteSpace: "nowrap" }}
             onClick={openManage}>

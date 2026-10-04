@@ -25,16 +25,16 @@ class TestEmotionalState:
         for _ in range(5):
             e.update(success=False)
         assert e.valence < 0.0
-        # 连续失败 ≥3 → 硬触发 angry
+        
         assert e.mood == "angry"
 
     def test_praise_hard_trigger(self):
         from core.emotion import EmotionalState
         e = EmotionalState()
         e.update(success=False, user_sentiment=-0.8, praise=True)
-        # praise 覆盖 user_sentiment 通道，硬触发 happy
+        
         assert e.mood == "happy"
-        assert e.valence == 0.0  # -0.15(task_fail) + 0.15(praise)，sentiment 被跳过
+        assert e.valence == 0.0  
 
     def test_violation_hard_trigger(self):
         from core.emotion import EmotionalState
@@ -60,10 +60,10 @@ class TestEmotionalState:
         e.valence = 0.8
         e.arousal = 0.9
         e.dominance = 0.9
-        e.mood = "happy"  # half_life 35h
+        e.mood = "happy"  
         e.last_updated = (datetime.now(timezone.utc) - timedelta(hours=35)).isoformat()
         e.decay()
-        # factor = 0.5^(35/35) = 0.5
+        
         assert abs(e.valence - 0.4) < 0.001
         assert abs(e.arousal - 0.6) < 0.001
         assert abs(e.dominance - 0.7) < 0.001
@@ -78,7 +78,7 @@ class TestEmotionalState:
     def test_novelty_positive_triggers_interested(self):
         from core.emotion import EmotionalState
         e = EmotionalState()
-        # success(+0.08) + novelty(+0.03) → valence 0.11 > 0.1，硬触发 interested
+        
         e.update(success=True, novelty=True)
         assert e.mood == "interested"
 
@@ -88,14 +88,14 @@ class TestEmotionalState:
         e.update(success=True, praise=True)
         assert e.mood == "happy"
         h, i = MOODS["happy"], MOODS["interested"]
-        # PAD 移到 happy↔interested 中点略偏 interested：切换收益 < 0.05 → 保持 happy
+        
         eps = 0.01
         e.valence = (h["valence"] + i["valence"]) / 2 - eps
         e.arousal = (h["arousal"] + i["arousal"]) / 2 + eps
         e.dominance = (h["dominance"] + i["dominance"]) / 2 - eps
         e._resolve_mood()
         assert e.mood == "happy"
-        # 大偏移（直接到 interested 目标）→ 切换收益 ≥ 0.05 → 切到 interested
+        
         e.valence = i["valence"]
         e.arousal = i["arousal"]
         e.dominance = i["dominance"]
@@ -105,7 +105,7 @@ class TestEmotionalState:
     def test_nearest_mood_reaches_all_eight(self):
         from core.emotion import EmotionalState, MOODS
         e = EmotionalState()
-        # PAD 精确落在每个 mood 目标坐标 → 最近邻应回到该 mood（8 种均可被触发）
+        
         for name, target in MOODS.items():
             e.valence = target["valence"]
             e.arousal = target["arousal"]
@@ -150,7 +150,7 @@ class TestBehaviorStore:
         from core.behavior import BehaviorStore
         bs = BehaviorStore()
         bs.reinforce("低置信模式", ["a"])
-        # 低置信度（0.3）不应注入
+        
         assert bs.to_prompt() == ""
 
     def test_to_prompt_includes_stable(self):
@@ -185,14 +185,14 @@ class TestNoveltyDetection:
 
     def test_bigrams_short_input(self):
         from core.novelty import bigrams
-        assert bigrams("") == set()      # 空串
-        assert bigrams("好") == set()     # 单字：len < 2 → 空集合
+        assert bigrams("") == set()      
+        assert bigrams("好") == set()     
 
     def test_bigrams_normal(self):
         from core.novelty import bigrams
         assert bigrams("ab") == {"ab"}
         assert bigrams("abc") == {"ab", "bc"}
-        assert bigrams("帮我写") == {"帮我", "我写"}  # 中文 bigram
+        assert bigrams("帮我写") == {"帮我", "我写"}  
 
     def test_bigrams_lowercase(self):
         from core.novelty import bigrams
@@ -200,9 +200,9 @@ class TestNoveltyDetection:
 
     def test_guard_short_confirmation(self):
         from core.novelty import is_short_confirmation
-        assert is_short_confirmation("好") is True     # 单字确认语
-        assert is_short_confirmation("好的") is True    # 双字确认语
-        assert is_short_confirmation("帮我写") is False  # 3 字符，非短确认语
+        assert is_short_confirmation("好") is True     
+        assert is_short_confirmation("好的") is True    
+        assert is_short_confirmation("帮我写") is False  
 
     def test_detect_novelty_guard_short_circuit(self):
         """入口守卫：空串/单字/双字确认语在 _detect_novelty 入口提前 return False，
@@ -218,7 +218,7 @@ class TestNoveltyDetection:
                 assert _detect_novelty("any_agent", msg) is False
 
 
-# ── A-008: Swarm Worker 心性继承 ────────────────────────────
+
 
 
 class TestWorkerPsycheInheritance:
@@ -236,7 +236,7 @@ class TestWorkerPsycheInheritance:
         fake_mem.get_facts.return_value = []
         with patch("core.memory.load_memory", return_value=fake_mem) as m:
             ctx = _retrieve_psyche_context(worker, "任务", memory_agent_id=main.id)
-            assert m.call_args[0][0] == main.id  # 以主 Agent id 检索
+            assert m.call_args[0][0] == main.id  
         assert "主记忆摘要内容" in ctx
 
     def test_retrieve_psyche_defaults_to_own_id(self):
@@ -286,5 +286,5 @@ class TestWorkerPsycheInheritance:
         _restore_psyche_snapshot(worker, {"lifecycle": "wise"})
         from core.evolve import AgentLifecycle
         assert worker.lifecycle == AgentLifecycle.WISE
-        _restore_psyche_snapshot(worker, {"lifecycle": "not-a-stage"})  # 非法值兜底
-        assert worker.lifecycle == AgentLifecycle.WISE  # 保持原值不崩溃
+        _restore_psyche_snapshot(worker, {"lifecycle": "not-a-stage"})  
+        assert worker.lifecycle == AgentLifecycle.WISE  

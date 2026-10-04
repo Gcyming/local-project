@@ -1,14 +1,14 @@
-/**
- * gui/src/renderer/components/SubagentAvatar.tsx — 子代理头像（A-980-R31）。
- *
- * 图标来自用户指定的图标库 `gui/icon/icon_1cdszr8as42`（经 `gui/scripts/gen-subagent-icons.mjs`
- * 生成到 `subagentIcons.ts`），按**名字首字符**选图标：字母→字母图标、数字→数字、`-`/`_`→符号，
- * 中文名/emoji 等无首字母可用时回落 `head` 通用头像。颜色仍由名字哈希决定，
- * 于是"同一个人"在任何面板里都是同一个图标 + 同一个颜色（可辨识、可跨面板对上号）。
- *
- * 之前是"哈希出一个字母 + 纯色方块"——中文名的子代理（代码审查员/调研员/数据分析员）
- * 全部退化成同一个 head 分支或随机字母，看起来像占位符而不是实体。现在图标即身份。
- */
+
+
+
+
+
+
+
+
+
+
+
 import type { CSSProperties, JSX } from "react";
 import {
   SUBAGENT_ICON_FALLBACK,
@@ -17,7 +17,7 @@ import {
   pickSubagentIconKey,
 } from "./subagentIcons.js";
 
-/** 头像配色盘（深色主题下都有足够对比度；与图标 currentColor 联动） */
+
 const AVATAR_COLORS = [
   "#f87171", "#fb923c", "#fbbf24", "#a3e635", "#34d399", "#22d3ee",
   "#60a5fa", "#a78bfa", "#f472b6", "#94a3b8", "#fb7185", "#facc15",
@@ -25,13 +25,13 @@ const AVATAR_COLORS = [
   "#fcd34d", "#86efac",
 ];
 
-/** 名字 → 稳定颜色（同一名字恒定同色，跨面板一致） */
+
 export function subagentAvatarColor(name: string): string {
   const sum = [...(name ?? "")].reduce((a, c) => a + c.charCodeAt(0), 0);
   return AVATAR_COLORS[Math.abs(sum) % AVATAR_COLORS.length];
 }
 
-/** 把 #rrggbb 加上 alpha（0-1）——用于头像底色/描边，避免到处写 rgba 字面量 */
+
 function withAlpha(hex: string, alpha: number): string {
   const h = hex.replace("#", "");
   const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
@@ -43,7 +43,7 @@ function withAlpha(hex: string, alpha: number): string {
 export interface SubagentAvatarProps {
   name: string;
   size?: number;
-  /** 运行中：加绿色呼吸点 + 光晕 */
+  
   running?: boolean;
   style?: CSSProperties;
   title?: string;

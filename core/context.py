@@ -9,12 +9,12 @@ import logging
 from typing import Optional
 
 
-# ── 默认配置 ──────────────────────────────────────────────
+
 
 DEFAULT_CONTEXT_CONFIG = {
-    "head": 3,     # 保留开头 N 条完整对话
-    "tail": 10,    # 保留结尾 M 条完整对话
-    "window": 30,  # 超过此阈值触发压缩
+    "head": 3,     
+    "tail": 10,    
+    "window": 30,  
 }
 
 
@@ -57,7 +57,7 @@ class ContextCompressor:
         tail_val = max(1, tail)
         tail_msgs = history[-tail_val:]
 
-        # 同步版本：无摘要时直接丢弃中间部分
+        
         compressed = head_msgs + tail_msgs
         return compressed
 

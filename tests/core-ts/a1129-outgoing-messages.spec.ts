@@ -1,26 +1,26 @@
-/**
- * tests/core-ts/a1129-outgoing-messages.spec.ts — 出网前 `messages[]` 规范化的守卫（A-1129）。
- *
- * ## 现场（一手证据）
- * 用户报「又出现上下文过长而无法输出」（其实与长度无关），并说「我换了个会话就好了」。特征串：
- *   400 BadRequestError: messages: Validation error: message content cannot be empty
- *
- * 在 `config/history.jsonl` 里定位到会话 `s_8637c98c1f81` 的**毒记录**
- * （2026-09-26T14:54:56Z）：`user: ""`、`ai: 2498 字`。
- * 该记录被读取路径**无条件展开**成两条消息（`{role:"user",content:""}` +
- * `{role:"assistant",content:…}`）⇒ 之后**每一次**请求都带着这条空消息 ⇒ **该会话永久 400**；
- * 新建会话没有这条记录 ⇒ 立刻正常。这就是"换会话就好了"的全部原因。
- *
- * ## 这个文件锁三件事
- *   ① 空内容**必须**被修好（判据与上限都在纯模块里，可行为断言）；
- *   ② 修法是**补占位**而不是丢消息 —— 丢消息会破坏角色交替，本身又是另一个 400 来源
- *      （本仓 A-1082 的 `user,user` 前科）；
- *   ③ 接线：`engine.buildMessages` 的**返回值**必须过这道门（两条发送路径共用它）。
- *
- * 变异：`gui/scripts/mut-a1129-outgoing-messages.mjs`
- *
- * ⚠️ 中文串里嵌引用一律 `「」`（ASCII 双引号会当场截断 TS 字符串）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ import {
   sanitizeWirePayload,
   type WireMessage,
 } from "../../core-ts/src/services/outgoingMessages.js";
-/* 线路级那一节用真实 router（照 tests/core-ts/reasoning-params.spec.ts 的注入模板） */
+
 import { ModelRouter } from "../../core-ts/src/router.js";
 import type { RouteEntry } from "../../core-ts/src/router.js";
 import type { ChatRequest } from "../../shared/gen/schemas.js";
@@ -44,10 +44,10 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const strip = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
-/**
- * **真实毒样本**（会话 s_8637c98c1f81 @2026-09-26T14:54:56Z 的那条记录展开出来的形状）。
- * ⚠️ 必须保留 `{role:"user", content:""}` 这一条 —— 整件事就是它引起的。
- */
+
+
+
+
 const POISONED: WireMessage[] = [
   { role: "system", content: "你是 slime" },
   { role: "user", content: "继续啊" },
@@ -79,7 +79,7 @@ describe("A-1129-A 空内容判据", () => {
       expect(placeholderForRole(role).trim()).not.toBe("");
     }
     expect(placeholderForRole("user")).toBe(EMPTY_CONTENT_PLACEHOLDER.user);
-    // 未知角色也要有一句中性话：请求出不去比"话不够准"严重得多
+    
     expect(placeholderForRole("weird").trim()).not.toBe("");
     expect(placeholderForRole("").trim()).not.toBe("");
   });
@@ -95,8 +95,8 @@ describe("A-1129-B 规范化：补占位、不丢消息、不改交替", () => {
   it("⚠️ 真实毒样本被修好：空 user → 占位，且**条数与角色序列不变**", () => {
     const out = sanitizeOutgoingMessages(POISONED);
     expect(countEmptyContent(out), "还有空 content ⇒ 上游照样 400").toBe(0);
-    /* 条数/顺序不变是**关键判据**：丢消息会造出 user,user / assistant,assistant，
-       那本身又是另一个 400 来源（A-1082 前科）。 */
+    
+
     expect(out.map((m) => m.role)).toEqual(POISONED.map((m) => m.role));
     expect(out).toHaveLength(POISONED.length);
     expect(out[3].content, "空 user 没被补成占位").toBe(placeholderForRole("user"));
@@ -111,8 +111,8 @@ describe("A-1129-B 规范化：补占位、不丢消息、不改交替", () => {
     ]);
     expect(out[1].content).toBe(placeholderForRole("assistant"));
     expect(out[2].content).toBe(placeholderForRole("tool"));
-    /* ⚠️ `content: null` + tool_calls 是 `tool_loop` 的真实形态：模型只回工具调用时
-       content 就是 null。**这条绝不能丢** —— 丢了后面的 tool 消息就失去配对。 */
+    
+
     expect(out[3].content).toBe(placeholderForRole("assistant"));
     expect(out[3].tool_calls, "补占位时把 tool_calls 弄丢了 ⇒ tool 消息失去配对").toEqual([{ id: "c1", function: { name: "f", arguments: "{}" } }]);
   });
@@ -124,7 +124,7 @@ describe("A-1129-B 规范化：补占位、不丢消息、不改交替", () => {
     ]);
     expect(out).toHaveLength(1);
     expect(out[0].role).toBe("user");
-    // 有内容的 system 一个字都不许动
+    
     const kept = sanitizeOutgoingMessages([{ role: "system", content: "你是 slime" }, { role: "user", content: "你好" }]);
     expect(kept).toHaveLength(2);
     expect(kept[0].content).toBe("你是 slime");
@@ -133,7 +133,7 @@ describe("A-1129-B 规范化：补占位、不丢消息、不改交替", () => {
   it("没变化 → 原样返回**同一个引用**（否则每帧都要为一次复制付账）", () => {
     const clean: WireMessage[] = [{ role: "user", content: "你好" }, { role: "assistant", content: "在" }];
     expect(sanitizeOutgoingMessages(clean)).toBe(clean);
-    // 而真有变化时必须是新数组（调用方据此知道"改过了"）
+    
     const dirty = sanitizeOutgoingMessages(POISONED);
     expect(dirty).not.toBe(POISONED);
   });
@@ -153,8 +153,8 @@ describe("A-1129-B 规范化：补占位、不丢消息、不改交替", () => {
 
 describe("A-1129-B2 请求体入口：只动 `messages`，其余字段与「没变就不复制」都要守住", () => {
   it("⚠️ 不带 messages 的请求**原样返回同一个引用**（embeddings 也从同一个出口走）", () => {
-    /* `ModelRouter` 的那个出口不只服务于 chat —— embeddings 之类不带 messages 的请求也经过它。
-       顺手塞一个 `messages: []` 会把那些请求改成非法形态（或至少改变语义）。 */
+    
+
     const emb = { model: "bge-m3", input: ["你好"] };
     const out = sanitizeWirePayload(emb);
     expect(out, "无变化时返回了副本 —— 下游拿它做引用比较会误判为「变了」").toBe(emb);
@@ -187,9 +187,9 @@ describe("A-1129-C 接线：唯一分派点（覆盖四个协议 + tool_loop 的
   it("`ModelRouter` 的两个入口都过这道门（chat / chatStream）", () => {
     const uses = ROUTER_C.split("sanitizeWirePayload(payload)").length - 1;
     expect(uses, `router 里接了 ${uses} 处，应为 2（chat 与 chatStream）—— 漏一处就等于漏一条发送路径`).toBe(2);
-    /* ⚠️ 位置判据要**精确**：窗口右界取"下一个 `const chain = this.fallbackChain`"，
-       而不是固定字数。用字数窗口的话，把 chat 里那次调用删掉、chatStream 里那次还在，
-       一个够大的窗口会**跨方法**匹配到后者 ⇒ 假绿。 */
+    
+
+
     const chatAt = ROUTER_C.indexOf("async chat(payload: ChatRequest)");
     expect(chatAt, "找不到 chat() 入口").toBeGreaterThan(-1);
     const chatPrelude = ROUTER_C.slice(chatAt, ROUTER_C.indexOf("const chain = this.fallbackChain", chatAt));
@@ -202,13 +202,13 @@ describe("A-1129-C 接线：唯一分派点（覆盖四个协议 + tool_loop 的
   });
 
   it("⚠️ 落点必须是 **router**：`tool_loop` 的中途重发要经过它（这是本修法的前提）", () => {
-    /* 这是整条修法的关键结构事实：`engine.buildMessages` 只管**本轮第一次**请求，
-       而 tool_loop 第 2..N 轮直接重发、不经过它 —— 那里正是推 `content: null` 的地方。
-       若哪天 tool_loop 改成绕过 router 直连客户端，这条修法就会静默失效。 */
+    
+
+
     const loop = strip(read("core-ts/src/tool_loop.ts"));
     expect(loop, "tool_loop 的中途重发不再走 router ⇒ 空 content 又有一条路能出网")
       .toMatch(/this\.router\.(chat|chatStream)\(/);
-    // 而它确实会推出空 content（`?? null`）—— 这就是必须靠 router 兜住的那一条
+    
     expect(loop, "tool_loop 不再推 content:null 了？前提变了，请重新评估本修法的落点")
       .toContain("content: msg?.content ?? null");
   });
@@ -220,21 +220,21 @@ describe("A-1129-C 接线：唯一分派点（覆盖四个协议 + tool_loop 的
   });
 
   it("读取路径确实会产出空消息（本修法的前提事实没变 —— 变了要重新评估）", () => {
-    /* 历史按 {user, ai} 成对落盘、读取时**无条件展开**成两条消息。只要这里还是 flatMap，
-       一条空记录就必然变成一条空消息 ⇒ 出网规范化这道判据就仍然必要。 */
+    
+
     const main = strip(read("gui/src/main/index.ts"));
     expect(main, "历史读取不再是「无条件展开成 user+assistant 两条」—— 前提变了，请重新评估本修法")
       .toMatch(/flatMap\(\(r\) => \[\s*\{ role: "user" as const, content: r\.user \},\s*\{ role: "assistant" as const, content: r\.ai \},\s*\]\)/);
   });
 });
 
-/**
- * ⚠️ 这一节是**线路级**证明：用真实的 `ModelRouter` + 注入的假客户端，
- * 抓它**实际交给客户端**的 payload（不是我们以为它会给的）。
- * 前面几节验的是纯判据与文本接线，只有这一节能证明"真到了出口就没空内容"。
- */
+
+
+
+
+
 describe("A-1129-D 线路级：真实 ModelRouter 交出去的 payload 里没有空 content", () => {
-  /** 假客户端：记录每次实际发出的请求体（照 tests/core-ts/reasoning-params.spec.ts 的模板） */
+  
   function makeRouter(): { router: ModelRouter; seen: ChatRequest[] } {
     const seen: ChatRequest[] = [];
     const router = new ModelRouter([], ((_route: RouteEntry) => ({
@@ -263,15 +263,15 @@ describe("A-1129-D 线路级：真实 ModelRouter 交出去的 payload 里没有
 
   it("chatStream()：同一条毒 payload 也过门（GUI 走的是这条）", async () => {
     const { router, seen } = makeRouter();
-    await router.chatStream({ model: "agnes-3.0-flash", messages: POISONED as never } as ChatRequest, () => { /* noop */ });
+    await router.chatStream({ model: "agnes-3.0-flash", messages: POISONED as never } as ChatRequest, () => {  });
     expect(seen).toHaveLength(1);
     expect(countEmptyContent(seen[0].messages as unknown as WireMessage[]), "流式路径把空 content 发出去了").toBe(0);
   });
 
   it("⚠️ 工具循环第 2..N 轮的那一条（`content: null` + tool_calls）也被修，且 tool_calls 没丢", async () => {
-    /* 这就是**绕开 `engine.buildMessages`** 的那条路：`tool_loop` 中途把模型回的
-       assistant（只带工具调用、content 为 null）push 进 messages 后**直接重发**。
-       它是"多轮工具调用就报错"的那一类，也是把规范化挂在 router（而不是 engine）的原因。 */
+    
+
+
     const { router, seen } = makeRouter();
     const toolRound: WireMessage[] = [
       { role: "system", content: "你是 slime" },

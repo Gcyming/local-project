@@ -54,7 +54,7 @@ describe("extractSnapshot（从上游响应提取实时能力）", () => {
       streamed: true,
       latencyMs: 420,
     }, () => 999);
-    expect(s.contextWindow).toBe(2000); // 1000*2
+    expect(s.contextWindow).toBe(2000); 
     expect(s.toolCalls).toBe(true);
     expect(s.streaming).toBe(true);
     expect(s.reasoning).toBe(false);
@@ -75,12 +75,12 @@ describe("extractSnapshot（从上游响应提取实时能力）", () => {
   });
 
   it("404 / 模型不可用正文 → modelDead=true；401/403/429（供应商级）→ modelDead 保持 false", () => {
-    // 模型级失效：404 或 "Model is unavailable" 正文
+    
     const dead404 = extractSnapshot("openai", "gpt-x", { ok: false, errorStatus: 404 });
     expect(dead404.modelDead).toBe(true);
     const deadBody = extractSnapshot("agg", "model", { ok: false, errorType: "upstream|model|Model is unavailable" });
     expect(deadBody.modelDead).toBe(true);
-    // 供应商级（换模型无用）：401/429 不置 modelDead（显式 false）
+    
     const auth = extractSnapshot("openai", "gpt-4o", { ok: false, errorStatus: 401, errorType: "upstream" });
     expect(auth.modelDead).toBe(false);
     const quota = extractSnapshot("openai", "gpt-4o", { ok: false, errorStatus: 429, errorType: "rate_limited" });
@@ -113,9 +113,9 @@ describe("LiveProbeCache.isDead（引擎前置剔除的查询口）", () => {
     c.put({ provider: "p", model: "alive", ts: t, modelDead: false });
     expect(c.isDead("p", "dead")).toBe(true);
     expect(c.isDead("p", "alive")).toBe(false);
-    expect(c.isDead("p", "nope")).toBe(false); // 无快照 ≠ 失效
-    t += 101; // 过期
-    expect(c.isDead("p", "dead")).toBe(false); // 过期后恢复（下轮重探）
+    expect(c.isDead("p", "nope")).toBe(false); 
+    t += 101; 
+    expect(c.isDead("p", "dead")).toBe(false); 
   });
 });
 
@@ -163,11 +163,11 @@ describe("LiveProbeCache.hydrate + 进程级共享单例", () => {
   it("hydrate：恢复未过期条目，丢弃已过期条目", () => {
     let t = 1_000_000;
     const c = new LiveProbeCache({ ttlMs: 100, now: () => t });
-    // 直接构造快照（模拟落盘后读回的条目；ts 相对 now 判断过期）
+    
     c.hydrate([
-      { provider: "p", model: "fresh", ts: t },           // 未过期
-      { provider: "p", model: "stale", ts: t - 500 },     // 已过期（> ttl）
-      { provider: "bad", model: "x" } as never,            // 缺 ts → 丢弃
+      { provider: "p", model: "fresh", ts: t },           
+      { provider: "p", model: "stale", ts: t - 500 },     
+      { provider: "bad", model: "x" } as never,            
     ]);
     expect(c.get("p", "fresh")).not.toBeNull();
     expect(c.get("p", "stale")).toBeNull();
@@ -182,13 +182,13 @@ describe("LiveProbeCache.hydrate + 进程级共享单例", () => {
     const custom = new LiveProbeCache({ now: () => 0 });
     setSharedLiveProbe(custom);
     expect(getSharedLiveProbe()).toBe(custom);
-    // 复位（避免跨测试污染其它用例的全局单例）
+    
     setSharedLiveProbe(null);
   });
 });
 
 describe("A-157 收敛：智谱 1211 / 中文「模型不存在」被共享特征表识别", () => {
-  // 智谱真实事故正文（含数字码 1211 + 中文文案），由上游错误正文特征表唯一实现识别
+  
   const zhipuErr =
     'upstream|上游错误 400: {"error":{"code":"1211","message":"模型不存在，请检查模型代码。"}}';
 

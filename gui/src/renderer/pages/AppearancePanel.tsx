@@ -1,20 +1,20 @@
-/**
- * gui/src/renderer/pages/AppearancePanel.tsx — 设置「外观」专栏（A-1115）。
- *
- * 用户点名的要求：
- *   「在设置中添加一个外观栏目，开一个栏目页面…最左侧设置一个合适大小的框格，里面**只显示对应的目录卷轴条**，
- *    用户可以把鼠标放在上面直接看效果。这个界面做好后，把**主题选择也挪过来**，
- *    以后这个界面就专门放所有跟 slime 外观、UI 设定相关的功能。」
- *
- * 版式（沿用「新建会话」弹窗那套：卡片 + 小节标题 + 内联控件）：
- *   左：演示框（真实滚动 + 真实卷轴，鼠标放上去就有完整效果：衬托 / 气泡 / 点击跳转）
- *   右：该目标的全部参数 + 主题选择
- *
- * ⚠️ 演示框用的是**同一个 TopicRail 组件**、读的是**同一份参数**（`railParams.ts`）——
- *    绝不在这里另写一份画的逻辑，否则"设置里调好了、实际界面没变"这类静默失效必然复发。
- * ⚠️ 改参数走 `saveRailParams`（写 localStorage + 广播）⇒ 已经打开的对话页 / 右栏 md 阅读器**即时生效**，
- *    不需要重启，也不需要重挂卷轴（卷轴内部逐帧读 ref）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import { THEMES, type ThemeName } from "../theme.js";
 import TopicRail, { type RailEntry } from "./TopicRail.js";
@@ -37,7 +37,7 @@ interface SliderDef {
   step?: number;
   fmt?: (v: number) => string;
   note?: string;
-  /** 只在哪些目标下显示（缺省 = 都显示） */
+  
   only?: TabId[];
 }
 
@@ -73,13 +73,13 @@ interface Props {
   onThemeChange?: (t: ThemeName) => void;
 }
 
-/** 演示用的假对话（够长才能滚；有用户发言 ⇒ 卷轴才有"话题"可显示） */
+
 const DEMO_TOPICS = [
   "上下文压缩到底是不是真压缩", "子代理会不会真的被派出去", "临时子代理怎么落地",
   "调试端口冲突怎么自愈", "侧栏命中区为什么要左右对称", "滚到最新时为什么会抖",
   "对话内滚动条换成什么样", "整页滚动条换成目录体系", "双线交织水波卷轴", "渲染优化怎么做",
 ];
-/** 演示用的假 md 标题（h1/h2/h3 混排 ⇒ 刻度长度有层级） */
+
 const DEMO_DOC: Array<{ lv: "h1" | "h2" | "h3"; text: string }> = [
   { lv: "h1", text: "上下文压缩 Agent-Loop 规格" },
   { lv: "h2", text: "一、触发与闸门" },
@@ -102,7 +102,7 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
   const [params, setParams] = React.useState<RailParams>(() => loadRailParams("wave"));
   const demoScrollRef = React.useRef<HTMLDivElement | null>(null);
 
-  // 切目标时换成那一份参数（两个目标各自独立存）
+  
   React.useEffect(() => { setParams(loadRailParams(mode)); }, [mode]);
 
   const demoScroller = React.useCallback((): HTMLElement | null => demoScrollRef.current, []);
@@ -125,36 +125,36 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
     setParams(saveRailParams(mode, { [key]: v } as Partial<RailParams>));
   };
   const reset = (): void => {
-    // 把该目标的默认值整体写回（saveRailParams 是"在当前值上打补丁"，所以传完整的默认对象）
+    
     setParams(saveRailParams(mode, defaultRailParams(mode)));
   };
 
   return (
-    /* A-1119：左右地板已**收归 `SettingsDialog` 内容区**（`:218` 现为 `paddingLeft: 16, paddingRight: 10`）。
-     *   ⇒ 本面板根的 paddingLeft / paddingRight **必须为 0**，否则两个产地叠加（16+16=32px）。
-     *
-     * 历史（A-1115 首版用户实例取证报「与边界相交、拥挤」）：
-     *   · 左：内容区此前**没有 paddingLeft**，导航栏 `aside` 的 `borderRight` 恰好落在内容区左缘
-     *     （实测窗口 1272 下 = x 287），而本面板当时 `paddingLeft: 0` ⇒ 页签按钮左边框与那条
-     *     分割线**像素级重合**，看着就是"按钮压在边界线上"。
-     *   · 右：右栏右缘距内容区右缘只剩 2px，卡片右边框距滚动条只剩 4px ⇒
-     *     「按钮右缘 → 卡片内边界 → 卡片边框 → 滚动条 → 对话框右边界」五条边挤在 20px 内。
-     *   当时是"本面板自己让出 14 / 10"（治标）。现在改治本：**边界的留白由共用祖先给**——
-     *   因为"分隔线在哪"是**所有面板共用**的事实，让每个面板各写一个数必然漂（实测过
-     *   16 / 12 / 4 / 0 四种口径，谁写 0 谁贴线）。本页只保留**右栏内部**的滚动条让位。
-     *
-     * ⚠️ 右栏的 `paddingRight` 不是随手取的：右栏变窄后主题卡的两个 `flex: 1 1 200px` 按钮
-     *    仍需**并排不换行**（见下方 `maxWidth: 280`），可用宽必须 ≥ 410px。
-     *
-     * ⚠️ **上下必须自己给**（A-1119 二次实例取证：用户截图「页签顶到顶部、与右上角 ✕ 那条分割线相交」）：
-     *    内容区的水平地板由共用祖先给（左=导航分割线、右=对话框边），但**垂直节奏是各面板自己的**
-     *    （实测：通用/技能库等 16px · 心智中枢 12px · 后台任务 6px）⇒ 不能收到内容区去，
-     *    否则既有面板会叠加成 32 / 28 / 22。本面板首版只让了左右、忘了上下，页签就直接顶在顶边。 */
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     <div className="settings-pane" style={{
       display: "flex", gap: 16, alignItems: "stretch", minHeight: 0, height: "100%",
       paddingTop: 14, paddingBottom: 14,
     }}>
-      {/* ── 左：演示框（**只有卷轴**，鼠标放上去就是真实效果）────────────────── */}
+      {}
       <div style={{ width: 320, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
           {TABS.map((t) => {
@@ -193,7 +193,7 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
                 </React.Fragment>
               ))}
           </div>
-          {/* ⚠️ 与对话页/右栏用的是**同一个组件、同一份参数**（不另写一份画法） */}
+          {}
           <TopicRail mode={mode} scroller={demoScroller} collect={demoCollect} params={params} />
         </div>
         <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.5 }}>
@@ -201,11 +201,11 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
         </div>
       </div>
 
-      {/* ── 右：参数 + 主题 ─────────────────────────────────────────────── */}
-      {/* ⚠️ `paddingRight` 必须 ≥ 滚动条宽（A-1113 全局样式 6px + 抗锯齿）+ 可见缝隙，
-          否则卡片右边框就贴在滚动条上（实测改前只剩 4px，用户读作"与边界相交"）。 */}
+      {}
+      {
+}
       <div style={{ flex: 1, minWidth: 0, overflowY: "auto", paddingRight: 10 }}>
-        {/* 主题选择（从「通用」迁到这儿：以后外观相关都归本页） */}
+        {}
         <div className="card" style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>界面主题</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -235,7 +235,7 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
           </div>
         </div>
 
-        {/* 卷轴参数 */}
+        {}
         <div className="card" style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
             <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>

@@ -1,12 +1,12 @@
-/**
- * core-ts/src/mcp.ts — MCP 客户端（语义移植自 core/mcp_client.py，逐行对照）。
- * 传输：stdio（子进程，JSONL/Content-Length 双帧嗅探 + 后台 reader 事件驱动）
- *       + Streamable HTTP（fetch + SSE 逐行，Mcp-Session-Id）。
- * 能力：tools / resources / prompts 桥接进 ToolRegistry（mcp_ / mcp_res_ / mcp_prompt_ 前缀）。
- * 权限：P2-3 按名覆写（tool_permissions），非法值回退 network；resources/prompts 固定 read。
- * 重连：A-096 上限 10 次，退避 1→60s（约 10 分钟），达上限 /mcp start 手动拉起。
- * OAuth 2.1（P2-5）：占位 OAuthManagerStub（未授权语义），完整浏览器授权流 = Electron 阶段 TODO。
- */
+
+
+
+
+
+
+
+
+
 
 import { spawn, ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -26,7 +26,7 @@ const MAX_RECONNECT = 10;
 const MEDIA_LABEL: Record<string, string> = { image: "图片", audio: "音频", video: "视频" };
 const VALID_PERMISSIONS: ToolPermission[] = ["read", "write", "terminal", "network"];
 
-// A-113：MCP 子进程环境白名单（不继承完整父环境，防窃取 API keys；slime.toml env 显式补充）
+
 const ENV_ALLOWLIST = [
   "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
   "TEMP", "TMP", "USERNAME", "USERPROFILE", "HOME",
@@ -48,7 +48,7 @@ export type MCPServerStatus = {
 
 export type OAuthStatus = "pending" | "authorized" | "expired" | "none";
 
-// ── OAuth 2.1 占位（P2-5 完整流 = Electron 阶段 TODO）────────────────
+
 
 export class OAuthManagerStub {
   readonly serverName: string;
@@ -78,7 +78,7 @@ export class OAuthManagerStub {
   }
 }
 
-// ── 传输抽象 ──────────────────────────────────────────────
+
 
 export interface Transport {
   start(): Promise<boolean>;
@@ -91,7 +91,7 @@ export interface Transport {
   onClose?(): void | Promise<void>;
 }
 
-// ── stdio 传输（JSONL / Content-Length 双帧嗅探，事件驱动 reader）──
+
 
 export class StdioTransport implements Transport {
   private command: string;
@@ -172,18 +172,18 @@ export class StdioTransport implements Transport {
   }
 
   private terminateTree(proc: ChildProcess): void {
-    // Windows：uvx/npx 包装器孙进程须 taskkill /T /F 整棵树；失败回退 kill
+    
     if (process.platform === "win32" && proc.pid) {
       try {
         spawn("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { windowsHide: true });
       } catch {
-        // 忽略
+        
       }
     }
     try {
       proc.kill();
     } catch {
-      // 已退出
+      
     }
   }
 
@@ -213,7 +213,7 @@ export class StdioTransport implements Transport {
     }
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        // 超时不杀进程：只丢弃本次 pending，reader 继续
+        
         this.pending.delete(reqId);
         console.warn(`[mcp] ${this.name}: 请求超时 (id=${reqId})`);
         resolve(null);
@@ -238,18 +238,18 @@ export class StdioTransport implements Transport {
     try {
       proc.stdin!.write(this.serialize(payload));
     } catch {
-      // 忽略
+      
     }
   }
 
   private handleEof(): void {
-    // 进程退出：清空所有 pending（在途 request 返回 null）
+    
     for (const { resolve, timer } of this.pending.values()) {
       clearTimeout(timer);
       resolve(null);
     }
     this.pending.clear();
-    // 自然死亡（非 close()）→ 触发重连回调
+    
     if (this.proc !== null && !this.closedByUs) {
       this.proc = null;
       const cb = this.onClose;
@@ -257,34 +257,34 @@ export class StdioTransport implements Transport {
         try {
           void cb();
         } catch {
-          // 忽略
+          
         }
       }
     }
   }
 
-  /** 同步解析缓冲中的完整帧（一个 chunk 可含多帧，循环处理） */
+  
   private processBuffered(): void {
     for (;;) {
       const frame = this.readFrame();
       if (frame === undefined) {
-        return; // 缓冲不足，等下一 chunk
+        return; 
       }
       if (frame === null) {
-        continue; // 超限帧已排空，继续
+        continue; 
       }
       this.dispatch(frame);
     }
   }
 
-  /** 返回 undefined=缓冲不足；null=超限已排空；dict=完整帧 */
+  
   private readFrame(): Record<string, unknown> | null | undefined {
     if (this.buf.length === 0) {
       return undefined;
     }
     const first = this.buf[0];
     if (first === 0x7b) {
-      // JSONL：`{json}\n`
+      
       const nl = this.buf.indexOf(0x0a);
       if (nl < 0) {
         if (this.buf.length > MAX_RESPONSE_BYTES) {
@@ -302,7 +302,7 @@ export class StdioTransport implements Transport {
         return null;
       }
     }
-    // Content-Length：LSP 风格
+    
     const headerEnd = this.buf.indexOf(Buffer.from("\r\n\r\n"));
     if (headerEnd < 0) {
       if (this.buf.length > MAX_HEADER_BYTES) {
@@ -349,21 +349,21 @@ export class StdioTransport implements Transport {
         console.warn(`[mcp] ${this.name}: 迟到/未知响应 id=${String(rid)} 丢弃`);
       }
     } else {
-      // notification（无 id）：异步分发回调，不卡读循环
+      
       console.info(`[mcp] ${this.name}: notification ${String(frame.method ?? "")}`);
       const cb = this.onNotification;
       if (cb) {
         try {
           void cb(frame);
         } catch {
-          // 忽略
+          
         }
       }
     }
   }
 }
 
-// ── HTTP 传输（Streamable HTTP）────────────────────────────
+
 
 export class HTTPTransport implements Transport {
   private url: string;
@@ -458,7 +458,7 @@ export class HTTPTransport implements Transport {
     }
   }
 
-  /** 逐行读 SSE，命中 reqId 即返回；流结束未命中返回 null */
+  
   private async readSseStream(
     resp: Response,
     reqId: number,
@@ -495,7 +495,7 @@ export class HTTPTransport implements Transport {
               return msg;
             }
           } catch {
-            // 跳过坏行
+            
           }
         }
         if (Date.now() > deadline) {
@@ -513,12 +513,12 @@ export class HTTPTransport implements Transport {
     try {
       await this.fetchImpl(this.url, { method: "POST", body: payload, headers: this.headers() });
     } catch {
-      // 忽略
+      
     }
   }
 }
 
-// ── MCP Server 连接 ────────────────────────────────────────
+
 
 export class MCPServerError extends Error {
   readonly code: number;
@@ -566,7 +566,7 @@ export class MCPServer {
     this.oauth = opts.oauth ?? null;
   }
 
-  /** P2-5：oauth 是否启用（startAll/startOne 的外壳超时判定） */
+  
   get oauthEnabled(): boolean {
     return this.oauth !== null;
   }
@@ -575,12 +575,12 @@ export class MCPServer {
     return this.oauth ? this.oauth.status() : "none";
   }
 
-  /** 暴露传输（MCPClient 挂 stdio 通知/断连回调用） */
+  
   get transportInstance(): Transport {
     return this.transport;
   }
 
-  /** 并发 list_changed 刷新串行化（收尾观察项 2） */
+  
   refreshLock(fn: () => Promise<void> | void): Promise<void> {
     const run = this.refreshChain.then(async () => {
       await fn();
@@ -600,7 +600,7 @@ export class MCPServer {
         clientInfo: { name: "slime", version: "0.3.0" },
       };
       const flip = this.transport.flipFraming;
-      // stdio 握手探测：帧格式不符时短超时快速失败 → 同帧重试（启动慢）→ flip 重启重试
+      
       let init = await this.request("initialize", params, flip ? 5_000 : undefined);
       if (init === null && flip) {
         if (this.transport.running) {
@@ -794,7 +794,7 @@ export class MCPServer {
     return parts.length > 0 ? parts.join("\n\n") : "[MCP 空提示]";
   }
 
-  /** MCP content 数组 → 文本；image/audio/video 落盘回传路径（P0-4） */
+  
   private async contentToText(content: unknown[]): Promise<string> {
     const parts: string[] = [];
     for (const item of content) {
@@ -827,7 +827,7 @@ export class MCPServer {
     return parts.length > 0 ? parts.join("\n") : "[MCP 空响应]";
   }
 
-  /** 二进制内容落盘 data/mcp/{server}/，返回绝对路径；超限/写失败返回 null */
+  
   private async saveMedia(data: Buffer, mime: string, kind: string): Promise<string | null> {
     if (data.length > MAX_MEDIA_BYTES) {
       console.warn(`[mcp] ${this.name}: ${kind} 超 ${MAX_MEDIA_BYTES}B，跳过落盘`);
@@ -860,7 +860,7 @@ export class MCPServer {
   }
 }
 
-// ── MCP 客户端管理器 ────────────────────────────────────────
+
 
 type ToolMapEntry = { server: string; kind: "tool" | "resource" | "prompt"; orig: string };
 
@@ -908,12 +908,12 @@ export class MCPClient {
     );
   }
 
-  /** 注入已构造的 MCPServer（测试/宿主组装用；等价 addServer 的注册效果） */
+  
   attachServer(name: string, server: MCPServer): void {
     this.servers.set(name, server);
   }
 
-  /** 并发启动，每 server 独立超时；oauth server 放宽 360s，非 oauth 60s */
+  
   async startAll(): Promise<Record<string, boolean>> {
     const out: Record<string, boolean> = {};
     await Promise.all(
@@ -1010,7 +1010,7 @@ export class MCPClient {
     return server.getPrompt(entry.orig, args);
   }
 
-  // ── 桥接 ─────────────────────────────────────────────
+  
 
   private registerCapabilities(serverName: string, server: MCPServer): void {
     for (const t of server.tools) {
@@ -1062,7 +1062,7 @@ export class MCPClient {
     }
   }
 
-  /** 桥接名去重（P2-4）：已占用则后缀 _2/_3/... */
+  
   private uniqueSlimeName(base: string): string {
     let name = base;
     let i = 2;
@@ -1074,7 +1074,7 @@ export class MCPClient {
     return name;
   }
 
-  /** P2-3：按工具名/默认键解析权限，非法值回退 network */
+  
   private resolveToolPermissions(server: MCPServer, toolName: string): ToolPermission[] {
     const cfg = server.toolPermissions ?? {};
     const raw = cfg[toolName] ?? cfg["default"] ?? ["network"];
@@ -1109,7 +1109,7 @@ export class MCPClient {
     this.unregisterTools(toRemove);
   }
 
-  // ── 通知 / 重连接线（P1-3 / P2-1）──────────────────────
+  
 
   private wireServer(name: string, server: MCPServer): void {
     const transport = server.transportInstance;
@@ -1130,7 +1130,7 @@ export class MCPClient {
     }
   }
 
-  /** list_changed → 重新发现 + 重注册（先摘旧再挂新，P1-3） */
+  
   private async refreshServerTools(name: string): Promise<void> {
     const server = this.servers.get(name);
     if (!server || !server.running) {
@@ -1148,17 +1148,17 @@ export class MCPClient {
     });
   }
 
-  /** 宿主/测试触发：tools/list_changed 通知处理 */
+  
   async handleNotificationForTest(name: string): Promise<void> {
     await this.refreshServerTools(name);
   }
 
-  /** 宿主/测试触发：传输断连 → 摘除工具 + 调度重连 */
+  
   async simulateTransportCloseForTest(name: string): Promise<void> {
     this.scheduleReconnect(name);
   }
 
-  /** 断连后摘除已死工具并调度指数退避重连（P2-1） */
+  
   private scheduleReconnect(name: string): void {
     if (this.reconnectTasks.has(name)) {
       return;
@@ -1176,7 +1176,7 @@ export class MCPClient {
     void task.finally(() => this.reconnectTasks.delete(name));
   }
 
-  /** A-096：重连上限 10 次（退避 1→60s），达上限放弃，/mcp start 手动拉起 */
+  
   private async reconnectLoop(name: string): Promise<void> {
     let backoff = 1_000;
     let attempt = 0;
@@ -1214,7 +1214,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** MCP prompt arguments → JSON Schema（全部 string 类型） */
+
 export function promptArgsToSchema(arguments_: Array<{ name?: string; description?: string; required?: boolean }>): Record<string, unknown> {
   const props: Record<string, unknown> = {};
   const required: string[] = [];
@@ -1231,7 +1231,7 @@ export function promptArgsToSchema(arguments_: Array<{ name?: string; descriptio
   return { type: "object", properties: props, required };
 }
 
-// ── 全局单例 ──────────────────────────────────────────────
+
 
 let client: MCPClient | null = null;
 

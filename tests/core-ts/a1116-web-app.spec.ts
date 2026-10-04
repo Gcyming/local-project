@@ -1,14 +1,14 @@
-/**
- * tests/core-ts/a1116-web-app.spec.ts — 「产出任意本地 web 程序」的守卫（A-1116）。
- *
- * 用户原话：「给我优化 HTTP 功能，能像你一样产出 html 等各式各样的本地 web 程序。」
- *
- * 这条改动把 `http_create_app` 从「6 个固定模板」升级为「模型自己写任意多文件」，于是
- * **模型可控的路径第一次允许写到子目录** —— 顺带开出一个新的风险面，必须锁住：
- *   `files: [{path: "../../config/agents.json"}]` 这种一次手滑就能写出 apps 之外。
- * 收敛原则是**拒绝**而不是「清洗后写入」：清洗会静默改掉模型的意图，而它收到的是「成功」，
- * 于是它以为自己写了一处实际上并不存在的文件（**假成功**，比报错更难查）。
- */
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

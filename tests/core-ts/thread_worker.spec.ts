@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/thread_worker.spec.ts — worker_threads 并行组件测试（真实 node:http 本地 server）。
- * 验证：<DONE> 完成协议 / 轮次耗尽失败 / API 错误 / 停止信号 / 并行双 Worker / 进度流。
- */
+
+
+
+
 import { describe, expect, it, afterAll } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";

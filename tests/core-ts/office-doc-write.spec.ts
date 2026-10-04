@@ -1,33 +1,33 @@
-/**
- * tests/core-ts/office-doc-write.spec.ts — 文档写入口 writeDocument 的行为级测试。
- *
- * 三层断言，缺一不可：
- * 1. **真的是那个格式**：魔数 / 容器部件齐不齐（用 jszip 反解，独立于被测写侧）。
- * 2. **结构自洽**：`[Content_Types].xml` 声明的每个部件都必须真实存在。
- * 3. **写读 round-trip**：写出的文件必须能被本模块的 extractDocumentText 读回来，
- *    文本逐行对得上（只允许空白差异）。写侧的转义与读侧的反转义必须同一套语义。
- */
+
+
+
+
+
+
+
+
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import JSZip from "jszip";
-/* ⚠️ A-1133 收口：ZIP 容器与 Office 抽文本**在仓库里早就各有一份**（`core-ts/src/zip.ts` 与
-   `core-ts/src/doc_text.ts`，后者连 .doc/.xls/.ppt 的 OLE 都能抽，`file_read` 已在用）。
-   本 spec 一律用**那两份**：为测试再养一份实现，等于把「同一事实两个产地」引进门（铁律 11）。 */
+
+
+
 import { listZip, readZipEntry } from "../../core-ts/src/zip.js";
 import { extractDocText, docKindFromExt } from "../../core-ts/src/doc_text.js";
 import { writeDocument } from "../../core-ts/src/office/docWrite.js";
 
-/**
- * round-trip 的判据是「**正文每一行都回来了**」，不是「与某个读器的排版逐字节相等」。
- * 为什么：读侧由仓库既有的 `doc_text.ts` 负责，它会按自己的口径加轻结构
- * （xlsx 加列字母表头、pptx 用 `--- 第 N 页 ---`、docx 去掉 markdown 前缀）。
- * 断言排版等于把测试绑死在**读器的实现细节**上 —— 读器一改口径，写侧明明没错也会红。
- */
-/** xlsx 的 round-trip 判据：**每个单元格的值**都在读回文本里。
- *  为什么不是整行/逐字节：既有读器把表格渲染成「列字母表头 + `A | B` 网格」（带轻结构是它的设计），
- *  TSV 的分隔符与它无关 ⇒ 比排版必然假红。 */
+
+
+
+
+
+
+
+
+
 function expectCellsKept(read: string, body: string): void {
   for (const cell of body.split(/[\t,\n]/).map((c) => c.trim()).filter(Boolean)) {
     expect(read, `单元格在读回文本里丢了：${cell}`).toContain(cell);
@@ -43,18 +43,18 @@ function expectLinesKept(read: string, want: string): void {
   }
 }
 
-/** 用既有 zip.ts 读全部条目（测试只做校验，不重写实现）。 */
+
 function readAll(buf: Buffer): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
   for (const e of listZip(buf)) { const d = readZipEntry(buf, e.name); if (d) { out.set(e.name, d); } }
   return out;
 }
 
-/** 读回写出的文件：包成 {ok,text,error} —— 让断言语义（成功/失败）与写接口对称。 */
+
 async function readBack(p: string): Promise<{ ok: boolean; text: string; error?: string }> {
   try {
     const kind = docKindFromExt(p.slice(p.lastIndexOf(".")));
-    /* 纯文本族（csv/md/txt）：没有"转换"一说，该格式的语义就是直读 utf-8。 */
+    
     if (!kind) { return { ok: true, text: (await readFile(p)).toString("utf8") }; }
     const r = extractDocText(await readFile(p), kind);
     return { ok: true, text: r.text };
@@ -72,11 +72,11 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-/* ⚠️ 原先这里有个 `norm()`（逐行 trim 后比对）—— A-1133 收口后不再需要：
-   round-trip 的判据已改为「行级 / 单元格级包含」（见 `expectLinesKept` / `expectCellsKept`），
-   因为读侧用的是仓库既有的 `doc_text.ts`，它按自己的口径加轻结构。留着会变成 TS6133 死代码。 */
 
-/** [Content_Types].xml 里声明的部件必须真实存在，否则 Office 会报「文件已损坏」。 */
+
+
+
+
 function assertPartsSelfConsistent(buf: Buffer): void {
   const parts = readAll(buf);
   const ct = parts.get("[Content_Types].xml")?.toString("utf8") ?? "";
@@ -113,7 +113,7 @@ describe("writeDocument — docx", () => {
     expect(docXml).toContain('w:val="Heading2"');
     expect(docXml).toContain("<w:numPr>");
 
-    // 独立阅读器（jszip）能打开
+    
     const out = await JSZip.loadAsync(buf);
     expect(out.file("word/document.xml")).not.toBeNull();
 
@@ -193,7 +193,7 @@ describe("writeDocument — pptx", () => {
     if (!res.ok) { throw new Error(res.error); }
     expect(res.text, "既有读器的页标记口径是 `--- 第 N 页 ---`").toContain("--- 第 1 页 ---");
     expect(res.text, "既有读器的页标记口径是 `--- 第 N 页 ---`").toContain("--- 第 2 页 ---");
-    /* 正文行用**行级**判据（不按页拆分：怎么分页属于读器口径，不是写侧契约）。 */
+    
     expectLinesKept(res.text, body);
   });
 });
@@ -220,7 +220,7 @@ describe("writeDocument — pdf", () => {
     const total = Number(blk![1]);
     const entries = blk![2].split("\n").filter((l) => l.length > 0);
     expect(entries.length).toBe(total);
-    // 每条非空闲记录指向的位置，必须真的是「<n> 0 obj」
+    
     for (let i = 1; i < total; i += 1) {
       const off = Number(entries[i].slice(0, 10));
       expect(s.slice(off, off + String(i).length + 6), `对象 ${i} 的 xref 偏移是假的`).toBe(`${i} 0 obj`);
@@ -228,9 +228,9 @@ describe("writeDocument — pdf", () => {
 
     const res = await readBack(p);
     if (!res.ok) { throw new Error(res.error); }
-    /* A-1133：PDF 读取**已补上**（`core-ts/src/pdf_text.ts`）⇒ 这条从"钉住缺口"升级为真 round-trip。
-       之前它钉的是 `docKindFromExt(".pdf") === null`（"读侧没有 PDF 分支"）—— 现在会红，
-       正是当时写下的交接信号。 */
+    
+
+
     expect(docKindFromExt(".pdf"), "PDF 现在必须有读取分支").toBe("pdf");
     expectLinesKept(res.text, body);
   });
@@ -244,7 +244,7 @@ describe("writeDocument — pdf", () => {
     for (const m of s.matchAll(/<< \/Length (\d+) >>\nstream\n/g)) {
       const declared = Number(m[1]);
       const start = m.index + m[0].length;
-      // 声明长度之后必须紧跟 "\nendstream"
+      
       expect(s.slice(start + declared, start + declared + 11)).toBe("\nendstream\n");
       checked += 1;
     }
@@ -261,7 +261,7 @@ describe("writeDocument — pdf", () => {
     expect((s.match(/\/Type \/Page /g) ?? []).length).toBe(2);
     const res = await readBack(p);
     if (!res.ok) { throw new Error(res.error); }
-    /* A-1133：PDF 读取已补上 ⇒ 多页正文也必须逐行读回（旧断言"钉缺口"当时写下的交接信号已兑现）。 */
+    
     expect(docKindFromExt(".pdf")).toBe("pdf");
     expectLinesKept(res.text, body);
   });

@@ -1,9 +1,9 @@
-/**
- * tests/core-ts/executor.spec.ts — Swarm Executor 测试。
- * 对照 core/executor.py 语义：拆解解析（A-058 栈式/A-067 兜底/A-078 时长）/
- * worker 循环 <DONE> 协议（A-047）/ 轮次耗尽标记失败 / A-055 轮次分组并发 / Merger 集成。
- * router 用 fake（tools.spec.ts 同款 cast 模式）。
- */
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { SwarmExecutor, MAX_ROUNDS, TASK_BOUNDARY } from "../../core-ts/src/executor.js";
 import {
@@ -45,7 +45,7 @@ describe("拆解解析", () => {
   });
 
   it("parseSubtasks：行号正则兜底（含截断 JSON 先行）", () => {
-    const reply = '{"rounds": [{"subtasks": [{"desc": "被截断'; // 未闭合 JSON → 兜底
+    const reply = '{"rounds": [{"subtasks": [{"desc": "被截断'; 
     expect(parseSubtasks(reply, 8)).toEqual([]);
     const lines = "思考过程...\n1. 子任务一：收集数据并整理\n2. 子任务二：完成分析报告\n3. 子任务三：输出最终结论";
     const items = parseSubtasks(lines, 8);
@@ -100,10 +100,10 @@ describe("拆解解析", () => {
 
   it("ruleBasedSegments：时间标记拆分 + 无标记字符比例兜底 + 无规则返回空", () => {
     const withMarks = ruleBasedSegments("第 1 段 0-8 秒：开场\n第 2 段 8-16 秒：高潮", 8);
-    expect(withMarks.length).toBe(4); // 16/5=4 段，每段 ≤5 秒
+    expect(withMarks.length).toBe(4); 
     expect(withMarks.every((m) => m.round === 1)).toBe(true);
     const byChar = ruleBasedSegments("生成一个 10 秒的视频，内容如下：" + "剧本".repeat(100), 8);
-    expect(byChar.length).toBe(2); // 10/5
+    expect(byChar.length).toBe(2); 
     expect(byChar[0].desc).toContain("agnes_generate_video");
     expect(ruleBasedSegments("随便", 8)).toEqual([]);
   });
@@ -136,7 +136,7 @@ describe("SwarmExecutor 主流程", () => {
       if (p.includes("整合为完整")) {
         return "这是最终合并总结。" + "任务已全部完成，所有子任务执行成功，结果汇总如下。".repeat(10);
       }
-      if (p.includes("主 Agent")) return ""; // verdict → 模板兜底
+      if (p.includes("主 Agent")) return ""; 
       return '{"rounds": [{"subtasks": [{"desc": "A"}, {"desc": "B"}]}]}';
     };
     const r = await ex.run({ task: "写一份报告", subtasks: ["子任务A", "子任务B"], llmFnOverride: llmFn, maxWorkers: 2 });
@@ -162,7 +162,7 @@ describe("SwarmExecutor 主流程", () => {
     expect(r.agent_snapshots[0].state).toBe("failed");
     expect(r.agent_snapshots[0].error).toContain("未确认完成");
     expect(r.agent_snapshots[0].rounds).toBe(MAX_ROUNDS);
-    expect(r.agent_snapshots[0].result).toContain("还在干"); // 保留最后一轮产出
+    expect(r.agent_snapshots[0].result).toContain("还在干"); 
     expect(r.merge_result!.trial_passed).toBe(false);
   });
 
@@ -237,7 +237,7 @@ describe("SwarmExecutor 主流程", () => {
       subtasks: [],
       llmFnOverride: async (p) => (p.includes("整合为完整") ? "总结" : '{"rounds": []}'),
     });
-    // decompose 三连空 → 规则兜底失败 → 单任务兜底；worker 无 <DONE> → failed（绝不虚报成功）
+    
     expect(r.merge_result).not.toBeNull();
     expect(r.agent_snapshots.length).toBe(1);
     expect(r.agent_snapshots[0].state).toBe("failed");

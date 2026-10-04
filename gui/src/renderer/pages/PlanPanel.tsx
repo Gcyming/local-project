@@ -1,13 +1,13 @@
-/**
- * gui/src/renderer/pages/PlanPanel.tsx — E：Plan 一等对象可视化。
- * - 订阅主进程 slime:plan:update / 快照读取 slime:plan:get
- * - 以卡片组（各会话）展示 Plan 的进度条 + 阶段状态列表
- * - 导出共享的 PlanCardList / usePlanStore，供 StatusPanel「任务进度」卡片复用
- */
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { PlanInfo, PlanStage } from "../../shared/ipc.js";
 
-/** 进度统计（与 core-ts planning/plan.ts planProgress 一致：done+skipped / total） */
+
 export function planProgress(plan: PlanInfo): { done: number; total: number; pct: number } {
   const total = Math.max(1, plan.stages.length);
   const done = plan.stages.filter((s) => s.status === "done" || s.status === "skipped").length;
@@ -31,7 +31,7 @@ function statusColor(status: PlanStage["status"]): string {
   }
 }
 
-/** 单张 Plan 卡片：描述 + 进度条 + 阶段列表（状态勾点 + 标签） */
+
 export function PlanCard({ plan, sessionLabel }: { plan: PlanInfo; sessionLabel?: string }): JSX.Element {
   const p = planProgress(plan);
   const failed = plan.status === "failed";
@@ -52,8 +52,8 @@ export function PlanCard({ plan, sessionLabel }: { plan: PlanInfo; sessionLabel?
       {sessionLabel && (
         <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>会话：{sessionLabel}</div>
       )}
-      {/* A-980-R29：标出来源。`todo` 是「待办任务」清单的**只读镜像**（用于在设置里也能看进度），
-          真 Plan 才是可被 plan_update 推进的一等对象——不标的话用户会分不清这两个东西。 */}
+      {
+}
       {plan.source && (
         <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, opacity: 0.85 }}>
           {plan.source === "todo" ? "来源：待办清单（只读镜像）" : "来源：plan_create（结构化计划）"}
@@ -89,7 +89,7 @@ export function PlanCard({ plan, sessionLabel }: { plan: PlanInfo; sessionLabel?
   );
 }
 
-/** 多会话 Plan 卡片组（StatusPanel「任务进度」与右栏共用） */
+
 export function PlanCardList({ plans }: { plans: PlanInfo[] }): JSX.Element {
   if (plans.length === 0) {
     return (
@@ -107,7 +107,7 @@ export function PlanCardList({ plans }: { plans: PlanInfo[] }): JSX.Element {
   );
 }
 
-/** 共享 store hook：监听所有会话的 Plan 更新（主事件源），挂载即订阅、卸载即注销。 */
+
 export function usePlanStore(): PlanInfo[] {
   const [plans, setPlans] = React.useState<PlanInfo[]>([]);
   React.useEffect(() => {
@@ -115,18 +115,18 @@ export function usePlanStore(): PlanInfo[] {
     if (!w.slimeAPI?.plan?.onUpdate) { return; }
     const off = w.slimeAPI.plan.onUpdate((payload: { sessionId: string; plan: PlanInfo }) => {
       setPlans((prev) => {
-        // A-980-R29：**按会话去重**，不再按 plan.id 入列。
-        // 一个会话可能同时/先后有两条来源的 Plan —— `plan_create` 的真 Plan（随机 id）与
-        // `todo_write` 派生的只读镜像（id = `todo-<sid尾8>`）；原来按 id 判重会让同一会话
-        // 在「任务进度」里冒出两张卡，数字还对不上。
+        
+        
+        
+        
         const key = payload.plan.sessionId ?? payload.sessionId ?? "";
         const at = key
           ? prev.findIndex((pl) => (pl.sessionId ?? "") === key)
           : prev.findIndex((pl) => pl.id === payload.plan.id);
-        // 真 Plan 不被派生镜像顶掉（主进程已拦一层；广播可能乱序，这里再兜一次）
+        
         if (at >= 0 && prev[at]!.source === "plan" && payload.plan.source === "todo") { return prev; }
         const next = at >= 0 ? prev.map((pl, i) => (i === at ? payload.plan : pl)) : [...prev, payload.plan];
-        return next.slice(-8); // 最多保留 8 个近期 Plan（按更新时间降序展示）
+        return next.slice(-8); 
       });
     });
     return off;
@@ -137,7 +137,7 @@ export function usePlanStore(): PlanInfo[] {
   );
 }
 
-/** 完整 Plan 面板（默认导出；右侧栏/状态面板可直接使用） */
+
 export default function PlanPanel(): JSX.Element {
   const plans = usePlanStore();
   return (

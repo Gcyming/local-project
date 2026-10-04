@@ -20,15 +20,15 @@ import asyncio
 from tools.registry import Tool
 
 logger = logging.getLogger(__name__)
-# A-096: 指导正文注入上限 12000 字符（原 2000 会把 ponytail 类 4KB 指导砍半）
+
 _SKILL_BODY_LIMIT = 12000
 
-# 技能默认配置
+
 DEFAULT_SKILL_DIR = Path(__file__).resolve().parent.parent / "config" / "skills"
-MAX_SKILL_DESCRIPTION_LENGTH = 500  # system prompt 中截断长度
+MAX_SKILL_DESCRIPTION_LENGTH = 500  
 
 
-# ── 权限级别映射 ──────────────────────────────────────────
+
 
 PERMISSION_LEVELS = {
     "read": 0,
@@ -38,10 +38,10 @@ PERMISSION_LEVELS = {
     "system": 5,
 }
 
-# 沙箱配置中的权限级别映射
-SANDBOX_APPROVE = {0, 1}  # 自动批准
-SANDBOX_REQUIRE = {2, 3, 4}  # 需确认
-SANDBOX_DENY = {5}  # 强制拒绝
+
+SANDBOX_APPROVE = {0, 1}  
+SANDBOX_REQUIRE = {2, 3, 4}  
+SANDBOX_DENY = {5}  
 
 
 @dataclass
@@ -53,8 +53,8 @@ class SkillManifest:
     author: str = ""
     tags: list[str] = field(default_factory=list)
     permissions: dict[str, bool] = field(default_factory=lambda: {"read": True})
-    args_schema: dict = field(default_factory=dict)  # JSON Schema 格式参数定义
-    trigger_patterns: list[str] = field(default_factory=list)  # 触发关键词
+    args_schema: dict = field(default_factory=dict)  
+    trigger_patterns: list[str] = field(default_factory=list)  
 
     @classmethod
     def from_dict(cls, data: dict) -> "SkillManifest":
@@ -87,9 +87,9 @@ class Skill:
     name: str
     description: str
     manifest: SkillManifest
-    body: str = ""  # SKILL.md 的正文部分（不含 frontmatter）
+    body: str = ""  
     path: Path = field(default_factory=Path)
-    execute_fn: Callable | None = None  # 自定义执行函数（可选）
+    execute_fn: Callable | None = None  
 
     def to_llm_schema(self) -> dict:
         """输出给 LLM 的统一格式"""
@@ -129,7 +129,7 @@ class SkillRegistry:
 
         self._skills.clear()
         loaded = []
-        # N11-P0-3: 拒绝 symlink，防任意目录代码执行
+        
         for skill_dir in sorted(self.skill_dir.iterdir()):
             if skill_dir.is_symlink():
                 logger.warning(f"[skills] 拒绝符号链接: {skill_dir.name}")
@@ -152,7 +152,7 @@ class SkillRegistry:
 
     def _load_single_skill(self, skill_dir: Path) -> Skill | None:
         """加载单个技能目录"""
-        # 1. 加载 manifest.yaml/json（可选增强，A-096：缺失时回退 SKILL.md frontmatter）
+        
         manifest = None
         manifest_path = skill_dir / "manifest.yaml"
         if not manifest_path.exists():
@@ -169,20 +169,20 @@ class SkillRegistry:
                 logger.warning(f"[skills] 加载 {skill_dir.name}/{manifest_path.name} 失败: {e}")
                 manifest = None
         if manifest is None:
-            manifest = SkillManifest(name=skill_dir.name)  # frontmatter 回退兜底
+            manifest = SkillManifest(name=skill_dir.name)  
 
         if not manifest.name:
             manifest.name = skill_dir.name
 
-        # 2. 加载 SKILL.md（唯一硬要求；A-096：frontmatter 回填 manifest——标准 Agent Skills
-        #    技能（仅 SKILL.md frontmatter）零适配直接可用）
+        
+        
         skill_md = skill_dir / "SKILL.md"
         description = manifest.description
         body = ""
         if skill_md.exists():
             try:
                 content = skill_md.read_text(encoding="utf-8")
-                # 解析 frontmatter（YAML 头）
+                
                 fm_match = re.match(r"^---\n(.*?)\n---\n?(.*)$", content, re.DOTALL)
                 if fm_match:
                     body = fm_match.group(2).strip()
@@ -197,7 +197,7 @@ class SkillRegistry:
                                 tags = fm_data["tags"]
                                 manifest.tags = tags if isinstance(tags, list) else str(tags).split(",")
                     except Exception:
-                        pass  # frontmatter 解析失败不影响加载（有正文兜底）
+                        pass  
                 else:
                     body = content.strip()
                 if not description:
@@ -214,9 +214,9 @@ class SkillRegistry:
             path=skill_dir,
         )
 
-        # 3. skill.py 自定义执行函数
-        # N11-P0-2: 禁用 exec_module —— 顶层代码会在权限检查前以全权限执行（RCE）。
-        # 仅允许 SKILL.md 指导模式；自定义执行函数需子进程沙箱隔离后方可重新启用。
+        
+        
+        
         skill_py = skill_dir / "skill.py"
         if skill_py.exists():
             logger.warning(
@@ -228,12 +228,12 @@ class SkillRegistry:
 
     def _extract_description(self, body: str) -> str:
         """从 SKILL.md 正文提取描述"""
-        # 尝试匹配 ## 功能 或 # 后面的第一段
+        
         for pattern in [r"^##\s+功能\s*\n+(.*?)(?=\n##|\Z)", r"^#\s+(.*?)(?=\n\n)"]:
             match = re.search(pattern, body, re.MULTILINE | re.DOTALL)
             if match:
                 desc = match.group(1).strip()
-                # 清理 markdown
+                
                 desc = re.sub(r"\*\*(.*?)\*\*", r"\1", desc)
                 desc = re.sub(r"`(.*?)`", r"\1", desc)
                 return desc[:MAX_SKILL_DESCRIPTION_LENGTH]
@@ -264,14 +264,14 @@ class SkillRegistry:
         if not skill:
             return f"[错误] 技能 '{name}' 未找到"
 
-        # A-038: 权限检查只约束【执行】——无 execute_fn 的指导模式仅返回
-        # SKILL.md 正文（纯读操作），不应被 manifest 的执行权限（write/terminal/network）
-        # 拦截。此前 network 类技能（如媒体生成类技能）的 skill_lookup 恒被
-        # "权限不足"拒绝，模型读不到指导 → 永远走不到真正的工具调用（用户实测）。
+        
+        
+        
+        
         if skill.execute_fn and not self._check_permissions(skill.manifest.permissions):
             return f"[错误] 技能 '{name}' 权限不足（需要写/终端/网络权限）"
 
-        # 执行
+        
         if skill.execute_fn:
             try:
                 result = skill.execute_fn(args)
@@ -282,7 +282,7 @@ class SkillRegistry:
                 logger.error(f"[skills] 技能 '{name}' 执行失败: {e}")
                 return f"[错误] 技能执行失败: {e}"
         else:
-            # 无自定义执行函数，返回 SKILL.md 正文作为指导
+            
             if skill.body:
                 return f"[技能 {name} 指导]\n{skill.body[:_SKILL_BODY_LIMIT]}"
             return f"[技能 {name}] 无执行函数，请查看 SKILL.md 获取指导。"
@@ -292,13 +292,13 @@ class SkillRegistry:
         for perm, required in permissions.items():
             if not required:
                 continue
-            # N11-P2-18: 未知权限默认最高级（fail-closed），而非 0（自动放行）
+            
             level = PERMISSION_LEVELS.get(perm, max(PERMISSION_LEVELS.values()))
             if level in SANDBOX_DENY:
                 return False
             if level in SANDBOX_REQUIRE:
-                # 无显式审批回调 → 拒绝（安全纵深，fail-closed）
-                # 调用方应在传入前设置审批逻辑
+                
+                
                 logger.warning(
                     f"[skills] 技能权限 '{perm}' (L{level}) 需要审批，"
                     f"但未配置审批回调，默认拒绝"
@@ -339,7 +339,7 @@ class SkillRegistry:
         self._loaded = False
 
 
-# ── 全局注册表 ────────────────────────────────────────────
+
 
 _registry: SkillRegistry | None = None
 

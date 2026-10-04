@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1106-loop-fixes.spec.ts — A-1106 第二支线：Agent-Loop 全面检查后修掉的三处。
- *
- * 与 a1106-guards.spec.ts 同一形态：**过 tsc、过构建、过所有既有逻辑测试，只在用户眼里翻车**。
- *
- * ① **压缩触发时机的单位错配**（`countTurns`）
- *    `needsCompress(used, cap, ratio, turnCount)` 的第 4 个参数语义是**轮数**，
- *    调用点却直接传 `historyAll.length`（**消息条数**）。一条用户消息通常带 1 条 assistant
- *    （有工具调用时更多）⇒ 消息数 ≈ 轮数 × 2 以上 ⇒ 最小轮次门槛（6 轮）实际在 2-3 轮就放行，
- *    **压缩触发得比设计早一倍**（用户症状：还没聊几句就开始压缩）。
- *
- * ② **委派规范只有一个产地**（`DELEGATION_GUIDANCE`）
- *    规范文本此前只写在 `ChatService.systemPromptFor` 里，另一条系统提示词产地
- *    `Engine.buildSystem`（定时任务 / 非 ChatService 的引擎路径）**完全拿不到委派引导**
- *    ⇒ 那条路径上的任务 100% 由主 Agent 单干（用户症状：「整个任务全是主Agent一个智能体做」）。
- *    现在收成唯一常量，两条产地共用；措辞也从「先想能不能拆」再平衡为**默认派发**。
- *
- * ③ **RPM 等待「等完了才出声」**（`acquire` 的 onWait）
- *    `acquire` 自己 `await sleep`，调用方在它**返回之后**才上报 ⇒ 用户在整个等待期
- *    （额度用满时可能十几秒到一分钟）看到的是一整段空白，只会以为卡死。
- *    现在 `onWait` 在**每次真正 sleep 之前**回调 ⇒ 真的做到「先上报再睡」。
- *
- * ⚠️ 中文句子里不许夹 ASCII 双引号（一律「」）——否则会把整份 spec 打成 0 用例。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -33,7 +33,7 @@ import { RpmLimiter } from "../../core-ts/src/llm/rpmLimiter.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readSrc = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再断言（注释里会**故意**写出旧写法/新写法的说明，不剥就是假红或假绿） */
+
 const stripComments = (s: string): string => s
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^[ \t]*\/\/.*$/gm, "");
@@ -44,7 +44,7 @@ const MAIN = stripComments(readSrc("gui/src/main/index.ts"));
 const CLIENT = stripComments(readSrc("core-ts/src/llm/client.ts"));
 const CHATPANEL = stripComments(readSrc("gui/src/renderer/pages/ChatPanel.tsx"));
 
-/* ────────────────────────── K 组：轮数口径（单位错配） ────────────────────────── */
+
 
 describe("A-1106 K 组 — 「轮」的唯一口径（堵单位错配）", () => {
   it("K1 一轮 = 一条 user 消息（与 planCut 的 turn 边界同源）", () => {
@@ -67,8 +67,8 @@ describe("A-1106 K 组 — 「轮」的唯一口径（堵单位错配）", () =>
       { role: "user" }, { role: "assistant" },
       { role: "user" }, { role: "assistant" },
     ];
-    expect(history.length).toBe(7);      // 消息条数 → 7 ≥ 6 ⇒ 旧写法直接放行
-    expect(countTurns(history)).toBe(3); // 真实轮数 → 3 < 6 ⇒ 门槛拦住
+    expect(history.length).toBe(7);      
+    expect(countTurns(history)).toBe(3); 
     expect(needsCompress(9000, 10000, 0.85, history.length)).toBe(true);
     expect(needsCompress(9000, 10000, 0.85, countTurns(history))).toBe(false);
   });
@@ -85,13 +85,13 @@ describe("A-1106 K 组 — 「轮」的唯一口径（堵单位错配）", () =>
   });
 });
 
-/* ────────────────────────── L 组：委派规范唯一出处 ────────────────────────── */
+
 
 describe("A-1106 L 组 — 委派规范收成唯一出处，两条产地共用", () => {
   it("L1 规范必须写明「默认派发」与「四类必须自己做」（用户要求：主 Agent 负责规划与主干）", () => {
     expect(DELEGATION_GUIDANCE).toContain("默认派发");
-    // ⚠️ 这一条是被 M42 变异漏出来后补上的（变异逃逸归因②=判据没覆盖，处置是**补样本**而不是删变异）：
-    //    只断言「四类里的两条内容」不够——标题被删掉时职责边界在语义上已经消失，而内容还在。
+    
+    
     expect(DELEGATION_GUIDANCE).toContain("必须自己做的四类");
     expect(DELEGATION_GUIDANCE).toContain("规划与拆解本身");
     expect(DELEGATION_GUIDANCE).toContain("主干上的整合与门禁");
@@ -118,10 +118,10 @@ describe("A-1106 L 组 — 委派规范收成唯一出处，两条产地共用",
   });
 });
 
-/* ────────────────────────── M 组：RPM 先上报再睡 ────────────────────────── */
+
 
 describe("A-1106 M 组 — 限流等待必须「先上报再睡」", () => {
-  /** 记录调用顺序的假时钟（不碰真实时间） */
+  
   const mkLimiter = (rpm: number) => {
     const order: string[] = [];
     let now = 0;
@@ -137,7 +137,7 @@ describe("A-1106 M 组 — 限流等待必须「先上报再睡」", () => {
     const note = (ms: number) => order.push(`wait:${ms}`);
     await lim.acquire("k", "m", note);
     await lim.acquire("k", "m", note);
-    await lim.acquire("k", "m", note);   // 第 3 次：窗口已满 ⇒ 必须等
+    await lim.acquire("k", "m", note);   
     const wi = order.findIndex((s) => s.startsWith("wait:"));
     const si = order.findIndex((s) => s.startsWith("sleep:"));
     expect(wi, "整轮没人等 —— 用例没构造出额度用满的场景").toBeGreaterThanOrEqual(0);
@@ -164,7 +164,7 @@ describe("A-1106 M 组 — 限流等待必须「先上报再睡」", () => {
   });
 });
 
-/* ────────────────────────── N 组：压缩比率的唯一出处 ────────────────────────── */
+
 
 describe("A-1106 N 组 — 压缩比率只有一个出处（渲染层不许再抄一份）", () => {
   it("N1 渲染层引用 core-ts 常量，且不再出现那组字面量（第二产地 = 静默失效）", () => {

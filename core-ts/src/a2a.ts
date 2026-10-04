@@ -1,16 +1,16 @@
-/**
- * core-ts/src/a2a.ts — A2A (Agent-to-Agent) 通信总线 + 委托标记协议。
- * 语义移植自 core/a2a.py：
- * - 内存消息总线：register/send(点对点+broadcast)/drain_all/get_history/get_shared_context
- * - N10-L1：MAX_HISTORY=500、TTL=24h、MAX_CONTENT=100000 截断
- * - 委托协议（N10-S1 平衡标签解析）：<DELEGATE name="..">..</DELEGATE> /
- *   <DELEGATE_RESULT name="..">..</DELEGATE_RESULT> / <BROADCAST>..</BROADCAST>
- * - ServerA2ABus 单例（服务级生命周期）
- * TS 侧无 asyncio.Queue：队列为同步数组（drain_all 取空），send 同步。
- */
+
+
+
+
+
+
+
+
+
+
 
 const MAX_HISTORY = 500;
-const HISTORY_TTL = 86_400_000; // 24h（毫秒）
+const HISTORY_TTL = 86_400_000; 
 const MAX_CONTENT = 100_000;
 
 export type A2AMsgType = "info" | "request" | "response" | "alert" | "done";
@@ -18,7 +18,7 @@ export type A2AMsgType = "info" | "request" | "response" | "alert" | "done";
 export interface A2AMessage {
   id: string;
   from_agent: string;
-  to_agent: string; // "broadcast" = 广播给所有人
+  to_agent: string; 
   content: string;
   msg_type: A2AMsgType;
   timestamp: number;
@@ -56,7 +56,7 @@ export class A2ABus {
     this.queues.delete(agentName);
   }
 
-  /** 发送消息。返回 delivered（至少一个接收方成功投递）。 */
+  
   send(fromAgent: string, toAgent: string, content: string, msgType: A2AMsgType = "info", requestId = "", inReplyTo = ""): { msg: A2AMessage; delivered: boolean } {
     const msg = makeA2AMessage({ from_agent: fromAgent, to_agent: toAgent, content: truncateContent(content), msg_type: msgType, request_id: requestId, in_reply_to: inReplyTo });
     this.history.push(msg);
@@ -84,7 +84,7 @@ export class A2ABus {
     return { msg, delivered };
   }
 
-  /** 一次性取出所有待处理消息（非阻塞） */
+  
   drainAll(agentName: string): A2AMessage[] {
     const q = this.queues.get(agentName);
     if (!q) return [];
@@ -101,7 +101,7 @@ export class A2ABus {
     return [...this.history];
   }
 
-  /** 其他 Agent 进展共享上下文（最近 30 条筛选 → 最近 20 条渲染） */
+  
   getSharedContext(agentName = ""): string {
     if (this.history.length === 0) return "";
     const relevant: string[] = [];
@@ -136,12 +136,12 @@ export class A2ABus {
   }
 }
 
-// ── 委托标记协议 ──────────────────────────────────────────
+
 
 const DELEGATE_OPEN = "<DELEGATE";
 const DELEGATE_CLOSE = "</DELEGATE>";
 
-/** N10-S1：平衡标签解析（嵌套深度计数），返回 [{name, task}] */
+
 export function parseDelegations(reply: string): Array<{ name: string; task: string }> {
   const results: Array<{ name: string; task: string }> = [];
   let pos = 0;
@@ -202,7 +202,7 @@ export function parseBroadcast(reply: string): string | null {
   return m ? m[1].trim() : null;
 }
 
-/** N10-S1：平衡标签移除（不依赖非贪婪正则），返回干净显示文本 */
+
 export function stripDelegationTags(text: string): string {
   let t = text;
   for (;;) {
@@ -270,7 +270,7 @@ export function buildDelegationPrompt(children: Array<{ name: string; role?: str
   return lines.join("\n");
 }
 
-// ── ServerA2ABus（服务级单例）──────────────────────────────
+
 
 export class ServerA2ABus extends A2ABus {
   private static instance: ServerA2ABus | null = null;
@@ -288,13 +288,13 @@ export class ServerA2ABus extends A2ABus {
     ServerA2ABus.instance = this;
   }
 
-  /** 委托任务给子 Agent */
+  
   delegate(fromAgent: string, toAgent: string, task: string): { msgId: string; delivered: boolean } {
     const r = this.send(fromAgent, toAgent, truncateContent(task), "request");
     return { msgId: r.msg.id, delivered: r.delivered };
   }
 
-  /** 子 Agent 回传委托结果 */
+  
   sendResult(fromAgent: string, toAgent: string, result: string, requestId = ""): { msgId: string; delivered: boolean } {
     const r = this.send(fromAgent, toAgent, truncateContent(result), "response", requestId);
     return { msgId: r.msg.id, delivered: r.delivered };

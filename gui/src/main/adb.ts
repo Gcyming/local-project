@@ -1,12 +1,12 @@
-/**
- * gui/src/main/adb.ts — ADB 设备管理核心服务（A-918++）。
- * - 解析 adb 可执行文件路径：环境变量 PATH → 常见安装路径 → 内置下载目录（userData/adb/platform-tools）
- * - detect()：检测 adb 是否就绪（含版本、来源）
- * - downloadPlatformTools()：下载官方便携包（platform-tools）并解压到内置目录（缺失时引导）
- * - devices/connect/disconnect/shell/install/uninstall/screencap/pull/push/reboot：封装 adb 子命令
- * - 安全基线：所有 adb 调用走 child_process.execFile（无 shell 拼接，杜绝注入）；超时 30s（install/screencap 120s）
- * - 严禁引入新依赖，仅用 node 内置（child_process/fs/path/https）+ electron app
- */
+
+
+
+
+
+
+
+
+
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createWriteStream } from "node:fs";
@@ -20,10 +20,10 @@ import { app } from "electron";
 import { request as httpsRequest } from "node:https";
 import { type IncomingMessage } from "node:http";
 
-/** adb 可执行文件检测来源 */
+
 export type AdbSource = "path" | "common" | "bundled" | "missing";
 
-/** detect 结果 */
+
 export interface AdbDetect {
   ok: boolean;
   path?: string;
@@ -32,7 +32,7 @@ export interface AdbDetect {
   error?: string;
 }
 
-/** 设备条目（解析 `adb devices -l`） */
+
 export interface AdbDevice {
   serial: string;
   state: string;
@@ -40,7 +40,7 @@ export interface AdbDevice {
   product?: string;
 }
 
-/** 通用命令结果（stdout/stderr/error 结构化返回） */
+
 export interface AdbCmdResult {
   ok: boolean;
   stdout?: string;
@@ -48,43 +48,43 @@ export interface AdbCmdResult {
   error?: string;
 }
 
-/** 截图结果（PNG base64） */
+
 export interface AdbScreencapResult {
   ok: boolean;
   pngBase64?: string;
   error?: string;
 }
 
-/** 下载进度（转发渲染层，驱动进度条） */
+
 export type AdbDownloadProgress = AdbDownloadProgressInfo;
 
-/** 官方 platform-tools 便携包（按平台区分） */
+
 const PLATFORM_TOOLS_URL: Record<string, string> = {
   win32: "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
   darwin: "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip",
   linux: "https://dl.google.com/android/repository/platform-tools-latest-linux.zip",
 };
 
-/** 命令默认超时（普通命令 30s） */
+
 const TIMEOUT_NORMAL = 30_000;
-/** 安装 / 截图耗时较长（120s） */
+
 const TIMEOUT_LONG = 120_000;
 
 export class AdbService {
-  /** 检测后缓存的 adb 路径（避免每次命令重复探测） */
+  
   private cachedPath: string | null = null;
 
-  /** 内置下载目录（app 用户数据目录下 adb/） */
+  
   private builtinDir(): string {
     try {
       return join(app.getPath("userData"), "adb");
     } catch {
-      // 极早期（app 未就绪）→ 回退到用户主目录，保证 API 可用
+      
       return join(homedir(), ".slime-adb");
     }
   }
 
-  /** 收集候选 adb 路径（按优先级：PATH → 常见安装路径 → 内置目录） */
+  
   private candidatePaths(): string[] {
     const isWin = process.platform === "win32";
     const exeName = isWin ? "adb.exe" : "adb";
@@ -92,9 +92,9 @@ export class AdbService {
     const androidHome = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? "";
 
     const candidates: string[] = [];
-    // 1) PATH（直接以文件名交由 execFile 解析）
+    
     candidates.push(exeName);
-    // 2) 常见安装路径
+    
     if (isWin) {
       candidates.push(join(localAppData, "Android", "Sdk", "platform-tools", "adb.exe"));
       if (androidHome) candidates.push(join(androidHome, "platform-tools", "adb.exe"));
@@ -104,12 +104,12 @@ export class AdbService {
       candidates.push("/usr/lib/android-sdk/platform-tools/adb");
       if (androidHome) candidates.push(join(androidHome, "platform-tools", "adb"));
     }
-    // 3) 内置下载目录
+    
     candidates.push(join(this.builtinDir(), "platform-tools", exeName));
     return candidates;
   }
 
-  /** 试探单个候选路径是否可执行并返回版本 */
+  
   private tryVersion(candidate: string): Promise<{ path: string; version: string } | null> {
     return new Promise((resolveResult) => {
       execFile(candidate, ["version"], { timeout: 8_000, windowsHide: true }, (err, stdout) => {
@@ -122,7 +122,7 @@ export class AdbService {
     });
   }
 
-  /** 解析当前可用 adb 路径（含缓存）；返回 null 表示未就绪 */
+  
   private async resolvePath(): Promise<string | null> {
     if (this.cachedPath && existsSync(this.cachedPath)) {
       return this.cachedPath;
@@ -138,7 +138,7 @@ export class AdbService {
     return null;
   }
 
-  /** 检测 adb 是否就绪 */
+  
   async detect(): Promise<AdbDetect> {
     const candidates = this.candidatePaths();
     for (let i = 0; i < candidates.length; i++) {
@@ -152,7 +152,7 @@ export class AdbService {
     return { ok: false, source: "missing", error: "未检测到 adb，请下载 Android platform-tools" };
   }
 
-  /** https 下载（跟随重定向；onProgress 上报字节进度） */
+  
   private downloadFile(url: string, dest: string, onProgress?: (p: AdbDownloadProgress) => void): Promise<AdbDownloadProgress> {
     return new Promise((resolveResult) => {
       const doRequest = (u: string, redirects: number): void => {
@@ -219,18 +219,18 @@ export class AdbService {
     });
   }
 
-  /**
-   * 解压 zip。
-   *
-   * A-1034：**不再 spawn 外部命令**。此前 Windows 用 `tar`、POSIX 用 `unzip`，
-   * 而"Windows 10+ 内置 tar.exe" **不等于它在 PATH 里** —— 打包后进程 PATH 与开发机不同，
-   * 用户实测报错就是 `spawn tar ENOENT`（红字「解压失败」）。
-   * 现在走 core-ts 的零依赖 zip 模块（node:zlib），平台无关、无外部依赖。
-   *
-   * A-1038：补上**解压期实时进度**。此前只在开解压前推一条 `extracting`、然后一路静默到
-   * `done`，platform-tools 有上百个文件，用户看到的就是"卡住了"。现在把 zip 层的
-   * 逐条目回调压频后转出去（同一个 `onProgress` 通道，state = extracting）。
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
   private async extractZip(zipPath: string, destDir: string, onProgress?: (p: AdbDownloadProgress) => void): Promise<{ ok: boolean; error?: string }> {
     try {
       const buf = await readFile(zipPath);
@@ -262,7 +262,7 @@ export class AdbService {
     }
   }
 
-  /** 下载官方 platform-tools 便携包并解压到内置目录 */
+  
   async downloadPlatformTools(onProgress?: (p: AdbDownloadProgress) => void): Promise<AdbCmdResult & { progress?: AdbDownloadProgress }> {
     const url = PLATFORM_TOOLS_URL[process.platform];
     if (!url) {
@@ -282,9 +282,9 @@ export class AdbService {
       if (!ex.ok) {
         return { ok: false, error: ex.error ?? "解压失败", progress: { state: "error", percent: 0, receivedMB: 0, totalMB: 0, error: ex.error } };
       }
-      // 清理压缩包（解压产物保留）
+      
       await rm(zipPath, { force: true });
-      // 重新探测路径（内置目录现已就绪）
+      
       this.cachedPath = null;
       const detected = await this.detect();
       onProgress?.({ state: "done", percent: 100, receivedMB: dl.receivedMB, totalMB: dl.totalMB });
@@ -298,7 +298,7 @@ export class AdbService {
     }
   }
 
-  /** 统一执行 adb 子命令（无 shell；serial 可选，为空则操作唯一/默认设备） */
+  
   private run(args: string[], opts: { timeout?: number; encoding?: BufferEncoding | null; maxBuffer?: number } = {}): Promise<AdbCmdResult & { buffer?: Buffer }> {
     return new Promise((resolveResult) => {
       void (async () => {
@@ -308,7 +308,7 @@ export class AdbService {
           return;
         }
         const encoding = opts.encoding === null ? null : (opts.encoding ?? "utf8");
-        // 统一把 string | Buffer 输出转成字符串（Buffer 走 utf8）
+        
         const toStr = (x: string | Buffer | undefined): string => (x == null ? "" : (typeof x === "string" ? x : x.toString("utf8")));
         execFile(adbPath, args, {
           timeout: opts.timeout ?? TIMEOUT_NORMAL,
@@ -337,7 +337,7 @@ export class AdbService {
     });
   }
 
-  /** 列出已连接设备（解析 `adb devices -l`） */
+  
   async devices(): Promise<{ ok: boolean; devices?: AdbDevice[]; error?: string }> {
     const r = await this.run(["devices", "-l"], { timeout: TIMEOUT_NORMAL });
     if (!r.ok) { return { ok: false, error: r.error }; }
@@ -361,21 +361,21 @@ export class AdbService {
     return { ok: true, devices };
   }
 
-  /** 无线连接设备（host 形如 192.168.1.10:5555） */
+  
   async connect(host: string): Promise<AdbCmdResult> {
     const h = (host ?? "").trim();
     if (!h) { return { ok: false, error: "连接地址为空" }; }
     return this.run(["connect", h]);
   }
 
-  /** 断开无线连接 */
+  
   async disconnect(host: string): Promise<AdbCmdResult> {
     const h = (host ?? "").trim();
     if (!h) { return { ok: false, error: "断开地址为空" }; }
     return this.run(["disconnect", h]);
   }
 
-  /** 在指定设备执行 shell 命令（cmd 整体作为单参数转发，避免拼接注入） */
+  
   async shell(serial: string, cmd: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
     const c = (cmd ?? "").trim();
@@ -384,22 +384,22 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_NORMAL });
   }
 
-  /**
-   * A-975：导出当前 UI 层级（uiautomator dump）——元素级定位的数据源。
-   * 兼容策略（覆盖 MIUI/部分机型 dump 往 stderr 打警告、但文件仍生成；以及 exec-out 直出两条路）：
-   *   ① dump 到 /sdcard → cat 读回（最稳，不受 tty 混输出影响）；
-   *   ② 回退 exec-out uiautomator dump /dev/tty，从输出里截取 <hierarchy> 段。
-   */
+  
+
+
+
+
+
   async uiDump(serial: string): Promise<{ ok: boolean; xml?: string; error?: string }> {
     const s = (serial ?? "").trim();
     const remote = "/sdcard/slime_ui_dump.xml";
     const withS = (rest: string[]): string[] => (s ? ["-s", s, ...rest] : rest);
-    // ① dump + cat
+    
     const dumped = await this.run(withS(["shell", `uiautomator dump ${remote}`]), { timeout: TIMEOUT_NORMAL });
     const read = await this.run(withS(["shell", `cat ${remote}`]), { timeout: TIMEOUT_NORMAL });
     const xml1 = read.stdout ?? "";
     if (xml1.includes("<hierarchy")) { return { ok: true, xml: xml1 }; }
-    // ② exec-out 回退
+    
     const tty = await this.run(withS(["exec-out", "uiautomator dump /dev/tty"]), { timeout: TIMEOUT_NORMAL });
     const out2 = tty.stdout ?? "";
     const hIdx = out2.indexOf("<hierarchy");
@@ -413,7 +413,7 @@ export class AdbService {
     };
   }
 
-  /** 安装 APK（serial + 本地 apk 路径） */
+  
   async install(serial: string, apkPath: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
     const p = (apkPath ?? "").trim();
@@ -422,7 +422,7 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_LONG });
   }
 
-  /** 卸载应用（serial + 包名） */
+  
   async uninstall(serial: string, pkg: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
     const p = (pkg ?? "").trim();
@@ -431,7 +431,7 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_LONG });
   }
 
-  /** 截图（返回 PNG base64；exec-out 二进制直出，无临时文件） */
+  
   async screencap(serial: string): Promise<AdbScreencapResult> {
     const s = (serial ?? "").trim();
     const args = s ? ["-s", s, "exec-out", "screencap", "-p"] : ["exec-out", "screencap", "-p"];
@@ -441,7 +441,7 @@ export class AdbService {
     return { ok: true, pngBase64: r.buffer.toString("base64") };
   }
 
-  /** 从设备拉取文件到本地 */
+  
   async pull(serial: string, remote: string, local: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
     const r = (remote ?? "").trim();
@@ -451,7 +451,7 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_LONG, maxBuffer: 64 * 1024 * 1024 });
   }
 
-  /** 推送本地文件到设备 */
+  
   async push(serial: string, local: string, remote: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
     const l = (local ?? "").trim();
@@ -461,7 +461,7 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_LONG, maxBuffer: 64 * 1024 * 1024 });
   }
 
-  /** 重启设备（A-978：支持可选 mode，如 recovery / bootloader / sideload / fastboot） */
+  
   async reboot(serial: string, mode?: string): Promise<AdbCmdResult> {
     const s = (serial ?? "").trim();
     const m = (mode ?? "").trim();
@@ -470,7 +470,7 @@ export class AdbService {
     return this.run(args, { timeout: TIMEOUT_NORMAL });
   }
 
-  /** A-918++：启动 ADB 服务（adb start-server）——连模拟器前需服务在跑；返回版本与状态 */
+  
   async startServer(): Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }> {
     const res = await this.run(["start-server"], { timeout: TIMEOUT_NORMAL });
     const v = await this.run(["version"], { timeout: TIMEOUT_NORMAL });
@@ -478,11 +478,11 @@ export class AdbService {
     return { ok: res.ok, version, stdout: res.stdout, stderr: res.stderr, error: res.error };
   }
 
-  /** A-918++：停止 ADB 服务（adb kill-server） */
+  
   async killServer(): Promise<AdbCmdResult> {
     return this.run(["kill-server"], { timeout: TIMEOUT_NORMAL });
   }
 }
 
-/** 模块级单例（main 启动时实例化并注入工具层） */
+
 export const adbService = new AdbService();

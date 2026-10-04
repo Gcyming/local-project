@@ -1,9 +1,9 @@
-/**
- * gui/src/renderer/pages/TraceViewer.tsx — D：全链路可观测可视化（LangSmith/LangGraph 语义）。
- * - 订阅主进程 slime:trace:update / 快照读取 slime:trace:get
- * - 展示最近一次请求的事件轨迹：route → tool_call(→tool_result) → reasoning/reply 采样 → done + eval
- * - 每条 span 带耗时与事件分类徽章；失败请求红标 eval 归因
- */
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { TraceSnapshot, TraceSpan } from "../../shared/ipc.js";
 
@@ -38,7 +38,7 @@ function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-/** 单事件行：分类徽章 + 名称 + 耗时 + 时间；tool 行附参数/结果摘要。 */
+
 function SpanRow({ span }: { span: TraceSpan }): JSX.Element {
   const dur = span.endedAt !== undefined ? span.endedAt - span.startedAt : undefined;
   const data = span.data ?? {};
@@ -80,7 +80,7 @@ function SpanRow({ span }: { span: TraceSpan }): JSX.Element {
   );
 }
 
-/** 单条 trace 渲染体（导出供 F 批次无 DOM 纯渲染测试；hook 数据来源由调用方灌入）。 */
+
 export function TraceBody({ trace }: { trace: TraceSnapshot }): JSX.Element {
   const total = trace.spans.length;
   const doneCount = trace.spans.filter((s) => s.endedAt !== undefined).length;
@@ -104,7 +104,7 @@ export function TraceBody({ trace }: { trace: TraceSnapshot }): JSX.Element {
   );
 }
 
-/** 共享 store hook：监听所有会话 trace 更新（主事件源），保序去重。 */
+
 export function useTraceStore(): TraceSnapshot[] {
   const [traces, setTraces] = React.useState<TraceSnapshot[]>([]);
   React.useEffect(() => {
@@ -114,7 +114,7 @@ export function useTraceStore(): TraceSnapshot[] {
       setTraces((prev) => {
         const idx = prev.findIndex((t) => t.id === payload.trace.id);
         const next = idx >= 0 ? prev.map((t, i) => (i === idx ? payload.trace : t)) : [...prev, payload.trace];
-        return next.slice(-6); // 最多保留 6 条近期链路
+        return next.slice(-6); 
       });
     });
     return off;
@@ -122,7 +122,7 @@ export function useTraceStore(): TraceSnapshot[] {
   return React.useMemo(() => [...traces].sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt)), [traces]);
 }
 
-/** 链路视图面板（默认导出）：按时间倒序列出近期 trace。 */
+
 export default function TraceViewer(): JSX.Element {
   const traces = useTraceStore();
   return (

@@ -68,16 +68,16 @@ def atomic_write_text(path: str | Path, text: str, *, keep_bak: bool = True) -> 
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(f"{target.suffix}.{uuid.uuid4().hex[:8]}.tmp")
 
-    # ① 写临时文件并 fsync —— 内容必须真正落到盘上，而不是停在 OS 缓存里等被丢
+    
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
 
-    # ② 留一份旧的完好内容（新内容万一损坏，还有回退）
-    #    ⚠️ 目标文件可能被硬化为"只可删除、不可覆盖"（加密配置会走 icacls 加固），
-    #    此时 copyfile 直接失败；必须先删再写，否则 .bak 会永远停在最早那一版，
-    #    回退回来的是过期内容（比没有 .bak 更危险——它看起来是"恢复成功"了）。
+    
+    
+    
+    
     if keep_bak and target.exists():
         bak = target.with_suffix(f"{target.suffix}.bak")
         try:
@@ -87,9 +87,9 @@ def atomic_write_text(path: str | Path, text: str, *, keep_bak: bool = True) -> 
                 bak.unlink(missing_ok=True)
                 shutil.copyfile(target, bak)
             except OSError:
-                pass  # 备份失败不阻断主流程
+                pass  
 
-    # ③ 原子替换 + 刷目录（Windows 并发 replace 偶发 PermissionError → 短重试，沿用 A-113）
+    
     try:
         os.replace(tmp, target)
     except PermissionError:
@@ -159,7 +159,7 @@ def read_json_safe(path: str | Path, default: Any = None) -> Any:
                 _mark_corrupt(target)
             continue
         if raw.strip() == "":
-            # 空文件 = 写入被强杀的典型产物，视同损坏
+            
             if i == 0:
                 _mark_corrupt(target)
             continue

@@ -19,7 +19,7 @@ class TestChatStreamEndpoint:
         from core.agent import Agent
         from core.a2a import ServerA2ABus
         from fastapi.testclient import TestClient
-        ServerA2ABus._instance = None  # 无 lifespan → 无总线（端点应安全跳过）
+        ServerA2ABus._instance = None  
         agent = Agent(name="TestSlime", role="测试角色", model_choice="inherit")
         slime_server.agents.append(agent)
         client = TestClient(slime_server.app)
@@ -37,8 +37,8 @@ class TestChatStreamEndpoint:
         stack.enter_context(patch.object(slime_server, "decrypt", return_value={}))
         stack.enter_context(patch.object(slime_server, "history_append", return_value=None))
         stack.enter_context(patch.object(slime_server, "_spawn_background", side_effect=lambda coro: None))
-        # _post_process_chat 是 async 函数：patch.object 默认会造 AsyncMock（调用产生
-        # 无人 await 的协程泄漏）；用 new= 显式同步打桩，杜绝 RuntimeWarning
+        
+        
         stack.enter_context(patch.object(slime_server, "_post_process_chat",
                                          new=lambda *a, **k: None))
         return stack
@@ -60,7 +60,7 @@ class TestChatStreamEndpoint:
             events = [json.loads(l[5:].strip()) for l in lines]
             types = [e["type"] for e in events]
             assert types.count("done") == 1
-            assert types[-1] == "done"  # done 必为收尾事件
+            assert types[-1] == "done"  
             assert "TestSlime" in events[-1]["reply"]
         finally:
             self._cleanup(slime_server, agent)
@@ -111,7 +111,7 @@ class TestChatStreamEndpoint:
                        "prompt_tokens": 1, "completion_tokens": 1, "elapsed_ms": 1}
 
         async def slow_child(a, msg, history, providers, registry, **kw):
-            await asyncio.sleep(0.3)  # 慢委托 → 静默期触发心跳
+            await asyncio.sleep(0.3)  
             return {"reply": "子 Agent 结果"}
 
         try:
@@ -126,8 +126,8 @@ class TestChatStreamEndpoint:
             lines = [l for l in r.text.splitlines() if l.startswith("data:")]
             events = [json.loads(l[5:].strip()) for l in lines]
             types = [e["type"] for e in events]
-            assert "heartbeat" in types   # 委托静默期有心跳
-            assert "tool" in types        # 委托工具事件
+            assert "heartbeat" in types   
+            assert "tool" in types        
             assert types.count("done") == 1
             assert types[-1] == "done"
         finally:
@@ -150,10 +150,10 @@ class TestChatStreamEndpoint:
             assert r.status_code == 200
             body = r.json()
             assert "TestSlime" in body["reply"]
-            assert body["model"] == "silam-brain"  # A-120 SILAM 绝对大脑兜底
+            assert body["model"] == "silam-brain"  
             assert body["elapsed_ms"] >= 0
 
-            # A-120 向后兼容：as_brain 关闭 → 原默认回复 + model="none"
+            
             with self._noop_patches(slime_server), \
                     patch("core.llm._silam_as_brain", return_value=False):
                 r2 = client.post(
@@ -163,7 +163,7 @@ class TestChatStreamEndpoint:
                 )
             assert r2.status_code == 200
             body2 = r2.json()
-            assert body2["model"] == "none"  # 默认回复路径（A-120 关闭开关时）
+            assert body2["model"] == "none"  
             assert "未配置 API Provider" in body2["reply"]
         finally:
             self._cleanup(slime_server, agent)
@@ -241,13 +241,13 @@ class TestForcedToolRound:
             async def fake_stream(agent, user_message, history, providers, agents, **kw):
                 calls["n"] += 1
                 if calls["n"] == 1:
-                    # 第一轮：编造完成（表格形式，无工具）
+                    
                     fake = f"D:{bs}x{bs}fake.mp4"
                     yield {"type": "chunk", "content": "视频已生成！"}
                     yield {"type": "chunk", "content": f"完整路径 `{fake}` 文件大小 1,034,594 字节"}
                     yield {"type": "done", "reply": f"视频已生成！完整路径 `{fake}` 文件大小 1,034,594 字节"}
                 else:
-                    # 强制轮：先报进度，再真实调用工具（A-050-R：进度事件必须透传）
+                    
                     yield {"type": "progress", "name": "视频生成", "progress": 30}
                     yield {"type": "progress", "name": "视频生成", "progress": 100}
                     yield {"type": "tool", "name": "agnes_generate_video", "args": "{}", "result": "本地文件: D:/real.mp4（100 字节）"}
@@ -358,7 +358,7 @@ class TestToolsOnlyFilter:
         out = _filter_tools_schema(schemas, ["agnes_generate_image", "agnes_generate_video"])
         names = [t["function"]["name"] for t in out]
         assert names == ["agnes_generate_image", "agnes_generate_video"]
-        # 其余工具被过滤
+        
         assert "file_write" not in names and "web_search" not in names
 
     def test_filter_none_keeps_all(self):
@@ -436,8 +436,8 @@ class TestProviderValidation:
             saved = enc.call_args[0][0]
             cfg = saved["my-provider"]
             assert cfg["api_base"] == "https://api.example.com/v1"
-            assert cfg["api_key"] == "sk-123"      # 空白剥离
-            assert cfg["max_context"] == 0         # 负数钳制为 0
+            assert cfg["api_key"] == "sk-123"      
+            assert cfg["max_context"] == 0         
             assert cfg["max_output"] == 0
 
 
@@ -510,7 +510,7 @@ class TestSwarmReportEndpoint:
                 assert len(calls) == 1
                 called_results = calls[0]
                 assert called_results[0]["state"] == "done"
-                assert called_results[1]["state"] == "failed"  # 非法状态归一化
+                assert called_results[1]["state"] == "failed"  
         finally:
             self._cleanup(slime_server, agent)
 
@@ -540,7 +540,7 @@ class TestDeleteAgentCleansParentChildren:
                 assert child_id in parent.children
                 r2 = client.delete(f"/agents/{child_id}", headers=auth)
                 assert r2.status_code == 200
-                assert child_id not in parent.children  # A-034 悬空引用已清理
+                assert child_id not in parent.children  
         finally:
             slime_server.agents = [a for a in slime_server.agents if a.id != parent.id]
 
@@ -596,11 +596,11 @@ class TestSkillEvidenceInjection:
         import slime_server as S
         from core.skill_engine import get_registry
         from pathlib import Path
-        # 从**真实技能库**动态取一个能精确命中的技能名。
-        # 原用例写死 `ponytail`，但该技能已不在 config/skills 里（现为 banner-design /
-        # manim-video / webcrawler-deep-crawl 等 10 个）—— 于是这条用例长期变红，
-        # 掩盖了它真正要验证的不变式（**命中时注入平台证据**），且与任何代码改动无关。
-        # 技能库是可编辑的数据目录，用它的内容当夹具必须动态取，不能写死。
+        
+        
+        
+        
+        
         reg = get_registry()
         if not reg.is_loaded:
             reg.load_skills()

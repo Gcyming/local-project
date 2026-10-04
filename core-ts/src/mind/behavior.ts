@@ -1,13 +1,13 @@
-/**
- * core-ts/src/mind/behavior.ts — 行为模式（L2 半固定层）+ 沉淀引擎。
- * 语义移植自 core/behavior.py + core/consolidation.py（逐项对齐）：
- * - BehaviorPattern：场景 → 步骤（习惯/做事方式，含 decision_rationale）
- * - BehaviorStore：沉淀（L3→L2）+ 艾宾浩斯衰减 + 归档（降级到记忆层非删除）+ 再巩固
- * - ConsolidationEngine：每 N 次交互触发沉淀（高频 pattern 强化 + 长期未用弱化/归档）
- * - shadow 预留：分裂/继承时 BehaviorStore.clone() 即行为模式 shadow（夺舍核心：行为属于 Agent，
- *   不随模型切换而丢失；阶段 4.5 Swarm 分裂消费）
- * 序列化格式与 agents.json 的 agent.behavior 字段原样兼容。
- */
+
+
+
+
+
+
+
+
+
+
 
 import { randomUUID } from "node:crypto";
 
@@ -77,7 +77,7 @@ export class BehaviorStore {
     this.patterns = [...patterns];
   }
 
-  /** 强化已有模式或新建模式（初始 confidence 0.3，需多次重复才稳定） */
+  
   reinforce(opts: { scenario: string; steps: string[]; source?: string; rationale?: string }): BehaviorPattern {
     const now = nowIso();
     for (const p of this.patterns) {
@@ -108,7 +108,7 @@ export class BehaviorStore {
     return pattern;
   }
 
-  /** 艾宾浩斯衰减：长期未强化 confidence 下降；confidence < 0.15 → 标记待归档 */
+  
   decay(days = BEHAVIOR_DECAY_DAYS): { weakened: number; archived: BehaviorPattern[] } {
     const now = Date.now();
     let weakened = 0;
@@ -133,7 +133,7 @@ export class BehaviorStore {
     return { weakened, archived };
   }
 
-  /** 从活跃层移除（降级到记忆层，非删除） */
+  
   archive(pattern: BehaviorPattern): void {
     const idx = this.patterns.indexOf(pattern);
     if (idx >= 0) {
@@ -141,7 +141,7 @@ export class BehaviorStore {
     }
   }
 
-  /** 归档条目再巩固回活跃层：起点 max(0.3, 原confidence × 0.5)；scenario 已存在则强化而非新建 */
+  
   reconsolidate(opts: { scenario: string; steps: string[]; archivedConfidence?: number; source?: string; rationale?: string }): BehaviorPattern {
     const now = nowIso();
     for (const p of this.patterns) {
@@ -169,7 +169,7 @@ export class BehaviorStore {
     return pattern;
   }
 
-  /** 生成 L2 行为模式提示（只注入高置信度稳定习惯） */
+  
   toPrompt(maxPatterns = 5): string {
     const stable = this.patterns.filter((p) => p.confidence >= 0.5 && p.steps.length > 0);
     if (stable.length === 0) {
@@ -208,7 +208,7 @@ export class BehaviorStore {
   }
 }
 
-/** 沉淀引擎：L3 高频模式 → L2 行为习惯（量变到质变） */
+
 export class ConsolidationEngine {
   static CONSOLIDATE_INTERVAL = 50;
   static DECAY_DAYS = 30;
@@ -217,12 +217,12 @@ export class ConsolidationEngine {
     return totalInteractions > 0 && totalInteractions % ConsolidationEngine.CONSOLIDATE_INTERVAL === 0;
   }
 
-  /**
-   * 沉淀过程：
-   * 1. 知识引擎高频 pattern → 行为模式（跳过已存在 scenario）
-   * 2. 弱化长期未用的模式（艾宾浩斯）；归档条目交给 archiveSink（调用方写入记忆层）
-   * 返回 (reinforced, decayed)。
-   */
+  
+
+
+
+
+
   consolidate(opts: {
     behavior: BehaviorStore;
     totalInteractions: number;

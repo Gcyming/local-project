@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 class ConsolidationEngine:
     """沉淀引擎：L3 高频模式 → L2 行为习惯。"""
 
-    # 每 N 次交互触发一次沉淀（量变到质变）
+    
     CONSOLIDATE_INTERVAL = 50
-    # 长期未强化（天）则弱化
+    
     DECAY_DAYS = 30
 
     def should_consolidate(self, agent) -> bool:
@@ -32,7 +32,7 @@ class ConsolidationEngine:
         existing_scenarios = existing_scenarios or set()
         reinforced = 0
 
-        # 1. 高频 pattern → 行为模式（知识引擎兜底，仅补 LLM 未覆盖的）
+        
         if knowledge_engine is not None:
             try:
                 for pt in knowledge_engine.get_promotable_traits()[:3]:
@@ -46,10 +46,10 @@ class ConsolidationEngine:
             except Exception as e:
                 logger.debug(f"[consolidation] 知识引擎沉淀失败: {e}")
 
-        # 2. 弱化长期未用的模式
-        # Soul-Plan 第 6 步：decay 返回 (weakened, archived)——归档条目写入记忆
-        # （lessons + tags=["behavior_archive"] + importance=6 + 原 confidence/usage_count），
-        # 从活跃层移除（记忆层只增不删；再巩固起点 max(0.3, 原confidence×0.5)）
+        
+        
+        
+        
         decayed, archived = agent.behavior.decay(days=self.DECAY_DAYS)
         for pat in archived:
             try:

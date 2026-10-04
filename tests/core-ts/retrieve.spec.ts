@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/retrieve.spec.ts — L3 记忆检索客户端 + 注入落真测试。
- * 对照 sidecar /v1/retrieve 响应契约 + core/llm.py _retrieve_psyche_context 注入语义。
- */
+
+
+
+
 import { describe, expect, it, vi } from "vitest";
 import { RetrieveClient, formatMemoryItems, memoryRetrieveHooks, type RetrieveResponse } from "../../core-ts/src/memory/retrieve.js";
 import { EmotionalState } from "../../core-ts/src/mind/emotion.js";
@@ -72,7 +72,7 @@ describe("memoryRetrieveHooks（Session L3 检索注入落真）", () => {
     const captured: unknown[] = [];
     const emotion = new EmotionalState();
     for (let i = 0; i < 8; i++) {
-      emotion.update({ success: true }); // happy → top_k 10
+      emotion.update({ success: true }); 
     }
     const hooks = memoryRetrieveHooks(new RetrieveClient({ baseUrl: "http://x", fetchImpl }), emotion);
     const segs = await hooks.retrieveSegments("a1", "批量文件");

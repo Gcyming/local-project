@@ -1,32 +1,32 @@
-/**
- * tests/core-ts/a1131-session-model.spec.ts — 「同一个 Agent 在不同会话可以用不同模型」的守卫（A-1131）。
- *
- * 用户原话（2026-09-26）：
- *   「同一个 Agent 似乎不能在不同会话使用不同模型，即我之前在一个会话里使用 deepseek 的模型，
- *    然后再在另一个会话的相同 Agent 那里用 agnes 模型，**之前那个会话里面的 agent 模型直接变成
- *    deepseek 模型了**，你优化一下这个问题。」
- *
- * 病根：聊天区的模型下拉写的是 **Agent 记录**（`App.updateAgentConfig({model_choice})`
- * → `slime:agents:update`）⇒ 同一个 Agent 的所有会话共用一个字段，改一处全变。
- * ⇒ 模型选择本来就是**会话级**的事实，落到 `SessionMeta.modelChoice`；
- *    Agent 上的 `model_choice` 退化为「新建会话的初值 / 最近一次选择」。
- *
- * 这个文件锁四件事：
- *   ① 「取哪个模型」的**唯一判据**（纯函数 `effectiveModelChoice`，可行为断言）；
- *   ② 引擎侧**只在解析点收口**（`runAgentFor`）—— 9 处 engine 调用都吃同一个局部 agent，
- *      在调用点各写一遍必然漏（本仓反复踩过"只有一条路径记得改"）；
- *   ③ 三条通路都不得绕过它：正常发送 / 重试 / 压缩判定；
- *   ④ **反例**：不许退回"只写 Agent"（那就是用户报的那个 bug）。
- *
- * 变异：`gui/scripts/mut-a1131-session-model.mjs`
- *
- * ⚠️ 中文串里嵌引用一律 `「」`（ASCII 双引号会当场截断 TS 字符串）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-/* 只调用纯判据：**绝不**去调 setSessionModelChoice（它会写真实的 config/sessions.json） */
+
 import { effectiveModelChoice } from "../../core-ts/src/services/sessions.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -62,8 +62,8 @@ describe("A-1131-A 「取哪个模型」的唯一判据（纯函数）", () => {
   });
 
   it("⚠️ 两个会话各自独立（这就是用户报的那件事）", () => {
-    /* 用户场景：会话 A 用 deepseek、会话 B 用 agnes，同一个 Agent。
-       判据必须给出**各不相同的**结果，且谁都不会影响对方。 */
+    
+
     const agentDefault = "api:deepseek:deepseek-chat";
     const a = effectiveModelChoice("api:deepseek:deepseek-chat", agentDefault);
     const b = effectiveModelChoice("api:agnes:agnes-3.0-flash", agentDefault);
@@ -86,8 +86,8 @@ describe("A-1131-B 引擎侧：只在**解析点**收口（runAgentFor）", () =
     expect(CHAT_C, "chat() 没走收口点").toContain("this.runAgentFor(agentId, req.modelChoice)");
     const uses = CHAT_C.split("this.runAgentFor(agentId, req.modelChoice)").length - 1;
     expect(uses, `runAgentFor 被用了 ${uses} 处，应为 2（chat 与 stream 两条入口）`).toBe(2);
-    /* ⚠️ 反过来锁：`registry.findAgent(agentId)` 只该出现在 runAgentFor 里（外加 analyze 那处，
-       它不参与会话模型）。多出来的一处 = 有人又在调用点各自 findAgent ⇒ 那条路径会绕过覆盖。 */
+    
+
     const direct = CHAT_C.split("this.registry.findAgent(agentId)").length - 1;
     expect(direct, `直接 findAgent(agentId) 有 ${direct} 处，应为 2（runAgentFor 内部 1 处 + analyze 1 处）——` +
       " 多出来的那一处会绕过会话级模型覆盖").toBe(2);
@@ -135,7 +135,7 @@ describe("A-1131-D 渲染层与 IPC 接线（含反例：不许退回「只写 A
       .toContain("selectedSession?.modelChoice");
     expect(APP_C, "切模型没写会话（那就还是「同 Agent 全会话共用」= 原来的 bug）")
       .toContain("apiSetSessionModel(selectedSession.sessionId, v)");
-    /* ⚠️ 两条都要：只写会话 ⇒ 新建会话会继承很久以前的陈旧模型；只写 Agent ⇒ 就是原 bug。 */
+    
     expect(APP_C, "切模型时没把 Agent 上的值更新为「最近选择」⇒ 新建会话会继承陈旧模型")
       .toContain("updateAgentConfig({ model_choice: v })");
   });

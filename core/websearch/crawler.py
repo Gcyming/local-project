@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+
 """Slime Mini Web Search — 爬虫模块（crawler.py）
 
 按 Google 式架构的第一环「抓取」实现，个人级规模：
@@ -27,7 +27,7 @@ from collections import deque
 from html.parser import HTMLParser
 
 USER_AGENT = 'SlimeMiniBot/1.0 (+https://slime.local; personal search engine)'
-MAX_BODY_BYTES = 1_500_000  # 单页最多读取 1.5MB
+MAX_BODY_BYTES = 1_500_000  
 SKIP_EXT = re.compile(
     r'\.(?:jpg|jpeg|png|gif|webp|svg|ico|css|js|mjs|map|json|xml|pdf|zip|gz|tar|'
     r'mp3|mp4|avi|mov|wmv|woff2?|ttf|eot|exe|dmg|iso|7z|rar)(?:[?#].*)?$', re.I)
@@ -145,7 +145,7 @@ class RobotsCache:
             try:
                 rp.read()
             except Exception:
-                rp = None  # 取不到 robots → 宽松放行
+                rp = None  
             self._cache[base] = rp
         if rp is None:
             return True
@@ -211,7 +211,7 @@ def crawl(seeds, db_path, max_pages=200, max_depth=3, delay=1.0,
 
     fetched = 0
     skipped_robots = 0
-    last_hit = {}  # host -> last fetch ts（同主机限速）
+    last_hit = {}  
     t0 = time.time()
 
     while frontier and fetched < max_pages:
@@ -226,14 +226,14 @@ def crawl(seeds, db_path, max_pages=200, max_depth=3, delay=1.0,
             if progress:
                 progress('robots 拒绝: %s' % url)
             continue
-        # 同主机礼貌延迟
+        
         now = time.time()
         wait = delay - (now - last_hit.get(h, 0))
         if wait > 0:
             time.sleep(wait)
         try:
             html, err = fetch(url, timeout)
-        except Exception as e:  # 网络/超时等
+        except Exception as e:  
             html, err = None, str(e)
         last_hit[h] = time.time()
         if err or html is None:
@@ -248,7 +248,7 @@ def crawl(seeds, db_path, max_pages=200, max_depth=3, delay=1.0,
             pass
         text = parser.text
         if len(text) < 20:
-            continue  # 空页/纯脚本页
+            continue  
         save_page(conn, url, parser.title, text)
         fetched += 1
         if fetched % 10 == 0:

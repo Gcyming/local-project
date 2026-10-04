@@ -1,8 +1,8 @@
-/**
- * brainstorm.spec.ts — 群聊头脑风暴引擎（A-943）回归锚点。
- * 覆盖：纯提示词构建（首轮自由发言/后续轮纠错/组长点评/终局收束）、并行轮次执行与共享讨论记录、
- * 空成员/单轮收敛等边界。
- */
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   runBrainstorm,
@@ -14,7 +14,7 @@ import {
   type TranscriptLine,
 } from "../../core-ts/src/services/brainstorm.js";
 
-/** 记录每次发言收到的提示词，便于断言轮次语义注入 */
+
 function speechQueue(name: string, role: string) {
   const prompts: string[] = [];
   const p: BrainstormParticipant = {
@@ -76,13 +76,13 @@ describe("runBrainstorm 执行器（并行轮次 + 共享记录 + 组长收束�
     expect(run.id).toBeTruthy();
     expect(run.maxRounds).toBe(2);
     expect(run.rounds).toHaveLength(2);
-    // 每轮两个成员并行发言；成员收到的提示词各 2 份（第 1、2 轮）
+    
     expect(a.prompts).toHaveLength(2);
     expect(b.prompts).toHaveLength(2);
-    // 首轮成员提示不含其他成员发言；第二轮提示带讨论记录（成员 B 的前轮发言注入）
+    
     expect(a.prompts[0]).not.toContain("B发言");
     expect(a.prompts[1]).toContain("B发言");
-    // 组长：1 次点评 + 1 次终局收束
+    
     expect(leaderPrompts).toHaveLength(2);
     expect(leaderPrompts[0]).toContain("点评");
     expect(leaderPrompts[1]).toContain("终局总结");
@@ -121,12 +121,12 @@ describe("runBrainstorm 执行器（并行轮次 + 共享记录 + 组长收束�
     const b = speechQueue("B", "角色B");
     const run = await runBrainstorm({ members: [a.p, b.p], topic: "议题X", maxRounds: 2 });
     expect(run.rounds).toHaveLength(2);
-    // 无组长：每轮无 leaderReview；summary 为空（收束交给用户）
+    
     expect(run.rounds.every((r) => r.leaderReview === undefined)).toBe(true);
     expect(run.summary).toBe("");
-    // 成员提示的"组长"为「用户」
+    
     expect(a.prompts[0]).toContain("组长为 用户");
-    // 共享记录照常：第二轮成员可见另一人首轮发言
+    
     expect(a.prompts[1]).toContain("B发言");
     expect(run.rounds.every((r) => r.speeches.length === 2)).toBe(true);
   });

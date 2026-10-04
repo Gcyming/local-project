@@ -1,19 +1,19 @@
-/**
- * core-ts/src/thread_worker.ts — worker_threads 并行 Worker（4.5 并行能力组件）。
- * 结构对齐 core/process_worker.py（ProcessWorker 管理器）：
- * - 每个子任务在独立线程中执行（Worker 线程内跑异步循环）
- * - 主线程：start / isAlive / stop / getResult / drainProgress / cleanup / elapsed
- * - 结果/进度经线程消息回传（对齐 multiprocessing.Queue 语义）
- *
- * 语义说明（与 Python 差异）：
- * - 线程内为**纯文本 LLM 轮询**（<DONE> 完成协议 + 轮次上限 + 未确认即失败），
- *   工具调用型子任务应走 executor.ts 协程模式（完整工具轮/沙箱语义）；
- * - eval 模式（vitest 无法加载 .ts worker 文件；eval 线程代码自包含，仅依赖 Node 内置 fetch）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
-/** A-1008：端点拼接的唯一实现（宿主侧解析后把完整 URL 交给线程，见 makeThreadWorkerInput） */
+
 import { joinApiEndpoint } from "./llm/client.js";
 
 export const THREAD_MAX_ROUNDS = 5;
@@ -28,7 +28,7 @@ export interface ThreadWorkerInput {
   apiKey?: string;
   model?: string;
   maxRounds?: number;
-  /** 线程内 429 退避（毫秒；默认 [5000, 15000, 30000]，测试可注入短值） */
+  
   retryBackoffMs?: number[];
   timeoutMs?: number;
 }
@@ -49,7 +49,7 @@ export interface ThreadProgress {
   reply_preview?: string;
 }
 
-// ── 线程内代码（eval 模式，自包含）───────────────────────
+
 
 const RUNTIME = `
 const { parentPort } = require("node:worker_threads");
@@ -171,7 +171,7 @@ main().catch((e) => {
 });
 `;
 
-// ── ThreadWorker 管理器 ───────────────────────────────────
+
 
 export class ThreadWorker {
   private input: ThreadWorkerInput;
@@ -233,7 +233,7 @@ export class ThreadWorker {
     try {
       this.worker.postMessage({ type: "stop" });
     } catch {
-      // 线程可能已退出
+      
     }
     try {
       const deadline = Date.now() + timeoutMs;
@@ -242,12 +242,12 @@ export class ThreadWorker {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }
     } catch {
-      // 轮询等待失败不影响
+      
     }
     try {
       this.worker.terminate();
     } catch {
-      // 已终止
+      
     }
     this.finishedAt = Date.now();
     this.worker = null;
@@ -262,7 +262,7 @@ export class ThreadWorker {
     return out;
   }
 
-  /** 等待完成（killOnTimeout=false 时超时返回 null，用于轮询） */
+  
   async getResult(timeoutMs = 600_000, killOnTimeout = true): Promise<ThreadWorkerOutput | null> {
     if (this.results.length > 0) return this.results[0];
     if (!this.pendingResult) return null;
@@ -285,7 +285,7 @@ export class ThreadWorker {
   }
 }
 
-// ── 便捷工厂 ──────────────────────────────────────────────
+
 
 export function createThreadWorker(input: ThreadWorkerInput): ThreadWorker {
   return new ThreadWorker(input);
@@ -298,10 +298,10 @@ export function makeThreadWorkerInput(partial: Partial<ThreadWorkerInput> & { ap
     subtaskName: partial.subtaskName ?? "Worker",
     subtaskDescription: partial.subtaskDescription,
     systemPrompt: partial.systemPrompt ?? "",
-    // A-1008：**在宿主侧把端点解析完**再交给线程。worker 源码是 `{ eval: true }` 的字符串
-    // （见文件头：vitest 加载不了 .ts worker），没法 import 端点拼接函数 —— 若让线程自己拼，
-    // 就等于同一条规则第二份实现（智谱 `…/paas/v4` 被拼成 `/v4/v1/chat/completions` 的事故
-    // 正是"两处实现"造成的）。线程侧只保留一个幂等判断。
+    
+    
+    
+    
     apiBase: joinApiEndpoint(partial.apiBase, "/v1/chat/completions"),
     apiKey: partial.apiKey,
     model: partial.model,

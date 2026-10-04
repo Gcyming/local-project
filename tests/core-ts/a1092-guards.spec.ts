@@ -1,23 +1,23 @@
-/**
- * tests/core-ts/a1092-guards.spec.ts — A-1092：RPM **手填兜底** + 静默失效守卫。
- *
- * ## 这一轮修/建的东西（都有"下一个人会踩回去、而且全都不报错"的退化形态）
- *
- * ① **任务栏图标异常**（问题 1）：AUMID 与安装版不一致 → 任务栏拿窗口 icon 兜底。
- *    修法（见 gui/src/main/index.ts）：`app.setAppUserModelId(APP_AUMID)` 提前声明身份 +
- *    窗口 `icon` 传 **nativeImage**（多尺寸一次交给系统）而非路径字符串。
- *    ⚠️ 这两个都是"过 tsc、过构建、过所有逻辑测试，只在用户眼里翻车"的静默失效
- *    ⇒ 必须静态锁住源码字面量（下面的 G 组）。
- *
- * ② **手填 RPM 兜底**（问题 4）：`resolveRpm` 从三层扩到**四层**
- *    （实测 > 手填 > 声明 > 未知），并提供 provider 表 → 限流器的接线。
- *    ⚠️ 手填值必须能穿过三处**白名单重建**（`sanitizeModels` / `saveProvider` / `refresh`），
- *    漏一处就是"填了没用"且不报错 ⇒ H 组逐个锁死。
- *
- * ③ **能力表不许塞"看似有、实则口径不同"的假 RPM**（问题 4 的核查结论）：
- *    DeepSeek 只在官方文档公布**并发数**（不是 RPM）、OpenAI/Anthropic/Gemini 按 tier、
- *    国内厂商多是 QPS/并发 —— 写死任何一个都会误伤用户。⇒ I 组用"反向断言"把它锁死。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -36,7 +36,7 @@ import {
 const ROOT = resolve(__dirname, "../..");
 const read = (p: string): string => readFileSync(resolve(ROOT, p), "utf8");
 
-/** 可控时钟（与 a1091 同形态：不碰真实时间） */
+
 function fakeClock(): LimiterClock & { sleeps: number[] } {
   let t = 1_000_000;
   const sleeps: number[] = [];
@@ -47,7 +47,7 @@ function fakeClock(): LimiterClock & { sleeps: number[] } {
   };
 }
 
-/* ───────────────────── A 组：四层取值（实测 > 手填 > 声明 > 未知）───────────────────── */
+
 
 describe("A-1092 A 组 — 四层取值优先级", () => {
   it("A1 实测 > 手填（实测是上游亲口说的，任何人工输入都不该盖过它）", () => {
@@ -80,7 +80,7 @@ describe("A-1092 A 组 — 四层取值优先级", () => {
   });
 
   it("A7 A-1106：入参按 key 传 ⇒ **位置不再承载语义**（填错 key 由 tsc 拒绝，而不是静默按位置错配）", () => {
-    // 同一组值用不同书写顺序给出，结果必须完全一致 —— 锁住「顺序无关」这条不变式。
+    
     const a = resolveRpm({ observed: null, manual: 7, declared: 10 });
     const b = resolveRpm({ declared: 10, observed: null, manual: 7 });
     const c = resolveRpm({ manual: 7, declared: 10, observed: null });
@@ -90,7 +90,7 @@ describe("A-1092 A 组 — 四层取值优先级", () => {
   });
 });
 
-/* ───────────────────── B 组：RpmLimiter 的手填接线 ───────────────────── */
+
 
 describe("A-1092 B 组 — RpmLimiter 接入手填解析器", () => {
   it("B1 setManualRpmOf 注入后，resolve 返回 manual", () => {
@@ -114,7 +114,7 @@ describe("A-1092 B 组 — RpmLimiter 接入手填解析器", () => {
 
   it("B4 手填生效：额度用满后第 N+1 次会等（手填不是写着好看，是真在限流）", async () => {
     const clock = fakeClock();
-    const l = new RpmLimiter({ clock, declaredOf: () => null }); // 声明为未知 → 只能靠手填
+    const l = new RpmLimiter({ clock, declaredOf: () => null }); 
     l.setManualRpmOf(() => 2);
     expect((await l.acquire("k", "m")).waitedMs).toBe(0);
     expect((await l.acquire("k", "m")).waitedMs).toBe(0);
@@ -134,7 +134,7 @@ describe("A-1092 B 组 — RpmLimiter 接入手填解析器", () => {
   });
 });
 
-/* ───────────────────── G 组：任务栏图标（静态源码守卫）───────────────────── */
+
 
 describe("A-1092 G 组 — 任务栏图标：AUMID 提前声明 + nativeImage 窗口图标", () => {
   const mainSrc = (): string => read("gui/src/main/index.ts");
@@ -145,7 +145,7 @@ describe("A-1092 G 组 — 任务栏图标：AUMID 提前声明 + nativeImage �
 
   it("G2 窗口 icon 必须传**解码后的 nativeImage**，不许传路径字符串", () => {
     const src = mainSrc();
-    // 反向断言：旧的 `icon: resolveAppIcon(),`（路径字符串）必须已被替换
+    
     expect(src).not.toMatch(/icon:\s*resolveAppIcon\(\),/);
     expect(src).toMatch(/icon:\s*resolveAppIconImage\(\),/);
   });
@@ -153,7 +153,7 @@ describe("A-1092 G 组 — 任务栏图标：AUMID 提前声明 + nativeImage �
   it("G3 resolveAppIconImage 必须在解码失败时**回落 + 出声**，不许静默空白", () => {
     const src = mainSrc();
     expect(src).toContain("const resolveAppIconImage = (): Electron.NativeImage | undefined =>");
-    // 出声：console.warn 必须出现在该函数体内
+    
     const fn = src.slice(src.indexOf("const resolveAppIconImage"));
     const body = fn.slice(0, fn.indexOf("\n};") + 3);
     expect(body).toContain("console.warn");
@@ -167,7 +167,7 @@ describe("A-1092 G 组 — 任务栏图标：AUMID 提前声明 + nativeImage �
   });
 });
 
-/* ───────────────────── H 组：手填 RPM 必须穿过三处白名单重建（静默丢弃守卫）───────────────────── */
+
 
 describe("A-1092 H 组 — 手填 RPM 的落库链路不许有静默丢弃点", () => {
   it("H1 sanitizeModels（每次读盘都跑的白名单重建）必须透传 rpm", () => {
@@ -179,7 +179,7 @@ describe("A-1092 H 组 — 手填 RPM 的落库链路不许有静默丢弃点", 
 
   it("H2 saveProvider 的整条重写必须显式带上 rpm（它是重建不是 merge）", () => {
     const src = read("gui/src/main/providers.ts");
-    // nextRpm 三态解析 + 写回
+    
     expect(src).toContain("let nextRpm: number | undefined;");
     expect(src).toMatch(/\.\.\.\(nextRpm !== undefined \? \{ rpm: nextRpm \} : \{\}\)/);
   });
@@ -212,7 +212,7 @@ describe("A-1092 H 组 — 手填 RPM 的落库链路不许有静默丢弃点", 
   });
 });
 
-/* ───────────────────── I 组：能力表不许塞"口径不同"的假 RPM（反向断言）───────────────────── */
+
 
 describe("A-1092 I 组 — 能力表里的 rpm 必须是有官方一手来源的「每分钟请求数」", () => {
   it("I1 凡写了 rpm 的厂商，RPM_VERIFIED_AT 必有核实日期（不许看着永远新鲜）", () => {
@@ -225,14 +225,14 @@ describe("A-1092 I 组 — 能力表里的 rpm 必须是有官方一手来源的
   });
 
   it("I2 ⚠️ DeepSeek 必须**没有** rpm —— 官方只公布并发数（2500/500），不是 RPM", () => {
-    // 反向断言：把并发数当 RPM 写进去会高估能力、变相关掉限流（本项目最忌讳的"猜一个数"）
+    
     expect(rpmDeclared("deepseek")).toBeUndefined();
     expect(resolveDeclaredRpm("deepseek-flash")).toBeUndefined();
     expect(resolveDeclaredRpm("deepseek-v4-pro")).toBeUndefined();
   });
 
   it("I3 ⚠️ 按 tier 分层的厂商（openai / claude / gemini 族）不许写死一个固定 rpm", () => {
-    // 写任何一个具体值都会误伤另一档用户（免费档 vs 付费档 vs tier N）
+    
     expect(rpmDeclared("openai")).toBeUndefined();
     expect(rpmDeclared("claude")).toBeUndefined();
   });
@@ -254,7 +254,7 @@ describe("A-1092 I 组 — 能力表里的 rpm 必须是有官方一手来源的
   });
 });
 
-/* ───────────────────── J 组：Agent-Loop 已在限流咽喉之内（架构判据）───────────────────── */
+
 
 describe("A-1092 J 组 — RPM 限流器已经是 Agent-Loop 的必经之路（单点布置，不重复布置）", () => {
   it("J1 Agent-Loop 每轮都走 router.chatStream（工具循环的唯一 LLM 出口）", () => {
@@ -274,13 +274,13 @@ describe("A-1092 J 组 — RPM 限流器已经是 Agent-Loop 的必经之路（�
 
   it("J4 限流的**唯一咽喉**是 fetchWithRetry：发前 acquire、收后 observe", () => {
     const src = read("core-ts/src/llm/client.ts");
-    // ⚠️ A-1106 迁移（2026-09-25）：`acquire` 现在多带一个 `onWait` 回调
-    //（在**每次真正 sleep 之前**上报，否则是「等完了才出声」）。
-    // 原断言的 `acquire(rateLimit.key, rateLimit.model);` 形态随之失效 —— 按纪律**迁移**：
-    // 意图「限流咽喉恰好一处、且是两参调用形态」改为「前缀两参 + 末参是 onWait 回调」。
+    
+    
+    
+    
     expect(src).toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {");
     expect(src).toContain("getSharedRpmLimiter().observe(");
-    // 反向：不许退化成不带 onWait 的两参调用（那就是「等完了才说」）
+    
     expect(src, "等待期界面会重新变成一整段空白").not.toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);");
   });
 

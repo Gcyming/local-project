@@ -1,13 +1,13 @@
-/**
- * core-ts/src/tool_loop.ts — 多轮工具调用循环（BUG-032 语义移植）。
- * 语义移植自 core/llm.py _handle_tool_calls：
- * - 每轮：执行 pending 工具调用（沙箱检查 → 去重 → 回填 tool 消息）→ 再请求模型
- * - MAX_ROUNDS=3 上限（与 core.executor.MAX_ROUNDS 对齐）；耗尽返回轮次摘要（不过滤模型名）
- * - 参数 JSON 解析失败回填错误不执行；请求级去重（同工具同参数只真实执行一次）
- * - 沙箱为插件点：sandboxGateFrom 把 L0-L5 SandboxManager 桥接为 SandboxGate（4.4）
- * - A-968：同轮多工具并发执行（Promise.all）——纯读/检索类工具无依赖可并发
- *   （对齐 Claude Code streaming concurrent execution，多工具场景 2-5× 加速）。
- */
+
+
+
+
+
+
+
+
+
+
 
 import { ModelRouter } from "./router.js";
 import { ChatMessage, ChatRequest } from "shared/schemas";
@@ -15,38 +15,38 @@ import { ToolRegistry } from "./tools/registry.js";
 import { targetFromArgs } from "./tools/hard_rules.js";
 import { SandboxManager } from "./sandbox.js";
 import { OutputFilter, StreamFilter } from "./filter.js";
-// A-1060：中途「引导」（steer）的会话级缓冲 —— 在**轮次边界**被消费，见 injectSteers
+
 import { drainSteers } from "./services/steerBus.js";
-// A-1061⑫：计划收尾核对 —— 本轮不再要工具时问一次"计划收完了吗"，见 planReconcileText
+
 import { planReconcileText } from "./services/todoStore.js";
 import { isAbsolute, join } from "node:path";
 
-/** 文件/路径类工具（沙箱需按路径 + 工作目录校验）；URL 走 SSRF 不在此列 */
+
 function uiIsPathTool(name: string): boolean {
   return /^(file_list|file_read|file_write|code_check)$/.test(name);
 }
 
-/**
- * 会话级工具：存储按 sessionId 隔离（待办列表 / 计划）。
- *
- * ⚠️ sessionId **必须由工具循环注入**，不能让模型自己填：
- * - 模型并不知道真实 sessionId，只能瞎编或留空。留空会长成 `data/todos_.json`，
- *   而主进程与界面读的是 `todos_<sessionId>.json` → 待办面板永远空。
- *   （这正是 A-980-R27 的根因：用户实测"待办任务什么都没出现过"，磁盘上却
- *   躺着一个 `todos_.json`，里面是 Agent 真实规划过的任务。）
- * - 允许模型传值 = 可以跨会话读写别人的待办/计划（越权面）。
- */
+
+
+
+
+
+
+
+
+
+
 const SESSION_SCOPED_TOOLS = new Set(["todo_write", "plan_create", "plan_update"]);
-/**
- * A-1122（③）：会**改动磁盘文件**的工具 ⇒ 注入受信 `_undo_scope`，
- * 让它们把"改前状态"记进改动账本（`file_undo.ts`），回滚时据此认领并还原。
- * 不含 `file_read`/`file_list`（只读，注入就是污染入参）。
- */
+
+
+
+
+
 const UNDO_SCOPED_TOOLS = new Set(["file_write", "file_delete"]);
 
-/** 截断工具结果时保护 [__slime_diff__] 标记（renderer 产物卡 +n/-m 与 diff 详情依赖它；
- *  正文可截断，标记必须完整保留——此前直接 slice(0,1200) 会把长 diff 的 base64 标记砍掉，
- *  产物卡永远不显示变更统计，用户实测"写入和删除的标注呢"的根因）。 */
+
+
+
 function truncateWithDiffTag(raw: string, limit: number): string {
   const m = DIFF_TAG_RE.exec(raw);
   if (!m) { return raw.slice(0, limit); }
@@ -54,61 +54,61 @@ function truncateWithDiffTag(raw: string, limit: number): string {
   return `${without.slice(0, limit)}\n${m[0]}`;
 }
 
-/**
- * 产物变更标记（base64 的 old|new 全文）；展示与入上下文两条截断路径都要保留它。
- *
- * A-1034：**导出**供 `services/chat.ts` 把标记一并写进思考记录 —— 历史回看时
- * 只能从思考记录重建工具节点，若这里各写一份正则，改一处必漂。
- *
- * ⚠️ A-1093：正则本体已上移到 `core-ts/src/diff_marker.ts`（与产地同源）。
- *    这里保留同名导出是为了不动既有消费者与守卫；**新代码请直接 import `diff_marker`**。
- */
+
+
+
+
+
+
+
+
+
 export { DIFF_MARKER_RE as DIFF_TAG_RE } from "./diff_marker.js";
 import { DIFF_MARKER_RE as DIFF_TAG_RE } from "./diff_marker.js";
 
-/** 回传给界面展示的工具结果字符上限（默认值） */
+
 const DISPLAY_LIMIT_DEFAULT = 1200;
 
-/**
- * A-980-R32：**按工具**放宽界面展示上限。
- *
- * `todo_write` 的回执不是普通工具输出，而是 `renderTodos` 渲染的**待办全景清单**
- * （进度头 + 最多 TODO_RENDER_MAX=30 条 `- [x] 内容`）。渲染层要把这份文本解析成
- * 「计划卡 + 逐项完成播报」折进思考历程：
- *  - 按 1200 截断会把长清单的尾部整条剪掉 → 计划卡缺项，用户看到"规划少了后面几条"；
- *  - 更糟的是截断可能落在某条**中间**，解析出的内容残缺 → 下一轮回执对比时该项内容对不上
- *    → 被当成"新任务"又播报一遍（重复刷屏）。
- * 清单本身体积很小（30 项 ≈ 1.5K 字符），放宽不构成上下文/内存压力，故单独给足空间。
- */
+
+
+
+
+
+
+
+
+
+
+
 const DISPLAY_LIMIT_BY_TOOL: Record<string, number> = { todo_write: 8000 };
 
-/** 该工具回传界面时允许的字符数 */
+
 function displayLimitFor(toolName: string): number {
   return DISPLAY_LIMIT_BY_TOOL[toolName] ?? DISPLAY_LIMIT_DEFAULT;
 }
 
-/** A-980-R24：**进入上下文**的工具结果硬上限（字符，≈6K token）。
- *
- *  此前工具结果**全文**进 messages（`messages.push({ role:"tool", … content: clean })`），
- *  只有给界面展示的那一份被截到 1200 字符。但单次工具输出可以极其巨大：
- *  `gui/src/main/adb.ts` 的 maxBuffer 允许 64MB、git 16MB、`file_read` 256KB ——
- *  一条 `adb logcat`、一次大文件 `cat`、一个几万行的 `git diff` 就能把数 MB 文本塞进上下文。
- *  后果是双重的：
- *    ① 该轮请求体积暴涨；工具循环每轮都要**全量重发历史** → 上游直接报「超出上下文/400」→ 任务中断；
- *    ② 主进程与渲染层要序列化/渲染这段巨型字符串 → 内存顶爆、界面卡死。
- *
- *  这里做「头 + 尾 + 明示省略」：头（开头结论/命令回显）与尾（错误栈/最后输出）通常最关键，
- *  中间换成明确提示，并告诉模型**怎么拿剩余内容**（否则它会以为输出就这么点，进而编造结论）。 */
+
+
+
+
+
+
+
+
+
+
+
+
 export const TOOL_RESULT_CONTEXT_MAX = 24_000;
 
-/** 工具结果 → 入上下文的安全形态（保留 diff 标记；超限则头尾保留 + 显式省略说明） */
+
 export function truncateForContext(raw: string, limit: number = TOOL_RESULT_CONTEXT_MAX): string {
   if (typeof raw !== "string" || raw.length <= limit) { return raw; }
   const m = DIFF_TAG_RE.exec(raw);
   const diffTag = m ? m[0] : "";
   const body = diffTag ? raw.replace(diffTag, "") : raw;
   if (body.length <= limit) { return diffTag ? `${body}\n${diffTag}` : body; }
-  // 预留 ~320 字符给省略说明与 diff 标记
+  
   const budget = Math.max(2000, limit - 320 - diffTag.length);
   const headLen = Math.floor(budget * 0.6);
   const tailLen = budget - headLen;
@@ -118,8 +118,8 @@ export function truncateForContext(raw: string, limit: number = TOOL_RESULT_CONT
   return `${body.slice(0, headLen)}${note}${body.slice(-tailLen)}${diffTag ? `\n${diffTag}` : ""}`;
 }
 
-/** 工具循环轮次上限（默认 500；可通过环境变量 SLIME_TOOL_MAX_ROUNDS 覆盖；分析类任务 8-12 轮、研究类 15-20 轮）。
- *  2026-08-29 用户要求：默认调到 500（A-152，此前 40 轮对长链路/多工具集成任务偏紧）。 */
+
+
 export const TOOL_MAX_ROUNDS = (() => {
   const env = typeof process !== "undefined" ? (process.env as Record<string, string | undefined>) : {};
   const n = Number(env.SLIME_TOOL_MAX_ROUNDS);
@@ -131,20 +131,20 @@ export interface SandboxDecision {
   allowed: boolean;
   anomalyDetected?: boolean;
   anomalyAlerts?: string[];
-  /** 拒绝原因（未授权 / 超出工作目录范围等）；tool_loop 透传给模型改进重试 */
+  
   reason?: string;
 }
 
-/** 沙箱检查上下文（触发请求的流所属会话；GUI 据此让渲染层丢弃切会话后旧流请求） */
+
 export interface SandboxCheckContext {
   sessionId?: string;
 }
 
 export interface SandboxGate {
-  /**
-   * 按工具所需权限逐级检查；返回拒绝原因时工具不执行（对齐 manager.check_permission 语义）。
-   * 实现方负责持久化审批结果（GUI：询问用户并写权限持久化；测试：全量放行 / 拒绝）。
-   */
+  
+
+
+
   check(
     agentId: string,
     toolName: string,
@@ -154,9 +154,9 @@ export interface SandboxGate {
   ): Promise<SandboxDecision>;
 }
 
-/** 把 SandboxManager 桥接为 SandboxGate（engine.ts 传入 SandboxManager 时自动转换）。
-   *  走 grantPermission（异步授权 + 审计落库）而非 checkPermission（同步纯决策无审计）——
-   *  与工具循环的审计语义一致（工具执行必须在 audit 留痕）。 */
+
+
+
 export function sandboxGateFrom(manager: SandboxManager): SandboxGate {
   return {
     async check(agentId, toolName, target, level) {
@@ -168,27 +168,27 @@ export function sandboxGateFrom(manager: SandboxManager): SandboxGate {
 
 const PERM_LEVEL: Record<string, number> = { read: 0, write: 2, terminal: 3, network: 4 };
 
-/** token 估算（~0.6×字符数，量级对齐 engine.estimateTokens；本文件不依赖 engine 防循环导入） */
+
 function tokEst(text: unknown): number {
   const s = typeof text === "string" ? text : text == null ? "" : JSON.stringify(text);
   return Math.round(s.length * 0.6);
 }
 
-/** 任务预算状态（run / runStream 各自维护一份，累计跨轮） */
+
 interface BudgetState {
   toolCalls: number;
   tokens: number;
   startMs: number;
 }
 
-/** 预算上限（缺省 undefined = 不限制） */
+
 interface BudgetLimits {
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
 }
 
-/** 任一预算超限返回原因文案；未超限返回 null。 */
+
 function budgetReason(b: BudgetState, limits: BudgetLimits): string | null {
   if (limits.maxToolCalls !== undefined && limits.maxToolCalls > 0 && b.toolCalls >= limits.maxToolCalls) {
     return `工具调用次数已达上限（${limits.maxToolCalls} 次）`;
@@ -202,49 +202,49 @@ function budgetReason(b: BudgetState, limits: BudgetLimits): string | null {
   return null;
 }
 
-/** 工具调用结果记录（RoundLog） */
+
 export interface ToolRoundDetail {
   name: string;
   args: string;
   result: string;
 }
 
-/** 工具循环对外结果 */
+
 export interface ToolLoopResult {
   text: string;
   raw: string;
   rounds: number;
   roundLog: ToolRoundDetail[];
   reasonings: string[];
-  /** A-162/A-164：是否因用户停止/插入指令（signal abort）提前终止——中止后已产出的（子）内容保留在 text */
+  
   interrupted?: boolean;
-  /** 是否因任务预算（工具次数/token/时长）耗尽提前收束——已产出内容保留在 text，末尾附预算提示 */
+  
   budgetExhausted?: boolean;
-  /** 预算耗尽的具体原因（供上层/GUI 展示与审计） */
+  
   budgetReason?: string;
-  /** 跨轮累计的上游 usage（含缓存命中 token，done 事件据此还原缓存命中率） */
+  
   usage?: LoopUsage;
-  /**
-   * A-974-R7：**最近一轮**（最后一次上游请求）的 usage —— 上下文窗口占用的唯一正确数据源。
-   * 工具循环每一轮都会全量重发历史，因此 `usage`（跨轮累计）是**计费口径**（各轮都付费），
-   * 而"当前窗口占用"只能取最后一轮。此前 GUI 用累计值当窗口占用 → N 轮 × 全量历史叠加，
-   * 数值虚高数倍（用户实测：正文输出后上下文环/右栏直接爆到 1.1M，实际窗口仅约 600K）。
-   */
+  
+
+
+
+
+
   lastUsage?: LoopUsage;
 }
 
-/** 跨轮累计的 token 用量（对齐 client.ChatStreamResult["usage"] 形态） */
+
 export interface LoopUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
   reasoning_tokens?: number;
-  /** A-974-R8：该上游 `prompt_tokens` 是否已含缓存命中（OpenAI 兼容=true / Anthropic=false） */
+  
   cache_read_in_prompt?: boolean;
 }
 
-/** 归并一轮用量到累计器（累加数值字段）。 */
+
 function mergeLoopUsage(acc: LoopUsage | undefined, u: LoopUsage | undefined): LoopUsage | undefined {
   if (!u) { return acc; }
   const out: LoopUsage = { ...(acc ?? {}) };
@@ -252,55 +252,55 @@ function mergeLoopUsage(acc: LoopUsage | undefined, u: LoopUsage | undefined): L
     const v = u[k];
     if (typeof v === "number" && Number.isFinite(v)) { out[k] = (out[k] ?? 0) + v; }
   }
-  // A-974-R8：协议语义标记透传（取本轮的；语义不会跨轮变化）
+  
   if (typeof u.cache_read_in_prompt === "boolean") { out.cache_read_in_prompt = u.cache_read_in_prompt; }
   return out;
 }
 
-/** FlatToolCall = 模型返回的未解析 tool_call（arguments 是 JSON string，name 平铺在顶层）。
- *  上游 OpenAI 兼容结构 { id, type, function:{name, arguments} } 经 toFlat() 转换而来。
- *  type 可选：扁平调用本身不消费 type（toContract 固定补 "function"）；测试/调用方
- *  传 { id, name, arguments } 即可（不需要重复声明 type）。 */
+
+
+
+
 export interface FlatToolCall {
   id: string;
-  /** 上游携带的 "function"；扁平调用不强制（toContract 会补全） */
+  
   type?: string;
   name: string;
   arguments: string;
 }
 
-/** 与 OpenAI Contract ToolCall 对齐的格式（tool_calls 入队统一这个结构，功能上函数名嵌套） */
+
 export interface ContractToolCall {
   id: string;
   type: "function";
   function: { name: string; arguments: string };
 }
 
-/**
- * A-1132：**收尾正文的唯一判据**（纯函数）—— 两条工具循环路径（`run` 非流式 / `runStream` 流式）
- * 必须给出**同一个口径**的"这次运行到底交付了什么正文"。
- *
- * 语义：以**收尾阶段**的正文为准（`tailText`）；只有它为空时才回退到跨轮累积（`allText`）。
- *
- * 什么叫"收尾阶段"：**最后一次工具调用之后**的那些轮次（见两个循环里的 `tailText` 累加）。
- *   · 本轮**以工具调用收尾**（`nextCalls.length > 0`）⇒ 这段正文是「说完就去做」的**过程叙述**，
- *     整段丢弃、收尾阶段从头开始（下一轮才是"做完之后说了什么"）。
- *   · 本轮**没有工具调用**（含被 steer / 计划核对**续轮**的情形）⇒ 并入收尾阶段。
- *   于是「多段连续收尾」不会被误伤（用户在正文写到一半插引导 ⇒ 两段都属于最终交付），
- *   而 25 轮的"计划叙述"不会堆进正文。
- *
- * 为什么不是"全过程累加"：
- *   实测那条记录（`config/history.jsonl`）：`ai` = 4546 字 = 25 轮叙述累加（读起来是过程日志），
- *   其中收尾那一轮只有 1471 字的正式汇报；用户原话「正文里面似乎混杂了思考历程里面的内容，
- *   **正文非常长**」。过程叙述**本来就在时间线里**（同一条记录 `timeline` 有 25 个 `body` 步），
- *   不会因为正文收敛而丢。
- *
- * 为什么回退 `allText`：它的原始注释写明了用途 ——「模型在最终轮可能只发工具调用、无任何正文」。
- * 那种收尾下如果直接交付空串，用户会看到**空回复**（比长正文更糟）。
- *
- * ⚠️ 中断 / 预算熔断那两条路径**不走本函数**：那里的语义是"保留已产出的全部内容、不要丢弃"，
- *    与"交付哪一段"是两件事（见 `runStream` 里两处 `allText` 的注释）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function pickFinalBody(tailText: string | undefined, allText: string | undefined): string {
   const r = tailText ?? "";
   return r ? r : (allText ?? "");
@@ -342,44 +342,44 @@ export interface AskUserResponse {
 }
 export type AskUserHook = (req: AskUserRequest) => Promise<AskUserResponse>;
 
-/** 流式工具循环事件（engine.ts 消费：chunk 正文 / reasoning 思考 / tool 工具结果） */
+
 export type ToolLoopEvent =
   | { type: "chunk"; content: string }
   | { type: "reasoning"; content: string }
-  /* A-1061②：工具**开始执行**（在结果回来之前就播）。
-     为什么要它：此前只有下面那条 `tool`（带 result）—— 界面只能**事后**显示"成功/失败"，
-     用户看不到"正在跑"。对齐 Claude Agent SDK 的 content_block_start(tool_use) → 状态指示
-     `[Using Read…]` → content_block_stop 打 `done`；以及 Claude Code 的
-     `• ToolName(params) 2.3s` 形态。`id` 与完成事件的 `id` 配对（同一次调用）。 */
+  
+
+
+
+
   | { type: "tool-start"; id: string; name: string; args: string }
   | {
       type: "tool";
-      /** A-1061②：与 tool-start 配对的调用 id（旧调用方没有它 → 界面退回"直接追加"行为） */
+      
       id?: string;
       name: string;
       args: string;
       result: string;
-      /** 图形控制截图（data URL），供 GUI 缩略图预览；不回灌到模型文本 */
+      
       image?: string;
     }
-  /* A-1060：中途「引导」已被注入本轮上下文。`id` 是渲染层待发卡片的自增 id ——
-     界面据此把那一张卡片撤掉（它已经进运行了，不该再走"排队等下一轮"那条路）。
-     ⚠️ 事件里带 `text` 是为了让界面能把用户气泡**就地补上**（注入发生在主进程，
-     渲染层原本不知道这句话已经进了上下文）。 */
+  
+
+
+
   | { type: "steer"; id: string; text: string };
 
-/* ── 图形控制：截图标记抽取 ──
- * screen_* 工具在结果里附一行 `@@IMG@@data:image/...;base64,...`；
- * 本循环把该行抽出（base64 绝不进文本上下文，否则一次截图就吃掉几 MB token），
- * 然后以 content-blocks 形式作为下一条 user 消息回灌 —— 模型因此能"看见"屏幕。 */
+
+
+
+
 const IMG_MARKER = "@@IMG@@";
-/** 与 engine.sanitizeImages 对齐的上限（本文件不 import engine，避免循环依赖） */
+
 const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_INLINE_IMAGES = 4;
-/** 每轮回灌的最大张数（只给最近 2 张当前画面，控 token） */
+
 const MAX_IMAGES_PER_ROUND = 2;
 
-/** 从工具结果文本中抽出 @@IMG@@ 图像行；返回剥离图像后的文本（保留其余说明） */
+
 function extractImages(text: string, sink: string[]): string {
   if (!text || !text.includes(IMG_MARKER)) { return text; }
   const kept: string[] = [];
@@ -393,7 +393,7 @@ function extractImages(text: string, sink: string[]): string {
       const approx = Math.floor((payload.length * 3) / 4);
       if (payload && approx <= MAX_INLINE_IMAGE_BYTES) { sink.push(url); }
     }
-    // 标记行整体丢弃：图像只走视觉通道，不进文本
+    
   }
   return kept.join("\n");
 }
@@ -409,7 +409,7 @@ export interface ToolLoopStreamOptions {
   sessionId?: string;
   signal?: AbortSignal;
   onEvent?: (ev: ToolLoopEvent) => void;
-  /** 任务预算护栏（三者独立，任一达到即优雅收束；缺省=不限制） */
+  
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
@@ -424,14 +424,14 @@ export interface ToolLoopOptions {
   model?: string;
   tools?: ChatRequest["tools"];
   sessionId?: string;
-  /** 任务预算护栏（三者独立，任一达到即优雅收束；缺省=不限制） */
+  
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
 }
 
-/** 工具循环构造参数（对象形式）。兼容旧的 (router, registry, opts?) 三参调用——旧调用方
- *  三参里没传 sandbox 等价于 { sandbox: undefined }，行为不变。测试/引擎均以对象形式为主。 */
+
+
 export interface ToolLoopInput {
   router: ModelRouter;
   registry: ToolRegistry;
@@ -441,8 +441,8 @@ export interface ToolLoopInput {
   onAskUser?: AskUserHook;
 }
 
-/** 多轮工具循环实现（ChatEngine 真入口）。
- *  对齐 core/llm.py ToolLoop 语义：executePendingTools → chat → loop。 */
+
+
 export class ToolLoop {
   router: ModelRouter;
   registry: ToolRegistry;
@@ -463,14 +463,14 @@ export class ToolLoop {
       onAskUser?: AskUserHook;
     },
   ) {
-    // 对象形式：new ToolLoop({ router, registry, sandbox?, ... })
+    
     if (routerOrOpts instanceof ModelRouter || !("router" in (routerOrOpts as object))) {
-      // 3 参形式：new ToolLoop(router, registry, opts?)
+      
       this.router = routerOrOpts as ModelRouter;
       this.registry = registry as ToolRegistry;
       opts = opts ?? {};
     } else {
-      // 对象形式
+      
       const o = routerOrOpts as ToolLoopInput;
       this.router = o.router;
       this.registry = o.registry;
@@ -481,10 +481,10 @@ export class ToolLoop {
         onAskUser: o.onAskUser,
       };
     }
-    // SandboxManager（checkPermission）与 SandboxGate 结构兼容：4 参实现可赋给 5 参接口，
-    // 返回 PermissionCheckResult 覆盖 SandboxDecision 全字段。直接按 SandboxGate 类型收窄即可。
+    
+    
     this.sandbox = (opts.sandbox as SandboxGate | null | undefined) ?? null;
-    this.networkEnabled = opts.networkEnabled ?? true; // A-918+：联网工具开箱即用（缺省从 false 改为 true），仅 renderer 显式传 false 才 gate
+    this.networkEnabled = opts.networkEnabled ?? true; 
     this.workspace = opts.workspace;
     this.outputFilter = new OutputFilter();
     this.streamFilter = new StreamFilter();
@@ -495,8 +495,8 @@ export class ToolLoop {
     return {};
   }
 
-  /** 执行一轮 pending 工具调用（A-968 并发版）。返回按模型回传顺序排列的 Results。
-   *  onEvent 可选：流式（runStream）透传每条工具的实时 tool 事件；run() 不传（旧行为无事件）。 */
+  
+
   private async executePendingTools(
     messages: ChatMessage[],
     pending: FlatToolCall[],
@@ -507,12 +507,12 @@ export class ToolLoop {
     signal?: AbortSignal,
     onEvent?: (ev: ToolLoopEvent) => void,
   ): Promise<ToolRoundDetail[]> {
-    // A-968：同轮多工具并发执行（Promise.all）——file_read/web_search/code_check 等纯读检索
-    // 工具彼此无依赖（对齐 Claude Code streaming concurrent execution，多工具场景 2-5× 加速）。
-    // abort 在每个工具执行前检查；去重 dedup 为并发共享集，命中重复的工具返回提示串不重复执行。
-    /* A-1061②：**执行前**先逐个播「开始」事件 —— 界面据此立刻显示「执行中…」。
-       同轮并发，所以一起播（它们本来就几乎同时开始）；不与结果事件共用一条通道，
-       否则"还没有结果"与"结果为空"会被混成一件事。 */
+    
+    
+    
+    
+
+
     if (onEvent) {
       for (const tc of pending) {
         onEvent({ type: "tool-start", id: tc.id, name: tc.name, args: tc.arguments ?? "" });
@@ -526,28 +526,28 @@ export class ToolLoop {
         return { tc, msg: await this.runOneTool(tc, agentId, dedup, agentName, sessionId, signal) };
       }),
     );
-    // 按模型回传顺序回填（不按完成先后，避免 tool_call_id 错位）；同时实时通知（思考过程展示）
+    
     const details: ToolRoundDetail[] = [];
-    /** 本轮工具产生的图像（图形控制截图）——抽出后回灌视觉通道 */
+    
     const images: string[] = [];
     for (const { tc, msg } of results) {
       const own: string[] = [];
       const clean = extractImages(msg, own);
       for (const u of own) { if (images.length < MAX_INLINE_IMAGES) { images.push(u); } }
-      // name 一并回传：Gemini 等原生端点按函数名匹配 functionCall↔functionResponse，而非 OpenAI 的 call_id
-      // A-980-R24：**入上下文前必须截断**（展示用的 1200 截断管不到这里）。
-      // 几 MB 的工具输出原样进 messages → 工具循环每轮全量重发 → 上游超长报错、主进程内存爆掉。
+      
+      
+      
       messages.push({ role: "tool", tool_call_id: tc.id, name: tc.name, content: truncateForContext(clean) });
-      // A-980-R32：展示用上限按工具取（todo_write 放宽，见 DISPLAY_LIMIT_BY_TOOL）
+      
       const displayLimit = displayLimitFor(tc.name);
       details.push({ name: tc.name, args: (() => { try { return JSON.stringify(JSON.parse(tc.arguments || "{}")); } catch { return tc.arguments ?? ""; } })(), result: truncateWithDiffTag(clean, displayLimit) });
       if (onEvent) {
-        // A-1061②：带上 id —— 界面靠它与 tool-start 配对，把那一行从「执行中」翻成「成功/失败」
+        
         onEvent({ type: "tool", id: tc.id, name: tc.name, args: tc.arguments ?? "", result: truncateWithDiffTag(clean, displayLimit), ...(own.length > 0 ? { image: own[own.length - 1] } : {}) });
       }
     }
-    // 截图回灌：作为下一条 user 消息的 content-blocks（模型因此能看见屏幕画面）。
-    // 若工具未把图像挂到事件上（如 screen_capture 返回后又经 screen_action 复截），此处补一条汇总事件供 GUI 预览。
+    
+    
     if (images.length > 0) {
       const use = images.slice(-MAX_IMAGES_PER_ROUND);
       const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
@@ -559,17 +559,17 @@ export class ToolLoop {
     return details;
   }
 
-  /**
-   * A-1060：在**轮次边界**消费中途「引导」（steer）—— 一轮工具执行完、下一次模型请求之前。
-   *
-   * 为什么正好落在这个位置：Cursor 的 changelog 写的是「follow-ups wait for the **next tool call**
-   * instead of cutting the agent off mid-action」，Claude Code 的排队消息也落在"轮次边界"。
-   * 放这里既保住"不打断当前步"，又让引导**在本轮内**被模型看到（不必等整个任务收尾）。
-   *
-   * ⚠️ 缓冲为空时（没有任何调用方 push 过）本函数是**纯空转**：不 push 消息、不发事件
-   *    → 对既有全部调用路径**零行为变化**（这是本次改动的安全边界）。
-   * ⚠️ 无 sessionId（部分调用方确实不传）→ 直接返回：没有会话就没有"中途"可言。
-   */
+  
+
+
+
+
+
+
+
+
+
+
   private injectSteers(
     sessionId: string | undefined,
     messages: ChatMessage[],
@@ -578,12 +578,12 @@ export class ToolLoop {
     const items = drainSteers(sessionId);
     if (items.length === 0) { return 0; }
     for (const it of items) {
-      /* A-1061⑩：**不能只塞原文** —— 用户原话：「要把内容直接输入，插进 Agent-Loop 循环，
-         让 Agent 先响应一下、了解用户需求，Agent-Loop 内部重新编排一下流程，
-         将用户插入的请求列入任务，在这轮会话解决」。
-         只塞原文时模型多半顺着原计划跑，插进来的请求就"看不见"了。
-         所以这里给一段**编排指令**，明确三步：先响应 → 调 todo_write 列入任务清单 → 再继续原任务。
-         ⚠️ 事件里带的仍是**原文**（界面折进思考历程的是用户说的话，不是这段元指令）。 */
+      
+
+
+
+
+
       messages.push({
         role: "user",
         content: [
@@ -591,12 +591,12 @@ export class ToolLoop {
           "",
           "用户在你运行期间插入了下面的请求。按这个顺序处理，**不要丢掉原有任务**：",
           "1. 先用一两句话向用户确认你理解了这条请求要什么（这是本环节的「模型响应」）；",
-          /* A-1064：用户原话「我的中间引导不要影响待办任务的执行啊，可以重组、加入我插入的引导请求」。
-             ⚠️ 这里**必须钉死 action="add"**。`todo_write` 的 add 是**按 id 合并**（未提及的项自动保留），
-             而 replace 是**整表重写**（只保留本次 items）—— 模型在"把它列入任务清单"这句话下
-             顺手用 replace 只带上新请求，就会把用户已有的整张计划**整体抹掉**。
-             用户实测症状正是"插了引导之后待办就乱了/没了"。允许重组（合法需求），
-             但重组必须带上完整清单 —— 把这条代价写在指令里，比事后补救有效。 */
+          
+
+
+
+
+
           "2. 调用 todo_write 把它列入当前任务清单：**默认用 action=\"add\"**（按 id 合并，未提及的项自动保留，"
             + "已完成项保持 completed）。只有你确实要**整体重组**计划时才用 action=\"replace\"，"
             + "且那时**必须把完整清单（含所有已完成项）一并带上** —— 只带新增项就 replace 等于把用户的计划抹掉。",
@@ -611,45 +611,45 @@ export class ToolLoop {
     return items.length;
   }
 
-  /**
-   * A-1061⑫：**计划收尾核对**（本轮运行最多一次）。
-   *
-   * 用户实测：「每次一项大任务做完，都有一些任务列表的任务没有划掉，没有实时监测进度并返回结果」。
-   * 只靠提示词反复要求"收尾前回写 todo_write"是不够的 —— 那是建议，模型在长任务末尾会忘。
-   * 所以在**循环层面**补一次硬核对：本轮已经不再要工具、准备返回最终答复时，若该会话的计划里
-   * 还有未完成项，就把当前正文留成 assistant 消息、再注一条核对要求，**续一轮**让模型二选一
-   * （收尾回写 / 明确交代为何留待下一轮）。
-   *
-   * ⚠️ 四条纪律（前三条与续轮注入引导同源，少一条就出错）：
-   *   ① `pending` 已在本分支清空，这里不重复动它 —— 否则会把上一批工具再跑一遍；
-   *   ② 本轮正文必须先作为 assistant 消息落进上下文（否则模型不知道"自己刚说了什么"）；
-   *   ③ **一次运行只核对一次**（调用方传 `!reconciled`）—— 否则模型选择"留待下一轮"时会被无限追问；
-   *   ④ **只在本次运行碰过计划时核对**（调用方传 `usedTodoWrite`）—— 否则会话里一条历史
-   *      未完成项会让之后每一轮简单问答都被追问一次。
-   *   轮次上限 `TOOL_MAX_ROUNDS` 仍是最终兜底。
-   *
-   * @param mayReconcile 准入条件（由调用方计算：`!reconciled && usedTodoWrite`）。
-   *   注意**是正向语义** —— 传 false 才是"不核对"，别写成反向（⑫ 的实现里曾把它命名成
-   *   `alreadyDone`，读起来是反的，属于"判据写反"的高危形状，已改名）。
-   * @returns true = 已续轮（调用方 `continue`），false = 按原样收尾（零行为变化）。
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   private reconcilePlan(
     sessionId: string | undefined,
     messages: ChatMessage[],
     roundText: string,
     mayReconcile: boolean,
   ): boolean {
-    if (!mayReconcile) { return false; }                             // ③④ 不打扰
-    if (!sessionId) { return false; }                                // 无会话 → 没有待办可言
+    if (!mayReconcile) { return false; }                             
+    if (!sessionId) { return false; }                                
     const ask = planReconcileText(sessionId);
-    if (!ask) { return false; }                                      // ② 收完了 / 读不到 → 正常收尾
-    if (roundText) { messages.push({ role: "assistant", content: roundText }); } // ②
+    if (!ask) { return false; }                                      
+    if (roundText) { messages.push({ role: "assistant", content: roundText }); } 
     messages.push({ role: "user", content: ask });
     return true;
   }
 
-  /** 单个工具执行（并发安全）：解析参数 → 去重 → 工作目录锚定 → 联网开关 → ask_user/沙箱 → callTool。
-   *  与旧串行版语义一致：解析失败/去重/联网禁用/沙箱拒绝均返回提示文本（供模型感知调整）。 */
+  
+
   private async runOneTool(
     tc: FlatToolCall,
     agentId: string,
@@ -675,62 +675,62 @@ export class ToolLoop {
       return "[提示] 相同参数的该工具已在本请求中执行过（结果见上方工具记录），不再重复执行";
     }
 
-    // 注入 Agent 工作目录上下文（file_* / code_check 据此锚定项目根 ∪ 工作目录）
+    
     if (this.workspace && !("_workspace" in args)) {
       args._workspace = this.workspace;
     }
-    // 安全：清除模型可能注入的 _sandbox_allowed——该豁免只能由本循环在沙箱审批通过后置位，
-    // 防止模型通过工具参数自授权绕过路径限制（无沙箱的调用路径不会拿到豁免）。
+    
+    
     delete args._sandbox_allowed;
 
-    // 注入当前 Agent 标识：仅 memory_* 工具需要（据此定位该 Agent 的记忆存储）；
-    // 覆盖模型可能伪造的 _agent_id，防止跨 Agent 读写记忆。其余工具不注入，避免污染入参。
+    
+    
     if (tc.name === "memory_insert" || tc.name === "memory_search" || tc.name === "memory_forget") {
       delete args._agent_id;
       args._agent_id = agentId;
     }
-    // 断链 C 修复：把父请求的联网开关透传给 delegate_subagent（子代理据此继承主 Agent 策略）。
-    // 先 delete 覆盖模型可能伪造的同名参数——防止用户关掉联网时模型私自把子代理联网打开。
+    
+    
     if (tc.name === "delegate_subagent") {
       delete args._network_enabled;
       args._network_enabled = this.networkEnabled;
     }
-    // A-1106：把本轮的 AbortSignal 透传给子代理工具 —— 前台委派默认 `await` 到子代理终态
-    // （等待上限 960s），此前那条 await **没有任何中断通路**，于是用户点「停止生成」后
-    // 工具仍会等满全程，表现为「停止按钮没反应」。
-    // 与上面 `_network_enabled` 同一条纪律：`_signal` 是**受信注入**，只能来自本循环持有的
-    // 那个 signal —— 先 delete 覆盖模型伪造的同名参数（普通 JSON 参数里不可能有真 AbortSignal）。
+    
+    
+    
+    
+    
     if (tc.name === "delegate_subagent" || tc.name === "subagent_result") {
       delete args._signal;
       if (signal) { args._signal = signal; }
     }
 
-    // 注入受信 sessionId：会话级工具（待办 / 计划）据此定位本会话的存储文件。
-    // ⚠️ 先 delete 再写，覆盖模型可能伪造的同名参数（防跨会话越权）。
-    // 无 sessionId（CLI/测试环境）时不注入，让工具自己如实报错，而不是静默写进空名文件。
+    
+    
+    
     if (SESSION_SCOPED_TOOLS.has(tc.name) && sessionId) {
       delete args.sessionId;
       args.sessionId = sessionId;
     }
 
-    // A-1122（③）：注入受信归属，供 `file_write`/`file_delete` 把改动记进回滚账本。
-    // 与 `_agent_id` 同一条纪律：**先 delete 再写**。`_undo_scope` 是对象，模型完全可以在
-    // JSON 参数里伪造一个"别的会话"的 scope ⇒ 把改动记到别人头上，回滚时自己的改动认不出来。
-    // 无 sessionId（CLI/测试）时写空串：`undoScopeOf` 仍认（记成"本 Agent、无会话"）。
+    
+    
+    
+    
     if (UNDO_SCOPED_TOOLS.has(tc.name)) {
       delete args._undo_scope;
       args._undo_scope = { agentId, sessionId: sessionId ?? "" };
     }
 
-    // 联网搜索开关：web_search / web_fetch 在未启用时被静默拒绝（模型侧无法绕过）
+    
     if (!this.networkEnabled && (tc.name === "web_search" || tc.name === "web_fetch")) {
       return `[联网搜索已禁用] 工具 '${tc.name}' 被拒绝：请在 GUI 输入栏右侧打开「联网搜索」开关后重试。`;
     }
 
     const tool = this.registry.get(tc.name);
     if (tc.name === "ask_user" && this.onAskUser) {
-      // ask_user 工具：模型向用户提问（方向分歧 / 关键决策）→ 走 onAskUser 钩子
-      // （GUI 输入框选择题 UI）；无钩子/无 UI 环境（CLI/测试）回退工具内置提示，不编造用户回答。
+      
+      
       const question = String(args.question ?? "").trim();
       const options = Array.isArray(args.options)
         ? args.options.filter((o): o is string => typeof o === "string").slice(0, 6)
@@ -745,10 +745,10 @@ export class ToolLoop {
       if (!question) {
         return "[错误] ask_user 缺少 question 参数";
       } else {
-        // A-9xx：契约只携带有效字段——header/consequences/recommendation/sessionId 无真实值时
-        // 直接省略（对齐 Anthropic AskUserQuestion 的 label/description 可选、Codex
-        // request_user_input 的 recommendation 独立可选语义；不给 UI 塞 undefined/空串占位）。
-        // consequences 全为空串（模型未给选项后果）时同样省略，UI 端 consequences?.[i] 已兼容缺省。
+        
+        
+        
+        
         const answer = await this.onAskUser({
           agentId, agentName: agentName || undefined, question, options,
           ...(header ? { header } : {}),
@@ -766,10 +766,10 @@ export class ToolLoop {
     }
 
     if (tool && this.sandbox) {
-      // 目标取值口径与闸门/分类器共用同一实现（含终端类的 command/cmd 字段）——
-      // 详见 core-ts/src/tools/hard_rules.ts:targetFromArgs 的说明。
+      
+      
       let target = targetFromArgs(args);
-      // 相对路径 + 配置工作目录 → 锚定工作目录转绝对，避免沙箱以进程 CWD 为基准误判超范围
+      
       if (this.workspace && uiIsPathTool(tc.name) && target && !isAbsolute(target)) {
         target = join(this.workspace, target);
       }
@@ -797,8 +797,8 @@ export class ToolLoop {
           : "该操作需要用户确认授权；若被拒绝请向用户说明并尝试其他方案。";
         return `[沙箱拒绝] 工具 '${tc.name}' 未获授权（${denyReason ?? "权限不足"}）${hint}`;
       }
-      // 沙箱已放行（含用户批准的工作目录外操作）→ 通知工具层跳过外部路径硬拒；
-      // 敏感文件/黑名单/符号链接防护仍在工具内部强制，不随豁免降级。
+      
+      
       args._sandbox_allowed = true;
       const r = await this.registry.callTool(tc.name, args);
       if (!String(r).startsWith("[沙箱拒绝]")) { dedup.add(dedupKey); }
@@ -810,27 +810,27 @@ export class ToolLoop {
     return r;
   }
 
-  /**
-   * 多轮工具循环：执行工具 → 请求 → 模型继续要工具则再轮（上限 TOOL_MAX_ROUNDS）。
-   * 返回 { text, raw, rounds, roundLog }；text 为对外安全文本（raw 供存储/学习）。
-   */
+  
+
+
+
   async run(opts: ToolLoopOptions): Promise<ToolLoopResult> {
     const dedup = new Set<string>();
     let pending = opts.initialToolCalls;
-    /** A-1061⑫：计划收尾核对是否已做过（一次运行最多一次，杜绝无限追问） */
+    
     let reconciled = false;
-    /** A-1061⑫：本轮运行是否真的碰过计划（调过 todo_write）—— 收尾核对的准入条件。
-     *  不加这条的话，一次会话里只要盘上留着历史未完成项，**之后每一轮简单问答**
-     *  （"你好"也算）都会在收尾时被强行续一轮追问"计划收完了吗"：噪声、浪费 token、
-     *  还会把不相关的旧计划重新拉回上下文。只在"这份计划是本次任务建的"时才核对。 */
+    
+
+
+
     let usedTodoWrite = false;
     const roundLog: Array<{ round: number; details: ToolRoundDetail[] }> = [];
     const reasonings: string[] = [];
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
-    /** 接近上限时注入提醒，促使模型收束而非硬熔断 */
+    
     const warnAt = Math.max(1, TOOL_MAX_ROUNDS - 3);
-    /** 任务预算（#4 护栏）：跨轮累计；allText 承载预算耗尽时保留的已产出正文 */
+    
     const limits: BudgetLimits = { maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs };
     const budget: BudgetState = {
       toolCalls: 0,
@@ -838,12 +838,12 @@ export class ToolLoop {
       startMs: Date.now(),
     };
     let allText = "";
-    /* A-1132：**收尾阶段**的正文（最后一次工具调用之后的所有 content）—— 交付口径，见 `pickFinalBody`。
-       ⚠️ 与 `allText`（全过程累加）刻意分开：前者回答"交付哪一段"，后者回答"保底别丢内容"。 */
+    
+
     let tailText = "";
-    /** 跨轮累计上游 usage（缓存命中 token 透传） */
+    
     let usageAcc: LoopUsage | undefined;
-    /** A-974-R7：最近一轮 usage（窗口占用数据源，见 ToolLoopResult.lastUsage） */
+    
     let lastUsage: LoopUsage | undefined;
 
     for (let round = 1; round <= TOOL_MAX_ROUNDS; round++) {
@@ -853,7 +853,7 @@ export class ToolLoop {
       budget.toolCalls += details.length;
       budget.tokens += details.reduce((s, d) => s + tokEst(d.result), 0);
 
-      // 预算护栏：第 2 轮起，在发起下一批模型请求前熔断（保留已产出内容，末尾附提示）
+      
       if (round > 1) {
         const reason = budgetReason(budget, limits);
         if (reason) {
@@ -863,7 +863,7 @@ export class ToolLoop {
         }
       }
 
-      // 最后三轮：提示模型收敛
+      
       if (round >= warnAt && round < TOOL_MAX_ROUNDS) {
         opts.messages.push({
           role: "system" as const,
@@ -871,8 +871,8 @@ export class ToolLoop {
         });
       }
 
-      // A-1060：非流式路径同样在轮次边界消费「引导」（语义与 runStream 一致：
-      // 工具执行完 → 下一次模型请求前注入）。此处没有 onEvent，故只注入消息、不广播事件。
+      
+      
       this.injectSteers(opts.sessionId, opts.messages);
 
       const payload: ChatRequest = {
@@ -884,10 +884,10 @@ export class ToolLoop {
       Object.assign(payload, reasoningParams);
       const resp = await this.router.chat(payload);
       usageAcc = mergeLoopUsage(usageAcc, resp.response.usage as LoopUsage | undefined);
-      // A-974-R7：同时记录本轮（最后一次请求）的原始 usage —— 窗口占用取它，不取累计
+      
       if (resp.response.usage) { lastUsage = resp.response.usage as LoopUsage; }
       const msg = resp.response.choices[0]?.message;
-      // 思考内容提取（OpenAI 兼容响应 message.reasoning_content；schema 未含该字段，类型断言）
+      
       const reasoning = (msg as { reasoning_content?: string } | undefined)?.reasoning_content ?? "";
       if (reasoning) {
         reasonings.push(reasoning);
@@ -897,31 +897,31 @@ export class ToolLoop {
       budget.tokens += tokEst(raw);
       if (raw) { allText = allText ? `${allText}\n\n${raw}` : raw; }
       const nextCalls = toFlat((msg?.tool_calls ?? []) as unknown as Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>);
-      /* A-1132：本轮**以工具调用收尾** ⇒ 这段正文是「说完就去做」的**过程叙述**，不进交付；
-         否则并入收尾阶段（含 steer / 计划核对续轮 —— 那是把一段答案切成两轮，两段都要留）。 */
+      
+
       if (nextCalls.length > 0) { tailText = ""; }
       else if (raw) { tailText = tailText ? `${tailText}\n\n${raw}` : raw; }
       if (nextCalls.length === 0) {
-        // A-1061⑥：与 runStream 同一语义 —— 本轮没要工具，但若有中途引导在等，
-        // 就续一轮把它注入**同一轮运行**（不能要求"必须有工具调用"才算边界）。
+        
+        
         pending = [];
         const steered = this.injectSteers(opts.sessionId, opts.messages);
         if (steered > 0) {
           if (raw) { opts.messages.push({ role: "assistant", content: raw }); }
           continue;
         }
-        /* A-1061⑫：引导之后再做**计划收尾核对**（顺序刻意的 —— 用户刚插进来的请求
-           优先于"清单有没有划掉"；且引导本身可能又添了新待办，核对必须在它之后）。
-           准入条件 = 本轮运行真的碰过计划 且 还没核对过（见 usedTodoWrite 的注释）。 */
+        
+
+
         if (this.reconcilePlan(opts.sessionId, opts.messages, raw, !reconciled && usedTodoWrite)) {
           reconciled = true;
           continue;
         }
         return {
-          /* A-1132：收尾正文的**唯一判据**（见 `pickFinalBody`）。
-             此前 `run()` 返回裸 `raw`（只最后一轮）、流式那条返回裸 `allText`（全过程累加）
-             ⇒ 同一件事两个产地，必然漂（用户就是在流式那条上看到"正文非常长"的）。 */
-          text: pickFinalBody(tailText, allText), // A-1132（run）
+          
+
+
+          text: pickFinalBody(tailText, allText), 
           raw: pickFinalBody(tailText, allText),
           rounds: round,
           roundLog: roundLog.map((r) => r.details).flat(),
@@ -933,7 +933,7 @@ export class ToolLoop {
       opts.messages.push({
         role: "assistant",
         content: msg?.content ?? null,
-        // DeepSeek 思考模式：reasoning_content 必须原样回传，否则上游 400（invalid_request_error）
+        
         reasoning_content: reasoning || undefined,
         tool_calls: toContract(nextCalls),
       });
@@ -944,40 +944,40 @@ export class ToolLoop {
     return { text, raw: text, rounds: TOOL_MAX_ROUNDS, roundLog: roundLog.map((r) => r.details).flat(), reasonings, lastUsage, usage: usageAcc };
   }
 
-  /**
-   * 真流式工具循环（5B.3）：每轮用 chatStream 流式请求，思考/正文边到边回调 onEvent，
-   * 实时可见（而非等整轮完成才一次性回放）。delta.tool_calls 按 index 累积 → 执行 → 下一轮。
-   * 返回 { text, raw, rounds, roundLog, reasonings }；text 为过滤后展示文本。
-   */
+  
+
+
+
+
   async runStream(opts: ToolLoopStreamOptions): Promise<ToolLoopResult> {
     const dedup = new Set<string>();
     let pending = opts.initialToolCalls;
-    /** A-1061⑫：计划收尾核对是否已做过（一次运行最多一次，杜绝无限追问） */
+    
     let reconciled = false;
-    /** A-1061⑫：本轮运行是否真的碰过计划（准入条件，理由同 run() 里的同名字段） */
+    
     let usedTodoWrite = false;
     const roundLog: Array<{ round: number; details: ToolRoundDetail[] }> = [];
     const reasonings: string[] = [];
-    /** 跨轮累积的模型正文（每轮 roundText 只含当轮内容）。**保底/中断**语义用它 ——
-     *  A-1132 起它不再是交付口径（交付看 `tailText` / `pickFinalBody`）。 */
+    
+
     let allText = "";
-    /* A-1132：**收尾阶段**的正文（最后一次工具调用之后的所有 content）—— 交付口径，见 `pickFinalBody`。
-       ⚠️ 与 `allText`（全过程累加）刻意分开：前者回答"交付哪一段"，后者回答"保底别丢内容"。 */
+    
+
     let tailText = "";
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
-    /** 接近上限时注入提醒，促使模型收束而非硬熔断 */
+    
     const warnAt = Math.max(1, TOOL_MAX_ROUNDS - 3);
-    /** 任务预算（#4 护栏）：跨轮累计；allText 承载预算耗尽时保留的已产出正文 */
+    
     const limits: BudgetLimits = { maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs };
     const budget: BudgetState = {
       toolCalls: 0,
       tokens: opts.messages.reduce((s, m) => s + tokEst(m.content), 0),
       startMs: Date.now(),
     };
-    /** 跨轮累计上游 usage（缓存命中 token 透传） */
+    
     let usageAcc: LoopUsage | undefined;
-    /** A-974-R7：最近一轮 usage（窗口占用数据源，见 ToolLoopResult.lastUsage） */
+    
     let lastUsage: LoopUsage | undefined;
 
     for (let round = 1; round <= TOOL_MAX_ROUNDS; round++) {
@@ -987,8 +987,8 @@ export class ToolLoop {
       budget.toolCalls += roundDetails.length;
       budget.tokens += roundDetails.reduce((s, d) => s + tokEst(d.result), 0);
 
-      // A-162：signal 已中止（用户停止/插入指令）→ 后续（含新一轮模型请求）不再执行。
-      // 已产出的正文/工具结果保留在 allText/roundLog，仅中断而非丢弃。
+      
+      
       if (opts.signal?.aborted) {
         return {
           text: allText,
@@ -1002,7 +1002,7 @@ export class ToolLoop {
         };
       }
 
-      // 预算护栏：第 2 轮起，在发起下一批模型请求前熔断（保留已产出内容，末尾附提示）
+      
       if (round > 1) {
         const reason = budgetReason(budget, limits);
         if (reason) {
@@ -1022,7 +1022,7 @@ export class ToolLoop {
         }
       }
 
-      // 最后三轮：提示模型收敛
+      
       if (round >= warnAt && round < TOOL_MAX_ROUNDS) {
         opts.messages.push({
           role: "system" as const,
@@ -1030,8 +1030,8 @@ export class ToolLoop {
         });
       }
 
-      // A-1060：轮次边界消费「引导」—— 工具已执行完、下一次模型请求之前。
-      // 放在最后一条：让引导成为模型读到的**最新**一句（不需要打断当前步，又能在本轮内生效）。
+      
+      
       this.injectSteers(opts.sessionId, opts.messages, opts.onEvent);
 
       const payload: ChatRequest = {
@@ -1042,7 +1042,7 @@ export class ToolLoop {
       };
       Object.assign(payload, reasoningParams);
 
-      /** 流式 delta 累加器（tool_calls 增量按 index 累积） */
+      
       const toolCallAcc: Array<{ index: number; id: string; name: string; args: string }> = [];
       const sf = new StreamFilter();
       let roundText = "";
@@ -1076,14 +1076,14 @@ export class ToolLoop {
         },
       );
       usageAcc = mergeLoopUsage(usageAcc, streamRes.usage);
-      // A-974-R7：记录本轮（最后一次请求）原始 usage —— 窗口占用取它，不取累计（同上）
+      
       if (streamRes.usage) { lastUsage = streamRes.usage; }
       const tail = sf.flush(this.outputFilter, agentName);
       if (tail) {
         roundText += tail;
         opts.onEvent?.({ type: "chunk", content: tail });
       }
-      // 把本轮正文并入跨轮累积（含默认轮：模型在最终轮可能只发工具调用、无任何正文）
+      
       if (roundText) {
         allText = allText ? `${allText}\n\n${roundText}` : roundText;
         budget.tokens += tokEst(roundText);
@@ -1092,54 +1092,54 @@ export class ToolLoop {
       const nextCalls = toolCallAcc
         .filter((a) => a.name)
         .map((a) => ({ id: a.id || `t_${a.index}`, type: "function" as const, name: a.name, arguments: a.args || "{}" }));
-      /* A-1132：本轮**以工具调用收尾** ⇒ 这段正文是「说完就去做」的**过程叙述**，不进交付；
-         否则并入收尾阶段（含 steer / 计划核对续轮 —— 那是把一段答案切成两轮，两段都要留）。 */
+      
+
       if (nextCalls.length > 0) { tailText = ""; }
       else if (roundText) { tailText = tailText ? `${tailText}\n\n${roundText}` : roundText; }
       if (nextCalls.length === 0) {
-        /* A-1061⑥：本轮模型没再要工具 —— 但**此刻有中途引导在等，就不能就这么收尾**。
-         *
-         * 用户实测（原话：「我点击了但是发不过去，只能等这个的 agent 回复完才能发送啊」）：
-         * agent 正在长段输出（无工具调用）时点「引导」，而引导原本只在
-         * 「工具执行完 → 下一次模型请求之前」那个边界被消费 —— 本轮压根没有工具调用，
-         * 于是这句话**一直等不到落点**，只能等整轮结束才作为**新的一轮**发出。
-         * 那等于没做 steer。
-         *
-         * 权威语义（Cursor 2026-08-19 / Claude Code）是「等到**下一个轮次边界**」——
-         * 边界 ≠ 必须有工具调用：本轮回答写完就是边界。所以这里**续一轮**把引导注入同一轮运行。
-         *
-         * ⚠️ 三条必须同时做，少一条就出错：
-         *   ① `pending = []` —— 否则下一轮会把**上一批工具再执行一遍**；
-         *   ② 把本轮正文作为 assistant 消息留进上下文（否则模型不知道"自己刚说了什么"就收到新要求）；
-         *   ③ 只在**真的取到了引导**时才续（`injectSteers` 取走即清空，取不到就正常收尾）。
-         * 轮次上限 `TOOL_MAX_ROUNDS` 仍然兜底，不会无限续。 */
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         pending = [];
         const steered = this.injectSteers(opts.sessionId, opts.messages, opts.onEvent);
         if (steered > 0) {
           if (roundText) { opts.messages.push({ role: "assistant", content: roundText }); }
           continue;
         }
-        /* A-1061⑫：引导之后再做**计划收尾核对**（顺序刻意的 —— 用户刚插进来的请求
-           优先于"清单有没有划掉"；且引导本身可能又添了新待办，核对必须在它之后）。
-           准入条件 = 本轮运行真的碰过计划 且 还没核对过（见 usedTodoWrite 的注释）。 */
+        
+
+
         if (this.reconcilePlan(opts.sessionId, opts.messages, roundText, !reconciled && usedTodoWrite)) {
           reconciled = true;
           continue;
         }
         return {
-          /* ══ A-1132：收尾口径与 `run()`（非流式）**统一**：正文 = **收尾阶段**的正文 ══
-             用户实测原话：「正文里面似乎混杂了思考历程里面的内容，**正文非常长**，你看看
-             是不是之前叫你做的最后拼接思考历程中的正文到正文输出这一个功能异常」。
-             实测那条记录（`config/history.jsonl`）：`ai` = 4546 字 —— 25 轮叙述的**累加**
-             （`allText`），读起来就是过程日志；而收尾阶段只有 1471 字的正式汇报；
-             正文与 40 个 `think` 步**零交集**（逐段比对 0/46）⇒ 不是"思考被抄进正文"。
-             病根 = **两条路径两种口径**：`run()` 收尾 `text: raw`（只最后一轮），
-             这里（GUI 走的流式路径）收尾 `text: allText`（**全过程**累加）——
-             同一件事两个产地，必然漂。现在两边共用 `pickFinalBody` + `tailText`（"收尾阶段"）。
-             ⚠️ `allText` 退回它注释里写明的**保底语义** ⇒ 收尾阶段空时才用它；中断（976）与
-                预算（992）那两条路径**必须继续用 allText**（"保留已产出、不丢弃"，别一起改）。
-             ⚠️ 过程叙述**没有丢**：它们在时间线里就是 `body` 步，思考历程照旧可回看。 */
-          text: pickFinalBody(tailText, allText), // A-1132（runStream）
+          
+
+
+
+
+
+
+
+
+
+
+
+          text: pickFinalBody(tailText, allText), 
           raw: pickFinalBody(tailText, allText),
           rounds: round,
           roundLog: roundLog.map((r) => r.details).flat(),
@@ -1160,7 +1160,7 @@ export class ToolLoop {
     return { text, raw: text, rounds: TOOL_MAX_ROUNDS, roundLog: roundLog.map((r) => r.details).flat(), reasonings, lastUsage, usage: usageAcc };
   }
 
-  /** 工具调用超轮时的提示文案（硬截断提示，不对 LLM 说话） */
+  
   private formatRoundLimit(log: Array<{ round: number; details: ToolRoundDetail[] }>): string {
     const last = log[log.length - 1];
     if (!last) { return "[警告] 工具调用达到上限，无法继续"; }

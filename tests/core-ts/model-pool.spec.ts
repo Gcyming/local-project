@@ -1,10 +1,10 @@
-/**
- * tests/core-ts/model-pool.spec.ts — 对话模型池过滤（防非对话模型污染降级链）。
- *
- * 背景：AGNES 供应商返回 10 个模型，其中 agnes-image-* / agnes-video-* 共 5 个在
- * /v1/chat/completions 上返回 400（"Model xxx is an image model"）。原实现把这些模型
- * 也注入对话降级池，主模型限流时降级链落到它们身上 → 表现为「模型突然不会调工具」。
- */
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { isChatCapableModel } from "../../core-ts/src/services/engine.js";
 

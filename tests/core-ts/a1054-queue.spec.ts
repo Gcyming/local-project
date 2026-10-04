@@ -1,15 +1,15 @@
-/**
- * tests/core-ts/a1054-queue.spec.ts — 待发指令队列（中途插入 / 即将插入）的守卫。
- *
- * 被测：`gui/src/renderer/pages/instructionQueue.ts`（纯逻辑）。
- *
- * 这一族锁的是**「用户的指令会不会被吞 / 会不会发错会话」**，所以断言的落点全是行为：
- * 顺序、不吞、跨会话隔离、幂等、以及"身份用 id 而不是下标"。
- * 文案层只保留"摘要"这一条（UI 据此决定整块显隐与条数）；**不再**锁徽标/悬停措辞
- * —— A-1056③ 起界面上已没有"模式徽标"这一层（用户原话"即将插入是什么鬼？"）。
- *
- * ⚠️ 验收标准是**变异测试**（见 `gui/scripts/mut-a1054.mjs`）：写完必须逐条改坏、确认变红。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   clearAll,
@@ -24,7 +24,7 @@ import {
   type QueuedInstruction,
 } from "../../gui/src/renderer/pages/instructionQueue.js";
 
-/** 造一条合法队列项（字段必须齐全：只填一半的假对象会让"测的不是真实入参形态"）。 */
+
 function item(over: Partial<QueuedInstruction> = {}): QueuedInstruction {
   return {
     id: nextQueueId(),
@@ -75,7 +75,7 @@ describe("A-1054 队列：出队（跨会话隔离 + 绝不吞指令）", () => 
     const list = [other, mine];
     const got = takeNext(list, "s1");
     expect(got).toBeNull();
-    // 反空转：如果 takeNext 顺手把队首丢了，上面那条 null 断言依然会绿 —— 必须验证"没被消费"
+    
     expect(list.map((q) => q.text)).toEqual(["别的会话的", "我的"]);
     expect(peek(list)?.id).toBe(other.id);
   });
@@ -145,9 +145,9 @@ describe("A-1054 队列：改模式 / 提升 / 删除", () => {
   });
 });
 
-/* A-1056③：原先这里整块测「徽标文案 / 悬停解释 / 一行预览」——那些函数已随界面改版删除
-   （用户原话"即将插入是什么鬼？"）。待发指令不再有"模式徽标"这一层，故只剩摘要这一条
-   —— 它仍是 UI 决定"整块显不显示、显示几条"的依据。 */
+
+
+
 describe("A-1054 队列：摘要", () => {
   it("摘要：空队列给空串（UI 据此整块隐藏），非空给条数", () => {
     expect(summarize([])).toBe("");

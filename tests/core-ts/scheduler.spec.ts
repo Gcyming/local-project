@@ -1,7 +1,7 @@
-/**
- * scheduler.spec.ts — 后台常驻定时唤醒（SchedulerService）回归锚点。
- * 覆盖：cron 单字段解析 / 完整表达式 / 下次触发时刻 / 触发语义（防重入、到点即跑、非法 job 拒绝、无 handler 兜底）。
- */
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { parseCron, parseCronPart, nextRunAfter, SchedulerService } from "../../core-ts/src/services/scheduler.js";
 
@@ -66,13 +66,13 @@ describe("SchedulerService（调度触发语义）", () => {
     svc.setHandler(async (job) => { runs.push(job.id); });
     svc.add({ id: "j1", name: "每分钟", cron: "* * * * *", prompt: "做简报" });
     const j = svc.get("j1")!;
-    j.state.nextRun = Date.now() - 1000; // 已到点
+    j.state.nextRun = Date.now() - 1000; 
     (svc as unknown as { tick(): void }).tick();
     await new Promise((r) => setTimeout(r, 5));
     expect(runs).toEqual(["j1"]);
     expect(j.state.lastRun).toBeDefined();
     expect(j.state.lastResult).toBe("ok");
-    // nextRun 推进到未来（下一分钟整）
+    
     expect(j.state.nextRun!).toBeGreaterThan(Date.now());
   });
 
@@ -83,7 +83,7 @@ describe("SchedulerService（调度触发语义）", () => {
     svc.add({ id: "j1", name: "慢任务", cron: "* * * * *", prompt: "长跑" });
     const j = svc.get("j1")!;
     j.state.nextRun = Date.now() - 1;
-    j.state.running = true; // 模拟上一轮未完成
+    j.state.running = true; 
     (svc as unknown as { tick(): void }).tick();
     expect(entered).toBe(0);
     expect(j.state.lastResult).toBeUndefined();
@@ -134,7 +134,7 @@ describe("SchedulerService（调度触发语义）", () => {
     (svc as unknown as { tick(): void }).tick();
     await new Promise((r) => setTimeout(r, 5));
     expect(entered).toBe(0);
-    // resume 后 nextRun 恢复为未来
+    
     svc.resume("p1");
     expect(j.state.nextRun).toBeGreaterThan(Date.now());
     expect(j.state.paused).toBe(false);
@@ -144,13 +144,13 @@ describe("SchedulerService（调度触发语义）", () => {
     const svc = new SchedulerService();
     const runs: string[] = [];
     svc.setHandler(async (job) => { runs.push(job.id); });
-    svc.add({ id: "t1", name: "事件触发", cron: "0 0 1 1 *", prompt: "x" }); // 非常远期
+    svc.add({ id: "t1", name: "事件触发", cron: "0 0 1 1 *", prompt: "x" }); 
     const j = svc.get("t1")!;
     const nextBefore = j.state.nextRun;
     expect(svc.trigger("t1")).toBe(true);
     await new Promise((r) => setTimeout(r, 5));
     expect(runs).toEqual(["t1"]);
-    expect(j.state.nextRun).toBe(nextBefore); // 不因手动触发重排
+    expect(j.state.nextRun).toBe(nextBefore); 
   });
 
   it("exportState/importState 往返：定义+lastResult/paused 保留，nextRun 重算", async () => {
@@ -167,7 +167,7 @@ describe("SchedulerService（调度触发语义）", () => {
     const j2 = svc2.get("e1")!;
     expect(j2.state.lastResult).toBe("ok");
     expect(j2.state.lastRun).toBe(123);
-    expect(j2.state.paused).toBe(true); // 暂停态保留
+    expect(j2.state.paused).toBe(true); 
     expect(j2.state.nextRun).toBeUndefined();
 
     const svc3 = new SchedulerService();
@@ -178,6 +178,6 @@ describe("SchedulerService（调度触发语义）", () => {
     svc4.importState(json2);
     const e2 = svc4.get("e2")!;
     expect(e2.state.paused).toBeUndefined();
-    expect(e2.state.nextRun).toBeGreaterThan(Date.now()); // 未暂停 → 重算未来时刻
+    expect(e2.state.nextRun).toBeGreaterThan(Date.now()); 
   });
 });

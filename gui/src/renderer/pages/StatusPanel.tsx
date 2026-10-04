@@ -1,10 +1,10 @@
-/**
- * gui/src/renderer/pages/StatusPanel.tsx — 状态面板（图表化）。
- * - 数字卡：Agent 树 / 会话 / 服务器概览
- * - 生命周期分布柱状图 + 轮询趋势折线图（SVG 自绘，无第三方库）
- * - 表格：模型服务器实例 / 告警
- * - 3s 轮询 → slime:stats:update 推送；自动更新状态
- */
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { StatsSnapshot, UpdateStatusDTO } from "../../shared/ipc.js";
 import { alertAsync } from "../dialog.js";
@@ -12,7 +12,7 @@ import PlanPanel from "./PlanPanel.js";
 import TraceViewer from "./TraceViewer.js";
 import ReleaseNotesView from "./ReleaseNotesView.js";
 
-/** 字节数 → 人类可读（下载进度行用；不足 1KB 直接给 B） */
+
 function fmtBytes(n: number | undefined): string {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) { return "—"; }
   if (n < 1024) { return `${n} B`; }
@@ -32,8 +32,8 @@ const ACCENT = "#38bdf8";
 const WARN = "#fbbf24";
 const DANGER = "#f87171";
 
-/** 加载等待秒数时钟（A-129）：自持 1s 计时只重渲染自身 span，
-    去掉之前每秒 setNowTick 触发的整面板重渲染（含柱状图/折线图/表格） */
+
+
 function LoadingClock({ since }: { since: number }): JSX.Element {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
@@ -44,7 +44,7 @@ function LoadingClock({ since }: { since: number }): JSX.Element {
   return <span style={{ fontSize: 11, color: WARN, marginLeft: 6 }}>已等待 {sec}s</span>;
 }
 
-/** 迷你折线图（SVG polyline + 网格线） */
+
 function TrendLine({ data, color, height = 110 }: { data: number[]; color: string; height?: number }): JSX.Element {
   if (data.length < 2) {
     return <div style={{ fontSize: 12, color: "var(--text-dim)", padding: "20px 0" }}>等待数据（轮询积累中）…</div>;
@@ -68,7 +68,7 @@ function TrendLine({ data, color, height = 110 }: { data: number[]; color: strin
   );
 }
 
-/** 柱状图（div 条，竖向） */
+
 function Bars({ data, color }: { data: Array<{ label: string; value: number }>; color: string }): JSX.Element {
   const max = Math.max(...data.map((d) => d.value), 1);
   return (
@@ -91,10 +91,10 @@ function Bars({ data, color }: { data: Array<{ label: string; value: number }>; 
 export default function StatusPanel(): JSX.Element {
   const [stats, setStats] = React.useState<StatsSnapshot | null>(null);
   const [updateStatus, setUpdateStatus] = React.useState<UpdateStatusDTO | null>(null);
-  /** 更新说明展开态：默认展开（用户点「检查更新」就是想看这版改了什么） */
+  
   const [notesOpen, setNotesOpen] = React.useState(true);
   const [trend, setTrend] = React.useState<TrendPoint[]>([]);
-  /** 各角色进入 loading 的时刻（展示「已等待 N 秒」，区分加载中与卡死） */
+  
   const [loadingSince, setLoadingSince] = React.useState<Record<string, number>>({});
   const api = React.useRef<any>(null);
 
@@ -105,11 +105,11 @@ export default function StatusPanel(): JSX.Element {
       return;
     }
     void api.current.stats.snapshot().then(setStats);
-    /* A-1055：**不再在挂载时自动 check**。
-       用户原话："怎么一有新版本，进入设置的状态菜单内，翻过去就直接显示后台更新了？你改一下，
-       要用户主动选择啊。" —— 面板一挂载就去查 GitHub，查到了还会（因为 autoDownload 默认 true）
-       把 500MB 安装包拉下来。现在检查与下载都由用户点按钮触发；下面的 onStatus 订阅仍照常收
-       主进程（启动期）自检推送，所以"有新版本"不会被动消失 —— 只是不再由"翻到这一页"触发。 */
+    
+
+
+
+
     const offPoll = api.current.stats.onPoll((snap: StatsSnapshot) => {
       setStats(snap);
       setLoadingSince((prev) => {
@@ -142,14 +142,14 @@ export default function StatusPanel(): JSX.Element {
     };
   }, []);
 
-  /** 「已等待 N 秒」实时跳动已由 LoadingClock 自计时完成（A-129），面板不再每秒重渲染 */
+  
 
   async function handleCheckUpdate() {
     const res = await api.current?.update?.check();
     if (res) setUpdateStatus(res);
   }
 
-  /** A-1055：下载更新（用户主动）—— 主进程已关掉 autoDownload，不走这一步永远不会下载 */
+  
   async function handleDownloadUpdate() {
     const res = await api.current?.update?.download();
     if (res) setUpdateStatus(res);
@@ -159,7 +159,7 @@ export default function StatusPanel(): JSX.Element {
     await api.current?.update?.install();
   }
 
-  /** 向量模型（embedding）重试：下载/配置完成后手动拉起，失败原因直接展示 */
+  
   async function handleRetryEmbedding() {
     const res = await api.current?.model?.startEmbedding?.();
     if (res?.error) {
@@ -172,12 +172,12 @@ export default function StatusPanel(): JSX.Element {
   const agents = stats?.agents ?? { total: 0, roots: 0, leaves: 0, byLifecycle: {}, maxDepth: 0 };
   const sessions = stats?.sessions ?? { totalRecords: 0, recent: 0 };
 
-  // 更新状态兜底：渲染层未收到主进程推送时，默认"未启用"（避免只有一个按钮显异常感）
+  
   const updateStatusSafe = updateStatus ?? { status: "disabled" };
   const isAvailable = updateStatus?.status === "available";
   const isDownloading = updateStatus?.status === "downloading";
   const isDownloaded = updateStatus?.status === "downloaded";
-  /** 有可展示的更新说明（归一化后非空；空串/纯空白不算） */
+  
   const notesAvailable = Boolean((updateStatusSafe.releaseNotes ?? "").trim());
 
   const lifecycleBars = Object.entries(agents.byLifecycle).map(([label, value]) => ({ label, value }));
@@ -196,11 +196,11 @@ export default function StatusPanel(): JSX.Element {
   ];
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, marginTop: 0 }}>运行状态</h2>
 
-      {/* 数字卡 */}
+      {}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginBottom: 14 }}>
         {numCards.map((c) => (
           <div key={c.label} className="card" style={{ padding: "10px 12px", textAlign: "center" }}>
@@ -211,7 +211,7 @@ export default function StatusPanel(): JSX.Element {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
-        {/* 生命周期分布柱状图 */}
+        {}
         <section className="card">
           <h3 style={{ marginTop: 0, marginBottom: 4, fontSize: 14 }}>Agent 生命周期分布</h3>
           {lifecycleBars.length === 0 ? (
@@ -221,7 +221,7 @@ export default function StatusPanel(): JSX.Element {
           )}
         </section>
 
-        {/* 趋势折线图 */}
+        {}
         <section className="card">
           <h3 style={{ marginTop: 0, marginBottom: 4, fontSize: 14 }}>实时趋势（最近 {trend.length}/30 采样）</h3>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
@@ -259,11 +259,11 @@ export default function StatusPanel(): JSX.Element {
         </section>
       </div>
 
-      {/* 本地模型服务器（Sidecar）— 统一单表 */}
+      {}
       <section className="card" style={{ marginBottom: 14 }}>
         <h3 style={{ marginTop: 0, fontSize: 14 }}>本地模型服务器（Sidecar）</h3>
         {servers.length === 0 ? (
-          /* 未安装/未配置本地模型服务时，只显示友好提示，不显示空表格 */
+          
           <div style={{ padding: "18px 0", textAlign: "center" }}>
             <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.5 }}>🖥</div>
             <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 4, fontWeight: 500 }}>未安装本地模型服务</div>
@@ -339,9 +339,9 @@ export default function StatusPanel(): JSX.Element {
         )}
       </section>
 
-      {/* E: 任务进度（Plan 一等对象）+ D: 链路视图（trace 可观测）
-          A-980-R30：保留——数据源真实（plan:update / trace:update 广播），仅在有任务/对话时才有内容；
-          空态由子组件给出引导文案，不算"死面板"。告警表已删除（主进程从不产出 alarms，永远为空）。 */}
+      {
+
+}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14, alignItems: "start" }}>
         <section className="card">
           <PlanPanel />
@@ -351,15 +351,15 @@ export default function StatusPanel(): JSX.Element {
         </section>
       </div>
 
-      {/* 自动更新 */}
+      {}
       <section className="card" style={{ marginBottom: 14 }}>
         <h3 style={{ marginTop: 0, fontSize: 14 }}>自动更新</h3>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           {updateStatusSafe.error && (
             <span style={{ color: DANGER, fontSize: 13 }}>检查失败: {updateStatusSafe.error}</span>
           )}
-          {/* A-1055：发现新版本 → 由**用户点「下载更新」**才开始下载（主进程已关闭自动下载）。
-              文案同步改掉"正在后台下载…"——那正是用户以为"它自己偷偷在下"的由来。 */}
+          {
+}
           {isAvailable && (
             <>
               <span style={{ color: "var(--success)", fontSize: 13 }}>
@@ -383,10 +383,10 @@ export default function StatusPanel(): JSX.Element {
               </button>
             </span>
           )}
-          {/* A-1059③：措辞必须分清"检查"与"下载/安装"。
-              此前这里写"自动检查未开启"，很容易被读成"更新功能被关掉了"
-              —— 用户的原话正是「我叫你换成手动点击更新，你怎能直接关了？」。
-              事实是：**下载与安装永远只能由你点**，只有"启动时是否自动检查"是可配的。 */}
+          {
+
+
+}
           {updateStatusSafe.status === "disabled" && !updateStatusSafe.error && (
             <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
               未开启启动时自动检查（可在 slime.toml 的 [update] 段设 auto_check = true）。
@@ -407,11 +407,11 @@ export default function StatusPanel(): JSX.Element {
           </button>
         </div>
 
-        {/* ── A-1055：实时下载进度条 ──────────────────────────────────────────────
-            此前这里只有一句静态文案（"正在后台下载…"），因为主进程**压根没监听
-            download-progress**，界面拿不到任何数字。现在主进程逐事件上报
-            percent/transferred/total/bytesPerSecond，这里如实渲染：
-            进度条 + 「已下载/总量（百分比）」+ 速率，全部可核对（不是"转圈等它好"）。 */}
+        {
+
+
+
+}
         {isDownloading && (
           <div style={{ marginTop: 10 }}>
             <div style={{ height: 6, borderRadius: 3, background: "var(--bg-hover)", overflow: "hidden" }}>
@@ -439,8 +439,8 @@ export default function StatusPanel(): JSX.Element {
             </div>
           </div>
         )}
-        {/* A-1037：Release 正文此前被当纯文本塞进 flex 行 → `<h3>`/`<table>` 源码裸露。
-            现在走结构化渲染（HTML/Markdown 双认），且**只按需展开**，不把面板顶爆。 */}
+        {
+}
         {(isAvailable || isDownloaded) && notesAvailable && (
           <div style={{ marginTop: 8 }}>
             <button

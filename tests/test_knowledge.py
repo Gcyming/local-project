@@ -30,7 +30,7 @@ class TestKnowledgeEngine:
         assert result["trait_name"] == "Code Review"
         stats = ke.get_stats()
         assert stats["total_patterns"] == 1
-        assert stats["total_rules"] == 1  # 第 5 次已晋升 rule
+        assert stats["total_rules"] == 1  
         promotable = ke.get_promotable_traits()
         assert len(promotable) == 1
         assert promotable[0]["name"] == "Code Review"
@@ -71,7 +71,7 @@ class TestKnowledgeEngine:
         assert result["action"] == "promote_to_rule"
         rule_id = result["rule"]
         assert (tmp_path / "rules" / f"{rule_id}.md").exists()
-        # 生产目录不新增该规则文件
+        
         proj_rules = Path(__file__).resolve().parent.parent / "Knowledge" / "Agent Memory" / "rules"
         if proj_rules.exists():
             assert not (proj_rules / f"{rule_id}.md").exists()
@@ -106,7 +106,7 @@ class TestConsolidationEngine:
         from core.agent import Agent
         ce = ConsolidationEngine()
         a = Agent(name="a", role="r")
-        assert ce.should_consolidate(a) is False  # 0 次交互
+        assert ce.should_consolidate(a) is False  
         a.evolution["total_interactions"] = 50
         assert ce.should_consolidate(a) is True
         a.evolution["total_interactions"] = 51
@@ -127,7 +127,7 @@ class TestConsolidationEngine:
         reinforced, decayed = ce.consolidate(a, knowledge_engine=ke)
         assert reinforced >= 1
         assert len(a.behavior.patterns) >= 1
-        # 已有 scenario 跳过（与 LLM 提取互斥防重复）
+        
         existing = {p.scenario for p in a.behavior.patterns}
         r2, _ = ce.consolidate(a, knowledge_engine=ke, existing_scenarios=existing)
         assert r2 == 0
@@ -145,7 +145,7 @@ class TestConsolidationEngine:
         """A-970：知识引擎实例数超上限 → 淘汰最久未使用（内存有界）"""
         from core import knowledge
         first = knowledge.get_knowledge_engine("lru0", str(tmp_path))
-        # 插入远超 64 上限的新实例，first（最旧且从未再访问）必被淘汰
+        
         for i in range(1, 80):
             knowledge.get_knowledge_engine(f"lru{i}", str(tmp_path))
         assert knowledge.get_knowledge_engine("lru0", str(tmp_path)) is not first
@@ -156,5 +156,5 @@ class TestConsolidationEngine:
         hot = knowledge.get_knowledge_engine("lru-hot", str(tmp_path))
         for i in range(70):
             knowledge.get_knowledge_engine(f"lru-other-{i}", str(tmp_path))
-            knowledge.get_knowledge_engine("lru-hot", str(tmp_path))  # 刷新到队尾
+            knowledge.get_knowledge_engine("lru-hot", str(tmp_path))  
         assert knowledge.get_knowledge_engine("lru-hot", str(tmp_path)) is hot

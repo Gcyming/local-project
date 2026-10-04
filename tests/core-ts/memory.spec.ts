@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/memory.spec.ts — MemoryStore 语义测试。
- * 对照 tests/test_smoke.py（CRUD/preference 更新）+ test_infer_server.py（recall 惰性初始化）移植。
- * 隔离：dataDir 指向临时目录，不触碰生产 Knowledge/。
- */
+
+
+
+
+
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -72,7 +72,7 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
     m.addSkill("code_review");
     m.addLesson("要使用 async", true);
 
-    expect(m.getFacts().length).toBe(3); // fact + preference + lesson
+    expect(m.getFacts().length).toBe(3); 
     expect(m.getPreferences().theme).toBe("dark");
     expect(m.getSkills()).toContain("code_review");
     expect(m.getLessons().length).toBe(1);
@@ -97,15 +97,15 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
     m.addPreference("lang", "Python");
     m.addPreference("lang", "Rust");
     expect(m.getPreferences().lang).toBe("Rust");
-    expect(m.getFacts().length).toBe(1); // 不新增条目
+    expect(m.getFacts().length).toBe(1); 
   });
 
   it("去重：同 category 相似度 >75% → repeated 计数不新增", () => {
     const dir = makeTmp();
     const m = new MemoryStore("test_dedup_agent", { dataDir: dir });
     m.addFact("用户非常喜欢使用 Python 语言");
-    m.addFact("用户非常喜欢使用 Python 语言"); // 完全相同
-    m.addFact("用户非常喜欢使用 python 语言"); // 仅大小写差异 → 仍 >75%（小写归一）
+    m.addFact("用户非常喜欢使用 Python 语言"); 
+    m.addFact("用户非常喜欢使用 python 语言"); 
     expect(m.getFacts().length).toBe(1);
     expect(m.getFacts()[0].repeated).toBe(2);
   });
@@ -115,7 +115,7 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
     const m = new MemoryStore("test_link_agent", { dataDir: dir });
     m.storeCategorized("fact", "学习 Python 语法", ["编程"]);
     const first = m.getFacts()[0];
-    m.storeCategorized("fact", "Python 项目经验", ["编程"]); // tags 重叠 → 关联
+    m.storeCategorized("fact", "Python 项目经验", ["编程"]); 
     const facts = m.getFacts();
     const second = facts[1];
     expect(second.links).toContain(first.id);
@@ -156,7 +156,7 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
 
   it("非法 agent_id 抛错（A-112 防路径遍历）", () => {
     expect(() => new MemoryStore("../../etc/passwd", { dataDir: makeTmp() })).toThrow();
-    expect(() => new MemoryStore("", { dataDir: makeTmp() })).not.toThrow(); // 空串 = global 语义
+    expect(() => new MemoryStore("", { dataDir: makeTmp() })).not.toThrow(); 
   });
 });
 
@@ -196,7 +196,7 @@ describe("LanceDB 接口（对照 A-027 语义）", () => {
       dataDir: dir,
       lancedbEnabled: true,
       lancedbUri: join(dir, "lance"),
-      embed: { embed: async (t: string) => hashEmbed(t) }, // 1024 维（BGE-M3 生产维度）
+      embed: { embed: async (t: string) => hashEmbed(t) }, 
     });
     await m.store("fact", "用户喜欢批处理脚本", "batch");
     await m.store("fact", "上次用了 PowerShell 循环", "tooling");
@@ -244,7 +244,7 @@ describe("Node 侧四阶段检索（对照 sidecar/retrieve_api.py 逐行）", (
     const m = new MemoryStore("bfs_agent", { dataDir: dir });
     m.storeCategorized("fact", "核心知识 A", ["t"]);
     const a = m.getFacts()[0];
-    m.storeCategorized("fact", "关联知识 B", ["t"]); // 自动关联到 A（backlinks）
+    m.storeCategorized("fact", "关联知识 B", ["t"]); 
     const facts = m.getFacts();
     const b = facts[1];
     const seeds = [facts[0]];

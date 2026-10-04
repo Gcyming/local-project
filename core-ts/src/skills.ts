@@ -1,10 +1,10 @@
-/**
- * core-ts/src/skills.ts — 技能引擎（语义移植自 core/skill_engine.py，逐行对照）。
- * - 加载 config/skills 下各技能目录（SKILL.md + 可选 manifest.yaml/json；frontmatter 回填）
- * - 权限检查（A-038：仅约束自定义执行；指导模式纯读不拦截；fail-closed）
- * - 注册精简工具面（A-004）：skill_search / skill_lookup
- * - N11-P0-2：禁用 skill.py 自定义执行（RCE 风险），仅 SKILL.md 指导模式
- */
+
+
+
+
+
+
+
 
 import { readdir, readFile, lstat } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,19 +25,19 @@ const PERMISSION_LEVELS: Record<string, number> = {
 const SANDBOX_REQUIRE = new Set([2, 3, 4]);
 const SANDBOX_DENY = new Set([5]);
 
-/** A-1048：已报过的缺失技能目录（同一路径只报一次，避免刷新时刷屏） */
+
 const MISSING_SKILL_DIR_REPORTED = new Set<string>();
 
-// ── 极简 YAML 子集解析（manifest.yaml / SKILL.md frontmatter 够用）─────
 
-/** 解析标量：内联列表 / 引号剥离 / null/true/false/数字 原样转 */
+
+
 function parseScalar(raw: string): unknown {
   const v = raw.trim();
   if (v === "" || v === "~" || v === "null") return null;
   if (v === "true") return true;
   if (v === "false") return false;
   if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
-  // 内联列表 `[a, b]`
+  
   if (v.startsWith("[") && v.endsWith("]")) {
     const inner = v.slice(1, -1).trim();
     if (inner === "") return [];
@@ -50,27 +50,27 @@ function parseScalar(raw: string): unknown {
   return s;
 }
 
-/** 判断值是否以未闭合引号开头（YAML 折叠多行字符串） */
+
 function isOpenQuote(v: string): boolean {
   return (v.startsWith("'") && !v.endsWith("'")) || (v.startsWith('"') && !v.endsWith('"'));
 }
 
-/**
- * 是否为 YAML **块标量头**（`>` 折叠 / `|` 字面），可带 chomping（`-` 剥尾换行 / `+` 保留）
- * 与显式缩进数字（如 `|2`）。
- *
- * 为什么必须有：主流 Agent 的 SKILL.md frontmatter（Claude / Cursor / Codex 生态）几乎都用
- * `description: >` 写法。此前 `parseMiniYaml` 只认单行/引号/续行三种形态，遇到 `>` 会把
- * **字面量 ">"** 当成描述存进去 —— 技能库里描述的来源就此断掉（用户实测：技能名在列表里
- * 一条描述都出不来）。这是「向上兼容外部技能」的关键缺口，不是格式洁癖。
- */
+
+
+
+
+
+
+
+
+
 function parseBlockScalarHeader(rest: string): { style: ">" | "|"; chomp: "-" | "+" | null } | null {
   const m = /^([|>])([+-]?)(\d*)$/.exec(rest.trim());
   if (!m) { return null; }
   return { style: m[1] as ">" | "|", chomp: (m[2] || null) as "-" | "+" | null };
 }
 
-/** 折叠块（`>`）：相邻非空行以空格连接；空行产出换行（YAML folded 语义的常用子集） */
+
 function foldBlockScalar(blockLines: string[]): string {
   const out: string[] = [];
   let buf: string[] = [];
@@ -85,7 +85,7 @@ function foldBlockScalar(blockLines: string[]): string {
   return out.join("\n");
 }
 
-/** YAML 子集：标量 / 嵌套 map / 列表（- item）/ 折叠续行（缩进对齐） */
+
 export function parseMiniYaml(text: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const lines = text.split("\n");
@@ -112,13 +112,13 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
     const indent = raw.length - stripped.length;
     const isList = stripped.startsWith("- ");
     if (!isList && !stripped.includes(":")) {
-      // 折叠续行：附到上一个值（引号串跨行/plain 多行均折叠为空格连接）
+      
       if (pendingKey !== null) {
         pendingRaw = (pendingRaw ?? "") + " " + stripped;
       }
       continue;
     }
-    // 缩进回退：弹栈直到父级
+    
     while (stack.length > 1 && indent <= stackIndent[stack.length - 1]) {
       flushPending();
       stack.pop();
@@ -128,7 +128,7 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
     const target = stack[stack.length - 1];
     if (isList) {
       const item = parseScalar(stripped.slice(2));
-      // `key:` 后紧跟的块状列表 → 数组直接挂父 key（tags: 场景）
+      
       if (lastEmptyChildKey !== null && stack.length > 1) {
         const parent = stack[stack.length - 2];
         const slot = parent[lastEmptyChildKey];
@@ -148,15 +148,15 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
       const rest = stripped.slice(idx + 1).trim();
       const bsHead = parseBlockScalarHeader(rest);
       if (rest === "") {
-        // 嵌套 map
+        
         const child: Record<string, unknown> = {};
         target[key] = child;
         stack.push(child);
         stackIndent.push(indent);
         lastEmptyChildKey = key;
       } else if (bsHead !== null) {
-        /* 块标量（`>` 折叠 / `|` 字面）：消费后续「比 key 行更缩进」的连续行。
-         * contentIndent 取首个非空内容行的缩进；遇到缩进回退即块结束（与 YAML 一致）。 */
+        
+
         const blockLines: string[] = [];
         const pendingBlanks: string[] = [];
         let contentIndent: number | null = null;
@@ -172,14 +172,14 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
           if (pendingBlanks.length > 0) { blockLines.push(...pendingBlanks); pendingBlanks.length = 0; }
           blockLines.push(l.slice(contentIndent));
         }
-        i = j - 1; // for 头部的 i++ 会补回来
+        i = j - 1; 
         let text = bsHead.style === ">" ? foldBlockScalar(blockLines) : blockLines.join("\n");
-        // clip（默认）与 strip（`-`）都剥掉尾换行；`+` 保留语义在此子集内不额外处理
+        
         while (text.endsWith("\n")) { text = text.slice(0, -1); }
         target[key] = text;
         lastEmptyChildKey = null;
       } else if (isOpenQuote(rest)) {
-        // 引号折叠串：跨行累积到闭合
+        
         pendingKey = key;
         pendingRaw = rest;
         lastEmptyChildKey = null;
@@ -193,15 +193,15 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
   return out;
 }
 
-/**
- * 从 SKILL.md 文本中提取 frontmatter 的**任意**字段（标量）。
- *
- * A-1140：`frontmatterDescription` 的泛化版本 —— 插件页要读 `origin` 来判断来源
- * （官方市场 / 用户自备 / Agent 自建）。解析逻辑与 description 完全同源，
- * 各写一份必然漂移，故收敛到这一个函数；`frontmatterDescription` 变成它的特例。
- *
- * 容错：允许 frontmatter 未闭合（GUI 只读文件头 4KB，可能正好截在字段中间）。
- */
+
+
+
+
+
+
+
+
+
 export function frontmatterField(text: string, key: string, limit = 200): string {
   const m = /^\uFEFF?---\r?\n([\s\S]*?)(?:\r?\n---|\r?\n?$)/.exec(text);
   if (!m) { return ""; }
@@ -215,21 +215,21 @@ export function frontmatterField(text: string, key: string, limit = 200): string
   return v.replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
-/**
- * 从 SKILL.md 文本中提取 frontmatter 的 `description`。
- *
- * 为何独立导出：GUI 技能库列表（`config_files.ts`）与引擎（`loadSingleSkill`）都要这个值。
- * 两处各写一份解析必然漂移 —— 事实上 GUI 侧此前是 `firstLineSafe()`（取 SKILL.md 物理首行），
- * 对带 frontmatter 的技能返回的**就是分隔符 `---`**，于是技能库里所有第三方技能描述都是空的。
- *
- * 容错：允许 frontmatter 未闭合（GUI 只读文件头 4KB，可能正好截在描述中间）。
- * 折叠/多行描述统一压成单行空格，便于列表展示。
- */
+
+
+
+
+
+
+
+
+
+
 export function frontmatterDescription(text: string, limit = 200): string {
   return frontmatterField(text, "description", limit);
 }
 
-// ── 模型 ─────────────────────────────────────────────────
+
 
 export interface SkillManifestData {
   name?: string;
@@ -324,20 +324,20 @@ export class Skill {
   }
 }
 
-// ── 注册表 ─────────────────────────────────────────────────
+
 
 export interface SkillRegistryOptions {
   skillDir?: string;
-  /** 沙箱审批回调（REQUIRE 级权限时询问）；缺省 fail-closed 拒绝 */
+  
   approvalCallback?: (permission: string, level: number) => boolean;
-  /**
-   * A-1035：**额外的技能扫描根**（在主 skillDir 之后扫）。
-   *
-   * 用途：知识引擎自动生成的技能落在 `<dataDir>/Knowledge/<agentId>/generated_skills/`，
-   * 不在 config/skills 下。没有这个入口，生成出来的技能只是磁盘上的文件 —— Agent
-   * 通过 `skill_search` / `skill_lookup` 依然看不到它，"能生成技能"就只是空话。
-   * 同名技能以**先扫到的为准**（主目录优先，允许人工版覆盖自动生成版）。
-   */
+  
+
+
+
+
+
+
+
   extraDirs?: string[];
 }
 
@@ -358,19 +358,19 @@ export class SkillRegistry {
     return this.loaded;
   }
 
-  /** 扫描并加载所有技能（主 skillDir + extraDirs），返回加载的技能名列表 */
+  
   async loadSkills(): Promise<string[]> {
     this.skills.clear();
     const loaded: string[] = [];
-    // A-1035：多根扫描。主目录优先（同名时人工版覆盖自动生成版）——原来的实现
-    // 一旦主目录不存在就 `return []`，那会让"主目录缺失"连坐掉自动生成的技能。
+    
+    
     for (const root of [this.skillDir, ...this.extraDirs]) {
       let entries: string[];
       try {
         entries = await readdir(root);
       } catch {
-        // A-1048：`loadSkills()` 会被多次调用（刷新 / 多 Agent），同一路径反复报
-        // "目录不存在"会把真正的问题淹没在噪音里 —— 而且"自动生成目录还没建"是**预期状态**。
+        
+        
         if (!MISSING_SKILL_DIR_REPORTED.has(root)) {
           MISSING_SKILL_DIR_REPORTED.add(root);
           console.info(`[skills] 技能目录不存在（跳过，只报一次）: ${root}`);
@@ -403,7 +403,7 @@ export class SkillRegistry {
     return loaded;
   }
 
-  /** 加载单个技能目录（N11-P0-3：拒绝 symlink 已在 loadSkills 处理） */
+  
   private async loadSingleSkill(dir: string, dirName: string): Promise<Skill | null> {
     let manifest: SkillManifest | null = null;
     for (const mf of ["manifest.yaml", "manifest.json"]) {
@@ -415,7 +415,7 @@ export class SkillRegistry {
         manifest = SkillManifest.fromDict(data ?? {});
         break;
       } catch {
-        // 缺失或解析失败 → 继续（frontmatter 兜底）
+        
       }
     }
     if (manifest === null) {
@@ -429,7 +429,7 @@ export class SkillRegistry {
     let body = "";
     try {
       const content = await readFile(join(dir, "SKILL.md"), "utf8");
-      // frontmatter：`---\n...\n---\n正文`
+      
       const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(content);
       if (fmMatch) {
         body = (fmMatch[2] ?? "").trim();
@@ -446,7 +446,7 @@ export class SkillRegistry {
             manifest.tags = Array.isArray(fm.tags) ? fm.tags.map(String) : String(fm.tags).split(",");
           }
         } catch {
-          // frontmatter 解析失败不影响加载
+          
         }
       } else {
         body = content.trim();
@@ -458,12 +458,12 @@ export class SkillRegistry {
       return null;
     }
 
-    // N11-P0-2：skill.py 自定义执行禁用（RCE 风险），仅指导模式
+    
     try {
       await readFile(join(dir, "skill.py"), "utf8");
       console.warn(`[skills] 技能 ${manifest.name} 含 skill.py，自定义执行函数已禁用（安全），仅使用 SKILL.md 指导模式`);
     } catch {
-      // 无 skill.py
+      
     }
 
     return new Skill({
@@ -475,7 +475,7 @@ export class SkillRegistry {
     });
   }
 
-  /** 从 SKILL.md 正文提取描述（## 功能 或 首个 # 标题后段落） */
+  
   private extractDescription(body: string): string {
     const sectionMatch = /^##\s+功能\s*\n+([\s\S]*?)(?=\n##|\Z)/m.exec(body);
     const headMatch = /^#\s+([\s\S]*?)(?=\n\n)/m.exec(body);
@@ -505,7 +505,7 @@ export class SkillRegistry {
     return [...this.skills.values()].map((s) => s.description);
   }
 
-  /** 调用技能（A-038：指导模式纯读不拦截；自定义执行需权限） */
+  
   async callSkill(name: string, _args: Record<string, unknown>): Promise<string> {
     const skill = this.skills.get(name);
     if (!skill) {
@@ -529,7 +529,7 @@ export class SkillRegistry {
     return `[技能 ${name}] 无执行函数，请查看 SKILL.md 获取指导。`;
   }
 
-  /** 权限检查（fail-closed：REQUIRE 级无审批回调 → 拒绝；未知权限默认最高级） */
+  
   private checkPermissions(permissions: Record<string, boolean>): boolean {
     for (const [perm, required] of Object.entries(permissions)) {
       if (!required) {
@@ -549,7 +549,7 @@ export class SkillRegistry {
     return true;
   }
 
-  /** 关键词检索（A-004）：名称 3 分 > 描述 1 分 = tags 1 分；空查询返回全部 */
+  
   search(query: string, limit = 10): Array<{ name: string; description: string }> {
     const q = (query ?? "").trim().toLowerCase();
     const n = Math.max(1, Math.min(limit ? parseInt(String(limit), 10) : 10, 50));
@@ -583,7 +583,7 @@ export class SkillRegistry {
   }
 }
 
-// ── 全局注册表 ────────────────────────────────────────────
+
 
 let skillRegistry: SkillRegistry | null = null;
 
@@ -598,10 +598,10 @@ export function resetSkillRegistry(): void {
   skillRegistry = new SkillRegistry();
 }
 
-/** 加载技能并注册精简工具面（A-004）：skill_search / skill_lookup */
+
 export async function loadAllSkills(opts: {
   skillDir?: string;
-  /** A-1035：额外扫描根（如某 Agent 的 Knowledge/<id>/generated_skills），让自动生成的技能可被检索 */
+  
   extraDirs?: string[];
   registry?: ToolRegistry;
   approvalCallback?: (permission: string, level: number) => boolean;

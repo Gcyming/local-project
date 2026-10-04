@@ -1,15 +1,15 @@
-/**
- * tests/core-ts/concurrency.spec.ts — §6.7 并发安全压测用例（5 个）。
- *
- * 验证并发纪律与验收要点：
- *   1. 单写者铁律：data/ 文件唯一写入方为主进程，无竞态写交错
- *   2. 审计串行化：audit.jsonl 主进程单点追加写，多线程上报不交错、时间戳非递减
- *   3. 共享状态保护：不同 agent 的上下文互不泄漏
- *   4. 并发 Swarm 子任务独立执行、互不干扰、不丢任务
- *   5. 高并发 audit 不崩溃、顺序稳定
- *
- * 注：每个用例使用独立 tmp 目录 + 唯一文件名，避免跨用例数据污染。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { SandboxManager, defaultSandboxConfig, resetSandboxManager, type AuditEntry } from "../../core-ts/src/sandbox.js";
 import { mkdir, readFile, appendFile } from "node:fs/promises";
@@ -21,9 +21,9 @@ function makeTmpDir(): string {
   return join(tmpdir(), `slime-concurrency-${randomUUID().slice(0, 8)}`);
 }
 
-/** 轮询等待审计文件行数达标（带超时）：writeAudit 走串行队列追加写，
- *  全量运行时磁盘 I/O 竞争大，固定 sleep 会偶发读到未 flush 完的部分行 → flaky。
- *  轮询不改变产品语义，只让测试在慢盘/高负载下也稳定。 */
+
+
+
 async function pollAuditLines(path: string, expected: number, timeoutMs = 8000): Promise<string[]> {
   const deadline = Date.now() + timeoutMs;
   let content = "";
@@ -31,20 +31,20 @@ async function pollAuditLines(path: string, expected: number, timeoutMs = 8000):
     try {
       content = await readFile(path, "utf-8");
     } catch {
-      content = ""; // 文件尚未创建
+      content = ""; 
     }
     const lines = content.trim().split("\n").filter(Boolean);
     if (lines.length >= expected) {
       return lines;
     }
     if (Date.now() > deadline) {
-      return lines; // 超时返回当前行数，由断言暴露差额
+      return lines; 
     }
     await new Promise((r) => setTimeout(r, 50));
   }
 }
 
-// ── Case 1：单写者铁律 — 并发写入同文件，行内无交错 ────────────────────────
+
 describe("§6.7 concurrency — 单写者铁律", () => {
   it("50 并发 appendFile 后每行恰好一个数字", async () => {
     const dir = makeTmpDir();
@@ -67,7 +67,7 @@ describe("§6.7 concurrency — 单写者铁律", () => {
   });
 });
 
-// ── Case 2：审计串行追加 ────────────────────────────────────────────────────
+
 describe("§6.7 concurrency — 审计串行追加", () => {
   let mgr: SandboxManager;
   let logPath: string;
@@ -88,7 +88,7 @@ describe("§6.7 concurrency — 审计串行追加", () => {
     await Promise.all(
       agents.flatMap((id) => Array.from({ length: 10 }, () => mgr.recordViolation(id))),
     );
-    // 轮询等待串行队列 flush 完成（高负载下固定 sleep 会误读未落盘行数 → flaky）
+    
     const lines = await pollAuditLines(logPath, 50);
 
     const entries = lines.map((l) => JSON.parse(l) as AuditEntry);
@@ -101,7 +101,7 @@ describe("§6.7 concurrency — 审计串行追加", () => {
   });
 });
 
-// ── Case 3：共享状态隔离 ────────────────────────────────────────────────────
+
 describe("§6.7 concurrency — 共享状态隔离", () => {
   it("不同 agent 的上下文 map 值互不相等", () => {
     const ctx = new Map<string, string>();
@@ -112,7 +112,7 @@ describe("§6.7 concurrency — 共享状态隔离", () => {
   });
 });
 
-// ── Case 4：并发 Swarm 子任务独立 ───────────────────────────────────────────
+
 describe("§6.7 concurrency — 并发 Swarm 子任务独立", () => {
   it("两个并行 async task 各自独立完成，互不干扰", async () => {
     let doneA = false;
@@ -138,7 +138,7 @@ describe("§6.7 concurrency — 并发 Swarm 子任务独立", () => {
   });
 });
 
-// ── Case 5：高并发 audit 不崩溃 ─────────────────────────────────────────────
+
 describe("§6.7 concurrency — 高并发 audit 不崩溃", () => {
   let mgr: SandboxManager;
   let logPath: string;
@@ -156,7 +156,7 @@ describe("§6.7 concurrency — 高并发 audit 不崩溃", () => {
 
   it("100 并发 recordViolation 能正常完成（串行队列保证）", async () => {
     await Promise.all(Array.from({ length: 100 }, () => mgr.recordViolation("heavy-agent")));
-    // 轮询等待串行队列 flush 完成（100 并发 + 每行前 mkdir，慢盘下 300ms 固定 sleep 曾只读到 74 行 → flaky）
+    
     const lines = await pollAuditLines(logPath, 100);
     expect(lines.length).toBe(100);
   });

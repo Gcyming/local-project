@@ -1,19 +1,19 @@
-/**
- * A-1044 守卫（core-ts 侧）：**用户与 Agent 的输入仲裁**（人优先）+ 操作区域几何 + 桌面空闲探针。
- *
- * **用户原话**：「当 agent 操作我这里或者操作 slime 内的一些地方的时候，我点击 slime 内的一些地方时，
- *   操作点击的地方会失效，要重新点击，你是不是设置的时候没设好，Agent 的操作与用户操作未作隔离？」
- *
- * 根因不是"没设好开关"：宿主桌面后端用 `SetCursorPos` + `mouse_event` + `SetForegroundWindow` 注入，
- * 用的是**全局唯一物理指针**与**前台窗口**；右栏浏览器则用 `wv.focus()` 抢应用内焦点。共享资源竞争
- * 没有"隔离"这个解 —— 正确的解是**人优先**：检测到用户在操作就让位等待，等不到就中止并如实汇报。
- *
- * 本守卫锁三件事：
- *   ① `decideUserYield` 的三条语义（等待 / 中止 / **探测不可用时放行但留痕**）；
- *   ② `operationRegionBox` 的四档几何（窗口矩形 → 动作点框 → 兜底 → 不猜）；
- *   ③ 位置驱动扫源码：让位门只装在"会注入输入"的动作上；`begin` 必在 `perform` **之前**、
- *      `end` 必在 `finally`；空闲探针是**内部**动作（模型调不到）、失败必须返回 null。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,7 +29,7 @@ import {
 
 const ROOT = join(__dirname, "../..");
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再扫 —— 本仓注释里大量引用了"被禁止的写法"，不剥会把断言喂饱。 */
+
 const stripComments = (s: string): string =>
   s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
@@ -56,7 +56,7 @@ describe("A-1044 ①：让位裁决 —— 人优先（纯逻辑）", () => {
   });
 
   it("等够了还没停手 → **中止**，并说清「本次未执行」（绝不硬点上去抢指针）", () => {
-    // 还差 600ms 才到窗口，但只允许再等 100ms
+    
     const d = decideUserYield({ ...base, idleMs: USER_ACTIVE_WINDOW_MS - 600, waitedMs: USER_YIELD_MAX_WAIT_MS - 100 });
     expect(d.action).toBe("abort");
     if (d.action === "abort") {
@@ -130,7 +130,7 @@ describe("A-1044 ②：操作区域几何（呼吸灯画在哪）", () => {
 
 describe("A-1044 ③：源码位置约束（让位门 / 事件时序 / 探针边界）", () => {
   const ctl = (): string => stripComments(read(CONTROLLER));
-  /** `performInner` 的函数体（位置驱动：范围限定在这一处，别处的同名文本不算数）。 */
+  
   const inner = (): string => {
     const src = ctl();
     const at = src.indexOf("private async performInner(");
@@ -198,8 +198,8 @@ describe("A-1044 ③：源码位置约束（让位门 / 事件时序 / 探针边
     expect(m, "找不到 DesktopScreenBackend.userIdleMs").not.toBeNull();
     const body = m![0];
     expect(body).toContain("null");
-    // ⚠️ 只断言"含 catch"太弱：`catch (e) { throw e; }` 同样含 catch —— 而它恰恰是**改坏后的样子**。
-    // 必须锁住 catch 块的**块体**：返回 null，且不抛。
+    
+    
     const c = /catch\s*(?:\([^)]*\))?\s*\{([\s\S]*?)\}/.exec(body);
     expect(c, "探针必须有 catch 兜底（宿主未就绪/超时）").not.toBeNull();
     expect(c![1], "catch 里必须 return null —— 探测不可用的语义是「放行但留痕」").toMatch(/return\s+null\s*;/);

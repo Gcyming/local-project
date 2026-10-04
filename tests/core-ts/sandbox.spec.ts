@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/sandbox.spec.ts — 沙箱系统测试（L0-L5 + 审计 + 异常检测）。
- * 对照 core/sandbox.py 决策链语义逐项验证。
- */
+
+
+
+
 import { describe, expect, it, afterAll, vi } from "vitest";
 import { rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -61,14 +61,14 @@ describe("checkPermission（决策链）", () => {
   it("工作目录：相对路径会误判超范围，绝对路径（ToolLoop 已锚定工作目录）才通过", () => {
     const ws = "/ws/project";
     const m = makeManager({ workspace: ws });
-    // 旧行为：模型只给相对路径 → 沙箱以进程 CWD 为基准 resolve → 超出工作目录 → 拒
+    
     const rel = m.checkPermission("a1", "file_read", "game.exe", 0);
     expect(rel.allowed).toBe(false);
     expect(rel.reason).toContain("超出工作目录范围");
-    // ToolLoop 修复后：相对路径已锚定工作目录为绝对路径 → 在工作目录内 → 通过
+    
     const abs = m.checkPermission("a1", "file_read", `${ws}/game.exe`, 0);
     expect(abs.allowed).toBe(true);
-    // 工作目录外的绝对路径仍拒绝（防逃逸）
+    
     const out = m.checkPermission("a1", "file_read", "/other/secret.txt", 0);
     expect(out.allowed).toBe(false);
   });
@@ -87,7 +87,7 @@ describe("checkPermission（决策链）", () => {
 
   it("黑名单工具优先于等级", () => {
     const m = makeManager({ tools: { deny: ["rm", "chmod"] } });
-    expect(m.checkPermission("a1", "rm", "file", 0).allowed).toBe(false); // 即使 L0
+    expect(m.checkPermission("a1", "rm", "file", 0).allowed).toBe(false); 
     expect(m.checkPermission("a1", "rm", "file", 0).reason).toContain("被禁止");
   });
 
@@ -100,8 +100,8 @@ describe("checkPermission（决策链）", () => {
 
   it("A-088 P1-9：mcp_* 白名单只放行低权限；network/terminal 级仍需确认", () => {
     const m = makeManager({ tools: { auto: ["mcp_*"] } });
-    expect(m.checkPermission("a1", "mcp_tool", "x", 2).allowed).toBe(true); // write 级 OK
-    expect(m.checkPermission("a1", "mcp_tool", "x", 4).allowed).toBe(false); // network 级拒绝
+    expect(m.checkPermission("a1", "mcp_tool", "x", 2).allowed).toBe(true); 
+    expect(m.checkPermission("a1", "mcp_tool", "x", 4).allowed).toBe(false); 
   });
 
   it("require_approval_tools 优先于等级自动批准", () => {
@@ -129,13 +129,13 @@ describe("checkPermission（决策链）", () => {
     const m = makeManager({ workspace: join(PROJECT_ROOT, "data"), auto: [0, 1, 2, 3, 4] });
     expect(m.checkPermission("a1", "file_read", join(PROJECT_ROOT, "package.json"), 0).allowed).toBe(false);
     expect(m.checkPermission("a1", "file_read", join(PROJECT_ROOT, "data", "x.txt"), 0).allowed).toBe(true);
-    // JSON 参数：path 字段在范围内 → 允许
+    
     const jsonIn = JSON.stringify({ path: join(PROJECT_ROOT, "data", "x.txt") });
     expect(m.checkPermission("a1", "file_read", jsonIn, 0).allowed).toBe(true);
-    // JSON 参数无路径字段 → 拒绝（宁严勿放）
+    
     const jsonNoPath = JSON.stringify({ query: "search" });
     expect(m.checkPermission("a1", "file_read", jsonNoPath, 0).allowed).toBe(false);
-    // url 目标归 SSRF 防护，不归工作目录隔离
+    
     expect(m.checkPermission("a1", "web_fetch", JSON.stringify({ url: "https://x" }), 4).allowed).toBe(true);
   });
 });
@@ -166,7 +166,7 @@ describe("grantPermission + 审计", () => {
   });
 
   it("会话级白名单：工作目录外路径经 approveToolForSession 后直接放行（不再询问）；清空后回落审批", async () => {
-    // 有工作目录 + 审批回调（记录被询问次数）
+    
     const ws = join(PROJECT_ROOT, "data");
     let asked = 0;
     const cb = (_req: PermissionRequest): ApprovalDecision => ({
@@ -176,25 +176,25 @@ describe("grantPermission + 审计", () => {
     cfg.audit_log_path = TEST_AUDIT;
     cfg.workspace = ws;
     const m = new SandboxManager(cfg, (_req) => { asked++; return cb(_req); });
-    const outside = join(PROJECT_ROOT, "config", "providers.enc.json"); // 工作目录外
+    const outside = join(PROJECT_ROOT, "config", "providers.enc.json"); 
 
-    // 未加入白名单：工作目录外 → 走审批回调（询问）
+    
     const first = await m.grantPermission({ agentId: "a1", action: "file_read", target: outside, level: 0 });
     expect(first.allowed).toBe(true);
     expect(asked).toBe(1);
 
-    // 会话级「总是允许」→ 不再询问，直接放行
+    
     m.approveToolForSession("a1", "file_read");
     const second = await m.grantPermission({ agentId: "a1", action: "file_read", target: outside, level: 0 });
     expect(second.allowed).toBe(true);
     expect(second.reason).toBe("会话级已批准");
-    expect(asked).toBe(1); // 未再询问
-    // 其他工具不受白名单影响，仍走审批
+    expect(asked).toBe(1); 
+    
     const other = await m.grantPermission({ agentId: "a1", action: "file_write", target: outside, level: 1 });
     expect(other.allowed).toBe(true);
     expect(asked).toBe(2);
 
-    // 清空白名单 → 回落审批
+    
     m.clearSessionAllowlist("a1");
     const third = await m.grantPermission({ agentId: "a1", action: "file_read", target: outside, level: 0 });
     expect(third.allowed).toBe(true);
@@ -218,12 +218,12 @@ describe("grantPermission + 审计", () => {
     await m.revokeAll("a1", "测试回收");
     const audits = m.queryAudit("a1");
     expect(audits.some((e) => e.status === "revoked")).toBe(true);
-    expect(m.getAgentConfig("a1")).toBeDefined(); // 回落到全局
+    expect(m.getAgentConfig("a1")).toBeDefined(); 
   });
 
   it("审计落盘 JSONL（独立文件，逐行追加）", async () => {
     const isolated = TEST_AUDIT + ".iso.jsonl";
-    await rm(isolated, { force: true }); // 幂等：失败残留不影响下次运行
+    await rm(isolated, { force: true }); 
     const cfg = defaultSandboxConfig();
     cfg.audit_log_path = isolated;
     const m = new SandboxManager(cfg);
@@ -231,7 +231,7 @@ describe("grantPermission + 审计", () => {
     await m.grantPermission({ agentId: "a1", action: "file_read", target: "y", level: 0 });
     await m.flushAudit();
     const lines = (await readFile(isolated, "utf-8")).trim().split("\n");
-    expect(lines.length).toBe(2); // 两条授权逐行追加
+    expect(lines.length).toBe(2); 
     const last = JSON.parse(lines.at(-1)!);
     expect(last.agent_id).toBe("a1");
     expect(last.status).toBe("allowed");
@@ -242,7 +242,7 @@ describe("grantPermission + 审计", () => {
   it("getAuditSummary 统计", async () => {
     const m = makeManager();
     await m.grantPermission({ agentId: "a1", action: "file_read", target: "x", level: 0 });
-    await m.grantPermission({ agentId: "a1", action: "file_write", target: "x", level: 2 }); // denied（无回调）
+    await m.grantPermission({ agentId: "a1", action: "file_write", target: "x", level: 2 }); 
     const s = m.getAuditSummary();
     expect(s.allowed).toBe(1);
     expect(s.denied).toBe(1);
@@ -254,9 +254,9 @@ describe("Agent 级配置（继承 + 覆盖合并）", () => {
     const base = defaultSandboxConfig();
     base.auto_approve_tools = ["web_fetch"];
     const merged = mergeAgentOverride(base, { auto_approve_tools: ["mcp_browser_*"], deny_levels: [5] });
-    expect(merged.auto_approve_tools).toEqual(["mcp_browser_*", "web_fetch"]); // 并集
-    expect(merged.deny_levels).toEqual([5]); // 非列表键覆盖
-    expect(merged.auto_approve_levels).toEqual([0, 1]); // 未提及键保留全局默认
+    expect(merged.auto_approve_tools).toEqual(["mcp_browser_*", "web_fetch"]); 
+    expect(merged.deny_levels).toEqual([5]); 
+    expect(merged.auto_approve_levels).toEqual([0, 1]); 
   });
 
   it("权限继承：子 Agent 继承父配置；inherit_from_parent=false 回落全局；不继承 workspace", () => {
@@ -265,25 +265,25 @@ describe("Agent 级配置（继承 + 覆盖合并）", () => {
     const childCfg = { ...defaultSandboxConfig(), deny_levels: [5] };
     m.setAgentConfig("parent", childCfg);
     m.registerAgent("child", { parentId: "parent" });
-    expect(m.getAgentConfig("child").deny_levels).toEqual([5]); // 继承
+    expect(m.getAgentConfig("child").deny_levels).toEqual([5]); 
     const noInherit = { ...defaultSandboxConfig(), deny_levels: [5], inherit_from_parent: false };
     m.setAgentConfig("parent2", noInherit);
     m.registerAgent("child2", { parentId: "parent2" });
-    expect(m.getAgentConfig("child2").deny_levels).toEqual([4]); // 回落全局
+    expect(m.getAgentConfig("child2").deny_levels).toEqual([4]); 
   });
 
   it("requestPermissionUpgrade：主 Agent 无需提升；L5 禁止；L2-L4 需回调批准（5 分钟临时）", async () => {
     const m = makeManager({ auto: [0, 1], require: [2, 3, 4] });
     m.registerAgent("main");
-    expect((await m.requestPermissionUpgrade("main", 3)).allowed).toBe(true); // 主 Agent 直接通过
+    expect((await m.requestPermissionUpgrade("main", 3)).allowed).toBe(true); 
     m.registerAgent("worker", { parentId: "main" });
-    expect((await m.requestPermissionUpgrade("worker", 5)).allowed).toBe(false); // L5 禁止
-    expect((await m.requestPermissionUpgrade("worker", 3)).allowed).toBe(false); // 无回调拒绝
+    expect((await m.requestPermissionUpgrade("worker", 5)).allowed).toBe(false); 
+    expect((await m.requestPermissionUpgrade("worker", 3)).allowed).toBe(false); 
     let approved = true;
     m.setApprovalCallback((_req) => ({ requestId: "", approved, approvedActions: [], deniedActions: [], reason: "", autoApproved: false }));
     const up = await m.requestPermissionUpgrade("worker", 3);
     expect(up.allowed).toBe(true);
-    expect(m.getAgentConfig("worker").auto_approve_levels).toContain(3); // 临时合并
+    expect(m.getAgentConfig("worker").auto_approve_levels).toContain(3); 
   });
 });
 
@@ -291,7 +291,7 @@ describe("AnomalyDetector", () => {
   it("写入速率限制：超过阈值告警；拒绝操作不计入", () => {
     const m = makeManager();
     const det = (m as unknown as { anomalyDetector: { checkRateLimit: (a: string, act: string, t: number) => boolean } }).anomalyDetector;
-    // 直接测内部：100 次内不超，101 次超
+    
     const act = "file_write";
     const agent = "a1";
     let triggered = false;
@@ -301,7 +301,7 @@ describe("AnomalyDetector", () => {
       }
     }
     expect(triggered).toBe(true);
-    // 非 write/delete 动作不计数
+    
     expect(det.checkRateLimit(agent, "file_read", 100)).toBe(false);
   });
 
@@ -365,7 +365,7 @@ describe("全局单例", () => {
 
   it("calculateRiskScore：基础分 + 非工作时段 + 系统路径加成，封顶 1.0", () => {
     const m = makeManager();
-    // 基础分 0.0 + 可能存在的非工作时段加成 0.2（不依赖墙钟断言）
+    
     expect(m.calculateRiskScore("file_read", { target: "a.txt" })).toBeLessThanOrEqual(0.2);
     const sudo = m.calculateRiskScore("sudo", { target: "C:\\Windows\\System32" });
     expect(sudo).toBeGreaterThanOrEqual(0.9);
@@ -399,7 +399,7 @@ describe("审计日志轮转（以磁盘为源，跨重启存活）", () => {
   it("全新实例（模拟重启，内存为空）轮转不清空磁盘近期记录", async () => {
     const isolated = join(PROJECT_ROOT, "data", `audit-rot-${Date.now()}.jsonl`);
     const now = new Date().toISOString();
-    const stale = new Date(Date.now() - 200 * 86_400_000).toISOString(); // 200 天前，超 90 天保留期
+    const stale = new Date(Date.now() - 200 * 86_400_000).toISOString(); 
     await writeFile(
       isolated,
       JSON.stringify({ timestamp: now, agent_id: "hist", action: "file_read", status: "allowed" }) + "\n" +

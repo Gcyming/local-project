@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/export.spec.ts — Agent 导出（身份移民协议 §4）。
- * 策略：临时项目根 + 真实 fs；断言 manifest / 包结构 / 单条提取 / 排除清单 / 懒创建语义。
- */
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { mkdtemp, writeFile, mkdir, rm, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -182,7 +182,7 @@ describe("isExcluded（§6 单元）", () => {
     expect(isExcluded("Knowledge/Agent Memory/agent_a/.trash/deleted.md")).toBe(true);
     expect(isExcluded("Knowledge/Agent Memory/agent_a/providers.enc.json")).toBe(true);
     expect(isExcluded("Knowledge/Agent Memory/agent_a/secret.slime_pass")).toBe(true);
-    expect(isExcluded("Knowledge/Agent Memory/agent_a/token.txt")).toBe(false); // 非敏感，保留
+    expect(isExcluded("Knowledge/Agent Memory/agent_a/token.txt")).toBe(false); 
     expect(isExcluded("Knowledge/Agent Memory/agent_a/memory.json")).toBe(false);
   });
 });

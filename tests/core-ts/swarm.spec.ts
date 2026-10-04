@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/swarm.spec.ts — Swarm 编排器状态机测试。
- * 对照 core/swarm.py 语义：五态流转 / max_workers 钳制 / provider 轮转 / 轮次分组。
- */
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { SwarmOrchestrator, TaskState, makeSubTask } from "../../core-ts/src/swarm.js";
 
@@ -39,7 +39,7 @@ describe("createPlan", () => {
     });
     expect(plan.subtasks[0].name).toBe("n1");
     expect(plan.subtasks[1].name).toBe("n2");
-    expect(plan.subtasks[2].name).toBe("Worker-3"); // 缺省
+    expect(plan.subtasks[2].name).toBe("Worker-3"); 
     expect(plan.subtasks[0].agent_name).toBe("persist");
     expect(plan.subtasks[1].agent_name).toBe("");
     expect(plan.subtasks[0].round).toBe(2);
@@ -47,7 +47,7 @@ describe("createPlan", () => {
     expect(plan.subtasks[2].round).toBe(1);
     expect(plan.subtasks[0].provider_key).toBe("p1");
     expect(plan.subtasks[1].provider_key).toBe("p2");
-    expect(plan.subtasks[2].provider_key).toBe("p1"); // 轮转
+    expect(plan.subtasks[2].provider_key).toBe("p1"); 
   });
 
   it("初始 state=pending；plan 注册进 plans", () => {

@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1088-first-byte.spec.ts — 首包超时与空闲超时**分离**（A-1088）
- * + `screen_windows` 空结果与故障**分态**（A-1088）。
- *
- * ## 本文件锁住的两个真实缺陷
- *
- * ### ① 冷缓存大 prompt 的「首包长静默」被与「真死」同态
- *
- * `IDLE_STREAM_MS` 与 `DEFAULT_LLM_TIMEOUT_MS` 此前**同为平的 300s**，而 prefill 阶段
- * 一个字节都不走网络 ⇒ 与"连接死了"**不可区分**。用户取证（`config/usage.jsonl` 5491 条）：
- * 29 条失败**全是 user-aborted**、无一上游错误，glm-5.3-flash 失败重发 prompt≈73.7K +
- * `cache_read=0` ⇒ **同一请求反复重发、缓存永不热 ⇒ 越重连越慢**。
- *
- * 修法：首包那一档**按 prompt 体积自适应**（`firstByteBudgetMs`），且**永不低于**
- * `IDLE_STREAM_MS`（纯增量 —— 不把当初为「上游把思考缓存在服务端一次推送」放宽到 300s
- * 的修复打回去）。同时把"在预填充 / 多大 / 最多等多久"如实上报（`formatPrefillNotice`）——
- * 因为失败是"人等不下去按停"，只放宽超时而不说明在等什么等于没修。
- *
- * ### ② `screen_windows` 空结果与故障同态
- *
- * `desktop.ts` 的 `listWindows` 两种情形**都抛**，而 `controller.ts` 又 `catch { return []; }`
- * 把异常吞掉 ⇒ 上层只能把"本机确实没有窗口"也当成故障报给模型
- * （模型于是去修一个并不存在的故障）。现在三态分明：真没窗口 = 空数组、枚举故障 = 抛。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,8 +49,8 @@ const BUILTIN = strip("core-ts/src/tools/builtin.ts");
 
 describe("A-1088 · firstByteBudgetMs：首包按体积自适应，且**永不收紧**既有行为", () => {
   it("🐛 小 prompt 必须仍拿到 IDLE_STREAM_MS（自适应值更低也不许收紧）", () => {
-    // 这条是本轮「纯增量」的核心保证：若哪天自适应值直接生效，
-    // 10K 的 prompt 首包只有 160s < 300s ⇒ 把「思考被缓存、一次推送」那条修复打回去
+    
+    
     expect(firstByteBudgetMs(10_000)).toBe(IDLE_STREAM_MS);
     expect(firstByteBudgetMs(1)).toBe(IDLE_STREAM_MS);
   });
@@ -126,7 +126,7 @@ describe("A-1088 · formatPrefillNotice：把「在等什么 / 多大 / 最多�
 
 describe("A-1088 · 接线：首包预算必须真的用进流式读取（不是只写了个纯函数）", () => {
   it("三处流式读取循环都区分「首包」与「后续」", () => {
-    // ChatClient / AnthropicClient / readSSEStream 各一处
+    
     const n = (CLIENT.match(/firstRead \? firstBudgetMs : IDLE_STREAM_MS/g) ?? []).length;
     expect(n, `只有 ${n} 处接上了首包预算（应为 3：ChatClient / Anthropic / readSSEStream）`).toBe(3);
     expect(CLIENT).toContain("let firstRead = true;");
@@ -160,8 +160,8 @@ describe("A-1088 · screen_windows：空结果与故障必须分态", () => {
     has(DESKTOP, "if (!diag) {", "diag 缺失没有单独判 ⇒ 协议不匹配会被当成「没有窗口」");
     has(DESKTOP, "const candidates = Number(diag.candidates ?? 0);", "没有读候选数 ⇒ 无法区分「真没窗口」与「枚举全挂」");
     has(DESKTOP, "if (candidates > 0) {", "候选非 0 却一条都没产出没有判为故障");
-    // 空结果那条 `return []` 必须排在 `candidates > 0` 的抛错分支**之后**（即"排除了故障"才落到它）
-    // ⚠️ 断言只认**代码**：本文件的 strip() 会剥掉注释，别拿注释当判据（第一版就是这么写错的）
+    
+    
     expect(
       /if \(candidates > 0\) \{[\s\S]{0,600}?\n      return \[\];/.test(DESKTOP),
       "空结果没有走「不是故障」这条分支（`return []` 不在候选数判定之后）",

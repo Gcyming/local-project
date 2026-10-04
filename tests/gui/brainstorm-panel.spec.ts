@@ -1,9 +1,9 @@
-/**
- * brainstorm-panel.spec.ts — 群聊右栏纯函数回归（A-951 / A-1011）。
- * parseProviderModel：从 model_choice（api:<provider>[:<model>] / local:<id> / inherit）拆出供应商与模型两段。
- * modelWindowCap（A-954）：入群模型 → 该成员上下文池 cap。
- * memberEffortCap / effortLabel / mergeEffortOverrides（A-1011）：成员思考推理强度的可选等级与覆盖合并。
- */
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   parseProviderModel,
@@ -47,7 +47,7 @@ describe("modelWindowCap（A-954 入群模型 → 池容量 context_window）", 
   it("未命中（供应商无此模型/无规格）→ undefined", () => {
     expect(modelWindowCap("api:openai:gpt-5", specs)).toBeUndefined();
     expect(modelWindowCap("api:no-such:model", specs)).toBeUndefined();
-    expect(modelWindowCap("local:qwen3b", specs)).toBeUndefined(); // 本地模型不走 providerModels
+    expect(modelWindowCap("local:qwen3b", specs)).toBeUndefined(); 
     expect(modelWindowCap("silam", specs)).toBeUndefined();
   });
   it("空串/缺规格 → undefined，不抛", () => {
@@ -56,9 +56,9 @@ describe("modelWindowCap（A-954 入群模型 → 池容量 context_window）", 
   });
 });
 
-/* ── A-1011：群聊成员「思考推理强度」纯逻辑 ───────────────────────
- * 这三条锁死的是「不许给假旋钮」这个语义：模型不接收等级时不给可点的等级胶囊，
- * 只给说明；否则用户调了没反应，会误以为程序坏了。 */
+
+
+
 describe("memberEffortCap（成员模型 → 可选等级 + 是否真会生效）", () => {
   it("本地模型：不给等级（引擎对 kind=local 一律回 chat_template_kwargs，等级不生效）", () => {
     for (const c of ["local:qwen3b", "local:agnes"]) {

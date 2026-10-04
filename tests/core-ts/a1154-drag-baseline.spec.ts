@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1154-drag-baseline.spec.ts — 拖拽**基准**与临时类完整性守卫（A-1154）。
- *
- * ## 为什么还要单独一个 spec（A-1153 已经锁了 13 条）
- * A-1153 锁的是「浮层铺满 ↔ 右栏宽度状态」的解耦。本轮用**真 App CDP 端到端取证**
- * （`gui/scripts/probe-drag-robust.mjs` / `probe-sidebar-e2e-cdp.mjs`）又抓到 4 条
- * **A-1153 完全没覆盖**的根因 —— 它们都在"拖动"这条路径上，且都会**静默**回归：
- *
- * | # | 缺陷 | 用户看到什么 | 真机证据 |
- * |---|---|---|---|
- * | 1 | `startWidth` 取的是 `rightWidthRef`（**请求值**），不是 DOM 实宽 | 第 1 轮拖动"完全无响应"，要左右多拖几次才恢复 | `probe-drag-robust` 第 1 轮 `宽 712 → 712`（同页第 2 轮起正常） |
- * | 2 | 持久化 px 宽度在窗口尺寸变化后**越界不收敛** | 「对话页自适应窗口调整失效」／拖拽基准错位 | 上限 `min(innerWidth-48, innerWidth-左栏-380)` 随窗口变，而 state 停在旧值 |
- * | 3 | `slime-dragging` **只禁宽度过渡**，没禁文本选中 / 没定光标 | 拖动头 140ms 内把对话区拖出蓝色选区 + 光标跳变（"一拖就闪一下"的杂讯源） | CSS `body.slime-dragging` 只有 `transition: none` |
- * | 4 | `GEOM_SYNC_NEVER_MOUNT_FRAMES`（"对象从未挂载"的有界等待）若被删/改成无限等 | `slime-freezing` + `--slime-freeze-w` 永久残留 ⇒ 聊天区被钉死 | `hidden=true` 取证环境会掩盖它（rAF 停摆），所以必须有**形状守卫**兜住 |
- *
- * ## 判据风格
- * 与 a1153 一致：**剥注释**后做形状断言（不渲染组件、不依赖会话数据）。
- * ⚠️ 本仓注释里大量引用"被删掉的旧写法"，不剥注释就会假红/假绿。
- *
- * ⚠️ 关于"数值"类判据（如 `startWidth` 该读什么）：
- * 光断言"出现了 `getBoundingClientRect`"是**弱判据**（别处也可能有）。
- * 这里的判据锚的是**同一个语句内的配对**：`startWidth` 的右值必须来自 `getBoundingClientRect`，
- * 且**不许**回落成 `rightWidthRef` / `sidebarWidthRef`（那正是被修掉的旧写法）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,7 +37,7 @@ const CSS_SRC = read("gui/src/renderer/index.css");
 const APP_CODE = strip(APP_SRC);
 const CSS_CODE = strip(CSS_SRC);
 
-/** 取 `function X(...) { ... }` 的函数体（到下一个顶格 `  }` 为止）。 */
+
 function fnBody(src: string, name: string): string {
   const m = new RegExp(`function ${name}\\([^)]*\\)[^]*?\\n  \\}`).exec(src);
   expect(m, `取不到 ${name}（守卫自己失效了）`).toBeTruthy();
@@ -47,14 +47,14 @@ function fnBody(src: string, name: string): string {
 describe("A-1154 ① 拖拽基准必须取 **DOM 实测宽度**（否则第 1 轮拖动无响应）", () => {
   it("`handleRightbarResize`：`startWidth` 来自 `getBoundingClientRect()`，**不是** `rightWidthRef`", () => {
     const body = fnBody(APP_CODE, "handleRightbarResize");
-    /* 判据 1：`startWidth` 的右值必须含 `getBoundingClientRect`。 */
+    
     expect(
       /const\s+startWidth\s*=[^;]*getBoundingClientRect/.test(body),
       "`startWidth` 没取 DOM 实测宽 ⇒ 与实宽错位时拖动基准错（真机实测：第 1 轮 712→712 完全无响应）",
     ).toBe(true);
-    /* 判据 2：**不许**出现 `const startWidth = rightWidthRef.current` 这条被修掉的旧写法。
-       ⚠️ 用"整句"匹配而不是全文 `includes`：`rightWidthRef.current` 在函数里还有别的合法用处
-       （`dismissFloat` 里读它算主区目标宽），只锚 `startWidth` 的赋值才精确。 */
+    
+
+
     expect(
       /const\s+startWidth\s*=\s*rightWidthRef\.current\s*;/.test(body),
       "`startWidth` 又回落成 state（请求值）—— 这正是被修的旧写法",
@@ -74,17 +74,17 @@ describe("A-1154 ① 拖拽基准必须取 **DOM 实测宽度**（否则第 1 �
   });
 
   it("落 state / localStorage 前必须 `Math.round`（实测宽是浮点，别把 286.375 写进持久层）", () => {
-    /* ⚠️ 判据必须是**配对**（"写出去的那个值被 round 过"），不能只数 `Math.round(` 出现次数：
-       函数体里还有别的 round（如 `Math.round(window.innerWidth * ratio)`）⇒ 删掉落盘那处
-       计数仍 ≥1、断言照样绿 = **弱判据**（变异实测 M3 因此"存活"）。
-       ⇒ 逐条锚"落盘语句的右值带 Math.round"：
-         · `setSidebarWidth(Math.round(...))` / `setRightWidth(Math.round(...))`（onCancel 路径）
-         · `localStorage.setItem('slime_*_w', String(<round 过的值>))`（onUp 路径） */
-    /* 右栏 onUp：`let w = …; …; w = Math.round(w); localStorage.setItem(…, String(w)); setRightWidth(w);`
-       ⇒ 判据锚 `w = Math.round(w)` 这一句（它是"写出去的那个值"的净化点）。
-       左栏 onUp：`const w = Math.round(Math.max(…)); setSidebarWidth(w); localStorage.setItem(…, String(w));`
-       ⇒ 判据锚 `const w = Math.round(`。
-       两栏结构不同，**不能用同一条正则**（照抄一条会漏掉另一栏 = 假守卫）。 */
+    
+
+
+
+
+
+    
+
+
+
+
     {
       const rBody = fnBody(APP_CODE, "handleRightbarResize");
       expect(
@@ -99,8 +99,8 @@ describe("A-1154 ① 拖拽基准必须取 **DOM 实测宽度**（否则第 1 �
     }
     for (const fn of ["handleSidebarResize", "handleRightbarResize"]) {
       const body = fnBody(APP_CODE, fn);
-      /* ⚠️ setter 名字不对称，别想当然：左栏是 `setSidebarWidth`，右栏是 `setRightWidth`
-         （**没有** `bar`）—— 写成 `setRightbarWidth` 会永远匹配不到 = 假守卫。 */
+      
+
       expect(
         /set(?:Sidebar|Right)Width\(Math\.round\(/.test(body),
         `${fn} 的 onCancel 路径没把实测浮点 round 就 setState`,
@@ -109,8 +109,8 @@ describe("A-1154 ① 拖拽基准必须取 **DOM 实测宽度**（否则第 1 �
         /localStorage\.setItem\('slime_(?:sidebar|rightbar)_w', String\([^)]*\)\)/.test(body),
         `${fn} 没有落 localStorage（守卫自己失效了）`,
       ).toBe(true);
-      /* 落盘那句的取值表达式必须来自 round 过的值（`String(w)` / `String(restoreW)` 里的标识符
-         必须在同一函数内被 round 过）—— 这条兜住"onUp 之外的落盘点"漏改。 */
+      
+
       const setItemIdx = body.indexOf("localStorage.setItem('slime_");
       const seg = body.slice(Math.max(0, setItemIdx - 700), setItemIdx + 80);
       expect(
@@ -123,16 +123,16 @@ describe("A-1154 ① 拖拽基准必须取 **DOM 实测宽度**（否则第 1 �
 
 describe("A-1154 ② 持久化 px 宽度在窗口变化时**必须收敛到合法区间**", () => {
   it("存在一个监听 `resize` 且把 `rightWidth` 钳进 `[minW, maxW]` 的 effect", () => {
-    /* ⚠️ 判据分三步（不分一条长正则：`APP_CODE` 已剥注释，但语句间隔不定长，
-       用 `[\s\S]{0,N}` 这种**有界窗口**匹配会随无关代码增删而静默失配 —— 那种守卫是假的）。
-       步骤：先定位那段 effect 的**特征开头**，再从它往后截一段区域，在区域里验三条。 */
-    /* 特征：`if (!rightCustom) { return; }` 紧跟 `let rafId = 0;`（本 effect 的固定形状）。 */
+    
+
+
+    
     const start = APP_CODE.indexOf("if (!rightCustom) { return; }");
     expect(
       start,
       "找不到「rightCustom 为假就跳过」的钳制 effect 开头 ⇒ 窗口变化时持久化 px 宽度不收敛（不再自适应）",
     ).toBeGreaterThan(-1);
-    /* 截到本 effect 的 return 清理行（`window.removeEventListener("resize"`）为止。 */
+    
     const endMark = APP_CODE.indexOf('window.removeEventListener("resize"', start);
     expect(endMark, "钳制 effect 没有收尾（守卫自己失效了）").toBeGreaterThan(start);
     const region = APP_CODE.slice(start, endMark);
@@ -145,9 +145,9 @@ describe("A-1154 ② 持久化 px 宽度在窗口变化时**必须收敛到合�
 
 describe("A-1154 ③ `slime-dragging` 必须一次性给全「拖动期语义」", () => {
   it("CSS：挂着 `slime-dragging` 时禁文本选中 + 定住 col-resize 光标", () => {
-    /* ⚠️ 真问题：拖动头 140ms 内（`slime-resizing` 还没挂）鼠标划过对话区会把大段文本
-       拖成蓝色选区，松手消失 —— 观感就是"一拖就闪一下"的杂讯。
-       ⇒ 这两条与"禁宽度过渡"同属拖动期语义，必须一起挂在**同一个** `slime-dragging` 上。 */
+    
+
+
     const m = /(^|\n)body\.slime-dragging\s*\{([^}]*)\}/.exec(CSS_CODE);
     expect(m, "找不到 `body.slime-dragging { … }` 这条规则").toBeTruthy();
     const rule = m![2];
@@ -165,19 +165,19 @@ describe("A-1154 ③ `slime-dragging` 必须一次性给全「拖动期语义」
 
 describe("A-1162 几何 done 必定有界（`u >= 1` 取代「等对象挂载」的帧数等待）", () => {
   it("收工判据含 `u >= 1`（对象从未挂载也必然收工）", () => {
-    /* ⚠️⚠️ 这条**替换** A-1154 ④ 的 `GEOM_SYNC_NEVER_MOUNT_FRAMES` 守卫，不是绕过它。
-       当时的问题是：对象从未挂载时 `seen` 恒 false ⇒ done 永不触发 ⇒ rAF 死循环 +
-       `slime-freezing` / `--slime-freeze-w` **永久残留**（真 App 实测 >3.7s，聊天区被钉死）。
-       当时的解法是"等 6 帧还不出现就收工"——一个**帧数**启发式。
-       A-1162 把进度改成纯时间后，这个场景**根本不需要等待**：
-       `done = u >= 1` 与对象在不在**完全无关**，到点必收工。
-       ⇒ 守的是同一个风险（永不收工 ⇒ 临时类残留）在新结构下的等价保证。 */
+    
+
+
+
+
+
+
     const body = fnBody(APP_CODE, "runGeometrySyncFade");
     expect(
       /const\s+done\s*=\s*[^;]*u\s*>=\s*1/.test(body),
       "done 里没有 `u >= 1` ⇒ 对象从未挂载时 rAF 可能死循环、临时类永久残留",
     ).toBe(true);
-    /* ⚠️ 反向断言：旧的"靠帧数等对象挂载"机制不该复活（它是旧不确定性的来源之一）。 */
+    
     expect(
       !/neverMount/.test(body),
       "neverMount 帧数等待又回来了 ⇒ 收工时刻重新依赖帧率",
@@ -186,8 +186,8 @@ describe("A-1162 几何 done 必定有界（`u >= 1` 取代「等对象挂载」
 
   it("`runGeometrySyncFade` 的 done 分支里**同时**摘 `slime-freezing` 与 `--slime-freeze-w`", () => {
     const body = fnBody(APP_CODE, "startFloatGeometryFade");
-    /* ⚠️ 成对写/摘（铁律 11）：只摘 class 会让下一轮过渡第一帧就退回"没钉"；
-       只摘变量则类永久残留。两条都必须有。 */
+    
+
     expect(body, "几何 done 没摘 slime-freezing").toMatch(/classList\.remove\("slime-freezing"\)/);
     expect(body, "几何 done 没摘 --slime-freeze-w（成对写/摘）").toMatch(/removeProperty\("--slime-freeze-w"\)/);
   });
@@ -195,11 +195,11 @@ describe("A-1162 几何 done 必定有界（`u >= 1` 取代「等对象挂载」
 
 describe("A-1154 ⑤ 淡出阶段定时器必须可取消且到点校验（防「松手后才挂类」）", () => {
   it("⚠️ A-1190：阶段定时器**只有一个产地**（`mark()`），两个 resizer 起点都不再起它", () => {
-    /* 用户原话：「一点击侧边栏的边缘，还没有拖拽就消失，这不对，改成只有发生实质性比例变化
-       才会消失」⇒ 起表点从两个 resizer 的起点搬到 `mark()`（"宽度真的变了"才淡出）。
-       ⚠️ 但"句柄必须存 ref"与"到点校验本轮是否已结束"这两条不变量**一字未变**，
-         只是校验的状态类从 `slime-dragging` 换成了 `slime-fading` —— 后者更通用：
-         窗口 resize 路径没有 `slime-dragging`，却同样要防"变化已结束还补挂"。 */
+    
+
+
+
+
     const at = APP_CODE.indexOf("const mark =");
     expect(at, "找不到 RO 的 mark 处理").toBeGreaterThan(-1);
     const seg = APP_CODE.slice(at, at + 2600);
@@ -211,7 +211,7 @@ describe("A-1154 ⑤ 淡出阶段定时器必须可取消且到点校验（防�
       /!document\.body\.classList\.contains\("slime-fading"\)\s*\)\s*\{\s*return/.test(seg),
       "mark() 的阶段定时器没有「本轮已结束则作废」的校验",
     ).toBe(true);
-    /* ⚠️ 反方向也要钉：起点若又自己起了定时器 ⇒ 用户"点一下边缘"（还没拖）就又淡出了。 */
+    
     for (const fn of ["handleSidebarResize", "handleRightbarResize"]) {
       const fnAt = APP_CODE.indexOf(`function ${fn}`);
       expect(fnAt, `找不到 ${fn}`).toBeGreaterThan(-1);

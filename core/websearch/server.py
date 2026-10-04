@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+
 """Slime Mini Web Search — 搜索服务（server.py）
 
 把 crawler.py 抓取的页面 + indexer.py 建立的倒排索引，包装成一个 HTTP 搜索服务：
@@ -66,7 +66,7 @@ def run_crawl_job(seed, max_pages, max_depth, delay):
             rebuild()
         CRAWL_STATE['last'] = {'ok': True, 'crawl': stats, 'index': istats}
         log('完成: 抓取 %d 页, 索引 %d 词' % (stats['fetched'], istats['terms']))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  
         CRAWL_STATE['last'] = {'ok': False, 'error': str(e)}
         log('失败: %s' % e)
     finally:
@@ -77,9 +77,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = 'SlimeMiniSearch/1.0'
 
     def log_message(self, *a):
-        pass  # 静音访问日志
+        pass  
 
-    # ── 工具 ──
+    
     def _send(self, code, obj, ctype='application/json; charset=utf-8'):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8') if isinstance(obj, (dict, list)) else obj
         self.send_response(code)
@@ -104,8 +104,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
-    # ── 路由 ──
-    def do_OPTIONS(self):  # 预检
+    
+    def do_OPTIONS(self):  
         self._send(204, '')
 
     def do_GET(self):
@@ -173,7 +173,7 @@ def main(argv=None):
 
     global DB_PATH
     DB_PATH = args.db
-    get_searcher()  # 预热
+    get_searcher()  
     st = get_searcher().stats()
     print('Slime Mini Web Search 服务已启动')
     print('  DB: %s | 已收录 %d 页 / %d 词' % (args.db, st['pages'], st['terms']))

@@ -74,8 +74,8 @@ class TestModelBackend:
 
 class TestModelServerManager:
     def _make_cfg(self, tmp_path):
-        # A-037: 测试专用高位端口（19511/19521）—— 避免与用户正在运行的
-        # 生产实例（embedding 8999 / chat 18082）冲突导致测试互相污染
+        
+        
         return {
             "llama_bin": str(tmp_path / "llama-server.exe"),
             "startup_timeout": 2,
@@ -104,13 +104,13 @@ class TestModelServerManager:
         """模型文件不存在 → ok=False"""
         from core.model_server import ModelServerManager
         cfg = self._make_cfg(tmp_path)
-        # 创建假 llama_bin 但模型文件不存在
+        
         (tmp_path / "llama-server.exe").write_text("")
         mgr = ModelServerManager(cfg)
         import asyncio
         result = asyncio.run(mgr.ensure("embedding", cfg["embedding"]["model_path"], "bge-m3"))
         assert result["ok"] is False
-        assert result["error"]  # 应有错误信息
+        assert result["error"]  
 
     def test_release_embedding_denied(self, tmp_path):
         """release 不存在的 role → ok=False"""
@@ -146,7 +146,7 @@ class TestModelServerManager:
         mgr = ModelServerManager(cfg)
         port = mgr._find_free_port(cfg["chat"]["port_start"])
         assert port >= 19521
-        # 高端口范围应能找到空闲
+        
         assert port < 19621
 
     def test_base_port_role_aware(self):
@@ -156,7 +156,7 @@ class TestModelServerManager:
         chat_cfg = {"port_start": 18082}
         assert _base_port_for("embedding", embed_cfg, chat_cfg) == 8999
         assert _base_port_for("chat", embed_cfg, chat_cfg) == 18082
-        # 缺省兜底
+        
         assert _base_port_for("embedding", {}, {}) == 8999
         assert _base_port_for("chat", {}, {}) == 18082
 
@@ -164,10 +164,10 @@ class TestModelServerManager:
         """A-003/H1: 启动时清空陈旧 registry（崩溃残留 ready 条目不再假就绪）"""
         from core import model_server as ms
         cfg = self._make_cfg(tmp_path)
-        cfg["embedding"]["persistent"] = False  # 不拉起实例，只验证清理
+        cfg["embedding"]["persistent"] = False  
         mgr = ms.ModelServerManager(cfg)
 
-        # 预置陈旧 registry（模拟崩溃残留：embedding ready@19511 但实际无进程）
+        
         original = ms._REGISTRY_PATH
         stale = tmp_path / "stale_registry.json"
         stale.write_text(json.dumps({
@@ -190,18 +190,18 @@ class TestEmbedFallback:
         from core import memory as mem
         from core.model_server import ModelServerManager
 
-        # 构造假 registry（端口指向不存在服务）
+        
         original = ModelServerManager.read_registry
         ModelServerManager.read_registry = lambda: {
             "embedding": {"port": 19999, "state": "ready"}
         }
         try:
             result = mem._embed("测试文本")
-            # A-1139：此处原先断言拿到 1024 维「哈希占位」。但那个向量是**伪嵌入**：
-            # 补位值是 ord(' ')/256 = 0.125 而非 0，短文本 99%+ 的维度是同一个常数，
-            # 实测 5 个语义无关短中文文本两两余弦 min=0.9659/max=0.9920/均值=0.9835
-            # （真实嵌入应在 0.3~0.6）。它让召回排序退化为随机却不报任何错 ——
-            # 静默的垃圾比显式失败更糟。现在必须是 None。
+            
+            
+            
+            
+            
             assert result is None
         finally:
             ModelServerManager.read_registry = original
@@ -223,15 +223,15 @@ class TestEmbedFallback:
             ModelServerManager.read_registry = original
 
 
-# ── A-017: 崩溃残留孤儿 llama-server 检测与回收 ──────────────
+
 
 
 class TestOrphanRecovery:
     """孤儿检测辅助函数（netstat/wmic/tasklist 解析）+ 活实例探测 + 回收决策"""
 
     def _make_cfg(self, tmp_path):
-        # A-037: 测试专用高位端口（19511/19521）—— 避免与用户正在运行的
-        # 生产实例（embedding 8999 / chat 18082）冲突导致测试互相污染
+        
+        
         return {
             "llama_bin": str(tmp_path / "llama-server.exe"),
             "startup_timeout": 2,
@@ -353,14 +353,14 @@ class TestOrphanRecovery:
         mgr = ModelServerManager(cfg)
 
         async def fake_probe(self, port):
-            return port == 19511  # 只有测试专用 embedding 端口有活实例
+            return port == 19511  
 
         with patch.object(ModelBackend, "probe_async", new=fake_probe), \
              patch("core.model_server._pid_for_port", return_value=4242):
             live = asyncio.run(mgr._probe_live("embedding", cfg["embedding"]))
             assert live == (19511, 4242)
             live2 = asyncio.run(mgr._probe_live("chat", cfg["chat"]))
-            assert live2 is None  # 扫描 100 端口无活实例
+            assert live2 is None  
 
     def test_ensure_adopts_external_instance(self, tmp_path):
         """活实例且非孤儿 → 外部复用（不杀、不重启）"""

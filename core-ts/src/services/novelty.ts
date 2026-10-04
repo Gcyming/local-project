@@ -1,10 +1,10 @@
-/**
- * core-ts/src/services/novelty.ts — novelty 信号检测（Intelligence 11.2.4.6 语义移植）。
- * 移植自 core/novelty.py + slime_server.py._detect_novelty：
- * - bigrams：字符级 bigram 分词（中英文通吃，避免空格分词使中文 Jaccard 恒为 0）
- * - isShortConfirmation：短确认语守卫（<3 字符判非新主题）
- * - detectNovelty：与最近 5 条历史的 bigram Jaccard 最大相似度 < 0.15 → 新主题
- */
+
+
+
+
+
+
+
 
 export function bigrams(text: string): Set<string> {
   const t = text.toLowerCase();
@@ -35,13 +35,13 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return inter / (a.size + b.size - inter);
 }
 
-/** 历史记录读取器（注入点：config/history.jsonl 或测试内存实现） */
+
 export type HistoryUserLoader = (agentId: string, limit: number) => Promise<Array<{ user: string }>>;
 
-/**
- * novelty 信号：与最近 5 条历史的最大 bigram Jaccard < 0.15 → 新主题（零嵌入成本）。
- * 守卫：空/短确认语直接判非新主题；无历史 → 新主题；当前无 bigram → 非新主题。
- */
+
+
+
+
 export async function detectNovelty(
   agentId: string,
   message: string,
@@ -58,7 +58,7 @@ export async function detectNovelty(
   }
   const prior = records.filter((r) => r.user && r.user !== message).map((r) => r.user).slice(-5);
   if (prior.length === 0) {
-    return true; // 首次交互视为新主题
+    return true; 
   }
   const cur = bigrams(message);
   if (cur.size === 0) {

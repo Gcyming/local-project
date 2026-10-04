@@ -1,15 +1,15 @@
-/**
- * core-ts/src/services/grouptalk.ts — 群聊发言调度引擎（A-950，A-951 学理落地）。
- *
- * 移植业界群聊 turn-taking 共识（AmorLink 五级决策梯 / fanyamin Conversation Router /
- * Claude Tag @ 路由 / AutoGen GroupChat / ACM threaded chat）：
- * - @ 路由：仅 @ 谁谁回；@全体/无 @ = 全员参与（决策梯 rung1/2）
- * - 短消息续说：紧跟成员发言的空 @ 短消息 → 上一位续说（rung3）
- * - 点名多成员 = **顺序生成**：一个一个按序发言，后一个能看到前一个的原文（sequential，rung2 学理）
- * - 无 @ 全员 = **抢答**：并行预研（省墙钟），按"谁先完成谁先上场"的顺序**逐个**回放（rung5 floor 平衡 +
- *   人类社交"先想好先说"），全程可流式
- * - 每个成员发言支持流式（speakStream: reasoning/chunk 逐段回调）
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { randomUUID } from "node:crypto";
 import type { TranscriptLine } from "./brainstorm.js";
 import { isSpeechFailure } from "./grouptalkTranscript.js";
@@ -17,11 +17,11 @@ import { isSpeechFailure } from "./grouptalkTranscript.js";
 export type { TranscriptLine } from "./brainstorm.js";
 
 export interface StreamEmit {
-  /** 思考增量（逐段） */
+  
   reasoning: (chunk: string) => void;
-  /** 正文增量（逐字/段） */
+  
   chunk: (text: string) => void;
-  /** 第一条正文产生（抢答计时点） */
+  
   firstChunk: () => void;
 }
 
@@ -29,9 +29,9 @@ export interface GroupTalkParticipant {
   id: string;
   name: string;
   role: string;
-  /** 一次性发言（测试/退化路径） */
+  
   speak?: (prompt: string) => Promise<string>;
-  /** 流式发言（GUI 主路径：engine.stream） */
+  
   speakStream?: (prompt: string, emit: StreamEmit) => Promise<string>;
 }
 
@@ -41,20 +41,20 @@ export interface GroupTalkOptions {
   members: GroupTalkParticipant[];
   topic: string;
   mode: GroupTalkMode;
-  /** 仅 mode=single/seq：发言成员（id 列表；single 取首个） */
+  
   targets?: string[];
-  /** seq 时的明确先后顺序（id 列表；缺省按 targets 或 members 顺序） */
+  
   order?: string[];
-  /** 既有讨论记录（首条为"用户议题"；后续成员发言由引擎追加） */
+  
   transcript?: TranscriptLine[];
-  /** 成员发言指令构建（默认 buildGroupPrompt；可覆写测试） */
+  
   buildPrompt?: (member: GroupTalkParticipant, topic: string, transcript: TranscriptLine[]) => string;
-  /** contest 第二轮（互看回应轮）指令构建；缺省 buildRebuttalPrompt */
+  
   buildRebuttalPrompt?: (member: GroupTalkParticipant, topic: string, transcript: TranscriptLine[]) => string;
-  /** A-959：contest 是否需要回应轮（互看轮）——收到第一轮全体观点后判定：
-   *  返回 true 才执行第二轮；缺省 defaultRebuttalFilter（寒暄/短议题/观点已高度一致 → 单轮收敛） */
+  
+
   rebuttalFilter?: (topic: string, round1: TranscriptLine[]) => boolean;
-  /** A-951：每成员独立上下文——装配方按该成员当下使用量返回压缩后的讨论记录；undefined=全量 */
+  
   compressTranscript?: (memberId: string, transcript: TranscriptLine[]) => TranscriptLine[] | undefined;
   onSpeechStart?: (m: { memberId: string; name: string }, index: number) => void;
   onReasoning?: (m: { memberId: string; name: string }, chunk: string) => void;
@@ -63,9 +63,9 @@ export interface GroupTalkOptions {
   onDone?: (transcript: TranscriptLine[]) => void;
 }
 
-/** A-1008：**喂给模型**的讨论记录只取真实观点 —— 发言失败的占位文本要从语境里剔除。
- *  否则其他成员会把"某某本次发言失败：…404…"当成一条观点来回应（用户实测模型在复述这段
- *  错误串），而且这段错误文本还会被逐轮放大。UI/历史仍保留该条（用户需要看见谁没说话）。 */
+
+
+
 function realSpeech(transcript: TranscriptLine[]): TranscriptLine[] {
   return transcript.filter((l) => !l.failed);
 }
@@ -81,7 +81,7 @@ function defaultPrompt(member: GroupTalkParticipant, topic: string, transcript: 
   );
 }
 
-/** contest 第二轮——互看回应轮：成员已能看到全部第一轮观点，基于他人观点补充/纠正/收敛 */
+
 function defaultRebuttalPrompt(member: GroupTalkParticipant, topic: string, transcript: TranscriptLine[]): string {
   const seen = realSpeech(transcript);
   const history = seen.length > 1
@@ -94,7 +94,7 @@ function defaultRebuttalPrompt(member: GroupTalkParticipant, topic: string, tran
   );
 }
 
-/** @ 提及解析：@全体/@所有人 → all；@名字（Unicode 字面匹配，防部分词误伤）→ mentions */
+
 export function parseMentions(text: string, names: string[]): { all: boolean; mentions: string[] } {
   const t = text ?? "";
   if (/@[ \t]*(全体|所有人|everyone|all)/i.test(t)) {
@@ -109,15 +109,15 @@ export function parseMentions(text: string, names: string[]): { all: boolean; me
   return { all: false, mentions: [...found] };
 }
 
-/** A-959 启发式：议题是否带任务/讨论意图（寒暄问候 → 无 → 单轮即可） */
+
 function hasTaskIntention(topic: string): boolean {
   const t = topic.trim();
   if (!t) { return false; }
-  if (/[?？]/.test(t)) { return true; } // 疑问=至少要答
+  if (/[?？]/.test(t)) { return true; } 
   return /怎么|如何|怎样|应该|需要|方案|建议|讨论|分析|优化|修复|设计|实现|是否|评估|比较|总结|安排|计划|写|做|改|查|看|找/.test(t);
 }
 
-/** 两串字符重合度（多集重叠 ×2 / 总长）；短中文观点相似度用 */
+
 function charOverlap(a: string, b: string): number {
   const A = a.replace(/\s+/g, "");
   const B = b.replace(/\s+/g, "");
@@ -132,8 +132,8 @@ function charOverlap(a: string, b: string): number {
   return (inter * 2) / (A.length + B.length);
 }
 
-/** A-959 默认回应轮判定：寒暄/短议题（≤10 字且无任务意图）→ 不需要；
- *  第一轮全体观点两两高度重合（>0.9）→ 已收敛，单轮结束；否则保留互看回应轮 */
+
+
 export function defaultRebuttalFilter(topic: string, round1: TranscriptLine[]): boolean {
   const t = topic.trim();
   if (t && t.length <= 10 && !hasTaskIntention(t)) {
@@ -152,7 +152,7 @@ export function defaultRebuttalFilter(topic: string, round1: TranscriptLine[]): 
   return (total / pairs) <= 0.9;
 }
 
-/** 发言调度主入口：single / seq / contest 三模式 */
+
 export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript: TranscriptLine[]; count: number }> {
   const members = opts.members;
   const topic = (opts.topic ?? "").trim();
@@ -163,12 +163,12 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
   const emit = (m: GroupTalkParticipant) => ({
     reasoning: (chunk: string) => opts.onReasoning?.({ memberId: m.id, name: m.name }, chunk),
     chunk: (text: string) => opts.onChunk?.({ memberId: m.id, name: m.name }, text),
-    firstChunk: () => { /* 抢答计时点 */ },
+    firstChunk: () => {  },
   });
 
-  // 单一成员发言（点名/续说/回应轮）：流式输出并并入共享讨论记录
+  
   const speakOne = async (m: GroupTalkParticipant, index: number, rebuttal = false): Promise<void> => {
-    // A-951：每成员独立上下文池——超预算按成员压缩讨论记录（compressTranscript 由装配方注入）
+    
     const hist = opts.compressTranscript?.(m.id, transcript) ?? transcript;
     const prompt = rebuttal
       ? (opts.buildRebuttalPrompt ?? defaultRebuttalPrompt)(m, topic, hist)
@@ -184,13 +184,13 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
       full = buf;
     }
     const content = (full ?? "").trim() || `（${m.name} 未输出）`;
-    // A-1008：发言失败（引擎把失败原因写进了正文）→ 标注，别让它冒充该成员的观点
+    
     transcript.push({ speaker: m.name, content, ...(isSpeechFailure(content) ? { failed: true } : {}) });
     opts.onSpeechEnd?.({ memberId: m.id, name: m.name }, content);
   };
 
   if (opts.mode !== "contest") {
-    // 点名（single / seq）：顺序非并发，后一个能看到前一个。
+    
     const byId = new Map(members.map((m) => [m.id, m]));
     const ids = (opts.mode === "single" ? (opts.targets ?? []).slice(0, 1) : (opts.order ?? opts.targets ?? []));
     const picked = ids.map((id) => byId.get(id)).filter((m): m is GroupTalkParticipant => Boolean(m));
@@ -202,10 +202,10 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
     return { transcript, count: roster.length };
   }
 
-  // 抢答（contest）：并行预研 → 按"先完成"顺序逐个回放（非并发输出，避免阻塞）
+  
   type Slot = { m: GroupTalkParticipant; buffer: Array<{ kind: "r" | "c"; text: string }>; done: boolean; order: number };
   const slots: Slot[] = members.map((m, i) => ({ m, buffer: [], done: false, order: i }));
-  /** 就绪队列（成员完成 → 依完成序入队）与阻塞等待器（事件驱动，杜绝忙等轮询） */
+  
   const ready: Slot[] = [];
   let notify: (() => void) | null = null;
   const runSlot = async (slot: Slot, prompt: string): Promise<void> => {
@@ -218,7 +218,7 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
       if (slot.m.speakStream) {
         await slot.m.speakStream(prompt, e);
       } else if (slot.m.speak) {
-        // 普通 speak（测试/退化路径）：返回值作为整段正文入缓冲，保证回放与后续互看可见
+        
         const buf = await slot.m.speak(prompt);
         if (buf) { e.chunk(buf); }
       }
@@ -229,7 +229,7 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
     }
   };
   for (const s of slots) {
-    void runSlot(s, buildPrompt(s.m, topic, transcript)); // 并行预研究（各自独立 prompt + 共享议程）
+    void runSlot(s, buildPrompt(s.m, topic, transcript)); 
   }
 
   let index = 0;
@@ -241,7 +241,7 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
       continue;
     }
     const slot = ready.shift()!;
-    // 逐个回放该成员完整流（思考 → 正文）——非并发输出，谁先完成谁先上台
+    
     opts.onSpeechStart?.({ memberId: slot.m.id, name: slot.m.name }, index);
     let full = "";
     for (const b of slot.buffer) {
@@ -249,17 +249,17 @@ export async function runGroupTalk(opts: GroupTalkOptions): Promise<{ transcript
       else { opts.onChunk?.({ memberId: slot.m.id, name: slot.m.name }, b.text); full += b.text; }
     }
     const content = (full ?? "").trim() || `（${slot.m.name} 未输出）`;
-    // A-1008：同上——失败占位文本不得冒充成员观点
+    
     transcript.push({ speaker: slot.m.name, content, ...(isSpeechFailure(content) ? { failed: true } : {}) });
     opts.onSpeechEnd?.({ memberId: slot.m.id, name: slot.m.name }, content);
     speechOrder.push(slot.m);
     index++;
   }
-  // A-950 补充（互看）：第二轮按第一轮完成顺序逐个"回应轮"——每个成员此时已能看到
-  // 全部第一轮观点（transcript 已并入），顺序生成、后见前文。
-  // A-959：回应轮不再无条件执行——寒暄/无分歧（观点高度收敛）时单轮结束，避免"问个好也讨论两轮"
-  // A-1008：收敛判定只看**真实观点**（失败占位文本既不参与相似度计算，也不该影响"要不要再来一轮"）
-  const round1 = realSpeech(transcript).slice(1); // 首条 = 用户议题，其余为第一轮全体观点
+  
+  
+  
+  
+  const round1 = realSpeech(transcript).slice(1); 
   const needRebuttal = (opts.rebuttalFilter ?? defaultRebuttalFilter)(topic, round1);
   if (needRebuttal) {
     const rebuttalMembers = speechOrder.length === members.length ? speechOrder : members;

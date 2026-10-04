@@ -18,7 +18,7 @@ from .sandbox import SandboxConfig
 from .emotion import EmotionalState
 from .behavior import BehaviorStore
 
-# ── 默认上下文压缩配置 ─────────────────────────────────────
+
 
 DEFAULT_CONTEXT_CONFIG = {
     "head": 3,
@@ -26,17 +26,17 @@ DEFAULT_CONTEXT_CONFIG = {
     "window": 30,
 }
 
-# system prompt 注入技能描述的上限（条数）；超出部分仅以工具形式暴露
+
 _MAX_INJECTED_SKILLS = 40
 
-# ── 项目根目录 ────────────────────────────────────────────
+
 
 def _project_root() -> Path:
     """返回项目根目录（slime/），锚定到本文件所在位置"""
     return Path(__file__).resolve().parent.parent
 
 
-# ── 身份铁律 ──────────────────────────────────────────────
+
 
 IDENTITY_CONSTRAINT = """## 身份铁律（最高优先级，不可违反）
 
@@ -48,7 +48,7 @@ IDENTITY_CONSTRAINT = """## 身份铁律（最高优先级，不可违反）
 """
 
 
-# ── 反幻觉协议 ────────────────────────────────────────────
+
 
 ANTI_HALLUCINATION_PROTOCOL = """## 诚实与验证铁律（最高优先级，与身份铁律同级）
 
@@ -61,12 +61,12 @@ ANTI_HALLUCINATION_PROTOCOL = """## 诚实与验证铁律（最高优先级，�
 7. **工具必用**：涉及生成、文件、搜索、执行类需求，**必须先调用相应工具再回答**；未调用任何工具时，禁止叙述"正在执行/已提交/已完成/已保存"等过程或声称任何结果。"""
 
 
-# ── Agent 类 ───────────────────────────────────────────────
+
 
 class Agent:
     """slime Agent 核心类"""
 
-    # 受保护字段：不可被演化引擎/Persona 自动修改，只能通过 API 显式更新
+    
     _PROTECTED_FIELDS = frozenset({"identity_prompt", "name", "role"})
 
     def __init__(
@@ -74,35 +74,35 @@ class Agent:
         name: str,
         role: str,
         identity_prompt: str = "",
-        model_choice: str = "silam",  # 原生使用 SILAM 作为意识层
+        model_choice: str = "silam",  
         parent_id: str | None = None,
         agent_id: str | None = None,
         persona: Persona | None = None,
         max_context: int = 4096,
         max_output: int = 2048,
         sandbox_override: dict | None = None,
-        reasoning_effort: str = "none",  # none/low/medium/high
-        show_thinking: str = "off",      # on/off/auto（auto = 仅 plan 模式显示）
-        mode: str | None = None,         # build/grow/normal；None→按 model_choice 取默认（silam→grow）
-        fork_depth: int = 0,             # fork 递归深度（自分裂层级，硬上限 2）
+        reasoning_effort: str = "none",  
+        show_thinking: str = "off",      
+        mode: str | None = None,         
+        fork_depth: int = 0,             
     ):
         self.id = agent_id or f"agent_{uuid.uuid4().hex[:8]}"
         self.name = name
         self.role = role
         self._identity_prompt = identity_prompt
-        self.model_choice = model_choice  # "inherit" | "api:<key>" | "local:<path>" | "silam" (原生)
+        self.model_choice = model_choice  
         self.parent_id = parent_id
         self.persona = persona or Persona()
-        # SILAM 意识层默认 grow（成长模式）；其余 model_choice 保持 build
+        
         self.mode = mode if mode else ("grow" if model_choice == "silam" else "build")
 
-        # ★ 原生 SILAM 意识层（不再是插件，而是 agent 的核心）
+        
         self.silam_engine = None
         self.silam_cfg = None
         try:
             import sys
             from pathlib import Path
-            # silam_core 引擎位于仓库 _model_stage/silam_core（全局唯一运行时副本）
+            
             _project_root = Path(__file__).resolve().parent.parent
             _silam_root = _project_root / "_model_stage"
             if str(_silam_root) not in sys.path:
@@ -115,16 +115,16 @@ class Agent:
             self.silam_cfg = SilamConfig()
             self.silam_engine = SILAMEngine(self.silam_cfg)
 
-            # 加载情感脑蒸馏权重（资产统一在 models/ 归档）
+            
             _backbone_path = (_project_root / "models" / "情感脑-silam-sigma-80m"
                               / "backbone_80m.npz")
             if _backbone_path.exists():
                 load_pretrained(self.silam_engine, str(_backbone_path))
         except Exception as e:
-            # 如果 SILAM 不可用，使用降级模式（保持向后兼容）
+            
             pass
 
-        # 兼容旧接口（emotion/behavior 仍保留）
+        
         if self.silam_engine is not None:
             self.emotion = SILAMEmotionProxy(self.silam_engine.affect)
             self.behavior = SILAMBehaviorProxy(self.silam_engine.dendrites)
@@ -137,23 +137,23 @@ class Agent:
         self.max_output = max_output
         self.reasoning_effort = reasoning_effort
         self.show_thinking = show_thinking
-        # self.mode 已在构造头部按 model_choice 求值（silam→grow / 其他→build）；此处不再覆盖
-        self.fork_depth = fork_depth      # 自分裂递归层级
+        
+        self.fork_depth = fork_depth      
         self.created_at = datetime.now(timezone.utc).isoformat()
-        self.children: list[str] = []  # 子 Agent ID 列表
-        # Phase 2: 生命周期 & 上下文压缩 & 演化统计
+        self.children: list[str] = []  
+        
         self.lifecycle: AgentLifecycle = AgentLifecycle.BIRTH
         self.context_config: dict = dict(DEFAULT_CONTEXT_CONFIG)
-        self.evolution: dict = {}  # 持久化 EvolutionEngine 统计
-        # 沙箱配置覆盖
+        self.evolution: dict = {}  
+        
         self.sandbox_override: dict = sandbox_override or {}
-        # ★ 自主探索器（始终创建，学习所有对话）
+        
         self._explorer = create_explorer(self)
 
-    # 自分裂最大递归深度（硬上限，不可通过提示词绕过）
+    
     MAX_FORK_DEPTH = 2
 
-    # ── 受保护属性 ────────────────────────────────────────
+    
 
     def __setattr__(self, key, value):
         """BUG-020: 身份铁律字段架构级保护。
@@ -186,9 +186,9 @@ class Agent:
         """获取所有受保护字段名"""
         return cls._PROTECTED_FIELDS
 
-    # ── 系统提示 ──────────────────────────────────────────
+    
 
-    # ── 平台能力描述 ──────────────────────────────────────
+    
 
     @staticmethod
     def _build_capabilities_prompt() -> str:
@@ -243,7 +243,7 @@ class Agent:
                 lines.append(f"  - {name}" + (f"：{desc}" if desc else ""))
             return lines
         except Exception:
-            # 注册表不可用时的兜底（与历史行为一致）
+            
             return ["  - file_read：读取文件内容", "  - file_list：列出目录"]
 
     @staticmethod
@@ -281,7 +281,7 @@ class Agent:
         parts = [IDENTITY_CONSTRAINT.replace("{name}", self.name).replace("{role}", self.role),
                  ANTI_HALLUCINATION_PROTOCOL]
 
-        # ── 生命周期阶段指导 ──
+        
         try:
             from .evolve import EvolutionEngine
             lifecycle_prompt = EvolutionEngine.build_lifecycle_prompt(self.lifecycle)
@@ -290,14 +290,14 @@ class Agent:
         except Exception:
             pass
 
-        # ── 平台能力描述（Agent 对自身功能的认知）──
+        
         parts.append(self._build_capabilities_prompt())
 
         if self.identity_prompt:
             parts.append(f"\n## 角色设定\n{self.identity_prompt}")
 
         if self.persona.traits:
-            # 按 weight 降序排列，低权重的弱显示
+            
             sorted_traits = sorted(
                 self.persona.traits,
                 key=lambda t: t.get("weight", 0.5) if isinstance(t, dict) else 0.5,
@@ -326,43 +326,43 @@ class Agent:
             skills_text = "\n".join(f"- {s}" for s in self.persona.skill_ownership)
             parts.append(f"\n## 技能\n{skills_text}")
 
-        # L2 行为模式（半固定习惯，不随模型切换丢失）
+        
         behavior_prompt = self.behavior.to_prompt()
         if behavior_prompt:
             parts.append(behavior_prompt)
 
-        # L3 情绪状态（当前输出风格）
-        # Soul-Plan 第 2 步：自我认知叙事（身份认领）与行为风格并列——
-        # to_identity_prompt（PAD/情绪/最近感受/承诺台词）+ to_prompt（输出风格/工具倾向）
+        
+        
+        
         parts.append(f"\n## 当前状态\n{self.emotion.to_identity_prompt()}\n\n{self.emotion.to_prompt()}")
 
-        # 加载可用技能并注入 system prompt
+        
         try:
             from core.skill_engine import get_registry as get_skill_registry
             skill_reg = get_skill_registry()
-            # 延迟加载：如果还没加载过，现在加载
+            
             if not skill_reg.is_loaded:
                 skill_reg.load_skills()
             skill_descs = skill_reg.list_skill_descriptions()
             if skill_descs:
-                # 技能量大时全量注入会撑爆 context（实测 417 技能 ≈ 120KB）：
-                # 截断到前 N 个且每条截短；完整技能通过 skill_search / skill_lookup 工具
-                # 按需检索调用（A-004：不再逐技能注册工具，避免 417 个 schema 全量注入 tools）
+                
+                
+                
                 shown = [d[:120] for d in skill_descs[:_MAX_INJECTED_SKILLS]]
                 parts.append("\n## 可用技能\n" + "\n".join(f"- {d}" for d in shown))
                 if len(skill_descs) > _MAX_INJECTED_SKILLS:
                     parts[-1] += (
                         f"\n（另有 {len(skill_descs) - _MAX_INJECTED_SKILLS} 个技能未列出，"
                         f"均可通过 skill_search 工具检索、skill_lookup 工具读取完整指导）")
-                # A-097（用户实测：Agent 把对话历史里的旧技能列表当当前状态，否认已新增的 ponytail）：
-                # 技能可用性以 skill_search 工具实时查询为准——对话历史/记忆中的技能列表可能过期
+                
+                
                 parts[-1] += ("\n⚠ 技能可用性以 skill_search 工具实时查询结果为准；"
                               "对话历史或记忆中出现的技能列表可能过期（平台技能会新增），"
                               "不得凭历史列表断言某技能不存在——不确定时调用 skill_search 核实。")
         except Exception:
             pass
 
-        # A-044: 结尾重申（首尾呼应——长提示词下首尾指令遵循率最高）
+        
         parts.append(
             "（提醒：务必遵守《诚实与验证铁律》——未真实执行不得声称完成；"
             "失败如实报告；引用文件前必须核实其真实存在。）"
@@ -370,7 +370,7 @@ class Agent:
 
         return "\n\n".join(parts)
 
-    # ── 分裂 ──────────────────────────────────────────────
+    
 
     def split(self, name: str, role: str, model_choice: str = "inherit",
               identity_prompt: str = "") -> "Agent":
@@ -381,7 +381,7 @@ class Agent:
         - "api:<key>"  → 使用 providers.enc.json 中指定 provider_key
         - "local:<path>" → 使用本地 GGUF 模型
         """
-        # 如果子 Agent 选择 inherit，继承父的 model_choice
+        
         if model_choice == "inherit":
             model_choice = self.model_choice
 
@@ -392,17 +392,17 @@ class Agent:
             model_choice=model_choice,
             parent_id=self.id,
             persona=self.persona.clone(),
-            reasoning_effort=self.reasoning_effort,  # 继承父级
-            show_thinking=self.show_thinking,        # 继承父级
-            mode=self.mode,                          # 继承父级
-            fork_depth=self.fork_depth + 1,          # 继承 fork 深度，防止绕过限制
+            reasoning_effort=self.reasoning_effort,  
+            show_thinking=self.show_thinking,        
+            mode=self.mode,                          
+            fork_depth=self.fork_depth + 1,          
         )
-        child.emotion = self.emotion.clone()    # 情绪继承
-        child.behavior = self.behavior.clone()  # 行为模式继承（夺舍核心）
+        child.emotion = self.emotion.clone()    
+        child.behavior = self.behavior.clone()  
         self.children.append(child.id)
         return child
 
-    # ── 序列化 ────────────────────────────────────────────
+    
 
     def to_dict(self) -> dict:
         return {
@@ -449,10 +449,10 @@ class Agent:
         )
         agent.children = data.get("children", [])
         agent.created_at = data.get("created_at", agent.created_at)
-        # 恢复情绪与行为模式（旧数据无此字段，用默认值）
+        
         agent.emotion = EmotionalState.from_dict(data.get("emotion", {}) or {})
         agent.behavior = BehaviorStore.from_dict(data.get("behavior", {}) or {})
-        # Phase 2: 恢复生命周期和上下文配置
+        
         lifecycle_val = data.get("lifecycle", "birth")
         try:
             agent.lifecycle = AgentLifecycle(lifecycle_val)
@@ -463,7 +463,7 @@ class Agent:
         return agent
 
 
-# ── Agent 注册表管理 ───────────────────────────────────────
+
 
 AGENTS_PATH = _project_root() / "config" / "agents.json"
 AGENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -490,7 +490,7 @@ def load_agents() -> list[Agent]:
                 agents.append(Agent.from_dict(a))
             except Exception as e:
                 logging.warning(f"[slime] 跳过损坏的 Agent 记录: {e}")
-        # 同步沙箱配置
+        
         try:
             from .sandbox import load_agent_sandbox_configs
             load_agent_sandbox_configs(agents)
@@ -505,7 +505,7 @@ def load_agents() -> list[Agent]:
         return []
 
 
-# A-113: save_agents 串行化锁——FastAPI 同步端点跑在线程池，多线程并发 save 会交错
+
 _save_agents_lock = __import__("threading").Lock()
 
 
@@ -534,7 +534,7 @@ def agent_tree(agents: list[Agent]) -> dict:
     """构建 Agent 树形结构（用于可视化）。孤儿 Agent 作为独立根节点标注 _orphan。"""
     agent_map = {a.id: a for a in agents}
     roots = [a for a in agents if a.parent_id is None]
-    # 检测孤儿：parent_id 指向不存在的 Agent
+    
     orphans = [
         a for a in agents
         if a.parent_id is not None and a.parent_id not in agent_map
@@ -564,7 +564,7 @@ def agent_tree(agents: list[Agent]) -> dict:
         }
         return node
 
-    # 将孤儿加入 roots（标注 _orphan）
+    
     orphan_nodes = []
     for o in orphans:
         node = build_node(o)
@@ -573,11 +573,11 @@ def agent_tree(agents: list[Agent]) -> dict:
 
     return {"roots": [build_node(r) for r in roots] + orphan_nodes}
 
-# ── SILAM 情绪/行为桥接代理 ────────────────────────────────────────────
-# 保留 slime 既有的 L3 情绪坐标（valence/arousal/dominance/mood）与 L2 行为库，
-# 同时持有 SILAM 引擎的 affect / dendrites 句柄，为后续深度接入留位。
-# 未定义的接口通过 __getattr__ 委托给真实 EmotionalState / BehaviorStore，
-# 保证测试与既有调用方（slime_server 的 update/reinforce/valence）零改动可用。
+
+
+
+
+
 
 class SILAMEmotionProxy:
     """兼容 EmotionalState 接口的代理：内部委托真实情绪状态，保留 affect 句柄。"""
@@ -588,7 +588,7 @@ class SILAMEmotionProxy:
         self._state = EmotionalState()
 
     def __getattr__(self, name):
-        # valence / update / decay / to_prompt / to_dict / clone ... 全部转发
+        
         return getattr(self._state, name)
 
 
@@ -601,11 +601,11 @@ class SILAMBehaviorProxy:
         self._store = BehaviorStore()
 
     def __getattr__(self, name):
-        # reinforce / to_prompt / to_dict / from_dict / clone ... 全部转发
+        
         return getattr(self._store, name)
 
 
-# ── 自主探索器集成 ───────────────────────────────────────────────────────
+
 
 class ExplorerProxy:
     """代理 Explorer 到 agent，提供简单的观察接口"""
@@ -623,12 +623,12 @@ def create_explorer(agent):
     try:
         from silam_core.explorer import Explorer, CuriosityEngine
     except ImportError:
-        # silam_core 不可用时，返回空探索器（保持向后兼容）
+        
         import logging
         logging.getLogger("slime.agent").warning("SILAM explorer 初始化失败，使用降级模式")
         return ExplorerProxy(None)
 
-    # 集成真实的 web_search
+    
     from core.search import SearchEngine
     from core.fetcher import get_fetcher
 
@@ -647,7 +647,7 @@ def create_explorer(agent):
     explorer = Explorer(
         silam_engine=agent.silam_engine if hasattr(agent, 'silam_engine') and agent.silam_engine else None,
         search_callback=search_callback,
-        loop_interval=300,  # 5 分钟检查一次
+        loop_interval=300,  
         min_response_quality=0.5
     )
 

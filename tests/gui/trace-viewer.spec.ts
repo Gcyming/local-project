@@ -1,8 +1,8 @@
-/**
- * tests/gui/trace-viewer.spec.ts — F：TraceViewer 链路视图纯渲染测试。
- * TraceBody 为纯展示组件（无 hook），可注入固定 span fixture 断言
- * 分类徽章/耗时/事件计数/失败红标；默认组件在 node 环境下渲染空态。
- */
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -30,8 +30,8 @@ describe("TraceBody（单条链路渲染）", () => {
   it("渲染事件计数、闭合数、总时长", () => {
     const html = renderToStaticMarkup(createElement(TraceBody, { trace: traceFixture() }));
     expect(html).toContain("5 事件");
-    expect(html).toContain("5 闭合"); // fixture 全 span 均已闭合
-    expect(html).toContain("共 1.00s"); // endedAt 2000 - startedAt 1000 → fmtDur 秒单位
+    expect(html).toContain("5 闭合"); 
+    expect(html).toContain("共 1.00s"); 
   });
 
   it("成功链路显示 ✓、失败链路显示 ⛔（eval passed=false 触发）", () => {

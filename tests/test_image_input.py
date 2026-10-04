@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """识图链路（images → OpenAI 兼容 content 数组）单测。
 
 覆盖：_sanitize_image_data_url 过滤、_build_user_content 组装（无图=纯字符串、
@@ -76,9 +76,9 @@ class TestSanitizeImageDataUrl:
         assert _sanitize_image_data_url(["file:///tmp/a.png"]) == []
 
     def test_keep_data_url_with_payload(self):
-        # 合法的 data:image/ 前缀 + 逗号分隔 + 非空数据 → 保留（宽容匹配，适配各类网关）
+        
         assert _sanitize_image_data_url(["data:image/png;charset=utf-8,abc"]) == ["data:image/png;charset=utf-8,abc"]
-        # 逗号后为空 → 非法
+        
         assert _sanitize_image_data_url(["data:image/png;base64,"]) == []
 
     def test_keep_valid_and_limit_4(self):
@@ -88,7 +88,7 @@ class TestSanitizeImageDataUrl:
         assert all(x.startswith("data:image/") for x in out)
 
     def test_reject_oversize(self):
-        # base64 长度 ≈ 11MB → 原始 ≈ 8.25MB（> 8MB 阈值被丢弃）
+        
         big_b64 = "A" * (11 * 1024 * 1024)
         big = f"data:image/png;base64,{big_b64}"
         assert _sanitize_image_data_url([big]) == []
@@ -99,7 +99,7 @@ class TestSanitizeImageDataUrl:
 
 
 class TestBuildUserContent:
-    # run_tests.py 不注入 pytest fixture（autouse fixture 失效）；用 xunit setup/teardown 保双跑器兼容
+    
     def setup_method(self):
         from unittest.mock import patch as _p
 
@@ -124,10 +124,10 @@ class TestBuildUserContent:
         assert content[1] == {"type": "image_url", "image_url": {"url": DATA_PNG}}
 
     def test_invalid_images_dropped(self):
-        # 非法项被过滤后退回纯字符串
+        
         content = _build_user_content(_agent(), "看看", ["not-a-url", "data:image/jpeg;base64,AAAA"])
         assert isinstance(content, list)
-        assert len(content) == 2  # text + 仅保留 jpeg
+        assert len(content) == 2  
         assert content[1]["image_url"]["url"].startswith("data:image/jpeg")
 
     def test_psyche_injected_into_text_block(self):
@@ -188,7 +188,7 @@ class TestCallApiProviderPayload:
         assert isinstance(last["content"], str)
 
     def test_history_with_block_content_does_not_crash(self):
-        # 历史中出现 content 数组（防御场景）不应在截断计数处崩溃
+        
         history = [
             {"role": "user", "content": [{"type": "text", "text": "旧图提问"}]},
             {"role": "assistant", "content": "回答"},
@@ -196,7 +196,7 @@ class TestCallApiProviderPayload:
         reply, captured = self._run_call(message="再看这张", history=history, images=[DATA_PNG])
         assert reply == "ok"
         msgs = captured["payload"]["messages"]
-        # 防御生效：历史保留 + 最新 user 为 blocks 数组
+        
         assert msgs[-1]["role"] == "user"
         assert isinstance(msgs[-1]["content"], list)
 
@@ -206,7 +206,7 @@ class TestChatRequestImagesValidation:
 
     def _make(self):
         import slime_server
-        slime_server.AUTH_TOKEN = "t"  # 防认证中间件对未初始化 token 报错
+        slime_server.AUTH_TOKEN = "t"  
         return slime_server.ChatRequest
 
     def test_valid_images_kept(self):

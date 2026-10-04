@@ -1,12 +1,12 @@
-/**
- * gui/src/renderer/pages/AgentsPanel.tsx — Agent 管理（A-C-C 属性面板风格参考）。
- * - 左侧：Agent 卡片列表（单行：名称/状态点/生命周期/子代数量，简洁不展开描述）
- * - 右侧：选中 Agent 的属性面板（PropsPanel 模式）：
- *   - 身份卡片：name（身份铁律不可改）+ role（可编辑，界面文案「设定」）
- *   - 模型卡片：模式（inherit / api:<key> / local:<id>）+ 模型选择 + 保存
- *     （推理强度的选择已移出设置：由聊天输入框「推理配置」面板 + 供应商「参数文件调试」的推理等级模式控制）
- * - 顶部操作：创建 / 分裂 / 导出 / 导入
- */
+
+
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import { CloseIcon } from "../components/Icon.js";
 import { confirmAsync } from "../dialog.js";
@@ -31,37 +31,37 @@ interface AgentDetail {
   max_context?: number;
   max_output?: number;
   lifecycle: string;
-  /** A-980-R22：工具面白名单（skill/MCP 差异化配置） */
+  
   tool_profile?: ToolProfileLocal;
-  /**
-   * A-1096：是否同意被派发为子代理。**必须按三态处理**（与判据唯一出处同源）：
-   * `undefined` = 未设置（默认允许）、`true` = 显式允许、`false` = 显式拒绝。
-   * 若这里写成 `?? true` 就会把"未设置"和"已同意"合并 ⇒ 用户永远看不到自己没设置过。
-   */
+  
+
+
+
+
   subagent_dispatch?: boolean;
 }
 
-/** A-980-R22：工具面白名单（与 shared/ipc ToolProfileDTO / core-ts ToolProfile 同构）
- *  A-1140：mode 增加 `creator`（创造模式）—— 能力面同标准模式，额外授权 Agent 自建技能。 */
+
+
 interface ToolProfileLocal {
   mode: "default" | "creator" | "custom";
   skills: string[];
   mcp: string[];
 }
 
-/** 工具配置初始值（default=标准模式内置推荐集，由 core-ts 运行时解析；custom=用户勾选） */
+
 const EMPTY_TOOL_PROFILE: ToolProfileLocal = { mode: "default", skills: [], mcp: [] };
 
-/**
- * A-1140：三档能力模式的**唯一产地**（显示名 + 说明 + 顺序）。
- *
- * ⚠️ 存储值仍是 `"default" | "creator" | "custom"`：`"default"` 是历史值，
- * 为了 UI 命名整齐去改它就得写 `config/agents.json` 迁移，不划算 —— 显示名在这里映射。
- *
- * 调研结论（`agent-plugin-ecosystem-research.md` Q3）：**没有任何主流产品实现
- * 「标准 / 创造 / 自定义」三档**，最接近的是 Zed 的三个内置 profile。故这里没有
- * 可抄的既有设计，说明文案按 slime 自己的语义写。
- */
+
+
+
+
+
+
+
+
+
+
 const CAPABILITY_MODES: Array<{ value: ToolProfileLocal["mode"]; label: string; desc: string }> = [
   {
     value: "default", label: "标准模式",
@@ -85,11 +85,11 @@ interface ExtrasCatalog {
 interface Props {
   selectedAgentId?: string;
   onSelectAgent: (agentId: string) => void;
-  /** 删除/变更后通知 App 刷新（选中回落由本组件处理） */
+  
   onAgentsChanged?: () => void;
-  /** 供应商 key 列表（model_choice = api:<key>） */
+  
   providerKeys: string[];
-  /** 本地模型列表（model_choice = local:<id>） */
+  
   localModels: Array<{ id: string; label: string; path: string }>;
 }
 
@@ -99,19 +99,19 @@ const MODE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "normal", label: "normal" },
 ];
 
-/**
- * A-980-R23：单个工具集面板（技能 / MCP 共用）——**独立搜索 + 独立滚动**。
- *
- * 背景：旧的实现把全部条目平铺成一条无限换行的胶囊流，skill/MCP 一多（几十上百个）就会
- * 把设置面板撑到几屏高、且没法按名字找。现在每个集合各自成一个"窗口"：
- *   头（标题 + 可用数 + 已选数） / 工具条（搜索 + 全选 + 清空） / 标签区（固定高度、可滚动）
- */
+
+
+
+
+
+
+
 function ToolSetBox(props: {
   title: string;
   items: Array<{ name: string; description?: string }>;
   selected: string[];
   onToggle: (name: string) => void;
-  /** 整批替换（全选/清空/清除失效项用） */
+  
   onReplace: (names: string[]) => void;
   emptyText: string;
 }): JSX.Element {
@@ -126,12 +126,12 @@ function ToolSetBox(props: {
   const shownNames = React.useMemo(() => shown.map((it) => it.name), [shown]);
   const allShownSelected = shownNames.length > 0 && shownNames.every((n) => selected.includes(n));
   const known = React.useMemo(() => new Set(items.map((i) => i.name)), [items]);
-  /** 已选但当前目录里已不存在（技能被删 / MCP 被移除）——照样显示，避免"配置被悄悄丢掉" */
+  
   const missing = selected.filter((n) => !known.has(n));
 
   return (
     <div style={{ border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", overflow: "hidden" }}>
-      {/* 头 */}
+      {}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderBottom: "1px solid var(--border)" }}>
         <span style={{ fontSize: 12.5, fontWeight: 700 }}>{title}</span>
         <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{items.length} 个可用</span>
@@ -142,7 +142,7 @@ function ToolSetBox(props: {
         }}>已选 {selected.length}</span>
       </div>
 
-      {/* 工具条 */}
+      {}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 10px 6px" }}>
         <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
           <input className="input-field" value={q} spellCheck={false} placeholder={`搜索${title}…`}
@@ -171,7 +171,7 @@ function ToolSetBox(props: {
           onClick={() => onReplace([])}>清空</button>
       </div>
 
-      {/* 标签区（固定高度、可滚动） */}
+      {}
       <div style={{
         maxHeight: 190, overflowY: "auto", padding: "0 10px 10px",
         display: "flex", flexWrap: "wrap", gap: 6, alignContent: "flex-start",
@@ -198,7 +198,7 @@ function ToolSetBox(props: {
         })}
       </div>
 
-      {/* 失效项提示（技能/MCP 被移除后，配置里仍留着名字） */}
+      {}
       {missing.length > 0 && (
         <div style={{
           borderTop: "1px solid var(--border)", padding: "6px 10px", fontSize: 11.5,
@@ -216,7 +216,7 @@ function ToolSetBox(props: {
   );
 }
 
-/** A-980-R22/R23：工具面选择器（默认推荐集 / 自定义勾选 skill + MCP 服务器），创建与详情编辑共用 */
+
 function ToolProfilePicker(props: {
   value: ToolProfileLocal;
   onChange: (v: ToolProfileLocal) => void;
@@ -226,7 +226,7 @@ function ToolProfilePicker(props: {
   const toggle = (list: string[], item: string): string[] =>
     list.includes(item) ? list.filter((x) => x !== item) : [...list, item];
 
-  /** 切档：切到 custom 时**保留**已勾选内容（切走再切回来不该丢），其余档位清空无意义的载荷 */
+  
   const pick = (mode: ToolProfileLocal["mode"]): void =>
     onChange(mode === "custom"
       ? { mode: "custom", skills: value.skills, mcp: value.mcp }
@@ -247,7 +247,7 @@ function ToolProfilePicker(props: {
             <input type="radio" name="capability-mode" checked={on}
               style={{ marginTop: 2, flexShrink: 0 }}
               onChange={() => pick(m.value)} />
-            {/* A-980-R30：标签不折行（CJK 每字都是断行点，容器窄时会被拆字） */}
+            {}
             <span style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
               <span style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{m.label}</span>
               <span style={{ color: "var(--text-muted)" }}>{m.desc}</span>
@@ -278,29 +278,29 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
 
-  /* 创建弹窗 */
+  
   const [creating, setCreating] = React.useState(false);
   const [newName, setNewName] = React.useState("");
   const [newRole, setNewRole] = React.useState("");
-  /** A-980-R22：创建时的工具面选择（默认推荐集 / 自定义勾选 skill+mcp） */
+  
   const [newTools, setNewTools] = React.useState<ToolProfileLocal>({ ...EMPTY_TOOL_PROFILE });
   const [extras, setExtras] = React.useState<ExtrasCatalog>({ skills: [], mcpServers: [] });
 
-  /**
-   * 本组件内部选中态：设置是 Agent 配置的中枢，选中不再依赖会话（selectedAgentId 仅作初始值）。
-   * 未配置模型的新 Agent 也能直接点击进入属性面板配置。
-   */
+  
+
+
+
   const [localId, setLocalId] = React.useState<string | null>(null);
 
   const selectedId = localId ?? props.selectedAgentId ?? null;
 
-  /** 选中 Agent：内部态优先（设置中枢），并上抛给 App（加载会话等副作用） */
+  
   const selectAgent = (id: string): void => {
     setLocalId(id);
     props.onSelectAgent(id);
   };
 
-  /** 删除确认用（记录待删 id + 弹确认层） */
+  
   const [pendingDelete, setPendingDelete] = React.useState<AgentBrief | null>(null);
 
   function showNotice(ok: boolean, text: string): void {
@@ -317,7 +317,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
     setAgents(list);
   }, []);
 
-  /** A-980-R22：加载技能与 MCP 服务器目录（创建/详情工具配置勾选用） */
+  
   const loadExtras = React.useCallback(async (): Promise<void> => {
     if (!api.current?.extras) { return; }
     const [sk, mcp] = await Promise.all([
@@ -339,14 +339,14 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
     }
   }, [loadAgents]);
 
-  /** 选中变化 → 拉取属性面板详情 */
+  
   React.useEffect(() => {
     if (!selectedId || !api.current) { return; }
     api.current.agents.detail(selectedId).then((d: AgentDetail | null) => setDetail(d ? { ...d, tool_profile: d.tool_profile ?? { ...EMPTY_TOOL_PROFILE } } : null)).catch(() => setDetail(null));
     void loadExtras();
   }, [selectedId, agents]);
 
-  /** 详情 → 同步 App 层 agentConfig（属性面板与 ChatPanel 头部一致） */
+  
   React.useEffect(() => {
     if (!selectedId || !detail) { return; }
     const w = window as unknown as { __onAgentDetail?: (id: string, d: AgentDetail) => void };
@@ -354,7 +354,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
   }, [selectedId, detail]);
 
   const roleRef = React.useRef<HTMLTextAreaElement | null>(null);
-  /** 切换 Agent 时重置「设定」输入框高度（避免上一个 Agent 的高度残留） */
+  
   React.useEffect(() => {
     const el = roleRef.current;
     if (el) {
@@ -363,8 +363,8 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
     }
   }, [detail?.id]);
 
-  /** 局部改详情（保存前只改本地态）。形参用 Partial<AgentDetail> 而非 Record<string,string>：
-   *  本卡片新增了**布尔**字段（subagent_dispatch），旧签名会把它静态挡在外面。 */
+  
+
   function patchLocal(patch: Partial<AgentDetail>): void {
     setDetail((prev) => (prev ? { ...prev, ...patch } : prev));
   }
@@ -373,17 +373,17 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
     if (!api.current || !detail) { return; }
     setBusy(true);
     try {
-      // A-980-R23：**不再下发 model_choice**。本面板已撤掉模型选择入口，
-      // 若继续把这里的陈旧快照写回去，会覆盖掉用户在聊天区刚选的模型（两处入口互相打架）。
-      // 模型统一由聊天区头部下拉维护（App.updateAgentConfig / engine 的 "inherit" 分支）。
+      
+      
+      
       const patch: Record<string, unknown> = { role: detail.role };
       if (detail.mode) { patch.mode = detail.mode; }
       if (detail.show_thinking !== undefined) { patch.show_thinking = detail.show_thinking; }
-      // A-980-R22：工具面白名单随保存一并落库
+      
       if (detail.tool_profile) { patch.tool_profile = detail.tool_profile; }
-      // A-1096：子代理派发开关。**只在用户显式设置过时下发**（undefined 不下发）——
-      // 下发 undefined 会被 updateAgent 的 Object.assign 写成键存在但值 undefined 的畸形字段，
-      // 而且会把"未设置（默认允许）"变成"已设置"。
+      
+      
+      
       if (detail.subagent_dispatch !== undefined) { patch.subagent_dispatch = detail.subagent_dispatch; }
       const res = await api.current.agents.update(detail.id, patch);
       if (res.ok) {
@@ -462,7 +462,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
         await loadAgents();
         props.onAgentsChanged?.();
         if (selectedId === pendingDelete.id) {
-          // 选中回落：下一个或清空
+          
           const remaining = agents.filter((a) => a.id !== pendingDelete.id);
           if (remaining[0]?.id) { selectAgent(remaining[0].id); } else { setLocalId(null); props.onSelectAgent(""); }
         }
@@ -491,7 +491,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
 
   return (
     <div className="settings-pane" style={{ display: "flex", height: "100%", overflow: "hidden" }}>
-      {/* ── 左：Agent 列表 ── */}
+      {}
       <div style={{ width: 280, minWidth: 280, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 14, fontWeight: 700, flex: 1 }}>Agents（{agents.length}）</span>
@@ -525,7 +525,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
                   background: active ? "var(--accent-soft)" : "transparent",
                   cursor: "pointer",
                 }}>
-                {/* 单行简洁：名称 + 生命周期状态点 + 子代数量；描述内容只在右侧「设定」编辑区展示 */}
+                {}
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{a.name}</span>
                   <span title={a.lifecycle} style={{ width: 7, height: 7, borderRadius: "50%", background: lifecycleColor(a.lifecycle), flexShrink: 0 }} />
@@ -545,7 +545,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
         </div>
       </div>
 
-      {/* ── 右：属性面板（A-C-C PropsPanel 风格） ── */}
+      {}
       <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {!detail ? (
           <div style={{ color: "var(--text-dim)", textAlign: "center", paddingTop: 48, fontSize: 13 }}>
@@ -553,7 +553,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
           </div>
         ) : (
           <>
-            {/* 身份卡片 */}
+            {}
             <div className="card" style={{ marginBottom: 12 }}>
               <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
                 <span style={{ fontSize: 18, fontWeight: 800 }}>{detail.name}</span>
@@ -572,21 +572,21 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
                 style={{ resize: "none", overflowY: "auto", minHeight: 56, maxHeight: 240, lineHeight: 1.5 }}
                 onChange={(e) => {
                   patchLocal({ role: e.target.value });
-                  // autoResize：内容增长自动增高，上限 240px 后内部滚动
+                  
                   e.target.style.height = "auto";
                   e.target.style.height = `${Math.min(e.target.scrollHeight, 240)}px`;
                 }} />
             </div>
 
-            {/*
-             * A-980-R23（用户要求）：**关闭「在 Agent 设置里指定模型」**。
-             * 原因：① 实际没什么用——聊天区头部的模型下拉才是日常入口，且它同样写 model_choice，
-             *          两处入口互相覆盖；② 容易报错——core-ts/services/engine.ts:686-719 对
-             *          `api:<key>` / `local:<id>` 是硬校验，供应商 key 被改名/删除、或本地 GGUF 被移除后，
-             *          这里存下的旧值会让整个 Agent 直接路由失败（报「未知的模型选择」），用户却以为是程序坏了。
-             * 现在只保留「运行模式」（build/grow/normal，与模型无关），
-             * 并且保存时**不再下发 model_choice**（避免用这里的陈旧快照覆盖聊天区刚选的模型）。
-             */}
+            {
+
+
+
+
+
+
+
+}
             <div className="card" style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>运行模式</div>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
@@ -611,10 +611,10 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               ) : null}
             </div>
 
-            {/* A-1096：是否同意被派发为子代理 —— 用户明确要求的「开个开关」。
-                它是「主 Agent 不必独自做完所有事」的数据前提：只有出现在这里被同意的 Agent，
-                才会进系统提示的「可用子代理」清单、也才能被 delegate_subagent 点名。
-                缺省（undefined）= 允许：开箱即可被派发，用户随时可在这里收回。 */}
+            {
+
+
+}
             <div style={{ padding: "12px 14px", border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>子代理派发</div>
               <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10, lineHeight: 1.7 }}>
@@ -624,7 +624,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               </div>
               <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                 {[{ v: true, label: "允许被派发" }, { v: false, label: "不派发" }].map((o) => {
-                  // 判据与装配层同源：undefined / true ⇒ 允许，只有 false 才是拒绝。
+                  
                   const allowed = detail.subagent_dispatch !== false;
                   return (
                     <button key={String(o.v)}
@@ -643,7 +643,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               </div>
             </div>
 
-            {/* A-980-R22：工具能力（skill / MCP 白名单）——创建后可在此随时修改 */}
+            {}
             <div style={{ padding: "12px 14px", border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>工具能力</div>
               <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10 }}>
@@ -656,7 +656,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               />
             </div>
 
-            {/* 管理操作 */}
+            {}
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn" onClick={handleFork} disabled={busy} style={{ fontSize: 12.5 }}>
                 ⑂ 分裂（fork）
@@ -677,7 +677,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
         )}
       </div>
 
-      {/* ── 创建弹窗 ── */}
+      {}
       {creating && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",
@@ -698,7 +698,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               <input className="input-field" value={newRole} spellCheck={false}
                 placeholder="如：负责资料检索与总结" style={{ marginBottom: 14 }}
                 onChange={(e) => setNewRole(e.target.value)} />
-              {/* A-980-R22：工具能力（默认推荐集 / 自定义 skill+MCP 白名单） */}
+              {}
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>工具能力（可在 Agent 管理中随时修改）</div>
               <div style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid var(--card-border)", background: "var(--card-surface)", marginBottom: 14 }}>
                 <ToolProfilePicker value={newTools} onChange={setNewTools} extras={extras} />
@@ -714,7 +714,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
         </div>
       )}
 
-      {/* ── 删除确认层 ── */}
+      {}
       {pendingDelete && (
         <div style={{
           position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.66)",

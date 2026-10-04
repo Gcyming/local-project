@@ -1,14 +1,14 @@
-/**
- * core-ts/src/merger.ts — 主 Agent 合并器（Merger）。
- * 语义移植自 core/merger.py：
- * - collect_results / analyze_errors / assess_risks（规则式风险分级）
- * - trial_run：基础检查 → 一致性检查（关键词启发式 + A-013 LLM 裁定）→
- *   完成度检查（长度 50% + 覆盖率 50%）→ LLM 质量评分 → 加权总分 0-10
- * - A-047 幻觉护栏硬信号：claims 声称"已保存/已生成"但文件不存在 → 记 errors →
- *   trial 基础检查失败 → 不虚报成功（复用 core-ts/claims.ts）
- * - finalize：collect → analyze → claims → risks → trial → verdict（LLM 或模板兜底）
- * - P2-23 修复语义：验证超时按失败处理（Python 侧曾返回 passed=True，TS 移植为修正语义）
- */
+
+
+
+
+
+
+
+
+
+
+
 
 import { findUnverifiedClaims } from "./claims.js";
 
@@ -31,7 +31,7 @@ export interface MergeResult {
 
 export interface SubtaskLike {
   name: string;
-  state: string; // "done" | "failed" | ...
+  state: string; 
   description?: string;
   result: string;
   error: string;
@@ -62,7 +62,7 @@ export function makeMergeResult(taskId: string, originalTask: string): MergeResu
   };
 }
 
-/** LLM 回调：接收 prompt 返回文本（同步或异步均可；异步优先） */
+
 export type LlmFn = (prompt: string) => Promise<string> | string;
 
 function safeAwait<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -80,7 +80,7 @@ export class Merger {
     this.result = makeMergeResult(taskId, originalTask);
   }
 
-  /** 收集所有子任务结果，生成合并上下文（返回给主 Agent 的合并 prompt） */
+  
   collectResults(subtasks: SubtaskLike[]): string {
     const parts = [`## 原始任务\n${this.originalTask}\n`, "## 子 Agent 执行结果\n"];
     for (const st of subtasks) {
@@ -130,11 +130,11 @@ export class Merger {
     return risks;
   }
 
-  /** 试运行验证（真实验证逻辑）：基础/一致性/完成度/质量评分 */
+  
   async trialRun(summary: string, subtasks: SubtaskLike[], llmFn?: LlmFn): Promise<TrialOutcome> {
     const details: Record<string, unknown> = {};
 
-    // ── 维度 1: 基础检查 ──────────────────────────────
+    
     const hasErrors = this.result.errors.length > 0;
     const hasCriticalRisks = this.result.risks.some((r) => r.level === "high" || r.level === "critical");
     const hasSummary = Boolean(summary && summary.trim());
@@ -147,7 +147,7 @@ export class Merger {
       summary_length: summary ? summary.length : 0,
     };
 
-    // ── 维度 2: 一致性检查 ──────────────────────────────
+    
     const consistencyResult = this.checkConsistency(subtasks);
     if (llmFn && !consistencyResult.consistent) {
       const adjudication = await this.adjudicateConflict(llmFn, subtasks);
@@ -160,33 +160,33 @@ export class Merger {
     details["consistency"] = consistencyResult;
     const consistencyPassed = consistencyResult.consistent;
 
-    // ── 维度 3: 完成度检查 ──────────────────────────────
+    
     const completionResult = this.checkCompletion(summary, subtasks);
     details["completion"] = completionResult;
     const completionScore = completionResult.score;
 
-    // ── 维度 4: 质量评分（需要 LLM）────────────────────
+    
     let qualityScore = 5;
     if (llmFn && summary) {
       try {
         qualityScore = await this.evaluateQuality(llmFn, summary, subtasks);
       } catch {
-        // LLM 质量评估失败 → 默认分
+        
       }
     }
     details["quality_score"] = qualityScore;
 
-    // ── 综合判断 ────────────────────────────────────────
+    
     this.result.trial_passed = basePassed && consistencyPassed && completionScore >= 0.5;
     let score = Math.round(
-      qualityScore * 0.4 + // 质量 40%
-        completionScore * 10 * 0.3 + // 完成度 30%
-        (consistencyPassed ? 10 : 3) * 0.3, // 一致性 30%
+      qualityScore * 0.4 + 
+        completionScore * 10 * 0.3 + 
+        (consistencyPassed ? 10 : 3) * 0.3, 
     );
     score = Math.max(0, Math.min(10, score));
     this.result.trial_score = score;
 
-    // ── 生成日志 ────────────────────────────────────────
+    
     const logParts: string[] = [];
     if (subtasks.length === 0) logParts.push("试运行：无子任务结果，无法验证");
     else if (!hasSummary) logParts.push("试运行：主 Agent 未生成有效总结，需人工审查");
@@ -202,7 +202,7 @@ export class Merger {
     return { passed: this.result.trial_passed, log: this.result.trial_log, score: this.result.trial_score, details };
   }
 
-  /** 一致性检查：关键词启发式基线（A-013：命中矛盾时经 LLM 裁定解除误报） */
+  
   checkConsistency(subtasks: SubtaskLike[]): { consistent: boolean; issue: string | null; positive_count: number; negative_count: number; llm_adjudication?: unknown } {
     const results = subtasks.filter((st) => st.result).map((st) => st.result);
     if (results.length < 2) {
@@ -227,7 +227,7 @@ export class Merger {
     };
   }
 
-  /** A-013：LLM 裁定关键词启发式矛盾是否真实（描述不同侧面 → 解除误报） */
+  
   async adjudicateConflict(llmFn: LlmFn, subtasks: SubtaskLike[]): Promise<{ is_conflict: boolean | null; reason: string }> {
     const results = subtasks
       .filter((st) => st.result || st.error)
@@ -250,19 +250,19 @@ export class Merger {
         return { is_conflict: Boolean(data.is_conflict), reason: String(data.reason ?? "").slice(0, 200) };
       }
     } catch {
-      // 裁定失败 → 保守保留启发式结论
+      
     }
     return { is_conflict: null, reason: "裁定失败" };
   }
 
-  /** 完成度检查：总结是否真正回答了原始任务（长度 50% + 覆盖率 50%） */
+  
   checkCompletion(summary: string, subtasks: SubtaskLike[]): { score: number; summary_length: number; subtask_count: number; success_count: number; length_score: number; coverage_score: number } {
     if (!summary || !this.originalTask) {
       return { score: 0.0, summary_length: summary?.length ?? 0, subtask_count: subtasks.length, success_count: 0, length_score: 0, coverage_score: 0 };
     }
     const summaryLen = summary.length;
     const successCount = subtasks.filter((st) => st.state === "done").length;
-    const lengthScore = Math.min(1.0, summaryLen / 200); // 200 字以上满分
+    const lengthScore = Math.min(1.0, summaryLen / 200); 
     const coverageScore = successCount / Math.max(1, subtasks.length);
     const score = lengthScore * 0.5 + coverageScore * 0.5;
     return {
@@ -275,7 +275,7 @@ export class Merger {
     };
   }
 
-  /** 使用 LLM 评估合并质量（0-10 分） */
+  
   async evaluateQuality(llmFn: LlmFn, summary: string, subtasks: SubtaskLike[]): Promise<number> {
     const subtaskInfo = subtasks
       .map((st) => `- ${st.name}: ${st.state} (${(st.result ?? "").length}字符)`)
@@ -286,12 +286,12 @@ export class Merger {
       const m = /\b([0-9]|10)\b/.exec(String(result));
       if (m) return parseInt(m[1], 10);
     } catch {
-      // 解析失败 → 默认分
+      
     }
     return 5;
   }
 
-  /** 完成合并流程（A-047 幻觉护栏硬信号在 analyze_errors 后注入） */
+  
   async finalize(summary: string, subtasks: SubtaskLike[], llmFn?: LlmFn): Promise<MergeResult> {
     this.collectResults(subtasks);
     this.analyzeErrors(subtasks);
@@ -310,10 +310,10 @@ export class Merger {
     return this.result;
   }
 
-  /** A-047：幻觉护栏硬信号——总结/子任务结果声称已生成但文件不存在 → 记 errors */
+  
   async appendClaimErrors(summary: string, subtasks: SubtaskLike[]): Promise<string[]> {
     try {
-      // 只核验总结与子任务产出（result），不核验 error（失败描述不是完成态声称）
+      
       const texts = [summary ?? ""];
       for (const st of subtasks) texts.push(st.result ?? "");
       const unverified = [...new Set(await findUnverifiedClaims(texts.join("\n")))];
@@ -324,11 +324,11 @@ export class Merger {
       }
       return unverified;
     } catch {
-      return []; // 护栏异常不阻断合并主流程
+      return []; 
     }
   }
 
-  /** 生成最终结论：有 LLM 时调用生成，否则模板兜底 */
+  
   async buildVerdict(summary: string, subtasks: SubtaskLike[], llmFn?: LlmFn): Promise<string> {
     const riskLines = this.result.risks.map((r) => `[${r.level}] ${r.description}`);
     const riskSummary = riskLines.length > 0 ? riskLines.join("; ") : "无风险";
@@ -337,7 +337,7 @@ export class Merger {
         const verdict = await this.llmVerdict(llmFn, summary, subtasks, riskSummary);
         if (verdict) return verdict;
       } catch {
-        // 回退模板
+        
       }
     }
     if (this.result.trial_passed && this.result.errors.length === 0) {
@@ -350,7 +350,7 @@ export class Merger {
     return `⚠ 任务完成但存在风险（评分 ${this.result.trial_score}/10）。${riskSummary}`;
   }
 
-  /** 用 LLM 生成自然的最终结论 */
+  
   async llmVerdict(llmFn: LlmFn, summary: string, subtasks: SubtaskLike[], riskSummary: string): Promise<string> {
     const doneCount = subtasks.filter((st) => st.state === "done").length;
     const failCount = subtasks.filter((st) => st.state === "failed").length;

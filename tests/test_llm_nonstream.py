@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """A-149 补漏：上游忽略 stream:true（非流式完整 JSON / message 形态 SSE 块）时
 正文/思考/工具调用恢复——此前静默返回空回复（GUI 只显示耗时无内容）。
 
@@ -174,7 +174,7 @@ class TestMergeCompleteToolCalls:
             "id": "c1", "type": "function",
             "function": {"name": "a", "arguments": '{"x":1}'},
         }])
-        # 增量已拼 name；完整对象不覆盖已有 name/arguments 中的非空部分
+        
         assert calls[0]["function"]["name"] == "a"
         assert calls[0]["function"]["arguments"] == '{"x":1}'
 

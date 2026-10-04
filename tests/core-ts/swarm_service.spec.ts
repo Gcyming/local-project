@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/swarm_service.spec.ts — SwarmService 测试（slime_server.py /swarm/report 语义对照）。
- * 覆盖：输入清洗（state 白名单/字段截断）/ 校验 400（task/summary 空、results>16）/
- * report 成功与失败的后处理管线（knowledge task.swarm.* / behavior / emotion / 保存）/ dispatch。
- */
+
+
+
+
+
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -146,7 +146,7 @@ describe("SwarmService.report", () => {
     expect(behavior.patterns).toHaveLength(1);
     expect(behavior.patterns![0].source).toBe("swarm_extracted");
     expect(agent.emotion).toHaveProperty("mood");
-    // 落盘核验
+    
     const reloaded = JSON.parse(await (await import("node:fs/promises")).readFile(join(dir, "agents.json"), "utf8"));
     expect(reloaded[0].behavior.patterns).toHaveLength(1);
   });
@@ -198,7 +198,7 @@ describe("SwarmService.dispatch", () => {
   it("engine 接线 → 真 SwarmExecutor 全流程（拆解→worker→合并）", async () => {
     const { SlimeEngine } = await import("../../core-ts/src/services/engine.js");
     const { ChatClient } = await import("../../core-ts/src/llm/client.js");
-    // 多轮响应：1)拆解 JSON 2)worker 完成 3)合并总结
+    
     const replies = [
       JSON.stringify({ rounds: [{ subtasks: [{ desc: "子任务A", agent: "" }] }] }),
       "子任务A完成<DONE>",
@@ -229,7 +229,7 @@ describe("SwarmService.dispatch", () => {
     expect(r.agent_snapshots).toHaveLength(1);
     expect(r.agent_snapshots[0].state).toBe("done");
     expect(r.merge_result?.summary).toContain("整合完成");
-    // 单 worker 场景：广播无接收方 → 如实产生 warning（非错误）
+    
     expect(r.warnings.some((w) => w.includes("无其他 Agent 在线"))).toBe(true);
   });
 

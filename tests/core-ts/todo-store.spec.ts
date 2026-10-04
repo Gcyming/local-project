@@ -1,16 +1,16 @@
-/**
- * tests/core-ts/todo-store.spec.ts — 待办存储（唯一真源）回归测试。
- *
- * A-980-R29 把待办存储从「工具里一份 + 主进程三处各手搓一份」收敛为
- * `core-ts/src/services/todoStore.ts`。本文件锁住这一层的契约，重点是两条：
- * ① **空 sessionId 必须拒绝**（`todos_` + `""` + `.json` 会拼出一个看似正常的文件名，
- *    那正是 R27 孤儿文件 `data/todos_.json` 的由来）；
- * ② 归一化规则（最多一个 in_progress / completedAt 打戳撤销）只在这一层实现，
- *    工具写的与主进程读的口径必须完全一致。
- *
- * ⚠️ 隔离策略同 todo-tasks.spec.ts：用带测试标记的 sessionId 写进真实 data/ 目录，
- * beforeEach/afterAll 无条件清理自己造的文件。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -32,7 +32,7 @@ function cleanMarked(): void {
   let names: string[] = [];
   try { names = readdirSync(DATA_DIR); } catch { return; }
   for (const n of names) {
-    if (n.includes(MARK)) { try { rmSync(join(DATA_DIR, n), { force: true }); } catch { /* 忽略 */ } }
+    if (n.includes(MARK)) { try { rmSync(join(DATA_DIR, n), { force: true }); } catch {  } }
   }
 }
 
@@ -50,7 +50,7 @@ describe("todoStore — 空 sessionId 必须拒绝（R27 根因防线）", () =>
     expect(todoPath("   ")).toBeNull();
     expect(todoPath(null as unknown as string)).toBeNull();
     expect(todoPath(undefined as unknown as string)).toBeNull();
-    // 正常 id 才给出真实路径，且必须以会话 id 结尾
+    
     expect(todoPath(sid)).toMatch(new RegExp(`todos_${MARK}`));
   });
 
@@ -60,7 +60,7 @@ describe("todoStore — 空 sessionId 必须拒绝（R27 根因防线）", () =>
     expect(readTodos("")).toEqual([]);
     expect(writeTodos("", [todo("1", "不该落盘")])).toBeNull();
     expect(hasTodos("")).toBe(false);
-    removeTodos(""); // 不应抛、也不应删掉任何共享文件
+    removeTodos(""); 
     expect(existsSync(ghost)).toBe(hadGhost);
   });
 
@@ -100,21 +100,21 @@ describe("todoStore — 读写与容错", () => {
     expect(hasTodos(sid)).toBe(true);
     removeTodos(sid);
     expect(hasTodos(sid)).toBe(false);
-    removeTodos(sid); // 重复删不抛
+    removeTodos(sid); 
   });
 });
 
 describe("todoStore — 清空必须是真删除（A-987：用户实测'删了又回来'）", () => {
   it("removeTodos 连带删掉 .bak —— 否则 readTodos 会从备份把整张清单读回来", () => {
     writeTodos(sid, [todo("a", "第一版")]);
-    writeTodos(sid, [todo("a", "第一版"), todo("b", "第二版")]); // 第二次写盘 → 留了一份 .bak
+    writeTodos(sid, [todo("a", "第一版"), todo("b", "第二版")]); 
     const p = todoPath(sid)!;
-    expect(existsSync(`${p}.bak`)).toBe(true); // 前提成立，否则这条测试是空转
+    expect(existsSync(`${p}.bak`)).toBe(true); 
 
     removeTodos(sid);
     expect(existsSync(p)).toBe(false);
     expect(existsSync(`${p}.bak`)).toBe(false);
-    // 关键断言：清空之后读盘必须真的是空的 —— 这里曾经会把刚删掉的清单整张读回来
+    
     expect(readTodos(sid)).toEqual([]);
   });
 
@@ -143,23 +143,23 @@ describe("todoStore — 清空必须是真删除（A-987：用户实测'删了�
 });
 
 describe("todoStore — 会话 id 必须转成单段合法文件名（A-987：NTFS 数据流幽灵文件）", () => {
-  /**
-   * 复现条件（本机 node 实测）：Windows 上 `fs.writeFileSync("data/xxx:yyy.json", …)` **不报错**，
-   * 但它不会创建 `xxx:yyy.json`，而是创建一个 **0 字节的 `xxx`**、把内容塞进它的隐藏数据流。
-   * 子代理会话 id 恰恰长这样：`__subagent__:<runId>`（含冒号）→ 现场遗留物 `data/todos___subagent__`。
-   */
+  
+
+
+
+
   it("含冒号的子代理 id 不再产生 0 字节幽灵文件，且读写往返正常", () => {
     const sub = `${MARK}sub:run123`;
     writeTodos(sub, [todo("a", "子代理任务")]);
 
     const p = todoPath(sub)!;
-    // ⚠️ 只能断言 **basename**：完整路径里的 `D:` 是盘符，不是文件名的一部分
-    expect(basename(p)).not.toContain(":"); // 冒号一旦进文件名就会被 NTFS 当数据流
+    
+    expect(basename(p)).not.toContain(":"); 
     expect(p.endsWith(".json")).toBe(true);
 
-    // 未编码时的 ADS 基名（无扩展名）绝不能出现在盘上
+    
     expect(existsSync(join(DATA_DIR, `todos_${sub}`))).toBe(false);
-    // 内容必须落在主文件本体里（而不是某个读不到的数据流里）
+    
     expect(JSON.parse(readFileSync(p, "utf8")).items).toHaveLength(1);
     expect(readTodos(sub).map((t) => t.content)).toEqual(["子代理任务"]);
   });
@@ -172,7 +172,7 @@ describe("todoStore — 会话 id 必须转成单段合法文件名（A-987：NT
     expect(todoPath(a)).not.toBe(todoPath(b));
     expect(readTodos(a).map((t) => t.content)).toEqual(["A 的任务"]);
     expect(readTodos(b).map((t) => t.content)).toEqual(["B 的任务"]);
-    // 删 A 不能把 B 一起带走（共用基名时 rmSync 会连坐）
+    
     removeTodos(a);
     expect(readTodos(b).map((t) => t.content)).toEqual(["B 的任务"]);
   });
@@ -206,7 +206,7 @@ describe("todoStore — 归一化规则（工具与主进程共用同一口径�
     const written = writeTodos(sid, [todo("1", "A", "in_progress"), todo("2", "B", "in_progress")]);
     expect(written).not.toBeNull();
     expect(written!.filter((t) => t.status === "in_progress")).toHaveLength(1);
-    // 读回的也必须是归一化后的（两个进程看到同一份真相）
+    
     expect(readTodos(sid).filter((t) => t.status === "in_progress")).toHaveLength(1);
   });
 });
@@ -244,15 +244,15 @@ describe("todoStore — 派生视图", () => {
   });
 });
 
-/**
- * A-985：僵尸 in_progress 收敛。
- *
- * 事故：App 卡死被强杀 → 重启后待办里那一项**永远停在「进行中」**（转圈 + 高亮 + 「进行中 1」），
- * 但根本没有流在跑。用户实测原话："我并未输入任何命令，列表却显示一个任务在进行中"。
- * 根因：`in_progress` 的语义是"此刻有人在干这一项"，而待办是**落盘**的真源，
- * 没有任何机制会在"干活的进程没了"时把它收回来（渲染层改内存镜像会被下一次读盘覆盖回来）。
- * 注意这与「全部完成 → 自动清空」是两件不同的事：那个管"做完的收走"，这个管"没人在做的别假装在做"。
- */
+
+
+
+
+
+
+
+
+
 describe("todoStore — 僵尸 in_progress 收敛（A-985）", () => {
   it("没有流在跑时：in_progress → pending，已完成项与内容原样保留", () => {
     writeTodos(sid, [
@@ -263,7 +263,7 @@ describe("todoStore — 僵尸 in_progress 收敛（A-985）", () => {
     expect(demoteStaleInProgress(sid)).toBe(1);
     const after = readTodos(sid);
     expect(after.map((t) => t.status)).toEqual(["completed", "pending", "pending"]);
-    // 只改状态、不动内容 —— 不丢"做到哪一步"的证据
+    
     expect(after.map((t) => t.content)).toEqual(["已完成的事", "卡在这一步（其实没人在做）", "还没开始"]);
   });
 
@@ -293,16 +293,16 @@ describe("todoStore — 僵尸 in_progress 收敛（A-985）", () => {
     const main = readFileSync(join(PROJECT_ROOT, "gui/src/main/index.ts"), "utf8");
     expect(main).toContain("demoteStaleInProgress(sid)");
     expect(main).toContain("if (!activeChats.has(sid))");
-    // 只在**首次**读盘时收敛：每次读都降级会把模型刚标记的"进行中"立刻打回待办
+    
     expect(main).toContain("if (!staleChecked.has(sid))");
-    // 用户主动中断后同样没人在做 → 也要收敛
+    
     expect(main).toContain("demoteStaleInProgress(key)");
   });
 
   it("读盘路径读到「已全部完成」的清单要**立即**清，不走 1.5s 延迟（源码守卫）", () => {
     const main = readFileSync(join(PROJECT_ROOT, "gui/src/main/index.ts"), "utf8");
-    // 延迟清空的唯一目的是让"划过动画"播完；读盘路径没有动画，延迟只会让列表
-    // 在打开会话 1.5s 后自己消失（用户当成显示异常），且若这 1.5s 内被强杀就永远不清。
+    
+    
     expect(main).toContain("if (allTodosCompleted(todos))");
     const loadTodos = main.slice(main.indexOf('"slime:sessions:loadTodos"'));
     const body = loadTodos.slice(0, loadTodos.indexOf("});"));
@@ -312,10 +312,10 @@ describe("todoStore — 僵尸 in_progress 收敛（A-985）", () => {
 });
 
 describe("todoStore — 计划收尾核对（A-1061⑫：用户实测「大任务做完还有项没划掉」）", () => {
-  /* 现象：右侧待办面板是用户盯进度的唯一地方，模型在长任务末尾常常直接给结论、
-     忘了最后一次 todo_write → 清单停在半途，进度是假的。
-     只靠提示词（planReminderText）是**建议**；这里在循环层面补一次硬核对。
-     判据落在纯函数上，三支互斥。 */
+  
+
+
+
 
   it("空表 → null（没有计划就别多跑一轮）", () => {
     expect(planReconcileFromTodos([])).toBeNull();
@@ -338,9 +338,9 @@ describe("todoStore — 计划收尾核对（A-1061⑫：用户实测「大任�
     expect(text).toContain("还有 2 项没标完成");
     expect(text).toContain("「补测试」(in_progress)");
     expect(text).toContain("「写文档」(pending)");
-    // 已完成的那项**不算**未完成（否则模型会被要求去"收尾"一个已经完成的项）
+    
     expect(text).not.toContain("「改接口」(");
-    // 二选一是硬要求，且必须给出"留待下一轮"这条合法出口（否则模型会假完成）
+    
     expect(text).toContain("调 todo_write");
     expect(text).toContain("为什么留到下一轮");
   });
@@ -358,24 +358,24 @@ describe("todoStore — 计划收尾核对（A-1061⑫：用户实测「大任�
 
   it("工具循环真的会在**本轮不再要工具**时续一轮去做核对（源码接线）", () => {
     const src = readFileSync(join(PROJECT_ROOT, "core-ts/src/tool_loop.ts"), "utf8");
-    // 两条路径（非流式 run / 流式 runStream）都要接上
+    
     expect((src.match(/this\.reconcilePlan\(/g) ?? []).length).toBe(2);
     const fn = src.slice(src.indexOf("private reconcilePlan("));
     const body = fn.slice(0, fn.indexOf("\n  }\n"));
-    // 续轮必须带"本轮正文先落成 assistant"（否则模型不知道刚说了什么）
+    
     expect(body).toContain('messages.push({ role: "assistant", content: roundText });');
     expect(body).toContain('messages.push({ role: "user", content: ask });');
-    // 只核对一次：入口必须被 mayReconcile 拦住（否则"留待下一轮"会被无限追问）
-    // ⚠️ 参数是**正向**语义（true = 可以核对）。写成 `if (alreadyDone) return false` 那种
-    //    反向命名属于"判据写反"的高危形状，故这里连名字一起锁住。
+    
+    
+    
     expect(body).toContain("if (!mayReconcile) { return false; }");
     expect(body).not.toContain("alreadyDone");
-    // 两个调用点都必须把「只一次」与「本次真的碰过计划」一起传进去。
-    // ⚠️ 必须锚**调用点整句**（`opts.sessionId, …`），不能用裸的 `!reconciled && usedTodoWrite` ——
-    //    函数文档里也写着这串，裸串会数出 3 处（注释计数陷阱，mutation-harness §8）。
+    
+    
+    
     expect((src.match(/this\.reconcilePlan\(opts\.sessionId, opts\.messages, (?:raw|roundText), !reconciled && usedTodoWrite\)/g) ?? []).length)
       .toBe(2);
-    // 准入条件的置位点：两条循环各一处，判据必须是 todo_write（不是别的工具）
+    
     expect((src.match(/pending\.some\(\(tc\) => tc\.name === "todo_write"\)/g) ?? []).length).toBe(2);
   });
 });

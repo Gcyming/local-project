@@ -1,15 +1,15 @@
-/**
- * tests/gui/target-path.spec.ts — A-980-R32：点击路径的多基准候选解析。
- *
- * 这一层出错的表现是「明明存在的文件报不存在」（用户实测的原始症状），
- * 而输入全是野生字符串，所以用真实形态逐条锁住：相对工作目录 / 相对项目根 /
- * 带项目名前缀 / 带行号锚点 / 带引号反斜杠 / 相对某个父目录 / 本来就是绝对路径。
- */
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { resolve, basename, dirname } from "node:path";
 import { buildTargetCandidates, normalizeTargetPath, isAbsoluteTarget } from "../../gui/src/main/targetPath.js";
 
-/** Windows 下用 win32 语义跑（本仓库目标平台）；用 posix 风格基准保证断言稳定 */
+
 function cands(rel: string, roots: { root?: string; sessionWorkspace?: string | null; projectRoot?: string }): string[] {
   return buildTargetCandidates(rel, roots, resolve, basename, dirname).candidates;
 }

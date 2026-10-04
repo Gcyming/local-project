@@ -1,9 +1,9 @@
-/**
- * tests/core-ts/mcp.spec.ts — MCP 桥接测试（对照 core/mcp_client.py 语义）。
- * 覆盖：JSONL/Content-Length 双帧嗅探（真实 node 子进程）/ 通知分发 /
- * HTTP SSE 逐行命中 / 桥接注册（mcp_ 前缀、权限解析、unique 名）/ 媒体落盘 /
- * list_changed 刷新 / 断连重连（成功路径）。
- */
+
+
+
+
+
+
 import { describe, expect, it, vi } from "vitest";
 import { rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,7 +31,7 @@ it("promptArgsToSchema：arguments → JSON Schema", () => {
   });
 });
 
-/** 内存 fake transport：按请求方法路由响应 */
+
 class FakeTransport {
   running = true;
   notifications: string[] = [];
@@ -143,7 +143,7 @@ describe("StdioTransport 双帧嗅探（真实 node 子进程）", () => {
       closed = true;
     };
     expect(await t.start()).toBe(true);
-    // 子进程 150ms 后退出；改为轮询等待 onClose（最多 3s），避免固定 600ms 在高负载下来不及触发 → flaky
+    
     const deadline = Date.now() + 3000;
     while (!closed && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
@@ -228,7 +228,7 @@ describe("MCPServer 能力层", () => {
     expect(m).not.toBeNull();
     const saved = await readFile(m![1], "utf8");
     expect(saved).toBe("fake-png-bytes");
-    // 同内容第二次调用 → 同路径（去重不重复写）
+    
     const text2 = await server.callTool("x", {});
     expect(text2).toBe(text);
     await server.stop();
@@ -248,15 +248,15 @@ describe("MCPClient 桥接", () => {
     expect(registry.listToolNames()).toEqual(
       expect.arrayContaining(["mcp_greet", "mcp_search", "mcp_res_ra", "mcp_prompt_p1"]),
     );
-    // 默认权限 network（缺省）
+    
     expect(registry.get("mcp_greet")?.permissions).toEqual(["network"]);
-    // 工具调用路由到 MCP server
+    
     expect(await registry.callTool("mcp_greet", {})).toBe("ok");
     expect(await registry.callTool("mcp_res_ra", {})).toBe("资源内容");
     expect(await registry.callTool("mcp_prompt_p1", { x: "1" })).toContain("提示正文");
-    // 未桥接名 → [错误]
+    
     expect(await registry.callTool("mcp_nope", {})).toContain("[错误]");
-    // stopAll → 全部摘除
+    
     await client.stopAll();
     expect(registry.listToolNames()).toEqual([]);
   });
@@ -281,7 +281,7 @@ describe("MCPClient 桥接", () => {
     client.attachServer("perm", server);
     await client.startOne("perm");
     expect(registry.get("mcp_safe_tool")?.permissions).toEqual(["read", "write"]);
-    expect(registry.get("mcp_evil_tool")?.permissions).toEqual(["network"]); // 非法回退
+    expect(registry.get("mcp_evil_tool")?.permissions).toEqual(["network"]); 
     await client.stopAll();
   });
 
@@ -313,7 +313,7 @@ describe("MCPClient 桥接", () => {
     client.attachServer("live", server);
     await client.startOne("live");
     expect(registry.get("mcp_t1")).toBeDefined();
-    // 模拟 server 通知 list_changed（新工具 t2）
+    
     toolCount = 2;
     await client.handleNotificationForTest("live");
     expect(registry.get("mcp_t2")).toBeDefined();
@@ -329,12 +329,12 @@ describe("MCPClient 桥接", () => {
     client.attachServer("flaky", server);
     await client.startOne("flaky");
     expect(registry.get("mcp_greet")).toBeDefined();
-    // 模拟传输自然死亡 → onClose → scheduleReconnect
+    
     fake.running = false;
     await client.simulateTransportCloseForTest("flaky");
-    // 工具立即摘除
+    
     expect(registry.get("mcp_greet")).toBeUndefined();
-    // 等待重连（退避 1s + start 成功）
+    
     await new Promise((r) => setTimeout(r, 1800));
     expect(registry.get("mcp_greet")).toBeDefined();
     expect(server.lastError).toBeNull();

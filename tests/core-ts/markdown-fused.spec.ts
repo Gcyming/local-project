@@ -1,17 +1,17 @@
-/**
- * markdown-fused.spec.ts — 行内块标记解塞（unjam）回归（A-9xx）。
- * 用户实测：agnes 类模型输出「块级标记与正文/同行内容挤在同一行」的畸形 markdown——
- *   `报告：--- ## 📋 项目功能分析 ### Campanula …：| 特性 | 说明 |`
- *   `| … | --- ## 🔍 下节标题 ### 1. Ollama …`
- * 此前解析器按行首判定块，导致 `---`/`##`/`###`/`|` 全部原样落进段落（markdown 渲染失效、
- * 实时流式也只见原始符号）。此处端到端断言最终 HTML：横线/标题/表格必须真实产出。
- */
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import Markdown, { normalizeMarkdownBlocks, normalizeBrokenLines, tightenCjkSpacing } from "../../gui/src/renderer/pages/Markdown.js";
 
-/** 用户实测缩样：块标记全挤行内 + 表格行尾巴嵌 `--- ##`（忠实还原原始形态） */
+
 const fusedSample = [
   "我已经了解了项目的基本情况。现在让我进行全网调研，看看类似的研究方向：根据我对 Campanula 项目的深入分析以及全网调研，以下是详细报告：--- ## 📋 项目功能分析 ### Campanula 的核心定位这是一个本地多模型协作 AI 助手桌面应用，主要特点：| 特性 | 说明 |",
   "|---|---|---|---|---|",
@@ -30,27 +30,27 @@ function render(text: string, streaming = false): string {
 describe("行内块标记解塞（横线/标题/表格从行内还原）", () => {
   it("`--- ## 标题` 挤在段尾 → 分离为横线 + 标题，不再原文直出", () => {
     const html = render(fusedSample);
-    expect(html).toContain("border-top:1px solid");          // --- 变为真横线
-    expect(html).toContain("📋 项目功能分析");                // ## 标题内容渲染
-    expect(html).toContain("font-weight:700");               // 标题粗体
-    expect(html).not.toContain("--- ## 📋");                 // 原始拼缝残留消失
-    expect(html).not.toContain("## 📋 项目功能分析");         // 未渲染成段落的原文不出现
-    expect(html).not.toContain("| 特性 |");                  // 表头不原文直出
+    expect(html).toContain("border-top:1px solid");          
+    expect(html).toContain("📋 项目功能分析");                
+    expect(html).toContain("font-weight:700");               
+    expect(html).not.toContain("--- ## 📋");                 
+    expect(html).not.toContain("## 📋 项目功能分析");         
+    expect(html).not.toContain("| 特性 |");                  
   });
 
   it("挤在一行的表格（表头粘正文 + 列数不一致）→ 渲染为真表格", () => {
     const html = render(fusedSample);
-    expect(html).toContain("border-collapse:collapse");      // table
-    expect(html).toContain("padding:4px 8px");               // td
-    expect(html).toContain("智能路由");                        // 单元格内容入 td
-    expect(html).toContain("显存自适应");                      // 多数据行同样入表
+    expect(html).toContain("border-collapse:collapse");      
+    expect(html).toContain("padding:4px 8px");               
+    expect(html).toContain("智能路由");                        
+    expect(html).toContain("显存自适应");                      
   });
 
   it("表格行尾巴嵌 `| --- ## 下节` → 行内横线+标题从行尾解出", () => {
     const html = render(fusedSample);
-    expect(html).toContain("🔍 类似项目/研究方向调研");        // ## 下节标题渲染
-    expect(html).toContain("1. Ollama (180k ⭐)");            // ### 条目渲染
-    expect(html).not.toContain("--- ## 🔍");                 // 拼缝残留消失
+    expect(html).toContain("🔍 类似项目/研究方向调研");        
+    expect(html).toContain("1. Ollama (180k ⭐)");            
+    expect(html).not.toContain("--- ## 🔍");                 
   });
 
   it("完好的标准 markdown（表格/列表）不受影响", () => {
@@ -88,7 +88,7 @@ describe("normalizeBrokenLines（A-9xx markdown 结构零误伤）", () => {
   it("token 碎片化换行仍折叠（原有行为不变）", () => {
     expect(normalizeBrokenLines("用\n户\n的\n工\n作\n目\n录")).toBe("用户的工作目录");
     expect(normalizeBrokenLines("The\nuser\nis\nasking\nme")).toBe("The user is asking me");
-    // 数字/短词夹杂的碎片行：内容行折叠时**不丢数字**
+    
     expect(normalizeBrokenLines("389\nk\nstars\n、\n81\n.7\nk\nforks")).toBe("389 k stars 、 81 .7 k forks");
   });
 });

@@ -10,10 +10,10 @@ import re
 
 from bs4 import BeautifulSoup
 
-# JS 渲染站特征标记（对应 search_engine.md 六.6）
+
 _JS_MARKERS = ("__INITIAL_STATE__", "__NEXT_DATA__", "__NUXT__")
 
-# 语义标签优先级（article/main/.content 等有实文本则取之，避免误判 JS 站）
+
 _SEMANTIC_SELECTORS = ("article", "main", ".post-content", ".article-content", ".content")
 
 _NOISE_TAGS = ("script", "style", "nav", "footer", "header", "aside", "noscript")
@@ -23,7 +23,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 def _is_js_rendered(soup: BeautifulSoup, raw_html: str, text: str) -> bool:
     """JS 渲染站检测：命中特征即返回 True，但语义标签有实文本则不误判。"""
-    # 误判避免：语义标签有实际文本内容则不触发
+    
     for sel in _SEMANTIC_SELECTORS:
         node = soup.select_one(sel)
         if node and node.get_text(strip=True):
@@ -32,11 +32,11 @@ def _is_js_rendered(soup: BeautifulSoup, raw_html: str, text: str) -> bool:
     for marker in _JS_MARKERS:
         if marker.lower() in lower:
             return True
-    # 空壳 app/root 容器
+    
     app = soup.select_one("#app, #root")
     if app is not None and not app.get_text(strip=True):
         return True
-    # script 数量多且正文为空
+    
     if len(soup.find_all("script")) > 20 and not text:
         return True
     return False
@@ -89,7 +89,7 @@ def extract_content(html_text: str, url: str = "", max_chars: int = 4000) -> str
     """从 HTML 提取结构化文本。返回「标题 + 正文」；JS 渲染站返回提示文案。"""
     soup = BeautifulSoup(html_text or "", "html.parser")
 
-    # 标题：<title> 或 h1，缺失用 URL 兜底
+    
     title = ""
     if soup.title and soup.title.get_text(strip=True):
         title = soup.title.get_text(strip=True)
@@ -98,7 +98,7 @@ def extract_content(html_text: str, url: str = "", max_chars: int = 4000) -> str
     else:
         title = url or "(无标题)"
 
-    # 正文：语义标签优先，无则 body 兜底
+    
     main_node = None
     for sel in _SEMANTIC_SELECTORS:
         node = soup.select_one(sel)
@@ -108,7 +108,7 @@ def extract_content(html_text: str, url: str = "", max_chars: int = 4000) -> str
     if main_node is None:
         main_node = soup.body or soup
 
-    # 移除噪声标签
+    
     for tag in main_node.find_all(list(_NOISE_TAGS)):
         tag.decompose()
 
@@ -116,7 +116,7 @@ def extract_content(html_text: str, url: str = "", max_chars: int = 4000) -> str
     text = _WHITESPACE_RE.sub(" ", text).strip()
 
     if _is_js_rendered(soup, html_text, text):
-        # B1: JS 渲染站先尝试从内嵌初始数据提取正文，失败才提示需浏览器渲染
+        
         js_text = _extract_js_data(html_text)
         if js_text:
             result = f"{title}\n\n{js_text}"
@@ -125,7 +125,7 @@ def extract_content(html_text: str, url: str = "", max_chars: int = 4000) -> str
             return result
         return "[该页面需浏览器渲染，无法获取内容]"
 
-    # HTML 实体解码（get_text 不解实体，需在此统一解码）
+    
     title = _html.unescape(title).strip()
     text = _html.unescape(text)
 

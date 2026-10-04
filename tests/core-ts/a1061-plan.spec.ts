@@ -1,17 +1,17 @@
-/**
- * A-1061① 守卫：中断后**计划接续** —— 每轮开头把未完成的计划复述回上下文。
- *
- * 用户症状：「中途中断，agent 重新开始输出后，原本划分好、出现在右侧任务列表的任务
- * **不会接续**，也不会清除，只能由用户手动消除」。
- *
- * 现状缺口（结构性，不是"忘了调某个函数"）：`renderTodos` 目前**只**在模型自己调
- * `todo_write` 时作为工具回执出现**一次**。中断之后再开一轮，模型手上没有任何信号告诉它
- * "那张计划表仍是当前目标" → 表现就是不接续（重头再来 / 当没这回事）。
- *
- * 权威依据：Claude Code 的 Task 系统把待办**落盘**并跨重启存活，且用 system-reminder
- * 把当前 todo 状态**反复注入上下文**以保持战略连贯；本仓 `renderTodos` 的注释里也早已写明
- * 这是 Manus「目标复述 / recitation」（长任务早期的计划会沉到上下文中段而失效）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,10 +43,10 @@ describe("A-1061①-A 计划复述：真值表（纯函数）", () => {
     expect(text!).toContain("写测试");
     expect(text!).toContain("跑门禁");
     expect(text!).toContain("不要重做");
-    // 逐项勾选状态：已完成的必须是 [x]，未完成的必须是 [ ]（模型据此知道做到哪了）
+    
     expect(text!).toContain("- [x] 装依赖");
     expect(text!).toContain("- [ ] 跑门禁");
-    // 进行中的那一项要标出来（否则模型不知道"当前该从哪继续"）
+    
     expect(text!).toContain("← 进行中");
   });
 
@@ -82,15 +82,15 @@ describe("A-1061①-B 接线：每轮开头注入，且放在**最后**", () => 
   it("🐛 复述必须折进消息数组**末尾**（放最前等于沉进中段，复述就白做了）", () => {
     const src = code(ENGINE);
     const atOut = src.indexOf("out = [", src.indexOf("const reminder = planReminderText"));
-    // 位置靠 recency：折进**最后一条 user** 而不是新增一条 system
-    // （非首位 system 会让 OpenAI 兼容上游 400 / Anthropic 静默改写 —— 见 userReminder.ts）
+    
+    
     const atFold = src.indexOf("out = foldUserReminder(out, reminder)", atOut);
-    /* A-1129 **迁移**（不是删）：折入之后仍然是**立刻返回**。
-       ⚠️ 形式改了两次，这条断言跟着改成**形态无关**的判据 ——
-       只看"折入之后第一个 return 是不是直接返回 out"，不把返回值的写法焊死
-       （A-1129 一度让它是 `return sanitizeOutgoingMessages(out)`，随后规范化的落点
-        又搬到了 `ModelRouter`（唯一分派点，覆盖 tool_loop 的中途重发）⇒ 又变回 `return out;`）。
-       守卫要守的是**位置与收尾性**，不是某一次的返回值拼写。 */
+    
+
+
+
+
+
     const afterFold = src.slice(atFold + "out = foldUserReminder(out, reminder);".length);
     const firstReturnAt = afterFold.indexOf("return ");
     expect(atOut, "找不到消息数组构造").toBeGreaterThan(-1);
@@ -120,7 +120,7 @@ describe("A-1061①-B 接线：每轮开头注入，且放在**最后**", () => 
   });
 
   it("[反例] 断言能抓住坏写法（守卫自检）", () => {
-    // 把"全部完成也复述"当成实现 → 上面第 2 条必须能区分
+    
     const naive = (items: StoredTodo[]): string | null => (items.length === 0 ? null : "x");
     expect(naive([t("1", "甲", "completed")])).not.toBeNull();
     expect(planReminderText([t("1", "甲", "completed")])).toBeNull();

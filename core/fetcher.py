@@ -21,7 +21,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_MAX_BYTES = 2 * 1024 * 1024          # 2MB 流式累计上限（防 chunked 无限推送）
+_MAX_BYTES = 2 * 1024 * 1024          
 _MAX_REDIRECTS = 5
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 _CONN_LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
@@ -31,7 +31,7 @@ _MOBILE_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 )
 
-# SSRF 拦截地址段（docs/search_engine.md 四）
+
 _PRIVATE_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -48,7 +48,7 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("2001:db8::/32"),
 ]
 
-# 非文本 Content-Type 拦截：响应头不以 text/ 开头且不含 html/xml/json → 拦截
+
 _TEXT_HINTS = ("text/", "html", "xml", "json")
 
 
@@ -81,7 +81,7 @@ def _resolve_and_validate(hostname: str) -> str:
         ips.append(ip)
     if not ips:
         raise FetchError("[错误] 无法解析域名") from None
-    # A-030: IPv4 优先（无 IPv6 路由环境的连接健壮性），IPv4 缺失才回退 IPv6
+    
     v4_ips = [ip for ip in ips if ":" not in ip]
     return (v4_ips or ips)[0]
 
@@ -106,7 +106,7 @@ class WebFetcher:
     async def __aexit__(self, *exc):
         await self.close()
 
-    # ── 协议白名单 + SSRF + 钉扎 ──────────────────────────
+    
 
     def _pin(self, url: str) -> tuple[str, str, str]:
         """协议白名单 + SSRF 校验 + IP 钉扎。返回 (pinned_url, host_header, sni_hostname)。"""
@@ -114,14 +114,14 @@ class WebFetcher:
         scheme = parsed.scheme.lower()
         if scheme not in ("http", "https"):
             raise FetchError("[错误] 仅支持 http/https 协议")
-        # urlparse 已剥离 userinfo：https://google.com@127.0.0.1/ → hostname = 127.0.0.1
+        
         hostname = parsed.hostname
         if not hostname:
             raise FetchError("[错误] 无效的 URL")
 
         ip = _resolve_and_validate(hostname)
 
-        # A-022: 非法端口（如 99999）parsed.port 抛 ValueError，统一转为用户友好 FetchError
+        
         try:
             port = parsed.port
         except ValueError:
@@ -134,14 +134,14 @@ class WebFetcher:
         host_header = hostname if port is None else f"{hostname}:{port}"
         return pinned_url, host_header, hostname
 
-    # ── 抓取 ─────────────────────────────────────────────
+    
 
     async def fetch_raw(self, url: str) -> str:
         """抓取并解码为文本（含 SSRF/重定向/2MB 截断/编码启发式）。返回原始 HTML 文本。"""
         current = url
         for _hop in range(_MAX_REDIRECTS + 1):
-            # A-022: DNS 解析（socket.getaddrinfo）是同步阻塞调用 —— 经线程池执行，
-            # 不阻塞事件循环（此前每次抓取都会卡住 server 事件循环最多数秒）
+            
+            
             pinned_url, host_header, sni_host = await asyncio.to_thread(self._pin, current)
 
             headers = {
@@ -151,13 +151,13 @@ class WebFetcher:
                 "Referer": f"{urlparse(pinned_url).scheme}://{host_header}",
                 "Host": host_header,
             }
-            # HTTPS 用 SNI 覆盖（URL 已是 IP，证书校验需按原域名）
+            
             extensions = {"sni_hostname": sni_host} if pinned_url.startswith("https://") else None
 
             try:
                 resp = await self._client.get(pinned_url, headers=headers, extensions=extensions)
             except httpx.HTTPError as e:
-                # A-030: httpx 异常 str() 可能为空（SSL/连接失败），兜底显示异常类名
+                
                 detail = str(e) or type(e).__name__
                 raise FetchError(f"[错误] 请求失败: {detail}") from None
 
@@ -167,7 +167,7 @@ class WebFetcher:
                 await resp.aclose()
                 if not location:
                     raise FetchError("[错误] 重定向缺少 Location")
-                current = urljoin(current, location)  # 相对路径规范化；下轮重新校验+钉扎
+                current = urljoin(current, location)  
                 continue
             if status >= 400:
                 await resp.aclose()
@@ -188,7 +188,7 @@ class WebFetcher:
         async for chunk in resp.aiter_bytes():
             data += chunk
             if len(data) >= _MAX_BYTES:
-                await resp.aclose()  # 显式释放连接（async for 中途 break 不保证关闭）
+                await resp.aclose()  
                 break
         return self._decode(data, resp.headers)
 
@@ -210,7 +210,7 @@ class WebFetcher:
         except UnicodeDecodeError:
             return data.decode("gb18030", errors="replace")
 
-    # ── 提取（web_fetch 工具入口）─────────────────────────
+    
 
     async def fetch(self, url: str, max_chars: int = 4000) -> str:
         """抓取并提取为结构化文本（web_fetch 工具入口）。FetchError → 返回文案。"""
@@ -222,7 +222,7 @@ class WebFetcher:
         return extract_content(html, url=url, max_chars=max_chars)
 
 
-# 模块级单例（连接池复用）
+
 _fetcher: WebFetcher | None = None
 
 

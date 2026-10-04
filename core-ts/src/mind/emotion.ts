@@ -1,12 +1,12 @@
-/**
- * core-ts/src/mind/emotion.ts — Agent 情绪状态（L3 动态心性 · 情感维度）。
- * 语义移植自 core/emotion.py（逐项对齐）：
- * - PAD 三维情绪模型（valence/arousal/dominance）
- * - 8 种情绪驱动映射 + 指数半衰期回落（Affective Chronometry）
- * - 情绪状态机：硬触发（praise > violation > 连续失败≥3 > novelty）> PAD 最近邻 + 滞回保护
- * - 事件时间线（cap 8）+ 输出风格/自我认知叙事注入
- * 序列化格式与 agents.json 的 agent.emotion 字段原样兼容。
- */
+
+
+
+
+
+
+
+
+
 
 export interface MoodDef {
   valence: number;
@@ -147,7 +147,7 @@ export class EmotionalState {
     }
   }
 
-  /** 指数半衰期回落回基线。hours 缺省按距 last_updated 自动计算。 */
+  
   decay(hours?: number): void {
     let h = hours;
     if (h === undefined) {
@@ -203,14 +203,14 @@ export class EmotionalState {
     this.arousal = clamp(this.arousal + d.arousal, 0.0, 1.0);
     this.dominance = clamp(this.dominance + d.dominance, 0.0, 1.0);
 
-    // 连续失败计数：仅 task 失败计入（tool/interrupt 不计；None=默认 task 语义）
+    
     if (success) {
       this.consecutiveFailures = 0;
     } else if (failureType === null || failureType === "task") {
       this.consecutiveFailures += 1;
     }
 
-    // 关系深度（失败仅非 interrupt 回落）
+    
     if (success) {
       this.relationalDepth = Math.min(1.0, this.relationalDepth + 0.01);
     } else if (failureType !== "interrupt") {
@@ -234,7 +234,7 @@ export class EmotionalState {
     this.lastUpdated = nowIso();
   }
 
-  /** 最近 n 条事件的叙事句子（禁止调大塞进 system prompt） */
+  
   recentEvents(n = 2): string {
     const evs = this.events.slice(-n);
     if (evs.length === 0) {
@@ -247,7 +247,7 @@ export class EmotionalState {
     return { ...(MOOD_BEHAVIOR_HINT[this.mood] ?? { caution_level: 0, promote_groups: [] }) };
   }
 
-  /** 手动调节情绪基线（GUI 心智中枢）：直接设 PAD 并重算 mood，不影响事件时间线/自动演化 */
+  
   setBaseline(valence: number, arousal: number, dominance: number): void {
     this.valence = clamp(valence, -1.0, 1.0);
     this.arousal = clamp(arousal, 0.0, 1.0);
@@ -256,7 +256,7 @@ export class EmotionalState {
     this.lastUpdated = nowIso();
   }
 
-  /** mood 判定：praise > violation > 连续失败≥3 > novelty > 最近邻+滞回 */
+  
   private resolveMood(opts: { praise: boolean; violation: boolean; novelty: boolean }): void {
     if (opts.praise) {
       this.mood = "happy";
@@ -338,7 +338,7 @@ export class EmotionalState {
     return "success";
   }
 
-  /** 情绪 + 工具倾向 + 关系感 → 输出风格提示 */
+  
   toPrompt(): string {
     const lines = [MOOD_STYLE[this.mood] ?? MOOD_STYLE.neutral];
     const toolTend = MOOD_TOOL_TENDENCY[this.mood];
@@ -353,7 +353,7 @@ export class EmotionalState {
     return lines.join("\n");
   }
 
-  /** 自我认知叙事（Soul-Plan）：PAD 数值 + 当前情绪 + 最近感受 + 行为倾向承诺台词 */
+  
   toIdentityPrompt(): string {
     const moodCn = MOOD_CN[this.mood] ?? this.mood;
     const lines = [

@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/social.spec.ts — 社交接入测试（语义对齐 Python tests/test_social.py）。
- * WeCom 企业微信：签名验证（URL echostr / msg） + 速率限制 + A-021 恒定时间 + P1-19 防重放。
- * 个人微信：TS 不实现（wechaty 弃用），501 回退文档。
- */
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { WeComAdapter } from "../../core-ts/src/social/wecom.js";

@@ -1,14 +1,14 @@
-/**
- * A-1136-C ㈬ — `docs_create` 工具：**Agent 自己从零生成 Office 文档**的端到端判据。
- *
- * ## 为什么单开一份 spec
- * 2026-09-30 审计发现：`core-ts/src/office/docWrite.ts::writeDocument()` **早就实现了**
- * docx/xlsx/pptx/pdf 的真容器生成（`office-doc-write.spec.ts` 已有 round-trip 测试），
- * IPC `slime:docs:create` 也接好了 —— 但**没有任何 Agent 工具包装它**
- * （`docs_create` 这条通道只有声明、**零消费者**）。
- * ⇒ `office-doc-write.spec.ts` 证明的是"**函数**能用"，**证明不了"Agent 能用"**（工具面里没有它）。
- * 本 spec 走**工具注册表 + executeFn** 那条路，补上这段。
- */
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -57,7 +57,7 @@ describe("A-1136-C ㈬ docs_create：Agent 从零生成 Office 文档", () => {
 
       const buf = await readFile(join(b.ws, file));
       expect(buf.length, "必须真有非空产物（成功判据 = 磁盘上有东西，不是回执里说成功）").toBeGreaterThan(200);
-      /* docx/xlsx/pptx 都是 OOXML ⇒ **真 ZIP 容器**（`PK\x03\x04`）；光写文本不会有这个 magic。 */
+      
       expect(buf.subarray(0, 2).toString("latin1"), "OOXML 必须是 ZIP 容器").toBe("PK");
 
       const k = docKindFromExt("." + kind)!;
@@ -76,7 +76,7 @@ describe("A-1136-C ㈬ docs_create：Agent 从零生成 Office 文档", () => {
       const second = await b.tools.get("docs_create")!.executeFn({ path: p, body: "第二版", _workspace: b.ws }) as string;
       expect(second, "第二次必须被拒绝").toContain("[错误]");
       expect(second).toContain("已存在");
-      /* ⚠️ 不只是"回执说拒绝"——**磁盘上必须一字节没变**（回执与事实不符是最坏的）。 */
+      
       const after = await readFile(p);
       expect(Buffer.compare(before, after), "拒绝后原文件必须原封不动").toBe(0);
     } finally { await b.cleanup(); }

@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/embed_cache.spec.ts — EmbedCache（LRU + 磁盘持久化）测试。
- * 隔离：filePath 指向临时目录，不触碰生产 data/embed_cache.json。
- */
+
+
+
+
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,7 +28,7 @@ describe("EmbedCache 基础", () => {
     c.set("hello", vec);
     const hit = c.get("hello");
     expect(hit).toEqual(vec);
-    expect(hit).not.toBe(vec); // 副本，防原地改坏缓存
+    expect(hit).not.toBe(vec); 
   });
 
   it("同文本跨实例（磁盘持久化）命中：flush 后重建可恢复", () => {
@@ -46,8 +46,8 @@ describe("EmbedCache 基础", () => {
     const c = new EmbedCache({ filePath: join(makeTmp(), "c.json"), maxEntries: 2 });
     c.set("a", [1]);
     c.set("b", [2]);
-    c.get("a"); // 刷新 a → LRU 序 b, a
-    c.set("c", [3]); // 淘汰最久未用 b
+    c.get("a"); 
+    c.set("c", [3]); 
     expect(c.get("b")).toBeUndefined();
     expect(c.get("a")).toEqual([1]);
     expect(c.get("c")).toEqual([3]);
@@ -58,7 +58,7 @@ describe("EmbedCache 基础", () => {
     const c = new EmbedCache({ filePath: join(makeTmp(), "c.json") });
     c.set("dimvec", [1, 2, 3]);
     expect(c.get("dimvec", 3)).toEqual([1, 2, 3]);
-    expect(c.get("dimvec", 1024)).toBeUndefined(); // 维度变更 → miss
+    expect(c.get("dimvec", 1024)).toBeUndefined(); 
   });
 });
 
@@ -81,7 +81,7 @@ describe("MemoryStore.embedOrHash 集成", () => {
     const r2 = await m.embedOrHash("重复查询文本");
     expect(r1).toEqual(vec);
     expect(r2).toEqual(vec);
-    expect(calls).toBe(1); // 第二次命中缓存
+    expect(calls).toBe(1); 
   });
 
   it("embedder 抛错 → 回退 hashEmbed，且不污染缓存", async () => {
@@ -96,6 +96,6 @@ describe("MemoryStore.embedOrHash 集成", () => {
       },
     });
     const r = await m.embedOrHash("会失败");
-    expect(r.length).toBeGreaterThan(0); // 哈希降级
+    expect(r.length).toBeGreaterThan(0); 
   });
 });

@@ -1,15 +1,15 @@
-/**
- * tests/core-ts/a1069-agentprocs.spec.ts — #226「Agent 启动的后台进程」面板守卫
- *
- * 用户原话：「请把 Agent 停下时的后台进程做一个……在输入栏上方的按钮，而且点击后可以展开」。
- * 范围由用户明确划定：**仅 Agent 启动的进程**（应用自身服务不算 —— 关掉它等于把应用打瘸）。
- *
- * 判据全在纯模块 `core-ts/src/services/agentProcs.ts`（不 import electron）——
- * 所以这里能**行为断言**，而不是只能锁源码形态。这是本仓推崇的形态：
- * 判据住纯模块、组件只调用。
- *
- * ⚠️ 中文串里嵌引用一律 `「」`：ASCII 双引号会当场把 TS 字符串截断（a1054/a1055/a1056/a1067/a1068 都踩过）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ import {
   type AgentProcSources,
 } from "../../core-ts/src/services/agentProcs.js";
 
-/* H 段（接线守卫）读源码用：注释一律剥掉再断言，避免注释里的同一个词把 toContain 喂饱（§8-1）。 */
+
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const strip = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
@@ -36,18 +36,18 @@ describe("A-1069-A 范围：只有「Agent 启动的」才进面板（应用服�
   });
 
   it("⚠️ **子代理不在这个面板里**（用户 2026-09-26：「只监视 Agent 运行的脚本、端口」）", () => {
-    /* 用户原话：「为什么这个后台任务监视的是子代理？不符合要求，只监视 Agent 运行的
-       后台脚本、端口」。
-       本条是**范围判据**的守卫：子代理曾经是这里的第三类（`"subagent"`），
-       它有自己的坞（SubAgentExpandButton + resident.state().subagents）与详情弹窗。
-       两边都列 = 同一件事两个产地，用户还会以为"后台任务"这个按钮在管人。
-       ⇒ 三重锁：类型联合里没有、KINDS 里没有、停止动作表里也没有。 */
+    
+
+
+
+
+
     const kinds = AGENT_PROC_KINDS as readonly string[];
     expect(kinds, "子代理又回到了后台资源面板（用户明确要求移出）").not.toContain("subagent");
     expect(Object.keys(AGENT_PROC_KIND_LABELS), "标签表里还有子代理").not.toContain("subagent");
     expect(Object.keys(AGENT_PROC_STOP_ACTIONS), "停止动作表里还有子代理").not.toContain("subagent");
     expect(isAgentStartedKind("subagent"), "isAgentStartedKind 仍把子代理当成后台资源").toBe(false);
-    // 真源也没了：即使有人硬塞 `subagents`，它也不该产出任何条目
+    
     const v = buildAgentProcView(
       { subagents: [{ id: "a1", name: "研究员", status: "running" }] } as unknown as AgentProcSources,
       1_000,
@@ -171,17 +171,17 @@ describe("A-1069-C2 范围判据（`origin`）：哪些服务**不该**出现在
     }
   });
 
-  /* ⚠️ 这条是**回归守卫**：`restored` 的过滤从 A-977/#230 起就写在纯视图里，
-     但在此之前**没有任何守卫**（spec 里搜不到 `origin`/`restored`）——
-     也就是说，把 `if (s.origin === "restored") continue;` 整行删掉，
-     tsc / 单测 / 构建全绿，而用户又会在刚打开应用时看到一个自己从没起过的端口。 */
+  
+
+
+
   it("`restored` → **不进**面板（应用启动时按上次清单重建的，不是 Agent 运行途中打开的）", () => {
     const v = buildAgentProcView({ httpServers: [svc("restored")] }, 1);
     expect(v.count, "启动时重建的服务又出现在面板里了（用户原话：「我要的是 Agent 运行途中打开的」）").toBe(0);
   });
 
-  /* ⚠️ A-1139 回归守卫：用户实测「搜索引擎的自研插件一直被视作后台进程」——
-     搜索页由 slime 自身功能托管（`origin: "builtin"`），不是 Agent 起的后台资源。 */
+  
+
   it("`builtin` → **不进**面板（slime 自身功能托管的页面，如右栏搜索页）", () => {
     const v = buildAgentProcView({ httpServers: [svc("builtin")] }, 1);
     expect(v.count, "slime 自己的页面又被当成 Agent 后台资源了").toBe(0);
@@ -195,9 +195,9 @@ describe("A-1069-C2 范围判据（`origin`）：哪些服务**不该**出现在
     expect(v.entries[0].id).toBe("mine");
   });
 
-  /* ⚠️ 这条锁的是**将来**：过滤写成 `origin !== "agent"`（黑名单）也能让上面几条通过，
-     但语义是"未知类别默认**进**面板"——方向错了（新增第四类时会默认泄漏到用户眼前）。
-     ⇒ 这里要求未知取值也**不进**面板（白名单方向）。 */
+  
+
+
   it("未知 origin 取值 → 不进面板（范围判据是白名单：只有明确的 `agent` 才进）", () => {
     const v = buildAgentProcView({
       httpServers: [{ ...svc(), origin: "something-new" as unknown as "agent" }],
@@ -207,12 +207,12 @@ describe("A-1069-C2 范围判据（`origin`）：哪些服务**不该**出现在
 });
 
 describe("A-1069-D 范围收窄（用户 2026-09-26）：子代理**不再是**后台资源条目", () => {
-  /* 这里原本是「子代理只收 running/pending」那一组（含 `isSubagentLive` / `subagentStatusLabel`
-     的行为断言）。用户要求把子代理整体移出本面板后，那两个函数与那组断言一起**迁移**到了
-     子代理自己的地盘 —— 面板的可见范围由 A 段那条「子代理不在这个面板里」锁住；
-     子代理的状态词/是否还在跑由 `SubAgentExpandButton` 自己的 STATUS_META 负责
-     （它有独立的守卫，见 tests/gui/ 下的子代理相关 spec）。
-     ⚠️ 迁移不是删除：原来"终态不该显示成运行中"的那份**关心**仍在，只是换了产地。 */
+  
+
+
+
+
+
   it("无论子代理什么状态，都不产出后台资源条目（running 也不行）", () => {
     for (const status of ["running", "pending", "done", "fail", "timeout", "cancelled"]) {
       const v = buildAgentProcView(
@@ -274,9 +274,9 @@ describe("A-1069-F 停止请求：合法才给动作，非法必须拒绝（不�
   });
 
   it("⚠️ 子代理的停止请求**必须被拒绝**（它已不是本面板的资源 —— 放行就等于两处都能停）", () => {
-    /* 用户要求把子代理移出本面板。若停止判据仍认 `subagent`，主进程那条 `cancel-subagent`
-       分支就成了**第二个产地**：渲染层只要还留着旧条目（或手改 IPC 参数）就能从"后台任务"
-       这个按钮里把子代理取消掉，与坞里的操作互相踩。⇒ 未识别的类别一律拒绝。 */
+    
+
+
     expect(planAgentProcStop({ kind: "subagent", id: "run-9" }).ok).toBe(false);
     expect(planAgentProcStop({ kind: "subagent" }).ok).toBe(false);
   });
@@ -289,8 +289,8 @@ describe("A-1069-F 停止请求：合法才给动作，非法必须拒绝（不�
   });
 
   it("未知类别**即使带了 id** 也拒绝（带 id 会把 `AGENT_PROC_STOP_ACTIONS[kind]` 取成 undefined）", () => {
-    /* ⚠️ 这条是补的：只测"不带 id"会被下面的 id 校验兜住 → 类别判据被删掉也照样绿
-       （变异 A11 实测"仍绿"）。必须让"带 id 的自造类别"也成为断言对象，类别判据才真的被锁住。 */
+    
+
     for (const k of ["llama-server", "python-backend", "mcp", "screenhost", "screen-host "]) {
       expect(planAgentProcStop({ kind: k, id: "x" }).ok, `${k} 带 id 也不该通过`).toBe(false);
     }
@@ -326,36 +326,36 @@ describe("A-1069-G 视图与真源不共享可变结构（面板渲染不会反�
     const v1 = buildAgentProcView(src, 1);
     v1.entries.pop();
     const v2 = buildAgentProcView(src, 1);
-    /* ⚠️ `count` 是派生那一刻的**快照**（数组被 pop 也不会变），所以只断言 count 会漏掉
-       "两次派生共享同一个数组实例"这种实现（变异 A15 实测"仍绿"）。必须直接断言数组。 */
+    
+
     expect(v2.count).toBe(1);
     expect(v2.entries, "两次派生共享了同一个数组实例 → 一处 pop 会污染另一处").toHaveLength(1);
     expect(v1.entries, "返回的是同一个数组引用").not.toBe(v2.entries);
   });
 });
 
-/* ══ H 段：接线守卫 ═══════════════════════════════════════════════════════════
- *
- * 上面 A~G 段用**行为断言**锁住了判据（纯模块，不 import electron，能直接跑）。
- * 但用户那句需求里有一半是**接线事实**，行为断言碰不到：
- *   ·「在**输入栏上方**的按钮」→ 面板与 textarea 的 DOM 顺序；
- *   ·「点击后可以展开」→ 有展开态与条目渲染；
- *   ·「Agent 停下时」→ 回合结束广播；
- *   · 面板不许自己判类别（否则"显示的"与"主进程认为的"会漂移）。
- * 这类事实**过 tsc、过构建、过 A~G 全部测试**，只在用户眼里翻车（本仓 §21 反复强调），
- * 所以必须单独锁，并且每一条都要能被变异弄红。
- *
- * ⚠️ 断言一律先 `strip()` 剥注释 —— 否则注释里出现同一个词就会把 toContain 喂饱
- *   （本仓 §8-1 的"同名多产地"陷阱）。取函数体一律用**下一个兄弟声明**当右界，
- *   不许用固定字数窗口（a1061/a1068 都被这个坑咬过）。 */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / 主进程现算+先校验", () => {
   const PANEL = read("gui/src/renderer/pages/ChatPanel.tsx");
   const PANEL_C = strip(PANEL);
   const MAIN_C = strip(read("gui/src/main/index.ts"));
   const PRELOAD_C = strip(read("gui/src/preload/index.ts"));
 
-  /** 取一段源码：`sig` 起点 → `nextSig` 起点（下一个兄弟声明）。
-   *  ⚠️ 不用固定字数窗口：注释剥掉后长度会变，字数窗口必然假红或假绿。 */
+  
+
   function between(src: string, sig: string, nextSig: string): string {
     const at = src.indexOf(sig);
     expect(at, `锚点漂移：找不到 ${sig}`).toBeGreaterThan(-1);
@@ -375,12 +375,12 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
   it("没有条目时**整个按钮不渲染**（`any` 为假 ⇒ 不留空壳、不写常驻说明）", () => {
     const panel = between(PANEL_C, "{agentProcs?.any && (", "<textarea ref={inputRef}");
     expect(panel, "渲染条件没绑 `any` → 没有资源时输入框上方会多一条空壳").toContain("agentProcs?.any");
-    /* A-1074 迁移：展开态从 `useState(false)` 的局部布尔改为**坞的单值判据**
-       （`dock` + `floatDock.toggleDock`，见 tests/gui/float-dock.spec.ts）。
-       本条守卫的原意不变 —— "有展开态、点击能展开"；判据换到新家的对应形态。 */
+    
+
+
     expect(panel, "没有展开态 → 点击展不开").toContain('toggleDockSlot("procs")');
-    /* ⚠️ 必须带 `(e, i)`：折叠摘要行里也有 `agentProcs.entries.map((e) => e.label)` ——
-       只断言 `agentProcs.entries.map(` 会被那处喂饱（§8-1 同名字串多产地），实测变异 B4 仍绿。 */
+    
+
     expect(panel, "没有条目渲染 → 展不开也等于没有").toContain("agentProcs.entries.map((e, i) => (");
   });
 
@@ -389,8 +389,8 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
       expect(PANEL_C, `组件里出现了类别字面量 ${k} → 判据搬到了渲染层，两边会漂移`).not.toContain(`"${k}"`);
     }
     const panel = between(PANEL_C, "{agentProcs?.any && (", "<textarea ref={inputRef}");
-    /* ⚠️ 断言必须带闭合的 `</span>`：`${e.kindLabel}` 出现在停止按钮的 title 里，
-       只断言 `{e.kindLabel}` 会被那处喂饱（§8-1），实测变异 B6 仍绿。 */
+    
+
     expect(panel, "类别名没取自主进程（`kindLabel`）").toContain(">{e.kindLabel}</span>");
     expect(panel, "时长没取自主进程（`elapsed`）").toContain("{e.elapsed}");
     expect(panel, "状态词没取自主进程（`status`）").toContain("{e.status}");
@@ -412,8 +412,8 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
   });
 
   it("主进程 list 是**现算**（每次从活真源派生，不维护注册表）", () => {
-    /* ⚠️ 必须**限定在 list 处理器体内**断言：同一句 `buildAgentProcView(await collectAgentProcSources(), …)`
-       在 stop 处理器（取剩余条数）里也有 —— 全局 toContain 会被那一处喂饱（§8-1），实测变异 B14 仍绿。 */
+    
+
     const listBody = between(
       MAIN_C,
       'handleTrusted<void>("slime:agentprocs:list"',
@@ -430,10 +430,10 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
       'handleTrusted<void>("slime:screen:info"',
     );
     expect(stopBody, "没走 planAgentProcStop 校验 → 手改的 IPC 参数会走到不存在的分支").toContain("planAgentProcStop(");
-    // 邻位断言：校验结果必须紧跟一个"不合法就返回失败"的分支（否则校验了也不用）
+    
     expect(stopBody, "校验了却不据此拒绝 → 等于没校验")
       .toMatch(/const plan = planAgentProcStop\([\s\S]{0,200}?if \(!plan\.ok\) \{ return \{ ok: false/);
-    // 按动作分派（不是自己 switch kind）—— 收窄成两类后主进程改成了显式 switch
+    
     expect(stopBody, "没有按 plan.action 分派").toContain('case "dispose-screen-host":');
     expect(stopBody, "http-server 那一路没有按 plan.action 分派").toContain('case "stop-http-server":');
   });
@@ -442,7 +442,7 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
     const src = between(MAIN_C, "async function collectAgentProcSources()", "function broadcastAgentProcs()");
     expect(src, "没取图形控制常驻宿主").toContain("desktopBackend.residentHost?.()");
     expect(src, "没取本地服务").toContain("httpServer.list()");
-    /* 用户 2026-09-26：「只监视 Agent 运行的脚本、端口」 —— 子代理不属于这两者。 */
+    
     expect(src, "取数里又出现了子代理（用户明确要求移出本面板）").not.toContain("subagents");
     for (const forbidden of ["llama", "python-backend", "mcp", "silam"]) {
       expect(src, `取数里出现了应用自身服务（${forbidden}）→ 用户会以为关掉只是停个任务`).not.toContain(forbidden);
@@ -450,7 +450,7 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
   });
 
   it("回合结束（含被用户停下）就广播 —— 正是用户说的「Agent 停下时」", () => {
-    // 邻位：清待办之后紧跟广播（同一段 finally 收口）
+    
     expect(MAIN_C, "回合结束没广播 → 用户停下后看到的是上一帧的旧列表")
       .toMatch(/clearTodosOnTurnEnd\(input\.sessionId\);[\s\S]{0,600}?broadcastAgentProcs\(\);/);
   });

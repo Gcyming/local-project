@@ -1,25 +1,25 @@
-/**
- * tests/core-ts/a1106-market-cn.spec.ts — A-1106 续：MCP 广场的**中文可用性**。
- *
- * ## 用户报障
- *
- *   「官方 MCP 全是英文，太不能用了」
- *
- * ## 两层原因（第二层比第一层更致命）
- *
- *   ① **语言**：registry 的 `description` 是英文原文，卡片上连"这是什么类别"都没有中文线索。
- *   ② **检索**：检索词此前是**把用户的中文原样 URL 编码**发给上游 ⇒ 上游搜不到任何东西
- *      ⇒ 中文用户只有"看字母序前 60 条长尾"（`ac.` / `ad.` / `agency.` 开头）这一条路。
- *      **只翻译语言不修检索，等于让人看一堆翻成中文的垃圾。**
- *
- * ## 判据一句话
- *
- *   · 中文输入必须被展开成**上游认得的英文检索词**，且**永不静默**（未收录要说出来）；
- *   · 卡片必须显示**中文类别标签**（只加标签，不翻译整句 —— 避免半中半英的怪句子）；
- *   · registry 结果**不许**再拿用户的中文输入做本地二次过滤（必空 —— 这就是"修一个坏一个"）。
- *
- * ⚠️ 中文句子里不许夹 ASCII 双引号（一律「」）——否则会把整份 spec 打成 0 用例。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -34,13 +34,13 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readSrc = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再断言（注释里会**故意**写出旧写法，不剥就是假红或假绿） */
+
 const stripComments = (s: string): string => s
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^[ \t]*\/\/.*$/gm, "");
 const countOf = (hay: string, needle: string): number => hay.split(needle).length - 1;
 
-/* ═════════════════ H 组：中文 → 英文检索词展开 ═════════════════ */
+
 
 describe("A-1106 H 组 — 中文输入必须被展开成上游认得的英文检索词", () => {
   it("H1 纯中文「浏览器」⇒ 检索词含 browser（此前是把中文原样发给上游 ⇒ 搜不到）", () => {
@@ -120,7 +120,7 @@ describe("A-1106 H 组 — 中文输入必须被展开成上游认得的英文�
   });
 });
 
-/* ═════════════════ I 组：中文类别标签 ═════════════════ */
+
 
 describe("A-1106 I 组 — 卡片必须给出中文类别标签（registry 描述是英文原文）", () => {
   it("I1 浏览器自动化类（playwright / puppeteer 的真实描述）", () => {
@@ -157,12 +157,12 @@ describe("A-1106 I 组 — 卡片必须给出中文类别标签（registry 描�
   });
 
   it("I7 标签不重复（同一类别被多条规则命中时也只出一个）", () => {
-    // filesystem / directory / folder 三条都映射「文件读写」⇒ 只许出一个
+    
     expect(localizeServerTags("x", "filesystem directory folder access")).toEqual(["文件读写"]);
   });
 });
 
-/* ═════════════════ J 组：接线（唯一出处 + 不许本地二次过滤）═════════════════ */
+
 
 const CFG = stripComments(readSrc("gui/src/main/config_files.ts"));
 const MCP = stripComments(readSrc("gui/src/renderer/pages/McpPanel.tsx"));

@@ -1,33 +1,33 @@
-/**
- * tests/core-ts/a1132-final-body.spec.ts — 「收尾正文 = 收尾那一轮」的守卫（A-1132）。
- *
- * 用户实测（2026-09-27）：「正文里面似乎混杂了思考历程里面的内容，**正文非常长**，你看看
- * 是不是之前叫你做的最后拼接思考历程中的正文到正文输出这一个功能异常」。
- *
- * ## 实测数据（`config/history.jsonl`，一手，不是推断）
- * | 事实 | 数值 |
- * |---|---|
- * | `ai`（正文） | 4546 字 / 46 段 |
- * | 同一条的 `reasoning` | 273085 字 |
- * | `timeline` | 120 步：think 40 / tool 43 / **body 25** / plan 4 / todo 8 |
- * | 正文段落能在 **body** 步里找到 | **39/46** |
- * | 正文段落能在 **think** 步里找到 | **0/46**（归一化后仍 0） |
- * | body 步与 think 步的交集 | **0/25** |
- * | 该会话是否压缩过 | **没有**（meta 无 summaryCount / contextSummary） |
- *
- * ⇒ 结论：**不是"思考被抄进正文"**（与 think 零交集），**也不是那个「整理正文」功能把 think 混进来**
- *   （交集 0/25）。真正的缺陷是 **两条工具循环路径的收尾口径不一致**：
- *   `run()`（非流式）返回**收尾那一轮**的正文，而 `runStream()`（GUI 走的流式路径）返回
- *   **全过程叙述的累加**（`allText`）⇒ 正文变成 25 轮过程日志（4546 字），
- *   而收尾那一轮只有 1471 字的正式汇报。
- *
- * 这个文件锁：① 唯一判据 `pickFinalBody`；② 两条路径都用它（口径一致）；
- * ③ 中断 / 预算那两条"保留已产出"的路径**不许**被顺手改掉。
- *
- * 变异：`gui/scripts/mut-a1132-final-body.mjs`
- *
- * ⚠️ 中文串里嵌引用一律 `「」`（ASCII 双引号会当场截断 TS 字符串）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -39,12 +39,12 @@ import { ModelRouter } from "../../core-ts/src/router.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const LOOP = readFileSync(join(ROOT, "core-ts/src/tool_loop.ts"), "utf8");
-/** 剥注释：注释里引用了"曾经是什么"（包括 `text: allText` 这种字样），不剥会把计数喂饱（§8-1）。 */
+
 const LOOP_C = LOOP.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 describe("A-1132-A 唯一判据 pickFinalBody：以**收尾那一轮**为准", () => {
   it("收尾轮有正文 → 用它（**不是**全过程累加）", () => {
-    // 实测形态：收尾那一轮 = 1471 字正式汇报；allText = 4546 字过程日志
+    
     const last = "## 本轮已完成\n① 闪窗修复（已落地）";
     const all = "两个需求都收到：…先看代码定闪窗根因。\n\n找到闪窗根因了：…\n\n" + last;
     expect(pickFinalBody(last, all), "又交付了全过程日志（用户报的「正文非常长」）").toBe(last);
@@ -81,9 +81,9 @@ describe("A-1132-B 接线：两条工具循环路径**共用**同一判据", () 
   });
 
   it("两条循环各自维护「收尾阶段」的累加（以工具调用为界）", () => {
-    /* 判据（`pickFinalBody`）只是"交付哪一段"的收尾一步；真正决定"哪一段"的是
-       两个循环里那两行：**以工具调用收尾 ⇒ 丢弃**（过程叙述）、否则并入。少一处就等于
-       该路径没有"收尾阶段"的概念（又退回只看最后一轮）。 */
+    
+
+
     const acc = LOOP_C.split("if (nextCalls.length > 0) { tailText = \"\"; }").length - 1;
     expect(acc, `「以工具调用为界重置收尾阶段」有 ${acc} 处，应为 2（run 与 runStream）`).toBe(2);
     const join = LOOP_C.split("tailText = tailText ? `${tailText}").length - 1;
@@ -92,7 +92,7 @@ describe("A-1132-B 接线：两条工具循环路径**共用**同一判据", () 
 
   it("判据共用同一个实现（两处文本一致，不许各写一份等价表达式）", () => {
     const uses = LOOP_C.split("pickFinalBody(").length - 1;
-    // 1 处函数定义 + 4 处调用（run 的 text/raw、runStream 的 text/raw）
+    
     expect(uses, `pickFinalBody 出现 ${uses} 次，应为 5（定义 1 + run 2 + runStream 2）`).toBe(5);
   });
 
@@ -109,16 +109,16 @@ describe("A-1132-B 接线：两条工具循环路径**共用**同一判据", () 
   });
 });
 
-/* ════════════════════════════════════════════════════════════════════════
-   C 节：**行为级**（不是搜源码）。
-   为什么必须补这一节（本轮实测教训，铁律 3「锚对象错」的又一例）：
-     B 节全是**源码文本**断言。变异 7 把 `if (roundText) { …累加… }` 改成 `if (false)` ——
-     那一行文本**一字未动**，B 节的 `toContain` 照样绿，而 `allText` 从此永远为空
-     （用户按停止 / 预算熔断 ⇒ 已产出正文全丢）。文本断言对"改条件"是**瞎的**。
-   ⇒ 下面每条都**真跑一遍循环**，用返回值判。
-   ════════════════════════════════════════════════════════════════════════ */
 
-/** 流式假路由：按轮次吐 SSE（形态同 `tools.spec.ts`，只取本文件需要的字段）。 */
+
+
+
+
+
+
+
+
+
 function mkStreamRouter(rounds: Array<{
   content?: string;
   toolDeltas?: Array<{ index: number; id: string; name: string; args: string }>;
@@ -142,7 +142,7 @@ function mkStreamRouter(rounds: Array<{
   );
 }
 
-/** 非流式假路由（走 `run()`）。 */
+
 function mkRouter(sequence: Array<{ content?: string | null; toolCalls?: Array<{ id: string; name: string; arguments: string }> }>) {
   let idx = 0;
   const fetchImpl = (async () => {
@@ -177,8 +177,8 @@ const echoRegistry = () => {
 
 describe("A-1132-C 行为级：正文 = 收尾阶段，且保底路径不丢内容", () => {
   it("⚠️ **用户报的症状**：25 轮过程叙述不许堆进正文（正文只交付收尾阶段）", async () => {
-    /* 这一条就是用户那张截图的最小复现：第 1 轮"说完就去做"（正文 + 工具调用），
-       第 2 轮才是正式汇报。旧实现交付 `allText` ⇒ 两段一起进正文（读起来像过程日志）。 */
+    
+
     const router = mkStreamRouter([
       { content: "过程叙述：先看一下代码定位根因", toolDeltas: [{ index: 0, id: "t1", name: "echo", args: "{}" }] },
       { content: "正式汇报：已修好，改动见上" },
@@ -192,7 +192,7 @@ describe("A-1132-C 行为级：正文 = 收尾阶段，且保底路径不丢内�
   it("⚠️ 中断时 `allText` 必须留住已产出正文（跨轮累加一删 ⇒ 用户按停止就什么都不剩）", async () => {
     const controller = new AbortController();
     const reg = new ToolRegistry();
-    // 工具执行中用户点停止（＝ signal 在第 2 轮开始前变 aborted）
+    
     reg.register(new Tool({ name: "echo", description: "", parameters: {}, executeFn: async () => { controller.abort(); return "E"; } }));
     const router = mkStreamRouter([
       { content: "第一轮说了这些", toolDeltas: [{ index: 0, id: "t1", name: "echo", args: "{}" }] },

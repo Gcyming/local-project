@@ -1,7 +1,7 @@
-/**
- * plan.spec.ts — Plan 一等对象回归（E：Claude Code Task System / Devin 拆解 对标）。
- * 覆盖：创建/状态机推导/阶段推进（id 与 label 双引用）/进度计算/序列化往返/工具注册与执行。
- */
+
+
+
+
 import { describe, it, expect, beforeEach } from "vitest";
 import { createPlan, updateStage, advanceByLabel, derivePlanStatus, planProgress, planToJSON, parsePlan } from "../../core-ts/src/planning/plan.js";
 import { getRegistry, resetRegistry } from "../../core-ts/src/tools/registry.js";

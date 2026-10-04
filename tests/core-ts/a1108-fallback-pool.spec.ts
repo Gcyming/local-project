@@ -1,26 +1,26 @@
-/**
- * tests/core-ts/a1108-fallback-pool.spec.ts — A-1108：全局降级池改为**用户自定义**（默认空）。
- *
- * ## 用户原话（这就是要根除的行为）
- *
- * 「我比较关注的是那个全局降级池，我都没设置，是哪来的？如果是编码的时候默认写入的话，
- *   请改一下，改成用户自定义编辑降级池，默认无降级池，放在通用设置里面。」
- *
- * 事实核对：那份池**不是**任何配置文件写进去的，是 `engine.ts` 的 `resolveRouteInternal`
- * 里一段硬编码 —— `const others = Object.entries(this.providers).filter(...)`，把其它所有已配置
- * 供应商的启用模型自动塞进降级链（旧日志 `[engine] 注入全局降级池（N 个候选）`）。
- *
- * ## 本文件锁什么
- *
- * A 组：`sanitizeFallbackPool` —— 坏数据不许炸、不许放大（去重 / 上限 / 裁剪）
- * B 组：`resolveFallbackTargets` —— 每条丢弃规则一个用例（这些正是"配了却不生效"的形态）
- * C 组：读盘 —— 文件缺失 / JSON 损坏 ⇒ **空池**（绝不许"读不到就补一个默认池"）
- * D 组：静态守卫 —— engine 的默认值来源、旧自动池不许回来、IPC 频道两边同值、UI 真接线
- *
- * ⚠️ 中文句子里不许夹 ASCII 双引号（一律「」）。
- * ⚠️ 静态守卫一律**读源码文本**（本目录既有约定：tests/core-ts 不 import gui 源码，
- *    否则会把整个 gui 依赖图拖进根 tsconfig 的程序里）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, afterAll } from "vitest";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -39,7 +39,7 @@ import { LOCAL_MODELS_KEY } from "../../core-ts/src/local_models.js";
 const ROOT = resolve(__dirname, "../..");
 const read = (p: string): string => readFileSync(resolve(ROOT, p), "utf8");
 
-/** 测试里用的对话能力判据（与 engine 的 isChatCapableModel 同形态，避免把 engine 拖进来） */
+
 const chatCapable = (id: string): boolean => !/(image|video|embedding|tts|whisper)/i.test(id);
 
 const PROVIDERS: Record<string, Record<string, unknown>> = {
@@ -61,7 +61,7 @@ const PROVIDERS: Record<string, Record<string, unknown>> = {
 const resolveTargets = (entries: Array<{ provider: string; model: string }>, primaryKey = "primary") =>
   resolveFallbackTargets({ entries }, PROVIDERS, primaryKey, { isChatCapable: chatCapable });
 
-/* ───────────────────── A 组：白名单重建（坏数据不许炸、不许放大）───────────────────── */
+
 
 describe("A-1108 A 组 — sanitizeFallbackPool", () => {
   it("A1 空/坏形状一律回空池（不抛）", () => {
@@ -74,7 +74,7 @@ describe("A-1108 A 组 — sanitizeFallbackPool", () => {
     const out = sanitizeFallbackPool({
       entries: [
         { provider: "a", model: "m1" },
-        { provider: "  b  ", model: "  m2  " }, // 两端空白被裁掉
+        { provider: "  b  ", model: "  m2  " }, 
         { provider: "", model: "m3" },
         { provider: "c", model: "" },
         { provider: 7, model: "m4" },
@@ -84,7 +84,7 @@ describe("A-1108 A 组 — sanitizeFallbackPool", () => {
         { provider: "e", model: "m5" },
       ],
     });
-    // ⚠️ 一条坏条目绝不该让整份配置作废 —— 其余好条目必须还在（保序）
+    
     expect(out.entries).toEqual([
       { provider: "a", model: "m1" },
       { provider: "b", model: "m2" },
@@ -112,19 +112,19 @@ describe("A-1108 A 组 — sanitizeFallbackPool", () => {
     const many = Array.from({ length: FALLBACK_POOL_MAX + 5 }, (_, i) => ({ provider: "p", model: `m${i}` }));
     const out = sanitizeFallbackPool({ entries: many });
     expect(out.entries.length).toBe(FALLBACK_POOL_MAX);
-    expect(out.entries[0]).toEqual({ provider: "p", model: "m0" }); // 保前
+    expect(out.entries[0]).toEqual({ provider: "p", model: "m0" }); 
     expect(out.entries[out.entries.length - 1]).toEqual({ provider: "p", model: `m${FALLBACK_POOL_MAX - 1}` });
   });
 });
 
-/* ───────────────────── B 组：解析为可注入目标（每条丢弃规则 = 一种"配了却不生效"）───────────────────── */
+
 
 describe("A-1108 B 组 — resolveFallbackTargets", () => {
   it("B1 **空池 ⇒ 空目标**（这是 A-1108 的核心：默认不降级）", () => {
     expect(resolveTargets([])).toEqual([]);
     expect(resolveFallbackTargets(null, PROVIDERS, "primary", { isChatCapable: chatCapable })).toEqual([]);
     expect(resolveFallbackTargets(undefined, PROVIDERS, "primary", { isChatCapable: chatCapable })).toEqual([]);
-    // providers 表都没有 ⇒ 也必须是空（不许凭空造目标）
+    
     expect(resolveFallbackTargets({ entries: [{ provider: "backup", model: "stable-x" }] }, null, "primary", { isChatCapable: chatCapable })).toEqual([]);
   });
 
@@ -170,7 +170,7 @@ describe("A-1108 B 组 — resolveFallbackTargets", () => {
   });
 
   it("B8 非对话模型（image/video/embedding…）⇒ 丢弃（不能让降级链落到它身上）", () => {
-    // 这是 A-158 遗留的 isChatCapableModel 过滤规则 —— 迁移后由 engine 把判据传进来
+    
     expect(resolveTargets([{ provider: "backup", model: "pic-image-2" }])).toEqual([]);
   });
 
@@ -205,7 +205,7 @@ describe("A-1108 B 组 — resolveFallbackTargets", () => {
   });
 });
 
-/* ───────────────────── C 组：读盘（缺失/损坏 ⇒ 空池）───────────────────── */
+
 
 const tmpDirs: string[] = [];
 const mkTmp = (tag: string): string => {
@@ -240,7 +240,7 @@ describe("A-1108 C 组 — 读盘语义", () => {
     const after = writeFallbackPool({ entries: [{ provider: "backup", model: "tuned-z" }] }, d);
     expect(after.entries).toEqual([{ provider: "backup", model: "tuned-z" }]);
     expect(readFallbackPool(d).entries).toEqual([{ provider: "backup", model: "tuned-z" }]);
-    // 落盘内容与消毒结果一致，且是易读 JSON（用户可能手改）
+    
     expect(JSON.parse(readFileSync(fallbackPoolPath(d), "utf8"))).toEqual({ entries: [{ provider: "backup", model: "tuned-z" }] });
   });
 
@@ -251,7 +251,7 @@ describe("A-1108 C 组 — 读盘语义", () => {
   });
 });
 
-/* ───────────────────── D 组：静态守卫（"只在用户眼里翻车"的那些点）───────────────────── */
+
 
 describe("A-1108 D 组 — 静态守卫", () => {
   const engine = read("core-ts/src/services/engine.ts");
@@ -260,7 +260,7 @@ describe("A-1108 D 组 — 静态守卫", () => {
   const panel = read("gui/src/renderer/pages/GeneralPanel.tsx");
   const ipc = read("gui/src/shared/ipc.ts");
 
-  /** 从 ipc.ts 文本里取频道常量值（本目录约定：不 import gui 源码） */
+  
   const ipcChannel = (name: string): string => {
     const m = new RegExp(`\\b${name}:\\s*"([^"]+)"`).exec(ipc);
     return m ? m[1] : "";
@@ -272,15 +272,15 @@ describe("A-1108 D 组 — 静态守卫", () => {
   });
 
   it("D2 **旧自动池不许回来**（反面断言：没有「遍历其它所有供应商自动注入」那段）", () => {
-    // 旧实现的特征字面量：遍历 this.providers 取 others、以及那句误导的日志
+    
     expect(engine).not.toMatch(/const others = Object\.entries\(this\.providers\)/);
     expect(engine).not.toMatch(/注入全局降级池/);
-    // 也不许在 engine 里手写「跳过本地模型伪供应商」这第二份规则（判据唯一出处）
+    
     expect(engine).not.toMatch(/import \{[^}]*LOCAL_MODELS_KEY/);
   });
 
   it("D3 默认值链路：engine 不注入时必须**读盘**（而不是内联一个默认池）", () => {
-    // 反面：不许出现 `?? { entries: [` 这种「贴心的默认值」
+    
     expect(engine).not.toMatch(/\?\?\s*\{\s*entries\s*:\s*\[/);
     expect(engine).toMatch(/fallbackPoolOverride \?\? readFallbackPool/);
   });
@@ -296,7 +296,7 @@ describe("A-1108 D 组 — 静态守卫", () => {
     expect(main).toMatch(/handleTrusted<void>\("slime:fallback:get", async \(\) => \{\s*return \{ ok: true, entries: readFallbackPool\(\)\.entries, providers: listProviders\(\) \};/);
     expect(main).toMatch(/handleTrusted<\{ entries\?: unknown \}>\("slime:fallback:set"/);
     expect(main).toMatch(/const next = writeFallbackPool\(\{ entries: p\?\.entries \}\);/);
-    // 反面：主进程不许内联一份条目数组当默认值
+    
     expect(main).not.toMatch(/entries\s*:\s*\[\s*\{\s*provider\s*:/);
   });
 
@@ -305,14 +305,14 @@ describe("A-1108 D 组 — 静态守卫", () => {
     expect(panel).toContain("api.current?.fallback?.set");
     expect(panel).toMatch(/void saveFallbackEntries\(\[\.\.\.fbEntries, \{ provider, model \}\]/);
     expect(panel).toMatch(/fbEntries\.filter\(\(_, i\) => i !== index\)/);
-    // 标题必须真的在通用设置里（用户点名「放在通用设置里面」）
+    
     expect(panel).toContain("全局降级池");
   });
 
   it("D7 界面文案不许把「空池」说成故障，也不许承诺会自动兜底", () => {
     expect(panel).toContain("默认是空的 —— 不配就不跨供应商降级");
     expect(panel).toContain("当前：无降级池（推荐保持）");
-    // 反面：不许出现「自动降级/自动兜底」这种与实现相反的承诺
+    
     expect(panel).not.toMatch(/自动降级/);
     expect(panel).not.toMatch(/自动兜底/);
   });
@@ -322,7 +322,7 @@ describe("A-1108 D 组 — 静态守卫", () => {
     for (const [name, src] of [["main", main], ["preload", preload]] as const) {
       expect(src.includes(FALLBACK_POOL_FILE), `${name} 不应硬编码配置文件名`).toBe(false);
     }
-    // 界面上的提示文案必须与常量同源（改名时这条会红，逼着改文案）
+    
     expect(panel).toContain(`config/${FALLBACK_POOL_FILE}`);
   });
 

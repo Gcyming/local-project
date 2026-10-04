@@ -1,9 +1,9 @@
-/**
- * tests/core-ts/encryption.spec.ts — 加密配置语义测试。
- * 对照 core/encryption.py：PBKDF2 600k + AES-256-GCM，格式 base64(salt16+nonce12+ct+tag)。
- * 隔离：passFile/configPath 全部注入临时目录，绝不触碰真实 ~/.slime_pass / config/providers.enc.json。
- * 关键验证：与 Python cryptography AESGCM 双向兼容（Node 解密 Python 密文、Python 解密 Node 密文）。
- */
+
+
+
+
+
+
 import { describe, expect, it, afterAll } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,7 +22,7 @@ afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
 });
 
-const LOW_ITER = 1000; // 测试用低迭代（600k 每次 ~0.3s，且避免阻塞）
+const LOW_ITER = 1000; 
 const ROOT = process.cwd();
 
 function pyScript(code: string): string {
@@ -52,7 +52,7 @@ describe("encrypt/decrypt（对照 Python encrypt/decrypt）", () => {
     expect(combined.length).toBeGreaterThan(SALT_SIZE + NONCE_SIZE + 16);
     const first = readFileSync(cfgPath, "utf8").trim();
     const enc2 = encrypt({ k: "v" }, cfgPath, opts);
-    expect(enc2).not.toBe(first); // 随机 salt/nonce → 密文不同
+    expect(enc2).not.toBe(first); 
   });
 
   it("解密失败（passphrase 不匹配）→ null（A-113 不静默）", () => {

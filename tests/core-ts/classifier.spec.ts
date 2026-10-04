@@ -1,8 +1,8 @@
-/**
- * classifier.spec.ts — 调用前权限分类器（B：工具权限细化 + 分类器审查）。
- * 覆盖：只读命令自动放行 / 写命令需确认 / 高危命令阻断 / 路径越权与敏感文件阻断 /
- *       HTTPS 放行与内网明文阻断 / 非法网络需确认。
- */
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { assessAction, splitCommand, isProtectedSourcePath } from "../../core-ts/src/tools/classifier.js";
 
@@ -56,13 +56,13 @@ describe("network 分类", () => {
   it("HTTPS → auto", () => {
     expect(assessAction({ kind: "network", url: "https://api.openai.com/v1" }).level).toBe("auto");
   });
-  /* A-1091 **迁移**（原断言是「内网/明文 → block」，见下方说明）。
-     ⚠️ 这条守卫的**意图**是"网络目标要有一个真实存在的边界"，这一点不变；
-     变的是边界的**位置** —— 旧位置把「user 可见的内置浏览器」也一起拦了，
-     而本应用自己的 http_create_app 就是靠内置浏览器打开 http://127.0.0.1:<port> 预览的。
-     实测事故：Agent 想打开用户本地服务被拒，如实回报「内置浏览器的硬规则不允许访问本地回环地址」。
-     ⇒ 内网/明文降到 confirm（说清风险、交审批/联网开关决定）；
-       **云元数据保持 block**（真凭证窃取面，且正常用户永远不会访问它）。 */
+  
+
+
+
+
+
+
   it("云元数据 → block（真 SSRF 面，唯一保留的硬拦）", () => {
     expect(assessAction({ kind: "network", url: "http://169.254.169.254/latest/meta-data/" }).level).toBe("block");
     expect(assessAction({ kind: "network", url: "http://metadata.google.internal/x" }).level).toBe("block");

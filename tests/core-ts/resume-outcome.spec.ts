@@ -1,22 +1,22 @@
-/**
- * tests/core-ts/resume-outcome.spec.ts — 「切换会话后永久停在（恢复中…）」的收尾判定守卫（A-1051）。
- *
- * 盯的病：**用户切回会话，气泡永远停在「（恢复中…）」，且此前刚输出的回复"凭空消失"**。
- * 两个都不是崩溃、都没有报错，都是判据错配：
- *   ① `isActive` 查询失败（方法缺失 / IPC 抖动）被 `.catch(() => null)` 吞成 `null`，
- *      与"仍在活跃"走同一分支**直接 return** → 没有重试、没有兜底 → loading 永久保持。
- *   ② "结束 loading"被绑在**粘性** `stoppingRef` 上（其语义是"别自动重连"），而 `onDone`
- *      的切走早退分支漏复位它 → 残留 `true` 让此后每次切回都跳过 `setLoading(false)`。
- *
- * 这一族守卫锁两个层次，缺一层就会重演：
- *  A. **语义层**（`decideResumeOutcome`）：四支判定的优先级与取舍，尤其"重试耗尽 → 结束 loading
- *     但保留气泡、且**不**打判死标记"这条刻意取舍。
- *  B. **契约层**（ChatPanel 源码静态不变式）：判定必须真的被调用；老判据必须绝迹；
- *     早退分支必须补齐复位 —— 少任何一环都静默。
- *
- * ⚠️ 验收标准是**变异测试**：写完必须逐条把源码改坏、确认它变红。
- *    "通过但锁错对象"比没有守卫更糟。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,12 +30,12 @@ import {
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const CHAT_PANEL = join(ROOT, "gui", "src", "renderer", "pages", "ChatPanel.tsx");
 
-/**
- * 剥掉块注释与行注释。
- * 必须剥：本文件的契约断言里，"老写法"与"resetStreamUI(); return;" 这类字样会**出现在
- * ChatPanel 的讲解注释里**，直接在原文上匹配会自伤（把正确的代码判成回归）。
- * 行注释正则用 `[^:]` 前缀避开 `http://` 这类 URL。
- */
+
+
+
+
+
+
 function stripComments(src: string): string {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -44,7 +44,7 @@ function stripComments(src: string): string {
 
 const chatSrc = stripComments(readFileSync(CHAT_PANEL, "utf8"));
 
-/** 默认入参：查询失败、未重试过、无正文 —— 各用例只覆盖自己关心的字段。 */
+
 const base = {
   query: undefined as { active: boolean } | null | undefined,
   attempts: 0,
@@ -97,8 +97,8 @@ describe("A-1051 A. decideResumeOutcome 语义", () => {
 
   it("查询失败且已达上限 → 结束 loading 但**保留气泡**、**不打**判死标记（核心取舍）", () => {
     const out = decideResumeOutcome({ ...base, query: null, attempts: RESUME_MAX_ATTEMPTS, partial: "在途正文" });
-    // 没有证据支撑"流还活着"→ 不让用户无限期看着「恢复中」；
-    // 也没有证据支撑"流已死"→ 不删气泡、不标记判死（万一流还活着，chunk 到了照样续长）。
+    
+    
     expect(out).toEqual({ endLoading: true, bubble: "keep", retry: false, confirmedDead: false });
   });
 
@@ -147,16 +147,16 @@ describe("A-1051 B. 契约层：ChatPanel 必须真的走这套判定", () => {
   });
 
   it("判死标记只在拿到「流已死」证据时才置位（重试耗尽不得冒充证据）", () => {
-    // 接入点必须是 `if (outcome.confirmedDead)` 守卫，而不是无条件 `streamConfirmedDead = true`
+    
     const m = /if \(outcome\.confirmedDead\) \{([\s\S]*?)\}/.exec(chatSrc);
     expect(m, "接入点的 confirmedDead 守卫结构变了，守卫需同步更新").toBeTruthy();
     expect(m?.[1]).toContain("streamConfirmedDead = true;");
   });
 
   it("isActive 调用对「方法缺失」也安全：可选调用后直接 .catch 会抛 TypeError 且无人接", () => {
-    // `api.chat?.isActive?.(sid)` 在方法缺失时求值为 undefined，紧随的 `.catch` **不被可选链保护**
-    // → `undefined.catch` 抛 TypeError → async IIFE reject（无 catch）→ setLoading(false) 永不执行。
-    // 这是与「被吞成 null」机制不同的**第二条独立卡死路径**，必须靠 Promise.resolve 包裹兜住。
+    
+    
+    
     expect(
       chatSrc,
       "isActive 调用没有用 Promise.resolve 包裹 → 方法缺失时会抛 TypeError，永久「恢复中」",

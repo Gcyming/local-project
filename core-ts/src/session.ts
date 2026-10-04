@@ -1,11 +1,11 @@
-/**
- * core-ts/src/session.ts — 会话最小闭环：消息组装 + 双路径注入骨架 + 身份铁律过滤。
- * 语义移植自 core/llm.py 会话循环的 prompt 组装层：
- * - 身份铁律区（"我是{name}，{role}"，不暴露模型名）
- * - 双路径注入骨架：固定段（L1 身份 + L2 规则/心智占位）+ 检索注入（L3，阶段 4 接入 sidecar /v1/retrieve）
- * - 诚实与验证铁律协议摘要（阶段 4 全量注入）
- * - 路由：经 ModelRouter 统一路由（本地/云端 + OOM 降级链，阶段 3），不直接持有 ChatClient
- */
+
+
+
+
+
+
+
+
 
 import { ModelRouter } from "./router.js";
 import { ChatMessage } from "shared/schemas";
@@ -16,11 +16,11 @@ export interface AgentBrief {
   role: string;
 }
 
-/** 双路径注入骨架：固定段注入点 + 检索注入点（阶段 4 实现检索端） */
+
 export interface InjectionHooks {
-  /** L2 规则/心智固定段（阶段 4.1 接入 AffectManager/BehaviorManager） */
+  
   fixedSegments(agent: AgentBrief): string[];
-  /** L3 检索注入（阶段 4.2 接入 sidecar /v1/retrieve；本阶段返回空） */
+  
   retrieveSegments(agentId: string, query: string): Promise<string[]>;
 }
 
@@ -51,7 +51,7 @@ export interface SessionChatResult {
   chunks: number;
   model: string;
   violations: number;
-  /** 本次实际使用的路由名（内部可观测；不向用户暴露） */
+  
   routeName: string;
 }
 
@@ -82,19 +82,19 @@ export class Session {
     this.hooks = opts.hooks ?? NOOP_HOOKS;
   }
 
-  /** 组装 system prompt：身份铁律区 + 诚实协议 + 双路径注入段 */
+  
   async buildSystemPrompt(agent: AgentBrief, agentId: string): Promise<string> {
     const parts: string[] = [IDENTITY_CONSTRAINT(agent.name, agent.role), HONESTY_PROTOCOL];
     parts.push(...this.hooks.fixedSegments(agent));
-    const query = "用户最近的需求"; // L3 检索的占位查询；阶段 4 用真实会话上下文
+    const query = "用户最近的需求"; 
     parts.push(...(await this.hooks.retrieveSegments(agentId, query)));
     return parts.join("\n\n");
   }
 
-  /**
-   * 会话最小闭环：组装消息 → 路由（本地/云端 + OOM 降级链）→ 身份铁律过滤。
-   * 过滤在流式层跨 chunk 进行（StreamFilter），保证跨 chunk 匹配正确且不中断输出。
-   */
+  
+
+
+
   async chat(opts: SessionChatOptions): Promise<SessionChatResult> {
     const system = await this.buildSystemPrompt(opts.agent, opts.agentId);
     const messages: ChatMessage[] = [

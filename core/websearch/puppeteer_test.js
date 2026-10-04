@@ -1,4 +1,4 @@
-/* puppeteer 实测：Slime Search v3.1.0「全网」模式 对 真实 server.py(demo.db) */
+
 const path = require('path');
 const { spawn } = require('child_process');
 const puppeteer = require('/mnt/work/uitest/node_modules/puppeteer-core');
@@ -16,7 +16,7 @@ async function waitHealth(timeoutMs) {
     try {
       const r = await fetch(BASE + '/health');
       if (r.ok) { const d = await r.json(); if (d && d.ok) return true; }
-    } catch (e) { /* not up yet */ }
+    } catch (e) {  }
     await sleep(200);
   }
   return false;
@@ -29,7 +29,7 @@ function check(name, cond, extra) {
 }
 
 (async () => {
-  // 1) 起真实搜索服务
+  
   const srv = spawn('python3', ['/mnt/work/websearch/server.py', '--db', DB, '--host', '127.0.0.1', '--port', String(PORT)], { stdio: 'ignore' });
   const up = await waitHealth(10000);
   check('server.py /health 就绪', up);
@@ -48,7 +48,7 @@ function check(name, cond, extra) {
     await page.goto(PAGE, { waitUntil: 'load', timeout: 20000 });
     check('页面加载', true);
 
-    // 2) 切到全网模式
+    
     await page.click('#modeWeb');
     await sleep(300);
     const pressed = await page.$eval('#modeWeb', el => el.getAttribute('aria-pressed'));
@@ -56,7 +56,7 @@ function check(name, cond, extra) {
     const noteVisible = await page.$eval('#webNote', el => !el.hidden);
     check('webNote 面板显示', noteVisible);
 
-    // 3) 等待服务连通（probeWeb 渲染「已连接」）
+    
     let statusTxt = '';
     try {
       await page.waitForFunction(() => {
@@ -69,14 +69,14 @@ function check(name, cond, extra) {
       statusTxt = await page.$eval('#webStatus', el => el.textContent).catch(() => '');
       check('全网服务已连接', false, statusTxt.replace(/\s+/g, ' ').slice(0, 80));
     }
-    // 收录页数应显示 24
+    
     check('状态显示收录 24 页', /24\s*页/.test(statusTxt), '');
 
-    // 4) 检索「咖啡」
+    
     await page.click('#searchInput');
     await page.type('#searchInput', '咖啡', { delay: 5 });
     await page.keyboard.press('Enter');
-    // 等结果页
+    
     let head = '';
     try {
       await page.waitForFunction(() => {
@@ -89,10 +89,10 @@ function check(name, cond, extra) {
       head = await page.$eval('#resultMeta', el => el.textContent).catch(() => '');
       check('结果页渲染', false, head.slice(0, 60));
     }
-    // 计数须匹配“约 N 条结果”整体，避免误配引擎名里的数字（如 BM25 的 25）
+    
     check('结果计数>0', /约\s*[1-9]\d*\s*条结果/.test(head), head.slice(0, 40));
 
-    // 5) 至少一条结果卡片，且 Top1 指向 coffee/espresso
+    
     const cardCount = await page.$$eval('#resultList a[href]', els => els.length).catch(() => 0);
     check('结果卡片链接数>0', cardCount > 0, 'links=' + cardCount);
     const firstHref = await page.$eval('#resultList a[href]', el => el.getAttribute('href')).catch(() => '');

@@ -1,14 +1,14 @@
-/**
- * tests/core-ts/local-server-probe.spec.ts — 本地端点「能力问询」的 IO 侧（计划 S1）。
- *
- * 纯解析逻辑在 `tests/core-ts/model-introspect.spec.ts`；这里钉的是**发请求这一段**：
- *   · baseUrl 怎么变成 `/props`（provider 的 `/v1` 尾巴必须剥掉 —— `/props` 在根路径下）
- *   · 哪些地址算"本机"（远端网关没有 `/props`，盲发只会拖慢 done 载荷的构造）
- *   · **身份校验**：托管的 chat 实例一次只服务一个模型，拿 A 的窗口回答 B 就是 A-1018 ③ 换位重演
- *   · 缓存与**绝不抛异常**：它被 done 载荷的构造调用，抛出去会让整轮对话的 done 发不出去
- *
- * 夹具用真实的 llama-server 响应（`tests/fixtures/llama/*.json`，抓取脚本见 gui/scripts/）。
- */
+
+
+
+
+
+
+
+
+
+
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ const PROPS_READY = read("props.ready");
 const MODELS_READY = read("models.ready");
 const LOADING = read("props.loading");
 
-/** 假 fetch：按 URL 路径分派到真实夹具；可统计调用次数 */
+
 function stubFetch(opts: { props?: unknown; models?: unknown; propsStatus?: number; modelsStatus?: number; throwOn?: RegExp } = {}) {
   const calls: string[] = [];
   vi.stubGlobal("fetch", async (input: unknown) => {
@@ -53,11 +53,11 @@ function stubFetch(opts: { props?: unknown; models?: unknown; propsStatus?: numb
 beforeEach(() => clearLocalCapabilityCache());
 afterEach(() => { vi.unstubAllGlobals(); setModelServer(null as unknown as ModelServerManager); });
 
-// ── URL 形状 ────────────────────────────────────────────────
+
 
 describe("baseUrl → 端点 URL", () => {
   it("★ provider 的 /v1 尾巴必须剥掉：/props 在根路径下，不在 /v1 下", () => {
-    // 这是本机实测结论：llama-server 的 /props 是根级路由；照抄 provider 的 base 会得到 /v1/props → 404
+    
     expect(propsUrlFor("http://127.0.0.1:8800/v1")).toBe("http://127.0.0.1:8800/props");
     expect(modelsUrlFor("http://127.0.0.1:8800/v1")).toBe("http://127.0.0.1:8800/v1/models");
   });
@@ -71,12 +71,12 @@ describe("baseUrl → 端点 URL", () => {
   });
 
   it("只剥**结尾**的版本段，不动路径中间的 /v1", () => {
-    // 万一有人把服务挂在子路径下（如 /llama/v1），剥错会打到别人身上
+    
     expect(propsUrlFor("http://127.0.0.1:8080/llama/v1")).toBe("http://127.0.0.1:8080/llama/props");
   });
 });
 
-// ── 本机判定 ────────────────────────────────────────────────
+
 
 describe("isLoopbackBaseUrl —— 只有本机端点才值得问 /props", () => {
   it("本机各种写法都认", () => {
@@ -91,9 +91,9 @@ describe("isLoopbackBaseUrl —— 只有本机端点才值得问 /props", () =>
   it("★ 形似但不是本机的必须判否（防前缀欺骗）", () => {
     for (const bad of [
       "https://api.openai.com/v1",
-      "http://127.0.0.1.evil.com/v1",       // 前缀欺骗
-      "https://localhost.mydomain.com/v1",  // 同上
-      "http://192.168.1.10:8080/v1",        // 局域网 ≠ 本机（无 /props）
+      "http://127.0.0.1.evil.com/v1",       
+      "https://localhost.mydomain.com/v1",  
+      "http://192.168.1.10:8080/v1",        
       "http://10.0.0.5:8800/v1",
       "http://127x0x0x1/v1",
       "",
@@ -104,7 +104,7 @@ describe("isLoopbackBaseUrl —— 只有本机端点才值得问 /props", () =>
   });
 });
 
-// ── 身份校验 ────────────────────────────────────────────────
+
 
 describe("capabilityMatchesModel —— 别拿 A 模型的窗口回答 B 模型", () => {
   const cap = {
@@ -147,7 +147,7 @@ describe("capabilityMatchesModel —— 别拿 A 模型的窗口回答 B 模型"
   });
 });
 
-// ── 问询 + 缓存 + 绝不抛 ────────────────────────────────────
+
 
 describe("probeLocalEndpoint / getLocalCapability", () => {
   it("★ 真实就绪夹具 → ready，且有效窗口 8192 / 训练上限 40960 都在", async () => {
@@ -173,9 +173,9 @@ describe("probeLocalEndpoint / getLocalCapability", () => {
   });
 
   it("★ JSON 解析失败：不抛，且**不判 down**（传输层是通的，进程就在跑）", async () => {
-    // 语义选择：`down` 的含义是"联系不上"。HTTP 200 说明进程活着、只是响应体读不动
-    // （代理插了一页 HTML、版本改了结构、半截响应…）。判 down 会把用户引向"重试启动"
-    // 这个**错误动作**（去杀掉一个其实正常的进程）。正确表达是：ready 但数字未知 + 留痕。
+    
+    
+    
     vi.stubGlobal("fetch", async () => ({ status: 200, json: async () => { throw new SyntaxError("bad json"); } }));
     const cap = await probeLocalEndpoint("http://127.0.0.1:8080");
     expect(cap.state).toBe("ready");
@@ -192,7 +192,7 @@ describe("probeLocalEndpoint / getLocalCapability", () => {
     const calls = stubFetch();
     await getLocalCapability("http://127.0.0.1:8800/v1");
     const first = calls.length;
-    expect(first).toBe(2); // /props + /v1/models
+    expect(first).toBe(2); 
     await getLocalCapability("http://127.0.0.1:8800/v1");
     await getLocalCapability("http://127.0.0.1:8800/v1");
     expect(calls.length).toBe(first);
@@ -223,7 +223,7 @@ describe("probeLocalEndpoint / getLocalCapability", () => {
   });
 });
 
-// ── 托管实例的端口来源 ──────────────────────────────────────
+
 
 describe("managedChatPorts —— 内存状态 + 跨进程 registry 两路", () => {
   function fakeMgr(items: Array<Partial<StatusItem>>): ModelServerManager {
@@ -239,8 +239,8 @@ describe("managedChatPorts —— 内存状态 + 跨进程 registry 两路", () 
     ]));
     const ports = managedChatPorts();
     expect(ports).toContain(18082);
-    expect(ports).not.toContain(18083); // 加载中不算可用
-    expect(ports).not.toContain(8999);  // embedding 不是 chat
+    expect(ports).not.toContain(18083); 
+    expect(ports).not.toContain(8999);  
     expect(ports).not.toContain(0);
   });
 

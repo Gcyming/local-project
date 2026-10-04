@@ -29,9 +29,9 @@ class TestAgnesMediaTools:
         assert "图片生成成功" in r
         assert "https://example.com/img.png" in r
         assert "D:\\x\\img.png" in r
-        assert "123456 字节" in r          # A-048: 成功返回真实文件大小（证据）
+        assert "123456 字节" in r          
         assert captured["model"] == "agnes-image-2.1-flash"
-        assert captured["size"] == "2K"  # 小写归一化
+        assert captured["size"] == "2K"  
         assert captured["ratio"] == "16:9"
 
     def test_generate_image_invalid_params(self):
@@ -63,8 +63,8 @@ class TestAgnesMediaTools:
             r = asyncio.run(_tool_generate_image({"prompt": "x"}))
         assert "[错误]" in r
         assert "未保存到本地" in r
-        assert "图片生成成功" not in r    # 绝不出现成功字样
-        assert "https://example.com/img.png" in r  # URL 仍可用
+        assert "图片生成成功" not in r    
+        assert "https://example.com/img.png" in r  
 
     def test_generate_video_completed(self):
         from tools.agnes_media import _tool_generate_video
@@ -88,7 +88,7 @@ class TestAgnesMediaTools:
         assert "视频生成完成" in r
         assert "https://example.com/v.mp4" in r
         assert "D:\\x\\v.mp4" in r
-        assert "2920440 字节" in r       # A-048: 真实文件大小
+        assert "2920440 字节" in r       
         assert captured["model"] == "agnes-video-v2.0"
         assert captured["duration"] == 5
 
@@ -111,7 +111,7 @@ class TestAgnesMediaTools:
             r = asyncio.run(_tool_generate_video({"prompt": "sunset"}))
         assert "[错误]" in r
         assert "未保存到本地" in r
-        assert "视频生成完成" not in r    # A-048（review 修复）：下载失败不用"完成"字样
+        assert "视频生成完成" not in r    
         assert "URL: https://e.com/v.mp4" in r
 
     def test_video_status_completed_download_failure(self):
@@ -149,7 +149,7 @@ class TestAgnesMediaTools:
         assert "[进行中]" in r
         assert "video_2" in r
         assert "未完成" in r
-        assert "agnes_video_status" in r  # 未完成给出查询指引
+        assert "agnes_video_status" in r  
 
     def test_video_status_tool(self):
         from tools.agnes_media import _tool_video_status
@@ -188,7 +188,7 @@ class TestAgnesMediaTools:
             return {"id": "video_nourl"}
 
         async def fake_get(url, timeout=30.0):
-            return {"status": "completed", "progress": 100}  # 无 url 字段
+            return {"status": "completed", "progress": 100}  
 
         with patch("tools.agnes_media._post_json", new=fake_post), \
              patch("tools.agnes_media._get_json", new=fake_get), \
@@ -221,7 +221,7 @@ class TestAgnesMediaTools:
         assert _extract_video_url({"video_url": "https://x/v2.mp4"}) == "https://x/v2.mp4"
         assert _extract_video_url({"metadata": {"url": "https://x/m.mp4"}}) == "https://x/m.mp4"
         assert _extract_video_url({"remixed_from_video_id": "https://x/r.mp4"}) == "https://x/r.mp4"
-        # 非 http 的 remixed_from_video_id（如内部 ID）不当作 URL
+        
         assert _extract_video_url({"remixed_from_video_id": "video_zzz"}) == ""
         assert _extract_video_url({"status": "completed"}) == ""
         assert _extract_video_url(None) == ""
@@ -245,7 +245,7 @@ class TestAgnesMediaTools:
              patch("tools.agnes_media._wait_video_slot", new=lambda k: __import__("asyncio").sleep(0)), \
              patch("tools.agnes_media._VIDEO_POLL_INTERVAL", 0.0):
             r = asyncio.run(_tool_generate_video({"prompt": "x"}))
-        assert "video_xyz" in captured["queried_url"]  # 用 video_id 查询
+        assert "video_xyz" in captured["queried_url"]  
         assert "task_abc" not in captured["queried_url"]
 
     def test_encode_image_and_limits(self, tmp_path):
@@ -276,13 +276,13 @@ class TestAgnesMediaTools:
         reset_registry()
         try:
             n1 = register_agnes_media_tools()
-            assert n1 == 5  # A-048: +agnes_prompt_build; A-059: +video_concat
+            assert n1 == 5  
             names = get_registry().list_tool_names()
             assert "agnes_prompt_build" in names
             assert "agnes_generate_image" in names
             assert "agnes_generate_video" in names
             assert "agnes_video_status" in names
-            assert register_agnes_media_tools() == 0  # 同名拒绝覆盖（注册表铁律）
+            assert register_agnes_media_tools() == 0  
         finally:
             reset_registry()
 
@@ -330,7 +330,7 @@ class TestAgnesLocalDownload:
         def handler(request):
             return httpx.Response(200, content=b"PNGDATA", headers={"content-type": "image/png"})
 
-        real_async_client = httpx.AsyncClient  # 保存真实类，防 mock 递归
+        real_async_client = httpx.AsyncClient  
 
         def make_client(**kwargs):
             kwargs.pop("transport", None)
@@ -366,7 +366,7 @@ class TestImageArgNormalization:
     def test_url_passthrough(self):
         from tools.agnes_media import _encode_image_arg
         url = "https://example.com/a.png"
-        assert _encode_image_arg(url) == url  # 原样透传
+        assert _encode_image_arg(url) == url  
 
     def test_local_path_base64(self, tmp_path):
         from tools.agnes_media import _encode_image_arg
@@ -395,7 +395,7 @@ class TestImageArgNormalization:
         with patch("tools.agnes_media._post_json", new=fake_post),              patch("tools.agnes_media._download_async", return_value="D:/x/out.png"),              patch("tools.agnes_media._real_size", return_value=1):
             r = asyncio.run(_tool_generate_image(
                 {"prompt": "x", "image": "https://example.com/src.png"}))
-        assert captured["image"] == ["https://example.com/src.png"]  # URL 数组透传
+        assert captured["image"] == ["https://example.com/src.png"]  
         assert "图片生成成功" in r
 
 
@@ -446,8 +446,8 @@ class TestMediaCache:
         try:
             M._MEDIA_CACHE_MAX_BYTES = 100
             with tempfile.TemporaryDirectory() as td:
-                # 注意必须传 Path（`_prune_media_cache_dir` 内部用 `d.iterdir()`；
-                # 传字符串会抛 AttributeError 并被它"尽力而为"的 except 静默吞掉 → 什么都没删）
+                
+                
                 d = Path(td) / "videos"
                 d.mkdir()
                 oldest = d / "a.mp4"
@@ -458,7 +458,7 @@ class TestMediaCache:
                 os.utime(oldest, (now - 1000, now - 1000))
                 os.utime(newer, (now, now))
                 M._prune_media_cache_dir(d)
-                # 60 + 60 = 120 > 100 → 淘汰最旧的 oldest，保留 newer
+                
                 assert not oldest.exists()
                 assert newer.exists()
         finally:
@@ -493,7 +493,7 @@ class TestMediaCache:
 
         async def fake_post(url, payload, timeout=60.0):
             calls.append(url)
-            return {"data": []}  # 走到"缺少 URL"分支即可证明绕过了缓存
+            return {"data": []}  
 
         with patch("tools.agnes_media._post_json", new=fake_post),              patch("tools.agnes_media._wait_video_slot", new=lambda k: __import__("asyncio").sleep(0)):
             r = asyncio.run(M._tool_generate_image({"prompt": "cached test", "size": "2K", "refresh": "true"}))
@@ -613,12 +613,12 @@ class TestVideoThrottle:
             M._last_video_submit.clear()
             t0 = _t.time()
             asyncio.run(M._wait_video_slot("throttle_key_123"))
-            assert _t.time() - t0 < 0.5  # 首次不等待
-            # 注意：结束后会恢复（pytest 进程内改模块属性有泄漏风险，此处用 with patch.object 更安全
+            assert _t.time() - t0 < 0.5  
+            
             t0 = _t.time()
             asyncio.run(M._wait_video_slot("throttle_key_123"))
             d = _t.time() - t0
-            assert 2.5 <= d <= 4.0, d  # 等满窗口（65s 缓冲逻辑）
+            assert 2.5 <= d <= 4.0, d  
 
     def test_video_throttle_jitter_applied(self):
         """A-074: 随机抖动注入（破坏均匀流水线指纹）——抖动被加进等待时长"""
@@ -630,7 +630,7 @@ class TestVideoThrottle:
             t0 = _t.time()
             asyncio.run(M._wait_video_slot("jitter_key"))
             d = _t.time() - t0
-            assert 12.5 <= d <= 14.0, d  # 3s 窗口 + 10s 抖动
+            assert 12.5 <= d <= 14.0, d  
 
     def test_video_throttle_diff_key_independent(self):
         """不同 key 独立窗口（多账号并行不受阻塞）"""
@@ -662,7 +662,7 @@ class TestAgnesPerAgentKey:
                 key = _get_api_key()
             finally:
                 current_model_choice.reset(token)
-        assert key == "sk-BBBB"  # 按 Agent 分配，非全局第一个 sk-AAAA
+        assert key == "sk-BBBB"  
 
     def test_fallback_first_match_without_context(self):
         """无 Agent 上下文（直调）→ 回退任意第一个 agnes-ai provider"""
@@ -719,8 +719,8 @@ class TestAgnesPerAgentKey:
             from core.llm import _execute_pending_tools
             asyncio.run(_execute_pending_tools(
                 agent, [], [{"id": "t1", "function": {"name": "probe_ctx", "arguments": "{}"}}]))
-            assert seen["mc"] == "api:Agnes-5"  # 工具内可见 Agent 上下文
-            assert current_model_choice.get() == ""  # 结束后清理
+            assert seen["mc"] == "api:Agnes-5"  
+            assert current_model_choice.get() == ""  
         finally:
             reset_registry()
 
@@ -746,7 +746,7 @@ class TestVideoConcat:
         reset_registry()
         try:
             n = register_agnes_media_tools()
-            assert n == 5  # A-059: 新增 video_concat
+            assert n == 5  
             names = get_registry().list_tool_names()
             assert "video_concat" in names
         finally:
@@ -766,7 +766,7 @@ class TestAgnesPromptBuild:
         assert "清纯女大学生在校园散步" in r
         assert "场景：林荫道" in r
         assert "风格：清新" in r
-        assert "杜绝塑料感或洋娃娃感" in r  # FACE_STANDARD 浓缩段
+        assert "杜绝塑料感或洋娃娃感" in r  
         assert "size=2K" in r and "ratio=1:1" in r
 
     def test_video_prompt_build(self):
@@ -791,17 +791,17 @@ class TestAgnesPromptBuild:
         """A-048（review 修复）：face_quality 未传时按主体启发式——
         人物主体自动追加脸部段，风景/产品不追加"""
         from tools.agnes_media import _tool_prompt_build
-        # 人物主体（含"女"）→ 自动追加
+        
         r1 = asyncio.run(_tool_prompt_build({
             "media_type": "image", "subject": "清纯女大学生在校园散步",
         }))
         assert "杜绝塑料感" in r1
-        # 风景主体 → 不追加（不污染）
+        
         r2 = asyncio.run(_tool_prompt_build({
             "media_type": "image", "subject": "清晨的山间湖泊日出",
         }))
         assert "杜绝塑料感" not in r2
-        # 英文人物词 → 自动追加
+        
         r3 = asyncio.run(_tool_prompt_build({
             "media_type": "image", "subject": "a portrait of an old man",
         }))
@@ -828,14 +828,14 @@ class TestAgnesPromptBuild:
         with patch("tools.agnes_media._GENERATED_DIR", tmp_path), \
              patch.object(httpx, "AsyncClient", side_effect=make_client):
             p1 = asyncio.run(_download_async(url, "videos"))
-            p2 = asyncio.run(_download_async(url, "videos"))  # 第二次应命中缓存
+            p2 = asyncio.run(_download_async(url, "videos"))  
         assert p1 == p2
-        assert calls["n"] == 1  # 只实际下载一次
+        assert calls["n"] == 1  
 
     def test_prompt_build_errors(self):
         from tools.agnes_media import _tool_prompt_build
         assert "[错误]" in asyncio.run(_tool_prompt_build({"media_type": "xxx", "subject": "a"}))
-        assert "[错误]" in asyncio.run(_tool_prompt_build({"media_type": "image"}))  # 缺 subject
+        assert "[错误]" in asyncio.run(_tool_prompt_build({"media_type": "image"}))  
         assert "[错误]" in asyncio.run(_tool_prompt_build({}))
 
     def test_prompt_build_invalid_params_normalized(self):
@@ -848,4 +848,4 @@ class TestAgnesPromptBuild:
         r2 = asyncio.run(_tool_prompt_build({
             "media_type": "video", "subject": "x", "duration": 999,
         }))
-        assert "duration=18" in r2  # 钳制到上限
+        assert "duration=18" in r2  

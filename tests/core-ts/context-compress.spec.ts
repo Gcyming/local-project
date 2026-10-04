@@ -1,15 +1,15 @@
-/**
- * tests/core-ts/context-compress.spec.ts — 上下文自动压缩纯函数单测（A-969 落地 / A-1082 修正）。
- *
- * ## 本文件锁住的「压缩并非真压缩」（用户原话）四条根因
- *
- * ① `estimateHistoryTokens` 曾为 `总字符 / 4` —— 1 个汉字 ≈ 1 token，于是中文长会话的占用
- *    被算成真实的 1/4 ⇒ **阈值形同虚设**、该压的时候永远不压。
- * ② 摘要轮输入超 `SUMMARIZE_INPUT_CAP` 就 `return null`（放弃摘要）⇒ 调用方降级。
- * ③ 而那条降级路径当时**什么都没裁**（界面却报「已压缩 N 轮」）—— 由 `truncateTurnAligned`
- *    与 `summaryCount` 独立生效兜住（主进程侧的守卫见 `tests/gui/context-compress-ui.spec.ts`）。
- * ④ 切口按**条数**硬切可能落在半轮上 ⇒ `user, user` 连续同角色（Anthropic 系直接 400）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_COMPRESS_RATIO, DEFAULT_TAIL_KEEP, SUMMARIZE_INPUT_CAP, MESSAGE_OVERHEAD_TOKENS,
@@ -19,7 +19,7 @@ import {
 } from "../../core-ts/src/services/context_compress.js";
 import { validateHistory } from "../../core-ts/src/services/context_loop.js";
 
-/** 生成 n 轮消息（每轮 user+assistant 各一段中文，长度可控） */
+
 function turns(n: number, chars = 80): Array<{ role: string; content: string }> {
   const out: Array<{ role: string; content: string }> = [];
   for (let i = 0; i < n; i++) {
@@ -41,8 +41,8 @@ describe("estimateHistoryTokens · A-1082 改成 CJK 感知口径", () => {
   });
 
   it("🐛 与旧口径的对照：长中文历史下新口径必须显著更大（旧口径对**正文**是 4 倍低估）", () => {
-    // ⚠️ 必须用**长**中文轮次：旧口径的每轮 300 字符固定开销在短消息里会掩盖 4 倍低估，
-    //    而真实的长会话恰恰是"每轮都很长"——那正是该触发压缩却永远不触发的场景。
+    
+    
     const msgs = turns(10, 1000);
     const chars = msgs.reduce((s, m) => s + m.content.length, 0);
     const legacy = Math.round((chars + msgs.length * 300) / 4);
@@ -93,8 +93,8 @@ describe("needsCompress（触发判定）", () => {
     expect(needsCompress(9000, 0, 0.85, 10)).toBe(false);
   });
   it("ratio 越界被夹紧（0.5~0.97）", () => {
-    expect(needsCompress(4000, 10000, 0.1, 10)).toBe(false); // 0.1→0.5 也 >0.4 → false
-    expect(needsCompress(5000, 10000, 0.1, 10)).toBe(true);   // 0.5×10000 ≤ 5000 → true
+    expect(needsCompress(4000, 10000, 0.1, 10)).toBe(false); 
+    expect(needsCompress(5000, 10000, 0.1, 10)).toBe(true);   
   });
 });
 
@@ -131,7 +131,7 @@ describe("messagesToPlainText（摘要轮输入）", () => {
       { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAA=" } }] },
     ]);
     expect(text).toContain("USER: 你好");
-    expect(text).not.toContain("AAA="); // dataURL 不参与摘要轮（防携带几 MB base64）
+    expect(text).not.toContain("AAA="); 
     expect(text).toContain("[图片内容]");
   });
 });
@@ -146,13 +146,13 @@ describe("buildSummaryInput · A-1082：超预算**摘录**而不是放弃摘要
   });
 
   it("🐛 放不下 → 取头 30% + 尾 70%，且**中间有省略说明**（旧实现直接 return null 放弃摘要）", () => {
-    const msgs = turns(200, 200); // 约 4 万汉字
+    const msgs = turns(200, 200); 
     const r = buildSummaryInput(msgs, 4000);
     expect(r.elided, "一条都没摘录 ⇒ 预算判定失效").toBeGreaterThan(0);
     expect(r.text, "没有省略说明 ⇒ 摘要模型不知道中间缺了内容").toMatch(/省略 \d+ 条/);
     expect(r.text, "头部丢失（最早的话题锚没了）").toContain("第0轮问题");
     expect(r.text, "尾部丢失（最新工作现场没了 ⇒ 摘要没有续接价值）").toContain("第199轮回答");
-    // 预算约束：产出不得超出预算太多（允许多出「省略说明」那一行）
+    
     expect(estimateTokensLocal(r.text)).toBeLessThan(4000 * 1.2);
   });
 
@@ -178,7 +178,7 @@ describe("truncateTurnAligned · 降级裁剪必须 turn 对齐（I2）", () => 
   it("保留最后 K **整轮**，切口落在 user 上", () => {
     const msgs = turns(20);
     const out = truncateTurnAligned(msgs, 6);
-    expect(out.length).toBe(12); // 6 轮 = 12 条
+    expect(out.length).toBe(12); 
     expect(out[0].role, "切口没落在 user 上 ⇒ 半轮被切开").toBe("user");
     expect(out[out.length - 1].content).toBe(msgs[msgs.length - 1].content);
   });
@@ -208,11 +208,11 @@ describe("buildCompactedHistory · 摘要头 + 垫脚 + 最近 K 整轮", () => 
   it("角色交替完整、切口 turn 对齐、摘要文本带过去", () => {
     const msgs = turns(20);
     const out = buildCompactedHistory("摘要：完成 X；下一步 Y", msgs, 8);
-    expect(out.length).toBe(18); // 摘要头 + 垫脚 + 8 轮(16 条)
+    expect(out.length).toBe(18); 
     expect(out[0].role).toBe("user");
     expect(out[0].content).toContain("摘要：完成 X；下一步 Y");
-    expect(out[0].content).toContain("24"); // 40 条记录，裁掉 24 条
-    expect(out[1].role).toBe("assistant"); // 垫脚：保证 user→assistant 交替
+    expect(out[0].content).toContain("24"); 
+    expect(out[1].role).toBe("assistant"); 
     for (let i = 1; i < out.length; i++) {
       expect(out[i].role).not.toBe(out[i - 1].role);
     }
@@ -233,7 +233,7 @@ describe("buildCompactedHistory · 摘要头 + 垫脚 + 最近 K 整轮", () => 
       { role: "assistant", content: "读完了" },
     ];
     const out = buildCompactedHistory("摘要", msgs, 2);
-    // 保留最近 2 轮：user(读一下文件) + assistant(tool_calls) + tool + assistant
+    
     const toolMsg = out.find((m) => m.role === "tool");
     expect(toolMsg, "`tool` 角色被塌成了 user ⇒ 工具配对被破坏（I1）").toBeDefined();
     expect(toolMsg?.tool_call_id, "tool_call_id 丢了 ⇒ 配对不上").toBe("call_1");

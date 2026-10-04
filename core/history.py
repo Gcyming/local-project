@@ -10,13 +10,13 @@ import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # N11-P3-11: resolve 锚定
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent  
 _HISTORY_PATH = _PROJECT_ROOT / "config" / "history.jsonl"
-_write_lock = threading.Lock()  # N11-P2-11: 保护 pop_last 读改写
+_write_lock = threading.Lock()  
 
-# BUG-027: 轮转参数，防 history.jsonl 无限增长
-_MAX_HISTORY_BYTES = 10 * 1024 * 1024  # 超过 10MB 触发轮转
-_KEEP_RECORDS = 5000                   # 轮转后保留最近条数
+
+_MAX_HISTORY_BYTES = 10 * 1024 * 1024  
+_KEEP_RECORDS = 5000                   
 
 
 def append(agent_id: str, user_msg: str, ai_reply: str, success: bool = True):
@@ -73,7 +73,7 @@ def pop_last(agent_id: str) -> bool:
                     continue
         if not records:
             return False
-        # 找到该 agent 最后一条记录
+        
         idx = None
         for i in range(len(records) - 1, -1, -1):
             if records[i].get("agent_id") == agent_id:
@@ -84,8 +84,8 @@ def pop_last(agent_id: str) -> bool:
         records.pop(idx)
         import os, uuid
         tmp_path = _HISTORY_PATH.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
-        # A-019: 必须以换行收尾 —— 否则下一次 append 会拼接到最后一条记录同一行，
-        # 形成 "}{" 拼接行，load() 解析失败导致两条记录同时丢失（静默数据损坏）
+        
+        
         tmp_path.write_text(
             "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
             encoding="utf-8",
@@ -116,7 +116,7 @@ def remove_agent(agent_id: str) -> int:
                         continue
                     kept_lines.append(json.dumps(record, ensure_ascii=False))
                 except json.JSONDecodeError:
-                    kept_lines.append(line)  # 无法解析的行保留原文
+                    kept_lines.append(line)  
         import os, uuid
         tmp_path = _HISTORY_PATH.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
         tmp_path.write_text(

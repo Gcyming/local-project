@@ -51,7 +51,7 @@ describe("probe 厂商指纹识别器", () => {
   describe("泛化识别（generic-openai-compat）", () => {
     it("有公开 pricing → 倾向聚合网关，但无官方域名 → generic/newapi", () => {
       const r = probe({ endpoint: "https://some-gateway.example.com/v1/models", auth: "bearer", modelCount: 30, hasPricing: true }, "https://some-gateway.example.com/v1");
-      // 无新-api 端点特征、无官方域名 → generic-openai-compat
+      
       expect(["generic-openai-compat", "newapi"]).toContain(r.vendor);
       expect(r.apiFormat).toBe("openai");
     });

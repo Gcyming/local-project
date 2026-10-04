@@ -33,11 +33,11 @@ async function makeSandbox(): Promise<string> {
 describe("GUI 主进程模块冒烟（临时验证）", () => {
   it("paths：electron-vite 打包入口也能解析到项目根（PROJECT_ROOT 回归）", async () => {
     const { existsSync } = await import("node:fs");
-    // electron-vite 打包后 core-ts 被 bundle 进 gui/out/main，import.meta.url 在 gui/out 之下
+    
     const fromOutMain = resolveProjectRootFrom("file:///D:/pilot%20project/gui/out/main/index.js");
     expect(fromOutMain).toContain("pilot project");
     expect(existsSync(`${fromOutMain}/slime.toml`)).toBe(true);
-    // 源码/测试入口（core-ts/src）解析不变
+    
     const fromSrc = resolveProjectRootFrom("file:///D:/pilot%20project/core-ts/src/paths.ts");
     expect(fromSrc).toContain("pilot project");
     expect(existsSync(`${fromSrc}/slime.toml`)).toBe(true);
@@ -62,23 +62,23 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(r.ok).toBe(true);
     expect(readConfigFile("slime.toml").content).toContain("enabled = false");
 
-    // agents.json：可读不可写
+    
     expect(readConfigFile("agents.json").ok).toBe(true);
     expect(writeConfigFile("agents.json", "{}").ok).toBe(false);
-    // 白名单外拒绝
+    
     expect(readConfigFile("other.toml").ok).toBe(false);
     expect(writeConfigFile("other.toml", "x").ok).toBe(false);
-    // 不存在文件
+    
     expect(readConfigFile("global_config.json").ok).toBe(false);
   });
 
   it("config_files：第三方风格技能（仅 SKILL.md，`>` 块标量 frontmatter）描述必须可读", async () => {
-    /*
-     * 事故形态：用户从 Claude/Cursor 生态拷来技能（只有 SKILL.md，没有 manifest.yaml），
-     * 技能库里**一条描述都没有**、只显示 `--`，看起来像"技能没装好/缺文件"。
-     * 根因是 scanSkillRoot 无 manifest 时退回 `firstLineSafe()` —— 取 SKILL.md 的**物理首行**，
-     * 而带 frontmatter 的文件首行就是分隔符 `---`。
-     */
+    
+
+
+
+
+
     const dir = await makeSandbox();
     const sk = join(dir, "config", "skills", "ponytail");
     await mkdir(sk, { recursive: true });
@@ -101,7 +101,7 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(info).toBeDefined();
     expect(info?.hasSkillMd).toBe(true);
     expect(info?.hasManifest).toBe(false);
-    // 描述必须来自 frontmatter，且**绝不能是 frontmatter 分隔符**
+    
     expect(info?.description).not.toBe("---");
     expect(info?.description).not.toBe("");
     expect(info?.description).toContain("laziest solution");
@@ -111,7 +111,7 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
   it("config_files：启用/禁用 MCP 不吞块外注释、不留残留空格（A-980-R28 真事故回归）", async () => {
     const dir = await makeSandbox();
     await mkdir(join(dir, "config"), { recursive: true });
-    // 复刻事故现场（与真实 slime.toml 同构）：注释态 server 块 + 块外散文/横幅注释 + 后续配置段
+    
     const src = [
       "[memory]",
       "enabled = true",
@@ -134,7 +134,7 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     ].join("\n");
     await writeFile(join(dir, "slime.toml"), src, "utf8");
 
-    // 启用：只剥 server 块自身，且不留残留前导空格；块外注释必须逐字保留（否则 toml 解析失败）
+    
     expect(setMcpEnabled("agent_browser", true).ok).toBe(true);
     const on = readConfigFile("slime.toml").content ?? "";
     expect(on).toContain('[[mcp_servers]]\nname = "agent_browser"\ncommand = "cmd"');
@@ -145,10 +145,10 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(on).toContain("# ── 说明横幅 ──");
     expect(on).toContain("[media]\nenv_key = \"X\"");
 
-    // 禁用：加/减 # 严格互逆 → 逐字节回到原样
+    
     expect(setMcpEnabled("agent_browser", false).ok).toBe(true);
     expect(readConfigFile("slime.toml").content).toBe(src);
-    // 未命中名称不写盘
+    
     expect(setMcpEnabled("not-exist", true).ok).toBe(false);
   });
 
@@ -164,20 +164,20 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(list[0].key_hint).toContain("***");
     expect(list[0].models[0].vision).toBe(true);
     expect(list[0].models[0].context_window).toBe(8192);
-    // 重存不传 key → 保留旧 key
+    
     expect((await saveProvider({ key: "demo", api_base: "https://api.demo.com/v1" })).ok).toBe(true);
     expect(listProviders()[0].has_key).toBe(true);
     expect(listProviders()[0].key_hint).toContain("***");
-    // 非法输入
+    
     expect((await saveProvider({ key: "bad key!", api_base: "https://x.com" })).ok).toBe(false);
     expect((await saveProvider({ key: "ok", api_base: "ftp://x.com" })).ok).toBe(false);
     expect((await saveProvider({ key: "ok", api_base: "https://x.com", api_key: "" })).ok).toBe(false);
-    // 删除
+    
     expect(removeProvider("demo").ok).toBe(true);
     expect(listProviders().length).toBe(0);
-    // 幂等删除
+    
     expect(removeProvider("demo").ok).toBe(true);
-    // 沙箱外无副作用（真实项目根不出现 demo）
+    
     expect(listProviders().find((p) => p.key === "demo")).toBeUndefined();
   });
 
@@ -189,19 +189,19 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
   });
 
   it("A-988 回归：缓存价 0（缓存免费）必须活过读盘往返，不能被 sanitizeModels 抹成「未定价」", async () => {
-    /*
-     * 事故形态：`sanitizeModels` 里给两个缓存价字段多写了一层 `&& value > 0` 过滤
-     * （上下文窗口那种字段加 `> 0` 是对的 —— 0 个 token 的窗口没有意义；
-     *   但价格字段的 0 是**合法价**："该网关缓存命中免费"是真实计费口径）。
-     *
-     * 后果链条（全程静默，界面上「看起来是个数字」）：
-     *   用户手填 缓存命中 = 0  →  sanitizeModels 抹成 undefined
-     *   → resolveCacheRates 的 stored 分支落空 → 走倍率推导 0.1× 输入价
-     *   → 缓存命中的 token 被按 0.1× 输入价收费。本来是免费的，被记成了钱。
-     *
-     * 而且 sanitizeModels 在 **saveProvider（1592 行）和 listProviders（230 行）两处都跑**，
-     * 所以这个 0 连磁盘都进不去 —— 必须两端都保住。
-     */
+    
+
+
+
+
+
+
+
+
+
+
+
+
     await makeSandbox();
     const saved = await saveProvider({
       key: "cachefree", api_base: "https://api.cachefree.com/v1", api_key: "sk-aaaaaaaaaaaa",
@@ -215,10 +215,10 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(saved.ok).toBe(true);
 
     const m = listProviders()[0].models[0];
-    // 0 必须原样活着 —— 不能变成 undefined（未定价），也不能被当成"空"而回退
+    
     expect(m.price_cache_read_usd).toBe(0);
     expect(m.price_cache_write_usd).toBe(0);
-    // 与此同时，真正的 undefined（未定价）不能被这里顺手写成 0 —— 两者语义相反，都别混
+    
     expect(m.price_in_usd).toBe(0.3);
     expect(m.price_source).toBe("manual");
   });
@@ -230,7 +230,7 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
       models: [{ id: "m1", selected: true, price_in_usd: 1, price_out_usd: 2 }],
     });
     const m = listProviders()[0].models[0];
-    // 「没填」= undefined，交给 resolveCacheRates 去推导；绝不能悄悄写成 0（那是"免费"）
+    
     expect(m.price_cache_read_usd).toBeUndefined();
     expect(m.price_cache_write_usd).toBeUndefined();
   });
@@ -244,18 +244,18 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     await writeFile(gguf, "GGUF_BYTES", "utf8");
     await writeFile(other, "not a model", "utf8");
 
-    // 扫描：只出 GGUF
+    
     const scan = scanLocalModels(modelDir);
     expect(scan.ok).toBe(true);
     expect(scan.models?.length).toBe(1);
     expect(scan.models?.[0].label).toBe("qwen-3b.gguf");
 
-    // 路径不存在 → 拒绝
+    
     expect(saveLocalModel({ id: "qwen", path: join(dir, "nope.gguf") }).ok).toBe(false);
-    // 相对路径 → 拒绝
+    
     expect(saveLocalModel({ id: "qwen", path: "models/qwen.gguf" }).ok).toBe(false);
 
-    // 保存成功 + 参数落地
+    
     const save = saveLocalModel({ id: "qwen", path: gguf, label: "Qwen 3B", ctx_len: 8192, gpu_layers: 99, max_output: 4096, vision: true });
     expect(save.ok).toBe(true);
     const list = listLocalModels();
@@ -266,19 +266,19 @@ describe("GUI 主进程模块冒烟（临时验证）", () => {
     expect(list[0].max_output).toBe(4096);
     expect(list[0].vision).toBe(true);
 
-    // Bug2 回归：本地模型不串入 API 供应商列表（_local_models 为特殊键，不得作为 provider 出现、也不得显示"无密钥"）
+    
     expect(listProviders().find((p) => p.key === "_local_models")).toBeUndefined();
 
-    // 与 API 供应商 key 冲突 → 拒绝
+    
     expect((await saveProvider({ key: "qwen", api_base: "https://x.com" })).ok).toBe(true);
     expect(saveLocalModel({ id: "qwen", path: gguf }).ok).toBe(false);
     expect(saveLocalModel({ id: "bad name!", path: gguf }).ok).toBe(false);
 
-    // 删除 + 幂等
+    
     expect(removeLocalModel("qwen").ok).toBe(true);
     expect(listLocalModels().length).toBe(0);
     expect(removeLocalModel("qwen").ok).toBe(true);
-    // 沙箱外无副作用
+    
     expect(listLocalModels().find((m) => m.id === "qwen")).toBeUndefined();
   });
 });

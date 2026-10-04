@@ -207,7 +207,7 @@ class TestHTTPStreaming:
         _run(t.close())
 
     def test_sse_keepalive_times_out(self):
-        # 问题1：server 只发 keep-alive ping（`: ...`）不发匹配响应 → wait_for 兜底返回 None，不挂起
+        
         import httpx
         from core.mcp_client import _HTTPTransport
 
@@ -219,7 +219,7 @@ class TestHTTPStreaming:
         t._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
         async def never_returns(resp, req_id):
-            await asyncio.sleep(3600)  # 模拟无限 keep-alive 流
+            await asyncio.sleep(3600)  
 
         t._read_sse_stream = never_returns
         result = _run(t.request('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}', 1, timeout=0.2))
@@ -305,7 +305,7 @@ class TestStdioFraming:
         from core.mcp_client import _StdioTransport
         t = _StdioTransport("cmd", [], None, "t")
         t._proc = MagicMock()
-        # 首字节 b'{' 已嗅探，read(1) 返回剩余行
+        
         t._proc.stdout.read = MagicMock(return_value=b'"jsonrpc":"2.0","id":1,"result":{"x":1}}\n')
         assert t._read_jsonl(b"{") == {"jsonrpc": "2.0", "id": 1, "result": {"x": 1}}
 
@@ -315,7 +315,7 @@ class TestStdioFraming:
         t._proc = MagicMock()
         body = b'{"jsonrpc":"2.0","id":1,"result":{"x":1}}'
         n = len(body)
-        # 首字节 b'C' 已嗅探，返回剩余 header + body
+        
         t._proc.stdout.read = MagicMock(side_effect=[f"ontent-Length: {n}\r\n\r\n".encode(), body])
         assert t._read_content_length(b"C") == {"jsonrpc": "2.0", "id": 1, "result": {"x": 1}}
 
@@ -396,7 +396,7 @@ for line in sys.stdin:
         _run(scenario())
 
     def test_stderr_drain(self):
-        # 子进程启动即写 200KB 到 stderr（>64KB 管道缓冲）；无 drain 则死锁
+        
         script = "import sys\nsys.stderr.write('x' * 200000)\nsys.stderr.flush()\n" + self._FAKE_SERVER
 
         async def scenario():
@@ -416,7 +416,7 @@ for line in sys.stdin:
             try:
                 r = await t.request(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}), 1, timeout=10.0)
                 assert r is not None and r.get("id") == 1
-                # tools/list 永不响应 → 超时，但进程仍 running（不再 kill）
+                
                 r = await t.request(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}), 2, timeout=1.0)
                 assert r is None
                 assert t.running is True
@@ -449,11 +449,11 @@ class TestMCPClient:
         assert registry.get("mcp_echo") is not None
         assert registry.get("mcp_res_doc") is not None
         assert registry.get("mcp_prompt_greet") is not None
-        # 权限：tools=network，resources/prompts=read
+        
         assert registry.get("mcp_echo").permissions == ["network"]
         assert registry.get("mcp_res_doc").permissions == ["read"]
         assert registry.get("mcp_prompt_greet").permissions == ["read"]
-        # 清理
+        
         client._unregister_all_tools()
 
     def test_call_tool_routing(self):
@@ -465,11 +465,11 @@ class TestMCPClient:
         client._register_capabilities("svc", server)
         client._tool_map["mcp_res_doc"] = ("svc", "resource", "file:///a")
 
-        # resource 路由
+        
         result = _run(client.call_tool("mcp_res_doc", {}))
         assert result == "[错误] MCP 资源 'file:///a' 读取失败：服务无响应" or "资源" in result
 
-        # 未知工具
+        
         assert _run(client.call_tool("mcp_nonexistent", {})) == "[错误] MCP 未找到工具 'mcp_nonexistent'"
         client._unregister_all_tools()
 
@@ -637,9 +637,9 @@ for line in sys.stdin:
             assert results["fake"] is True
             assert get_registry().get("mcp_t1") is not None
             assert get_registry().get("mcp_t2") is None
-            # 触发 server 加工具 + 发 list_changed
+            
             await client._servers["fake"]._request("trigger", {})
-            # 等通知异步处理（create_task → _refresh_server_tools）
+            
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and get_registry().get("mcp_t2") is None:
                 await asyncio.sleep(0.05)
@@ -658,7 +658,7 @@ for line in sys.stdin:
             client = MCPClient()
             handler = client._make_notification_handler("fake")
             with patch.object(client, "_refresh_server_tools", boom):
-                # 异常被 handler 吞掉，不向外抛（否则 create_task 的任务异常无人 retrieve）
+                
                 await handler({"method": "notifications/tools/list_changed"})
         _run(scenario())
 
@@ -669,7 +669,7 @@ for line in sys.stdin:
 
         class _SlowTransport(_FakeTransport):
             async def request(self, payload, req_id, timeout=None):
-                await asyncio.sleep(0.02)  # 强制真实交错，放大并发窗口
+                await asyncio.sleep(0.02)  
                 return await super().request(payload, req_id, timeout)
 
         async def scenario():
@@ -687,7 +687,7 @@ for line in sys.stdin:
                 client._refresh_server_tools("fake"),
                 client._refresh_server_tools("fake"),
             )
-            # 锁串行化后第二次刷新先摘旧再挂新，只保留一个 mcp_t1，无 _2 后缀
+            
             assert get_registry().get("mcp_t1") is not None
             assert get_registry().get("mcp_t1_2") is None
             client._unregister_server_tools("fake")
@@ -736,14 +736,14 @@ for line in sys.stdin:
             results = await client.start_all()
             assert results["fake"] is True
             assert get_registry().get("mcp_t1") is not None
-            # 让 server 死掉
+            
             await client._servers["fake"]._notify("die", {})
-            # 等死亡被检测（工具被摘除）
+            
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and get_registry().get("mcp_t1") is not None:
                 await asyncio.sleep(0.05)
             assert get_registry().get("mcp_t1") is None
-            # 等重连（退避 1s + 重启 + 重注册）
+            
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline and get_registry().get("mcp_t1") is None:
                 await asyncio.sleep(0.1)

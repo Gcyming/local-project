@@ -33,7 +33,7 @@ class TestMerger:
         st.provider_key = "test"
         return st
 
-    # ── collect_results ──────────────────────────────────
+    
 
     def test_collect_results_empty(self):
         """空子任务列表"""
@@ -53,7 +53,7 @@ class TestMerger:
         assert "认证模块实现完成" in context
         assert "数据库连接失败" in context
 
-    # ── analyze_errors ──────────────────────────────────
+    
 
     def test_analyze_errors_no_errors(self):
         """无错误"""
@@ -76,7 +76,7 @@ class TestMerger:
         assert "task2" in errors[0]
         assert "连接超时" in errors[0]
 
-    # ── assess_risks ─────────────────────────────────────
+    
 
     def test_assess_risks_all_success(self):
         """全部成功"""
@@ -112,7 +112,7 @@ class TestMerger:
         risks = self.merger.assess_risks([])
         assert risks[0]["level"] == RiskLevel.HIGH.value
 
-    # ── trial_run ────────────────────────────────────────
+    
 
     def test_trial_run_all_success(self):
         """全部成功，基础检查通过"""
@@ -163,7 +163,7 @@ class TestMerger:
             self._create_subtask("task2", "done", "认证失败，服务拒绝访问"),
         ]
         result = asyncio.run(self.merger.trial_run("总结", subtasks))
-        # 一致性警告应被记录
+        
         assert "一致性" in result["log"] or "通过" in result["log"]
 
     def test_trial_run_with_llm_fn(self):
@@ -176,11 +176,11 @@ class TestMerger:
             self._create_subtask("task2", "done", "结果2"),
         ]
         result = asyncio.run(self.merger.trial_run("好的总结", subtasks, llm_fn=mock_llm_fn))
-        # 应该有质量评分
+        
         assert result["score"] >= 0
         assert result["score"] <= 10
 
-    # ── finalize ─────────────────────────────────────────
+    
 
     def test_finalize_success(self):
         """完整合并流程：成功"""
@@ -210,7 +210,7 @@ class TestMerger:
         ]
         result = self.merger.finalize("总结", subtasks)
 
-        # 验证字段
+        
         assert result.task_id == self.task_id
         assert result.original_task == self.original_task
         assert result.summary == "总结"
@@ -261,7 +261,7 @@ class TestMergerEdgeCases:
         assert result.trial_passed is True
 
 
-# ── A-013: LLM 矛盾裁定 ────────────────────────────────────
+
 
 
 class TestConflictAdjudication:
@@ -271,7 +271,7 @@ class TestConflictAdjudication:
         self.merger = Merger("t1", "原始任务")
 
     def _conflict_subtasks(self):
-        # 1 正 2 负 → ratio 2/3 > 0.5，触发关键词启发式
+        
         def _st(name, result):
             st = MagicMock(spec=SubTask)
             st.name = name

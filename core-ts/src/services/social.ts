@@ -1,9 +1,9 @@
-/**
- * core-ts/src/services/social.ts — SocialService（WeCom 企业微信接入，语义对齐 slime_server.py social_webhook）。
- * - 企业微信：官方 HTTP API → TS 原生（WeComAdapter）
- * - 个人微信：wechaty TS 长弃维护 → 回退 sidecar（v2.7 唯一例外），本服务不实现个人微信路径
- * - 编排：verify（URL echostr / msg 验签）→ receive → chatFn（Agent LLM）→ send
- */
+
+
+
+
+
+
 import { WeComAdapter, WeComMessage } from "../social/wecom.js";
 import { AgentState } from "./agents.js";
 
@@ -22,7 +22,7 @@ export interface SocialChatFn {
   (agent: AgentState, content: string): Promise<string>;
 }
 
-/** 社交 webhook 处理结果（单一 ok 形状，echostr 与 reply 互斥） */
+
 export interface SocialWebhookOk {
   ok: true;
   echostr: string | null;
@@ -50,7 +50,7 @@ export class SocialService {
     });
   }
 
-  /** 企业微信 webhook 入口（对齐 Python social_webhook / personal_wechat_webhook 的 WeCom 分支） */
+  
   async handleWebhook(req: Record<string, unknown>): Promise<SocialWebhookResult> {
     const msgSignature = String(req.msg_signature ?? req.msg_signature ?? "");
     const timestamp = String(req.timestamp ?? "");
@@ -60,7 +60,7 @@ export class SocialService {
     const hasSig = Boolean(msgSignature && timestamp && nonce);
 
     if (hasEchostr) {
-      // P1-19: URL 验证也必须先验签再回显
+      
       if (!this.adapter.verifyToken) {
         return { ok: false, status: 503, error: "未配置 wechat_verify_token，webhook 已禁用" };
       }
@@ -83,7 +83,7 @@ export class SocialService {
       return { ok: false, status: 403, error: "签名校验失败" };
     }
 
-    // 消息处理流程
+    
     const agentId = String(req.agent_id ?? "").trim();
     const message: WeComMessage = {
       chat_id: String(req.chat_id ?? ""),
@@ -104,7 +104,7 @@ export class SocialService {
       return { ok: true, echostr: null, reply: null, sent: false };
     }
 
-    // N11-P3-3: 速率限制（per chat_id）
+    
     if (message.chat_id && !this.adapter.checkRateLimit(message.chat_id)) {
       const reply = "[消息过于频繁，请稍候再试]";
       const sent = reply ? await this.adapter.send(message.chat_id, reply) : false;
@@ -127,7 +127,7 @@ export class SocialService {
     }
   }
 
-  /** 直接暴露 WeComAdapter 供测试/外部直调 */
+  
   getWeComAdapter(): WeComAdapter {
     return this.adapter;
   }

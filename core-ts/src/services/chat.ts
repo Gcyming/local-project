@@ -1,14 +1,14 @@
-/**
- * core-ts/src/services/chat.ts — ChatService（slime_server.py /chat、/chat/analyze、/chat/stream 语义移植）。
- * 承载端点全语义：
- * - analyze：Swarm 分裂分析（build_swarm_analysis_prompt + parseSwarmAnalysis，A-015 显式降级）
- * - chat：委托 prompt → A2A 排水 → A-098 平台证据注入 → 推理 → 委托/广播路由（≤3）
- *        → A-087 失败前缀黑名单 → A-090 reply_raw 分离 → 交互/历史持久化 → 后台 post-process
- * - stream：事件流（chunk/tool/reasoning/progress/done/heartbeat/error，统一 {seq,type,data}）
- *        → A-049/A-085 编造检测强制工具轮 → 委托心跳（15s）→ done 单收尾 → finally 持久化
- * 依赖注入：ChatEngine（模型+工具轮执行器）、ServerA2ABus、AgentRegistry、post-process hooks
- * （evolution/记忆提取为 5B.3 注入点，缺省跳过并告警——对齐 Python best-effort 语义）。
- */
+
+
+
+
+
+
+
+
+
+
+
 
 import { ChatMessage } from "shared/schemas";
 import {
@@ -37,35 +37,35 @@ import { consolidateMemoryNow } from "../memory/store.js";
 import { EventSequence, ServiceEvent } from "./events.js";
 import { AlarmBus, getAlarmBus, AlarmSeverity } from "./stats.js";
 import { getSession } from "./sessions.js";
-// A-1034：diff 标记正则的唯一出处（tool_loop 负责截断时保护它，这里负责把它写进思考记录）
+
 import { DIFF_TAG_RE } from "../tool_loop.js";
-// A-1106：委派规范的**唯一出处**（与 `Engine.buildSystem` 共用同一常量，不再各写一遍）。
+
 import { DELEGATION_GUIDANCE } from "./subagentCatalog.js";
-/* A-1144：右栏「挂载」——把用户此刻在右栏看的东西按会话拼进系统提示（唯一产地 `sidebarMount.ts`）。 */
+
 import { sidebarMountSection } from "../sidebarMount.js";
-// A-1093：标记字面量的唯一出处（`diff_marker.ts`）—— 正则、占位符、构造器、统计口径同源。
+
 import { DIFF_TRIMMED_MARKER as DIFF_TRIMMED_TAG } from "../diff_marker.js";
 
-// ── 常量（对齐 slime_server.py）────────────────────────────
+
 
 export const HEARTBEAT_INTERVAL_MS = 15_000;
 export const STREAM_MAX_CHARS = 10 * 1024 * 1024;
 export const MAX_DELEGATIONS = 3;
 
-/** A-980-R24：工具循环的**默认预算护栏**（可被环境变量覆盖）。
- *
- *  `core-ts/src/tool_loop.ts` 早就定义了 `maxToolCalls` / `maxTotalTokens` / `maxWallClockMs`，
- *  但 GUI 调用链（`chat.ts` → `engine.stream`）**从来没有传过** —— 于是实际只有
- *  `TOOL_MAX_ROUNDS`（500 轮）在生效，另外三道护栏是死代码。
- *
- *  后果：模型陷入"反复调工具但拿不到进展"时，会一路跑满 500 轮；而工具循环**每轮都要全量重发
- *  历史消息**，于是主进程内存与上游请求体积双双膨胀 → 渲染进程 OOM（`renderer-crash.log` 有过
- *  `oom` 记录）/ 上游超长报错 → 用户侧看到的就是"用着用着 slime 直接崩了、任务中断"。
- *
- *  这里补上**宽松但有限**的默认值（正常任务差 1~2 个数量级，只拦真正失控的循环；
- *  命中后 `tool_loop` 会给模型"预算耗尽"提示并**优雅收束**输出已有结论，不是硬中断）：
- *    - 墙钟 3 小时（`SLIME_MAX_WALL_CLOCK_MS`）：单轮对话跑过 3 小时必然是卡死，不是长任务；
- *    - 累计 token 1200 万（`SLIME_MAX_TOTAL_TOKENS`）。 */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 function positiveEnvNumber(key: string, fallback: number): number {
   const env = typeof process !== "undefined" ? (process.env as Record<string, string | undefined>) : {};
   const n = Number(env[key]);
@@ -74,7 +74,7 @@ function positiveEnvNumber(key: string, fallback: number): number {
 export const DEFAULT_TOOL_WALL_CLOCK_MS = positiveEnvNumber("SLIME_MAX_WALL_CLOCK_MS", 3 * 60 * 60 * 1000);
 export const DEFAULT_TOOL_MAX_TOTAL_TOKENS = positiveEnvNumber("SLIME_MAX_TOTAL_TOKENS", 12_000_000);
 
-/** 工具名 → 思考过程留痕的展示标签（与 GUI renderer TOOL_LABELS 对齐；未知工具回退原始名） */
+
 const TOOL_DISPLAY_LABELS: Record<string, string> = {
   web_search: "网络搜索",
   web_fetch: "网页抓取",
@@ -98,41 +98,41 @@ export function toolDisplayName(name: string): string {
   return TOOL_DISPLAY_LABELS[name] ?? name;
 }
 
-/**
- * A-1034：写进思考记录的 diff 标记**源码字符上限**（old + new 合计）。
- *
- * 为什么思考记录里也要带 diff：工具结果本身（含标记）只在**本轮内存**里存在，
- * 落盘的历史只有 assistant 的 `reasoning`。此前 `composeToolCallBlock` 只写工具名，
- * 于是重新打开会话时工具节点没有 result → 产物卡与思考历程**都展不开改动对比**
- * （用户报「改动的产物无法展开查看改动对比」的根因）。
- *
- * 为什么要设上限：标记是 base64，体积 ≈ 1.33×；思考记录进会话文件。
- * 这里的取值比产物卡的 `PRODUCT_DIFF_PERSIST_MAX`(120000) 更保守，因为它是
- * **逐行**追加到同一条 reasoning 里的，不是每条产品一份。
- * 超限则只写 `DIFF_TRIMMED_TAG`，让界面如实说"详情未随记录保存"而不是点开空白。
- * （已确认 reasoning **不回灌上游上下文** —— GUI 只发 `r.ai`，所以不存在毒化上下文的风险。）
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const TRACE_DIFF_MAX = 60_000;
 
-/** 超限时写进思考记录的位置占位：告知"曾有改动、但详情没存"（标记字面量的唯一出处见 `diff_marker.ts`） */
 
-/** 从工具结果里取出可直接写进思考记录的 diff 片段（无标记/超限各有对应形态）。
- *  导出供守卫直测阈值边界 —— 只测"函数能跑"等于没测。 */
+
+
+
 export function diffTagForTrace(result: unknown): string | undefined {
   if (typeof result !== "string") { return undefined; }
   const m = DIFF_TAG_RE.exec(result);
   if (!m) { return undefined; }
   const tag = m[0];
-  // base64 长度 → 源码长度估算足够做闸门，不必真解码
+  
   if (tag.length > TRACE_DIFF_MAX * 1.4) { return DIFF_TRIMMED_TAG; }
   return tag;
 }
 
-/** 组装「工具调用记录」思考块（无思考模型也能在思考过程留痕；同一工具多次调用逐行记录）。
- *
- * `diffTags` 与 `toolNames` **按下标对齐**（缺项 = 该次调用没有改动信息）。
- * 标记附在行尾，渲染层 `splitToolTrace` → `traceEntriesToToolSteps` 会把它拆回
- * `result` 字段，历史回看时才拿得到 diff。 */
+
+
+
+
+
 export function composeToolCallBlock(toolNames: string[], diffTags?: Array<string | undefined>): string {
   if (toolNames.length === 0) { return ""; }
   const lines = toolNames.map((n, i) => {
@@ -142,7 +142,7 @@ export function composeToolCallBlock(toolNames: string[], diffTags?: Array<strin
   return `### 工具调用记录\n${lines.join("\n")}`;
 }
 
-/** A-087（漏洞清单 P1-2）：回复失败前缀黑名单——命中任一 → success=False */
+
 export const FAIL_REPLY_PREFIXES = [
   "[API 调用失败",
   "[API 响应解析失败",
@@ -179,132 +179,132 @@ export const MEDIA_TOOLS = ["agnes_prompt_build", "agnes_generate_image", "agnes
 export const CLAIM_VERBS = ["已保存", "保存到", "已生成", "已创建", "已写入", "已下载", "已导出"];
 export const EVIDENCE_HINTS = ["字节", "kb", "mb", "文件大小", "完整路径", "时长"];
 
-// ── 类型 ──────────────────────────────────────────────────
+
 
 export interface ChatRequest {
   message: string;
   history?: ChatMessage[];
   retry?: boolean;
   maxTokens?: number;
-  /** 会话 ID（GUI 项目内独立会话；缺省写入无 session_id 记录） */
+  
   sessionId?: string;
-  /**
-   * A-1131：**本次请求要用的模型**（会话级选择，由主进程从会话 meta 读出后透传）。
-   *
-   * 用户原话：「同一个 Agent 似乎不能在不同会话使用不同模型……之前那个会话里面的 agent
-   * 模型直接变成 deepseek 模型了」。原因是下拉写的是 **Agent 记录** ⇒ 同 Agent 全会话共用。
-   * 现在模型选择住在**会话**上，主进程读出来后经本字段下发；引擎侧由 `runAgentFor` 收口。
-   *
-   * ⚠️ 缺省（undefined / 空串）= 跟随 `agent.model_choice`（老数据与所有内部调用零行为变化）。
-   */
+  
+
+
+
+
+
+
+
+
   modelChoice?: string;
-  /** 联网搜索开关：false 时 web_search/web_fetch 工具被静默拒绝（GUI 侧下发） */
+  
   networkEnabled?: boolean;
-  /** 识图图片（data URL 列表，data:image/png;base64,...）。引擎层转为 OpenAI 兼容 content 数组 */
+  
   images?: string[];
-  /** 故障自愈续接提示：自动重连/换模型继续时告知模型『你被中断了，从断点继续』，防幻觉已完成 */
+  
   resumeHint?: string;
-  /**
-   * A-1084：本次请求**实际要用的模型**窗口上限（由主进程 `resolveSessionWindowCap` 解析后透传）。
-   *
-   * 为什么要它：引擎里那道**保险门**（`planEngineSend`）必须知道"这个模型到底能装多少"，
-   * 否则只能在窗口未知时放行 —— 而"绕过主进程预检的入口"（群聊/子代理/强制工具轮）
-   * 恰恰就在这里失去了保护。缺省 undefined = 未知 ⇒ 不拦（不猜，零回归）。
-   */
+  
+
+
+
+
+
+
   windowCap?: number;
 }
 
-/** 引擎事件块（对齐 Python call_llm_stream chunk 协议） */
+
 export interface EngineChunk {
   type: "chunk" | "tool" | "tool-start" | "reasoning" | "progress" | "done" | "error" | "heartbeat" | "member" | "steer" | "notice";
   content?: string;
   name?: string;
-  /**
-   * A-1061②：工具调用 id（`tool-start` 与 `tool` 同值，界面靠它把「执行中」翻成「成功/失败」）。
-   */
+  
+
+
   toolId?: string;
-  /**
-   * A-1060：中途「引导」已被注入本轮上下文（type="steer"）。
-   * 值是渲染层待发卡片的自增 id —— 界面据此撤掉那张卡片，避免它走"排队等下一轮"再发一遍。
-   * `content` 同时携带原文，供界面就地补上用户气泡。
-   */
+  
+
+
+
+
   steerId?: string;
-  /** 团队会话：成员发言事件（type="member"）的发声 Agent ID */
+  
   agentId?: string;
   args?: string;
   result?: string;
   message?: string;
   reply?: string;
   reply_raw?: string;
-  /** A-124 正文/思考分离：SILAM 兑底的思考过程（done 事件携带，供上层折叠展示） */
+  
   reasoning?: string | null;
   model?: string;
   prompt_tokens?: number;
   completion_tokens?: number;
-  /** 缓存命中/写入 token（上游 prompt caching；done 事件携带，缓存命中率监测数据源） */
+  
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
-  /** 推理/思考 token（上游 completion_tokens_details.reasoning_tokens；done 事件携带，
-   *  供 GUI「推理 Tokens（思考）」明细与用量统计还原真实思考成本） */
+  
+
   reasoning_tokens?: number;
-  /**
-   * A-974-R7：**窗口占用口径**（仅工具循环路径下发）——「最近一轮」上游请求的输入侧 token。
-   * `prompt_tokens` 是跨轮累计（计费口径）；上下文窗口占用必须用最近一轮，否则 N 轮全量重发叠加爆表。
-   */
+  
+
+
+
   window_prompt_tokens?: number;
   window_cache_read_tokens?: number;
   window_cache_creation_tokens?: number;
-  /**
-   * A-974-R8：该上游 `prompt_tokens` **是否已含缓存命中**（OpenAI 兼容=true / Anthropic=false）。
-   * GUI 窗口占用公式据此决定是否 +cache_read，避免 OpenAI 兼容系重复计缓存导致窗口虚高。
-   */
+  
+
+
+
   cache_read_in_prompt?: boolean;
   elapsed_ms?: number;
   tools_only?: string[];
-  /** v2.8 可观测性：全链路耗时（路由→检索→推理→工具轮），done 事件必带 */
+  
   timings?: Record<string, number>;
-  /** A-939 上下文分桶：done 事件携带各来源 token 估算（供 GUI 分桶托盘显示） */
+  
   ctxBuckets?: ContextBuckets;
 }
 
 export interface ChatEngineResult {
   reply: string;
   replyRaw?: string;
-  /** A-124 正文/思考分离：SILAM 兑底的思考过程（情绪/取向/生长提示），供上层折叠展示 */
+  
   reasoning?: string | null;
   model?: string;
   promptTokens?: number;
   completionTokens?: number;
-  /** 缓存命中/写入 token（上游 prompt caching；缓存命中率监测数据源） */
+  
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   elapsedMs?: number;
   timings?: Record<string, number>;
-  /** A-939 上下文分桶：一次请求各来源 token 估算（system/rules/memory/workspace/planning/tools/history/message） */
+  
   ctxBuckets?: ContextBuckets;
 }
 
-/**
- * A-939 上下文分桶（对齐 Cursor 3.3 Context Buckets / Claude Code context-window 分来源计量）：
- * 按「注入来源」切分一次请求的上下文占用。全部为估算（estimateTokens 0.6×字符），与总 prompt_tokens 同量级。
- * 纯数据结构（零逻辑）→ 契约层定义，engine 层计算，GUI 层展示。
- */
+
+
+
+
+
 export interface ContextBuckets {
-  /** 身份铁律 + 诚实协议 + 人格（identity_prompt）+ 思考格式约束 */
+  
   system: number;
-  /** 规则注入（InjectionHooks.fixedSegments：技能/平台规则等固定段） */
+  
   rules: number;
-  /** 记忆检索注入（InjectionHooks.retrieveSegments：心智/记忆上下文） */
+  
   memory: number;
-  /** 工作目录清单（workspace 预加载清单段） */
+  
   workspace: number;
-  /** 任务执行规范（todo_write 规划引导段） */
+  
   planning: number;
-  /** 工具 schema（本次请求注入的工具定义） */
+  
   tools: number;
-  /** 历史消息 */
+  
   history: number;
-  /** 当前用户消息（含图片文本段） */
+  
   message: number;
 }
 
@@ -316,31 +316,31 @@ export interface ChatEngineCall {
   maxTokens?: number;
   toolsOnly?: string[];
   onChunk?: (delta: string) => void;
-  /** 用户主动中断信号（GUI 停止生成时中止底层流） */
+  
   signal?: AbortSignal;
-  /** 联网搜索开关：false 时 web_search/web_fetch 工具被静默拒绝 */
+  
   networkEnabled?: boolean;
-  /** 会话级工作目录（"以文件夹为主"：优先于 Agent sandbox_override.workspace） */
+  
   workspace?: string;
-  /** 会话 ID（透传至工具循环的权限/提问请求，GUI 据此打会话标签过滤旧流） */
+  
   sessionId?: string;
-  /** 识图图片（data URL 列表），引擎层组装进最新 user 消息的 content 数组 */
+  
   images?: string[];
-  /** 任务预算护栏（透传工具循环：任一达到即优雅收束；缺省=不限制） */
+  
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
-  /**
-   * A-1084：本条请求的模型窗口上限（主进程解析后透传；见 `ChatRequest.windowCap`）。
-   * 引擎在**发上游之前**用它跑 `planEngineSend` —— 装不下就**不出网**（发了只会被拒/挂住）。
-   */
+  
+
+
+
   windowCap?: number;
 }
 
 export interface ChatEngine {
   chat(opts: ChatEngineCall): Promise<ChatEngineResult>;
   stream(opts: ChatEngineCall): AsyncIterable<EngineChunk>;
-  /** A-980-R22：可选工具目录列举（支持则按 Agent 白名单下发 toolsOnly；缺省引擎返回 undefined → 全量零回归） */
+  
   listTools?(): Array<{ function?: { name?: string } }>;
 }
 
@@ -356,7 +356,7 @@ export interface ExtractedMemory {
   behaviorPatterns: BehaviorPatternExtracted[];
 }
 
-/** post-process 注入点（evolution / 记忆提取为 5B.3 迁移后接线；缺省跳过） */
+
 export interface PostProcessHooks {
   extractMemory?: (opts: {
     agent: AgentState;
@@ -372,7 +372,7 @@ export interface PostProcessHooks {
   }) => Promise<void>;
 }
 
-/** 平台证据注入（A-098；skill_engine/MCP 迁移后接线，缺省原样返回） */
+
 export type EvidenceInjector = (message: string) => Promise<string> | string;
 
 export interface ChatServiceOptions {
@@ -381,20 +381,20 @@ export interface ChatServiceOptions {
   bus?: ServerA2ABus;
   postProcess?: PostProcessHooks;
   evidence?: EvidenceInjector;
-  /** 流事件发射器（缺省 emitServiceEvent 输出；SSE 由 gateway 消费） */
+  
   emit?: (ev: ServiceEvent<unknown>) => void;
-  /** 异常告警总线（v2.8：sidecar 崩溃/OOM/检索超时 → 日志 + stats 状态 + 可选通知钩子） */
+  
   alarms?: AlarmBus;
-  /** 历史存储（缺省 config/history.jsonl 文件实现；测试注入内存实现） */
+  
   history?: HistoryStore;
   logger?: Pick<Console, "warn" | "info" | "debug">;
-  /**
-   * A-1035：知识/记忆的落盘根（不传 = 项目根的 `Knowledge/Agent Memory`）。
-   *
-   * 为什么需要这么一个入口：后处理链路（知识 pattern / 生成技能 / 人格 trait）此前
-   * **固定**落在项目根下，嵌入方与测试都无法改道 —— 测试于是把生成的技能写进了
-   * 仓库真实的 `Knowledge/` 目录。传一个绝对路径即可完全隔离。
-   */
+  
+
+
+
+
+
+
   dataDir?: string;
 }
 
@@ -422,9 +422,9 @@ export interface SwarmAnalysis {
   parse_ok: boolean;
 }
 
-// ── 纯函数（对齐 slime_server.py 同级函数）────────────────
 
-/** A-015：解析 Swarm 分析回复（整体 JSON → 正则兜底 → 显式降级标记） */
+
+
 export function parseSwarmAnalysis(reply: string): SwarmAnalysis {
   let data: Record<string, unknown> | null = null;
   let parseOk = false;
@@ -435,7 +435,7 @@ export function parseSwarmAnalysis(reply: string): SwarmAnalysis {
       parseOk = true;
     }
   } catch {
-    // 继续正则兜底
+    
   }
   if (data === null) {
     const m = (reply ?? "").match(/\{[^{}]*"action"\s*:\s*"(chat|fork|swarm)"[^{}]*\}/);
@@ -447,7 +447,7 @@ export function parseSwarmAnalysis(reply: string): SwarmAnalysis {
           parseOk = true;
         }
       } catch {
-        // 兜底失败
+        
       }
     }
   }
@@ -475,7 +475,7 @@ export function parseSwarmAnalysis(reply: string): SwarmAnalysis {
   };
 }
 
-/** 构建 Swarm 分析提示词（对齐 Agent.build_swarm_analysis_prompt） */
+
 export function buildSwarmAnalysisPrompt(userMessage: string, availableProviders = 1): string {
   return (
     "分析以下用户任务，判断是否需要分裂执行。\n\n" +
@@ -503,7 +503,7 @@ export function buildSwarmAnalysisPrompt(userMessage: string, availableProviders
   );
 }
 
-/** A-049：生成类请求判定 */
+
 export function isGenerationRequest(message: string): boolean {
   if (!message) {
     return false;
@@ -514,7 +514,7 @@ export function isGenerationRequest(message: string): boolean {
   );
 }
 
-/** A-085：图片请求判定（视频词 → False；图片词 → True；文本目标词 → False；默认图片） */
+
 export function isImageRequest(message: string): boolean {
   if (!message) {
     return false;
@@ -532,7 +532,7 @@ export function isImageRequest(message: string): boolean {
   return GEN_REQ_HINTS.some((h) => message.includes(h));
 }
 
-/** 完成态声称判定（A-049；对齐 core/claims.py 语义：声称动词 或 证据描述+路径核验） */
+
 export async function claimsCompletion(reply: string): Promise<boolean> {
   if (!reply) {
     return false;
@@ -555,12 +555,12 @@ export async function claimsCompletion(reply: string): Promise<boolean> {
   return false;
 }
 
-/** A-087：失败前缀黑名单判定（命中任一 → 失败） */
+
 export function isFailReply(reply: string): boolean {
   return FAIL_REPLY_PREFIXES.some((p) => reply.includes(p));
 }
 
-/** XML 风格思考标签对（open 在前；有前缀重叠的按更长优先，避免 <reasoning> 被 <reason> 误匹配） */
+
 const THINK_TAG_PAIRS: ReadonlyArray<{ open: string; close: string }> = [
   { open: "<thinking", close: "</thinking>" },
   { open: "<reasoning", close: "</reasoning>" },
@@ -569,10 +569,10 @@ const THINK_TAG_PAIRS: ReadonlyArray<{ open: string; close: string }> = [
   { open: "<|begin_of_thought|>", close: "<|end_of_thought|>" },
 ];
 
-/** DeepSeek 风格无尖括号思考块（DeepSeek R1 / 部分 Qwen3/蒸馏模型）：开头 ` thinking`、结尾 ` response`。
- *  仅用于「正文尚未开始」的前沿——思考块总是模型输出的首块，避免正文中正常出现的「 response」被误判。
- *  注意：DeepSeek 标准闭合是「空格+response」（` response`，如 `\n\n response\n\n`）；部分模型输出
- *  `\nresponse`（无空格）或 `\n response`（换行+空格），由 findDsMarker 的行界判定统一兼容。 */
+
+
+
+
 const DS_START = " thinking";
 const DS_END = " response";
 
@@ -581,33 +581,33 @@ export function stripToolCallXml(text: string): { clean: string; toolCalls: stri
     return { clean: text, toolCalls: "" };
   }
   const parts: string[] = [];
-  // ① 带 dots_ 前缀的伪工具块（小模型常见误写：<dots_function_call>…</dots_function_call>）
+  
   let clean = text.replace(/<[a-z0-9_]*function_call[\s\S]*?<\/[a-z0-9_]*function_call\s*>/gi, (m) => {
     parts.push(m.trim());
     return "";
   });
-  // ② Claude 风格 XML 工具调用（<invoke name="web_search">…<parameter>…</parameter></invoke>）
+  
   clean = clean.replace(/<invoke\b[\s\S]*?<\/invoke\s*>/gi, (m) => {
     parts.push(m.trim());
     return "";
   });
-  // ③ 游离 parameter 残片（外层块被剥后裸露的）
+  
   clean = clean.replace(/<parameter\b[^>]*>[\s\S]*?<\/parameter\s*>|<parameter\b[^>]*\/>/gi, (m) => {
     parts.push(m.trim());
     return "";
   });
-  // ④ 剥除后残留的空壳包装标签（模型常以 <ignore>…</ignore> 包裹工具声明；剥掉内容后空壳也清理）
+  
   clean = clean.replace(/<(ignore|result|output|tool)\b[^>]*>\s*<\/\1\s*>/gi, "");
   return { clean, toolCalls: parts.join("\n") };
 }
 
-/** 从回复正文中剥离思考内容（Qwen3/DeepSeek 等思考模型已知会把思考泄漏进 content）。
- * 处理三种形态（业界共识：客户端/展示层须同时兼容 reasoning_content + 内嵌思考标签）：
- * 1. XML 风格思考块：<thinking>...</thinking> / <reasoning> / <thought> / <reason> / <|begin_of_thought|>
- * 2. DeepSeek 无尖括号思考块：前缀 ` thinking…\nresponse`（正文前沿）
- * 3. 思考重复前缀：content 以已捕获的 reasoning 开头（模型把思考同时写进 content，可能重复多次）
- * 返回 { cleanReply, reasoning }：cleanReply 为剥离后的正文，reasoning 为合并后的思考内容。
- */
+
+
+
+
+
+
+
 export function extractThinkingFromReply(
   reply: string,
   existingReasoning = "",
@@ -618,7 +618,7 @@ export function extractThinkingFromReply(
   let clean = reply;
   let reasoning = existingReasoning;
 
-  // 1. XML 风格思考标签块（跨标签对捕获；同开同闭，容忍换行/空白）
+  
   const tagParts: string[] = [];
   clean = clean.replace(/<(thinking|thought|reasoning|reason)>[\s\S]*?<\/(thinking|thought|reasoning|reason)>/gi, (m) => {
     tagParts.push(m.replace(/<\/?(thinking|thought|reasoning|reason)>/gi, "").trim());
@@ -629,8 +629,8 @@ export function extractThinkingFromReply(
     return "";
   });
 
-  // 2. DeepSeek 无尖括号思考块：仅当 clean 在「正文前沿」出现 ` thinking` 且其后有 `\nresponse` 闭合。
-  //    开标记前必须是非字母数字（通常是换行/空格），避免误匹配正文里的「thinking」一词。
+  
+  
   const dsRe = /(^|[\s])thinking\s+([\s\S]*?)(\n\s*response\b)/i;
   let change = true;
   let guard = 0;
@@ -638,7 +638,7 @@ export function extractThinkingFromReply(
     change = false;
     const dm = clean.match(dsRe);
     if (dm && dm.index !== undefined) {
-      const prefix = dm[1] || ""; // 开标记前那个分隔符（换行等，保留给正文排版）
+      const prefix = dm[1] || ""; 
       const reason = dm[2].trim();
       const tail = clean.slice(dm.index! + dm[0].length);
       if (reason) {
@@ -653,15 +653,15 @@ export function extractThinkingFromReply(
     reasoning = [reasoning, ...tagParts].filter(Boolean).join("\n");
   }
 
-  // A-966：剥离工具调用 XML 误写（小模型以 XML 声明工具、系统无法解析执行 → 直接泄漏成正文异常文本）。
-  // 剥出的声明并入思考区（用户可见"想调 web_search"），正文保持干净。
+  
+  
   const tc = stripToolCallXml(clean);
   clean = tc.clean;
   if (tc.toolCalls) {
     reasoning = [reasoning, tc.toolCalls].filter(Boolean).join("\n");
   }
 
-  // 3. 思考重复前缀：content 以 reasoning 开头且其后仍有内容 → 剥离（循环处理重复）
+  
   const rt = reasoning.trim();
   let trimmed = clean.trimStart();
   while (rt && trimmed.startsWith(rt) && trimmed.length > rt.length) {
@@ -669,25 +669,25 @@ export function extractThinkingFromReply(
   }
   clean = trimmed;
 
-  // 4. 逐词换行思考检测：模型有时把整段思考以「每行1-3字」的逐词换行格式输出（无XML标签）。
-  //    这类文本不含强/弱关键词，会穿透 splitUntaggedThinking 泄漏到正文。
+  
+  
   const tokenStrip = stripTokenByTokenThinking(clean, reasoning);
   if (tokenStrip.cleanReply !== clean) {
     return { cleanReply: tokenStrip.cleanReply, reasoning: tokenStrip.reasoning.trim() };
   }
 
-  // 5. 无标记裸思考兜底：正文前沿「分析用户输入 + 自我指涉回应」段 → 剥离为 reasoning
+  
   const untagged = splitUntaggedThinking(clean, reasoning);
   return { cleanReply: untagged.cleanReply, reasoning: untagged.reasoning.trim() };
 }
 
-/** 逐词换行思考检测：模型有时把整段思考以「每行1-3字」的逐词换行格式输出（无XML标签）。
- *  这类文本不含强/弱关键词，会穿透 splitUntaggedThinking 泄漏到正文。
- *  策略：扫描正文前沿，若前 N 行中 ≥70% 是 ≤3字符的超短行 → 视为逐词换行思考块并剥离。 */
+
+
+
 function stripTokenByTokenThinking(reply: string, existingReasoning = ""): { cleanReply: string; reasoning: string } {
   if (!reply) { return { cleanReply: reply, reasoning: existingReasoning }; }
   const lines = reply.split("\n");
-  // 只扫描前 40 行（避免误伤正常列表/代码块）
+  
   const scanLimit = Math.min(lines.length, 40);
   let shortLineCount = 0;
   let totalNonEmpty = 0;
@@ -697,14 +697,14 @@ function stripTokenByTokenThinking(reply: string, existingReasoning = ""): { cle
     totalNonEmpty++;
     if (trimmed.length <= 3) shortLineCount++;
   }
-  // 阈值：非空行 ≥8 且 ≥70% 是超短行 → 判定为逐词换行思考
+  
   if (totalNonEmpty >= 8 && shortLineCount / totalNonEmpty >= 0.7) {
-    // 找到最后一个连续超短行段的结束位置
+    
     let thinkingEnd = 0;
     for (let i = 0; i < lines.length; i++) {
       const trimmed = lines[i].trim();
       if (!trimmed || trimmed.length <= 3) {
-        thinkingEnd += lines[i].length + 1; // +1 for \n
+        thinkingEnd += lines[i].length + 1; 
       } else {
         break;
       }
@@ -716,22 +716,22 @@ function stripTokenByTokenThinking(reply: string, existingReasoning = ""): { cle
         return { cleanReply: rest, reasoning: [existingReasoning, thinkingText].filter(Boolean).join("\n") };
       }
     }
-    // 整个 reply 都是逐词换行 → 全部作为思考，正文留空（由 promoteOrphanThinking 处理）
+    
     return { cleanReply: "", reasoning: [existingReasoning, reply.trim()].filter(Boolean).join("\n") };
   }
   return { cleanReply: reply, reasoning: existingReasoning };
 }
 
-/** orphan thought 提升（对照 agentero docs deepseek-thinking-body 完成时兜底）：
- *  当 turn 结束只有思考（reasoning）而无正文（cleanReply 为空）时，说明模型把含最终答案的整块
- *  内容全写进了思考区。把最后一个非空思考块提升为正文，避免「答案被藏在思考里 / 正文 (empty)」。
- *  仅提升最后一段：兼容「思考 → 工具 → 再思考 → 答案被误标」的多段场景，更早的思考仍归思考区。 */
+
+
+
+
 export function promoteOrphanThinking(
   cleanReply: string,
   reasoning: string,
 ): { cleanReply: string; reasoning: string } {
   if (cleanReply.trim()) {
-    return { cleanReply, reasoning }; // 已有正文：不抬升
+    return { cleanReply, reasoning }; 
   }
   const blocks = (reasoning ?? "")
     .split(/\n{2,}/)
@@ -747,31 +747,31 @@ export function promoteOrphanThinking(
   };
 }
 
-/**
- * 无标记裸思考剥离（模型把思考裸写进正文、无任何标签时的保守兜底）。
- *
- * 模型（尤其未开启推理强度但本身会思考的模型，本地/云端均可能）会把「分析用户输入 + 自我指涉
- * 回应」的思考直接写进正文，形如「用户发送了…根据我的身份设定…我需要…我可以概述…」后接真正
- * 回答。此时无标签可拆，只能靠启发式。
- *
- * 判定策略（0.1.4 增强，修复同行密集思考 + 思考与正文同行 + 第一人称分析型思考无法剥离）：
- *  1) 特征计权：强思考信号（身份/角色/用中文回应/保持自然等自我指涉）+2，弱思考信号（用户发送
- *     了/我需要/我看到/根据我的等分析动作）+1。累积权重 ≥3 才剥离。
- *      - 强信号型（你好问候）自然过线；
- *      - 弱信号型（长任务分析：我需要…我可以概述…）多处累积过线；
- *      - 正常回答开头（「用户询问…根据我的经验…应该先分析瓶颈」，权重仅 2）不过线，避免误伤。
- *  2) 思考块末行支持「行内正文锚点切分」：思考特征之后若紧跟正文引导词（你好/您好/好/以下是…），
- *     行内切开，锚点起为正文，避免思考与首句正文同行时被整段误归思考、或单行时思考端=全文。
- *
- * 剥离条件：累积权重 ≥3 且 思考块结束下标 < 全文长度（之后确有正文）。仅作用于正文前沿（≤8 行）。
- */
-/** 允许「剥离后正文为空」（rest 为空）的思考段最小字符数：
- *  短句（如"根据我的角色设定，我需要保持角色。"）可能是模型把自述当回复 → 不剥离，
- *  交给 promoteOrphanThinking 终局提升；超长思考（正文尚未到达）才允许空正文剥离。 */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const MIN_EMPTY_REST_CHARS = 60;
-/** 无标记裸思考扫描行上限：低证据（weight<3）时 8 行快速判定；一旦权重 ≥3（疑似长思考块）
- *  扩展到本上限以找到真正正文起始行，避免 >8 行的思考块尾部（如「不过，作为 X，我可以…」）
- *  被误当正文泄漏。 */
+
+
+
 const UNTAGGED_SCAN_LIMIT = 60;
 export function splitUntaggedThinking(
   reply: string,
@@ -782,30 +782,30 @@ export function splitUntaggedThinking(
   }
   const lines = reply.split("\n");
 
-  // 强思考信号（自我指涉程度高，几乎不会出现在正常回答开头）。带 g 以统计同一次命中。
+  
   const strongRe =
     /身份设定|角色设定|我的身份|保持角色|用中文\s*(回应|回答|回复|沟通)|作为[^，。\n]{0,8}(我|助手|agent)|保持[^，。\n]{0,6}(自然|平静|专业|均衡|情绪)|当前[^，。\n]{0,4}(情绪|状态)|我[^，。\n]{0,6}\b(回应|回复|回答)用户/ig;
-  // 弱思考信号（分析用户输入 / 明确自指分析动作 / 自我指涉义务；正常回答开头可能零星出现，
-  // 需累积到阈值才生效，避免误伤）。刻意排除「可以/要/从/先」等正文中也常见、易误吞正文的词。
-  // 带 g。
+  
+  
+  
   const weakRe =
     /用户\s*(发送了|说|问|询问|提到|要求|让我|叫我|给|上报|讲述了)|用户[^，。\n]{0,6}(说|问|发|提|要|想|给|夸|称|表示|认为|觉得|称赞|赞美|夸奖|只是|还|终于)|我\s*(需要|应该|将|打算|必须|看到|已经|分析|检测|列出|读取|查看|检查|介绍|说明|概述|总结|给出|提供|梳理|整理|研究|了解|根据|翻一下|找一下|查一下|得先)|根据(我的|系统提示)|让我\s*(先|开始|列出|阅读|查看|分析|检查|了解|确认|概述)|(我先|首先)\s*(列表|阅读|查看|分析|检查|了解|确认|概述)/ig;
-  // 正文引导锚词（用于区分「正文起始行」与「思考内部尾句」）
+  
   const bodyStartRe =
     /^(哈哈|你好|您好|好的|当然|没问题|谢谢|抱歉|可以|好嘞|明白了|收到|好的呀|好的呢|嗯嗯|好的吧|没毛病|没问题|来啦|在的|你好呀)/;
 
-  let thinkingEnd = -1; // 思考块在整段中的结束下标（字符级，含前导）
+  let thinkingEnd = -1; 
   let weight = 0;
-  let prevHadFeature = false; // 上一行是否有思考特征（用于列表项延续）
-  let anchorStart = -1; // 行内正文锚点起点（仅最后一个特征行内的锚点有效，前面的可能是假阳性引用锚）
-  let naturalBreak = false; // 前面已有思考特征时遇到独立正文行 → 思考块结束
+  let prevHadFeature = false; 
+  let anchorStart = -1; 
+  let naturalBreak = false; 
 
-  // 低证据（weight<3）时 8 行快速判定；一旦权重 ≥3（疑似长思考块）扩展到 UNTAGGED_SCAN_LIMIT，
-  // 以扫描到真正的正文起始行，避免 >8 行的思考块尾部（如「不过，作为 X，我可以…」）被误当正文泄漏。
+  
+  
   for (let i = 0; i < lines.length && i < (weight >= 3 ? UNTAGGED_SCAN_LIMIT : 8); i++) {
     const line = lines[i].trim();
     if (!line) {
-      // 思考块前的空行归思考段（思考段常含空行）
+      
       continue;
     }
     const strongCount = (line.match(strongRe) || []).length;
@@ -816,25 +816,25 @@ export function splitUntaggedThinking(
       weight += strongCount * 2 + weakCount;
       prevHadFeature = true;
       thinkingEnd = computeLineEnd(lines, i);
-      // 行内正文锚点切分：本行已有思考特征权，其后紧跟正文引导词 → 行内切开
-      // 注意：只覆盖记录（最后一个特征行的 anchor 才可能是真实分界），不立即 break
-      // 否则前面行里引用用户话里的"你好"会触发假阳性、中断扫描导致权重不足
+      
+      
+      
       const anchor = findBodyAnchor(line, strongRe, weakRe);
       if (anchor >= 0) {
         anchorStart = computeLineStart(lines, i) + anchor;
       }
       continue;
     }
-    // 列表项且前面是思考特征 → 延续思考块（思考常以「1. 2.」列步骤）
+    
     if (isList && (prevHadFeature || weight > 0)) {
       thinkingEnd = computeLineEnd(lines, i);
       continue;
     }
-    // 无思考特征、非延续列表行
+    
     if (weight > 0) {
-      // 冒号结尾 → 思考内过渡行（"根据角色要求：" 通常引出后续列表/说明）→ 延续思考
+      
       if (/[:：]\s*$/.test(line)) {
-        // 强正文锚词行（报告/结论起头，如「以下是项目分析报告：」）且特征充足 → 思考块结束、正文开始
+        
         if (strongBodyStartRe.test(line) && weight >= 3) {
           naturalBreak = true;
           break;
@@ -842,33 +842,33 @@ export function splitUntaggedThinking(
         thinkingEnd = computeLineEnd(lines, i);
         continue;
       }
-      // 正文引导锚词开头（哈哈/你好/好的…），或强正文锚词（报告/结论/交付开场如「让我来分享…」，
-      // 需 weight≥3 避免误伤）→ 确认为正文起始行 → 思考块结束
+      
+      
       if (bodyStartRe.test(line) || (strongBodyStartRe.test(line) && weight >= 3)) {
         naturalBreak = true;
         break;
       }
-      // 其他无特征行：视为思考内部尾句（"同时要保持轻松友好的语气。"），延续思考
+      
       thinkingEnd = computeLineEnd(lines, i);
       continue;
     }
-    // 首行即无特征（weight===0）：非正文锚词开头 → 疑似思考开头（特征未出现），整段非裸思考，直通
+    
     break;
   }
 
-  // naturalBreak 为真：思考块后紧跟独立正文行（正文引导锚词开头）。
-  // 此时 thinkingEnd 已正确指向最后一个特征/列表行的末尾 → 直接用 thinkingEnd 切分，
-  // 丢弃 anchorStart（它是前面某特征行内的锚点，必然是引用假阳性或无关行内切分）。
+  
+  
+  
   const endIdx = naturalBreak ? thinkingEnd : (anchorStart >= 0 ? anchorStart : thinkingEnd);
-  // 判定：naturalBreak 且 weight≥2（思考段已结束 + 特征证据），或 weight≥3（行内锚点/无独立正文行）
+  
   const canCut = (naturalBreak && weight >= 2) || weight >= 3;
   if (canCut && endIdx > 0 && endIdx <= reply.length) {
     const thinkingText = reply.slice(0, endIdx).trim();
     const rest = reply.slice(endIdx).trim();
-    // 允许 rest 为空：超长思考（>8 行）在正文到达前被兜底剥离时，把思考段剥离、正文留空，
-    // 后续正文 chunk 再正常输出；否则思考会因「无正文 rest」被误判为正文而泄漏。
-    // 但短句「思考即全文」（如"根据我的角色设定，我需要保持角色。"）不剥离——可能是
-    // 模型把整段自述当回复（无独立正文），交由 promoteOrphanThinking 终局提升，避免误删空回复。
+    
+    
+    
+    
     const emptyRestLongEnough = thinkingText.length >= MIN_EMPTY_REST_CHARS;
     if (thinkingText && (rest || emptyRestLongEnough)) {
       return {
@@ -880,38 +880,38 @@ export function splitUntaggedThinking(
   return { cleanReply: reply, reasoning: existingReasoning };
 }
 
-/** 计算第 i 行在整段中的起始字符下标（含换行） */
+
 function computeLineStart(lines: string[], i: number): number {
   let s = 0;
   for (let k = 0; k < i; k++) {
-    s += lines[k].length + 1; // +1 换行
+    s += lines[k].length + 1; 
   }
   return s;
 }
-/** 计算第 i 行结束后的字符下标 */
+
 function computeLineEnd(lines: string[], i: number): number {
   return computeLineStart(lines, i) + lines[i].length;
 }
-/** 判断锚词前的字符是否为「词内」字符（CJK 表意字符/ASCII 字母数字/全角字母数字）。
- *  若是，说明锚词只是更长单词的一部分（如「友好的」里的"好的"、"理所当然"里的"当然"），
- *  不是真正的正文引导词 → 应跳过该命中。 */
+
+
+
 function isAnchorInWord(pre: string): boolean {
   return /[\u4e00-\u9fff\u3400-\u4dbfA-Za-z0-9\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A]/.test(pre);
 }
 
-/** 强正文锚词行开头（报告性/结论性/交付开场起头）：思考段后紧跟此类行 → 思考结束、正文开始。
- *  即使行尾是冒号（如「以下是项目分析报告：」「让我来分享几点：」）也属正文起头；
- *  但需 weight≥3 才生效，避免「以下是具体方案：」式正常回答被误吞（弱特征时保守直通）。 */
+
+
+
 const strongBodyStartRe =
   /^(以下是|总结是|答案是|先说|下面|综上所述|综上|简单说|简单来说|总之|答案|结果|让我来|接下来|我来给|我来说|我来分享|让我分享|让我直接)/;
 
-/**
- * 在思考特征行内找「正文引导锚点」的起始位置（特征之后紧跟的正文起头）。
- * 返回相对行首的下标；未找到返回 -1。避免把思考特征自身的「你好」误判——仅扫描最后一个
- * 思考特征匹配结束之后。找不到则整体仍属思考。
- */
+
+
+
+
+
 function findBodyAnchor(line: string, strongRe: RegExp, weakRe: RegExp): number {
-  // 收集行内所有思考特征匹配，取最后一个匹配的结束位置
+  
   let lastEnd = -1;
   for (const re of [strongRe, weakRe]) {
     re.lastIndex = 0;
@@ -926,7 +926,7 @@ function findBodyAnchor(line: string, strongRe: RegExp, weakRe: RegExp): number 
   if (lastEnd < 0) {
     return -1;
   }
-  // 特征之后的 tail 内找首个正文引导锚词（强烈分界词，思考中几乎不会单独出现）
+  
   const tail = line.slice(lastEnd);
   const anchorWords = ["你好", "您好", "好的", "当然", "所以", "因此", "那么", "总之", "总结是", "以下是", "先说", "下面", "答案", "结果"];
   const leftQuotes = new Set(['"', "'", "「", "『", "(", "（", "`", "<", "《", "【", "[", "{"]);
@@ -936,16 +936,16 @@ function findBodyAnchor(line: string, strongRe: RegExp, weakRe: RegExp): number 
     while (from < tail.length) {
       const p = tail.indexOf(word, from);
       if (p < 0) break;
-      // 排除引用场景：锚词前紧邻左引号/括号（如「用户发送了"你好"」中的"你好"是复述，非正文引导）
+      
       const preChar = p > 0 ? tail.charAt(p - 1) : "";
       const inQuote = preChar && leftQuotes.has(preChar);
-      // 排除词内场景：锚词是更长单词的一部分（"友好的"里的"好的"）→ 非正文引导，跳过
+      
       const inWord = p > 0 && isAnchorInWord(preChar);
       if (!inQuote && !inWord) {
         anchorIndexes.push({ pos: p, word });
-        break; // 每种锚词只取最左一个（非引用、非词内），继续下一种
+        break; 
       }
-      from = p + 1; // 锚词在引号里或词内，跳过继续找同词的下一次出现
+      from = p + 1; 
     }
   }
   if (anchorIndexes.length === 0) {
@@ -955,46 +955,46 @@ function findBodyAnchor(line: string, strongRe: RegExp, weakRe: RegExp): number 
   return lastEnd + anchorIndexes[0].pos;
 }
 
-/**
- * 流式思考剥离器（模型无关）：跨 chunk 状态机，把思考内容从正文中剥离并路由到 reasoning。
- * 解决云端/本地思考模型（Qwen3/DeepSeek 等）把思考同时写进 content 的已知问题——等 done 才剥离
- * 会让思考在流式过程中混入正文，必须边到边剥离。
- * 处理四种形态（业界共识 + 生产实测）：
- * 1. XML 风格思考标签块（多标签变体，可能跨 chunk）：
- *    <thinking> / <thought> / <reasoning> / <reason> / <|begin_of_thought|>
- * 2. DeepSeek 无尖括号思考块：行首 ` thinking` … 行首 ` response`
- *    仅在正文前沿（started=false）检测，避免正文里的「 thinking/response」被误判。
- * 3. 思考重复前缀：正文开头以已捕获 reasoning 开头（模型把思考同时写进 content）
- * 4. 无标记裸思考（生产实测最难）：思考直接裸写在正文前沿、无任何标签（用户实测场景）。
- *    采用「前沿缓冲 + 启发式权重判定」：在 started=true 前先缓冲前沿，
- *    累积足够特征（splitUntaggedThinking 阈值逻辑）后实时剥离；缓冲超限则直通避免延迟。
- * getReasoning 返回当前已剥离的思考累积（供重复前缀比对与最终合并）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function createThinkingStripper(getReasoning: () => string): {
   push(content: string): string;
   flush(): string;
   get reasoning(): string;
 } {
-  let rawReasoning = ""; // 原始思考累积（含标签，getter 剥离）
-  let inTag = false; // XML 思考标签内
-  let activeClose = ""; // 当前 XML 思考标签对的闭合标签
-  let inDs = false; // DeepSeek 无尖括号思考块内
-  let pending = ""; // 未决缓冲（可能含跨 chunk 的标签残片）
-  let headBuf = ""; // 正文开头缓冲（重复前缀判定，仅在正文尚未输出时启用）
+  let rawReasoning = ""; 
+  let inTag = false; 
+  let activeClose = ""; 
+  let inDs = false; 
+  let pending = ""; 
+  let headBuf = ""; 
   let started = false;
-  // ── 流式无标记裸思考缓冲与状态 ──
-  let untaggedBuf = "";      // 正文前沿缓冲（started=true 前，标签剥离后进入，待启发式判定）
-  let untaggedLineCount = 0; // untaggedBuf 中已累积行数（仅扫描前 8 行，对齐 splitUntaggedThinking）
-  const UNTAGGED_MAX_CHARS = 4000; // 缓冲上限：超限强制判定直通，避免无限延迟
-  const UNTAGGED_MAX_LINES = 8;    // 对齐 splitUntaggedThinking 的 i < 8
-  // ── 逐词换行思考剥离状态（A-175）：模型偶发把中间思考「每 token 换一行」输出且无标签，
-  //     特征词启发式（evalUntagged）对逐词文本无权重（每行 1-2 字），quickRelease 会直接放行泄漏到正文。
-  //     用「超短行密度」识别：短行(≤3字符)占绝对多数 → 判定为思考、整体剥离到 rawReasoning。
-  let tbtBuf = "";   // 跨 chunk 累积的行（未判定，正文前沿及中部均生效）
-  let inTbt = false; // 已判定进入逐词换行思考模式（后续内容整体剥离，直至正文回归）
-  const TBT_END_LEN = 4; // 长度 >=4 且非纯符号的行视为「正常行」
+  
+  let untaggedBuf = "";      
+  let untaggedLineCount = 0; 
+  const UNTAGGED_MAX_CHARS = 4000; 
+  const UNTAGGED_MAX_LINES = 8;    
+  
+  
+  
+  let tbtBuf = "";   
+  let inTbt = false; 
+  const TBT_END_LEN = 4; 
 
-  /** pending 尾部是否为某标签的部分前缀（跨 chunk 场景），返回应保留的字符数 */
+  
   const holdTail = (s: string, tag: string): number => {
     const lower = s.toLowerCase();
     let hold = 0;
@@ -1004,9 +1004,9 @@ export function createThinkingStripper(getReasoning: () => string): {
     return hold;
   };
 
-  /** 在 s 中找行首 DeepSeek 闭合标记 `response`（兼容 ` response` 空格 / `\nresponse` 无空格 /
-   *  `\n response` 换行+空格三种形态）。返回标记起始位置（含前导空白），未找到返回 -1。
-   *  仅当 response 位于行首（字符串开头/换行后，可带前导空格/tab）时命中，避免正文中单词误匹配。 */
+  
+
+
   const findDsMarker = (s: string, marker: string, from = 0): number => {
     const lower = s.toLowerCase();
     const word = marker.trim().toLowerCase();
@@ -1023,9 +1023,9 @@ export function createThinkingStripper(getReasoning: () => string): {
     return -1;
   };
 
-  /** 找 DeepSeek 思考块开标记：` thinking`（标准，行首带空格）或 `thinking`（行首无空格）。
-   *  返回 { pos, len }：pos 为标记起始（含前导空白），len 为应消费的字符数。
-   *  仅当标记位于行首（字符串开头/换行后，可带前导空白）时命中，避免正文中单词误匹配。 */
+  
+
+
   const findDsStart = (s: string, from = 0): { pos: number; len: number } | null => {
     const lower = s.toLowerCase();
     let idx = from;
@@ -1043,23 +1043,23 @@ export function createThinkingStripper(getReasoning: () => string): {
     return null;
   };
 
-  // ── 流式无标记裸思考判定：复用 splitUntaggedThinking 的阈值与正则，独立副本（避免闭包互相污染） ──
+  
   const _strongRe =
     /身份设定|角色设定|我的身份|保持角色|用中文\s*(回应|回答|回复|沟通)|作为[^，。\n]{0,8}(我|助手|agent)|保持[^，。\n]{0,6}(自然|平静|专业|均衡|情绪)|当前[^，。\n]{0,4}(情绪|状态)|我[^，。\n]{0,6}\b(回应|回复|回答)用户/ig;
   const _weakRe =
     /用户\s*(发送了|说|问|询问|提到|要求|让我|叫我|给|上报|讲述了)|用户[^，。\n]{0,6}(说|问|发|提|要|想|给|夸|称|表示|认为|觉得|称赞|赞美|夸奖|只是|还|终于)|我\s*(需要|应该|将|打算|必须|看到|已经|分析|检测|列出|读取|查看|检查|介绍|说明|概述|总结|给出|提供|梳理|整理|研究|了解|根据|翻一下|找一下|查一下|得先)|根据(我的|系统提示)|让我\s*(先|开始|列出|阅读|查看|分析|检查|了解|确认|概述)|(我先|首先)\s*(列表|阅读|查看|分析|检查|了解|确认|概述)/ig;
   const _anchorWords = ["你好", "您好", "好的", "当然", "所以", "因此", "那么", "总之", "总结是", "以下是", "先说", "下面", "答案", "结果"];
-  /** 正文引导锚词（用于区分「正文起始行」与「思考内部尾句」） */
+  
   const _bodyStartRe =
     /^(哈哈|你好|您好|好的|当然|没问题|谢谢|抱歉|可以|好嘞|明白了|收到|好的呀|好的呢|嗯嗯|好的吧|没毛病|没问题|来啦|在的|你好呀)/;
-  /** 流式版无标记裸思考评估：对 buf 前 maxLines 行扫特征权重与行内锚点。
-   *  返回 { decided: true,  thought, body } 时立即切分；
-   *  返回 { decided: false, weight, naturalBreak, bodyStart } 时表示：尚需更多数据（或超限无法判定，调用方自行直通）。
-   *  weight 回传给调用方，用于「无特征正常对话快速放行」的判定；
-   *  naturalBreak：已出现独立正文行（思考段明确结束，前面已有特征）→ 可立即放行/按阈值剥离；
-   *  bodyStart：首行即为正文引导锚词开头（哈哈/你好…）→ 纯正文，可立即放行。
-   *  判定条件：naturalBreak 且 weight≥2（思考段已结束 + 特征证据），或 weight≥3（行内锚点/无独立正文行）。
-   */
+  
+
+
+
+
+
+
+
   const evalUntagged = (buf: string): { decided: boolean; thought?: string; body?: string; weight: number; naturalBreak: boolean; bodyStart: boolean } => {
     if (!buf) return { decided: false, weight: 0, naturalBreak: false, bodyStart: false };
     const lines = buf.split("\n");
@@ -1069,11 +1069,11 @@ export function createThinkingStripper(getReasoning: () => string): {
     let anchorStart = -1;
     let naturalBreak = false;
     let bodyStart = false;
-    let bodyStartPending = false; // 首行命中引导锚词（无特征），待后续行确认是正文还是思考
+    let bodyStartPending = false; 
     const _leftQuotes = new Set(['"', "'", "「", "『", "(", "（", "`", "<", "《", "【", "[", "{"]);
-    let scannedChars = 0; // 已扫描行的字符累计（含换行）
-    // 低证据（weight<3）时 8 行快速判定；一旦权重 ≥3（疑似长思考块）扩展到 UNTAGGED_SCAN_LIMIT，
-    // 以扫描到真正的正文起始行（对齐 splitUntaggedThinking，避免长思考块尾部泄漏）
+    let scannedChars = 0; 
+    
+    
     for (let i = 0; i < lines.length && i < (weight >= 3 ? UNTAGGED_SCAN_LIMIT : UNTAGGED_MAX_LINES); i++) {
       const line = lines[i];
       const trimmed = line.trim();
@@ -1085,7 +1085,7 @@ export function createThinkingStripper(getReasoning: () => string): {
       const isList = /^(\d+[.、]|[-*])\s/.test(trimmed);
       const hasFeature = strongCount > 0 || weakCount > 0;
       if (hasFeature) {
-        // 前面已有引导锚词行（如「好的」）+ 本行出现思考特征 → 引导词属于思考开头，给弱特征加成
+        
         if (bodyStartPending) {
           weight += 1;
           bodyStartPending = false;
@@ -1093,8 +1093,8 @@ export function createThinkingStripper(getReasoning: () => string): {
         weight += strongCount * 2 + weakCount;
         prevHadFeature = true;
         thinkingEnd = lineStart + line.length;
-        // 行内正文锚点：最后一个特征之后找首个引导锚词（排除引用场景）
-        // 注意：仅覆盖记录（最后一个特征行的 anchor 才可能是真实切分），不立即 break
+        
+        
         let lastEnd = -1;
         for (const re of [_strongRe, _weakRe]) {
           re.lastIndex = 0;
@@ -1117,9 +1117,9 @@ export function createThinkingStripper(getReasoning: () => string): {
               const inWord = p > 0 && isAnchorInWord(preChar);
               if (!inQuote && !inWord) {
                 if (bestIdx === -1 || p < bestIdx) bestIdx = p;
-                break; // 该锚词找到有效命中
+                break; 
               }
-              from = p + 1; // 引号内或词内，继续找同词的下一处
+              from = p + 1; 
             }
           }
           if (bestIdx >= 0) {
@@ -1132,11 +1132,11 @@ export function createThinkingStripper(getReasoning: () => string): {
         thinkingEnd = lineStart + line.length;
         continue;
       }
-      // 无特征、非列表行
+      
       if (weight > 0) {
-        // 冒号结尾 → 思考内过渡行（"根据角色要求：" 通常引出后续列表/说明）→ 延续思考
+        
         if (/[:：]\s*$/.test(trimmed)) {
-          // 强正文锚词行（报告/结论起头，如「以下是项目分析报告：」）且特征充足 → 思考段结束、正文开始
+          
           if (strongBodyStartRe.test(trimmed) && weight >= 3) {
             naturalBreak = true;
             break;
@@ -1144,28 +1144,28 @@ export function createThinkingStripper(getReasoning: () => string): {
           thinkingEnd = lineStart + line.length;
           continue;
         }
-        // 正文引导锚词开头（哈哈/你好/好的…），或强正文锚词（报告/结论/交付开场如「让我来分享…」，
-        // 需 weight≥3 避免误伤）→ 确认为正文起始行 → 思考段结束
+        
+        
         if (_bodyStartRe.test(trimmed) || (strongBodyStartRe.test(trimmed) && weight >= 3)) {
           naturalBreak = true;
           break;
         }
-        // 其他无特征行：视为思考内部尾句（"同时要保持轻松友好的语气。"），延续思考
+        
         thinkingEnd = lineStart + line.length;
         continue;
       }
-      // 首行即无特征（weight===0）：
-      // 正文引导锚词开头 → 暂记 bodyStartPending（可能是「好的\n用户说…」思考开头），
-      // 不立即 break，继续扫描后续行确认：后续出现特征 → 整体按思考；全程无特征 → 纯正文直通
+      
+      
+      
       if (_bodyStartRe.test(trimmed)) {
         bodyStartPending = true;
         thinkingEnd = lineStart + line.length;
         continue;
       }
-      // 非引导锚词的无特征行：疑似思考开头（特征未出现），等更多数据
+      
       break;
     }
-    // 全程无任何特征且首行为引导锚词 → 纯正文直通
+    
     if (bodyStartPending && weight === 0) {
       bodyStart = true;
     }
@@ -1179,15 +1179,15 @@ export function createThinkingStripper(getReasoning: () => string): {
     return { decided: false, weight, naturalBreak, bodyStart };
   };
 
-  /** A-9xx 逐词换行思考缓存判定（push/flush 共用）。
-   *  短行判定：≤3 字符且非列表标记、**非缩进行**——缩进（代码/引用/对齐）与列表标记作中性行，
-   *  不参与密度统计（修复原实现把缩进代码块/列表逐行误判为「逐词换行思考」并整个吞掉的缺陷）。
-   *  决策：
-   *   - buffer：证据不足，继续累积；
-   *   - release：出现正文行但碎片证据不足（或超长防卡）→ 整段按正文释放；
-   *   - all-think：纯短行密集（≥8 行且 ≥70% 短行）→ 整体进思考并进入逐词思考模式；
-   *   - cut：短行碎片（≥3 行且碎片占多数）后跟正文行（如 `好\n，让…。\n\n以下是报告`）
-   *     → 碎片进思考、首个正文行起为正文（单 chunk 内「思考+正文」一次解出）。 */
+  
+
+
+
+
+
+
+
+
   const evaluateTbt = (buf: string): { decision: "buffer" | "release" | "all-think" | "cut"; reason?: string; body?: string } => {
     const lines = buf.split("\n");
     let total = 0;
@@ -1196,14 +1196,14 @@ export function createThinkingStripper(getReasoning: () => string): {
     for (let i = 0; i < lines.length; i++) {
       const tr = lines[i].trim();
       if (!tr) continue;
-      if (/^[ \t]/.test(lines[i]) || /^(\s*[-*•+]\s|\s*\d+[.、]\s)/.test(tr)) continue; // 缩进/列表：中性
+      if (/^[ \t]/.test(lines[i]) || /^(\s*[-*•+]\s|\s*\d+[.、]\s)/.test(tr)) continue; 
       if (tr.length <= 3) { short++; total++; continue; }
       if (!/^[\d.\-*•>\s]+$/.test(tr)) {
         if (firstNormal < 0) firstNormal = i;
         total++;
         continue;
       }
-      // 纯符号/数字行（`---`、`123`）：中性
+      
     }
     if (firstNormal < 0) {
       if (total >= 8 && short / total >= 0.7) return { decision: "all-think" };
@@ -1218,8 +1218,8 @@ export function createThinkingStripper(getReasoning: () => string): {
     return { decision: "release" };
   };
 
-  /** A-9xx 逐词碎片拼接：把 token 逐行思考（`好\n，让\n我\n继续…`）合并为可读文本——全中文碎片
-   *  直接拼接（`关\n键` → `关键`），含英文用空格（`The\nuser` → `The user`），与正文折叠语义一致。 */
+  
+
   const joinFragmentedLines = (s: string): string => {
     const parts = s.split("\n").map((l) => l.trim()).filter(Boolean);
     const allCjk = parts.every((p) => /^[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+$/.test(p));
@@ -1241,7 +1241,7 @@ export function createThinkingStripper(getReasoning: () => string): {
       const clean: string[] = [];
       while (pending.length > 0) {
         if (inDs) {
-          // DeepSeek 思考块内：找行首 `response` 闭合（兼容 ` response` / `\nresponse` / `\n response`）
+          
           const ci = findDsMarker(pending, DS_END);
           if (ci === -1) {
             const hold = holdTail(pending, "response");
@@ -1251,17 +1251,17 @@ export function createThinkingStripper(getReasoning: () => string): {
                 rawReasoning += pending.slice(0, keep);
                 pending = pending.slice(keep);
               }
-              break; // 尾部是闭合标记前缀，等待更多数据
+              break; 
             }
             rawReasoning += pending;
             pending = "";
           } else {
-            // ci 指向行首空白（含前导空格/tab）；消费到 response 词尾
+            
             const rest = pending.slice(ci);
             const m = rest.match(/^\s*response\b/i);
             const consume = m ? m[0].length : "response".length;
             rawReasoning += pending.slice(0, ci + consume);
-            // response 后的换行是 DS 格式分隔符，不属于正文，去掉避免正文前导空行
+            
             pending = pending.slice(ci + consume).replace(/^\s+/, "");
             inDs = false;
           }
@@ -1275,7 +1275,7 @@ export function createThinkingStripper(getReasoning: () => string): {
                 rawReasoning += pending.slice(0, keep);
                 pending = pending.slice(keep);
               }
-              break; // 尾部是闭合标签前缀，等待更多数据
+              break; 
             }
             rawReasoning += pending;
             pending = "";
@@ -1286,7 +1286,7 @@ export function createThinkingStripper(getReasoning: () => string): {
             activeClose = "";
           }
         } else {
-          // 正常模式：找最早出现的 XML 开标签或 DeepSeek 开标记（仅正文前沿）
+          
           let oi = -1;
           let pairIdx = -1;
           for (let p = 0; p < THINK_TAG_PAIRS.length; p++) {
@@ -1298,7 +1298,7 @@ export function createThinkingStripper(getReasoning: () => string): {
           }
           const dsStart = !started ? findDsStart(pending) : null;
           if (dsStart && (oi === -1 || dsStart.pos < oi)) {
-            // 畸形标签防护：`< thinking >`（标记后紧跟 `>`）不是 DeepSeek 思考块，按普通文本放行
+            
             const after = pending.slice(dsStart.pos + dsStart.len);
             const ws = after.match(/^\s*/);
             const firstNonWs = ws ? after.charAt(ws[0].length) : "";
@@ -1307,8 +1307,8 @@ export function createThinkingStripper(getReasoning: () => string): {
               pending = "";
               continue;
             }
-            // 标记后仅有空白：可能是 ` thinking 内容`（思考）或 `< thinking >` 残片（畸形标签）
-            // 保守暂扣留等待更多数据判定，避免误判畸形标签或思考块
+            
+            
             if (after.trim() === "") {
               const keep = dsStart.pos;
               if (keep > 0) {
@@ -1317,7 +1317,7 @@ export function createThinkingStripper(getReasoning: () => string): {
               pending = pending.slice(keep);
               break;
             }
-            // DeepSeek 开标记更早：进入思考块（统一记录标准标记，getter 剥离）
+            
             clean.push(pending.slice(0, dsStart.pos));
             rawReasoning += DS_START;
             pending = pending.slice(dsStart.pos + dsStart.len);
@@ -1325,7 +1325,7 @@ export function createThinkingStripper(getReasoning: () => string): {
             continue;
           }
           if (oi === -1) {
-            // 无开标签：检查尾部是否为某开标签前缀（跨 chunk）
+            
             let hold = 0;
             for (const p of THINK_TAG_PAIRS) {
               hold = Math.max(hold, holdTail(pending, p.open));
@@ -1339,7 +1339,7 @@ export function createThinkingStripper(getReasoning: () => string): {
                 clean.push(pending.slice(0, keep));
                 pending = pending.slice(keep);
               }
-              break; // 尾部是开标签前缀，等待更多数据
+              break; 
             }
             clean.push(pending);
             pending = "";
@@ -1349,13 +1349,13 @@ export function createThinkingStripper(getReasoning: () => string): {
             const active = THINK_TAG_PAIRS[pairIdx];
             const ci = rest.toLowerCase().indexOf(active.close);
             if (ci !== -1) {
-              // 同一 chunk 内闭合：提取思考，剩余部分继续按正文处理
+              
               rawReasoning += rest.slice(0, ci + active.close.length);
               pending = rest.slice(ci + active.close.length);
             } else {
               const hold = holdTail(rest, active.close);
               if (hold > 0) {
-                // rest 尾部是闭合标签前缀残片：保留残片，其余入思考
+                
                 const keep = rest.length - hold;
                 if (keep > 0) {
                   rawReasoning += rest.slice(0, keep);
@@ -1376,13 +1376,13 @@ export function createThinkingStripper(getReasoning: () => string): {
       }
       let out = clean.join("");
 
-      // ── A-175/A-9xx: 逐词换行思考剥离（全阶段生效，包含正文中部/工具轮后的第二轮思考）──
-      // 模型把中间思考逐 token 换行输出且无标签时，特征词启发式（evalUntagged）失效，
-      // quickRelease 会把它当普通正文放行。此处用「超短行密度」识别并整体剥离。
-      let tbtCut = false; // 本次 push 已由逐词层确认「碎片思考+正文」切分（body 免再受怀疑缓冲）
+      
+      
+      
+      let tbtCut = false; 
       if (inTbt) {
-        // 已在逐词思考模式：碎片先累积（不逐 chunk 进 reasoning），等正文回归时**一次性拼接**，
-        // 避免 `关\n键` 等跨 chunk 碎片在 reasoning 里保留逐行形态。
+        
+        
         tbtBuf += out;
         out = "";
         const tbtBufLines = tbtBuf.split("\n");
@@ -1395,19 +1395,19 @@ export function createThinkingStripper(getReasoning: () => string): {
           offset += tbtBufLines[i].length + 1;
         }
         if (cutOff >= 0) {
-          // **首个**正文行即正文回归（原实现要求连续 2 个正常行——正文一侧只有一行时整段被吞，A-9xx 修正）
+          
           rawReasoning += "\n" + joinFragmentedLines(tbtBuf.slice(0, cutOff)) + "\n";
           out = tbtBuf.slice(cutOff);
           inTbt = false;
           tbtBuf = "";
         }
-        // 否则：碎片继续累积（out 保持空，流式阶段不泄漏）
+        
       } else if (out) {
         tbtBuf += out;
         out = "";
         const ev = evaluateTbt(tbtBuf);
         if (ev.decision === "release") {
-          // 无碎片特征（正常正文）→ 立即释放；避免正文被卡在缓冲里、饿死后续 untagged 判定层
+          
           out = tbtBuf;
           tbtBuf = "";
         } else if (ev.decision === "all-think") {
@@ -1420,41 +1420,41 @@ export function createThinkingStripper(getReasoning: () => string): {
           tbtBuf = "";
           tbtCut = true;
         }
-        // decision === "buffer" → 继续累积（out 保持空）
+        
       }
 
-      // ── 新增：流式无标记裸思考层（仅正文前沿 started=false，先于重复前缀判定） ──
+      
       if (!started && out) {
         if (!tbtCut) {
-          // 逐词层已确认本片段为正文（碎片思考已入 reasoning）——跳过怀疑缓冲，直接进重复前缀层
+          
           untaggedBuf += out;
         out = "";
-        // 统计行数（换行符 + 1，首行无前置换行也算；上限 UNTAGGED_MAX_LINES 对齐 i<8）
+        
         let lc = 1;
         for (let i = 0; i < untaggedBuf.length; i++) if (untaggedBuf[i] === "\n") lc++;
         untaggedLineCount = lc;
         const judged = evalUntagged(untaggedBuf);
         if (judged.decided && judged.thought && judged.body) {
-          // 命中：思考推入 rawReasoning（加换行，getter 会 trim），body 进入后续 headBuf 流程
+          
           rawReasoning += "\n" + judged.thought + "\n";
           untaggedBuf = judged.body;
           untaggedLineCount = 1;
-          // body 是真实正文：untagged 层使命完成；后续 chunk 不再进这层（started 仍由 headBuf 设置）
-          // 但考虑到 body 可能仍有思考重复前缀，把 untaggedBuf 内容「直接交给」下一层 headBuf
-          out = untaggedBuf; // 转入 headBuf 分支（下面的 !started 块会 += out 再处理）
+          
+          
+          out = untaggedBuf; 
           untaggedBuf = "";
           untaggedLineCount = 0;
         } else {
-          // 未判定：分策略决定是继续扣留（疑似裸思考，需要更多证据）还是立即放行（正常对话）
+          
           const trimmed = untaggedBuf.trim();
           const bufChars = trimmed.length;
-          // 权重 ≥3（疑似长思考块）时放宽行上限到 UNTAGGED_SCAN_LIMIT，避免长思考块在正文到达前
-          // 被提前强制切分、尾部思考泄漏为正文；低证据时维持 8 行快速判定
+          
+          
           const overLines = untaggedLineCount > (judged.weight >= 3 ? UNTAGGED_SCAN_LIMIT : UNTAGGED_MAX_LINES);
           const overChars = bufChars > UNTAGGED_MAX_CHARS;
-          // 最高优先级：已出现独立正文行（naturalBreak）→ 说明思考段已结束，可立即放行
-          // 注意：bodyStart（首行锚词如「好的」）不再立即放行——可能是「好的\n用户说…」思考开头，
-          // 需等待第二行确认：第二行同为正文锚词 → 纯正文放行；否则继续缓冲供 eval 判定剥离。
+          
+          
+          
           const sawBodyLine = judged.naturalBreak;
           let bodyConfirm = false;
           if (judged.bodyStart) {
@@ -1463,7 +1463,7 @@ export function createThinkingStripper(getReasoning: () => string): {
               bodyConfirm = true;
             }
           }
-          // 快速放行：完全无思考特征 / 特征极弱 → 到达温和阈值即直通（阈值放宽，避免思考开头被误放行）
+          
           let quickRelease = false;
           if (judged.weight === 0) {
             quickRelease = untaggedLineCount >= 4 || bufChars >= 200;
@@ -1472,7 +1472,7 @@ export function createThinkingStripper(getReasoning: () => string): {
           }
           if (overLines || overChars || sawBodyLine || bodyConfirm || quickRelease) {
             let result = { cleanReply: untaggedBuf, reasoning: "" };
-            // 超限：仍尝试一次完整的 splitUntaggedThinking 兜底（弱/强阈值可能命中）
+            
             if (overLines || overChars) {
               result = splitUntaggedThinking(untaggedBuf);
               if (result.reasoning && result.cleanReply !== untaggedBuf) {
@@ -1486,29 +1486,29 @@ export function createThinkingStripper(getReasoning: () => string): {
                 untaggedLineCount = 0;
               }
             } else {
-              // naturalBreak / bodyStart / quickRelease：判为无裸思考或思考段已结束，直通不做思考剥离
+              
               out = untaggedBuf;
               untaggedBuf = "";
               untaggedLineCount = 0;
             }
           }
         }
-        } // tbtCut else（正常走怀疑缓冲分支）收口
+        } 
       }
 
-      // 重复前缀剥离（仅正文开头；无 reasoning 时零延迟直通）
+      
       if (!started) {
         headBuf += out;
         out = "";
         const rt = getReasoning().trim();
         if (headBuf.trim()) {
           if (rt) {
-            // 循环剥离重复前缀（模型可能把思考重复写进 content）
+            
             while (headBuf.startsWith(rt) && headBuf.length > rt.length) {
               headBuf = headBuf.slice(rt.length).trimStart();
             }
             if (headBuf.startsWith(rt) || rt.startsWith(headBuf)) {
-              // headBuf 仍是 rt 前缀（或等于 rt）→ 继续缓冲等待更多数据
+              
             } else {
               started = true;
               out = headBuf;
@@ -1520,7 +1520,7 @@ export function createThinkingStripper(getReasoning: () => string): {
             headBuf = "";
           }
         }
-        // 全空白 headBuf：继续缓冲（等待可能的 DeepSeek 思考块或首个真实正文）
+        
       }
       return out;
     },
@@ -1531,14 +1531,14 @@ export function createThinkingStripper(getReasoning: () => string): {
         rawReasoning += out;
         out = "";
       }
-      // ── A-175/A-9xx: 逐词换行思考残留兜底（流结束未判定/未退出的缓冲区一次性处理） ──
+      
       if (inTbt) {
         rawReasoning += "\n" + joinFragmentedLines(tbtBuf + out) + "\n";
         out = "";
         inTbt = false;
         tbtBuf = "";
       } else if (tbtBuf) {
-        // 流结束未判定缓冲：按同一套密度逻辑最终判定（短行占多数 → 并入思考；buffer 在流结束视为正文）
+        
         const ev = evaluateTbt(tbtBuf);
         if (ev.decision === "all-think") {
           rawReasoning += "\n" + joinFragmentedLines(tbtBuf) + "\n";
@@ -1548,14 +1548,14 @@ export function createThinkingStripper(getReasoning: () => string): {
           out = (ev.body ?? "") + (out ? out : "");
           tbtBuf = "";
         } else {
-          // buffer / release：流结束一律按正文释放（不再等后续数据）
+          
           out = tbtBuf + (out ? out : "");
           tbtBuf = "";
         }
       }
-      // ── 残余 untaggedBuf + TBT 释放的正文前沿兜底切分（完整 splitUntaggedThinking） ──
-      // A-9xx：TBT 在流结束释放的内容**并入 untaggedBuf 统一走怀疑判定**（原来直接落 headBuf，
-      // 「同行思考+正文单行」等场景在 flush 时思考从未被评估 → 泄漏到正文）
+      
+      
+      
       if (!started && (untaggedBuf || out)) {
         untaggedBuf += out;
         out = "";
@@ -1610,7 +1610,7 @@ function drainA2AContext(pending: Array<{ msg_type: string; from_agent: string; 
   return "## 来自其他 Agent 的消息\n" + parts.join("\n");
 }
 
-// ── 流会话（{seq,type,data} + 断线重放缓冲）───────────────
+
 
 export interface StreamSession {
   streamId: string;
@@ -1644,7 +1644,7 @@ export function createStreamSession(): StreamSession {
   };
 }
 
-// ── ChatService ────────────────────────────────────────────
+
 
 export class ChatService {
   private registry: AgentRegistry;
@@ -1670,7 +1670,7 @@ export class ChatService {
     this.knowledgeDataDir = opts.dataDir;
   }
 
-  /** A-1035：知识/记忆落盘根（见 ChatServiceOptions.dataDir） */
+  
   private knowledgeDataDir?: string;
 
   private alarm(source: string, message: string, severity: AlarmSeverity = "warning"): void {
@@ -1686,25 +1686,25 @@ export class ChatService {
     if (delegation) {
       sys += "\n\n" + delegation;
     }
-    // A-980-R30：委派规范重写。原句只说"主动调 delegate_subagent，结果由系统回收"——
-    // ① 没讲怎么派（Anthropic 实测：只写一句"研究半导体短缺"会让多个子代理重复劳动，
-    //    task 必须带「目标 + 输出格式 + 边界」）；
-    // ② 没讲按复杂度伸缩（简单事实查不该委派）；
-    // ③ **"由系统回收"是当时的空头承诺**（代码里根本没有回收），现在工具本身阻塞等结果并交回验收，
-    //    所以这里必须明确要求主 Agent 验收，否则多智能体最大的失效模式就是"不加核对地转述子代理结论"。
-    // A-1096：措辞**重平衡**。原版把「何时不委派」写成主句、还断言"结果由系统回收"，
-    // 实际效果是模型**默认自己做完**（用户原话：「不能所有项目都让主Agent做，效率太低了」）。
-    // 现在把「先想能不能拆」提到第一位，把"自己做"降格为例外；并补上"点名优先清单里的名字"。
-    // 依据（Anthropic《How we built our multi-agent research system》/《Building Effective Agents》）：
-    //   协调器要**主动拆分**、按复杂度伸缩规模、给 worker 明确目标+输出格式+边界；
-    //   同时 Cognition《Don't Build Multi-Agents》的反方约束也要保留——需共享同一上下文 / 强依赖难并行的，不要拆。
-    // A-1106：整段规范**迁到唯一出处** `services/subagentCatalog.ts::DELEGATION_GUIDANCE`。
-    // 迁移理由：同一段文本此前**只有这一个产地** ⇒ 另一条系统提示词产地
-    // `Engine.buildSystem`（定时任务 / 非 ChatService 的引擎路径）**完全拿不到委派引导**，
-    // 那些任务 100% 由主 Agent 单干（用户症状：「整个任务全是主Agent一个智能体做」）。
-    // 同时把措辞从「先想能不能拆」再平衡为**默认派发**（详见常量处的设计说明）。
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     sys += "\n\n" + DELEGATION_GUIDANCE;
-    // A-918++：指令驱动 —— ADB / HTTP 网页应用生成，全靠 Agent 工具，不让用户手动操作
+    
     sys += "\n\n指令驱动（无需让用户手动操作面板）：\n" +
       "1) 用户要「做个网页 / 应用 / 小工具 / 页面 / 网站 / 落地页 / 表单 / 计算器 / 待办 / 计时器」等需求时，**直接用 http_create_app 工具**生成自包含单页应用（按需求自动选模板），生成后会在右侧栏浏览器自动打开，并把可点击的访问地址（http://127.0.0.1:<port>）直接告诉用户。不要追问技术细节，直接生成并给链接。\n" +
       "2) 用户要「操作手机 / 模拟器 / 安卓设备 / 装 App / 卸载 / 截图 / 跑命令」时，**直接用 adb_* 工具**：先 adb_connect（不传 host 会自动扫描雷电/夜神/MuMu/Genymotion/AVD 等常见模拟器端口并列出连上的设备）或 adb_devices 拿到 serial，再执行 adb_shell / adb_install / adb_screencap 等操作。**不要让用户自己输参数或手动连设备**——你主动探测、连接、操作，只把结果汇报给用户。\n" +
@@ -1720,13 +1720,13 @@ export class ChatService {
       "   b. **元素定位优先于坐标**（与安卓同思路）；确实要按坐标点时浏览器坐标是**页面像素**（可用 browser_screenshot 的元素编号辅助）。\n" +
       "   c. 页面需要时间加载/渲染时用 browser_wait；要同时访问多个网站用 browser_open_tab 新开页（各页内容互相独立）。\n" +
       "   d. 操作后**必须核对**（snapshot 或截图）；没生效就重新 snapshot 再试，不要重复同样的点击。";
-    // A-980-R22：工具面白名单——按 Agent 概况注入「已启用技能/MCP 清单」，模型只把清单内能力当可用
+    
     sys += agentSkillGuide(resolveAgentToolProfile(agent.tool_profile));
     return sys;
   }
 
-  /** A-980-R22：按 Agent 概况解析工具面下发白名单（内置工具+skill 入口恒保留；mcp_* 按勾选服务器前缀匹配）。
-   *  引擎未实现 listTools（例如测试 mock）→ 返回 undefined，调用处不传 toolsOnly（全量，零回归） */
+  
+
   private agentToolsFor(agent: AgentState): string[] | undefined {
     const names = this.engine.listTools?.().map((t) => t?.function?.name).filter((n): n is string => !!n);
     if (!names) { return undefined; }
@@ -1737,7 +1737,7 @@ export class ChatService {
   }
 
   private async effectiveMessage(agent: AgentState, message: string): Promise<string> {
-    let effective = await this.evidence(message); // A-098: 平台证据注入
+    let effective = await this.evidence(message); 
     if (this.bus) {
       const pending = this.bus.drainAll(agent.name);
       if (pending.length > 0) {
@@ -1756,9 +1756,9 @@ export class ChatService {
     return effective;
   }
 
-  // ── /chat/analyze ──────────────────────────────────────
+  
 
-  /** 会话级工作目录（"以文件夹为主"模型）：按 sessionId 查 SessionMeta.workspace；无会话/无配置 → undefined（回退 Agent 级） */
+  
   private async sessionWorkspaceFor(sessionId?: string): Promise<string | undefined> {
     if (!sessionId) { return undefined; }
     try {
@@ -1770,7 +1770,7 @@ export class ChatService {
     }
   }
 
-  /** 团队会话声明信息（组长视角）：按 sessionId 解析成员名单与角色（"一个会话=一个团队"模型） */
+  
   private async teamContextFor(sessionId?: string): Promise<string> {
     if (!sessionId) { return ""; }
     try {
@@ -1798,19 +1798,19 @@ export class ChatService {
     }
   }
 
-  /**
-   * A-1131：**本次运行要用哪个 Agent 对象** —— 会话级模型覆盖的唯一收口点。
-   *
-   * 为什么必须收在这里（而不是各个 engine 调用点）：`chat()` / `stream()` 里共有
-   * **9 处** `this.engine.chat/stream({ agent, … })`（含委托子调用、强制工具轮、续接轮），
-   * 它们吃的都是同一个局部 `agent` ⇒ 在**解析点**覆盖一次，下游一处都不会漏；
-   * 在调用点各写一遍注定漏（本仓反复踩过"只有一条路径记得改"的坑）。
-   *
-   * ⚠️ 只覆盖 `model_choice`，其余字段（persona / 工具面 / max_context…）原样透传。
-   * ⚠️ 覆盖值为空 ⇒ 原样返回**同一个对象**（零行为变化，且避免无谓复制）。
-   * ⚠️ 不做合法性校验：取值域与 `agent.model_choice` 完全同一套，路由解析是**唯一**判据
-   *    （engine 对未知选择会给出「未知的模型选择」的明确报错，这里再判一次就是两个产地）。
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
+
   private async runAgentFor(agentId: string, modelChoiceOverride?: string): Promise<AgentState | undefined> {
     const agent = await this.registry.findAgent(agentId);
     const override = typeof modelChoiceOverride === "string" ? modelChoiceOverride.trim() : "";
@@ -1838,7 +1838,7 @@ export class ChatService {
     return parsed;
   }
 
-  // ── /chat ──────────────────────────────────────────────
+  
 
   async chat(agentId: string, req: ChatRequest): Promise<ChatResult> {
     const agent = await this.runAgentFor(agentId, req.modelChoice);
@@ -1847,9 +1847,9 @@ export class ChatService {
     }
     const systemPrompt = await this.systemPromptFor(agent);
     const teamCtx = await this.teamContextFor(req.sessionId);
-    /* A-1144：右栏挂载段（按会话）。放在团队上下文**之后** —— 它描述"此刻屏幕上的东西"，
-       越贴近用户当前那句话越有用。⚠️ 三个来源拼装口径统一用 `filter(Boolean).join`：
-       `teamCtx ? a+"\n\n"+b : a` 那种写法每加一个来源就要再写一遍分支（迟早漏一处）。 */
+    
+
+
     const mount = sidebarMountSection(req.sessionId);
     const systemBegin = [systemPrompt, teamCtx, mount].filter(Boolean).join("\n\n");
     const effective = await this.effectiveMessage(agent, req.message);
@@ -1863,14 +1863,14 @@ export class ChatService {
       systemPrompt: systemBegin,
       maxTokens: req.maxTokens,
       workspace,
-      // 断链 A 修复：联网开关原样透传到引擎 → 工具循环（非流式路径同样漏传，导致开关在普通对话里是死的）。
+      
       networkEnabled: req.networkEnabled,
-      // A-980-R22：工具面白名单（内置+skill 入口保留，mcp_* 按 Agent 勾选过滤）
+      
       toolsOnly: this.agentToolsFor(agent),
     });
     let reply = result.reply?.trim() || "[Agent 未返回有效回复]";
 
-    // ── 委托 / 广播路由 ──
+    
     const delegations = parseDelegations(reply);
     const broadcastMsg = parseBroadcast(reply);
     if (broadcastMsg && this.bus) {
@@ -1893,10 +1893,10 @@ export class ChatService {
             history: [],
             systemPrompt: child.identity_prompt || `你是 ${child.name}，你的角色是：${child.role}`,
             workspace,
-            // A-1014-C2：非流式路径**内部**的两处 engine.chat 同样必须透传联网开关。
-            // 这里是「文本委托」子路径（回复里写 @名字 触发的老机制，与新工具 delegate_subagent
-            // 是两套）—— 漏传的后果：用户关了联网搜索，父 Agent 不联网，但被委托的子 Agent
-            // 照旧联网（缺省即开），开关表现为"有时管用"。
+            
+            
+            
+            
             networkEnabled: req.networkEnabled,
           });
           const childReply = childResult.reply ?? "";
@@ -1926,7 +1926,7 @@ export class ChatService {
           systemPrompt: systemBegin,
           maxTokens: req.maxTokens,
           workspace,
-          // A-1014-C2：汇总轮同样是「父 Agent 在跑」，用户关了联网时它也不能联网。
+          
           networkEnabled: req.networkEnabled,
         });
         reply = stripDelegationTags(followupResult.reply ?? "");
@@ -1940,13 +1940,13 @@ export class ChatService {
     if (!reply) {
       reply = "[Agent 未返回有效回复]";
     }
-    // 思考内容剥离（Qwen3 泄漏进正文时提取；非流式路径无 reasoning 展示，直接丢弃）
+    
     reply = extractThinkingFromReply(reply).cleanReply || "[Agent 未返回有效回复]";
 
-    // A-087: 失败前缀黑名单（API 失败不驱动人格正反馈）
+    
     const success = !isFailReply(reply);
 
-    // A-090: 存储/学习用原文（reply_raw），品牌过滤只作用于展示
+    
     const rawReply = extractThinkingFromReply(result.replyRaw ?? reply).cleanReply;
 
     if (req.retry) {
@@ -1954,7 +1954,7 @@ export class ChatService {
     }
     await this.recordInteraction(agent, req.message, rawReply, success, req.sessionId, undefined, result.elapsedMs && result.elapsedMs > 0 ? result.elapsedMs : undefined);
 
-    void this.spawnPostProcess(agent, req.message, rawReply, success); // 后台派发，不阻塞响应
+    void this.spawnPostProcess(agent, req.message, rawReply, success); 
 
     return {
       reply,
@@ -1967,20 +1967,20 @@ export class ChatService {
     };
   }
 
-  // ── /chat/stream ───────────────────────────────────────
+  
 
-  /**
-   * 流式对话：事件流（{seq,type,data}）。完整语义：
-   * A-005 委托能力对齐 /chat；A-049/A-085 编造检测强制工具轮；
-   * 委托后台执行 + 15s 心跳；done 单收尾（委托整合后发出）；finally 持久化。
-   */
+  
+
+
+
+
   async *stream(agentId: string, req: ChatRequest, resumeSeq = 0, signal?: AbortSignal): AsyncGenerator<ServiceEvent<unknown>> {
     const agent = await this.runAgentFor(agentId, req.modelChoice);
     if (!agent) {
       throw new ChatServiceError(404, "Agent 不存在");
     }
     const session = createStreamSession();
-    // 断线重连：先重放缓冲中 seq 之后的事件，再继续新事件
+    
     for (const ev of session.resumeFrom(resumeSeq)) {
       yield ev;
       this.emit(ev);
@@ -1994,15 +1994,15 @@ export class ChatService {
 
     const systemPrompt = await this.systemPromptFor(agent);
     const teamCtx = await this.teamContextFor(req.sessionId);
-    /* A-1144：流式路径同样要挂载（两条路径漏一条 = "只有打字机模式才看得见右栏"这种诡异症状）。 */
+    
     const mount = sidebarMountSection(req.sessionId);
     const systemBase = [systemPrompt, teamCtx, mount].filter(Boolean).join("\n\n");
     const system = req.resumeHint ? `${systemBase}\n\n[系统·中断续接] ${req.resumeHint}` : systemBase;
     const workspace = await this.sessionWorkspaceFor(req.sessionId);
-    // 显式传唤预委派：入参消息若直接包含 <DELEGATE name="..">（用户按「⟳ 传唤」按钮，
-    // 或消息里手写委派标签），不依赖主 Agent 二次输出标签，立即按标签直连目标 Agent
-    // 执行并把结果注入，保证本地小模型下传唤也稳定生效。
-    // 团队会话中，成员的答复以 type="member" 事件冒泡成独立"成员发言"（群聊渲染）。
+    
+    
+    
+    
     const directDelegates = parseDelegations(req.message);
     let directDelegationInject = "";
     for (const d of directDelegates.slice(0, MAX_DELEGATIONS)) {
@@ -2020,7 +2020,7 @@ export class ChatService {
           history: [],
           systemPrompt: target.identity_prompt || `你是 ${target.name}，你的角色是：${target.role}`,
           workspace,
-          // A-1014-C2：「传唤」子路径 —— 关联网时被传唤的 Agent 也不能联网。
+          
           networkEnabled: req.networkEnabled,
         });
         const childReply = childResult.reply ?? "";
@@ -2036,7 +2036,7 @@ export class ChatService {
         yield emitChunk({ type: "member", name: target?.name ?? d.name, agentId: target?.id, content: `（任务执行出错）${msg}` });
       }
     }
-    // 主消息去掉 DELEGATE 标签文本本身（委派结果已注入），避免模型把标签当普通内容
+    
     const mainMsg = stripDelegationTags(req.message).trim();
     const msgForEngine = directDelegationInject ? `${mainMsg}\n${directDelegationInject}` : mainMsg;
     const effective = await this.effectiveMessage(agent, msgForEngine || req.message);
@@ -2048,17 +2048,17 @@ export class ChatService {
     let heldDone: EngineChunk | null = null;
     let toolEventCount = 0;
     const toolEventNames: string[] = [];
-    /** 本次所有工具调用（主循环 + 委托 + 强制工具轮），持久化进思考过程留痕 */
+    
     const reasoningToolNames: string[] = [];
-    // A-1034：与 reasoningToolNames 下标对齐的 diff 标记（缺项 = 该次调用无改动信息）
+    
     const reasoningToolDiffTags: Array<string | undefined> = [];
     let model = "";
     let promptTokens = 0;
     let completionTokens = 0;
     let elapsedMs = 0;
-    /** 推理/思考过程累积（持久化到历史，切换会话后仍可展开查看） */
+    
     let reasoningBuf = "";
-    /** 流式思考剥离器：边到边把思考从正文 chunk 中剥离（云端/本地思考模型都可能泄漏） */
+    
     const stripper = createThinkingStripper(() => reasoningBuf);
 
     try {
@@ -2072,16 +2072,16 @@ export class ChatService {
         workspace,
         sessionId: req.sessionId,
         images: req.images,
-        // A-1084：把"这个模型能装多少"透传到引擎 —— 引擎侧的保险门（planEngineSend）靠它
-        // 判定"发不发"。缺省 undefined 时引擎不拦（窗口未知不猜）。
+        
+        
         windowCap: req.windowCap,
-        // 断链 A 修复：联网开关必须原样透传到引擎 → 工具循环（此前漏传 → tool_loop 缺省 true → 闸门永死）。
-        // ChatRequest.networkEnabled 已声明，这里只是接线；不传时保持 undefined（保住 A-918+「缺省即开」语义）。
+        
+        
         networkEnabled: req.networkEnabled,
-        // A-980-R22：工具面白名单（内置+skill 入口保留，mcp_* 按 Agent 勾选过滤）
+        
         toolsOnly: this.agentToolsFor(agent),
-        // A-980-R24：接线工具循环的预算护栏（此前从未传 → tool_loop 里的三道护栏是死代码）。
-        // 用宽松默认值（见文件头常量注释）；需要更长/更短时改环境变量，无需改代码。
+        
+        
         maxWallClockMs: DEFAULT_TOOL_WALL_CLOCK_MS,
         maxTotalTokens: DEFAULT_TOOL_MAX_TOTAL_TOKENS,
       })) {
@@ -2100,7 +2100,7 @@ export class ChatService {
           const tname = String(chunk.name ?? "");
           toolEventNames.push(tname);
           reasoningToolNames.push(tname);
-          // A-1034：把 diff 标记一起留痕（内存里的 chunk.result 含标记，落盘后就只剩这一份）
+          
           reasoningToolDiffTags.push(diffTagForTrace(chunk.result));
           yield emitChunk(chunk);
         } else if (chunk.type === "reasoning" || chunk.type === "progress") {
@@ -2110,7 +2110,7 @@ export class ChatService {
           yield emitChunk(chunk);
         } else if (chunk.type === "done") {
           doneReceived = true;
-          // A-090: 存储/学习用原文（reply_raw），展示走逐 chunk
+          
           fullReply = chunk.reply_raw ?? chunk.reply ?? fullReply;
           heldDone = chunk;
         } else if (chunk.type === "error") {
@@ -2119,40 +2119,40 @@ export class ChatService {
           this.alarm("chat.stream", `${agent.name}: ${errorMsg.slice(0, 200)}`, "warning");
           yield emitChunk(chunk);
         } else {
-          /* A-1064：**未列举的类型一律原样透传** —— 绝不静默吞事件。
-           *
-           * 这一条 else 是一个真实的、用户可见的缺陷的修复（bug 形状：**链路中间少一环**）。
-           * `EngineChunk["type"]` 声明了 11 种事件，本循环的 if 链只列举了 6 种，且**没有兜底**
-           * → 剩下的 `tool-start` / `steer` / `notice` 走到这里被**静默丢弃**。
-           *
-           * 为什么长期没被发现：三个必要环节**各自都有守卫**，唯独缺中间这一环 ——
-           *   · `tool_loop.ts` 确实在工具执行前广播了 `tool-start`（有测试）；
-           *   · `engine.ts` 确实把它抬进 liveQueue（有测试）；
-           *   · 类型联合与主进程白名单确实认它（有测试）；
-           *   · 界面 `onChunk` 确实有 `tool-start` 分支（有测试）；
-           * 而"引擎 → 界面"之间的**这一跳没有任何测试**，于是四段各自绿、整条链路断。
-           *
-           * 用户侧症状（全部同一个根因）：
-           *   ① 中途「引导」已被注入本轮，但 `steer` 事件到不了界面 → 那张待发卡片**不被撤掉**
-           *      → 本轮结束 `onDone` 的续发路径把它当普通排队**再发一遍**（用户原话：
-           *      "引导内容仍然在排队队列？而且会在这轮输出完毕后再次输出"）；
-           *   ② 同一条 `steer` 事件还负责把引导折进**思考历程** → 历程里看不到自己插入的引导；
-           *   ③ `tool-start` 到不了界面 → 脚本/命令**没有"执行中"态**，只有事后成败；
-           *   ④ `notice` 到不了界面 → 上游重试期仍是静默的"加载半天没动静"。
-           *
-           * 用**兜底 else** 而不是补三个 `else if`：根因不是"漏了三个名字"，而是"这个循环允许静默
-           * 丢弃"。补名字只治这一次，下一次往联合里加事件类型会**再犯一遍同样的错**（本项目
-           * 已在"同一语义多个产地"上反复踩坑）。兜底之后，新类型默认安全；真需要变形
-           * （如 `chunk` 剥思考、`done` 挂起）的**显式**在前面的分支里处理。
-           * ⚠️ 因此**不要**把这个 else 挪到前面，也不要在它之后再加 `else if`（永远不生效）。 */
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
           yield emitChunk(chunk);
         }
       }
 
-      // 主循环结束：冲刷剥离器残留（未闭合标签/未决前缀），并把剥离的思考并入 reasoningBuf
+      
       const stripperTail = stripper.flush();
       if (stripperTail) {
-        // done 已携带全文（reply_raw 含缓冲内容）→ 不再重复累加，仅流未完成（无 done）时补充到 fullReply
+        
         if (!doneReceived) {
           fullReply += stripperTail;
         }
@@ -2163,7 +2163,7 @@ export class ChatService {
         reasoningBuf = [reasoningBuf, sr].filter(Boolean).join("\n");
       }
 
-      // 用户已中断：跳过 A-049 强制轮/委托等后续处理，直接以 partial done 收尾
+      
       if (signal?.aborted && heldDone) {
         const extracted = extractThinkingFromReply(heldDone.reply ?? "", reasoningBuf);
         heldDone.reply = extracted.cleanReply;
@@ -2173,11 +2173,11 @@ export class ChatService {
         return;
       }
 
-      // ── A-049/A-085: 编造检测 → 强制工具轮 ──
+      
       if (doneReceived && heldDone !== null && isGenerationRequest(req.message)) {
         const img = toolEventNames.includes("agnes_generate_image");
-        // A-085（对齐 Python）：图片请求未调 image 也未调 prompt_build → 类型不匹配
-        // （注意：调了 video 不算匹配，模型把图片请求做成视频也是错误类型）
+        
+        
         const mediaMismatch =
           isImageRequest(req.message) && !img && !toolEventNames.includes("agnes_prompt_build");
         if ((toolEventCount === 0 || mediaMismatch) && (await claimsCompletion(fullReply))) {
@@ -2206,7 +2206,7 @@ export class ChatService {
         }
       }
 
-      // ── A-005: 委托/广播处理（对齐 /chat）──
+      
       if (doneReceived && heldDone !== null) {
         const firstReply = fullReply;
         const broadcastMsg = parseBroadcast(firstReply);
@@ -2215,14 +2215,14 @@ export class ChatService {
           this.logger.info(`[slime] ${agent.name} 广播了一条消息给 ${this.bus.getRegisteredNames()}`);
         }
         const delegations = parseDelegations(firstReply);
-        /** 按委托顺序占位（undefined = 未找到成员，被过滤），保证整合 prompt 顺序稳定 */
+        
         const delegationResults: Array<{ name: string; task: string; result: string } | undefined> = [];
         if (delegations.length > 0) {
-          // A-045: 委托执行后台化 + 心跳防读超时
+          
           const eventQueue: Array<EngineChunk | null> = [];
           const worker = (async () => {
-            // 并行委派：一次派单涉及的所有成员任务同时执行（团队协作「各司其职」的核心语义），
-            // 结果按委托顺序索引占位；成员完成时按自然先后顺序以 type="member" 事件冒泡（群聊）。
+            
+            
             await Promise.all(
               delegations.slice(0, MAX_DELEGATIONS).map(async (d, idx) => {
                 const child = (await this.registry.loadedAgents).find(
@@ -2238,7 +2238,7 @@ export class ChatService {
                     history: [],
                     systemPrompt: child.identity_prompt || `你是 ${child.name}，你的角色是：${child.role}`,
                     workspace,
-                    // A-1014-C2：流式路径的并发委派 —— 关联网时子 Agent 一并关（与 delegate_subagent 工具口径一致）。
+                    
                     networkEnabled: req.networkEnabled,
                   });
                   const childReply = childResult.reply ?? "";
@@ -2252,7 +2252,7 @@ export class ChatService {
                     args: d.task,
                     result: childReply.slice(0, 200),
                   });
-                  // 团队会话：成员答复冒泡为独立"成员发言"（群聊渲染，与组长整合回复并列）
+                  
                   eventQueue.push({
                     type: "member",
                     name: child.name,
@@ -2278,7 +2278,7 @@ export class ChatService {
                 }
               }),
             );
-            eventQueue.push(null); // 哨兵：委托全部完成
+            eventQueue.push(null); 
           })();
           const deadlineMs = HEARTBEAT_INTERVAL_MS;
           while (true) {
@@ -2304,7 +2304,7 @@ export class ChatService {
 
         const realResults = delegationResults.filter((r): r is { name: string; task: string; result: string } => !!r);
         if (realResults.length > 0) {
-          // 有委托结果：父 Agent 流式整合后收尾（单 done 终局）
+          
           const resultsText = realResults
             .map((r) => `## ${r.name} 的回复\n任务：${r.task}\n结果：${r.result}`)
             .join("\n\n");
@@ -2324,7 +2324,7 @@ export class ChatService {
             signal,
             workspace,
             sessionId: req.sessionId,
-            // A-1014-C2：流式汇总轮 —— 与主路径同一口径（关联网时整条链都不联网）。
+            
             networkEnabled: req.networkEnabled,
           })) {
             if (fchunk.type === "chunk") {
@@ -2366,16 +2366,16 @@ export class ChatService {
                 elapsed_ms: elapsedMs,
                 timings: fchunk.timings ?? heldDone.timings,
                 ctxBuckets: fchunk.ctxBuckets ?? heldDone.ctxBuckets,
-                // A-973：缓存命中透传——委托整合路径重建 done 时此前丢了 cache_read/creation_tokens，
-                // 导致主进程 toStreamChunk 的 timings.cacheReadTokens 恒 0 → 右栏「平均命中」永远是 0%
-                // （而设置页读 DB 有真实值，两处不一致的根因）。
+                
+                
+                
                 ...(typeof fchunk.cache_read_tokens === "number" ? { cache_read_tokens: fchunk.cache_read_tokens } : {}),
                 ...(typeof fchunk.cache_creation_tokens === "number" ? { cache_creation_tokens: fchunk.cache_creation_tokens } : {}),
                 ...(typeof fchunk.reasoning_tokens === "number" ? { reasoning_tokens: fchunk.reasoning_tokens } : {}),
-                // A-974-R7：窗口占用口径必须随 done 一起透传（重建 done 时漏字段 = GUI 退回累计值爆表）
+                
                 ...(typeof fchunk.window_prompt_tokens === "number" ? { window_prompt_tokens: fchunk.window_prompt_tokens } : {}),
                  ...(typeof fchunk.window_cache_read_tokens === "number" ? { window_cache_read_tokens: fchunk.window_cache_read_tokens } : {}),
-                 // A-974-R8：协议语义标记随 done 透传（GUI 窗口占用公式据此决定是否 +cache_read）
+                 
                  ...(typeof fchunk.cache_read_in_prompt === "boolean" ? { cache_read_in_prompt: fchunk.cache_read_in_prompt } : {}),
               });
             } else if (fchunk.type === "error") {
@@ -2401,7 +2401,7 @@ export class ChatService {
             elapsed_ms: elapsedMs,
             timings: heldDone.timings,
             ctxBuckets: heldDone.ctxBuckets,
-            // A-973：委托收尾路径同样补回缓存命中 token（同上方 fchunk 路径）
+            
             ...(typeof heldDone.cache_read_tokens === "number" ? { cache_read_tokens: heldDone.cache_read_tokens } : {}),
             ...(typeof heldDone.cache_creation_tokens === "number" ? { cache_creation_tokens: heldDone.cache_creation_tokens } : {}),
             ...(typeof heldDone.reasoning_tokens === "number" ? { reasoning_tokens: heldDone.reasoning_tokens } : {}),
@@ -2413,7 +2413,7 @@ export class ChatService {
       }
     } catch (e) {
       if (signal?.aborted && (fullReply || heldDone)) {
-        // 用户中断：保留已生成部分正常收尾（委托/强制轮等非引擎 await 被中止时兜底）
+        
         const extracted = extractThinkingFromReply(fullReply || heldDone?.reply || "", reasoningBuf);
         const partial = extracted.cleanReply;
         reasoningBuf = extracted.reasoning;
@@ -2427,7 +2427,7 @@ export class ChatService {
           elapsed_ms: elapsedMs,
           timings: heldDone?.timings,
           ctxBuckets: heldDone?.ctxBuckets,
-          // A-973：中断路径同样补回缓存命中 token（heldDone 可选链）
+          
           ...(typeof heldDone?.cache_read_tokens === "number" ? { cache_read_tokens: heldDone.cache_read_tokens } : {}),
           ...(typeof heldDone?.cache_creation_tokens === "number" ? { cache_creation_tokens: heldDone.cache_creation_tokens } : {}),
           ...(typeof heldDone?.reasoning_tokens === "number" ? { reasoning_tokens: heldDone.reasoning_tokens } : {}),
@@ -2437,30 +2437,30 @@ export class ChatService {
         });
         return;
       }
-      // S2: 显式捕获异常为 error chunk
+      
       errorMsg = `[流式生成异常: ${e instanceof Error ? e.message : String(e)}]`;
       this.alarm("chat.stream", `${agent.name}: ${errorMsg.slice(0, 200)}`, "warning");
       yield emitChunk({ type: "error", message: errorMsg });
     } finally {
-      // N11-P2-2: 无论客户端是否断开，确保记录交互、历史、记忆、演化
+      
       if (doneReceived || fullReply || errorMsg) {
-        // 兜底合并流式剥离器残留（异常/断线路径主循环未完成时）
+        
         const sr = stripper.reasoning.trim();
         if (sr && !reasoningBuf.includes(sr)) {
           reasoningBuf = [reasoningBuf, sr].filter(Boolean).join("\n");
         }
-        // 断线/异常兜底：正文里残留的思考内容也一并剥离，保证历史记录干净
+        
         const extracted = extractThinkingFromReply(fullReply || errorMsg, reasoningBuf);
         let persistReply = extracted.cleanReply || errorMsg;
         reasoningBuf = extracted.reasoning;
-        // orphan thought 兜底（仅非错误路径）：模型把含答案的整块写进思考区、正文为空时，
-        // 把最后一段思考提升为正文，避免历史里只留思考、正文 (empty)。
+        
+        
         if (!errorMsg) {
           const promoted = promoteOrphanThinking(persistReply, reasoningBuf);
           persistReply = promoted.cleanReply;
           reasoningBuf = promoted.reasoning;
         }
-        // N12-2: 流未完成（客户端中途断开）时标记截断
+        
         if (fullReply && !doneReceived && !errorMsg) {
           persistReply = persistReply + "\n[截断]";
         }
@@ -2468,8 +2468,8 @@ export class ChatService {
         if (req.retry) {
           await this.historyStore.popLast(agent.id, req.sessionId);
         }
-        // 工具调用留痕：无思考模型不产出 reasoning，工具记录会随流结束丢失；
-        // 把本次工具调用合并进思考记录，持久化后历史回看/切换会话仍可见（N14）
+        
+        
         const toolBlock = composeToolCallBlock(reasoningToolNames, reasoningToolDiffTags);
         if (toolBlock) {
           reasoningBuf = reasoningBuf ? `${reasoningBuf}\n\n${toolBlock}` : toolBlock;
@@ -2494,7 +2494,7 @@ export class ChatService {
     return undefined;
   }
 
-  // ── A-049 强制工具轮（媒体工具子集注入）────────────────
+  
 
   async runForcedRound(
     agent: AgentState,
@@ -2554,7 +2554,7 @@ export class ChatService {
     return { reply, events, progress };
   }
 
-  // ── 交互记录 + 后台 post-process ───────────────────────
+  
 
   private async recordInteraction(
     agent: AgentState,
@@ -2581,8 +2581,8 @@ export class ChatService {
   ): Promise<void> {
     return (async () => {
       try {
-        // A-1035：把 dataDir 透传下去 —— 否则知识/技能/记忆永远写项目根，
-        // 嵌入方与测试都没法改道（测试污染仓库 Knowledge/ 就是这么来的）。
+        
+        
         await this.postProcessChat(agent, userMsg, reply, success, {
           tools,
           ...(this.knowledgeDataDir ? { dataDir: this.knowledgeDataDir } : {}),
@@ -2593,7 +2593,7 @@ export class ChatService {
     })();
   }
 
-  /** _post_process_chat / _post_process_swarm 公共管线：记忆提取 → 演化 → 知识 → 行为 → 情绪 → 巩固 → 保存 */
+  
   async postProcessChat(
     agent: AgentState,
     userMsg: string,
@@ -2625,7 +2625,7 @@ export class ChatService {
       this.logger.debug("[slime] 记忆提取未接线（5B.3 迁移后启用），跳过");
     }
 
-    // 演化引擎（注入点；缺省跳过）
+    
     if (this.postProcess.evolve) {
       try {
         await this.postProcess.evolve({ agent, success, traitSignals, userSentiment });
@@ -2636,17 +2636,17 @@ export class ChatService {
       this.logger.debug("[slime] 演化引擎未接线（5B.3 迁移后启用），跳过");
     }
 
-    // 知识引擎：记录 pattern（沉淀的「记录」半环，整理交给 ConsolidationEngine）
+    
     let ke: ReturnType<typeof getKnowledgeEngine> | null = null;
     try {
       ke = getKnowledgeEngine(agent.id, opts.dataDir ? { dataDir: opts.dataDir } : {});
       const primary = success
         ? ke.recordPattern(`${knowledgePrefix}.success`, "task", `成功回复: ${userMsg.slice(0, 80)}`, "low")
         : ke.recordPattern(`${knowledgePrefix}.fail`, "task", `回复失败: ${userMsg.slice(0, 80)}`, "medium");
-      // A-1035：把晋升结果**当场消费**（知识→技能／知识→人格）。
-      // 此前 recordPattern 的返回值没人接 —— 于是 promote_to_skill / promote_to_trait
-      // 只是两个没人读的字符串，generateSkill() 与写 persona.traits 的代码全部是死代码，
-      // 对外宣称的「五级跃迁」实际只走到 Rule。
+      
+      
+      
+      
       const promoted = ke.applyPromotion(primary, agent.persona as never);
       if (promoted.skill) {
         this.logger.info(`[slime] 自动生成技能: ${promoted.skill.name}（来源 pattern ${String(primary.key ?? "")}）`);
@@ -2654,9 +2654,9 @@ export class ChatService {
       if (promoted.trait) {
         this.logger.info(`[slime] 人格特征强化: ${promoted.trait}（来源 pattern ${String(primary.key ?? "")}）`);
       }
-      // A-1035：能力使用也进知识 —— 工具/skill/MCP 的成败是本 Agent 最该记住的事实，
-      // 单个工具反复成功 → recurrence 跨过阈值 → 自动沉淀成可复用技能（category=learning）。
-      // 去重 + 上限：一轮里同一工具调用多次只记一次，最多 8 个，避免知识库被刷爆。
+      
+      
+      
       const usedTools = [...new Set((opts.tools ?? []).filter((t) => t && !t.startsWith("delegate:")))].slice(0, 8);
       for (const t of usedTools) {
         ke.recordPattern(
@@ -2670,7 +2670,7 @@ export class ChatService {
       this.logger.debug(`[slime] 知识引擎更新失败: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // L3→L2 沉淀：LLM 提取的行为模式 → 行为模式库
+    
     const behavior = BehaviorStore.fromDict(agent.behavior);
     for (const bp of behaviorPatterns) {
       behavior.reinforce({
@@ -2681,9 +2681,9 @@ export class ChatService {
       });
     }
 
-    // 情绪更新（全信号：novelty/violation/praise/failure_type）
+    
     const emotion = new EmotionalState(agent.emotion as Record<string, unknown>);
-    const violation = false; // 沙箱审计接线点（阶段 5B.2）
+    const violation = false; 
     const novelty = await detectNovelty(agent.id, userMsg, (id, limit) =>
       this.historyStore.load(id, limit).then((rs) => rs.map((r) => ({ user: r.user }))),
     );
@@ -2697,7 +2697,7 @@ export class ChatService {
       praise,
     });
 
-    // BUG-024: 沉淀统一走 ConsolidationEngine（知识引擎兜底 + 艾宾浩斯衰减）
+    
     try {
       const ce = new ConsolidationEngine();
       const total = agent.persona?.interactions?.length ?? 0;
@@ -2705,21 +2705,21 @@ export class ChatService {
         ce.consolidate({
           behavior,
           totalInteractions: total,
-          // A-1035：**知识 → 心智**这一跳此前是断的（参数存在但从来没人传）。
-          // 不传 = 知识引擎里攒的高频 pattern 永远沉淀不成行为模式，三方只剩单向。
+          
+          
           knowledgeTraits: ke ? ke.getPromotableTraits() : undefined,
           existingScenarios: new Set(behaviorPatterns.map((bp) => bp.scenario)),
           onArchived: (pat) => behavior.archive(pat),
         });
-        // A-1035：同频做**周期性审查**（唯一会批量写 persona.traits 的入口，此前零调用者）：
-        // 归档 90 天未出现的 pattern + 强化达标 trait + 衰减记忆。
+        
+        
         if (ke) {
           const rv = ke.review(agent.persona as never);
           if (rv.traits_reinforced > 0 || rv.patterns_resolved > 0) {
             this.logger.info(`[slime] 知识审查: 强化 trait ${rv.traits_reinforced} · 归档 pattern ${rv.patterns_resolved}`);
           }
         }
-        // C-记忆三层：与行为巩固同频触发记忆分层巩固（working→episodic；episodic 高访问→semantic）
+        
         const memStats = consolidateMemoryNow(agent.id, opts.dataDir ? { dataDir: opts.dataDir } : {});
         if (memStats.moved || memStats.pruned) {
           this.logger.debug(`[slime] 记忆分层巩固完成: 迁移 ${memStats.moved} · 剔除 ${memStats.pruned}`);
@@ -2735,7 +2735,7 @@ export class ChatService {
   }
 }
 
-// ── 辅助 ──────────────────────────────────────────────────
+
 
 const PRAISE_KEYWORDS = ["谢谢", "感谢", "做得好", "不错", "棒", "太棒", "辛苦", "厉害"];
 
@@ -2746,7 +2746,7 @@ export function isPraise(message: string, userSentiment: number): boolean {
   return PRAISE_KEYWORDS.some((k) => message.includes(k));
 }
 
-/** Persona 便捷构造（对齐 core/persona.py 空骨架语义） */
+
 export function personaFrom(data?: unknown): PersonaModel {
   return new PersonaModel(data as Record<string, unknown>);
 }

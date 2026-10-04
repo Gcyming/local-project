@@ -1,13 +1,13 @@
-/**
- * core-ts/src/sandbox.ts — 沙箱系统（L0-L5 权限分级 + 审计 + 异常检测）。
- * 语义移植自 core/sandbox.py：
- * - 权限分级模型 L0-L5（默认只读），决策链：workspace → 异常 deny 规则 → 黑名单 → 需确认工具 → 自动批准 → 需确认等级 → fail-closed
- * - 审计日志（内存 + data/audit.jsonl，retention 轮转）
- * - 异常检测（写入速率 / 文件大小 / 危险模式 deny+alert / 循环 terminate / 资源耗尽）
- * - Agent 级配置覆盖（列表字段与全局取并集，A-002）
- * - 权限继承（父 Agent）与紧急回收
- * - 全局单例 + reset
- */
+
+
+
+
+
+
+
+
+
+
 
 import { mkdir, appendFile, writeFile, readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
@@ -16,15 +16,15 @@ import { randomUUID } from "node:crypto";
 
 export { PROJECT_ROOT };
 
-// ── 权限分级 ──────────────────────────────────────────────
+
 
 export enum PermissionLevel {
-  L0 = 0, // 纯读取
-  L1 = 1, // 查看信息
-  L2 = 2, // 修改文件
-  L3 = 3, // 执行命令
-  L4 = 4, // 网络访问
-  L5 = 5, // 系统操作
+  L0 = 0, 
+  L1 = 1, 
+  L2 = 2, 
+  L3 = 3, 
+  L4 = 4, 
+  L5 = 5, 
 }
 
 export const LEVEL_NAMES: Record<number, string> = {
@@ -37,10 +37,10 @@ export function levelFromString(s: string): PermissionLevel {
   if (Number.isInteger(n) && n >= 0 && n <= 5) {
     return n as PermissionLevel;
   }
-  return PermissionLevel.L0; // 解析失败回退最安全等级
+  return PermissionLevel.L0; 
 }
 
-/** 工具名匹配：支持 fnmatch 通配（A-002："mcp_browser_*"） */
+
 function toolMatches(action: string, patterns: string[]): boolean {
   if (!patterns || patterns.length === 0) {
     return false;
@@ -53,7 +53,7 @@ function fnmatch(name: string, pattern: string): boolean {
   return new RegExp(`^${re}$`).test(name);
 }
 
-// ── 异常检测 ──────────────────────────────────────────────
+
 
 export interface AnomalyRule {
   name: string;
@@ -112,7 +112,7 @@ export class AnomalyDetector {
       if (rule.name === "write_rate_limit" && this.checkRateLimit(agentId, action, rule.threshold ?? 100)) {
         alerts.push(rule.description);
       } else if (rule.name === "file_size_limit") {
-        // 文件大小核验由调用方通过 context 提供（无 context 时跳过，避免盲查盘）
+        
       } else if (rule.name === "loop_detection" && this.checkLoop(agentId, rule.threshold ?? 1000)) {
         alerts.push(rule.description);
       } else if (ruleMatches(rule, action, target)) {
@@ -122,7 +122,7 @@ export class AnomalyDetector {
     return { detected: alerts.length > 0, alerts };
   }
 
-  /** 写入速率：先检查后记录，避免拒绝操作被计入 */
+  
   checkRateLimit(agentId: string, action: string, threshold: number): boolean {
     if (!action.toLowerCase().includes("write") && !action.toLowerCase().includes("delete")) {
       return false;
@@ -157,10 +157,10 @@ export class AnomalyDetector {
   }
 }
 
-// ── 配置 ──────────────────────────────────────────────────
+
 
 export interface SandboxConfig {
-  default_level: string; // strict | moderated | relaxed
+  default_level: string; 
   auto_approve_levels: number[];
   require_approval_levels: number[];
   deny_levels: number[];
@@ -177,13 +177,13 @@ export interface SandboxConfig {
   audit_log_path: string;
   audit_retention_days: number;
   workspace: string;
-  /** 自定义白名单（权限设置预设的目录/仓库）：命中路径一律自动放行，免审批 */
+  
   allowPaths?: string[];
-  /** 系统级拒绝（黑名单/异常 deny）命中时转用户确认（手动/自动档：权限不足再问） */
+  
   askOnDeny?: boolean;
-  /** 无需审批档：系统级拒绝也直接放行（黑名单失效，非 terminate 级） */
+  
   allowDeny?: boolean;
-  /** 工作目录外操作自动放行（auto/none 档放开） */
+  
   allowOutsideWorkspace?: boolean;
 }
 
@@ -246,7 +246,7 @@ export function defaultLevelAsInt(cfg: SandboxConfig): number {
   return mapping[cfg.default_level] ?? 1;
 }
 
-/** Agent 级覆盖合并：列表字段与全局取并集（A-002，覆盖不丢全局放行项） */
+
 const MERGE_UNION_KEYS = ["auto_approve_tools", "deny_tools", "require_approval_tools"] as const;
 
 export function mergeAgentOverride(base: SandboxConfig, override: Record<string, unknown> | undefined): SandboxConfig {
@@ -268,7 +268,7 @@ export function mergeAgentOverride(base: SandboxConfig, override: Record<string,
   return data;
 }
 
-// ── 请求/决策/结果 ────────────────────────────────────────
+
 
 export interface PermissionRequest {
   requestId: string;
@@ -278,7 +278,7 @@ export interface PermissionRequest {
   taskDescription: string;
   actions: Array<{ action: string; target: string; level: number }>;
   timestamp: string;
-  /** 触发该请求的流所属会话（engine 流上下文精确注入；切会话后旧流请求可被渲染层按会话丢弃） */
+  
   sessionId?: string;
 }
 
@@ -307,8 +307,8 @@ export interface AuditEntry {
   action: string;
   target: string;
   level: number;
-  status: string; // allowed | denied | revoked
-  granted_by: string; // auto | user | main_agent
+  status: string; 
+  granted_by: string; 
   grant_id: string;
   details: Record<string, unknown>;
   risk_score: number;
@@ -334,7 +334,7 @@ function makeAuditEntry(partial: Partial<AuditEntry>): AuditEntry {
   };
 }
 
-// ── 辅助 ──────────────────────────────────────────────────
+
 
 function isWorkHours(): boolean {
   const h = new Date().getHours();
@@ -354,7 +354,7 @@ function isSystemPath(path: string): boolean {
 
 function validateWorkspace(workspace: string, target: string): boolean {
   if (!workspace || !target) {
-    return !workspace; // 无 workspace 不限制；有 workspace 必须有 target
+    return !workspace; 
   }
   try {
     let tp = target;
@@ -362,16 +362,16 @@ function validateWorkspace(workspace: string, target: string): boolean {
       const parsed = JSON.parse(target);
       if (parsed && typeof parsed === "object") {
         if (parsed.url) {
-          return true; // 网络目标归 SSRF 防护管
+          return true; 
         }
         const p = parsed.path ?? parsed.file ?? parsed.target;
         if (!p) {
-          return false; // 无路径字段拒绝（隔离范围内必须明确目标）
+          return false; 
         }
         tp = String(p);
       }
     } catch {
-      // 非 JSON，按路径处理
+      
     }
     const ws = resolve(workspace);
     const abs = resolve(tp);
@@ -381,11 +381,11 @@ function validateWorkspace(workspace: string, target: string): boolean {
   }
 }
 
-// ── SandboxManager ────────────────────────────────────────
+
 
 export class SandboxManager {
   config: SandboxConfig;
-  /** 审批回调：同步或异步皆可（GUI 走 IPC 往返渲染层输入框 UI） */
+  
   private approvalCallback: ((req: PermissionRequest) => ApprovalDecision | Promise<ApprovalDecision>) | null;
   private activeGrants = new Map<string, { agent_id: string; action: string; target: string; level: number; granted_by: string; granted_at: number }>();
   private agentGrants = new Map<string, string[]>();
@@ -395,7 +395,7 @@ export class SandboxManager {
   private auditLog: AuditEntry[] = [];
   private anomalyDetector = new AnomalyDetector();
   private upgradeExpiry = new Map<string, Array<[number, number]>>();
-  /** 会话级「总是允许」工具白名单（本次会话内同工具不再询问；AgentId → Set<action>） */
+  
   private sessionToolAllowlist = new Map<string, Set<string>>();
   private auditQueue: Promise<void> = Promise.resolve();
 
@@ -408,19 +408,19 @@ export class SandboxManager {
     this.approvalCallback = cb;
   }
 
-  /** 会话级「总是允许」：用户批准后，本次会话内该 Agent 的该工具不再弹审批 */
+  
   approveToolForSession(agentId: string, action: string): void {
     const set = this.sessionToolAllowlist.get(agentId) ?? new Set<string>();
     set.add(action);
     this.sessionToolAllowlist.set(agentId, set);
   }
 
-  /** 会话级白名单是否命中 */
+  
   private sessionToolAllowed(agentId: string, action: string): boolean {
     return this.sessionToolAllowlist.get(agentId)?.has(action) ?? false;
   }
 
-  /** 清空会话级白名单（Agent 删除 / 会话切换时） */
+  
   clearSessionAllowlist(agentId = ""): void {
     if (agentId) {
       this.sessionToolAllowlist.delete(agentId);
@@ -447,7 +447,7 @@ export class SandboxManager {
         details: { violation_count: this.violations.get(agentId) },
       }));
     } catch {
-      // 审计失败不影响主流程
+      
     }
   }
 
@@ -457,12 +457,12 @@ export class SandboxManager {
     return n > 0;
   }
 
-  /** 预检查（不写审计）：返回 PermissionCheckResult（对齐 check_permission 决策链）。
-   *  工作目录外的操作不再硬拒，而是标为「需要用户确认」（授权时走审批回调，UI 决策）。 */
+  
+
   checkPermission(agentId: string, action: string, target: string, level: number): PermissionCheckResult {
     const cfg = this.getAgentConfig(agentId);
 
-    // 自定义白名单命中 → 直接放行（与 grantCore 一致）
+    
     if (target && (cfg.allowPaths ?? []).length > 0) {
       for (const ap of cfg.allowPaths ?? []) {
         if (ap && validateWorkspace(ap, target)) {
@@ -486,12 +486,12 @@ export class SandboxManager {
       anomalyAlerts = r.alerts;
     }
 
-    // 1. 黑名单优先
+    
     if (cfg.deny_levels.includes(level) || toolMatches(action, cfg.deny_tools)) {
       return { allowed: false, reason: `操作 '${action}' (L${level}) 被禁止`, level, anomalyDetected, anomalyAlerts };
     }
 
-    // B1: 异常 deny/terminate 级规则强制执行（含非模式规则：循环检测等）
+    
     if (anomalyDetected) {
       for (const rule of this.anomalyDetector.rules) {
         if ((ruleMatches(rule, action, target) || anomalyAlerts.includes(rule.description)) && (rule.action === "deny" || rule.action === "deny+alert" || rule.action === "terminate")) {
@@ -500,22 +500,22 @@ export class SandboxManager {
       }
     }
 
-    // 2. 需确认的工具优先于等级自动批准
+    
     if (toolMatches(action, cfg.require_approval_tools)) {
       return { allowed: false, reason: `工具 '${action}' 需要用户确认`, level, anomalyDetected, anomalyAlerts };
     }
 
-    // 3. 自动批准
+    
     if (cfg.auto_approve_levels.includes(level) || toolMatches(action, cfg.auto_approve_tools)) {
-      // A-088 P1-9：mcp_* 通配只自动批准低权限；network/terminal 级仍需确认/拒绝
+      
       if (toolMatches(action, cfg.auto_approve_tools) && action.startsWith("mcp_") && level >= 3) {
-        // 落入后续等级判定
+        
       } else {
         return { allowed: true, reason: "自动批准", level, anomalyDetected, anomalyAlerts };
       }
     }
 
-    // 4. 需确认的等级
+    
     if (cfg.require_approval_levels.includes(level)) {
       return { allowed: false, reason: `操作 '${action}' (L${level}) 需要用户确认`, level, anomalyDetected, anomalyAlerts };
     }
@@ -523,7 +523,7 @@ export class SandboxManager {
     return { allowed: false, reason: `未知权限等级 L${level}，已拒绝`, level, anomalyDetected, anomalyAlerts };
   }
 
-  /** 授权 + 审计（决策链同 check_permission；工作目录外 / L2-L4 走异步 approval 回调） */
+  
   async grantPermission(opts: {
     agentId: string;
     action: string;
@@ -550,7 +550,7 @@ export class SandboxManager {
     const taskId = opts.taskId ?? "";
     const cfg = this.getAgentConfig(agentId);
 
-    // 自定义白名单（设置·权限·预设放行目录/仓库）：命中路径一律直接放行，免审批
+    
     if (target && (cfg.allowPaths ?? []).length > 0) {
       for (const ap of cfg.allowPaths ?? []) {
         if (ap && validateWorkspace(ap, target)) {
@@ -561,9 +561,9 @@ export class SandboxManager {
       }
     }
 
-    // 工作目录外：不再硬拒，转用户确认（输入框选择题 UI 展示风险并让用户抉择）。
-    // 会话级「总是允许」白名单命中时直接放行（已获得用户明确授权）。
-    // 自动/无需档：allowOutsideWorkspace=true → 直接放行。
+    
+    
+    
     if (cfg.workspace && target && !validateWorkspace(cfg.workspace, target)) {
       if (cfg.allowOutsideWorkspace) {
         const gid = this.recordGrant(agentId, action, target, level, grantedBy);
@@ -588,7 +588,7 @@ export class SandboxManager {
     }
 
     if (cfg.deny_levels.includes(level) || toolMatches(action, cfg.deny_tools)) {
-      // 无需审批档：连黑名单也放行；手动/自动档：系统级拒绝转用户确认（权限不足再问）
+      
       if (cfg.allowDeny) {
         const gid = this.recordGrant(agentId, action, target, level, grantedBy);
         this.writeAudit(makeAuditEntry({ agent_id: agentId, task_id: taskId, action, target, level, status: "allowed", granted_by: grantedBy, grant_id: gid, details: { reason: "无需审批档：系统级拒绝已放行" } }));
@@ -624,14 +624,14 @@ export class SandboxManager {
       }
     }
 
-    // 会话级「总是允许」（已授权的工具跳过后续询问）
+    
     if (this.sessionToolAllowed(agentId, action)) {
       const gid = this.recordGrant(agentId, action, target, level, "user");
       this.writeAudit(makeAuditEntry({ agent_id: agentId, task_id: taskId, action, target, level, status: "allowed", granted_by: "user", grant_id: gid, anomaly_detected: anomalyDetected }));
       return { allowed: true, reason: "会话级已批准", anomalyDetected, anomalyAlerts };
     }
 
-    // 需确认的工具（回调）
+    
     if (toolMatches(action, cfg.require_approval_tools)) {
       const r = await this.approvalPath({ agentId, action, target, level, taskId, anomalyDetected, rule: "工具", sessionId: opts.sessionId });
       return { ...r, anomalyDetected, anomalyAlerts };
@@ -666,11 +666,11 @@ export class SandboxManager {
       agentId: opts.agentId,
       agentName: info.name,
       taskId: opts.taskId || info.task_id,
-      // 工作目录外请求：任务描述给出明确提示，UI 据此高亮风险
+      
       taskDescription: opts.rule === "工作目录外" ? `目标超出工作目录范围，需确认是否授权访问外部路径` : "",
       actions: [{ action: opts.action, target: opts.target, level: opts.level }],
       timestamp: new Date().toISOString(),
-      // 流上下文注入的会话标识（GUIMain 据此精确打标签；切会话后旧流请求可被渲染层丢弃）
+      
       sessionId: opts.sessionId,
     };
     const decision = await this.approvalCallback(req);
@@ -690,7 +690,7 @@ export class SandboxManager {
     return gid;
   }
 
-  /** 紧急回收某 Agent 所有权限 */
+  
   async revokeAll(agentId: string, reason = ""): Promise<void> {
     for (const gid of this.agentGrants.get(agentId) ?? []) {
       const grant = this.activeGrants.get(gid);
@@ -717,8 +717,8 @@ export class SandboxManager {
       const info = this.agentRegistry.get(agentId);
       if (info?.parent_id) {
         const parentCfg = this.getAgentConfig(info.parent_id);
-        // 子代权限永远 ⊆ 父代：workspace 必须原样继承（父代未设则回退全局），
-        // 绝不可置空——空 workspace 在 validateWorkspace 中语义为「不限制」，等于沙箱逃逸
+        
+        
         cfg = parentCfg.inherit_from_parent ? { ...parentCfg, workspace: parentCfg.workspace || this.config.workspace } : this.config;
       } else {
         cfg = this.config;
@@ -746,7 +746,7 @@ export class SandboxManager {
     this.agentConfigs.delete(agentId);
   }
 
-  /** 子 Agent 申请权限提升（B4：5 分钟临时有效，不永久改 config）；审批回调可异步（GUI 输入框选择题） */
+  
   async requestPermissionUpgrade(agentId: string, targetLevel: number, reason = ""): Promise<{ allowed: boolean; reason: string }> {
     const info = this.agentRegistry.get(agentId);
     if (!info?.parent_id) {
@@ -782,7 +782,7 @@ export class SandboxManager {
     return { allowed: false, reason: `L${targetLevel} 未在审批规则中列出，默认拒绝` };
   }
 
-  // ── 审计 ──────────────────────────────────────────────
+  
 
   writeAudit(entry: AuditEntry): void {
     if (!this.config.audit_enabled) {
@@ -797,23 +797,23 @@ export class SandboxManager {
         .then(() => appendFile(path, line, "utf-8"))
         .catch(() => {});
     } catch {
-      // 审计写入失败不影响主流程
+      
     }
     if (this.auditLog.length % 200 === 0) {
-      // 轮转串入写入队列：与 appendFile 严格串行，消除「读文件→写文件」之间漏掉新追加的竞态
+      
       this.auditQueue = this.auditQueue.then(() => this.rotateAuditLog()).catch(() => {});
     }
   }
 
-  /** 等待审计磁盘写入排空（测试/收尾用） */
+  
   async flushAudit(): Promise<void> {
     await this.auditQueue;
   }
 
   async rotateAuditLog(): Promise<void> {
     const cutoff = new Date(Date.now() - this.config.audit_retention_days * 86_400_000).toISOString();
-    // 以磁盘文件为轮转源（而非内存镜像）：原实现用内存 kept 全量覆写文件，
-    // 进程重启后内存为空，首次轮转即清空历史审计——审计日志必须 append-only 且跨重启存活。
+    
+    
     const path = resolveAuditPath(this.config);
     try {
       const raw = await readFile(path, "utf-8");
@@ -828,12 +828,12 @@ export class SandboxManager {
       });
       await writeFile(path, keptLines.join("\n") + (keptLines.length ? "\n" : ""), "utf-8");
     } catch (e) {
-      // 文件不存在（首轮）属正常；其余失败打日志但不阻断主流程
+      
       if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
         console.warn("[sandbox] 审计日志轮转失败（保留原文件）:", e);
       }
     }
-    // 内存镜像同步淘汰（仅供 queryAudit 查询）
+    
     this.auditLog = this.auditLog.filter((e) => e.timestamp >= cutoff);
   }
 
@@ -878,7 +878,7 @@ function resolveAuditPath(cfg: SandboxConfig): string {
   return resolve(PROJECT_ROOT, cfg.audit_log_path);
 }
 
-// ── 全局单例 ──────────────────────────────────────────────
+
 
 let globalManager: SandboxManager | null = null;
 

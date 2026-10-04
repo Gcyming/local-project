@@ -1,7 +1,7 @@
-/**
- * tests/gui/git-diff.spec.ts — A-968 git unified diff 解析单测（纯函数）。
- * 验证右栏 Git 面板的红绿标注渲染数据源：@@ 块切分、+/-/上下文归类、行数统计、\r\n 兼容。
- */
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { parseUnifiedDiff } from "../../gui/src/main/git_diff.js";
 

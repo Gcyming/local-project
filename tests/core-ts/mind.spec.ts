@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/mind.spec.ts — 心智模块（情绪 + 行为）语义对照测试。
- * 对照 Python 侧 core/emotion.py + core/behavior.py 语义逐项移植验证。
- */
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { EmotionalState, topKForMood } from "../../core-ts/src/mind/emotion.js";
 import { BehaviorStore, BehaviorPattern, ConsolidationEngine } from "../../core-ts/src/mind/behavior.js";
@@ -24,12 +24,12 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
     expect(e.events.length).toBe(1);
     expect(e.events[0].trigger).toBe("success");
     expect(e.events[0].detail).toBe("任务完成");
-    // 单次 success 不满足滞回收益（Python 语义一致：保持 neutral）
+    
     expect(e.mood).toBe("neutral");
     for (let i = 0; i < 7; i++) {
       e.update({ success: true });
     }
-    expect(e.mood).toBe("happy"); // 8 次后滞回收益 0.076 ≥ 0.05 → happy
+    expect(e.mood).toBe("happy"); 
   });
 
   it("连续 3 次任务失败 → angry 硬触发（≥3 跳闸）", () => {
@@ -55,7 +55,7 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
 
   it("interrupt 三零语义：PAD 全零、失败不计数、关系深度不回落", () => {
     const e = new EmotionalState();
-    e.update({ success: true }); // 建立关系深度
+    e.update({ success: true }); 
     const depthBefore = e.relationalDepth;
     e.update({ success: false, failureType: "interrupt" });
     expect(e.relationalDepth).toBeCloseTo(depthBefore, 5);
@@ -91,12 +91,12 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
 
   it("指数半衰期衰减：离基线越远回落越多；half_life 因 mood 而异", () => {
     const e = new EmotionalState();
-    e.update({ success: true, praise: true }); // 大幅正向
+    e.update({ success: true, praise: true }); 
     const v0 = e.valence;
-    e.decay(35); // happy 半衰期
+    e.decay(35); 
     expect(e.valence).toBeGreaterThan(0);
     expect(e.valence).toBeLessThan(v0);
-    expect(e.arousal).toBeGreaterThanOrEqual(0.3); // 向基线 0.3 回落不越过
+    expect(e.arousal).toBeGreaterThanOrEqual(0.3); 
   });
 
   it("events cap 8（Soul-Plan 时间线容量）", () => {
@@ -109,9 +109,9 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
 
   it("滞回保护：邻近 mood 切换收益不足保持原状态", () => {
     const e = new EmotionalState();
-    e.update({ success: true, praise: true }); // happy
+    e.update({ success: true, praise: true }); 
     const moodAfter = e.mood;
-    // 轻微正向不满足 0.05 切换收益 → 保持
+    
     e.decay(0.001);
     expect(e.mood).toBe(moodAfter);
   });
@@ -129,7 +129,7 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
     const e = new EmotionalState();
     e.update({ success: false, failureType: "task" });
     e.update({ success: false, failureType: "task" });
-    e.update({ success: false, failureType: "task" }); // angry
+    e.update({ success: false, failureType: "task" }); 
     const identity = e.toIdentityPrompt();
     expect(identity).toContain("当前情绪：愤怒");
     expect(identity).toContain("对抗态");
@@ -139,7 +139,7 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
 
   it("current_behavior_hint：concerned → caution_level 2", () => {
     const e = new EmotionalState();
-    // 构造 concerned：负 valence 中 arousal
+    
     e.update({ success: false, failureType: "task" });
     expect(e.currentBehaviorHint).toMatchObject({ caution_level: 0 });
     const c = new EmotionalState({ valence: -0.3, arousal: 0.55, dominance: 0.35, mood: "concerned" });
@@ -149,7 +149,7 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
   it("序列化往返（agents.json 字段格式）+ clone 深拷贝", () => {
     const e = new EmotionalState();
     for (let i = 0; i < 8; i++) {
-      e.update({ success: true }); // happy
+      e.update({ success: true }); 
     }
     const d = e.toDict();
     expect(d).toHaveProperty("valence");
@@ -159,16 +159,16 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
     expect(d).toHaveProperty("events");
     const e2 = EmotionalState.fromDict(d);
     expect(e2.mood).toBe(e.mood);
-    /* ⚠️ 判据只能是「3 位小数接近」，**不能**用 `toBe`：
-       `toDict()` 走 `round3`（权威 = Python 侧 `core/emotion.py::to_dict` 的 `round(v, 3)`），
-       而 `update()` 内部先调 `decay()`，半衰期按 `Date.now()` 算 ⇒ 8 次 update 之间的
-       **亚毫秒漂移**会把 `valence` 顶到 round3 的边界上（实测 `0.6399999845967296`）。
-       写 `toBe` 等于要求 round3 给出它没有的精度 ⇒ 单独跑绿、全量并发时红（**假守卫**）。
-       Python 侧同名用例只断言 `events`、从不比浮点值，正是同一个道理。 */
+    
+
+
+
+
+
     expect(e2.valence).toBeCloseTo(e.valence, 3);
     const c = e.clone();
     c.update({ success: false, failureType: "task" });
-    expect(c.mood).not.toBe(e.mood); // 克隆独立
+    expect(c.mood).not.toBe(e.mood); 
   });
 
   it("top_k_for_mood 夹紧 [3,10]（防负面情绪负反馈循环）", () => {
@@ -199,8 +199,8 @@ describe("BehaviorStore（L2 行为模式）", () => {
     s.patterns.push(old);
     const { weakened, archived } = s.decay(30);
     expect(weakened).toBe(1);
-    expect(old.confidence).toBeCloseTo(0.1, 5); // 0.2-0.1，下限 0.1
-    expect(archived).toContain(old); // 0.1 < 0.15
+    expect(old.confidence).toBeCloseTo(0.1, 5); 
+    expect(archived).toContain(old); 
   });
 
   it("archive 从活跃层移除（非删除——调用方负责写入记忆）", () => {
@@ -213,10 +213,10 @@ describe("BehaviorStore（L2 行为模式）", () => {
   it("reconsolidate 再巩固：起点 max(0.3, 原confidence×0.5)；重复调用强化而非新建", () => {
     const s = new BehaviorStore();
     const p = s.reconsolidate({ scenario: "回归习惯", steps: ["a"], archivedConfidence: 0.7 });
-    expect(p.confidence).toBeCloseTo(0.35, 5); // 0.7×0.5
+    expect(p.confidence).toBeCloseTo(0.35, 5); 
     const n1 = s.patterns.length;
     s.reconsolidate({ scenario: "回归习惯", steps: ["a", "b"], archivedConfidence: 0.0 });
-    expect(s.patterns.length).toBe(n1); // 不重复建
+    expect(s.patterns.length).toBe(n1); 
   });
 
   it("to_prompt 只注入高置信度稳定习惯（≥0.5 且有 steps）", () => {
@@ -256,11 +256,11 @@ describe("MindHooks（L2 心智注入固定段）", () => {
   it("buildMindSegments：行为模式 + 当前状态（情绪叙事）注入", () => {
     const e = new EmotionalState();
     for (let i = 0; i < 8; i++) {
-      e.update({ success: true }); // happy
+      e.update({ success: true }); 
     }
     const b = new BehaviorStore();
     for (let i = 0; i < 6; i++) {
-      b.reinforce({ scenario: "先测试再交付", steps: ["写测试", "跑测试", "交付"] }); // 0.55
+      b.reinforce({ scenario: "先测试再交付", steps: ["写测试", "跑测试", "交付"] }); 
     }
     const segs = buildMindSegments(e, b);
     expect(segs.some((s) => s.includes("## 行为模式"))).toBe(true);
@@ -303,7 +303,7 @@ describe("ConsolidationEngine（沉淀引擎）", () => {
       ],
       existingScenarios: existing,
     });
-    expect(r.reinforced).toBe(2); // 只新增 2 个（跳过已有 + 前 3 限制）
+    expect(r.reinforced).toBe(2); 
     expect(s.patterns.some((p) => p.scenario === "新场景A")).toBe(true);
   });
 

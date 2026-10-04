@@ -1,18 +1,18 @@
-/**
- * A-1045 守卫：**内嵌浏览器面板的主题化**（消除"每次进去都是纯白，有点晃眼睛"）。
- *
- * **用户原话**：「给右侧边栏的浏览器页的界面改成目前slime主题色，每次进去都是纯白，有点晃眼睛。」
- *
- * 根因（三处硬编码白 + 一处判据漏窗）：
- *   ① `<webview>` 的 host 内联 `background: "#fff"` —— guest 未绘制的那一帧由宿主露白；
- *   ② index.css `.browser-wrap { background: #fff }` —— 同源残留（另一个宿主层）；
- *   ③ 真正的白来自 **guest 自己**：`about:blank` 占位文档由 Chromium 以白色基底绘制，
- *      宿主 CSS 管不到 guest 内部 —— 只改①②仍然"进去就白"（这是本次必须用**覆盖层**的原因）；
- *   ④ 原空态提示的判据是 `!active && !navUrl` —— 只要地址栏里有值（哪怕还在加载、页面还没落地）
- *      覆盖层就撤掉 → 整个加载窗口期又露出 ③ 的白。判据必须只锚「有没有真实文档」= `!active`。
- *
- * 本守卫锁四件事：无硬编码白 / 占位页存在且判据正确 / 覆盖层不吞点击不越权盖错误页 / 地址栏随主题。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,11 +22,11 @@ const SIDEBAR = "gui/src/renderer/pages/RightSidebar.tsx";
 const CSS = "gui/src/renderer/index.css";
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再扫 —— 否则注释里提到的写法会把断言喂饱（本仓反复踩过；本轮注释里就写了 "#fff 残留"）。 */
+
 const stripComments = (s: string): string =>
   s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
 
-/** 取 `BrowserTabInstance` 组件体（位置驱动：从函数签名切到下一段分区注释）。 */
+
 function browserBody(raw: string): string {
   const src = stripComments(raw);
   const start = src.indexOf("function BrowserTabInstance(");
@@ -35,7 +35,7 @@ function browserBody(raw: string): string {
   return src.slice(start, end === -1 ? undefined : end);
 }
 
-/** 取一个 CSS 规则块（选择器必须在行首，块到第一个 `}` 为止）。 */
+
 function cssBlock(raw: string, selector: string): string {
   const src = stripComments(raw);
   const start = src.indexOf(`\n${selector} {`);
@@ -44,7 +44,7 @@ function cssBlock(raw: string, selector: string): string {
   return src.slice(start, end === -1 ? undefined : end + 1);
 }
 
-/** 把某条 CSS 声明的数值取出来（`z-index: 6;` → 6）。 */
+
 function cssNum(block: string, prop: string): number {
   const m = new RegExp(`${prop}\\s*:\\s*(-?\\d+)`).exec(block);
   expect(m, `规则里找不到 ${prop}`).not.toBeNull();
@@ -54,7 +54,7 @@ function cssNum(block: string, prop: string): number {
 describe("A-1045 ①：浏览器面板不存在硬编码白底", () => {
   it("webview 的 host 底色走主题变量，不再内联 #fff", () => {
     const body = browserBody(read(SIDEBAR));
-    // 只扫 background 声明 —— 按钮文字色 `color:"#fff"`（叠在 accent 上）是另一回事，不在本条射程内
+    
     expect(body).not.toMatch(/background\s*:\s*["']\s*(#fff|#ffffff|white)\b/i);
     expect(body).toMatch(/background:\s*"var\(--bg\)"/);
   });
@@ -80,7 +80,7 @@ describe("A-1045 ②：占位页 —— 盖住 guest 的白色基底", () => {
     const cond = m![1];
     expect(cond, "必须含 `!active`（active 仅由真实 did-navigate 置真）").toMatch(/!active/);
     expect(cond, "必须含 `!failInfo`（失败页自己会盖，别和它抢）").toMatch(/!failInfo/);
-    // 反向断言：这正是"进去就白"的成因 —— 只要地址栏有值就撤层，加载窗口期必露白
+    
     expect(cond, "判据不许依赖 navUrl —— 那是加载期露白的直接成因").not.toMatch(/navUrl/);
   });
 

@@ -1,20 +1,20 @@
-/**
- * tests/core-ts/a1050-guards.spec.ts — 「随包默认技能」守卫。
- *
- * 盯的病：**默认技能既不随包、也没人发现**。
- * `config/` 被 `.gitignore` 整目录忽略 → 历史上既不进安装包也不被 git 跟踪；`boot.ts`
- * 只引导 `slime.toml`、不播种任何 config 内容 → **全新安装的技能库是空的**。而
- * `DEFAULT_TOOL_PROFILE` 声明的 6 个默认技能在盘上不存在，工具白名单**静默**解析为空
- * （不报错，模型只是「什么技能都没有」——正是最难查的那种失败）。
- *
- * 这一族守卫锁两个层次，缺一层就会重演：
- *  A. **语义层**（`seedDefaultSkills`）：不覆盖 / 不复活 / 幂等 / 容忍缺目录。
- *  B. **契约层**（源码与配置的静态不变式）：代码声明的默认技能必须真的在 tracked 种子目录里，
- *     且必须真的被 electron-builder 挂进安装包、被 boot 在打包分支调用 —— 少任何一环都静默。
- *
- * ⚠️ 验收标准是**变异测试**：写完必须逐条把源码改坏、确认它变红。
- *    "通过但锁错对象"比没有守卫更糟。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +24,7 @@ import { seedDefaultSkills } from "../../gui/src/main/skill_seed.js";
 import { DEFAULT_TOOL_PROFILE } from "../../core-ts/src/services/agentTools.js";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
-/** tracked 的默认技能正本（随 extraFiles 落到安装根 template/skills）。 */
+
 const SEED_DIR = join(ROOT, "gui", "template", "skills");
 
 let sandbox: string | null = null;
@@ -41,7 +41,7 @@ afterEach(() => {
   if (sandbox) { rmSync(sandbox, { recursive: true, force: true }); sandbox = null; }
 });
 
-/** 在种子目录里造一个技能：<seed>/<name>/SKILL.md */
+
 function makeSeedSkill(name: string, body = `# ${name}`): void {
   mkdirSync(join(seedDir, name), { recursive: true });
   writeFileSync(join(seedDir, name, "SKILL.md"), body, "utf8");
@@ -65,8 +65,8 @@ describe("A-1050 A. seedDefaultSkills 语义", () => {
 
   it("不覆盖：用户已有同名技能时内容原样保留，且不登记为已播种", () => {
     makeSeedSkill("alpha", "# alpha default");
-    // ⚠️ 必须有「至少一个真被复制」的技能，台账才会落盘 —— 否则这条用例观察不到
-    //    「跳过也记账」的差异（变异 M3 就是这么逃过去的：锁得太浅 = 锁错对象）。
+    
+    
     makeSeedSkill("beta");
     mkdirSync(join(skillsDir, "alpha"), { recursive: true });
     writeFileSync(join(skillsDir, "alpha", "SKILL.md"), "# 用户自己改过的 alpha", "utf8");
@@ -76,7 +76,7 @@ describe("A-1050 A. seedDefaultSkills 语义", () => {
     expect(skillBody(skillsDir, "alpha")).toBe("# 用户自己改过的 alpha");
     expect(skillBody(skillsDir, "beta")).toBe("# beta");
 
-    // 用户随后删掉自己那份 → 默认技能应当补上（"没做过的事不许记账"）
+    
     rmSync(join(skillsDir, "alpha"), { recursive: true, force: true });
     expect(seedDefaultSkills(seedDir, skillsDir)).toEqual(["alpha"]);
     expect(skillBody(skillsDir, "alpha")).toBe("# alpha default");
@@ -86,7 +86,7 @@ describe("A-1050 A. seedDefaultSkills 语义", () => {
     makeSeedSkill("alpha", "# alpha default");
     expect(seedDefaultSkills(seedDir, skillsDir)).toEqual(["alpha"]);
 
-    // 等价于用户「删掉」或经 GUI「停用」（停用是把目录移进 .disabled/）
+    
     rmSync(join(skillsDir, "alpha"), { recursive: true, force: true });
 
     expect(seedDefaultSkills(seedDir, skillsDir)).toEqual([]);
@@ -148,7 +148,7 @@ describe("A-1050 B. 契约层：默认技能必须真的随包", () => {
 
   it("boot 在**打包分支**内调用播种（开发分支不播种，避免遮蔽打包才能暴露的故障）", () => {
     const src = readFileSync(join(ROOT, "gui", "src", "main", "boot.ts"), "utf8");
-    // 换行无关：仓库工作树是 CRLF，写死 \n 会让守卫在换行风格变化时静默失效。
+    
     const packaged = /if \(app\.isPackaged\) \{([\s\S]*?)\r?\n\} else \{/.exec(src);
     expect(packaged, "boot.ts 的 if (app.isPackaged) { … } else { 结构变了，守卫需同步更新").toBeTruthy();
     expect(packaged?.[1]).toContain("bootstrapSkills(");

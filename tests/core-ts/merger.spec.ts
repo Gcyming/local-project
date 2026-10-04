@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/merger.spec.ts — Merger 合并器测试。
- * 对照 core/merger.py 语义：collect/analyze/assess（风险分级）/trial（四维验证）/
- * A-047 幻觉护栏硬信号 / verdict 模板。
- */
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { Merger, makeMergeResult, type SubtaskLike } from "../../core-ts/src/merger.js";
 
@@ -44,7 +44,7 @@ describe("collectResults / analyzeErrors / assessRisks", () => {
   it("assessRisks：超过半数失败 → high", () => {
     const m = new Merger("t1", "");
     m.assessRisks([sub("A", { state: "failed", error: "x" }), sub("B"), sub("C")]);
-    expect(m.result.risks[0].level).toBe("medium"); // 1/3 未过半
+    expect(m.result.risks[0].level).toBe("medium"); 
     const m2 = new Merger("t1", "");
     m2.assessRisks([sub("A", { state: "failed", error: "x" }), sub("B", { state: "failed", error: "y" }), sub("C")]);
     expect(m2.result.risks[0].level).toBe("high");
@@ -109,7 +109,7 @@ describe("trialRun 四维验证", () => {
     expect(c1.coverage_score).toBe(1);
     expect(c1.score).toBe(1);
     const c2 = m.checkCompletion("短", [sub("A", { result: "r" }), sub("B", { state: "failed", error: "x" })]);
-    expect(c2.length_score).toBe(0.005); // 1/200
+    expect(c2.length_score).toBe(0.005); 
     expect(c2.coverage_score).toBe(0.5);
   });
 
@@ -127,7 +127,7 @@ describe("trialRun 四维验证", () => {
     m2.analyzeErrors(sts2);
     m2.assessRisks(sts2);
     const t2 = await m2.trialRun("这是一段足够长的总结文字，用来通过长度检查。", sts2, () => '{"is_conflict": false, "reason": "描述不同侧面"}');
-    expect(t2.passed).toBe(true); // LLM 裁定非矛盾 → 解除
+    expect(t2.passed).toBe(true); 
   });
 });
 

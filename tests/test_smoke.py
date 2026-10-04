@@ -5,7 +5,7 @@ slime 冒烟测试
 
 import pytest
 
-# ── Agent 测试 ──────────────────────────────────────────────
+
 
 
 class TestAgent:
@@ -62,7 +62,7 @@ class TestAgent:
         assert "{role}" in IDENTITY_CONSTRAINT
 
 
-# ── A2A 通信测试 ───────────────────────────────────────────
+
 
 
 class TestA2A:
@@ -93,7 +93,7 @@ class TestA2A:
         bus.register("AgentB")
         bus.register("AgentC")
         result = await bus.send("AgentA", "broadcast", "Hi all", msg_type="info")
-        # 广播给所有其他 Agent（不包括自己）
+        
         assert result["delivered"] is True
 
     @pytest.mark.asyncio
@@ -135,7 +135,7 @@ class TestA2A:
         assert msg.in_reply_to == "msg_001"
 
 
-# ── Swarm 状态机测试 ───────────────────────────────────────
+
 
 
 class TestSwarm:
@@ -194,7 +194,7 @@ class TestSwarm:
         assert set(keys) == {"p1", "p2", "p3"}
 
 
-# ── Merger 测试 ────────────────────────────────────────────
+
 
 
 class TestMerger:
@@ -230,7 +230,7 @@ class TestMerger:
         assert mr.risks[0]["level"] == "medium"
 
 
-# ── LLM 常量测试 ───────────────────────────────────────────
+
 
 
 class TestLLMConstants:
@@ -249,7 +249,7 @@ class TestLLMConstants:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parents[1]))
-        # 通过检查 slime_cli 模块的 MAX_OUTPUT_LIMIT 是否与 core.llm 相同
+        
         from core.llm import MAX_OUTPUT_LIMIT as llm_max_output
         from core.llm import MAX_CONTEXT_LIMIT as llm_max_context
         from slime_cli import MAX_OUTPUT_LIMIT, MAX_CONTEXT_LIMIT
@@ -263,11 +263,11 @@ class TestStreamToolCalls:
     def test_accumulate_fragmented(self):
         from core.llm import _accumulate_tool_calls
         tcs = []
-        # 第 1 块：index 0 的 id + name
+        
         _accumulate_tool_calls(tcs, {"tool_calls": [
             {"index": 0, "id": "call_1", "function": {"name": "file_read", "arguments": ""}},
         ]})
-        # 第 2/3 块：arguments 分片
+        
         _accumulate_tool_calls(tcs, {"tool_calls": [
             {"index": 0, "function": {"arguments": '{"path": "a'}},
         ]})
@@ -282,7 +282,7 @@ class TestStreamToolCalls:
     def test_accumulate_multi_index(self):
         from core.llm import _accumulate_tool_calls
         tcs = []
-        # index 1 先到（乱序），index 0 后到
+        
         _accumulate_tool_calls(tcs, {"tool_calls": [
             {"index": 1, "id": "call_2", "function": {"name": "file_list", "arguments": "{}"}},
         ]})
@@ -347,9 +347,9 @@ class TestToolLoop:
         reg = self._fake_registry()
         try:
             client, calls = self._fake_client([
-                # 第 1 轮：模型继续要工具（依赖链 web_search → web_fetch 形态）
+                
                 {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [self._tc("call_2", "chain")]}}]},
-                # 第 2 轮：最终文本
+                
                 {"choices": [{"message": {"content": "完成"}}]},
             ])
             agent = Agent(name="t", role="测试")
@@ -360,7 +360,7 @@ class TestToolLoop:
                 messages, {"messages": messages}, {}, "http://test", client, agent))
             assert calls["n"] == 2
             assert reply == "完成"
-            # 历史链：assistant(tool)→tool→assistant(tool)→tool；最终回复不入历史
+            
             assert [m["role"] for m in messages] == \
                 ["system", "user", "assistant", "tool", "assistant", "tool"]
         finally:
@@ -373,7 +373,7 @@ class TestToolLoop:
 
         reg = self._fake_registry()
         try:
-            # 模型永远要工具 → 循环到上限
+            
             always_tool = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [self._tc("call_x", "again")]}}]}
             client, calls = self._fake_client([always_tool] * 10)
             agent = Agent(name="t", role="测试")
@@ -384,7 +384,7 @@ class TestToolLoop:
                 messages, {"messages": messages}, {}, "http://test", client, agent))
             assert calls["n"] == _TOOL_MAX_ROUNDS
             assert reply.startswith(f"[工具调用轮次已达上限（{_TOOL_MAX_ROUNDS} 轮）]")
-            assert "第1轮: fake_echo" in reply  # A4: 附工具链摘要
+            assert "第1轮: fake_echo" in reply  
         finally:
             reg.unregister("fake_echo")
 
@@ -395,7 +395,7 @@ class TestToolLoop:
 
         reg = self._fake_registry()
         try:
-            # 第 2 轮 content=None 且无 tool_calls → 不再产出空回复
+            
             client, _ = self._fake_client([
                 {"choices": [{"message": {"role": "assistant", "content": None}}]},
             ])
@@ -410,7 +410,7 @@ class TestToolLoop:
             reg.unregister("fake_echo")
 
 
-# ── 加密模块测试 ───────────────────────────────────────────
+
 
 
 class TestEncryption:
@@ -450,7 +450,7 @@ class TestEncryption:
             assert decrypted == {}
 
 
-# ── Persona 测试 ───────────────────────────────────────────
+
 
 
 class TestPersona:
@@ -483,7 +483,7 @@ class TestPersona:
         assert len(p2.interactions) == 1
 
 
-# ── Phase 2 测试 ────────────────────────────────────────────
+
 
 
 class TestMemory:
@@ -492,7 +492,7 @@ class TestMemory:
     def test_memory_store_crud(self, tmp_path):
         from core.memory import MemoryStore
         import core.memory as mem_mod
-        # 临时替换数据目录
+        
         original_data_dir = mem_mod._DATA_DIR
         original_knowledge_dir = mem_mod._KNOWLEDGE_MEMORY_DIR
         mem_mod._DATA_DIR = tmp_path
@@ -504,7 +504,7 @@ class TestMemory:
             m.add_skill("code_review")
             m.add_lesson("要使用 async", True)
 
-            assert len(m.get_facts()) == 3  # fact + preference + lesson → 统一 facts 列表
+            assert len(m.get_facts()) == 3  
             assert m.get_preferences()["theme"] == "dark"
             assert "code_review" in m.get_skills()
             assert len(m.get_lessons()) == 1
@@ -526,7 +526,7 @@ class TestMemory:
         try:
             m = MemoryStore("test_pref_agent")
             m.add_preference("lang", "Python")
-            m.add_preference("lang", "Rust")  # 更新已有
+            m.add_preference("lang", "Rust")  
             assert m.get_preferences()["lang"] == "Rust"
         finally:
             mem_mod._DATA_DIR = original_data_dir
@@ -571,7 +571,7 @@ class TestEvolve:
         p = Persona()
         p.traits = ["helpful", "precise"]
         e = EvolutionEngine("test_forget")
-        e.weaken_trait(p, 0, 0.5)  # weight → 0.0
+        e.weaken_trait(p, 0, 0.5)  
         removed = e.forget_stale(p)
         assert removed == 1
         assert len(p.traits) == 1
@@ -599,7 +599,7 @@ class TestContext:
         c = ContextCompressor({"head": 2, "tail": 2, "window": 5})
         history = [{"role": "user", "content": f"msg{i}"} for i in range(10)]
         result = c.compress(history)
-        assert len(result) <= 5  # head + 1 summary + tail
+        assert len(result) <= 5  
 
     def test_head_tail_validation(self):
         from core.context import ContextCompressor
@@ -767,7 +767,7 @@ class TestSandboxManager:
         from core.sandbox import SandboxManager, SandboxConfig, reset_sandbox_manager
         reset_sandbox_manager()
         mgr = SandboxManager()
-        # 设置 Agent 级配置：允许 L2 自动通过
+        
         agent_cfg = SandboxConfig(auto_approve_levels=[0, 1, 2])
         mgr.set_agent_config("agent_special", agent_cfg)
         result = mgr.check_permission("agent_special", "file_write", "/tmp/test.txt", level=2)
@@ -787,7 +787,7 @@ class TestSandboxManager:
         from core.sandbox import SandboxManager, reset_sandbox_manager
         reset_sandbox_manager()
         mgr = SandboxManager()
-        # L0 自动批准，L1 也自动批准，都会记录审计
+        
         mgr.grant_permission("agent_test", "file_read", "/tmp/test.txt", level=0)
         mgr.grant_permission("agent_test", "git_status", "/tmp/repo", level=1)
         summary = mgr.get_audit_summary()
@@ -808,7 +808,7 @@ class TestSandboxManager:
         reset_sandbox_manager()
         mgr = SandboxManager()
         score = mgr.calculate_risk_score("file_read")
-        # file_read 基础分 0.0，非工作时间 +0.2
+        
         assert 0.0 <= score <= 0.3
         score = mgr.calculate_risk_score("sudo")
         assert score >= 0.9
@@ -853,11 +853,11 @@ class TestAnomalyDetector:
                 threshold=5,
             ),
         ])
-        # 5 次以内不触发
+        
         for i in range(5):
             detected, _ = detector.check("agent_test", "any_action", f"target_{i}")
             assert not detected
-        # 超过阈值触发
+        
         detected, alerts = detector.check("agent_test", "any_action", "target_6")
         assert detected
 
@@ -875,7 +875,7 @@ class TestAnomalyDetector:
             detector.check("agent_test", "write", f"target_{i}")
         detector.reset("agent_test")
         detected, _ = detector.check("agent_test", "write", "new_target")
-        assert not detected  # 计数器已重置
+        assert not detected  
 
 
 class TestSandboxAudit:
@@ -900,7 +900,7 @@ class TestSandboxAudit:
         from core.sandbox import SandboxManager, reset_sandbox_manager
         reset_sandbox_manager()
         mgr = SandboxManager()
-        # L0 和 L1 都自动批准并记录审计
+        
         mgr.grant_permission("agent_test", "file_read", "/tmp/a.txt", level=0)
         mgr.grant_permission("agent_test", "git_log", "/tmp/repo", level=1)
         summary = mgr.get_audit_summary()
@@ -989,11 +989,11 @@ class TestAgentPhase2:
         a.persona.traits = [{"name": "helpful", "weight": 0.8}, {"name": "weak_trait", "weight": 0.2}]
         prompt = a.get_system_prompt()
         assert "helpful" in prompt
-        assert "显著" in prompt  # weight >= 0.7
-        assert "弱" in prompt     # weight < 0.3
+        assert "显著" in prompt  
+        assert "弱" in prompt     
 
 
-# ── 输出过滤层测试 ──────────────────────────────────────────
+
 
 
 class TestFilter:
@@ -1061,7 +1061,7 @@ class TestFilter:
         result = f.filter("这是一个测试违规词的例子", agent_name="Slime")
         assert "测试违规词" not in result.filtered
         assert "已过滤" in result.filtered
-        # 移除规则
+        
         removed = f.remove_rule(r'测试违规词')
         assert removed
         result2 = f.filter("这是一个测试违规词的例子", agent_name="Slime")
@@ -1086,7 +1086,7 @@ class TestFilter:
         assert not f2.strict_mode
 
 
-# ── A-042: 反幻觉协议 ───────────────────────────────────────
+
 
 
 class TestAntiHallucinationProtocol:
@@ -1100,7 +1100,7 @@ class TestAntiHallucinationProtocol:
         assert "报告前验证" in prompt
         assert "能力边界诚实" in prompt
         assert "名称不改写" in prompt
-        assert "工具必用" in prompt  # A-046: 第 7 条"先调用工具再回答"
+        assert "工具必用" in prompt  
 
     def test_protocol_is_second_section(self):
         """协议紧邻身份铁律之后（同为最高优先级区）"""
@@ -1112,7 +1112,7 @@ class TestAntiHallucinationProtocol:
         assert 0 <= idx_identity < idx_protocol
 
 
-# ── A-039: 身份过滤不破坏功能性文本 ─────────────────────────
+
 
 
 class TestFilterFunctionalTextProtection:
@@ -1160,7 +1160,7 @@ class TestFilterFunctionalTextProtection:
         assert "slime 平台" in out
 
 
-# ── A-010: 跨 chunk 流式过滤缓冲 ─────────────────────────────
+
 
 
 class TestToolProgressEvents:
@@ -1276,7 +1276,7 @@ class TestMediaCallDedup:
                     media_calls_log.reset(token)
 
             asyncio.run(consume())
-            # 从 messages 无法取结果，改直接验证：第二个工具被拦（未执行）
+            
             return called
         finally:
             reset_registry()
@@ -1386,7 +1386,7 @@ class TestMediaCallDedup:
             async def one_request():
                 token = media_calls_log.set([])
                 try:
-                    # 第 1 轮：失败；第 2 轮：重试（同一请求，模拟 Worker 下轮）
+                    
                     await _execute_pending_tools(Agent(name="A", role="r"), msgs, [
                         {"id": "t1", "function": {"name": "agnes_generate_video", "arguments": "{}"}}])
                     await _execute_pending_tools(Agent(name="A", role="r"), msgs, [
@@ -1468,7 +1468,7 @@ class TestMediaCallDedup:
                     media_calls_log.reset(token)
 
             asyncio.run(one_request())
-            asyncio.run(one_request())  # 新请求
+            asyncio.run(one_request())  
             assert len(called) == 2, "跨请求各允许一次"
         finally:
             reset_registry()
@@ -1499,7 +1499,7 @@ class TestRetry429:
         with patch("core.llm._RETRY_429_BACKOFF", (0.01, 0.01, 0.01)):
             resp = asyncio.run(_post_chat_with_retry(client, "u", {}, {}))
         assert resp.status_code == 200
-        assert calls["n"] == 3  # 429×2 + 成功
+        assert calls["n"] == 3  
 
     def test_no_retry_on_success(self):
         from unittest.mock import MagicMock
@@ -1533,7 +1533,7 @@ class TestRetry429:
         client.post.side_effect = fake_post
         with patch("core.llm._RETRY_429_BACKOFF", (0.01, 0.01, 0.01)):
             resp = asyncio.run(_post_chat_with_retry(client, "u", {}, {}))
-        assert resp.status_code == 429  # 重试耗尽后返回 429（由调用方 raise_for_status）
+        assert resp.status_code == 429  
         assert client.post.call_count == 3
 
 
@@ -1597,7 +1597,7 @@ class TestStreamFilter:
         assert "GPT-4" not in out
 
 
-# ── IPC 总线测试 ────────────────────────────────────────────
+
 
 
 class TestIPCBus:
@@ -1647,7 +1647,7 @@ class TestIPCBus:
         bus.send("AgentA", "AgentB", "msg1")
         bus.send("AgentA", "AgentB", "msg2")
         bus.send("AgentA", "AgentB", "msg3")
-        # multiprocessing.Queue put→get 有缓冲延迟：send 后短暂等待再 drain（防偶发 0 条）
+        
         time.sleep(0.05)
         msgs = bus.drain_all("AgentB")
         assert len(msgs) == 3
@@ -1682,7 +1682,7 @@ class TestIPCBus:
         bus.shutdown()
 
 
-# ── A-009: CLI 流式渲染纯函数 ───────────────────────────────
+
 
 
 class TestCLIStreamHelpers:
@@ -1699,9 +1699,9 @@ class TestCLIStreamHelpers:
         from slime_cli import _format_tool_event
         call_line, result_line = _format_tool_event("web_search", "x" * 500, "r" * 300)
         assert "web_search" in call_line
-        assert len(call_line) < 350  # args 截断到 300 + 前后缀
+        assert len(call_line) < 350  
         assert "参数过长已截断" in call_line
-        assert "r" * 200 in result_line  # 结果截断 200
+        assert "r" * 200 in result_line  
         assert len(result_line) < 240
 
     def test_format_tool_event_sanitizes_ansi(self):
@@ -1720,9 +1720,9 @@ class TestCLIStreamHelpers:
 
     def test_flush_thinking_panel_semantics(self):
         from slime_cli import _flush_thinking_panel
-        assert _flush_thinking_panel([], False) is False        # 无缓冲无渲染
-        assert _flush_thinking_panel(["x"], True) is True       # 已渲染不重复
-        assert _flush_thinking_panel(["已思考"], False) is True  # 未渲染则冲刷
+        assert _flush_thinking_panel([], False) is False        
+        assert _flush_thinking_panel(["x"], True) is True       
+        assert _flush_thinking_panel(["已思考"], False) is True  
 
     def test_find_unverified_claims_fabricated(self, tmp_path):
         """A-044: 声称已保存但不存在的文件 → 命中护栏"""
@@ -1769,7 +1769,7 @@ class TestCLIStreamHelpers:
         assert claims == [missing]
 
 
-# ── A-032: 委托/广播标记解析（此前零直接测试） ────────────────
+
 
 
 class TestDelegationParsing:
@@ -1825,7 +1825,7 @@ class TestDelegationParsing:
         assert "正文  尾" in out
 
 
-# ── A-011: extract_memories_from_chat（LLM 提取链路） ────────
+
 
 
 class TestExtractMemories:
@@ -1869,7 +1869,7 @@ class TestExtractMemories:
         assert r["user_sentiment"] == 0.5
         assert r["behavior_patterns"][0]["scenario"] == "代码评审"
         assert r["behavior_patterns"][0]["rationale"] == "避免返工"
-        # 实际写入 store
+        
         facts = mem.get_facts()
         contents = [f.get("content", "") for f in facts]
         assert "用户喜欢用 Python" in contents
@@ -1947,7 +1947,7 @@ class TestExtractMemories:
         assert len(r["behavior_patterns"][0]["rationale"]) == 200
 
 
-# ── A-020: launcher 进程身份校验 ─────────────────────────────
+
 
 
 class TestCodeCheckTool:
@@ -2069,7 +2069,7 @@ class TestLauncherHelpers:
             assert _is_python_process("1234") is False
 
 
-# ── A-026: Multiplexer 输出编码安全 ─────────────────────────
+
 
 
 class TestMultiplexerEncoding:
@@ -2078,7 +2078,7 @@ class TestMultiplexerEncoding:
         import sys
         from core.multiplexer import _ensure_output_encoding_safe
         if not hasattr(sys.stdout, "reconfigure"):
-            return  # 捕获流环境（pytest 默认）不支持重配，跳过
+            return  
         orig = sys.stdout.errors
         try:
             _ensure_output_encoding_safe()

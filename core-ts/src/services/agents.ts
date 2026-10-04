@@ -1,10 +1,10 @@
-/**
- * core-ts/src/services/agents.ts — Agent 状态注册表 + 人格画像（core/agent.py + core/persona.py 语义移植）。
- * - AgentRegistry：读 config/agents.json（list），findAgent / childrenOf / names / atomicSave
- * - PersonaModel：addInteraction（保留最近 200 条）、clone、toDict
- * 注意：本注册表是 core-ts 侧权威读取器；5C 前双轨并行期不改写 Python server 内存态，
- * 写入仅用于 core-ts 自身服务流程（对齐 promote 铁律：经服务 API 变更，不经文件直写绕过）。
- */
+
+
+
+
+
+
+
 
 import { randomUUID } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
@@ -59,7 +59,7 @@ function normalizeTraits(value: unknown): Array<Record<string, unknown>> {
   return out;
 }
 
-/** 人格画像（对齐 core/persona.py Persona 核心语义） */
+
 export class PersonaModel {
   data: PersonaData;
 
@@ -121,7 +121,7 @@ export class PersonaModel {
   }
 }
 
-/** agents.json 单条 Agent 状态（字段对齐 Python Agent 序列化） */
+
 export interface AgentState {
   id: string;
   name: string;
@@ -144,13 +144,13 @@ export interface AgentState {
   context_config?: Record<string, unknown>;
   evolution?: Record<string, unknown>;
   sandbox_override?: Record<string, unknown>;
-  /** A-980-R22：工具面白名单配置（mode=default 内置推荐集 / mode=custom 用户勾选 skills+mcp） */
+  
   tool_profile?: import("./agentTools.js").ToolProfile;
-  /**
-   * A-1096：Agent 设置里的「同意被派发为子代理」开关。三态语义（判据唯一出处
-   * `services/subagentCatalog.ts::isSubagentDispatchAllowed`，**不许把 undefined 与 false 合并**）：
-   *   undefined（缺省 / 历史配置）⇒ 允许；true ⇒ 允许；false ⇒ 拒绝。
-   */
+  
+
+
+
+
   subagent_dispatch?: boolean;
   [key: string]: unknown;
 }
@@ -160,7 +160,7 @@ export interface AgentBrief {
   role: string;
 }
 
-/** Agent 注册表：config/agents.json 权威读取 + 原子保存 */
+
 export class AgentRegistry {
   private agents: AgentState[] = [];
   private path: string;
@@ -220,7 +220,7 @@ export class AgentRegistry {
     return out;
   }
 
-  /** 原子写回（tmp + rename）；调用方负责并发语义（core-ts 单进程内串行即可） */
+  
   async save(): Promise<void> {
     const { mkdir, rm } = await import("node:fs/promises");
     await mkdir(dirname(this.path), { recursive: true });
@@ -229,14 +229,14 @@ export class AgentRegistry {
     try {
       await rename(tmp, this.path);
     } catch (e) {
-      // Windows 上 rename 覆盖目标偶发独占窗口失败（EBUSY/EPERM）→ 短重试后清理残留
+      
       for (let i = 0; i < 3; i++) {
         await new Promise((r) => setTimeout(r, 30));
         try {
           await rename(tmp, this.path);
           return;
         } catch {
-          // 继续重试
+          
         }
       }
       await rm(tmp, { force: true }).catch(() => undefined);
@@ -244,7 +244,7 @@ export class AgentRegistry {
     }
   }
 
-  /** 更新单个 Agent 的若干字段并落盘（返回新状态） */
+  
   async updateAgent(agentId: string, patch: Partial<AgentState>): Promise<AgentState | undefined> {
     const agent = await this.findAgent(agentId);
     if (!agent) {
@@ -255,11 +255,11 @@ export class AgentRegistry {
     return agent;
   }
 
-  /**
-   * 删除 Agent 及其全部子 Agent（对齐 Python delete_agent 语义）：
-   * 递归收集 + 清理其余 Agent 悬空 children 引用 + 原子落盘。
-   * 返回被删除的 id 集合（调用方可清理 history/data 等孤立数据）。
-   */
+  
+
+
+
+
   async removeAgent(agentId: string): Promise<string[]> {
     await this.load();
     const target = this.agents.find((a) => a.id === agentId);
@@ -278,7 +278,7 @@ export class AgentRegistry {
     };
     collect(target, new Set());
     this.agents = this.agents.filter((a) => !toDelete.has(a.id));
-    // A-034 对齐：清理悬空 children 引用，防幽灵子 Agent
+    
     for (const a of this.agents) {
       a.children = (a.children ?? []).filter((c) => !toDelete.has(c));
     }
@@ -287,7 +287,7 @@ export class AgentRegistry {
   }
 }
 
-/** 进程级单例（对齐 Python load_agents 全局态；服务层默认注入点） */
+
 let registrySingleton: AgentRegistry | null = null;
 
 export function getAgentRegistry(path = AGENTS_PATH): AgentRegistry {

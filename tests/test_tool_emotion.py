@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """Soul-Plan 第 7 步：工具情绪闭环测试（环 2/3，docs/soul-plan.md）+ P1-14 工具去重"""
 import asyncio
 from unittest.mock import patch
@@ -36,7 +36,7 @@ class TestToolEmotion:
             ])
         triggers = [ev["trigger"] for ev in agent.emotion.events]
         assert "tool" in triggers
-        assert agent.emotion.consecutive_failures == 0  # 不计硬跳闸
+        assert agent.emotion.consecutive_failures == 0  
 
     @pytest.mark.asyncio
     async def test_success_after_failure_resets_streak(self):

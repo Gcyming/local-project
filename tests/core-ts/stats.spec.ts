@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/stats.spec.ts — AlarmBus + StatsService 测试（面板数据 /stats 语义对照）。
- * 注意：sessions() 读真实 config/history.jsonl，本文件不测该路径（避免污染），
- * 只测 AlarmBus（内存）与 agentsStats（纯内存计算）+ servers 空态。
- */
+
+
+
+
+
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -102,10 +102,10 @@ describe("StatsService", () => {
     const svc = new StatsService(reg, new AlarmBus());
     const s = await svc.agentsStats();
     expect(s.total).toBe(4);
-    expect(s.roots).toBe(2); // root + orphan（parent_id=null）
-    expect(s.leaves).toBe(2); // grand + orphan
-    expect(s.maxDepth).toBe(2); // root→child→grand
-    expect(s.byLifecycle).toEqual({ growth: 1, stable: 1, dormant: 1, unknown: 1 }); // root 无 lifecycle 字段
+    expect(s.roots).toBe(2); 
+    expect(s.leaves).toBe(2); 
+    expect(s.maxDepth).toBe(2); 
+    expect(s.byLifecycle).toEqual({ growth: 1, stable: 1, dormant: 1, unknown: 1 }); 
   });
 
   it("lifecycle 缺省计 unknown", async () => {

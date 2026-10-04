@@ -1,11 +1,11 @@
-/**
- * tests/core-ts/pricing-display.spec.ts — A-989 分时「峰 / 谷」全时段展示回归。
- *
- * 用户诉求原文：「把峰、谷时间端全部显示出来」。
- * 此前「空闲档」不写 windows（缺省 = 其余所有时段，计费语义最准确），
- * 副作用是**界面上完全看不到谷时段**——用户只看到高峰两行，无法确认夜间/周末到底算不算空闲。
- * 本文件锁定：补集推导正确、跨周末不被切碎、展示数据包含全部时段。
- */
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import {
   complementSpans,
@@ -19,7 +19,7 @@ import {
   type ModelPriceTiers,
 } from "../../shared/gen/model-capabilities.js";
 
-/** DeepSeek 官方形态：工作日双高峰（北京时间），并带**官方两列币种** */
+
 const DEEPSEEK_SPEC: ModelPriceTiers = {
   timezone: "Asia/Shanghai",
   tiers: [
@@ -31,7 +31,7 @@ const DEEPSEEK_SPEC: ModelPriceTiers = {
   ],
 };
 
-/** 一段跨度覆盖的分钟数（`daysCrossed === 0` 时即当天内长度） */
+
 function spanMinutes(s: { daysCrossed: number; startMin: number; endMinExclusive: number }): number {
   return s.daysCrossed * 1440 + (s.endMinExclusive - s.startMin);
 }
@@ -39,7 +39,7 @@ function spanMinutes(s: { daysCrossed: number; startMin: number; endMinExclusive
 describe("complementSpans：谷时段（补集）推导", () => {
   it("工作日双高峰 → 补集恰好覆盖全部非高峰时刻，且不重不漏", () => {
     const spans = complementSpans(DEEPSEEK_SPEC.tiers[0].windows!);
-    // 工作日高峰 = 5×(3h + 4h) = 35h；一周 = 168h → 谷 = 133h
+    
     const totalMin = spans.reduce((acc, s) => acc + spanMinutes(s), 0);
     expect(totalMin).toBe(7 * 1440 - 35 * 60);
   });
@@ -55,8 +55,8 @@ describe("complementSpans：谷时段（补集）推导", () => {
 
   it("谷时段文案逐条列出，合并依据是**连续区间**而非按天切形状（不得重复计时长）", () => {
     const lines = describeComplementSpans(DEEPSEEK_SPEC.tiers[0].windows!);
-    // 事实形状：工作日午休 12:00-14:00 五天一形状；周一至周四 18:00→次日 09:00 四天一形状；
-    // 周五 18:00 一口气跨到周一 09:00（跨 3 天）单独一段 —— 三者合计 133h，不重不漏。
+    
+    
     expect(lines).toEqual([
       "周一至周五 12:00-14:00",
       "周一至周四 18:00-09:00（次日）",
@@ -71,7 +71,7 @@ describe("complementSpans：谷时段（补集）推导", () => {
   });
 
   it("窗口未覆盖到当日最后一分钟 → 只补出该分钟，且七天形状合并成一天一行", () => {
-    // 0..1439 覆盖 00:00-23:59，第 1439 分钟（23:59）仍空闲
+    
     const lines = describeComplementSpans([{ startMin: 0, endMin: 1439 }]);
     expect(lines).toEqual(["每天 23:59-24:00"]);
   });
@@ -89,10 +89,10 @@ describe("describeTiersForDisplay：峰 + 谷**全部**时段", () => {
     const peak = tiers.find((t) => t.id === "peak")!;
     const off = tiers.find((t) => t.id === "offpeak")!;
     expect(peak.isFallback).toBe(false);
-    // 同星期的多个窗口合并成一行（`09:00-12:00、14:00-18:00`），不把星期重复两遍
+    
     expect(peak.windowLines).toEqual(["周一至周五 09:00-12:00、14:00-18:00"]);
     expect(off.isFallback).toBe(true);
-    // 谷时段必须**逐条可见**，而不是一句"其余时段"
+    
     expect(off.windowLines).toHaveLength(3);
     expect(off.windowLines.join(" ")).toContain("12:00-14:00");
     expect(off.windowLines.join(" ")).toContain("18:00-09:00");
@@ -106,20 +106,20 @@ describe("describeTiersForDisplay：峰 + 谷**全部**时段", () => {
   });
 
   it("传时刻 → 命中档 active=true，且与 resolveTierId 完全一致（单一判定源）", () => {
-    // 北京时间 2026-09-16（周三）10:30 = UTC 02:30 → 高峰
+    
     const peakAt = new Date("2026-09-16T02:30:00Z");
     const tiers = describeTiersForDisplay(DEEPSEEK_SPEC, peakAt);
     expect(tiers.find((t) => t.id === "peak")!.active).toBe(true);
     expect(tiers.find((t) => t.id === "offpeak")!.active).toBe(false);
     expect(resolveTierId(DEEPSEEK_SPEC.tiers, peakAt, DEEPSEEK_SPEC.timezone)!.id).toBe("peak");
 
-    // 北京时间 13:00（午休）= UTC 05:00 → 谷
+    
     const offAt = new Date("2026-09-16T05:00:00Z");
     expect(describeTiersForDisplay(DEEPSEEK_SPEC, offAt).find((t) => t.id === "offpeak")!.active).toBe(true);
   });
 
   it("周末任意时刻都落在谷档", () => {
-    const sat = new Date("2026-09-19T02:30:00Z"); // 北京时间周六 10:30
+    const sat = new Date("2026-09-19T02:30:00Z"); 
     expect(describeTiersForDisplay(DEEPSEEK_SPEC, sat).find((t) => t.id === "offpeak")!.active).toBe(true);
   });
 
@@ -131,7 +131,7 @@ describe("describeTiersForDisplay：峰 + 谷**全部**时段", () => {
     for (const t of describeTiersForDisplay(bad, at)) {
       expect(t.active, t.id).toBeUndefined();
     }
-    // 计费侧行为**不变**：仍落到兜底档（宁可退回高峰标准价，也不要凭空把成本清零）
+    
     expect(resolveTierId(bad.tiers, at, bad.timezone)!.id).toBe("offpeak");
   });
 });
@@ -165,7 +165,7 @@ describe("档位双币种展示（用户指令：把＄跟人民币分开）", (
     const off = tiers.find((t) => t.id === "offpeak")!;
     expect([peak.priceInCny, peak.priceOutCny]).toEqual([2, 8]);
     expect([off.priceInCny, off.priceOutCny]).toEqual([1, 4]);
-    // 美元列也在，且**不等于**人民币 ÷ 7.2 —— 官方两列非等比，两个数字都要留
+    
     expect(peak.priceIn).toBe(0.3);
     expect(peak.priceInCny! / 7.2).not.toBeCloseTo(peak.priceIn, 3);
   });
@@ -174,7 +174,7 @@ describe("档位双币种展示（用户指令：把＄跟人民币分开）", (
     const amt = formatTierAmounts({ priceIn: 0.3, priceOut: 1.2, priceInCny: 2, priceOutCny: 8 });
     expect(amt.usd).toBe("$0.3 / $1.2");
     expect(amt.cny).toBe("¥2 / ¥8");
-    // 两个串里不得出现"混血"（美元串带 ¥ 或反之）
+    
     expect(amt.usd).not.toContain("¥");
     expect(amt.cny).not.toContain("$");
   });

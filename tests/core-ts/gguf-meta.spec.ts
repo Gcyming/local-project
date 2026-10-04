@@ -1,20 +1,20 @@
-/**
- * tests/core-ts/gguf-meta.spec.ts — GGUF 几何参数解析 + KV cache 显存换算 + KV 量化参数下发（A-1021）。
- *
- * 背景（用户症状）：本地模型（qwen3-1.7b-q8_0，ctx_len=32768）起不来，
- * llama-server 报 `failed to allocate buffer for kv cache` / `cudaMalloc failed: out of memory`；
- * 而 GUI 的显存预检**放行了** —— 因为预检用的是与模型无关的常量 `chat_est_gb = 4.0`，
- * 而 ctx=32768 的真实占用 ≈ 5.4GB（权重 1.8 + KV 3.5）。
- *
- * 本测试要把两件事钉住：
- *  ① 几何参数能**从模型文件本身**读出来（含"架构前缀"这个坑：现代 GGUF 写的是 `qwen3.block_count`，
- *     不是老文档里的 `llama.block_count`；写死前缀会"解析成功但全是 NaN"）；
- *  ② KV 换算结果与**实测占用**一致 —— 这是本文件的核心价值：公式必须对得上真实显存表，
- *     否则预检只是换了个数字继续骗人。
- *
- * ⚠️ 全部用**合成 GGUF**（stdlib 临时目录）做主断言，不依赖 1.7GB 的真实模型文件；
- *    真实文件仅作"存在才跑"的交叉验证（CI/别的机器上没有该文件也不该红）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,11 +32,11 @@ import {
 } from "../../core-ts/src/gguf_meta.js";
 import { buildLlamaArgv, sanitizeAlias, type BackendArgs } from "../../core-ts/src/model_server.js";
 
-// ── 合成 GGUF 构造器（只写元数据区，够解析用） ─────────────
+
 
 const GT = { U32: 4, STR: 8, U64: 10, ARR: 9 } as const;
 
-/** 极简 GGUF 元数据写入器：只支持 u32 / u64 / string / array<u32|string> */
+
 function writeGguf(kvs: Array<[string, number, unknown]>, opts: { version?: number; magic?: string } = {}): Buffer {
   const parts: Buffer[] = [];
   const u32 = (v: number): Buffer => { const b = Buffer.alloc(4); b.writeUInt32LE(v, 0); return b; };
@@ -57,7 +57,7 @@ function writeGguf(kvs: Array<[string, number, unknown]>, opts: { version?: numb
   };
   parts.push(Buffer.from(opts.magic ?? "GGUF", "latin1"));
   parts.push(u32(opts.version ?? 3));
-  parts.push(u64(0)); // tensor_count
+  parts.push(u64(0)); 
   parts.push(u64(kvs.length));
   for (const [k, t, v] of kvs) {
     parts.push(str(k), u32(t), val(t, v));
@@ -65,7 +65,7 @@ function writeGguf(kvs: Array<[string, number, unknown]>, opts: { version?: numb
   return Buffer.concat(parts);
 }
 
-/** 一份"像 qwen3-1.7b"的元数据（几何取值照抄本机真实模型，见文件头注释） */
+
 const QWEN3_KVS: Array<[string, number, unknown]> = [
   ["general.architecture", GT.STR, "qwen3"],
   ["general.name", GT.STR, "Qwen3 1.7B Instruct"],
@@ -76,7 +76,7 @@ const QWEN3_KVS: Array<[string, number, unknown]> = [
   ["qwen3.attention.key_length", GT.U32, 128],
   ["qwen3.attention.value_length", GT.U32, 128],
   ["qwen3.context_length", GT.U32, 40960],
-  // 模拟真实文件里"排在后头的大数组"——用来验证"截断在大数组中间仍能成功"
+  
   ["tokenizer.ggml.tokens", GT.ARR, [[GT.STR, "a"], [GT.STR, "b"], [GT.STR, "c"]]],
 ];
 
@@ -107,7 +107,7 @@ describe("parseGgufHeader：几何参数解析", () => {
   });
 
   it("写死 llama. 前缀会读不到（回退用 general.architecture 才是对的）", () => {
-    // 反证：把架构名换成 llama3.x，键前缀随之变化 —— 解析仍应成功
+    
     const kvs = QWEN3_KVS.map(([k, t, v]) => [k.replace(/^qwen3\./, "llama."), t, v] as [string, number, unknown]);
     const g = parseGgufHeader(writeGguf(kvs.map((e) => (e[0] === "general.architecture" ? ["general.architecture", GT.STR, "llama"] as [string, number, unknown] : e))));
     expect(g).not.toBeNull();
@@ -117,7 +117,7 @@ describe("parseGgufHeader：几何参数解析", () => {
 
   it("truncation：截断在尾部大数组中间，但所需键已读齐 → 仍然成功", () => {
     const full = writeGguf([...QWEN3_KVS, ["tokenizer.ggml.merges", GT.ARR, Array.from({ length: 400 }, (_, i) => [GT.STR, "m" + i] as [number, unknown])]]);
-    // 砍掉最后 200 字节：保证落在 merges 数组内部
+    
     const cut = full.subarray(0, Math.max(0, full.length - 200));
     const g = parseGgufHeader(cut);
     expect(g).not.toBeNull();
@@ -128,7 +128,7 @@ describe("parseGgufHeader：几何参数解析", () => {
   it("truncation：几何键本身缺失/被截断 → 返回 null（调用方据此回退，而不是拒绝启动）", () => {
     const kvs = QWEN3_KVS.filter(([k]) => !k.startsWith("qwen3.block_count"));
     expect(parseGgufHeader(writeGguf(kvs))).toBeNull();
-    // 只留前 8 字节（连 version 都没读完）
+    
     expect(parseGgufHeader(writeGguf(QWEN3_KVS).subarray(0, 8))).toBeNull();
   });
 
@@ -142,8 +142,8 @@ describe("parseGgufHeader：几何参数解析", () => {
     const kvs = QWEN3_KVS.filter(([k]) => k !== "qwen3.attention.head_count_kv" && !k.startsWith("qwen3.attention.key_length") && !k.startsWith("qwen3.attention.value_length"));
     const g = parseGgufHeader(writeGguf(kvs));
     expect(g).not.toBeNull();
-    expect(g!.headCountKv).toBe(16);                 // 回退到 head_count
-    expect(g!.keyLength).toBe(2048 / 16);            // embedding/head_count 推导
+    expect(g!.headCountKv).toBe(16);                 
+    expect(g!.keyLength).toBe(2048 / 16);            
     expect(g!.valueLength).toBe(128);
   });
 });
@@ -169,12 +169,12 @@ describe("readGgufMeta：从磁盘读头部（含 fileSizeBytes）", () => {
 });
 
 describe("KV cache 显存换算：必须对得上实测表", () => {
-  /**
-   * 实测表（RTX 4070 Laptop 8G，qwen3-1.7b-q8_0，baseline 占 1287~1351 MiB）：
-   *   ctx=32768 f16  → 6653 MiB → KV ≈ 5353−1739 = 3614 MiB = 3.53 GiB
-   *   ctx=32768 q8_0 → 5062 MiB → KV ≈ 3762−1739 = 2023 MiB = 1.98 GiB
-   * 下面断言"公式值"与"实测值"同量级（±20%），并断言 slack 让它**保守偏大**。
-   */
+  
+
+
+
+
+
   it("f16 KV @ctx=32768 ≈ 3.50 GiB（实测 3.53 GiB）", () => {
     const bytes = kvCacheBytes(QWEN3_GEOM(), 32768, "f16", "f16")!;
     expect(bytes / 1024 ** 3).toBeCloseTo(3.5, 1);
@@ -215,20 +215,20 @@ describe("KV cache 显存换算：必须对得上实测表", () => {
 });
 
 describe("estimateGpuFootprintGb：预检必须能拦住实测失败的那组配置", () => {
-  const FILE_GIB = 1834426016 / 1024 ** 3; // 1.708 GiB
+  const FILE_GIB = 1834426016 / 1024 ** 3; 
 
   it("q8_0 @32768 的估算**不小于**实测总占用（必须保守，否则预检又放行一个会 OOM 的配置）", () => {
     const gb = estimateGpuFootprintGb(QWEN3_GEOM(1834426016), 32768, "q8_0", "q8_0")!;
-    const measuredTotal = (5062 - 1300) / 1024; // 实测 GPU 占用（扣掉 baseline）≈ 3.67 GiB
+    const measuredTotal = (5062 - 1300) / 1024; 
     expect(gb).toBeGreaterThanOrEqual(measuredTotal);
-    // 也不能保守到离谱（否则会误伤本来能跑的配置）
+    
     expect(gb).toBeLessThan(measuredTotal * 1.35);
   });
 
   it("f16 @32768 的估算**高于** q8_0（差的就是 KV 那一半，这是量化的收益来源）", () => {
     const f16 = estimateGpuFootprintGb(QWEN3_GEOM(1834426016), 32768, "f16", "f16")!;
     const q8 = estimateGpuFootprintGb(QWEN3_GEOM(1834426016), 32768, "q8_0", "q8_0")!;
-    expect(f16 - q8).toBeGreaterThan(1.5); // 实测差 ≈ 1.6GiB
+    expect(f16 - q8).toBeGreaterThan(1.5); 
     expect(f16 - q8).toBeLessThan(2.5);
   });
 
@@ -264,7 +264,7 @@ describe("buildLlamaArgv：KV 量化参数下发（本地模型能否起来的�
   });
 
   it("非法 KV 类型 → **静默不下发**，而不是把非法值传给 llama-server（否则会 exit 1 起不来）", () => {
-    // 这条直接对应 A-1018 的教训：非法参数值让"文件名含 qwen 的模型必然起不来"
+    
     for (const bad of ["qwen", "Q8_0", "int8", "q3_k"]) {
       const argv = buildLlamaArgv({ ...base, kvTypeK: bad, kvTypeV: bad });
       expect(argv).not.toContain("-ctk");
@@ -300,12 +300,12 @@ describe("S4-A：--alias 具名身份（身份不再依赖路径字符串）", (
   it("下发 -a <id>（llama-server 收到后 /props.model_alias 与 /v1/models.data[].id 都等于它）", () => {
     const argv = buildLlamaArgv({ ...base, alias: "qwen3" });
     expect(argv[argv.indexOf("-a") + 1]).toBe("qwen3");
-    // 路径仍然照常下发 —— 别名是**附加身份**，不是路径的替代
+    
     expect(argv[argv.indexOf("-m") + 1]).toBe("models/chat/qwen3.gguf");
   });
 
   it("★ 逗号必须被清洗：--alias 的取值是**逗号分隔的列表**，含逗号会让 id 被拆成两个", () => {
-    // 抄自 llama-server --help：can be comma-separated for multiple aliases
+    
     const argv = buildLlamaArgv({ ...base, alias: "qwen3,1.7b" });
     const got = argv[argv.indexOf("-a") + 1];
     expect(got).not.toContain(",");
@@ -346,8 +346,8 @@ describe("sanitizeAlias：别名清洗的唯一出处", () => {
 
 describe("常量自洽 / 与 llama-server 契约一致", () => {
   it("SUPPORTED_KV_TYPES 与 KV_CACHE_BYTES_PER_ELEMENT 完全对齐", () => {
-    // 若给 SUPPORTED 加了一个词条却忘了给字节数，kvCacheBytes 会返回 null → 预检静默回退，
-    // 于是"用户设了量化但其实没生效"。这条守卫把两个表绑在一起。
+    
+    
     for (const t of SUPPORTED_KV_TYPES) {
       expect(typeof KV_CACHE_BYTES_PER_ELEMENT[t], `缺少 ${t} 的字节宽`).toBe("number");
       expect(KV_CACHE_BYTES_PER_ELEMENT[t]).toBeGreaterThan(0);
@@ -356,7 +356,7 @@ describe("常量自洽 / 与 llama-server 契约一致", () => {
   });
 
   it("SUPPORTED_KV_TYPES 逐字等于 llama-server --help 的 allowed values", () => {
-    // 抄自本机 llama-server --help：f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
+    
     expect(SUPPORTED_KV_TYPES).toEqual(["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]);
   });
 
@@ -365,10 +365,10 @@ describe("常量自洽 / 与 llama-server 契约一致", () => {
   });
 });
 
-/**
- * 交叉验证：如果本机真的放着那个模型文件，就直接拿它验一遍
- * （"合成夹具通过"不等于"真实文件通过"——真实文件有真实的大数组与真实几何）。
- */
+
+
+
+
 describe("真实模型文件交叉验证（不存在则跳过）", () => {
   const dir = resolve(process.cwd(), "models", "chat");
   const ggufs = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".gguf")) : [];
@@ -381,8 +381,8 @@ describe("真实模型文件交叉验证（不存在则跳过）", () => {
     expect(g!.blockCount).toBe(28);
     expect(g!.headCountKv).toBe(8);
     expect(g!.keyLength).toBe(128);
-    expect(g!.fileSizeBytes).toBeGreaterThan(1024 ** 3); // > 1GiB
-    // 估算必须 ≥ 实测占用 3.67GiB（保守），且 < 5GiB（不夸张）
+    expect(g!.fileSizeBytes).toBeGreaterThan(1024 ** 3); 
+    
     const gb = estimateGpuFootprintGb(g!, 32768, "q8_0", "q8_0")!;
     expect(gb).toBeGreaterThanOrEqual(3.67);
     expect(gb).toBeLessThan(5);

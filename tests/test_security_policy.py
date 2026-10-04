@@ -46,7 +46,7 @@ def test_python_side_uses_shared_source() -> None:
             _WRITE_BLOCKED_NAMES,
             _WRITE_BLOCKED_SUFFIXES,
         )
-    except Exception as e:  # pragma: no cover - 环境异常
+    except Exception as e:  
         pytest.skip(f"无法导入 tools.builtin：{e}")
 
     import importlib.util

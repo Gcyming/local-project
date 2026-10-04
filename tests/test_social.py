@@ -97,7 +97,7 @@ class TestSocialRateLimit:
         assert results[:10] == [True] * 10
         assert results[10] is False
         assert results[11] is False
-        assert a._check_rate_limit("c2") is True  # 其他 chat 不受影响
+        assert a._check_rate_limit("c2") is True  
 
     def test_rate_limit_wechat_work(self):
         from social.base import WeChatWorkAdapter

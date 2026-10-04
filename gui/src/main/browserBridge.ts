@@ -1,11 +1,11 @@
-/**
- * gui/src/main/browserBridge.ts — 主进程 → 渲染层「右侧栏浏览器控制」请求/响应桥（A-976）。
- *
- * 背景：Agent 工具在主进程执行，而右侧栏浏览器是 renderer 里的 <webview>。
- * main 不能直接调用 renderer 的函数，所以采用 IPC 请求/响应：
- *   main 发 `slime:browser:command` {id, ...cmd} → renderer 在 webview 上执行
- *   → renderer 回 `slime:browser:result` {id, ok, data|error} → 这里按 id 兑现 Promise。
- */
+
+
+
+
+
+
+
+
 import { ipcMain, type BrowserWindow } from "electron";
 
 interface Pending {
@@ -30,7 +30,7 @@ export class BrowserBridge {
     });
   }
 
-  /** 下发一条浏览器指令并等待 renderer 回传结果 */
+  
   async exec(
     cmd: Record<string, unknown>,
     timeoutMs = 30_000,

@@ -1,28 +1,28 @@
-/**
- * core-ts/src/tools/classifier.ts — 调用前权限分类器（Claude Code 调用前分类器 / 头部闭源工具权限分层 对标）。
- *
- * 在工具真正执行前对动作做规则式风险复核，输出三级决策：
- *   auto     — 只读/安全的动作，免审批直接放行
- *   confirm  — 需会话级确认（现有 ask_user / approvalMode 审批链路可承载）
- *   block    — 高危/越权/敏感，直接拒绝（不进入审批，防社工绕过）
- *
- * 纯函数、零副作用（可单测）；挂接点由装配方决定（工具执行 wrapper / sandbox gate）。
- */
+
+
+
+
+
+
+
+
+
+
 export type RiskLevel = "auto" | "confirm" | "block";
 
 import { resolve, sep } from "node:path";
 
 export interface AssessInput {
   kind: "terminal" | "write" | "network" | "read";
-  /** terminal：命令（首词），如 "rm"、"curl" */
+  
   command?: string;
-  /** terminal：命令参数（小写全文），如 "rm -rf /etc" */
+  
   commandArgs?: string;
-  /** write：目标路径（相对/绝对均可） */
+  
   path?: string;
-  /** write：写入字节数（已知时） */
+  
   size?: number;
-  /** network：目标 URL */
+  
   url?: string;
 }
 
@@ -32,7 +32,7 @@ export interface AssessResult {
   matched: string;
 }
 
-/** 只读命令白名单（常见 shell 只读/排查命令 → auto） */
+
 const READONLY_CMDS = new Set([
   "ls", "cat", "head", "tail", "less", "more", "grep", "rg", "find", "pwd", "whoami",
   "date", "echo", "printf", "env", "printenv", "which", "type", "git", "git status",
@@ -40,7 +40,7 @@ const READONLY_CMDS = new Set([
   "uname", "getconf", "stat", "file", "wc", "sort", "uniq", "cut", "sed -n", "cksum", "sha1sum", "sha256sum",
 ]);
 
-/** 命令参数高危特征（→ block，绝不进入审批） */
+
 const BLOCK_PATTERNS: Array<RegExp> = [
   /\brm\s+-rf\s+(?:\/|\*|\.\s*$|~\/?\*)/,
   /\bsudo\s+rm\b/,
@@ -55,7 +55,7 @@ const BLOCK_PATTERNS: Array<RegExp> = [
   /\b(?:curl|wget|http)\b.*https?:\/\/(?:127\.0\.0\.1|localhost|169\.254|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|metadata\.google)/i,
 ];
 
-/** 需确认的写操作命令（→ confirm） */
+
 const CONFIRM_PATTERNS: Array<RegExp> = [
   /\b(rm|rmdir)\b/,
   /\b(mv|cp)\b/,
@@ -69,21 +69,21 @@ const CONFIRM_PATTERNS: Array<RegExp> = [
   /\bkill\b/,
 ];
 
-// 安全清单取自 shared/security-policy.yaml（scripts/gen_security_policy.py 生成），
-// 与 Python 侧 tools/builtin.py 同源——杜绝双栈清单漂移。
+
+
 import { PROTECTED_DIRS_SET, SENSITIVE_FILENAMES_SET, CLASSIFIER_WRITE_BLOCK_SUFFIXES } from "shared/security-policy";
 
 const SENSITIVE_FILES = SENSITIVE_FILENAMES_SET;
 
-/** 受保护源码目录（写 → block，防止 Agent 改写自身护栏/宿主/契约）。
- *  原为此处硬编码，已收敛到 shared 单一来源；保留导出名以兼容既有调用方。 */
+
+
 export const PROTECTED_SOURCE_DIRS = PROTECTED_DIRS_SET;
 
-/**
- * 目标路径是否落在 root 下的受保护源码目录。
- * root 之外的路径一律 false——Agent 的工作区与 slime 安装根分离，绝不能误伤
- * 用户项目里的同名目录（如用户自己的 core/、gui/）。
- */
+
+
+
+
+
 export function isProtectedSourcePath(target: string, root: string): boolean {
   if (!target || !root) return false;
   try {
@@ -109,7 +109,7 @@ export function assessAction(input: AssessInput): AssessResult {
     const cmd = (input.command ?? "").trim().toLowerCase();
     const args = (input.commandArgs ?? "").toLowerCase();
     const full = `${cmd} ${args}`.trim();
-    // 高危特征优先 → block
+    
     for (const re of BLOCK_PATTERNS) {
       if (re.test(full)) { return { level: "block", reason: `命令命中高危特征：${args.slice(0, 60)}`, matched: re.source }; }
     }
@@ -135,33 +135,33 @@ export function assessAction(input: AssessInput): AssessResult {
     return { level: "auto", reason: `工作区内普通写入 ${p.slice(0, 60)}`, matched: "normal-write" };
   }
 
-  // network
+  
   const url = (input.url ?? "").toLowerCase();
   if (/^https:\/\//.test(url)) { return { level: "auto", reason: `HTTPS 访问 ${url.slice(0, 60)}`, matched: "https" }; }
-  /* A-1091：**云元数据**是唯一仍然硬拦（block）的网络目标。
-     它同时满足两个条件：① 真正的凭证窃取面（169.254.169.254 / metadata.google 能读到实例临时凭据）；
-     ② **没有任何正常用户会去访问它** —— 拦掉不会伤害任何真实功能。 */
+  
+
+
   if (/169\.254\.169\.254|metadata\.google|metadata\.azure/.test(url)) {
     return { level: "block", reason: `云元数据地址禁止访问（可读取实例凭据）${url.slice(0, 60)}`, matched: "cloud-metadata" };
   }
-  /* A-1091：普通 HTTP / 回环 / 内网**降级为 confirm**（原先一律 block）。
-     ⚠️ 根因：那条 block 同时管着两种性质完全不同的东西 ——
-       ① Agent 以**程序身份**去取远端资源（`web_fetch`）：拦内网是合理的 SSRF 边界；
-       ② **用户可见的内置浏览器**（`browser_navigate`）：这是**用户自己的浏览器** ——
-          地址栏本来就允许 `http://` 与 `127.0.0.1`，而且本应用**自己的** `http_create_app`
-          生成单页应用后就是靠内置浏览器打开 `http://127.0.0.1:<port>` 来预览的。
-     实测事故：Agent 想打开用户的本地服务（`http://127.0.0.1:8800`）被硬规则拒绝，
-     于是如实回报「内置浏览器的硬规则不允许访问本地回环地址」——
-     **我们自己的硬规则把自己的功能拦死了**，而用户侧看起来就是"右侧栏浏览器坏了"。
-     现在：如实说清目标性质，把决定权交回审批/「联网」开关（开关放行 = 用户已授权联网）。
-     ⚠️ 终端那条路不受影响：它走上面的 `BLOCK_PATTERNS`（curl|wget + 私网地址）仍然 block。 */
+  
+
+
+
+
+
+
+
+
+
+
   if (/^(http|ws):\/\//.test(url) || /127\.0\.0\.1|localhost|\[::1\]/.test(url)) {
     return { level: "confirm", reason: `非 HTTPS / 本地地址访问 ${url.slice(0, 60)}`, matched: "lan-insecure" };
   }
   return { level: "confirm", reason: `非标准网络访问 ${url.slice(0, 60)}`, matched: "unknown-net" };
 }
 
-/** 终端命令规范化：将首词与剩余参数拆开（供 assessAction 消费）。 */
+
 export function splitCommand(line: string): { command: string; commandArgs: string } {
   const t = line.trim();
   const seg = t.split(/[\s]+/);

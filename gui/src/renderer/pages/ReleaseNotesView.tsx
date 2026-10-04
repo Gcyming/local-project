@@ -1,10 +1,10 @@
-/**
- * gui/src/renderer/pages/ReleaseNotesView.tsx — 更新说明渲染（只负责画）。
- *
- * 解析在 `shared/releaseNotes.ts`（纯逻辑、可测）；这里只把结构化块映射成 React 元素。
- * **绝不用 `dangerouslySetInnerHTML`**：内容来自远端 Release 正文，注入执行等于把
- * preload 暴露给远端字符串。
- */
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import { parseReleaseNotes, type ReleaseNoteBlock, type ReleaseNoteRun } from "../../shared/releaseNotes.js";
 
@@ -110,7 +110,7 @@ function Block({ b }: { b: ReleaseNoteBlock }): JSX.Element | null {
   }
 }
 
-/** 更新说明正文视图（限高滚动，避免长文把整面板顶爆） */
+
 export default function ReleaseNotesView({ notes, maxHeight = 340 }: { notes: string; maxHeight?: number }): JSX.Element | null {
   const blocks = React.useMemo(() => parseReleaseNotes(notes), [notes]);
   if (blocks.length === 0) { return null; }

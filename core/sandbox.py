@@ -22,22 +22,22 @@ from enum import IntEnum, auto
 from pathlib import Path
 from typing import Callable
 
-# ── 项目根目录 ────────────────────────────────────────────
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-# ── 权限分级 ──────────────────────────────────────────────
+
 
 class PermissionLevel(IntEnum):
     """权限分级模型"""
-    L0 = 0  # 纯读取：cat, ls, file_read
-    L1 = 1  # 查看信息：git log, pytest --collect-only
-    L2 = 2  # 修改文件：vim, file_write, git add
-    L3 = 3  # 执行命令：pytest, python -m test
-    L4 = 4  # 网络访问：pip install, git push
-    L5 = 5  # 系统操作：sudo, kill, rm -rf
+    L0 = 0  
+    L1 = 1  
+    L2 = 2  
+    L3 = 3  
+    L4 = 4  
+    L5 = 5  
 
     @classmethod
     def from_string(cls, s: str) -> "PermissionLevel":
@@ -46,7 +46,7 @@ class PermissionLevel(IntEnum):
         try:
             return cls(int(s))
         except (ValueError, KeyError):
-            return cls.L0  # 解析失败回退最安全等级
+            return cls.L0  
 
     def display_name(self) -> str:
         names = {
@@ -68,7 +68,7 @@ def _tool_matches(action: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(action, p) for p in patterns)
 
 
-# ── 审计日志 ──────────────────────────────────────────────
+
 
 @dataclass
 class AuditEntry:
@@ -80,8 +80,8 @@ class AuditEntry:
     action: str = ""
     target: str = ""
     level: int = 0
-    status: str = "allowed"  # allowed | denied | revoked
-    granted_by: str = "auto"  # auto | user | main_agent
+    status: str = "allowed"  
+    granted_by: str = "auto"  
     grant_id: str = ""
     details: dict = field(default_factory=dict)
     risk_score: float = 0.0
@@ -105,14 +105,14 @@ class AuditEntry:
         }
 
 
-# ── 异常检测规则 ──────────────────────────────────────────
+
 
 @dataclass
 class AnomalyRule:
     """异常检测规则"""
     name: str
     description: str
-    action: str  # alert | deny | deny+alert | terminate
+    action: str  
     threshold: int | float = 0
     patterns: list[str] = field(default_factory=list)
 
@@ -125,7 +125,7 @@ class AnomalyRule:
         return False
 
 
-# ── 默认异常检测规则 ──────────────────────────────────────
+
 
 DEFAULT_ANOMALY_RULES: list[AnomalyRule] = [
     AnomalyRule(
@@ -177,8 +177,8 @@ class AnomalyDetector:
 
     def __init__(self, rules: list[AnomalyRule] | None = None):
         self.rules = rules or DEFAULT_ANOMALY_RULES
-        self._rate_counters: dict[str, list[float]] = {}  # action -> timestamps
-        self._iteration_counters: dict[str, int] = {}  # agent_id -> count
+        self._rate_counters: dict[str, list[float]] = {}  
+        self._iteration_counters: dict[str, int] = {}  
 
     def check(self, agent_id: str, action: str, target: str,
               context: dict | None = None) -> tuple[bool, list[str]]:
@@ -207,10 +207,10 @@ class AnomalyDetector:
         key = f"{agent_id}:{action}"
         now = time.time()
         self._rate_counters.setdefault(key, [])
-        # 先清理旧记录再判断（不计入本次调用）
+        
         recent = [t for t in self._rate_counters[key] if now - t < 60]
         exceeded = len(recent) >= threshold
-        # 记录本次（即使超限也记录，防止持续冲击）
+        
         recent.append(now)
         self._rate_counters[key] = recent
         return exceeded
@@ -247,12 +247,12 @@ class AnomalyDetector:
             self._iteration_counters.clear()
 
 
-# ── 沙箱配置 ──────────────────────────────────────────────
+
 
 @dataclass
 class SandboxConfig:
     """沙箱配置（支持全局和 Agent 级覆盖）"""
-    default_level: str = "strict"  # strict | moderated | relaxed
+    default_level: str = "strict"  
     auto_approve_levels: list[int] = field(default_factory=lambda: [0, 1])
     require_approval_levels: list[int] = field(default_factory=lambda: [2, 3, 4])
     deny_levels: list[int] = field(default_factory=lambda: [5])
@@ -268,7 +268,7 @@ class SandboxConfig:
     audit_enabled: bool = True
     audit_log_path: str = "data/audit.jsonl"
     audit_retention_days: int = 90
-    workspace: str = ""  # Agent 工作目录隔离（空字符串=不限制）
+    workspace: str = ""  
 
     def to_dict(self) -> dict:
         return {
@@ -295,7 +295,7 @@ class SandboxConfig:
     def from_dict(cls, data: dict) -> "SandboxConfig":
         if not isinstance(data, dict):
             return cls()
-        # 解析嵌套配置
+        
         child_default = data.get("child_default", {})
         anomaly = data.get("anomaly_detection", {})
         audit = data.get("audit", {})
@@ -325,7 +325,7 @@ class SandboxConfig:
         return mapping.get(self.default_level, 1)
 
 
-# ── 权限请求 ──────────────────────────────────────────────
+
 
 @dataclass
 class PermissionRequest:
@@ -335,7 +335,7 @@ class PermissionRequest:
     agent_name: str = ""
     task_id: str = ""
     task_description: str = ""
-    actions: list[dict] = field(default_factory=list)  # [{action, target, level}]
+    actions: list[dict] = field(default_factory=list)  
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
     def to_dict(self) -> dict:
@@ -350,7 +350,7 @@ class PermissionRequest:
         }
 
 
-# ── 授权决策 ──────────────────────────────────────────────
+
 
 @dataclass
 class ApprovalDecision:
@@ -363,7 +363,7 @@ class ApprovalDecision:
     auto_approved: bool = False
 
 
-# ── 权限检查结果 ──────────────────────────────────────────
+
 
 @dataclass
 class PermissionCheckResult:
@@ -375,7 +375,7 @@ class PermissionCheckResult:
     anomaly_alerts: list[str] = field(default_factory=list)
 
 
-# ── SandboxManager ────────────────────────────────────────
+
 
 class SandboxManager:
     """沙箱中央控制器"""
@@ -384,16 +384,16 @@ class SandboxManager:
                  approval_callback: Callable[[PermissionRequest], ApprovalDecision] | None = None):
         self.config = config or SandboxConfig()
         self._approval_callback = approval_callback
-        self._active_grants: dict[str, dict] = {}  # grant_id -> grant info
-        self._agent_grants: dict[str, list[str]] = {}  # agent_id -> [grant_id, ...]
-        self._active_sandboxes: dict[str, "Sandbox"] = {}  # agent_id -> Sandbox
+        self._active_grants: dict[str, dict] = {}  
+        self._agent_grants: dict[str, list[str]] = {}  
+        self._active_sandboxes: dict[str, "Sandbox"] = {}  
         self._audit_log: list[AuditEntry] = []
         self._anomaly_detector = AnomalyDetector()
-        self._agent_configs: dict[str, SandboxConfig] = {}  # agent_id -> SandboxConfig
-        self._agent_registry: dict[str, dict] = {}  # agent_id -> {parent_id, name, task_id}
-        self._violations: dict[str, int] = {}  # agent_id -> 未读违规次数（供情绪 violation 信号消费）
+        self._agent_configs: dict[str, SandboxConfig] = {}  
+        self._agent_registry: dict[str, dict] = {}  
+        self._violations: dict[str, int] = {}  
         self._audit_log_path = self._resolve_audit_path()
-        self._upgrade_expiry: dict[str, list] = {}  # B4: {agent_id: [(level, expires_at), ...]}
+        self._upgrade_expiry: dict[str, list] = {}  
 
     def set_approval_callback(self, callback: Callable[[PermissionRequest], ApprovalDecision]):
         """设置用户确认回调函数"""
@@ -414,7 +414,7 @@ class SandboxManager:
                 details={"violation_count": self._violations[agent_id]},
             ))
         except Exception:
-            pass  # 审计失败不影响主流程
+            pass  
 
     def pop_violations(self, agent_id: str) -> bool:
         """读取并清除该 Agent 的未读违规标记，返回是否有违规。"""
@@ -435,7 +435,7 @@ class SandboxManager:
             path = _project_root() / path
         return Path(path)
 
-    # ── 权限管理 ────────────────────────────────────────
+    
 
     def grant_permission(self, agent_id: str, action: str, target: str,
                          level: int = 0, granted_by: str = "auto",
@@ -452,7 +452,7 @@ class SandboxManager:
         """
         agent_config = self._get_agent_config(agent_id)
 
-        # 工作目录隔离检查
+        
         if agent_config.workspace and target:
             if not self._validate_workspace(agent_config.workspace, target):
                 self._write_audit(AuditEntry(
@@ -462,14 +462,14 @@ class SandboxManager:
                 ))
                 return False, f"目标 '{target}' 超出工作目录范围"
 
-        # 检查异常行为
+        
         anomaly_detected, anomaly_alerts = False, []
         if agent_config.anomaly_detection_enabled:
             anomaly_detected, anomaly_alerts = self._anomaly_detector.check(
                 agent_id, action, target
             )
-        # 权限决策
-        # 1. 黑名单优先
+        
+        
         if level in agent_config.deny_levels or _tool_matches(action, agent_config.deny_tools):
             self._write_audit(AuditEntry(
                 agent_id=agent_id, task_id=task_id, action=action, target=target,
@@ -479,7 +479,7 @@ class SandboxManager:
             ))
             return False, f"操作 '{action}' (L{level}) 被禁止"
 
-        # B1: 异常检测 (deny 级 rule 强制执行)
+        
         if anomaly_detected:
             for rule in self._anomaly_detector.rules:
                 if rule.check(action, target) and rule.action in ("deny", "deny+alert", "terminate"):
@@ -491,7 +491,7 @@ class SandboxManager:
                     ))
                     return False, f"异常操作被拒绝: {rule.description}"
 
-        # 2. 需确认的工具优先于等级自动批准
+        
         if _tool_matches(action, agent_config.require_approval_tools):
             if self._approval_callback:
                 agent_info = self._agent_registry.get(agent_id, {})
@@ -521,7 +521,7 @@ class SandboxManager:
             else:
                 return False, f"工具 '{action}' 需要用户确认（未配置确认回调）"
 
-        # 3. 自动批准
+        
         if level in agent_config.auto_approve_levels or _tool_matches(action, agent_config.auto_approve_tools):
             grant_id = self._record_grant(agent_id, action, target, level, granted_by)
             self._write_audit(AuditEntry(
@@ -532,9 +532,9 @@ class SandboxManager:
             ))
             return True, "自动批准"
 
-        # 4. L2-L4 需要确认
+        
         if level in agent_config.require_approval_levels:
-            # 如果有确认回调，调用它
+            
             if self._approval_callback:
                 agent_info = self._agent_registry.get(agent_id, {})
                 req = PermissionRequest(
@@ -561,10 +561,10 @@ class SandboxManager:
                     ))
                     return False, f"用户拒绝: {decision.reason}"
             else:
-                # 无回调，默认拒绝
+                
                 return False, f"操作 '{action}' (L{level}) 需要用户确认（未配置确认回调）"
 
-        # 默认：拒绝未知 level（fail-closed）
+        
         return False, f"未知权限等级 L{level}，已拒绝"
 
     def revoke_permission(self, agent_id: str, action: str):
@@ -594,9 +594,9 @@ class SandboxManager:
                     grant_id=gid,
                     details={"reason": reason} if reason else {},
                 ))
-                del self._active_grants[gid]  # B8: 同步清理活跃 grant
+                del self._active_grants[gid]  
         self._agent_grants.pop(agent_id, None)
-        self._agent_configs.pop(agent_id, None)  # B4: 回收临时提升的配置
+        self._agent_configs.pop(agent_id, None)  
         self._upgrade_expiry.pop(agent_id, None)
         self._anomaly_detector.reset(agent_id)
 
@@ -615,7 +615,7 @@ class SandboxManager:
         self._agent_grants.setdefault(agent_id, []).append(grant_id)
         return grant_id
 
-    # ── 权限查询 ────────────────────────────────────────
+    
 
     def check_permission(self, agent_id: str, action: str, target: str,
                          level: int = 0) -> PermissionCheckResult:
@@ -625,7 +625,7 @@ class SandboxManager:
         """
         agent_config = self._get_agent_config(agent_id)
 
-        # 工作目录隔离检查
+        
         if agent_config.workspace and target:
             if not self._validate_workspace(agent_config.workspace, target):
                 return PermissionCheckResult(
@@ -633,14 +633,14 @@ class SandboxManager:
                     level=level,
                 )
 
-        # 异常检测
+        
         anomaly_detected, anomaly_alerts = False, []
         if agent_config.anomaly_detection_enabled:
             anomaly_detected, anomaly_alerts = self._anomaly_detector.check(
                 agent_id, action, target
             )
 
-        # 1. 黑名单优先
+        
         if level in agent_config.deny_levels or _tool_matches(action, agent_config.deny_tools):
             return PermissionCheckResult(
                 allowed=False, reason=f"操作 '{action}' (L{level}) 被禁止",
@@ -648,7 +648,7 @@ class SandboxManager:
                 anomaly_alerts=anomaly_alerts,
             )
 
-        # B1: 异常检测拒绝
+        
         if anomaly_detected:
             for rule in self._anomaly_detector.rules:
                 if rule.check(action, target) and rule.action in ("deny", "deny+alert", "terminate"):
@@ -658,7 +658,7 @@ class SandboxManager:
                         anomaly_alerts=anomaly_alerts + [rule.description],
                     )
 
-        # 2. 需确认的工具优先于等级自动批准
+        
         if _tool_matches(action, agent_config.require_approval_tools):
             return PermissionCheckResult(
                 allowed=False, reason=f"工具 '{action}' 需要用户确认",
@@ -666,13 +666,13 @@ class SandboxManager:
                 anomaly_alerts=anomaly_alerts,
             )
 
-        # 3. 自动批准
+        
         if level in agent_config.auto_approve_levels or _tool_matches(action, agent_config.auto_approve_tools):
-            # A-088（漏洞清单 P1-9）：mcp_* 通配只自动批准低权限（read/write）；
-            # network/terminal 级 MCP 工具（缺省 network=L4）仍需确认/拒绝——防权限声明失效
+            
+            
             if (_tool_matches(action, agent_config.auto_approve_tools)
                     and action.startswith("mcp_") and level >= 3):
-                pass  # 落入后续等级判定（不自动批准高权限 MCP）
+                pass  
             else:
                 return PermissionCheckResult(
                     allowed=True, reason="自动批准", level=level,
@@ -680,7 +680,7 @@ class SandboxManager:
                     anomaly_alerts=anomaly_alerts,
                 )
 
-        # 4. 需确认的等级
+        
         if level in agent_config.require_approval_levels:
             return PermissionCheckResult(
                 allowed=False, reason=f"操作 '{action}' (L{level}) 需要用户确认",
@@ -688,7 +688,7 @@ class SandboxManager:
                 anomaly_alerts=anomaly_alerts,
             )
 
-        # 默认：拒绝未知 level
+        
         return PermissionCheckResult(
             allowed=False, reason=f"未知权限等级 L{level}，已拒绝", level=level,
             anomaly_detected=anomaly_detected,
@@ -705,7 +705,7 @@ class SandboxManager:
             "config": self._get_agent_config(agent_id).to_dict(),
         }
 
-    # ── Agent 配置管理 ──────────────────────────────────
+    
 
     def set_agent_config(self, agent_id: str, config: SandboxConfig):
         """设置 Agent 级沙箱配置"""
@@ -717,7 +717,7 @@ class SandboxManager:
         优先级：Agent 自身覆盖 > 父 Agent 继承 > 全局默认。
         B4: 合并临时权限提升，自动清除过期的。
         """
-        # 1. Agent 自身有覆盖配置
+        
         if agent_id in self._agent_configs:
             cfg = self._agent_configs[agent_id]
         else:
@@ -727,13 +727,13 @@ class SandboxManager:
                 parent_config = self._get_agent_config(parent_id)
                 if parent_config.inherit_from_parent:
                     cfg = SandboxConfig.from_dict(parent_config.to_dict())
-                    cfg.workspace = ""  # 子 Agent 不继承工作目录
+                    cfg.workspace = ""  
                 else:
                     cfg = self.config
             else:
                 cfg = self.config
 
-        # B4: 合并临时权限提升，清理过期项
+        
         upgrades = self._upgrade_expiry.get(agent_id, [])
         if upgrades:
             now = time.time()
@@ -762,26 +762,26 @@ class SandboxManager:
         """
         try:
             ws = Path(workspace).resolve()
-            # 尝试解析 target 为 JSON（工具参数通常是 JSON 字符串）
+            
             import json
             try:
                 target_obj = json.loads(target)
                 if isinstance(target_obj, dict):
-                    # 网络目标（url）归 SSRF 防护管，不归工作目录隔离管（search_engine.md 七.5）
+                    
                     if target_obj.get("url"):
                         return True
-                    # 从 JSON 中提取路径字段
+                    
                     target_path = target_obj.get("path") or target_obj.get("file") or target_obj.get("target")
                     if not target_path:
-                        return False  # 无路径字段，拒绝（隔离范围内必须明确目标）
+                        return False  
                     tp = Path(target_path).resolve()
                 else:
                     tp = Path(target).resolve()
             except (json.JSONDecodeError, TypeError):
-                # 不是 JSON，直接当作路径处理
+                
                 tp = Path(target).resolve()
 
-            # 检查 target 是否在 workspace 内（或就是 workspace 本身）
+            
             tp.relative_to(ws)
             return True
         except (ValueError, OSError):
@@ -796,11 +796,11 @@ class SandboxManager:
         agent_info = self._agent_registry.get(agent_id, {})
         parent_id = agent_info.get("parent_id", "")
 
-        # 无父 Agent 的主 Agent 无需提升
+        
         if not parent_id:
             return True, "主 Agent 无需权限提升"
 
-        # 检查目标等级是否被禁止
+        
         agent_config = self._get_agent_config(agent_id)
         if target_level in agent_config.deny_levels:
             self._write_audit(AuditEntry(
@@ -811,7 +811,7 @@ class SandboxManager:
             ))
             return False, f"L{target_level} 操作被禁止"
 
-        # 需要用户确认
+        
         if target_level in agent_config.require_approval_levels:
             if self._approval_callback:
                 req = PermissionRequest(
@@ -822,7 +822,7 @@ class SandboxManager:
                 )
                 decision = self._approval_callback(req)
                 if decision.approved:
-                    # B4: 记录临时提升（5 分钟有效），不在 config 上永久修改
+                    
                     self._upgrade_expiry.setdefault(agent_id, []).append(
                         (target_level, time.time() + 300))
                     self._write_audit(AuditEntry(
@@ -841,10 +841,10 @@ class SandboxManager:
             else:
                 return False, "权限提升需要用户确认（未配置确认回调）"
 
-        # 未列等级拒绝（fail-closed）
+        
         return False, f"L{target_level} 未在审批规则中列出，默认拒绝"
 
-    # ── 审计日志 ────────────────────────────────────────
+    
 
     def _write_audit(self, entry: AuditEntry):
         """记录审计日志（内存 + 文件），定期按 retention_days 轮转"""
@@ -852,7 +852,7 @@ class SandboxManager:
             return
         self._audit_log.append(entry)
 
-        # 写入文件
+        
         try:
             self._audit_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._audit_log_path, "a", encoding="utf-8") as f:
@@ -860,7 +860,7 @@ class SandboxManager:
         except Exception as e:
             logging.warning(f"[SLIME Sandbox] 审计日志写入失败: {e}")
 
-        # 定期轮转：每 200 条清理超过 retention_days 的旧记录
+        
         if len(self._audit_log) % 200 == 0:
             self._rotate_audit_log()
 
@@ -876,7 +876,7 @@ class SandboxManager:
         removed = old_count - len(self._audit_log)
         if removed > 0:
             logging.info(f"[SLIME Sandbox] 审计日志轮转: 移除 {removed} 条 >{retention} 天旧记录")
-            # 重写文件
+            
             try:
                 lines = [
                     json.dumps(e.to_dict(), ensure_ascii=False) + "\n"
@@ -913,7 +913,7 @@ class SandboxManager:
             "recent_denials": recent_denials,
         }
 
-    # ── 配置更新 ────────────────────────────────────────
+    
 
     def update_config(self, config: dict | SandboxConfig):
         """更新全局沙箱配置"""
@@ -922,7 +922,7 @@ class SandboxManager:
         else:
             self.config = config
 
-    # ── 风险评分 ────────────────────────────────────────
+    
 
     def calculate_risk_score(self, action: str, context: dict | None = None) -> float:
         """计算操作风险评分 (0.0 - 1.0)"""
@@ -938,18 +938,18 @@ class SandboxManager:
         }
         base_score = RISK_BASE.get(action, 0.2)
 
-        # 时间因素
+        
         if not _is_work_hours():
             base_score += 0.2
 
-        # 目标因素：系统路径
+        
         if context and _is_system_path(context.get("target", "")):
             base_score += 0.4
 
         return min(base_score, 1.0)
 
 
-# ── 辅助函数 ──────────────────────────────────────────────
+
 
 def _is_work_hours() -> bool:
     """检查是否在工作时间（9:00-18:00）"""
@@ -969,7 +969,7 @@ def _is_system_path(path: str) -> bool:
     return any(path_lower.startswith(p.lower()) for p in system_prefixes)
 
 
-# ── 全局单例 ──────────────────────────────────────────────
+
 
 _global_manager: SandboxManager | None = None
 
@@ -989,9 +989,9 @@ def reset_sandbox_manager(config: SandboxConfig | None = None,
     _global_manager = SandboxManager(config=config, approval_callback=approval_callback)
 
 
-# ── Agent 配置加载 ────────────────────────────────────────
 
-# A-002: Agent 级覆盖中与全局取并集的列表字段（白名单语义，覆盖不应丢失全局放行项）
+
+
 _MERGE_UNION_KEYS = ("auto_approve_tools", "deny_tools", "require_approval_tools")
 
 
@@ -1024,13 +1024,13 @@ def load_agent_sandbox_configs(agents: list) -> int:
     mgr = get_sandbox_manager()
     count = 0
     for agent in agents:
-        # 注册 Agent 信息（用于权限继承）
+        
         mgr.register_agent(
             agent_id=agent.id,
             parent_id=agent.parent_id or "",
             name=agent.name,
         )
-        # 如果有 sandbox_override，合并为 Agent 级配置（A-002：与全局默认合并）
+        
         if hasattr(agent, "sandbox_override") and agent.sandbox_override:
             cfg = _merge_agent_override(mgr.config, agent.sandbox_override)
             mgr.set_agent_config(agent.id, cfg)
@@ -1038,7 +1038,7 @@ def load_agent_sandbox_configs(agents: list) -> int:
     return count
 
 
-# ── CLI 确认回调 ──────────────────────────────────────────
+
 
 def cli_approval_callback(request: PermissionRequest) -> ApprovalDecision:
     """
@@ -1046,7 +1046,7 @@ def cli_approval_callback(request: PermissionRequest) -> ApprovalDecision:
     同步模式（wizard/直接命令）：通过 input() 阻塞等待用户输入。
     异步模式（Swarm 协程）：自动拒绝，避免 input() 阻塞事件循环。
     """
-    # B5: 检测异步上下文，避免 input() 冻结事件循环
+    
     import asyncio as _aio
     try:
         _aio.get_running_loop()
@@ -1059,7 +1059,7 @@ def cli_approval_callback(request: PermissionRequest) -> ApprovalDecision:
             reason="异步模式不交互，请使用同步模式或预先配置白名单",
         )
     except RuntimeError:
-        pass  # 无事件循环，同步交互模式
+        pass  
 
     print("\n" + "=" * 60)
     print(f"  [沙箱授权请求] {request.agent_name}")
@@ -1120,9 +1120,9 @@ def cli_approval_callback(request: PermissionRequest) -> ApprovalDecision:
         )
 
 
-# ==============================================================
-# 向后兼容层：保留旧的 SkillManifest 和 Sandbox 类
-# ==============================================================
+
+
+
 
 @dataclass
 class SkillManifest:
@@ -1164,7 +1164,7 @@ class Sandbox:
         """请求写入权限，返回是否允许"""
         if self.manifest.write:
             return True
-        # 通过 SandboxManager 检查
+        
         if self.agent_id:
             result = self._manager.check_permission(
                 self.agent_id, "file_write", reason, level=2

@@ -1,17 +1,17 @@
-/**
- * gui/src/renderer/pages/ResidentPanel.tsx — 设置「后台任务」面板（A-913 迭代）。
- * - Agent 选择：下拉「已有 Agent（默认选中首项）」，不再手填 ID；无 Agent 时提供「自动创建默认 Agent」兜底；
- * - 子代理：预设模板卡片（点选即填，可改）；
- * - 定时任务：cron 常用预设下拉（点选即填，可改）；
- * - 布局：卡片分区 + 按钮恒横排 + 内容可滚动（A-911/A-912 保留）。
- * 数据经主进程（core-ts SchedulerService / SubAgentManager），4s 轻轮询刷新。
- */
+
+
+
+
+
+
+
+
 import React from "react";
-/** A-980-R31：子代理头像抽成公共组件（三处面板共用"图标=身份"的口径） */
+
 import SubagentAvatar from "../components/SubagentAvatar.js";
-/** A-1098：模型池的勾选判据抽成纯模块（可单测 / 可变异；判据不许住在 .tsx 里）*/
+
 import { INHERIT_MODEL, toggleModelInPool } from "./modelPool.js";
-/** A-1100：IPC 调用的唯一安全口（裸 await 的 reject 会变 Uncaught 红字 + 后续语句不执行）*/
+
 import { asReply, tryInvoke } from "./ipcSafe.js";
 
 type ResJob = { id: string; name: string; cron: string; prompt: string; agentId?: string; nextRun?: number; lastRun?: number; lastResult?: string; paused?: boolean; running?: boolean };
@@ -19,29 +19,29 @@ type SubRun = {
   id: string;
   name: string;
   status: string;
-  /** A-980-R31：派发时的任务指令（详情可查"这次让它干什么"） */
+  
   task?: string;
-  /** A-980-R31：本次生效的墙钟预算（毫秒） */
+  
   timeoutMs?: number;
   result?: string;
   error?: string;
   startedAt?: number;
   finishedAt?: number;
-  /** A-980-R30：路由到的模型（可核验用户设的"执行档"是否真的生效） */
+  
   model?: string;
-  /** A-980-R30：结构化自评（子代理按 outputSchema 契约输出）；面板据此做轻量验收 */
+  
   structured?: { status: string; summary: string; artifacts: string[]; confidence: number };
 };
 type AgentBrief = { id: string; name: string; role?: string };
 
 const fmtTime = (ts?: number): string => (ts ? new Date(ts).toLocaleString() : "—");
 
-/**
- * A-980-R30：子代理状态 → 徽标样式。
- *
- * 此前只有 running/done/fail 三态分支，`timeout` 与 `cancelled` 会掉进 else 显示成**「排队」**
- * ——超时中断的子代理看起来像还在排队，用户据此判断"没跑"，直接误导。
- */
+
+
+
+
+
+
 const SUBS_STATUS_UI: Record<string, { text: string; bg: string; fg: string }> = {
   pending: { text: "排队", bg: "var(--bg-hover)", fg: "var(--text-muted)" },
   running: { text: "● 执行中", bg: "rgba(34,197,94,.15)", fg: "#22c55e" },
@@ -51,13 +51,13 @@ const SUBS_STATUS_UI: Record<string, { text: string; bg: string; fg: string }> =
   cancelled: { text: "⃠ 已取消", bg: "var(--bg-hover)", fg: "var(--text-muted)" },
 };
 
-/**
- * A-980-R31：子代理头像已抽成 `components/SubagentAvatar.tsx`
- * （图标库 gui/icon/icon_1cdszr8as42，按名字首字符选图标；监测栏下拉/详情弹窗共用同一实现，
- * 于是"同一个人在哪个面板里都长一样"）。此处不再保留"哈希出一个字母"的旧实现。
- */
 
-/** 子代理预设模板（点选填充表单，仍可修改） */
+
+
+
+
+
+
 const SUBAGENT_PRESETS = [
   { id: "research", label: "深度研究", desc: "多源检索 + 归纳报告", task: "对主题进行多源检索与交叉验证，输出结构化研究报告（含来源、要点、结论）", systemPrompt: "你是资深研究员：先查证再下结论，明确区分事实与推断，引用真实来源。", tag: "带检索" },
   { id: "code-review", label: "代码审查", desc: "只读审查近期改动", task: "审查本次改动：按严重度（严重/警告/建议）分类输出问题，并给出修复示例", systemPrompt: "你是资深代码审查员，只标记正确性与需求符合度缺陷，避免过度工程化建议。", tag: "只读" },
@@ -65,7 +65,7 @@ const SUBAGENT_PRESETS = [
   { id: "data-parse", label: "数据处理", desc: "解析/整理数据文件", task: "解析指定数据文件并整理成结构化摘要", systemPrompt: "你是数据分析师：先看清数据，再给结论，不编造数值。", tag: "文件" },
 ] as const;
 
-/** cron 常用预设（点选即填，可继续手改） */
+
 const CRON_PRESETS = [
   { label: "每天 09:00", cron: "0 9 * * *" },
   { label: "每小时整点", cron: "0 * * * *" },
@@ -79,11 +79,11 @@ const input: React.CSSProperties = { background: "var(--bg)", border: "1px solid
 const btn: React.CSSProperties = { background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", color: "var(--accent-hover)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" };
 const miniBtn: React.CSSProperties = { ...btn, padding: "3px 9px", fontSize: 12 };
 
-/**
- * Agent 选择下拉（**模块级**组件——A-915：此前定义在面板函数体内，每次渲染生成新组件类型，
- * 导致 select 被卸载重挂载，打开的下拉总被收起；提升到模块级后稳定）。
- * 只显示 Agent 名称（去掉 id 前缀，观感更干净）。
- */
+
+
+
+
+
 function AgentSelect({ agents, value, onChange, span = 3, onEnsure }: {
   agents: AgentBrief[];
   value: string;
@@ -117,51 +117,51 @@ export default function ResidentPanel(): React.JSX.Element {
   const [agents, setAgents] = React.useState<AgentBrief[]>([]);
   const [notice, setNotice] = React.useState("");
 
-  // ── 定时任务表单 ──
+  
   const [jName, setJName] = React.useState("");
   const [jCron, setJCron] = React.useState<string>(CRON_PRESETS[0].cron);
   const [jPrompt, setJPrompt] = React.useState("");
   const [jAgentId, setJAgentId] = React.useState("");
 
-  // ── 子代理表单（预设点选填充，仍可改）──
+  
   const [saName, setSaName] = React.useState("");
   const [saTask, setSaTask] = React.useState("");
   const [saSystem, setSaSystem] = React.useState("");
   const [saAgentId, setSaAgentId] = React.useState("");
   const [presetId, setPresetId] = React.useState<string | null>(null);
 
-  // ── A-942 → A-1097：子代理**执行模型池**（多选；第 1 档 = 兜底档，其余供主 Agent 按难度点名）──
-  /** 已保存的池（唯一写入者 = 主进程返回值：首载 / 保存回执 / 4s 轮询）。**弹层绝不直接读写它**。 */
+  
+  
   const [defaultModels, setDefaultModels] = React.useState<string[]>([]);
-  /**
-   * A-1098：弹层里的**草稿池**——勾选读写的是它，不是已保存池。
-   *
-   * ⚠️ 必须与已保存池分开，否则症状是「勾选几秒后自动取消勾选」：
-   *   4s 轮询 `refresh()` 会用服务端快照 `setDefaultModels(...)` 覆盖 `defaultModels`，
-   *   而弹层 checkbox 此前直接绑在 `defaultModels` 上 ⇒ 用户每勾一项，最多 4 秒后就被
-   *   服务端快照**回滚**（用户眼里就是"自己把勾去掉了"）。
-   *   草稿态隔离后：轮询只刷新"已保存"的徽标，弹层里未保存的勾选不再受影响。
-   *   生命周期：打开弹层 = `setDraftModels(defaultModels)` 拷一份；保存 = 提交草稿；
-   *   取消 / 点遮罩关闭 = 丢弃草稿（下次打开重新从已保存值拷，故无需显式清理）。
-   */
+  
+
+
+
+
+
+
+
+
+
+
   const [draftModels, setDraftModels] = React.useState<string[]>([]);
   const [modelModal, setModelModal] = React.useState(false);
-  /** A-1100：保存失败的**弹层内**就地提示（回显在弹层里，不靠面板底部的 `notice` —— 那个被弹层遮着）。 */
+  
   const [saveError, setSaveError] = React.useState("");
   const [modelOptions, setModelOptions] = React.useState<Array<{ value: string; label: string }>>([
     { value: "inherit", label: "继承（沿用目标 Agent 模型）" },
   ]);
-  /** 池内可勾选的档位：`inherit` 不是档位（它是"不覆盖"的占位）⇒ 不进多选列表。
-   *  ⚠️ 判据常量与纯逻辑都在 `./modelPool.ts`（唯一出处），此处不再写字面量 "inherit"。 */
+  
+
   const modelPoolOptions = React.useMemo(() => modelOptions.filter((o) => o.value !== INHERIT_MODEL), [modelOptions]);
-  // ── A-918+：用户选定的子代理（自建 agent id 列表；派发优先级 = 用户选定 > 内置专家）──
+  
   const [selectedAgentIds, setSelectedAgentIds] = React.useState<string[]>([]);
-  /** A-1091：并行度 = 「设置 → 通用 → 请求频率 · 并发上限」的实时值。
-   *  此前这里写死「最多 3 个并发」，而那个设置**根本没被读取**（死开关）——
-   *  文案与行为不一致 = 说反话（A-1062 那一族：文案描述动作结果，就必须与判据同源）。 */
+  
+
+
   const [maxParallel, setMaxParallel] = React.useState<number | null>(null);
 
-  // 加载可选的子代理执行模型：全部供应商的启用模型 + 本地模型
+  
   React.useEffect(() => {
     const w = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!w?.providers?.list) { return; }
@@ -183,15 +183,15 @@ export default function ResidentPanel(): React.JSX.Element {
         }
         setModelOptions(opts);
       }).catch(() => setModelOptions(opts));
-    }).catch(() => { /* 未配置供应商时仅保留继承 */ });
+    }).catch(() => {  });
   }, []);
 
-  // A-1091：回显当前的子代理并行度（= 请求频率设置里的「并发上限」）——文案必须与实际生效值同源，
-  // 不许再写死一个数字（写死就是"说反话"：用户调了设置、文案却纹丝不动）。
+  
+  
   React.useEffect(() => {
     api.requests?.get?.().then((r: { concurrency?: number }) => {
       if (typeof r?.concurrency === "number" && r.concurrency >= 1) { setMaxParallel(r.concurrency); }
-    }).catch(() => { /* 未就绪 → 保持 null（文案退化为不带数字的说法） */ });
+    }).catch(() => {  });
   }, [api]);
 
   const refresh = React.useCallback(() => {
@@ -199,20 +199,20 @@ export default function ResidentPanel(): React.JSX.Element {
       if (!s) { return; }
       setJobs(Array.isArray(s.scheduler) ? s.scheduler : []);
       setRuns(Array.isArray(s.subagents) ? s.subagents : []);
-      // A-1097：池子（多选）。只认数组 —— 旧字段 defaultModel 不再作为控制源，
-      // 但主进程仍返回它（= 池首）供旧入口回显，这里不读，避免"两套真相源"。
+      
+      
       if (Array.isArray(s.defaultModels)) { setDefaultModels(s.defaultModels); }
-    }).catch(() => { /* 服务未就绪 */ });
+    }).catch(() => {  });
     api.agents?.list?.().then((list: AgentBrief[]) => {
       if (Array.isArray(list)) {
         setAgents(list);
         if (list.length === 0) { setJAgentId(""); setSaAgentId(""); }
       }
-    }).catch(() => { /* 忽略 */ });
-    // A-918+：回显用户选定子代理
+    }).catch(() => {  });
+    
     api.resident?.subagentGetSelection?.().then((r: any) => {
       if (r?.ok && Array.isArray(r.selectedAgentIds)) { setSelectedAgentIds(r.selectedAgentIds); }
-    }).catch(() => { /* 忽略 */ });
+    }).catch(() => {  });
   }, [api]);
 
   React.useEffect(() => {
@@ -222,9 +222,9 @@ export default function ResidentPanel(): React.JSX.Element {
   }, [refresh]);
 
   const act = async (fn: () => Promise<unknown>, msg: string): Promise<void> => {
-    /* A-1100：走安全口 —— `slime:resident:*` 的写通道在冷启动窗口内可能尚未注册，
-       裸 await 会把 reject 抛成 Uncaught（= 用户看到的「调试面板有 error」），
-       且后面的 `setNotice` / `refresh` 永不执行（按钮"点了没反应"）。 */
+    
+
+
     const r: any = asReply(await tryInvoke(fn));
     if (r?.ok ?? r?.id) { setNotice(msg); refresh(); } else { setNotice(`操作失败：${r?.error ?? "未知"}`); }
   };
@@ -239,13 +239,13 @@ export default function ResidentPanel(): React.JSX.Element {
     setNotice(`已载入「${p.label}」预设——以下字段均可自行修改后派发`);
   };
 
-  /** 自动创建默认 Agent 兜底（用户无需预先建 Agent） */
+  
   const ensureAgent = async (): Promise<void> => {
-    /* A-1100：⚠️ 此前写作 `api.agents?.create?.(…).catch(() => null)` ——
-       可选链**短路成 `undefined`** 时，紧跟的 `.catch` 是在 `undefined` 上取属性 ⇒ 同步 TypeError，
-       被 async 包成 reject；而两处调用点都是 `void ensureAgent()`（丢弃 promise、无 catch）
-       ⇒ 一条 `Uncaught (in promise)` 红字 —— 与「调试面板有 error」同源（另一处产地）。
-       现在同样走安全口：短路 / 未注册 / 异常都**如实交回**，由这里决定怎么出声。 */
+    
+
+
+
+
     const r = await tryInvoke(() => api.agents?.create?.("助手", "通用助理"));
     const a: any = r.ok ? r.value : null;
     if (a?.id) {
@@ -265,19 +265,19 @@ export default function ResidentPanel(): React.JSX.Element {
   };
   const spawnSub = async (): Promise<void> => {
     if (!saName.trim() || !saTask.trim()) { setNotice("子代理名称 / 任务指令 必填"); return; }
-    // A-980-R30：带上 outputSchema —— 要求子代理按 {status,summary,artifacts,confidence} 自评，
-    // 面板才能显示"部分完成/置信度/产物数"这类可核验信息（与内置专家定义口径一致）。
+    
+    
     await act(() => api.resident?.subagentSpawn({ name: saName.trim(), task: saTask.trim(), systemPrompt: saSystem.trim() || undefined, agentId: saAgentId || undefined, outputSchema: true }), "子代理已派发（后台执行）");
     setSaName(""); setSaTask(""); setSaSystem("");
   };
 
-  /**
-   * A-980-R31：清空子代理历史记录。
-   * 记录现在会落盘（data/subagent-runs.json），所以需要一个显式的"清空"入口，
-   * 否则历史只增不减。在途（运行中/排队中）的任务**不受影响**——清的是跑完的痕迹。
-   */
+  
+
+
+
+
   const clearRuns = async (): Promise<void> => {
-    /* A-1100：同样走安全口（该通道在主进程属「后台任务 IPC」组，冷启动窗口内可能未注册）*/
+    
     const r: any = asReply(await tryInvoke(() => api.resident?.subagentClear?.()));
     if (r?.ok) {
       setNotice(`已清空 ${r.cleared ?? 0} 条历史记录（在途任务保留）`);
@@ -287,7 +287,7 @@ export default function ResidentPanel(): React.JSX.Element {
     }
   };
 
-  // 首次加载后默认选中第一个 Agent
+  
   React.useEffect(() => {
     if (agents.length > 0 && !jAgentId && !saAgentId) {
       setJAgentId(agents[0].id);
@@ -296,11 +296,11 @@ export default function ResidentPanel(): React.JSX.Element {
   }, [agents, jAgentId, saAgentId]);
 
   return (
-    /* A-1119：左/右地板归 `SettingsDialog` 内容区，此处左右 padding 归 0（此前左右各 4px，是"贴线"那一族）。 */
+    
     <div className="settings-pane" style={{ display: "flex", flexDirection: "column", gap: 16, padding: "6px 0 16px", maxWidth: 860 }}>
       {notice && <div style={{ fontSize: 12.5, color: "var(--accent-hover)", padding: "8px 12px", background: "var(--bg-input)", borderRadius: 8 }}>{notice}</div>}
 
-      {/* ── 定时任务 ── */}
+      {}
       <section style={card}>
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>
           定时任务
@@ -317,7 +317,7 @@ export default function ResidentPanel(): React.JSX.Element {
           </div>
           <input style={{ ...input, gridColumn: "span 3", fontFamily: "Consolas, monospace" }} placeholder="或直接填 cron（如 0 9 * * *）" value={jCron} onChange={(e) => setJCron(e.target.value)} />
           <AgentSelect agents={agents} value={jAgentId} onChange={setJAgentId} span={2} onEnsure={() => void ensureAgent()} />
-          {/* A-914：按钮收进首行行尾，避免 12 列已满被 grid 落到次行形成孤立竖排 */}
+          {}
           <button style={{ ...btn, gridColumn: "span 1", whiteSpace: "nowrap" }} onClick={() => void addJob()}>添加</button>
           <input style={{ ...input, gridColumn: "span 12" }} placeholder="任务文本：到点交给 Agent 做什么（例：生成今日工作简报并汇总待办）" value={jPrompt} onChange={(e) => setJPrompt(e.target.value)} />
         </div>
@@ -365,18 +365,18 @@ export default function ResidentPanel(): React.JSX.Element {
         )}
       </section>
 
-      {/* ── 子代理 ── */}
+      {}
       <section style={card}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
           <div style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>
             子代理
             <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（{maxParallel !== null ? `最多 ${maxParallel} 个并发` : "并行度见「设置 → 通用 → 请求频率」"}，受上游 RPM 限速保护）· 这里手动派发的产出落盘 data/generated/subagent-*.md；<b>对话里由 Agent 委派的，产出会作为工具结果交回主对话并由主 Agent 验收</b></span>
           </div>
-          {/* A-980-R31：运行记录现在持久化（data/subagent-runs.json），给一个显式清空入口。
-              ⚠️ A-1127（用户 2026-09-26）：「设置中的历史记录不受限，但是设置一个用户可主动选择
-              删除历史记录的选项按钮」⇒ 这里是**设置侧**的完整历史（上限 100 条，与本页的
-              240px 滚动区一起看），**不受**悬浮面板那条「只显示最近 5 条」的限制；
-              删除只能由用户在这里点（不可恢复，title 里写明）。 */}
+          {
+
+
+
+}
           {runs.length > 0 && (
             <button style={{ ...miniBtn, flexShrink: 0, color: "var(--text-dim)" }} onClick={() => void clearRuns()}
               title={`清空子代理历史记录（共 ${runs.length} 条：落盘 data/subagent-runs.json + 已结束的内存记录，不可恢复）；运行中/排队中的任务不受影响。悬浮面板只看最近 5 条，完整历史只在这里`}>
@@ -385,7 +385,7 @@ export default function ResidentPanel(): React.JSX.Element {
           )}
         </div>
 
-        {/* A-942 → A-1097：子代理执行模型池（贵模型统筹、多档可点名执行） */}
+        {}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10,
           padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
           <span style={{ fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>子代理执行模型</span>
@@ -394,8 +394,8 @@ export default function ResidentPanel(): React.JSX.Element {
               ? "未指定 —— 子代理跟随目标 Agent 的模型"
               : `兜底档 ${defaultModels[0]}${defaultModels.length > 1 ? `　（另 ${defaultModels.length - 1} 档可点名）` : ""}`}
           </span>
-          {/* A-1098：打开弹层时把**已保存池**拷成草稿——之后弹层内的一切勾选都只动草稿，
-              4s 轮询刷新已保存池时不会再把用户的勾选冲掉。 */}
+          {
+}
           <button style={{ ...miniBtn, flexShrink: 0 }}
             onClick={() => { setDraftModels(defaultModels); setModelModal(true); setSaveError(""); }}
             title="多选子代理可用的执行模型档位：第 1 个是默认兜底档，其余档位主 Agent 可按子任务难度点名">
@@ -409,13 +409,13 @@ export default function ResidentPanel(): React.JSX.Element {
           建议用便宜的/免费模型执行机械子任务，贵的模型专司统筹规划与评审。
         </div>
 
-        {/* A-1097：多选窗口（弹层）。第 1 个勾选项 = 兜底档，勾选顺序即优先级。 */}
+        {}
         {modelModal && (
           <div onClick={() => setModelModal(false)}
             style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 2000,
               display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {/* A-1098：浮层必须用实底 `modal-card`（beta 主题下 `.card` 是 0.42/0.5 半透明渐变，
-                背后正文会透出来）。⚠️ 不要写成 `card modal-card`，否则又会被 `.card` 规则盖回半透明。 */}
+            {
+}
             <div className="modal-card" onClick={(e) => e.stopPropagation()}
               style={{ width: 560, maxWidth: "92vw", maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>子代理执行模型（可多选）</div>
@@ -458,21 +458,21 @@ export default function ResidentPanel(): React.JSX.Element {
                 <button className="btn" style={{ fontSize: 12.5 }} onClick={() => setModelModal(false)}>取消</button>
                 <button className="btn primary" style={{ fontSize: 12.5 }}
                   onClick={() => void (async () => {
-                    // A-1098：提交的是**草稿**（弹层内勾选的那份），不是轮询中的已保存池。
-                    /* A-1100：⚠️ 提交那次 IPC **必须**走安全口（`tryInvoke`），此前是裸 `await`。
-                     * `slime:resident:subagent:setModels` 在冷启动窗口内可能**尚未注册**，
-                     * 此时 `ipcRenderer.invoke` 会 **reject**（`No handler registered for …`），后果是：
-                     *   ① 抛出后下面的 `setModelModal(false)` 永不执行
-                     *      ⇒ 弹层卡住不关、按钮「点了没反应」（用户实测「界面保存按钮无法实现功能」）；
-                     *   ② 控制台多一条 `Uncaught (in promise)` 红字（用户看到的「调试面板有 error」）。
-                     * 现在失败**并进同一个失败分支**：弹层内就地如实显示、弹层保持打开供重试
-                     * （不假装成功、也不静默吞掉）。 */
+                    
+                    
+
+
+
+
+
+
+
                     setSaveError("");
                     const r: any = asReply(await tryInvoke(() => api.resident?.subagentSetModels?.(draftModels)));
                     if (r?.ok && Array.isArray(r.defaultModels)) {
-                      setDefaultModels(r.defaultModels); // 回写规范化后的池（去重/剔 inherit/限长）
-                      /* ⚠️ 提示必须用**规范化后**的值：`defaultModels` 此刻还是旧 state
-                         （setState 是异步的）——用它会出现"徽标显示有 3 档、提示却说已清空"的自相矛盾。 */
+                      setDefaultModels(r.defaultModels); 
+                      
+
                       setNotice(r.defaultModels.length === 0 ? "子代理执行模型已清空（跟随目标 Agent）" : "子代理执行模型已保存");
                       setModelModal(false);
                     } else {
@@ -484,7 +484,7 @@ export default function ResidentPanel(): React.JSX.Element {
           </div>
         )}
 
-        {/* A-918+：用户选定子代理——勾选自建 agent 作为子代理；任务自动派发时优先于内置专家，不足才自动创建补充 */}
+        {}
         <div style={{ marginTop: 10, padding: "10px 12px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 2 }}>可派发的 Agent（快捷开关）</div>
           <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8, lineHeight: 1.6 }}>
@@ -512,7 +512,7 @@ export default function ResidentPanel(): React.JSX.Element {
                           ? selectedAgentIds.filter((id) => id !== a.id)
                           : [...selectedAgentIds, a.id];
                         setSelectedAgentIds(next);
-                        /* A-1100：走安全口 —— 该通道同属「后台任务 IPC」组，冷启动窗口内可能未注册 */
+                        
                         const r: any = asReply(await tryInvoke(() => api.resident?.subagentSetSelection?.(next)));
                         setNotice(r?.ok ? "子代理选定已保存" : `保存失败：${r?.error ?? "未知"}`);
                       })()}
@@ -526,7 +526,7 @@ export default function ResidentPanel(): React.JSX.Element {
           )}
         </div>
 
-        {/* 预设模板：点选即填，仍可自定义调整 */}
+        {}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8, marginTop: 10 }}>
           {SUBAGENT_PRESETS.map((p) => (
             <button key={p.id} onClick={() => pickPreset(p.id)}
@@ -548,7 +548,7 @@ export default function ResidentPanel(): React.JSX.Element {
           <input style={{ ...input, gridColumn: "span 3" }} placeholder="子代理名称" value={saName} onChange={(e) => setSaName(e.target.value)} />
           <input style={{ ...input, gridColumn: "span 6" }} placeholder="任务指令（做什么）" value={saTask} onChange={(e) => setSaTask(e.target.value)} />
           <AgentSelect agents={agents} value={saAgentId} onChange={setSaAgentId} span={2} onEnsure={() => void ensureAgent()} />
-          {/* A-914：派发按钮收进首行行尾，避免落到次行孤立竖排 */}
+          {}
           <button style={{ ...btn, gridColumn: "span 1", whiteSpace: "nowrap" }} onClick={() => void spawnSub()}>派发</button>
           <input style={{ ...input, gridColumn: "span 12" }} placeholder="专用系统提示（可选，专家角色/约束；留空用默认身份）" value={saSystem} onChange={(e) => setSaSystem(e.target.value)} />
         </div>
@@ -562,18 +562,18 @@ export default function ResidentPanel(): React.JSX.Element {
               const isRunning = r.status === "running";
               const isOk = r.status === "done";
               const elapsed = r.startedAt && r.finishedAt ? `${((r.finishedAt - r.startedAt) / 1000).toFixed(1)}s` : null;
-              // 轻量验收信息：耗时 / 路由模型 / 自评置信度 / 产物数（让"设置里的执行档到底生效没"可核验）
+              
               const meta = [
                 elapsed ? `耗时 ${elapsed}` : null,
-                // A-980-R31：把生效的执行预算显式写出来——用户看到"超时中断"时能立刻判断
-                // 是"任务本就超过预算"还是"中断根本没生效"，不必再去猜
+                
+                
                 r.timeoutMs ? `限时 ${(r.timeoutMs / 1000).toFixed(0)}s` : null,
                 r.model ? `模型 ${r.model}` : null,
                 r.structured ? `置信度 ${r.structured.confidence.toFixed(2)}` : null,
                 r.structured?.artifacts?.length ? `产物 ${r.structured.artifacts.length} 项` : null,
               ].filter(Boolean).join(" · ");
               const partial = isOk && r.structured?.status === "partial";
-              // A-980-R31：中断的 run 现在也会带部分产出，面板必须把它显示出来（否则"记录还在但内容是空的"）
+              
               const interruptedPartial = !isOk && !isRunning && (r.result ?? "").trim();
               return (
                 <div key={r.id} style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)", background: isRunning ? "rgba(34,197,94,0.04)" : "transparent" }}>

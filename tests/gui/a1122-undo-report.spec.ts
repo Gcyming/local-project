@@ -1,16 +1,16 @@
-/**
- * tests/gui/a1122-undo-report.spec.ts — ③ 渲染层守卫：回滚文案 + 调用顺序（A-1122）。
- *
- * 这一半守的是**用户看得见的那一层**：
- *  · 确认框把「将还原 N 个文件」算对（少算 = 用户在错误预期下点确定）；
- *  · 还原失败/不可还原/别的会话被波及，都要出现在红字横幅里（吞掉 = 用户以为回滚干净了）；
- *  · `rollbackTo` 的两条**顺序硬约束**：
- *      ① 先 `fileUndo.plan/apply`、后 `chat.truncateFrom`
- *         —— 切分线靠 `history.jsonl` 里那条用户消息定位，先截断 ⇒ 文件还原**静默**失效；
- *      ② 横幅在 `commit()` **之后**设
- *         —— `commit` 走 `resetPartial()`，复位系列会 `setStreamErrorBanner(null)`
- *            （A-1090 的静默失效：同一批 setState 后者胜，先设后清 = 永远看不见）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ function codeOf(rel: string): string {
 const CHAT = codeOf("gui/src/renderer/pages/ChatPanel.tsx");
 const REPORT_SRC = codeOf("gui/src/renderer/pages/fileUndoReport.ts");
 
-/** 取函数体：先把窗口收窄到签名处，再按缩进找结尾（别用贪婪跨函数匹配） */
+
 function fnBody(src: string, signature: string, endMarker: string): string {
   const at = src.indexOf(signature);
   if (at < 0) { return ""; }
@@ -45,7 +45,7 @@ const result = (over: Partial<FileUndoResult> = {}): FileUndoResult => ({
   ok: true, restored: 0, deleted: 0, dirs: 0, failed: [], blocked: [], foreign: 0, ...over,
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+
 describe("A-1122 确认框：数字必须是真的（少算/多算都是误导）", () => {
   it("拿不到切分线（`ok:false`）→ **不弹**确认框（由调用方如实报错）", () => {
     expect(fileUndoConfirmText(plan({ ok: false, error: "找不到" }))).toBeNull();
@@ -88,11 +88,11 @@ describe("A-1122 确认框：数字必须是真的（少算/多算都是误导�
   it("别的会话的改动要**报数**（`foreign`），不参与还原", () => {
     const c = fileUndoConfirmText(plan({ count: 1, foreign: 4 }))!;
     expect(c.detail).toContain("4 处改动属于其它会话");
-    expect(c.message).not.toContain("其它会话"); // 标题保持短，细节在 detail
+    expect(c.message).not.toContain("其它会话"); 
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+
 describe("A-1122 回滚后横幅：只报问题，且必须报全", () => {
   it("干净成功 → `null`（回滚本身看得见，红字横幅只在有话说时出现）", () => {
     expect(fileUndoReport(result({ restored: 3, deleted: 1, dirs: 1 }))).toBeNull();
@@ -143,12 +143,12 @@ describe("A-1122 回滚后横幅：只报问题，且必须报全", () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+
 describe("A-1122 接线：`rollbackTo` 的两条顺序硬约束", () => {
   const rollback = fnBody(CHAT, "const rollbackTo = React.useCallback((id: number): void => {", "}, [messages, resetPartial, agentId, sessionId, loading, setStreamErrorBanner]);");
 
   it("窗口取到了 `rollbackTo` 的函数体（没取到会让下面几条**空转通过**）", () => {
-    // ⚠️ 这条是"守卫自己别空转"的保险：清屏/改名会让 indexOf 落空，之后所有断言都对着 "" 跑
+    
     expect(rollback.length).toBeGreaterThan(600);
     expect(rollback).toContain("fileUndo");
   });
@@ -157,14 +157,14 @@ describe("A-1122 接线：`rollbackTo` 的两条顺序硬约束", () => {
     const commitBody = fnBody(rollback, "const commit = (): void => {", "};");
     expect(commitBody).toContain("truncateFrom");
     expect(commitBody).toContain("setMessages(retained)");
-    // 真正的**调用**只有一处，且必在 commit 里（别的地方再冒一个 = 出现「先截断」的旁路）
+    
     expect(rollback.split("api.chat.truncateFrom(").length - 1).toBe(1);
     expect(commitBody).toContain("api.chat.truncateFrom(");
   });
 
   it("⚠️ 终局的 `commit()` 在 `await fileUndo.apply(...)` **之后**（反了 = 文件还原静默失效）", () => {
-    // 注意：这里比的是**执行顺序**，不是源码先后 —— `commit` 是闭包定义在上、调用在下，
-    // 用 indexOf("truncateFrom") 比大小会被类型声明/闭包定义骗过去（第一版就踩了）。
+    
+    
     const iife = rollback.slice(rollback.indexOf("void (async () => {"));
     const atApply = iife.indexOf("await fileUndo.apply(");
     const atCommit = iife.indexOf("commit()");
@@ -195,7 +195,7 @@ describe("A-1122 接线：`rollbackTo` 的两条顺序硬约束", () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+
 describe("A-1122 唯一出处：文案不许在组件里手搓", () => {
   it("`ChatPanel` 只 import 这两个纯函数，没有自己拼「将还原 N 个文件」", () => {
     expect(CHAT).toContain("fileUndoConfirmText");

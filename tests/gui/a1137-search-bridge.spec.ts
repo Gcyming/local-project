@@ -1,26 +1,26 @@
-/**
- * A-1137：搜索页接入右栏浏览器 + 对话侧实时监测。
- *
- * ## 这组守卫为什么必须存在（每一条都对应一个「静默失效」）
- * 1. **右栏浏览器页是 `<webview>`（独立顶层 frame）** ⇒ 页面里 `window.parent === window`，
- *    搜索页原设计的 `postMessage` 通道**天然失效**；接入只能靠 guest preload + IPC。
- *    ⇒ 一旦有人把 guest preload 从 webview 上摘掉，页面只是「能看但搜不动」，**没有任何报错**。
- * 2. **`gui/src/preload/searchHost.cjs` 不受任何静态检查**（`gui/tsconfig.json` 的 `include` 只含
- *    `src/` 下的 `.ts`；它也不进 electron-vite 构建）⇒ 语法错不会在构建期炸，
- *    只会在运行期「preload 加载即抛 ⇒ 页面永远未接入」。**真踩过**：块注释里写了路径通配，
- *    其中的 星号紧跟斜杠 提前闭合了块注释 ⇒ 整个文件 `SyntaxError`。所以这里**真在 vm 里跑它**。
- * 3. **两类 sender 必须两套白名单**：`search_host_info` / `search_view_get` 的 sender 是**主窗口**，
- *    而 `search_query` / `search_event` 的 sender 是 webview 的 **guest**。早先错用 guest 那条判据，
- *    后果是**开发模式下渲染层问不到搜索页**（dev 时渲染层 origin 是另一个端口 ⇒ 被拒），
- *    表现为「搜索页根本打不开」且 `hostInfo` 静默返回 `{ok:false}`。
- * 4. **广播是一次性的** ⇒ 渲染层晚挂载就永远空白；所以必须有 `search_view_get` 这条 pull 补课。
- *
- * ## 判据风格
- * 全部是**行为级**：真的把 IPC 注册进一个假 `ipcMain`、真的用假事件调 handler、真的在 `vm` 里
- * 执行 preload 源。不做「文件里有没有这段文本」的断言（那对「改了条件」是瞎的，本仓铁律 3）。
- * 只有两处例外（guest preload 的「channel 不许硬编码 / 只准 require electron」）——
- * 那要守的东西本身就是「源码里不该出现某个字面量」，且范围已钉死在注入后的全文上。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import vm from "node:vm";
 
-/* ══════════ 假 electron：把 IPC 注册面抓在手里（模块级假件必须 hoist） ══════════ */
+
 
 const fake = vi.hoisted(() => {
   const handlers = new Map<string, (...a: unknown[]) => unknown>();
@@ -93,10 +93,10 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  try { rmSync(TMP_ROOT, { recursive: true, force: true }); } catch { /* 临时目录清不掉不该让门禁红 */ }
+  try { rmSync(TMP_ROOT, { recursive: true, force: true }); } catch {  }
 });
 
-/* ══════════════════════════ ① 页面事件 → 右栏视图（唯一翻译器） ══════════════════════════ */
+
 
 describe("A-1137 ① 页面事件翻译（searchView.viewFromPageEvent）", () => {
   it("results：拿到模式 / 检索词 / 条数 / 标题", () => {
@@ -139,8 +139,8 @@ describe("A-1137 ① 页面事件翻译（searchView.viewFromPageEvent）", () =
     for (const m of ["local", "ONLINE", "WEB", "Web", "", 7, null, undefined]) {
       expect(viewFromPageEvent({ type: "results", mode: m }, 1)!.mode, `mode=${String(m)} 不是联网`).toBe("local");
     }
-    /* 切模式事件同理：`hostNotify('mode', {mode: state.mode})` 里 `state.mode` 就是 `'web'`
-       ⇒ 认不出来时，用户切到「全网」会被对话侧显示成「本地索引」。 */
+    
+
     expect(viewFromPageEvent({ type: "mode", mode: "web" }, 1)!.mode).toBe("online");
   });
 
@@ -206,26 +206,26 @@ describe("A-1137 ① 页面事件翻译（searchView.viewFromPageEvent）", () =
   });
 
   it("标题最多取前 8 条里的非空项；空标题被丢掉（空行会让状态条看着像卡住）", () => {
-    /* 契约：先截前 8 条、再丢掉空标题 ⇒ 第 1 条是空标题时结果恰好 7 条。
-       这个"先截后滤"的顺序是有意的（事件里最多只认 8 条，避免一条事件撑爆状态条）。 */
+    
+
     const items = Array.from({ length: 20 }, (_, i) => ({ title: i === 0 ? "" : `t${i}` }));
     const v = viewFromPageEvent({ type: "results", items }, 1)!;
     expect(v.titles.length).toBe(7);
     expect(v.titles[0]).toBe("t1");
     expect(v.titles).not.toContain("");
-    /* 全部非空时就是 8 条（不是 20 条） */
+    
     const all = viewFromPageEvent({ type: "results", items: items.map((x) => ({ title: x.title || "x" })) }, 2)!;
     expect(all.titles.length).toBe(8);
   });
 });
 
-/* ══════════════════════════ ② guest preload：真在 vm 里跑 ══════════════════════════ */
 
-/**
- * 在 `vm` 沙箱里执行 guest preload 源（**注入 channel 之后**的那个形态）。
- * 这是本 spec 最有价值的一条判据：它同时对「块注释提前闭合」这类**语法错**和
- * 「白名单失效（外网站点也拿到对象）」这两件事变红。
- */
+
+
+
+
+
+
 function runPreload(opts: { injectChannels: boolean; protocol: string; hostname?: string }) {
   const raw = readFileSync(PRELOAD_SRC, "utf8");
   const placeholder = "/*__SLIME_CHANNELS__*/ null";
@@ -251,8 +251,8 @@ function runPreload(opts: { injectChannels: boolean; protocol: string; hostname?
       };
     },
   };
-  /* ⚠️ 这里**不 mock 掉语法错**：源里有语法错时 `runInNewContext` 立刻抛 ⇒ 守卫变红。
-     这正是当初那个「preload 加载即抛、页面永远未接入、构建期零报错」的真 bug 的判据。 */
+  
+
   vm.runInNewContext(src, vm.createContext(sandbox) as object);
   return { exposed, sent, invoked, src };
 }
@@ -314,22 +314,22 @@ describe("A-1137 ② guest preload（searchHost.cjs）", () => {
 
   it("源里**不许硬编码 channel 名**、**只准 require electron**（channel 唯一产地在 shared/ipc.ts）", () => {
     const { src } = runPreload({ injectChannels: true, protocol: "file:", hostname: "" });
-    /* 注入后的形态里 channel 全来自注入对象 ⇒ 正文不该出现任何 channel 字面量。
-       ⚠️ 要先把**注入进去的那段 JSON** 摘掉再查，否则它自己就是「字面量」。 */
+    
+
     const withoutInjected = src.split(JSON.stringify(IPC_CHANNELS)).join("<ch>");
     expect(withoutInjected).not.toMatch(/slime:search:/);
-    /* sandbox preload 根本不能 require node_modules ⇒ 引了就是运行期炸。
-       ⚠️ 先剥注释再查：本文件的**块注释里就举过 `require('electron')` 这个例子**
-       （不给它剥掉的话，扫到的会是注释而不是代码 —— 铁律 10「形状断言先剥注释」）。 */
+    
+
+
     const code = withoutInjected.replace(/\/\*[\s\S]*?\*\//g, " ");
     const requires = [...code.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]);
     expect(requires).toEqual(["electron"]);
   });
 
   it("源里绝不允许块注释被提前闭合（用真编译器判，不靠肉眼）", () => {
-    /* 判据就是「能不能编译」—— 块注释体里一旦出现注释结束符（星号紧跟斜杠），
-       剩下的散字立刻是 SyntaxError。真踩过一次：注释里写路径通配，整个文件加载即抛
-       且构建期零报错。（本行特意用文字描述那个符号组合，不写出来才安全。） */
+    
+
+
     const raw = readFileSync(PRELOAD_SRC, "utf8");
     let err = "";
     try { new vm.Script(raw); } catch (e) { err = e instanceof Error ? e.message : String(e); }
@@ -337,7 +337,7 @@ describe("A-1137 ② guest preload（searchHost.cjs）", () => {
   });
 });
 
-/* ═══════════════════ ③ 交付链 + 两类 sender（真注册、真调 handler） ═══════════════════ */
+
 
 interface Sent { ch: string; payload: unknown }
 
@@ -354,15 +354,15 @@ function mkDeps(over: Partial<SearchBridgeDeps> = {}) {
   return { deps, sent };
 }
 
-/** 主窗口 sender（`isMainSender` 只认 id === 1）。 */
+
 const MAIN = { id: 1 } as unknown as Electron.WebContents;
-/** guest（webview 的 webContents）—— 永远不是主窗口。 */
+
 const GUEST = { id: 2, getURL: () => SEARCH_URL } as unknown as Electron.WebContents;
-/** 不可信的 guest（外网站点）。 */
+
 const EVIL = { id: 3, getURL: () => "https://evil.test/" } as unknown as Electron.WebContents;
 
-/** ⚠️ 必须支持**多参数**：`search_query` 的签名是 `(event, payload)` —— 只传 event 的话
- *  payload 恒为 undefined，于是「入参清洗」那几条会**因为错误的理由而绿**（本仓铁律 3）。 */
+
+
 const call = <T,>(ch: string, ...args: unknown[]): T => (fake.handlers.get(ch) as (...a: unknown[]) => T)(...args);
 const fire = (ch: string, ...args: unknown[]): void => {
   for (const fn of fake.listeners.get(ch) ?? []) { fn(...args); }
@@ -379,7 +379,7 @@ describe("A-1137 ③ 搜索页交付（ensureSearchPage / search_host_info）", 
     expect(r.url).toBe(SEARCH_URL);
     expect(r.preload).toMatch(/^file:\/\/\/.*searchHost\.cjs$/);
     expect(r.fingerprint).toBe(searchPageFingerprint());
-    /* 成功判据是**磁盘上真有产物**，不是「函数返回了 ok」（铁律 28） */
+    
     const file = fileURLToPath(r.preload!);
     expect(existsSync(file), "preload 没真落盘").toBe(true);
     const written = readFileSync(file, "utf8");
@@ -391,7 +391,7 @@ describe("A-1137 ③ 搜索页交付（ensureSearchPage / search_host_info）", 
   it("**主窗口判据不看 URL**：dev 渲染层是 `http://localhost:PORT`，也必须放行（真 bug 的判据）", async () => {
     const { deps } = mkDeps();
     registerSearchBridge(deps);
-    /* 注意 guest 那条判据对 `http://localhost:5173/` 是**拒绝**的 —— 这正是当初那个缺口 */
+    
     expect(isTrustedSearchUrl("http://localhost:5173/")).toBe(false);
     const r = await call<Promise<{ ok: boolean }>>(IPC_CHANNELS.search_host_info, {
       sender: MAIN, senderFrame: { url: "http://localhost:5173/" },
@@ -448,7 +448,7 @@ describe("A-1137 ③ 搜索页交付（ensureSearchPage / search_host_info）", 
     const p1 = statSync(preloadFile).mtimeMs;
     const q1 = statSync(pageFile).mtimeMs;
     await new Promise((r) => setTimeout(r, 40));
-    __resetSearchBridgeForTest();          // 清掉 delivered ⇒ 逼它重跑整条落盘路径
+    __resetSearchBridgeForTest();          
     const second = await ensureSearchPage(deps);
     expect(second.ok).toBe(true);
     expect(second.preload).toBe(first.preload);
@@ -458,7 +458,7 @@ describe("A-1137 ③ 搜索页交付（ensureSearchPage / search_host_info）", 
 
   it("交付成功后，**搜索页 origin 才被登记**为可信；未登记的站点一律不可信", async () => {
     const { deps } = mkDeps();
-    expect(isTrustedSearchUrl(SEARCH_URL)).toBe(false);      // 还没交付
+    expect(isTrustedSearchUrl(SEARCH_URL)).toBe(false);      
     registerSearchBridge(deps);
     await ensureSearchPage(deps);
     expect(isTrustedSearchUrl(SEARCH_URL)).toBe(true);
@@ -472,10 +472,10 @@ describe("A-1137 ③ 搜索页交付（ensureSearchPage / search_host_info）", 
 });
 
 describe("A-1137 ③ guest 侧 handler 的白名单", () => {
-  /**
-   * guest 侧的可信判据是**搜索页 origin**，而 origin 只有在交付成功后才被登记
-   * ⇒ 每条用例都必须先把页面交付掉，否则测的其实是"未授权"，全是假绿/假红。
-   */
+  
+
+
+
   async function setupDelivered(over: Partial<SearchBridgeDeps> = {}) {
     const { deps, sent } = mkDeps(over);
     registerSearchBridge(deps);
@@ -489,8 +489,8 @@ describe("A-1137 ③ guest 侧 handler 的白名单", () => {
     for (const payload of [{ query: "   " }, { query: 123 }, "", null, {}]) {
       const r = await call<Promise<{ ok: boolean; error?: string }>>(IPC_CHANNELS.search_query, guestFrame, payload);
       expect(r.ok).toBe(false);
-      /* 关键：可信 frame 得到的是「缺少查询词」。若白名单被换成 `isMainSender`，
-         guest 会先撞上授权，这里变成「未授权」⇒ 本条变红（这才是它真正锁住的东西）。 */
+      
+
       expect(r.error).toBe("缺少查询词");
     }
   });
@@ -503,7 +503,7 @@ describe("A-1137 ③ guest 侧 handler 的白名单", () => {
       expect(r.ok).toBe(false);
       expect(r.error).toContain("未授权");
     }
-    /* 顺带确认"可信"的那条不是碰巧：把入参换成非空才会真的联网 ⇒ 只断言它**没有**被授权拦下 */
+    
     const trusted = await call<Promise<{ ok: boolean; error?: string }>>(IPC_CHANNELS.search_query, guestFrame, { query: "   " });
     expect(trusted.error).not.toContain("未授权");
   });
@@ -524,7 +524,7 @@ describe("A-1137 ③ guest 侧 handler 的白名单", () => {
     expect(sent[0].ch).toBe(IPC_CHANNELS.search_view_changed);
     expect((sent[0].payload as { query: string }).query).toBe("天气");
     expect(getSidebarSearchView()?.query).toBe("天气");
-    /* 序号由 main 持有并递增（翻译函数是纯函数、序号是显式入参 ⇒ 两个进程各加载一次也不会错乱） */
+    
     fire(IPC_CHANNELS.search_event, guestFrame, { type: "results", query: "第二个", count: 1 });
     const v2 = getSidebarSearchView()!;
     expect(v2.query).toBe("第二个");
@@ -581,7 +581,7 @@ describe("A-1137 ③ guest 侧 handler 的白名单", () => {
   });
 });
 
-/* ══════════════════ ④ 对话侧视图 store（渲染层汇合点） ══════════════════ */
+
 
 const tab = (kind: SidebarTabView["kind"], url: string, title = ""): SidebarTabView => ({ kind, url, title });
 
@@ -684,16 +684,16 @@ describe("A-1137 ④ 状态条文案（describeSidebarSnapshot）", () => {
   });
 
   it("非搜索页签：说清是哪个面板 + 位置；页签类型中文名有唯一产地", () => {
-    /* ⚠️ A-1144 起**只对内容类页签**（浏览器/文件/终端）出文案：任务、Git 是**内部面板**，
-       不是"用户在看的东西"—— 上一版对它们也播报，用户实测吐槽「怎么待办任务列表都会出现这个？」。
-       `tasks` / `git` 的"不出文案"由 `a1144-sidebar-mount.spec.ts` 正面守着（那边是这条改动的居民）。 */
+    
+
+
     for (const [kind, label] of [["terminal", "终端"], ["file", "文件"]] as const) {
       __resetSidebarViewForTest();
       publishSidebarTab(tab(kind, "loc-" + kind, ""), SEARCH_URL);
       const t = describeSidebarSnapshot(getSidebarSnapshot())!;
       expect(t.label).toContain(label);
-      /* ⚠️ 这条**必须**在 label 上也断言位置：芯片上写的就是 label，
-         只查 inject 的话「label 丢掉位置」的变异溜得过去（名字比断言强 = 假守卫）。 */
+      
+
       expect(t.label, "芯片文案里没有位置 ⇒ Agent 不知道用户在看哪个文件").toContain("loc-" + kind);
       expect(t.inject).toContain(label);
       expect(t.inject).toContain("loc-" + kind);
@@ -712,14 +712,14 @@ describe("A-1137 ④ 状态条文案（describeSidebarSnapshot）", () => {
     publishSidebarTab(tab("file", "D:/a/b.md", ""), SEARCH_URL);
     expect(describeSidebarSnapshot(getSidebarSnapshot())!.label).toContain("D:/a/b.md");
     __resetSidebarViewForTest();
-    /* ⚠️ A-1144：这里原来用的是 `tasks` —— 而任务页已归入"内部面板 ⇒ 不出文案"。
-       换成一个**内容类**页签来测同一条性质（"没标题没地址 ⇒ 未命名"），别把这条守卫一起废掉。 */
+    
+
     publishSidebarTab(tab("terminal", "", ""), SEARCH_URL);
     expect(describeSidebarSnapshot(getSidebarSnapshot())!.inject).toContain("未命名");
   });
 });
 
-/* ══════════════════ ⑤ 交付信息：只成功问一次；失败必须能重试 ══════════════════ */
+
 
 describe("A-1137 ⑤ 渲染层索取交付信息", () => {
   function stubWindow(host: () => Promise<unknown>) {
@@ -782,7 +782,7 @@ describe("A-1137 ⑤ 渲染层索取交付信息", () => {
     const view = viewFromPageEvent({ type: "results", mode: "online", query: "补课", count: 2 }, 9)!;
     apiObj.view = vi.fn(async () => view);
     const off = connectSidebarSearch();
-    await new Promise((r) => setTimeout(r, 0));       // 让 pull 那个 promise 落定
+    await new Promise((r) => setTimeout(r, 0));       
     expect(getSidebarSnapshot().search?.query, "没有 pull 补课 ⇒ 状态条永远空白").toBe("补课");
     pushView(viewFromPageEvent({ type: "results", query: "广播", count: 1 }, 10));
     expect(getSidebarSnapshot().search?.query).toBe("广播");
@@ -790,7 +790,7 @@ describe("A-1137 ⑤ 渲染层索取交付信息", () => {
   });
 });
 
-/* ══════════════════ ⑥ 主题映射漂移守卫（两边漂了不会报错） ══════════════════ */
+
 
 describe("A-1137 ⑥ 主程序主题 → 搜索页主题", () => {
   it("`APP_THEMES` 与 renderer 的 `ThemeName` **取值集合一致**", () => {
@@ -812,7 +812,7 @@ describe("A-1137 ⑥ 主程序主题 → 搜索页主题", () => {
   });
 });
 
-/* ══════════════════ ⑦ 联网检索的解析层（结构变了也不该静默返回空） ══════════════════ */
+
 
 describe("A-1137 ⑦ 联网检索解析", () => {
   it("Bing：从 `li.b_algo` 抽标题/链接/摘要，source 是去 www 的域名", () => {

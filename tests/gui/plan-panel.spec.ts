@@ -1,8 +1,8 @@
-/**
- * tests/gui/plan-panel.spec.ts — F：PlanPanel 组件单测（无 DOM 纯渲染 + 纯计算）。
- * 用 renderToStaticMarkup 断言最终 HTML：进度条宽度百分比、阶段状态文本、
- * 完成删除线、空态提示。usePlanStore 为 window 订阅 hook，node 环境只测纯渲染路径。
- */
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";

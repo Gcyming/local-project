@@ -1,20 +1,20 @@
-/**
- * core-ts/src/screen/backends/desktop.ts — 桌面图形控制后端（Windows 优先）。
- *
- * 实现选择（调研结论：computer-use-mcp / Claude Code hostAdapter）：
- *   Windows 自带 PowerShell + .NET Framework，经 user32.dll（SetCursorPos / mouse_event /
- *   keybd_event / SendInput）+ System.Drawing 即可完成截屏与输入注入 —— **零外部依赖**。
- *   唯一缺点是每次冷启 PowerShell + Add-Type 需 200-500ms，因此这里采用
- *   **常驻 PowerShell 宿主**：Add-Type 只编译一次，之后走换行分隔的 base64(JSON) 请求-响应协议，
- *   单次动作开销降到毫秒级。
- *
- * 协议（stdin/stdout 各一行一条）：
- *   请求： base64(UTF-8 JSON) + "\n"
- *   响应： "@@R@@" + base64(UTF-8 JSON) + "\n"
- *
- * 安全：脚本以 -EncodedCommand 传入（不落盘、无引号注入面）；所有输入走 JSON 参数，
- * 不拼接 shell 命令。DPI 感知在宿主启动时调用 SetProcessDPIAware 一次性解决。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -29,7 +29,7 @@ import {
 } from "../types.js";
 import { toOptimizedDataUrl } from "../optimize.js";
 
-/** 桌面后端支持的动作（Android 专属的 tap/swipe 不在其中，由 android 后端承载） */
+
 const DESKTOP_ACTIONS: ReadonlySet<ScreenActionKind> = new Set<ScreenActionKind>([
   "click", "double_click", "right_click", "middle_click", "mouse_move",
   "drag", "scroll", "type", "key", "wait", "long_press",
@@ -39,7 +39,7 @@ const RESP_PREFIX = "@@R@@";
 const CALL_TIMEOUT_MS = 20_000;
 const BOOT_TIMEOUT_MS = 25_000;
 
-/** 常驻 PowerShell 宿主脚本（UTF-16LE base64 经 -EncodedCommand 传入） */
+
 const PS_HOST = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -430,18 +430,18 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
-/**
- * A-1034：解析 PowerShell 宿主的**绝对路径**。
- *
- * 为什么不能直接拿裸名去 spawn（`powershell.exe` 这个写法本身）：**"系统自带" ≠ "在 PATH 里"**。
- * Windows 自带的是 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`，
- * 但打包后的进程 PATH 未必含 System32 —— 用户的另一台机器就是这样：同一个坑先让
- * platform-tools 解压报 `spawn tar ENOENT`，再让这里宿主起不来，窗口枚举恒为空，
- * 对外表现为「挂不上屏幕」。
- *
- * 顺序：System32 的 Windows PowerShell → SysWOW64 → PowerShell 7（pwsh）→ PATH 兜底。
- * 返回试过的路径列表，失败时一并报出来，避免又变成"静默没功能"。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 export function resolvePowerShellExe(): { exe: string; tried: string[] } {
   const tried: string[] = [];
   const root = process.env.SystemRoot || process.env.windir || "C:\\Windows";
@@ -453,7 +453,7 @@ export function resolvePowerShellExe(): { exe: string; tried: string[] } {
   if (pf) { cands.push(join(pf, "PowerShell", "7", "pwsh.exe")); }
   for (const c of cands) {
     tried.push(c);
-    try { if (existsSync(c)) { return { exe: c, tried }; } } catch { /* 无权限访问 → 继续试下一个 */ }
+    try { if (existsSync(c)) { return { exe: c, tried }; } } catch {  }
   }
   return { exe: "powershell.exe", tried };
 }
@@ -467,11 +467,11 @@ export class DesktopScreenBackend implements ScreenBackend {
   private stdoutBuf = "";
   private stderrBuf = "";
   private cachedSize: { width: number; height: number; originX: number; originY: number } | null = null;
-  /** A-1069：宿主启动时刻（`residentHost()` 报给「后台进程」面板的时长基准）。
-   *  一处赋值（spawn 之后）、一处清空（dispose / 宿主退出）—— 与 `proc` 同生共死。 */
+  
+
   private hostStartedAt: number | null = null;
 
-  /** 平台能力：目前完整实现 Windows；其它平台如实报错（不假装支持） */
+  
   private unsupportedReason(): string | null {
     if (process.platform === "win32") { return null; }
     return `桌面图形控制当前仅在 Windows 上实现（当前平台：${process.platform}）。可改用 backend="android" 控制安卓设备。`;
@@ -484,7 +484,7 @@ export class DesktopScreenBackend implements ScreenBackend {
     if (this.booting) { return this.booting; }
     this.booting = new Promise<void>((resolve, reject) => {
       const encoded = Buffer.from(PS_HOST, "utf16le").toString("base64");
-      // A-1034：绝对路径优先，PATH 只是最后的兜底（见 resolvePowerShellExe 的注释）
+      
       const host = resolvePowerShellExe();
       const proc = spawn(
         host.exe,
@@ -504,7 +504,7 @@ export class DesktopScreenBackend implements ScreenBackend {
         }
       }, BOOT_TIMEOUT_MS);
 
-      // 宿主就绪判定：Add-Type 完成后会执行到常驻循环 —— 用一个 size 探针确认
+      
       const probe = () => {
         if (settled) { return; }
         settled = true;
@@ -533,7 +533,7 @@ export class DesktopScreenBackend implements ScreenBackend {
               p.reject(new Error(`宿主返回异常行：${line.slice(0, 200)}`));
             }
           } else if (!settled && line.trim()) {
-            // 首次输出（Add-Type 警告等）不计入协议帧
+            
             probe();
           }
           idx = this.stdoutBuf.indexOf("\n");
@@ -544,7 +544,7 @@ export class DesktopScreenBackend implements ScreenBackend {
       proc.stderr.on("data", (c: string) => { this.stderrBuf += c; });
 
       proc.on("error", (e: Error) => {
-        // A-1034：失败必须带上"试过哪些路径"，否则用户只能看到一句 ENOENT 无从下手
+        
         const hint = host.exe === "powershell.exe"
           ? `（已尝试并回退 PATH：${host.tried.join(" | ")}）`
           : `（路径：${host.exe}）`;
@@ -563,14 +563,14 @@ export class DesktopScreenBackend implements ScreenBackend {
         this.failAll(msg);
       });
 
-      // 立刻发一个 size 探针，确保脚本已进入常驻循环（Add-Type 编译完成）
+      
       this.rawSend({ kind: "size" })
         .then(() => { probe(); })
         .catch((e: Error) => {
           if (!settled) { settled = true; clearTimeout(bootTimer); reject(e); }
         });
     });
-    // 宿主就绪后保留 booting（并发调用复用；宿主退出时在 exit 回调清空）
+    
     await this.booting;
   }
 
@@ -583,7 +583,7 @@ export class DesktopScreenBackend implements ScreenBackend {
     }
   }
 
-  /** 直接写一帧（不做 ensureHost，供启动探针使用） */
+  
   private rawSend(req: Record<string, unknown>): Promise<{ ok: boolean; result?: Record<string, unknown>; error?: string }> {
     return new Promise((resolve, reject) => {
       const proc = this.proc;
@@ -624,9 +624,9 @@ export class DesktopScreenBackend implements ScreenBackend {
     const width = Number(r.result.width ?? 0);
     const height = Number(r.result.height ?? 0);
     if (!width || !height) { throw new Error("桌面分辨率解析失败"); }
-    // A-1014：**必须**把虚拟桌面原点一起收下（PowerShell 侧 `size` 分支早就返回了
-    // `GetSystemMetrics(76/77)`，此前在这里被丢弃 → 整屏坐标基准的 origin 恒为 0 →
-    // 副屏在主屏左/上（vx/vy 为负）时点击整体偏移）。取不到时按 0 处理（单屏下正确）。
+    
+    
+    
     const originX = Number(r.result.originX ?? 0) || 0;
     const originY = Number(r.result.originY ?? 0) || 0;
     this.cachedSize = { width, height, originX, originY };
@@ -641,11 +641,11 @@ export class DesktopScreenBackend implements ScreenBackend {
       if (!r.ok || !r.result) { return { ok: false, error: r.error ?? "截图失败" }; }
       const pngBase64 = String(r.result.png ?? "");
       if (!pngBase64) { return { ok: false, error: "截图返回为空" }; }
-      // A-975：物理分辨率（坐标落地基准）
+      
       let devW = this.cachedSize?.width ?? 0;
       let devH = this.cachedSize?.height ?? 0;
-      // A-1014：虚拟桌面原点 —— 图像 0 点 = 虚拟坐标 (vx,vy)，必须一并回传，
-      // 否则 controller 的坐标基准 origin 为 0，副屏在左/上时点击整体偏移（见 DisplayInfo 注释）。
+      
+      
       let originX = this.cachedSize?.originX ?? 0;
       let originY = this.cachedSize?.originY ?? 0;
       if (!devW || !devH) {
@@ -653,16 +653,16 @@ export class DesktopScreenBackend implements ScreenBackend {
           const info = await this.displayInfo(target);
           devW = info.width; devH = info.height;
           originX = info.originX ?? 0; originY = info.originY ?? 0;
-        } catch { /* 尺寸取不到不阻断截图 */ }
+        } catch {  }
       }
       const bytes = Math.floor((pngBase64.length * 3) / 4);
-      /* A-1123：桌面也能叠**窗口编号框**（此前恒 `marks: 0` —— Set-of-Marks 的底子有、数据源没有）。
-         数据来自 `listWindows`（与"先聚焦窗口"同一份），粒度是**窗口**。
-         ⚠️ 坐标必须**减掉虚拟桌面原点**：标注的 marksSpace 是"图像空间"（见 `imageAnnotate`
-            的缩放 `x * W / marksSpace.width`），而窗口矩形是**虚拟桌面坐标**（副屏在左/上时为负）。
-            这与下面 `uiDump` 返回的坐标**刻意不同** —— 那边用于 `SetCursorPos` 点击，必须原样虚拟坐标。
-         ⚠️ 枚举失败**不阻断截图**（截图是主功能），但必须把原因写进 `warning` 出声 ——
-            否则症状就是"截图上没有编号框"而没有任何解释（静默失效家族的老毛病）。 */
+      
+
+
+
+
+
+
       let marks: Array<{ index: number; label?: string; x1: number; y1: number; x2: number; y2: number }> = [];
       let marksWarning = "";
       if (opts?.marks !== false) {
@@ -701,17 +701,17 @@ export class DesktopScreenBackend implements ScreenBackend {
     }
   }
 
-  /** A-977：枚举可见窗口（标题 + 矩形）——供"先聚焦目标窗口再操作" */
+  
   async listWindows(): Promise<Array<{ title: string; pid: number; x: number; y: number; width: number; height: number }>> {
     const unsupported = this.unsupportedReason();
     if (unsupported) { throw new Error(unsupported); }
     const r = await this.send({ kind: "windows" });
     if (!r.ok || !r.result) { throw new Error(r.error ?? "枚举窗口失败"); }
-    // A-1034：**不再把"形状不对"静默当成"没有窗口"**。
-    // 旧写法 `Array.isArray(...) ? … : []` 会把单元素折叠（PowerShell 标量化）、
-    // 字段改名、宿主降级返回等一切异常都伪装成"未枚举到可见窗口" —— 用户看到的是
-    // "这功能没有"，而不是"枚举失败了"，这是本项目最贵的一类失效（静默降级）。
-    // 现在：数组直接用；对象视为单窗口（容错）；其余一律抛错，让上层如实报给模型。
+    
+    
+    
+    
+    
     const raw = r.result.windows;
     let list: Array<Record<string, unknown>>;
     if (Array.isArray(raw)) {
@@ -723,15 +723,15 @@ export class DesktopScreenBackend implements ScreenBackend {
     } else {
       throw new Error(`枚举窗口失败：宿主返回的 windows 字段形状异常（${typeof raw}）`);
     }
-    /* A-1061⑨：**空列表必须说清为什么**。此前一句「未枚举到可见窗口」把四种完全不同的
-       故障（宿主没起来 / RectOf 全挂 / 进程枚举异常 / 真没窗口）压成同一句，
-       用户无从下手、我们也无从定位。宿主现在会带 diag 回来，这里如实转述。
-       A-1088：**并且把「真没窗口」与「枚举故障」分成两种结果** ——
-       此前两种情形都抛 Error，上层只能把"本机确实没有窗口"也当成故障报给模型
-       （模型于是去修一个并不存在的故障）。判据用 diag 里的 `candidates`：
-         · `candidates > 0` 却一条都没产出 ⇒ RectOf/尺寸**全挂** ⇒ 真故障（抛）；
-         · `candidates === 0` 且枚举正常返回 ⇒ 本机确实没有带标题的顶层窗口 ⇒ **空数组**（不是错误）；
-         · `diag` 缺失 ⇒ 宿主协议对不上 ⇒ 真故障（抛，绝不静默当成"没有窗口"）。 */
+    
+
+
+
+
+
+
+
+
     if (list.length === 0) {
       const diag = (r.result as { diag?: { candidates?: number; rectFail?: number; sizeFail?: number; total?: number } } | undefined)?.diag;
       if (!diag) {
@@ -747,7 +747,7 @@ export class DesktopScreenBackend implements ScreenBackend {
           "候选非 0 但一条都没产出通常是 Add-Type/P-Invoke 编译问题。",
         );
       }
-      // 枚举成功、确实没有带标题的顶层窗口 ⇒ **空结果不是故障**
+      
       return [];
     }
     return list.map((w) => ({
@@ -760,22 +760,22 @@ export class DesktopScreenBackend implements ScreenBackend {
     }));
   }
 
-  /**
-   * A-1123：桌面后端的**元素级定位**数据源 —— 粒度是**窗口**。
-   *
-   * 【为什么是窗口而不是控件】Windows 上要拿到窗口内的控件树必须走 UIAutomation
-   * （`System.Windows.Automation`）：要在常驻宿主里再挂一个 .NET 程序集，枚举深度与耗时都不可控
-   * （大页面上秒级），且拿到的 bounds 还要再做一次坐标系换算。而**窗口矩形**用现有的
-   * `GetWindowRect` + 进程枚举就能拿到（`listWindows` 已经在用）—— 零新增依赖、零新增宿主命令。
-   * 粒度粗一级，但收益正是 Set-of-Marks 的收益：**把"目测像素"换成"系统给出的矩形中心"**。
-   *
-   * 【坐标空间】返回的 `bounds`/`center` 是**虚拟桌面坐标**（与 `SetCursorPos` 同一个空间）。
-   * controller 把这些值以 `coordSpace:"device"` 直通回后端，两端口径一致，**不要再加原点**。
-   * ⚠️ 与 `capture` 里画编号框用的坐标**刻意不同**（那边要先减 `originX/originY` 变成图像空间）。
-   *
-   * 【故障不许吞】`listWindows` 在真故障时**抛错**（A-1088 判据），这里原样上抛，
-   * 由 controller 折成 `ok:false` 出声 —— 绝不 `catch { return [] }` 变成"桌面没有元素"。
-   */
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   async uiDump(): Promise<UiElement[]> {
     const wins = await this.listWindows();
     return wins.map((w, i) => ({
@@ -784,22 +784,22 @@ export class DesktopScreenBackend implements ScreenBackend {
       text: w.title,
       bounds: { x1: w.x, y1: w.y, x2: w.x + w.width, y2: w.y + w.height },
       center: { x: Math.round(w.x + w.width / 2), y: Math.round(w.y + w.height / 2) },
-      // 窗口即"可点区域"（点它的中心通常就是把它带到前台）
+      
       clickable: true,
       enabled: true,
     }));
   }
 
-  /** A-977：按标题（包含匹配）聚焦/还原窗口，返回其矩形 */
+  
   async focusWindow(title: string): Promise<{ focused: boolean; detail: string; rect?: { x: number; y: number; width: number; height: number } }> {
     const unsupported = this.unsupportedReason();
     if (unsupported) { throw new Error(unsupported); }
     const r = await this.send({ kind: "focus", title });
     if (!r.ok || !r.result) { throw new Error(r.error ?? "聚焦窗口失败"); }
     const focused = Boolean(r.result.focused);
-    // A-1014：**无论是否抢到前台都回传矩形**（宿主两个分支都带 rect）。
-    // 上层据此仍能区域截图与坐标换算；是否"可安全操作"由上层结合 focused 决定，
-    // 不再把"没抢到前台"一律当成"窗口不可用"（窗口其实可见时那是可用路径）。
+    
+    
+    
     const rect = {
       x: Number(r.result.x ?? 0), y: Number(r.result.y ?? 0),
       width: Number(r.result.width ?? 0), height: Number(r.result.height ?? 0),
@@ -808,34 +808,34 @@ export class DesktopScreenBackend implements ScreenBackend {
     return { focused, detail: String(r.result.detail ?? ""), rect: hasRect ? rect : undefined };
   }
 
-  /**
-   * A-978：按窗口标题截取**该窗口区域**（先聚焦 → 取矩形 → 区域截取）。
-   * 返回的 width/height = 窗口尺寸、originX/originY = 窗口左上角，
-   * controller 的坐标换算会带上这个原点 → 截图后按图内坐标点击不会整体偏移。
-   */
+  
+
+
+
+
   async captureWindow(title: string, opts?: { marks?: boolean }): Promise<ScreenCaptureResult> {
     const unsupported = this.unsupportedReason();
     if (unsupported) { return { ok: false, error: unsupported }; }
     const t = (title ?? "").trim();
     if (!t) { return { ok: false, error: "需要窗口标题（片段即可）" }; }
-    // ① 先聚焦：顺带把最小化/被遮挡的窗口拉到前台，否则会截到压在上面的别的窗口
+    
     const f = await this.focusWindow(t);
     if (!f.rect) { return { ok: false, error: f.detail || `未找到标题包含「${t}」的窗口` }; }
     const rect = f.rect;
     if (rect.width <= 0 || rect.height <= 0) { return { ok: false, error: "窗口尺寸为 0（可能已最小化）" }; }
-    // A-1014：最小化窗口在 Windows 上被放在 (-32000, -32000) 附近。此时 SW_RESTORE 也没能
-    // 救回来（否则矩形会正常）→ 截这个区域只会得到屏幕外的空白，点击也会打到屏外。
-    // 这是**真不可用**，必须硬失败并说清原因（不要截一张空白图让模型瞎猜）。
+    
+    
+    
     if (rect.x <= -30000 || rect.y <= -30000) {
       return { ok: false, error: `窗口「${t}」仍处于最小化状态（矩形 ${rect.x},${rect.y}）——请先手动还原该窗口，或改用不依赖窗口截图的方式` };
     }
-    // A-1014：**没能抢到前台不再等于不能截**。窗口若是可见的（只是没获得焦点），
-    // 区域截图依然正确；只有当它被别的窗口盖住时画面才不是目标窗口 ——
-    // 那种情况交一张带 warning 的图给模型，让它自己看图判断，比硬失败更有用。
+    
+    
+    
     const focusWarning = f.focused
       ? undefined
       : `${f.detail}；本图只保证是屏幕该区域的画面，若被其它窗口遮挡请先手动把「${t}」切到前台`;
-    // ② 区域截取
+    
     const r = await this.send({ kind: "capture", rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } });
     if (!r.ok || !r.result) { return { ok: false, error: r.error ?? "窗口截图失败" }; }
     const png = String(r.result.png ?? "");
@@ -846,8 +846,8 @@ export class DesktopScreenBackend implements ScreenBackend {
       ok: true,
       pngBase64: png,
       dataUrl: opt.dataUrl,
-      width: rect.width, height: rect.height,      // 区域（窗口）尺寸
-      originX: rect.x, originY: rect.y,            // ★ 区域原点
+      width: rect.width, height: rect.height,      
+      originX: rect.x, originY: rect.y,            
       imageWidth: opt.width, imageHeight: opt.height,
       bytes: opt.bytes || bytes,
       warning: focusWarning,
@@ -883,8 +883,8 @@ export class DesktopScreenBackend implements ScreenBackend {
     }
   }
 
-  /** A-1044：系统级空闲时间（距上次用户键鼠输入）。`null` = 探测不可用（不等于"用户没操作"）。
-   *  让位仲裁（`arbiter.ts`）唯一的数据源；非 Windows 平台如实返回 null。 */
+  
+
   async userIdleMs(): Promise<number | null> {
     if (this.unsupportedReason()) { return null; }
     try {
@@ -895,28 +895,28 @@ export class DesktopScreenBackend implements ScreenBackend {
       if (typeof v !== "number" || !Number.isFinite(v)) { return null; }
       return v;
     } catch {
-      // 宿主未就绪/超时：探测不可用。**不抛**——让位判据的语义是"探测不到就放行但留痕"，
-      // 而不是让一次探针失败把用户的图形操作整条打断。
+      
+      
       return null;
     }
   }
 
-  /**
-   * A-1069：报告**常驻宿主进程**的存活状态，供「Agent 启动的后台进程」面板展示（#226）。
-   *
-   * 为什么这个探针必须在后端自己身上：宿主是**懒启动**的 —— 第一次 `screen_*` 工具调用时
-   * `ensureHost()` 才 spawn，调用方（主进程）无从知道它什么时候起来、什么时候死掉。
-   * 让后端自己报，就不需要在外面维护一份"它还在不在"的镜像状态（那种镜像必然与真实漂移）。
-   *
-   * 返回 null = 当前没有常驻宿主（从未启动 / 已退出 / 已 dispose）。
-   */
+  
+
+
+
+
+
+
+
+
   residentHost(): { pid?: number; startedAt: number } | null {
     const proc = this.proc;
     if (!proc || proc.killed) { return null; }
     return { pid: proc.pid, startedAt: this.hostStartedAt ?? Date.now() };
   }
 
-  /** 应用退出时释放宿主进程 */
+  
   dispose(): void {
     const proc = this.proc;
     this.proc = null;
@@ -924,8 +924,8 @@ export class DesktopScreenBackend implements ScreenBackend {
     this.booting = null;
     this.cachedSize = null;
     if (proc && !proc.killed) {
-      try { proc.stdin.end(); } catch { /* ignore */ }
-      try { proc.kill(); } catch { /* ignore */ }
+      try { proc.stdin.end(); } catch {  }
+      try { proc.kill(); } catch {  }
     }
   }
 }

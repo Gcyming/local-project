@@ -1,7 +1,7 @@
-/**
- * tests/core-ts/claims.spec.ts — 幻觉护栏核心测试（A-047 语义移植）。
- * 对照 core/claims.py 的检测语义逐项验证。
- */
+
+
+
+
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -76,7 +76,7 @@ describe("findUnverifiedClaims（幻觉护栏）", () => {
     const claims = await findUnverifiedClaims("已保存到 docs/../../secret.md");
     expect(claims).toEqual([]);
     const inside = await findUnverifiedClaims("已保存到 package.json");
-    expect(inside).toEqual([]); // 项目根内真实存在
+    expect(inside).toEqual([]); 
   });
 
   it("反引号包裹的路径同样检出（A-048-R6 markdown 代码包裹）", async () => {
@@ -85,12 +85,12 @@ describe("findUnverifiedClaims（幻觉护栏）", () => {
     expect(claims).toContain(fake);
   });
 
-  // ── A-987：空间路径截断（假指控根因）+ 精度优先改造 ──────────────
+  
 
   it("含空格的不存在路径必须**整条**报出（A-987：碎片化报告会误导调用方）", async () => {
-    // 本用例目录本身就在 `…\pilot project\…` 下，天然含空格
+    
     if (process.platform !== "win32") {
-      return; // POSIX 盘符分支不适用（护栏面向 Windows-first 场景），跳过
+      return; 
     }
     const fake = join(work, "sub dir", "report.md");
     const claims = await findUnverifiedClaims(`报告已生成：${fake}`);
@@ -98,7 +98,7 @@ describe("findUnverifiedClaims（幻觉护栏）", () => {
   });
 
   it("同一句里的两个路径不得被拼成一条（惰性收尾到扩展名，A-987）", async () => {
-    // 旧版贪婪匹配会把「a.png 和 b.png」吞成一条不存在的路径 → 凭空制造假警报
+    
     const a = join(work, "a.png");
     const b = join(work, "b.png");
     await writeFile(a, "x", "utf-8");
@@ -118,21 +118,21 @@ describe("findUnverifiedClaims（幻觉护栏）", () => {
   });
 
   it("证据性触发要求「数字 + 单位」：英文里的 mb 子串不再误触发（A-987）", async () => {
-    // 旧版把 `mb` 当裸子串 → "Remember"/"number" 命中 → 整段无关文本进入核验
+    
     const decoy = "Remember the number of steps: 3. See docs/ghost_never_abc123.md for details.";
     expect(await findUnverifiedClaims(decoy)).toEqual([]);
-    // 真正的证据性描述仍必须触发
+    
     const hits = await findUnverifiedClaims("完整路径 docs/ghost_never_abc123.md");
     expect(hits.length).toBeGreaterThan(0);
   });
 
   it("auditClaims 给出结构化结果（类别 + 「是不是想写 X」建议 + 跳过计数）", async () => {
     await writeFile(join(work, "report_final.md"), "x", "utf-8");
-    const audit = await auditClaims(`已生成 ${join(work, "report_fianl.md")}`); // 拼错
+    const audit = await auditClaims(`已生成 ${join(work, "report_fianl.md")}`); 
     expect(audit.issues.map((i) => i.kind)).toEqual(["missing"]);
     expect(audit.issues[0]!.severity).toBe("high");
     expect(audit.issues[0]!.suggestion).toBe("report_final.md");
-    // 兼容接口：旧的字符串返回保持不变
+    
     expect(await findUnverifiedClaims(`已生成 ${join(work, "report_fianl.md")}`))
       .toEqual([join(work, "report_fianl.md")]);
   });

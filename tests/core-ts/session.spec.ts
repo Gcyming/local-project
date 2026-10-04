@@ -67,7 +67,7 @@ describe("Session（会话最小闭环）", () => {
       onDelta: (d) => deltas.push(d),
     });
     const r = await session.chat({ agent: AGENT, agentId: "agent_x", history: [], onDelta: (d) => deltas.push(d) });
-    expect(r.text).toContain("Qwen"); // 原始文本保留（过滤只作用于对外输出）
+    expect(r.text).toContain("Qwen"); 
     expect(r.violations).toBeGreaterThan(0);
     const visible = deltas.join("");
     expect(visible).not.toContain("Qwen");

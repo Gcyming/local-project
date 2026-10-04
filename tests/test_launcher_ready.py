@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """A-071/A-080: slime_launcher 测试——就绪校验 + server 信号隔离"""
 import json
 import sys
@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import slime_launcher as L  # noqa: E402
+import slime_launcher as L  
 
 
 class _FakeHandler(http.server.BaseHTTPRequestHandler):
@@ -71,7 +71,7 @@ class TestServerSignalIsolation:
                 captured["server_cmd"] = cmd
                 captured["server_kw"] = kw
                 return mock.MagicMock()
-            # CLI：wait 返回 0 使 launcher 正常退出
+            
             return mock.MagicMock(wait=mock.MagicMock(return_value=0))
 
         with mock.patch.object(L.subprocess, "Popen", side_effect=fake_popen), \
@@ -82,12 +82,12 @@ class TestServerSignalIsolation:
              mock.patch.object(L, "_kill_port"), \
              mock.patch.object(sys, "argv", ["slime"]):
             try:
-                L.main()  # 正常路径以 sys.exit(0) 结束
+                L.main()  
             except SystemExit:
                 pass
-        # server 启动命令指向 slime_server.py
+        
         assert str(captured["server_cmd"][1]).endswith("slime_server.py"), captured["server_cmd"]
-        # Windows 下必须带 CREATE_NEW_PROCESS_GROUP（脱离控制台信号组）
+        
         if sys.platform == "win32":
             expected = getattr(L.subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             assert captured["server_kw"].get("creationflags", 0) == expected, captured["server_kw"]

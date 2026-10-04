@@ -1,14 +1,14 @@
-/**
- * gui/src/renderer/pages/PermissionsPanel.tsx — 设置「权限」专栏（全局权限控制台）。
- * - 全局默认审批模式（手动/自动/无需/自定义）：作为会话未单独配置时的兜底
- * - 自定义审批白名单（custom 档生效）：预设目录/仓库命中免审批
- * - 工具权限类别开关 / 图形控制 / MCP / 技能 全局开关：统一持久化到 gui_permissions.json
- *
- * 【生效说明】工具类别开关由主进程注入的 ToolCategoryGate 在每次工具调用时实时读取：
- * 开关即授权：开启的类别直接放行（免逐次审批），关闭的类别被直接拒绝并把原因回传模型（模型无法绕过）。
- * 硬规则（越权路径 / 敏感文件 / 受保护源码目录 / 终端高危命令 / 内网地址）由 ToolCategoryGate 同批执行，
- * **不随开关或审批档位降级**。改动即时生效，无需重启。
- */
+
+
+
+
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { GuiPermissions, ApprovalMode } from "../../shared/ipc.js";
 
@@ -66,7 +66,7 @@ export default function PermissionsPanel(): JSX.Element {
   }
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>全局权限控制</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
@@ -89,7 +89,7 @@ export default function PermissionsPanel(): JSX.Element {
         <div style={{ color: "var(--text-dim)", fontSize: 13, padding: 12 }}>加载中…</div>
       ) : (
         <>
-          {/* 全局默认审批 */}
+          {}
           <div className="card" style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>全局默认审批模式</div>
             <select
@@ -107,7 +107,7 @@ export default function PermissionsPanel(): JSX.Element {
             </div>
           </div>
 
-          {/* 自定义白名单（custom 档生效）：目录/仓库命中免审批 */}
+          {}
           <div className="card" style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>自定义审批白名单</div>
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8 }}>
@@ -153,7 +153,7 @@ export default function PermissionsPanel(): JSX.Element {
             </div>
           </div>
 
-          {/* 工具权限类别 */}
+          {}
           <div className="card" style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>工具权限类别</div>
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 6 }}>
@@ -180,7 +180,7 @@ export default function PermissionsPanel(): JSX.Element {
             ))}
           </div>
 
-          {/* 图形控制能力（桌面 + 安卓） */}
+          {}
           <div className="card" style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>图形控制能力</div>
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8 }}>
@@ -203,7 +203,7 @@ export default function PermissionsPanel(): JSX.Element {
             ) : null}
           </div>
 
-          {/* 全局功能开关 */}
+          {}
           <div className="card">
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>全局功能开关</div>
             <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 8 }}>

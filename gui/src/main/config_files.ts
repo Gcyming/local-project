@@ -1,11 +1,11 @@
-/**
- * gui/src/main/config_files.ts — 参数文件调试（折叠栏后端）。
- * - 白名单配置文件：slime.toml / global_config.json 可读写；agents.json / providers.enc.json 只读
- *   （agents.json 权威源是 server/AgentRegistry 内存，GUI 直写会互相覆盖，故只读）
- * - 技能库扫描：config/skills 下各技能目录的 manifest.yaml 与 SKILL.md
- * - MCP 服务器清单：从 slime.toml 提取 [[mcp_servers]] 块（不引入 TOML 依赖，行级正则）
- * - 写入：备份 + 原子写（tmp + rename），上限 512KB
- */
+
+
+
+
+
+
+
+
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { frontmatterDescription, frontmatterField } from "../../../core-ts/src/skills.js";
 import { encrypt, decrypt } from "../../../core-ts/src/encryption.js";
@@ -26,12 +26,12 @@ export interface SkillInfo {
   description: string;
   hasManifest: boolean;
   hasSkillMd: boolean;
-  /** 是否启用（禁用 = 技能目录被移至 config/skills/.disabled/ 下） */
+  
   enabled: boolean;
-  /** A-1140：**声明的**来源（SKILL.md frontmatter 的 `origin` 字段）。
-   *  `market` = 官方技能仓库 / `user` = 用户自备 / `agent` = Agent 自建 / `""` = 未声明。
-   *  ⚠️ 这是**声明值而非可信归属** —— 任何写入方都能伪造它。插件页按「声明」如实展示，
-   *  安全判定不得依赖它（权限判定走 core/permissions.py 与沙箱）。 */
+  
+
+
+
   origin: string;
 }
 
@@ -53,7 +53,7 @@ const WRITABLE = new Set(["slime.toml", "global_config.json"]);
 const ALLOWED = new Set(["slime.toml", "global_config.json", "agents.json", "providers.enc.json"]);
 const MAX_SIZE = 512 * 1024;
 
-/** 测试专用根覆盖（vitest 隔离；生产路径不受影响） */
+
 let rootOverride: string | null = null;
 export function setRootOverrideForTest(root: string | null): void {
   rootOverride = root;
@@ -125,7 +125,7 @@ export function writeConfigFile(name: string, content: unknown): { ok: boolean; 
   }
 }
 
-/** 扫描某个技能根目录（enabled=config/skills；disabled=config/skills/.disabled） */
+
 function scanSkillRoot(base: string, enabled: boolean): SkillInfo[] {
   const out: SkillInfo[] = [];
   for (const entry of readDirSafe(base)) {
@@ -143,13 +143,13 @@ function scanSkillRoot(base: string, enabled: boolean): SkillInfo[] {
     if (hasSkillMd) {
       const head = readHeadSafe(skillPath, 4096);
       if (!description) {
-        /* 主流 Agent 的技能只有 SKILL.md（无 manifest.yaml），描述写在 frontmatter 里。
-         * 此前这里取 `firstLineSafe()` —— 即**物理首行**，而带 frontmatter 的文件首行就是
-         * 分隔符 `---`，于是技能库里所有第三方技能都显示不出描述（用户实测「明明加了却像缺东西」）。
-         * 改为先用共享解析器读 frontmatter.description，读不到再退回首个非分隔符标题行。 */
+        
+
+
+
         description = frontmatterDescription(head) || firstLineSafe(skillPath);
       }
-      // A-1140：来源声明（插件页用于区分 官方市场 / 用户自备 / Agent 自建）
+      
       origin = frontmatterField(head, "origin", 32).toLowerCase();
     }
     out.push({ name: entry, description, hasManifest, hasSkillMd, enabled, origin });
@@ -157,7 +157,7 @@ function scanSkillRoot(base: string, enabled: boolean): SkillInfo[] {
   return out;
 }
 
-/** 扫描技能库：config/skills/<name>{manifest.yaml,SKILL.md}（启用）+ .disabled/<name>（禁用） */
+
 export function listSkills(): SkillInfo[] {
   const base = join(projectRoot(), "config", "skills");
   if (!existsSync(base)) { return []; }
@@ -165,7 +165,7 @@ export function listSkills(): SkillInfo[] {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** 启用/禁用技能（物理移动目录至 .disabled/ 下，引擎不再加载） */
+
 export function setSkillEnabled(name: string, enabled: boolean): { ok: boolean; error?: string } {
   const base = join(projectRoot(), "config", "skills");
   const enabledDir = join(base, name);
@@ -195,7 +195,7 @@ export function setSkillEnabled(name: string, enabled: boolean): { ok: boolean; 
   }
 }
 
-/** 技能目录路径（启用=config/skills/<name>；禁用=config/skills/.disabled/<name>） */
+
 export function skillDirPath(name: string): string {
   const base = join(projectRoot(), "config", "skills");
   const enabledDir = join(base, name);
@@ -205,7 +205,7 @@ export function skillDirPath(name: string): string {
   return join(base, ".disabled", name);
 }
 
-/** 删除技能（递归删除其目录，含 .disabled 下的停用副本） */
+
 export function deleteSkill(name: string): { ok: boolean; error?: string } {
   const base = join(projectRoot(), "config", "skills");
   const targets = [join(base, name), join(base, ".disabled", name)];
@@ -234,7 +234,7 @@ function extractManifestDescription(head: string): string {
   return "";
 }
 
-/** 提取 slime.toml 中的 [[mcp_servers]] 块（支持行首 # 注释的块=禁用） */
+
 export function listMcpServers(): McpServerInfo[] {
   const tomlPath = join(projectRoot(), "slime.toml");
   if (!existsSync(tomlPath)) { return []; }
@@ -255,7 +255,7 @@ export function listMcpServers(): McpServerInfo[] {
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j].trim();
       if (/^\[\[/.test(line) || (/^\[/.test(line) && !line.startsWith("[[") && !line.startsWith("[["))) { break; }
-      // 禁用块内的键也读取（剥单层 #），便于 UI 呈现被禁用的服务器并可恢复
+      
       const dataLine = line.startsWith("#") ? line.slice(1).trim() : line;
       if (dataLine === "") { continue; }
       const kv = /^([a-zA-Z0-9_]+)\s*=\s*(.+)$/.exec(dataLine);
@@ -282,37 +282,37 @@ interface BlockRef {
   end: number;
 }
 
-/** 判断某行是否为 TOML 表头 `[[...]]` 或 `[section]`（忽略行首单层 # 注释前缀） */
+
 function isTableStart(line: string): boolean {
   const t = line.trimStart().replace(/^#/, "").trimStart();
   return /^\[/.test(t);
 }
 
-/** 判断某行是否为「键 = 值」行（同样忽略行首单层 # 注释前缀）。
- *  A-980-R28：用于界定 server 块的**结尾**——块内允许空行与注释掉的键，
- *  但「空行之后不再是键值行」（散文注释 / 新段落 / EOF）就说明块已经结束。 */
+
+
+
 function isKeyValueLine(line: string): boolean {
   const t = line.trimStart().replace(/^#/, "").trimStart();
   return /^[A-Za-z_][A-Za-z0-9_.-]*\s*=/.test(t);
 }
 
-/** 从 [[mcp_servers]] 表头收集该 server 块。
- *  结束条件：下一个表头（含被 # 注释的表头）/ EOF / **空行之后已不是块内容**。
- *
- *  A-980-R28（真事故根因）：此前只认「下一个表头」——于是**文件里最后一个 server 块**
- *  会把其后所有内容（散文注释、下一个配置段的横幅注释…）一并吞进块内。再叠加下面
- *  rebuildBlock 启用侧"逐行剥一层 #"的行为，用户一在 GUI 里点「启用」，这些注释就被剥成裸文本：
- *      `# 已删除（A-092-R）：headroom…`  →  ` 已删除（A-092-R）：headroom…`
- *  → 整个 slime.toml 解析失败（实测 `Invalid statement (at line 191, column 2)`），
- *  于是 [media]/[silam]/[sandbox] 等**全文件配置一起失效**；同时被误剥的 server 块
- *  （agent_browser）也从「注释禁用」悄悄变成真启用。 */
+
+
+
+
+
+
+
+
+
+
 function collectTomlBlock(lines: string[], header: number): BlockRef {
   let end = header + 1;
   while (end < lines.length) {
     const candidate = lines[end];
     if (isTableStart(candidate)) { break; }
     if (candidate.trim() === "") {
-      // 空行可能是块内分隔，也可能是块已结束：看空行之后第一个非空行还像不像块内容
+      
       let probe = end + 1;
       while (probe < lines.length && lines[probe].trim() === "") { probe++; }
       if (probe >= lines.length || !isKeyValueLine(lines[probe])) { break; }
@@ -322,7 +322,7 @@ function collectTomlBlock(lines: string[], header: number): BlockRef {
   return { start: header, end };
 }
 
-/** 解析 MCP server 块中的 name（读取时剥离单层 # 注释） */
+
 function parseBlockName(body: string[]): string {
   for (const line of body) {
     const t = line.trim().replace(/^#/, "").trim();
@@ -332,13 +332,13 @@ function parseBlockName(body: string[]): string {
   return "";
 }
 
-/** 重建一个 MCP server 块（enabled=false 时逐行加 #；true 时剥去单层 # 与其后的一个空格）。
- *
- *  A-980-R28：启用侧此前是 `/^((\s*)#)/` → 只剥 `#`、把 `# ` 里那个空格留在原地，
- *  `# name = "x"` 变成 ` name = "x"`（带前导空格但仍是合法 TOML）：功能上等于已启用，
- *  可外观仍是缩进的、像没启用；被误吞进块的散文注释同样被剥成裸文本 → 文件解析失败。
- *  现在两侧严格互逆（加/减 `#` + 至多一个空格，保留原有缩进），且禁用侧用 `/^\s*#/`
- *  判断"已注释"，缩进过的注释行不会被重复加 `#`。 */
+
+
+
+
+
+
+
 function rebuildBlock(lines: string[], block: BlockRef, enabled: boolean): string[] {
   const out: string[] = [];
   for (let i = block.start; i < block.end; i++) {
@@ -356,7 +356,7 @@ function rebuildBlock(lines: string[], block: BlockRef, enabled: boolean): strin
   return out;
 }
 
-/** 启用/禁用指定 MCP 服务器（注释/取消注释 [[mcp_servers]] 块；备份 + 原子写） */
+
 export function setMcpEnabled(name: string, enabled: boolean): { ok: boolean; error?: string } {
   const tomlPath = join(projectRoot(), "slime.toml");
   if (!existsSync(tomlPath)) {
@@ -399,7 +399,7 @@ export function setMcpEnabled(name: string, enabled: boolean): { ok: boolean; er
   }
 }
 
-/** 删除指定 MCP 服务器（从 slime.toml 移除整个 [[mcp_servers]] 块；备份 + 原子写） */
+
 export function deleteMcp(name: string): { ok: boolean; error?: string } {
   const tomlPath = join(projectRoot(), "slime.toml");
   if (!existsSync(tomlPath)) {
@@ -441,8 +441,8 @@ export function deleteMcp(name: string): { ok: boolean; error?: string } {
   }
 }
 
-/** 新增 MCP 服务器（追加 [[mcp_servers]] 块到 slime.toml；备份 + 原子写）。
- *  A-918++：此前 MCP 面板只支持「打开配置文件手动编辑」，小白用户无从下手；现提供 GUI 表单直达。 */
+
+
 export function addMcp(input: {
   name: string;
   kind: "stdio" | "http";
@@ -450,7 +450,7 @@ export function addMcp(input: {
   args?: string[];
   url?: string;
   env?: Record<string, string>;
-  /** A-918++：用户已确认风险时 force=true 放行 */
+  
   force?: boolean;
 }): { ok: boolean; error?: string; riskWarning?: string[] } {
   const name = (input.name ?? "").trim();
@@ -459,7 +459,7 @@ export function addMcp(input: {
   if (listMcpServers().some((s) => s.name === name)) {
     return { ok: false, error: `已存在同名 MCP 服务器「${name}」` };
   }
-  // A-918++：危险命令检测（用户自填 command/args/url/env）——命中先返回 riskWarning，renderer 二次确认后 force 重发
+  
   if (!input.force) {
     const riskTexts = [input.command, ...(input.args ?? []), input.url, ...Object.entries(input.env ?? {}).map(([k, v]) => `${k}=${v}`)];
     const risks = detectRiskPatterns(riskTexts);
@@ -469,7 +469,7 @@ export function addMcp(input: {
   }
   const kind = input.kind === "http" ? "http" : "stdio";
 
-  // 构建新块
+  
   const block: string[] = ["[[mcp_servers]]", `name = "${name}"`];
   if (kind === "http") {
     const url = (input.url ?? "").trim();
@@ -490,7 +490,7 @@ export function addMcp(input: {
   }
   block.push("");
 
-  // 读取现有内容，追加块
+  
   const tomlPath = join(projectRoot(), "slime.toml");
   let text = "";
   if (existsSync(tomlPath)) {
@@ -511,27 +511,27 @@ export function addMcp(input: {
   }
 }
 
-/**
- * A-1140：往 SKILL.md 的 frontmatter 里注入一个字段（**已存在则不覆盖**）。
- *
- * 用途：给「官方市场下载来的技能」打上 `origin: market` —— 插件页的来源维度靠它分类。
- * 为什么不直接拼字符串：下载来的 SKILL.md **自带 frontmatter**（name/description/许可等），
- * 整块重写会把上游字段丢掉；这里只做「在闭合 `---` 之前插一行」。
- * 没有 frontmatter 时补一个最小块（否则该字段读不到，来源会显示「未声明」）。
- */
+
+
+
+
+
+
+
+
 function injectFrontmatterField(text: string, key: string, value: string): string {
   const m = /^\uFEFF?---\r?\n([\s\S]*?)(?:\r?\n---)/.exec(text);
   if (!m) {
     return `---\n${key}: ${value}\n---\n\n${text}`;
   }
   if (new RegExp(`^\\s*${key}\\s*:`, "m").test(m[1])) {
-    return text;                       // 上游已声明该字段，尊重原文
+    return text;                       
   }
   return `---\n${m[1]}\n${key}: ${value}` + text.slice(m.index + m[0].length);
 }
 
-/** 新增技能（生成 config/skills/<name>/SKILL.md，含 frontmatter；GUI 表单直达，小白无需手动建目录）。
- *  A-918++：此前技能只能手动放文件夹；现提供表单创建。 */
+
+
 export function addSkill(input: { name: string; description: string; content?: string }): { ok: boolean; error?: string; name?: string } {
   const name = (input.name ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!name) { return { ok: false, error: "名称不能为空（将规范化为小写连字符形式）" }; }
@@ -541,7 +541,7 @@ export function addSkill(input: { name: string; description: string; content?: s
   const dir = join(base, name);
   if (existsSync(dir)) { return { ok: false, error: `已存在同名技能「${name}」` }; }
   const body = (input.content ?? "").trim() || `# ${name}\n\n${desc}\n`;
-  // A-1140：声明来源为「用户自备」—— 插件页的来源维度靠它分类，不写就显示「未声明」
+  
   const md = `---\nname: ${name}\ndescription: ${desc}\norigin: user\n---\n\n${body}\n`;
   const manifest = `name: ${name}\nversion: "1.0"\ndescription: ${desc}\n`;
   try {
@@ -554,18 +554,18 @@ export function addSkill(input: { name: string; description: string; content?: s
   }
 }
 
-/* ── A-918++：联网技能市场（接入 Anthropic 官方 anthropics/skills 仓库，GitHub API 可编程访问） ── */
+
 
 const SKILL_MARKET_REPO = "anthropics/skills";
-/** 模块级缓存：GitHub 匿名 API 仅 60 req/h，避免反复拉取列表 */
+
 let skillMarketCache: Array<{ name: string; description: string }> | null = null;
 
-/* ── A-918++：数据源认证（GitHub Personal Access Token，加密存储 config/registry_auth.json） ──
-   用户可内嵌配置 GitHub Token，把匿名 60 req/h 提升到 5000 req/h；token 加密落盘不泄露。 */
+
+
 
 const REGISTRY_AUTH_PATH = "config/registry_auth.json";
 
-/** 读取数据源认证（加密解密；失败返回空，不影响匿名访问） */
+
 export function getRegistryAuth(): { githubToken?: string } {
   try {
     const data = decrypt(REGISTRY_AUTH_PATH, rootOverride ? { projectRoot: rootOverride } : {}) as Record<string, unknown> | null;
@@ -576,21 +576,21 @@ export function getRegistryAuth(): { githubToken?: string } {
   }
 }
 
-/** 保存数据源认证（加密写盘） */
+
 export function setRegistryAuth(auth: { githubToken?: string }): { ok: boolean; error?: string } {
   try {
     const prev = getRegistryAuth();
     const githubToken = (auth.githubToken ?? prev.githubToken ?? "").trim();
     const next: Record<string, unknown> = { github_token: githubToken };
     encrypt(next, REGISTRY_AUTH_PATH, rootOverride ? { projectRoot: rootOverride } : {});
-    skillMarketCache = null; // token 变化 → 清缓存，下次用新 token 重新拉取
+    skillMarketCache = null; 
     return { ok: true };
   } catch (e) {
     return { ok: false, error: `保存认证失败：${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
-/** 构造 GitHub 请求头（有 token 则带 Authorization 提升限流） */
+
 function githubHeaders(): Record<string, string> {
   const h: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "slime-agent" };
   const token = getRegistryAuth().githubToken;
@@ -598,7 +598,7 @@ function githubHeaders(): Record<string, string> {
   return h;
 }
 
-/** 从 SKILL.md frontmatter 提取 description（兼容单行 / 多行折叠 / 引号包裹 / 末尾 --- 残留） */
+
 function extractFrontmatterDescription(md: string): string {
   const m = /description:\s*(.+?)(?:\n\w+:|$)/s.exec(md);
   if (!m) { return ""; }
@@ -610,7 +610,7 @@ function extractFrontmatterDescription(md: string): string {
     .trim();
 }
 
-/** 联网搜索技能市场（搜索/浏览 anthropics/skills 官方技能） */
+
 export async function searchSkillMarket(query: string): Promise<{ ok: boolean; skills?: Array<{ name: string; description: string }>; error?: string }> {
   try {
     if (!skillMarketCache) {
@@ -620,7 +620,7 @@ export async function searchSkillMarket(query: string): Promise<{ ok: boolean; s
       if (!listRes.ok) { return { ok: false, error: `拉取技能列表失败（HTTP ${listRes.status}）` }; }
       const list = (await listRes.json()) as Array<{ name: string; type: string }>;
       const names = list.filter((e) => e.type === "dir").map((e) => e.name);
-      // 并发拉取各技能 SKILL.md 的 frontmatter 提取 description（限流 6 并发）
+      
       const entries: Array<{ name: string; description: string }> = [];
       const pool = [...names];
       const worker = async (): Promise<void> => {
@@ -652,7 +652,7 @@ export async function searchSkillMarket(query: string): Promise<{ ok: boolean; s
   }
 }
 
-/** 从官方仓库安装单个技能（下载 SKILL.md 写入 config/skills/<name>/，并生成 manifest.yaml 便于第三方工具识别） */
+
 export async function installSkillFromMarket(name: string): Promise<{ ok: boolean; error?: string; name?: string }> {
   const safeName = (name ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!safeName) { return { ok: false, error: "技能名无效" }; }
@@ -664,7 +664,7 @@ export async function installSkillFromMarket(name: string): Promise<{ ok: boolea
     if (!rawRes.ok) { return { ok: false, error: `下载 SKILL.md 失败（HTTP ${rawRes.status}）` }; }
     const text = await rawRes.text();
     mkdirSync(dir, { recursive: true });
-    // A-1140：打上「官方市场」来源（注入而非重写，保留上游 frontmatter 全部字段）
+    
     writeFileSync(join(dir, "SKILL.md"), injectFrontmatterField(text, "origin", "market"), "utf8");
     const desc = extractFrontmatterDescription(text) || safeName;
     writeFileSync(join(dir, "manifest.yaml"), `name: ${safeName}\nversion: "1.0"\ndescription: ${desc}\n`, "utf8");
@@ -674,8 +674,8 @@ export async function installSkillFromMarket(name: string): Promise<{ ok: boolea
   }
 }
 
-/** A-918++：危险特征检测——对用户自填的 command/args/url/env/SKILL 内容做扫描。
- *  命中返回特征清单（如 ["递归删除 rm -rf", "管道执行 curl|sh"]）；官方仓库下载内容豁免（调用方不扫）。 */
+
+
 export function detectRiskPatterns(texts: Array<string | undefined>): string[] {
   const hits: string[] = [];
   const rules: Array<{ re: RegExp; label: string }> = [
@@ -719,9 +719,9 @@ function readHeadSafe(p: string, max: number): string {
   } catch { return ""; }
 }
 
-/** 兜底描述：跳过 frontmatter 块后取首个非空行的标题。
- *  直接取物理首行会把分隔符 `---` 或 `name: xxx` 当描述（这是技能库描述为空的直接原因），
- *  故这里先剥掉 frontmatter，再从正文里找第一行。 */
+
+
+
 function firstLineSafe(p: string): string {
   try {
     const src = readFileSync(p, "utf8").replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
@@ -734,31 +734,31 @@ function firstLineSafe(p: string): string {
   } catch { return ""; }
 }
 
-/* ── A-918++：MCP 官方 registry 联网搜索/安装（registry.modelcontextprotocol.io，Linux Foundation 维护）
-   实测单 server 内联完整 server.json：packages[]（stdio，含 npm 包名+npx runtime）或 remotes[]（http url）→ 可直接拼装 */
+
+
 
 export interface RegistryServerCard {
-  name: string;            // 规范化安装名（namespace/name → namespace-name）
-  displayName: string;     // 原始名（如 ac.tandem/docs-mcp）
+  name: string;            
+  displayName: string;     
   description: string;
   source: string;
   install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string };
 }
 
-/** 联网搜索 MCP 官方 registry（按 name/description 关键词）
- *
- *  A-1106：`query` 先过 `expandMarketQuery` —— 中文输入（「浏览器」「数据库」）被展开成
- *  上游认得的英文检索词再发出去。此前的形态是**把中文原样 URL 编码发给上游**，上游当然
- *  搜不到任何东西 ⇒ 中文用户实际只有"看字母序前 60 条长尾"这一条路，「太不能用」。
- *  ⚠️ 这一点必须在 main 做而不是渲染层：它是**上游请求参数的构造**，
- *     渲染层无权知道也不该复制一份规则（唯一出处在 `marketLocalize.ts`）。
- *  回带 `appliedQuery` / `unrecognized` 是为了**如实告知**用户"真正搜的是什么"。
- */
+
+
+
+
+
+
+
+
+
 export async function searchMcpRegistry(query: string): Promise<{
   ok: boolean; servers?: RegistryServerCard[]; error?: string;
-  /** 真正发给上游的检索词（可能已从中文展开成英文）；便于界面如实显示 */
+  
   appliedQuery?: string;
-  /** 非空输入但一个词都没识别出来（纯中文且词典未收录）⇒ 上游大概率搜不到，界面必须提醒 */
+  
   unrecognized?: boolean;
 }> {
   try {
@@ -784,7 +784,7 @@ export async function searchMcpRegistry(query: string): Promise<{
         environmentVariables?: Array<{ name?: string }>;
       }>;
       const remotes = (s.server?.remotes ?? []) as Array<{ type?: string; url?: string }>;
-      // 优先 stdio 包（可 npx 一键装）；其次 remote http
+      
       if (pkgs.length > 0 && pkgs[0]?.identifier) {
         const p0 = pkgs[0];
         const command = p0.runtimeHint && /^(npx|uvx|node|python|docker)$/i.test(p0.runtimeHint) ? p0.runtimeHint : "npx";
@@ -798,8 +798,8 @@ export async function searchMcpRegistry(query: string): Promise<{
         cards.push({ name: safeName, displayName, description: desc, source: "registry" });
       }
     }
-    // A-1106：如实回带「实际检索词」与「没认出来」——
-    // ⚠️ 不静默：输入中文却没认出来时，界面必须说清（否则用户以为搜过了，其实上游什么都没搜到）
+    
+    
     return {
       ok: true, servers: cards, appliedQuery: q,
       ...(expanded.unrecognized ? { unrecognized: true } : {}),
@@ -809,7 +809,7 @@ export async function searchMcpRegistry(query: string): Promise<{
   }
 }
 
-/** 从官方 registry 卡片安装（stdio → npx 命令写 slime.toml；http → url）。registry 为可信源，跳过危险检测 */
+
 export async function installFromMcpRegistry(card: RegistryServerCard): Promise<{ ok: boolean; error?: string }> {
   if (!card?.install) { return { ok: false, error: "该服务器无可用安装配置（可能是纯元数据条目）" }; }
   if (card.install.kind === "stdio") {

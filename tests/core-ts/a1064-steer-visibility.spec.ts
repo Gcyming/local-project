@@ -1,16 +1,16 @@
-/**
- * A-1064 守卫（二）：中途「引导」在界面上的**可见性与完整性**，以及它不许干扰待办。
- *
- * 用户原话（同一段里报了三件事）：
- *   · "思考历程看不到我插入引导的卡片"               → 引导必须是时间线上的一等节点
- *   · "而且似乎由于我这个引导，思考历程也出现了一点问题——完整性"
- *                                                    → 折进 think 会污染"要不要补思考节点"的判据
- *   · "我的中间插入引导不要影响待办任务的执行啊，可以重组、加入我的插入的引导请求啊"
- *                                                    → 编排指令必须禁止"只带新增项的 replace"
- *
- * ⚠️ 为什么这三件事写在一个 spec 里：它们是**同一次插入**的三个可见后果，共用一条链路
- *    （`injectSteers` → `steer` 事件 → 界面折时间线 + 撤卡片）。分开写会让人以为可以只修一半。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,7 +28,7 @@ const LOOP = "core-ts/src/tool_loop.ts";
 
 describe("A-1064-A 引导是时间线上的一等节点（不是折进思考段的一段文字）", () => {
   it("🐛 引导**绝不**合并进相邻的思考段（此前会与模型思考糊成一坨）", () => {
-    // 先来一段思考，再插入引导
+    
     let steps = appendTimelineStep([], { kind: "think", text: "模型在想办法。" });
     steps = appendTimelineStep(steps, { kind: "steer", text: "把颜色改成红色" });
     expect(steps).toHaveLength(2);
@@ -36,7 +36,7 @@ describe("A-1064-A 引导是时间线上的一等节点（不是折进思考段�
     expect(steps[0]!.text).toBe("模型在想办法。");
     expect(steps[1]!.kind).toBe("steer");
     expect(steps[1]!.text).toBe("把颜色改成红色");
-    // 再来一段思考：**不许**跟上面的引导粘在一起
+    
     steps = appendTimelineStep(steps, { kind: "think", text: "好的我改。" });
     expect(steps).toHaveLength(3);
     expect(steps[2]!.kind).toBe("think");
@@ -56,9 +56,9 @@ describe("A-1064-A 引导是时间线上的一等节点（不是折进思考段�
   });
 
   it("🐛 引导节点**不**冒充 think —— 否则 onDone 的「要不要补思考节点」判据被它顶掉", () => {
-    /* `ChatPanel.onDone` 用 `!timeline.some(s => s.kind === "think")` 决定要不要用 m.reasoning
-       兜底补思考节点（A-918++ / A-1028）。若引导以 kind=think 落进时间线，
-       "只有引导、没有真思考"时这个 some 为 true → 兜底不再补 → 思考历程缺一段（用户报的"完整性"）。 */
+    
+
+
     const steps = appendTimelineStep([], { kind: "steer", text: "插入的引导" });
     const hasThink = steps.some((s) => s.kind === "think");
     expect(hasThink, "引导被当成 think 了 → 思考节点兜底会被它顶掉").toBe(false);
@@ -77,10 +77,10 @@ describe("A-1064-A 引导是时间线上的一等节点（不是折进思考段�
 
 describe("A-1064-B 接线：三处产地同源，缺一处症状就回来", () => {
   it("契约类型认 steer（时间线节点 + 持久化镜像两处都要认，否则回看历史时静默丢节点）", () => {
-    /* A-1095 #8′ 迁移（原锚点写的是 `"think" | "tool" | "plan" | "todo" | "steer"`）：
-       时间线新增了 `body`（该轮正文片段）这一等节点，两处联合都必须带上它 —— 否则
-       "回看历史时静默丢节点"这个症状会**原样复现**在 body 上（当次会话成立、重启后就没了）。
-       意图逐字保留：这里仍然**整条联合**逐字锁死（新增成员必须同步两处，不许只加一处）。 */
+    
+
+
+
     expect(code(PANORAMA), "TimelineStep.kind 不认 steer/body")
       .toMatch(/kind:\s*"think"\s*\|\s*"body"\s*\|\s*"tool"\s*\|\s*"plan"\s*\|\s*"todo"\s*\|\s*"steer"/);
     expect(code(CTX_META), "持久化镜像 TimelineStepLite.kind 不认 steer/body（重启后引导卡与正文片段消失）")
@@ -115,7 +115,7 @@ describe("A-1064-C 引导不许干扰待办（编排指令钉死 action=add）",
     const src = read(LOOP);
     const at = src.indexOf("[用户中途插入 · Agent-Loop 编排指令]");
     expect(at, "找不到引导的 Agent-Loop 编排指令").toBeGreaterThan(-1);
-    // 取到该条 push 的结束（用户原文那一行）为止
+    
     const end = src.indexOf("—— 用户插入的原文 ——", at);
     expect(end).toBeGreaterThan(at);
     const body = src.slice(at, end);
@@ -130,7 +130,7 @@ describe("A-1064-C 引导不许干扰待办（编排指令钉死 action=add）",
   });
 
   it("[反例] 断言能抓住坏写法（守卫自检）", () => {
-    // 旧指令（只说"列入当前任务清单"，不给 action）在模型手里会落到 replace 上 → 计划被抹掉
+    
     const oldOk = (instruction: string): boolean => instruction.includes('action=\\"add\\"');
     expect(oldOk("2. 调用 todo_write 把它列入当前任务清单（放在合适的位置，已完成的部分保持不变）；")).toBe(false);
   });

@@ -1,14 +1,14 @@
-/**
- * tests/core-ts/a1121-sidebar-open.spec.ts — ②「右栏 = Agent 的工具栏」的守卫（A-1121）。
- *
- * 这一条的**根因**是：opener 原先只认"一个 url 字符串"，链路三步（工具 → 主进程 → 渲染层）
- * 每一步都各自把"不是 url 的东西"丢掉 —— 而丢掉的方式全是**静默**的：
- *   · `setSidebarOpener((url, name) => send({kind:"url", url, name}))` —— 非 url 请求字段全丢；
- *   · 渲染层 `if (p.kind === "url" && p.url)` —— 白名单之外的 kind 连日志都没有；
- *   · 工具回执硬写"已在右侧栏浏览器自动打开" —— 没装配界面时这是**假陈述**。
- * ⇒ 所以本守卫的重点不是"功能能跑"，而是**每一种失败都要能说出来**：
- *   归一失败返回 `null`、`fireSidebarOpen` 返回 `false`、工具回执出现「未就绪」。
- */
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,7 +43,7 @@ describe("A-1121 归一：唯一的请求判据", () => {
   });
 
   it("url 为空 / 只有空白 → `null`（请求不成立，调用方必须出声）", () => {
-    // 若在这里返回一个空 url 的请求，渲染层会静默忽略 —— 那正是"点了没反应"
+    
     expect(normalizeSidebarOpenRequest("")).toBeNull();
     expect(normalizeSidebarOpenRequest("   ")).toBeNull();
     expect(normalizeSidebarOpenRequest({ kind: "url" })).toBeNull();
@@ -54,7 +54,7 @@ describe("A-1121 归一：唯一的请求判据", () => {
     expect(normalizeSidebarOpenRequest({ kind: "terminal", cmd: "  npm run dev  " }))
       .toMatchObject({ kind: "terminal", cmd: "npm run dev" });
     expect(normalizeSidebarOpenRequest({ kind: "terminal" })).toEqual({ kind: "terminal", cmd: undefined, name: undefined });
-    // 空白 cmd 归一成 undefined，不许留一个 " " 让渲染层预填一个空格
+    
     expect(normalizeSidebarOpenRequest({ kind: "terminal", cmd: "   " })?.cmd).toBeUndefined();
   });
 
@@ -133,7 +133,7 @@ describe("A-1121 工具面：两个新工具的参数与权限口径", () => {
   });
 
   it("⚠️ 终端工具的预填参数**不许**叫 `cmd` / `command`（那是 targetFromArgs 的终端命令字段）", () => {
-    // 撞名的后果：同一份字符串会以"终端命令"的身份进硬规则/分类器 → 难以解释的误拦
+    
     const t = getRegistry().get("sidebar_open_terminal")!;
     const props = (t.parameters as { properties: Record<string, unknown> }).properties;
     expect(Object.keys(props)).toContain("prefill");
@@ -176,7 +176,7 @@ describe("A-1121 工具面：两个新工具的参数与权限口径", () => {
   });
 
   it("目录不存在 → 当场报错（**不许**开出一个空树让用户以为这里没文件）", async () => {
-    setSidebarOpener(() => { /* 已装配 */ });
+    setSidebarOpener(() => {  });
     const missing = join(tmpdir(), "slime-a1121-not-exist-9527");
     const r = await getRegistry().get("sidebar_open_files")!.executeFn({ root: missing });
     expect(r).toContain("[错误]");
@@ -184,7 +184,7 @@ describe("A-1121 工具面：两个新工具的参数与权限口径", () => {
   });
 
   it("给了 rel 但没给 root → 如实说明「未能定位」", async () => {
-    setSidebarOpener(() => { /* 已装配 */ });
+    setSidebarOpener(() => {  });
     const r = await getRegistry().get("sidebar_open_files")!.executeFn({ rel: "apps" });
     expect(r).toContain("[已打开]");
     expect(r).toContain("未能定位");
@@ -204,7 +204,7 @@ describe("A-1121 接线：三步链路都必须整包透传（不许任何一步
 
   it("preload 的载荷类型取唯一出处（不是手抄一份形状）", () => {
     expect(PRELOAD).toContain("SidebarOpenRequest");
-    // 反面：手抄形状的下场是"主进程多发一个字段、渲染层不知道"
+    
     expect(PRELOAD).not.toMatch(/onSidebarOpen[\s\S]{0,80}kind: "url"; url: string/);
   });
 
@@ -240,7 +240,7 @@ describe("A-1121 接线：三步链路都必须整包透传（不许任何一步
   });
 
   it("http_create_app 的回执**按真实结果**写（未装配界面时不得声称已自动打开）", () => {
-    /* A-1142：末尾多了 `sessionId` —— 形状变了就同步锚点（铁律：改源码形状必须同步锚点）。 */
+    
     expect(BUILTIN).toContain("fireSidebarOpen({ kind: \"url\", url: localUrl, name: title, sessionId: sessionIdFromArgs(args) })");
     expect(BUILTIN).toContain("界面未就绪，未自动打开");
   });

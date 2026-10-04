@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """Soul-Plan 第 7 步：工具排序 + 审慎承诺测试（三杠杆，docs/soul-plan.md）"""
 from core.agent import Agent
 from core.emotion import EmotionalState
@@ -38,7 +38,7 @@ class TestToolOrdering:
                [t["function"]["name"] for t in self.SCHEMA]
 
     def test_caution_injection(self):
-        # angry(caution=1) → 审慎承诺注入；neutral(0) → 无
+        
         a1 = self._agent_with_mood("angry")
         assert "先向用户确认" in _compose_system_prompt(a1)
         a2 = self._agent_with_mood("neutral")

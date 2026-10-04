@@ -1,30 +1,30 @@
-/**
- * 守卫：上下文压缩闭环的**接线**（A-1082）—— 锁住「压缩并非真压缩」（用户原话）的根因。
- *
- * ## 本文件锁的真实缺陷（逐条都有代码证据）
- *
- * | # | 缺陷 | 判据 |
- * | --- | --- | --- |
- * | ① | `estimateHistoryTokens` 用 `字符/4` ⇒ CJK 4 倍低估 ⇒ 阈值形同虚设 | `context-compress.spec.ts` 的数值判据 |
- * | ② | 摘要轮输入超 9000 就 `return null` **放弃摘要** | 本文件锁 engine 不再有 `inputTokens >= cap` 早退 |
- * | ③ | 摘要不可用时 `setSessionSummary(sid, null, K)` **连 summaryCount 一起删** ⇒ `loadSessionHistory` 判假 ⇒ **返回完整未裁剪历史**：界面报「已压缩 N 轮」，请求一字未减 | 本文件锁 sessions 不再 `delete meta.summaryCount`、且 `loadSessionHistory` 有 `summaryCount !== undefined` 的只裁分支 |
- * | ④ | 渲染层 `ctxAnchorRef = cap × 0.5` —— 与真实体积**无关的构造值**（假报，且污染后续判定） | 本文件锁 ChatPanel 里不存在 `cap * 0.5`、且用 `res.tokensAfter` |
- * | ⑤ | `force` 只越过**渲染层**阈值，主进程再判一次 `needsCompress` ⇒ **一次也没压** | 本文件锁主进程 `if (!force && !needsCompress(` |
- *
- * ## ⚠️ 断言一律用 `has / hasNot` 包装
- *
- * 这些源文件动辄数千行，直接 `expect(SRC).toContain(x)` 在失败时会把**整个文件**灌进报告
- * （实测单条失败 300KB，日志无法阅读）。包装成布尔断言后失败只打一行。
- *
- * 变异：把任一条判据改回去，本文件必须变红（2026-09-23 已逐条手工验证）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
-/** 读源码并剥掉注释 —— 判据只认**代码**，不认注释里提到的旧写法（否则守卫会被自己的说明文字满足） */
+
 const strip = (rel: string): string =>
   readFileSync(join(ROOT, rel), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -36,13 +36,13 @@ const SESSIONS = strip("core-ts/src/services/sessions.ts");
 const ENGINE = strip("core-ts/src/services/engine.ts");
 const IPC = strip("gui/src/shared/ipc.ts");
 
-/** 必须**出现**（失败只打一行，不灌整个源文件） */
+
 const has = (src: string, needle: string, why: string): void =>
   expect(src.includes(needle), `${why}｜缺少：${needle}`).toBe(true);
-/** 必须**不出现** */
+
 const hasNot = (src: string, needle: string, why: string): void =>
   expect(src.includes(needle), `${why}｜不该出现：${needle}`).toBe(false);
-/** 正则判据 */
+
 const matches = (src: string, re: RegExp, why: string): void =>
   expect(re.test(src), `${why}｜不匹配：${re}`).toBe(true);
 
@@ -64,11 +64,11 @@ describe("④ 去掉 `cap × 0.5` 假报，改实测回填（P1-7）", () => {
   });
 
   it("主进程必须**重新加载后实测**（不是拿压缩前的数字改一改）", () => {
-    /* A-1085 迁移（**保留原意**：必须重新加载压缩后的历史，而不是拿压缩前的数字改一改）：
-       那之后所有压缩路径的历史加载都带 `{ full: true }`（摘要必须覆盖**全部**历史），
-       原锚点 `loadSessionHistory(sessionId)` 因此消失 —— 锚点演进而意图不变，故改判新形态。
-       ⚠️ 变量名 `after` 必须一起带上：`{ full: true }` 在压缩前那次加载里也出现，
-          只匹配它会让这条守卫退化成「只要有一处 full 就算过」（同族假绿）。 */
+    
+
+
+
+
     has(MAIN, "const after = await loadSessionHistory(sessionId, { full: true });", "没有重新加载压缩后历史（且必须读全量，与压缩前同口径）⇒ tokensAfter 不可信");
     has(MAIN, "const tokensAfter = estimateHistoryTokens(after) + fixedOverhead;", "tokensAfter 没按「历史 + 固定开销」同口径算");
     has(MAIN, "const stillOverflow = cap > 0 && tokensAfter >= cap;", "没有「压完仍超限」判据");
@@ -79,17 +79,17 @@ describe("③ 降级路径必须**真的裁**（「压缩并非真压缩」的�
   it("🐛 sessions 里 `summary` 为 null **不许**连带删掉 `summaryCount`", () => {
     hasNot(SESSIONS, "delete meta.summaryCount;", "summaryCount 被一起删了 ⇒ trim 档失效 ⇒ 返回完整历史");
     has(SESSIONS, "meta.summaryCount = Math.max(1, Math.floor(keep));", "任何一次压缩都必须落 K（与摘要是否成功无关）");
-    // 反例自检：证明「删 contextSummary」这条**确实**在，否则上面那条断言可能是空转
+    
     has(SESSIONS, "delete meta.contextSummary;", "summary 为 null 时仍应清掉过期摘要文本");
   });
 
   it("🐛 折叠判据的注入条件**不许**绑死在 `contextSummary` 上", () => {
-    /* A-1106 迁移（**保留原意，不许删**）：A-1082 时这段拼装住在 `loadSessionHistory` 里、
-       入参叫 `lines`、`meta` 恒非空。A-1106 把它抽成**纯函数** `foldSessionHistory(raw, meta)`
-       （因为压缩判据必须同时拿到「原始全量」与「折叠视图」，两者不能再揉在一个函数里），
-       于是局部变量改名为 `raw`、`meta` 变可空 ⇒ 锚点演进，但**判据一个字没变**：
-       条件必须绑 `summaryCount`（任何一次压缩都落 K）而**不是** `contextSummary`
-       （摘要不可用时也要**真的裁**，否则界面报「已压缩 N 轮」而请求一字未减）。 */
+    
+
+
+
+
+
     has(MAIN, "if (meta?.summaryCount !== undefined && raw.length > keep * 2) {", "条件仍是 `meta.contextSummary && …` ⇒ 摘要不可用时判假、返回完整历史");
     has(MAIN, "return truncateTurnAligned(raw, keep);", "没有「只裁不摘要」的 trim 分支");
   });
@@ -99,12 +99,12 @@ describe("③ 降级路径必须**真的裁**（「压缩并非真压缩」的�
   });
 
   it("切口不许再按条数硬切（`slice(-(meta.summaryCount …))` 会落在半轮上）", () => {
-    /* A-1106 迁移：原锚点用的是旧变量名 `lines`。变量一改名，这条 `hasNot` 就**恒绿**
-       （`lines` 在源码里已不存在）—— 负面断言空转比缺失更坏：它看着像守住了一道门。
-       现在对**两种变量名**都禁，任何名字下重新按条数硬切都会红。 */
+    
+
+
     hasNot(MAIN, ".slice(-(meta?.summaryCount", "又用 slice 按条数硬切了 ⇒ user,user 连续同角色（Anthropic 系 400）");
     hasNot(MAIN, ".slice(-(meta.summaryCount", "又用 slice 按条数硬切了（非可选链形态）");
-    // 正面锚：切口必须落在 turn 对齐纯函数上（上面两条 hasNot 的对照组 —— 证明不是靠「整段被删」蒙过去的）
+    
     has(MAIN, "truncateTurnAligned(raw, keep)", "trim 档切口没走 turn 对齐纯函数");
   });
 });
@@ -130,12 +130,12 @@ describe("② 摘要轮**不许**再无条件放弃（P1-7 的前提）", () => 
 
 describe("⑤ force 必须透传到主进程（P0「少的那一环」真正接上）", () => {
   it("🐛 主进程的压缩判定必须把 force 当**反应式触发**（否则压缩一次也不会发生）", () => {
-    /* A-1083 **迁移**：判定已收口到唯一出处 `planSend`（此前是两条散落的内联 `!force &&` 判定，
-       而"`force` 要在每一处都记得越过"正是 A-1082 踩过的坑）。原意逐字不变 ——
-       「上游说了太长，就必须真的压一次」；判据搬到新家：
-       ① `force` 以 `afterOverflow` 入参进入 planSend；
-       ② 空转护栏以 `canShrink` 入参进入（而不是在调用点外再判一次）；
-       ③ planSend 内部让 overflow 档**优先于**预算档与用户阈值档（见 context-loop.spec.ts 的 A-1083 用例）。 */
+    
+
+
+
+
+
     has(MAIN, "afterOverflow: force,", "主进程没把 force 当反应式触发 ⇒ 上游说了太长也不压，force 形同虚设");
     has(MAIN, "planSend({", "判定没收口到唯一出处 planSend ⇒ 散落判定会让「force 忘了越过」复发");
     has(MAIN, "canShrink: !noRoomToCut,", "空转护栏没进 planSend ⇒ 上游说太长时仍可能什么都不做");
@@ -147,7 +147,7 @@ describe("⑤ force 必须透传到主进程（P0「少的那一环」真正接�
   });
 
   it("force 下「一点也没压下去」的 skipped 必须回带 stillOverflow（否则会白等一次注定失败的请求）", () => {
-    // 两条 force 路径的 skipped：历史过短、已熔断
+    
     matches(MAIN, /reason: "历史过短[^}]*\.\.\.\(force \? \{ stillOverflow: true \}/, "历史过短的 skipped 没回带 stillOverflow");
     matches(MAIN, /breakerOpen: true,\s*\.\.\.\(force \? \{ stillOverflow: true \}/, "熔断的 skipped 没回带 stillOverflow");
   });

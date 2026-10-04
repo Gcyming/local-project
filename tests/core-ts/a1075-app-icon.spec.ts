@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1075-app-icon.spec.ts — Issue 5「任务栏/托盘图标异常」的回归守卫。
- *
- * ## 排查结论（一手证据）
- *
- * 原实现把 **`gui/build/icon.png`（1024×1024、951.7 KB）** 同时喂给三处：
- *   · 托盘 `Tray`（Windows 实际渲染 **16 px**，200% DPI 下 32 px）；
- *   · 窗口 `BrowserWindow.icon`（任务栏 24/32/48 px）；
- *   · electron-builder `win.icon`（exe / 快捷方式图标）。
- *
- * ⇒ 等于每次都让系统把一张 1024² 位图**现场缩**到十几像素：观感糊，且每处都要读近 1 MB。
- * 这与 #228「通知图标」是**同一类**问题（渲染处只有几十像素，却喂它一张 1024²），
- * 所以沿用同一个解法与同一个生成器：**渲染处需要多大，就给它多大**。
- *
- * 修法：`gui/scripts/make-notify-icon.mjs` 追加产出 `build/icon.ico`（逐尺寸预置
- * 16/24/32/48/64/128/256 七张位图，16×16 那张仅 0.75 KB）；Windows 的托盘与任务栏用它
- * ⇒ **全程零缩放**。非 Windows 回落到 PNG（Electron 在 Linux/macOS 上读不了 `.ico`）。
- *
- * ## 为什么需要这个文件
- *
- * "图标换了个格式"这类改动**过 tsc、过构建、过全部逻辑测试**，只在用户桌面上看得见；
- * 而它又是**两个**产地的（托盘 + 窗口）—— 只改一处就会出现"任务栏对了、托盘还是糊的"。
- * 所以这里锁三件事：资产本身合格、两处都走**同一个出处**、配置与 extraFiles 跟上。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +41,7 @@ const CFG = JSON.parse(read("gui/electron-builder.json")) as {
   extraFiles?: Array<{ from?: string; to?: string }>;
 };
 
-/** 读 ICO 目录：每个条目的尺寸与内嵌数据（Vista+ 支持内嵌 PNG）。 */
+
 function icoEntries(): Array<{ size: number; bytes: number; ok: boolean }> {
   const b = readFileSync(ICO_PATH);
   const n = b.readUInt16LE(4);
@@ -55,7 +55,7 @@ function icoEntries(): Array<{ size: number; bytes: number; ok: boolean }> {
   return out;
 }
 
-/** 取一段源码（`from` 起点 → `next` 起点）。 */
+
 function between(src: string, from: string, next: string): string {
   const at = src.indexOf(from);
   expect(at, `锚点漂移：找不到 ${from}`).toBeGreaterThan(-1);
@@ -69,8 +69,8 @@ describe("A-1075①：资产 —— icon.ico 逐尺寸预置，渲染处要多�
     expect(existsSync(ICO_PATH), "icon.ico 缺失（跑 gui/scripts/make-notify-icon.mjs 生成）").toBe(true);
     const icoKb = statSync(ICO_PATH).size / 1024;
     const pngKb = statSync(PNG_PATH).size / 1024;
-    /* 这条断言锁的是**问题本身**：给十几像素的位置喂一张近 1 MB 的图。
-       ico 里最大的一张是 256²（≈59 KB），加上其余六张一共 ≈91 KB —— 比源图小一个数量级。 */
+    
+
     expect(icoKb, `icon.ico 反而更大（${icoKb.toFixed(1)} KB）—— 没有起到「按需取用」的作用`).toBeLessThan(pngKb / 4);
   });
 
@@ -90,7 +90,7 @@ describe("A-1075①：资产 —— icon.ico 逐尺寸预置，渲染处要多�
   it("**托盘实际渲染的那一张**（16×16）极小 —— 这才是「按需取用」的可测判据", () => {
     const e16 = icoEntries().find((x) => x.size === 16);
     expect(e16, "没有 16px 那一张").toBeTruthy();
-    /* 0.75 KB 实测。给个宽上界：> 4 KB 说明尺寸/编码不对（尺寸错了会连带把别的尺寸塞进来）。 */
+    
     expect(e16!.bytes, `16px 那张 ${(e16!.bytes / 1024).toFixed(2)} KB —— 不对，托盘只该读几百字节`)
       .toBeLessThan(4096);
   });
@@ -106,8 +106,8 @@ describe("A-1075②：接线 —— 托盘与任务栏走**同一个出处**，�
   it("存在唯一出处 `resolveAppIcon()`，且按平台选格式（非 Windows 不许用 .ico）", () => {
     const fn = between(MAIN_C, "const resolveAppIcon = (): string => {", "const ensureTray");
     expect(fn, "没有按平台分支 → Linux/macOS 上读 .ico 会得到空图").toContain('process.platform === "win32" ? "icon.ico" : "icon.png"');
-    /* 读不出来必须**回落 + 出声**（换格式本身也可能失败：资产缺失/解码不出）——
-       否则托盘图标会变成静默空白，比"糊"更难发现。 */
+    
+
     expect(fn, "图标读不出来时没有回落 → 换格式失败就是静默空白").toContain("isEmpty()");
     expect(fn, "回落时不出声 → 静默失败").toContain("console.warn");
     expect(fn, "回落目标不是 PNG").toContain('join(INSTALL_ROOT, "build", "icon.png")');
@@ -121,16 +121,16 @@ describe("A-1075②：接线 —— 托盘与任务栏走**同一个出处**，�
   });
 
   it("任务栏（窗口）图标用**同一个**出处", () => {
-    /*
-     * A-1092 迁移：窗口图标由 `resolveAppIcon()`（返回路径字符串）改为
-     * `resolveAppIconImage()`（返回**解码后的 nativeImage**，一次把 ico 里 16/24/32… 全套
-     * 尺寸交给系统，避免任务栏按路径重新采样把小尺寸糊成白块）。
-     * ⚠️ **唯一出处的意图不变** —— `resolveAppIconImage()` 内部就是先调 `resolveAppIcon()`
-     *    再解码，不是另起一份路径。守卫因此改为"必须走 Image 包装器 + 包装器内部复用出处"，
-     *    而不是删掉这条断言（保留意图、迁移断言，见本仓守卫纪律）。
-     */
+    
+
+
+
+
+
+
+
     expect(MAIN_C, "窗口图标没走唯一出处 → 「任务栏对了托盘还是糊」这类半修").toContain("icon: resolveAppIconImage(),");
-    // 包装器必须真的复用 resolveAppIcon（否则等于又拼了一份路径）
+    
     const imgFn = between(MAIN_C, "const resolveAppIconImage = (): Electron.NativeImage | undefined => {", "\n};");
     expect(imgFn, "resolveAppIconImage 没有复用 resolveAppIcon → 两处路径会漂移").toContain("resolveAppIcon()");
   });

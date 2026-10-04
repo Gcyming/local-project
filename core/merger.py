@@ -21,7 +21,7 @@ def _safe_await(llm_fn, prompt: str):
     result = llm_fn(prompt)
     if inspect.isawaitable(result):
         return result
-    # 同步函数返回普通值，包装为可 await
+    
     async def _wrap():
         return result
     return _wrap()
@@ -39,14 +39,14 @@ class MergeResult:
     """合并结果"""
     task_id: str
     original_task: str
-    summary: str = ""       # 主 Agent 生成的总结
+    summary: str = ""       
     subtask_results: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    risks: list[dict] = field(default_factory=list)  # [{level, description}]
+    risks: list[dict] = field(default_factory=list)  
     trial_passed: bool = False
     trial_log: str = ""
-    trial_score: int = 0  # 0-10 质量评分
-    trial_details: dict = field(default_factory=dict)  # 详细验证信息
+    trial_score: int = 0  
+    trial_details: dict = field(default_factory=dict)  
     final_verdict: str = ""
     created_at: float = field(default_factory=time.time)
 
@@ -66,7 +66,7 @@ class Merger:
         self.task_id = task_id
         self.original_task = original_task
         self.result = MergeResult(task_id=task_id, original_task=original_task)
-        # 验证回调（由调用方注入）
+        
         self._validator_fn: Optional[Callable] = None
 
     def set_validator(self, fn: Callable) -> None:
@@ -165,7 +165,7 @@ class Merger:
         """
         details = {}
         
-        # ── 维度 1: 基础检查 ──────────────────────────────
+        
         has_errors = len(self.result.errors) > 0
         has_critical_risks = any(
             r["level"] in (RiskLevel.HIGH.value, RiskLevel.CRITICAL.value)
@@ -182,9 +182,9 @@ class Merger:
             "summary_length": len(summary) if summary else 0,
         }
         
-        # ── 维度 2: 一致性检查 ──────────────────────────────
+        
         consistency_result = self._check_consistency(subtasks)
-        # A-013: 启发式命中矛盾且有 LLM 时裁定（描述不同侧面 → 解除误报；失败保守保留）
+        
         if llm_fn is not None and not consistency_result.get("consistent", True):
             adjudication = await self._adjudicate_conflict(llm_fn, subtasks)
             consistency_result["llm_adjudication"] = adjudication
@@ -195,14 +195,14 @@ class Merger:
         
         consistency_passed = consistency_result.get("consistent", True)
         
-        # ── 维度 3: 完成度检查 ──────────────────────────────
+        
         completion_result = self._check_completion(summary, subtasks)
         details["completion"] = completion_result
         
         completion_score = completion_result.get("score", 0.5)
         
-        # ── 维度 4: 质量评分（需要 LLM）────────────────────
-        quality_score = 5  # 默认分
+        
+        quality_score = 5  
         if llm_fn and summary:
             try:
                 quality_score = await self._evaluate_quality(
@@ -213,21 +213,21 @@ class Merger:
         
         details["quality_score"] = quality_score
         
-        # ── 综合判断 ────────────────────────────────────────
-        # 通过条件：基础检查通过 + 一致性通过 + 完成度 >= 0.5
+        
+        
         self.result.trial_passed = (
             base_passed and consistency_passed and completion_score >= 0.5
         )
         
-        # 最终评分（加权）
+        
         self.result.trial_score = int(
-            quality_score * 0.4 +  # 质量评分 40%
-            completion_score * 10 * 0.3 +  # 完成度 30%
-            (10 if consistency_passed else 3) * 0.3  # 一致性 30%
+            quality_score * 0.4 +  
+            completion_score * 10 * 0.3 +  
+            (10 if consistency_passed else 3) * 0.3  
         )
         self.result.trial_score = max(0, min(10, self.result.trial_score))
         
-        # 生成日志
+        
         log_parts = []
         if not subtasks:
             log_parts.append("试运行：无子任务结果，无法验证")
@@ -267,10 +267,10 @@ class Merger:
         if len(results) < 2:
             return {"consistent": True, "issue": None}
         
-        # 简单一致性检查：关键词冲突
+        
         issues = []
         
-        # 检查是否有相互矛盾的关键字
+        
         positive_keywords = ["成功", "完成", "正确", "通过"]
         negative_keywords = ["失败", "错误", "异常", "拒绝"]
         
@@ -336,20 +336,20 @@ class Merger:
         if not summary or not self.original_task:
             return {"score": 0.0, "reason": "缺少摘要或原始任务"}
         
-        # 简单启发式：检查摘要长度和子任务覆盖
+        
         summary_len = len(summary)
         subtask_count = len(subtasks)
         success_count = sum(
             1 for st in subtasks if st.state.value == "done"
         )
         
-        # 长度评分（0-1）
-        length_score = min(1.0, summary_len / 200)  # 200字以上满分
         
-        # 覆盖率评分（0-1）
+        length_score = min(1.0, summary_len / 200)  
+        
+        
         coverage_score = success_count / max(1, subtask_count)
         
-        # 综合评分
+        
         score = length_score * 0.5 + coverage_score * 0.5
         
         return {
@@ -391,7 +391,7 @@ class Merger:
         
         try:
             result = await _safe_await(llm_fn, prompt)
-            # 尝试解析数字
+            
             import re
             match = re.search(r'\b([0-9]|10)\b', str(result))
             if match:
@@ -399,7 +399,7 @@ class Merger:
         except Exception:
             pass
         
-        return 5  # 默认分
+        return 5  
 
     def finalize(self, summary: str, subtasks: list,
                  llm_fn: Optional[Callable] = None) -> MergeResult:
@@ -413,12 +413,12 @@ class Merger:
         """
         self.collect_results(subtasks)
         self.analyze_errors(subtasks)
-        # A-047: 幻觉护栏硬信号——summary/子任务结果声称"已保存/已生成"的文件
-        # 真实不存在时追加为错误（trial_run 基础检查会因此失败，不虚报成功）
+        
+        
         self._append_claim_errors(summary, subtasks)
         self.assess_risks(subtasks)
 
-        # 试运行验证
+        
         trial_result = self._run_trial_sync(summary, subtasks, llm_fn)
 
         self.result.summary = summary
@@ -433,7 +433,7 @@ class Merger:
             for st in subtasks
         ]
 
-        # 生成最终结论
+        
         self.result.final_verdict = self._build_verdict(
             summary, subtasks, llm_fn
         )
@@ -450,40 +450,40 @@ class Merger:
         仅当出现完成态声称动词时才触发路径核验（无声称不误伤）。"""
         try:
             from core.claims import find_unverified_claims
-            # 只核验总结与子任务产出文本（result），不核验 error：
-            # 错误信息本身是"失败描述"（如"文件不存在"），不是完成态声称，
-            # 纳入会把无关上下文升级为幻觉错误（review 指出的误报源）
+            
+            
+            
             texts = [summary or ""]
             for st in subtasks:
                 texts.append(st.result or "")
-            # 去重：同一路径在 summary 与多个 result 重复出现时只记一条
+            
             unverified = list(dict.fromkeys(find_unverified_claims("\n".join(texts))))
             if unverified:
                 for p in unverified[:5]:
                     self.result.errors.append(f"幻觉护栏：声称已生成/已保存但文件不存在: {p}")
             return unverified
         except Exception:
-            return []  # 护栏异常不阻断合并主流程（与 CLI 既有语义一致）
+            return []  
 
     def _build_verdict(self, summary: str, subtasks: list,
                        llm_fn: Optional[Callable] = None) -> str:
         """生成最终结论：有 LLM 时调用生成，否则使用模板"""
-        # 先构建风险摘要文本
+        
         risk_lines = []
         for r in self.result.risks:
             risk_lines.append(f"[{r['level']}] {r['description']}")
         risk_summary = "; ".join(risk_lines) if risk_lines else "无风险"
 
-        # 有 LLM 时，用 LLM 生成自然语言结论
+        
         if llm_fn and summary:
             try:
                 verdict = self._llm_verdict(llm_fn, summary, subtasks, risk_summary)
                 if verdict:
                     return verdict
             except Exception:
-                pass  # 回退模板
+                pass  
 
-        # 模板兜底
+        
         if self.result.trial_passed and not self.result.errors:
             return (
                 f"✓ 任务完成（评分 {self.result.trial_score}/10），"
@@ -528,8 +528,8 @@ class Merger:
         except RuntimeError:
             result = _asyncio.run(_safe_await(llm_fn, prompt))
             return str(result).strip() if result else ""
-        # 已在事件循环中，用同步包装。
-        # A-028: 用 lambda 延迟创建协程（同 _run_trial_sync 的泄漏修复）
+        
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
                 lambda: _asyncio.run(_safe_await(llm_fn, prompt))
@@ -548,11 +548,11 @@ class Merger:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # 无运行中的事件循环，直接跑
+            
             return asyncio.run(self.trial_run(summary, subtasks, llm_fn))
-        # 有运行中的事件循环，在新线程跑避免阻塞。
-        # A-028: 用 lambda 延迟创建协程（此前在主线程预创建 trial_run 协程再提交，
-        # 与 llm_fn 嵌套循环交互时产生未 await 协程泄漏）
+        
+        
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
                 lambda: asyncio.run(self.trial_run(summary, subtasks, llm_fn))

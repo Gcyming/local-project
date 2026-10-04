@@ -1,29 +1,29 @@
-/**
- * tests/core-ts/a1088-screen-fault.spec.ts — A-1088 续：「窗口枚举 / 聚焦」的空结果与真故障必须分两态。
- *
- * ## 这一族缺陷的形状（用户报 → 根因）
- *
- * 用户报「用的时候总是糊涂」的一个来源：把**真故障**当**业务限制**报出去，模型于是
- * 去绕一个绕不过去的东西。`screen_windows` 那条链在 A-1088 已修（`desktop.ts` 三态 /
- * `controller.listWindows` 不再吞异常 / 工具层措辞分开）；但**紧挨着的 `screen_focus` 漏了**：
- *
- *   `controller.focusWindow` 旧实现 `catch (e) { return { focused:false, detail: … } }`
- *   把两种完全不同的情形压成**同一个形状**（都只有 `focused:false`，没有可区分的标记）：
- *     · 「未找到标题匹配的窗口」「没抢到前台」—— 后端**正常返回**，业务态，有替代路径；
- *     · 「宿主崩溃 / 启动超时 / 从未启动」—— 后端**抛错**，真故障，怎么绕都不会成功。
- *   `screen_focus` 工具只能看 `focused` ⇒ 对**真故障**也回一句「[未获得前台] …」并附
- *   「可直接 screen_capture 传 window 试试区域截图」⇒ 模型把它当成**焦点限制**去绕
- *   （换标题、反复重试、试区域截图），**永远不会去报告那个已经死掉的宿主**。
- *
- * ## 三层判据（每层测的都是**它自己那一层的输出**）
- *
- *   A 组 行为级（controller）：抛错必须 reject；业务态必须原样透传；不支持必须回业务态。
- *   B 组 端到端（工具层措辞）：真故障 → `[错误] …`；业务态 → `[未获得前台] …`。
- *        —— 这一组才是「用户看到什么」，也是唯一能发现"controller 修了但工具层又吞回去"的地方。
- *   C 组 源码契约：防下一个人顺手把 `catch` 写回去（行为级测得到，但源码级更快定位）。
- *
- * ⚠️ 中文句子一律用「」，不许夹 ASCII 双引号 —— 否则会把整份 spec 打成 0 用例。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { ScreenController } from "../../core-ts/src/screen/controller.js";
@@ -37,9 +37,9 @@ import type {
 import { ToolRegistry } from "../../core-ts/src/tools/registry.js";
 import { registerBuiltinTools, setScreenController } from "../../core-ts/src/tools/builtin.js";
 
-/* ───────────────────────── 三个假后端（分别代表三种真实情形） ───────────────────────── */
 
-/** 宿主已死：枚举与聚焦都抛错 —— 真故障 */
+
+
 class FaultBackend implements ScreenBackend {
   readonly id = "desktop" as const;
   readonly actions = new Set<ScreenAction["kind"]>(["click"]);
@@ -57,7 +57,7 @@ class FaultBackend implements ScreenBackend {
   }
 }
 
-/** 枚举成功但没有窗口 / 窗口都在后台 —— 业务态（后端**正常返回**，不抛） */
+
 class NoWindowBackend implements ScreenBackend {
   readonly id = "desktop" as const;
   readonly actions = new Set<ScreenAction["kind"]>(["click"]);
@@ -73,7 +73,7 @@ class NoWindowBackend implements ScreenBackend {
   }
 }
 
-/** 不具备窗口概念的后端（如 android）：两个可选方法都没实现 */
+
 class NoWindowAbilityBackend implements ScreenBackend {
   readonly id = "desktop" as const;
   readonly actions = new Set<ScreenAction["kind"]>(["click"]);
@@ -86,11 +86,11 @@ class NoWindowAbilityBackend implements ScreenBackend {
 }
 
 afterEach(() => {
-  // 全局单例必须复位，否则后续用例（含同文件的 B 组）会拿到上一条留下的控制器
+  
   setScreenController(null);
 });
 
-/* ───────────────────────── A 组：controller 行为（真故障必须上抛） ───────────────────────── */
+
 
 describe("A-1088 续 A 组 — controller.focusWindow 的两态：真故障上抛，业务态透传", () => {
   it("A1 后端抛错（宿主崩溃/超时/未启动）⇒ **必须 reject**，不许 resolve 成 focused:false", async () => {
@@ -128,7 +128,7 @@ describe("A-1088 续 A 组 — controller.focusWindow 的两态：真故障上�
   });
 });
 
-/* ───────────────────────── B 组：工具层措辞（用户真正看到的那一层） ───────────────────────── */
+
 
 describe("A-1088 续 B 组 — 工具层措辞：真故障 [错误]，业务态才说「未获得前台」", () => {
   const runFocus = async (backend: ScreenBackend, title = "记事本"): Promise<string> => {
@@ -176,10 +176,10 @@ describe("A-1088 续 B 组 — 工具层措辞：真故障 [错误]，业务态�
   });
 });
 
-/* ───────────────────────── C 组：源码契约（防下一个人顺手把 catch 写回去） ───────────────────────── */
+
 
 describe("A-1088 续 C 组 — 源码契约：这两条路径都**不许**吞异常", () => {
-  /** 剥注释后再断言（注释里会故意写"旧实现 catch …"，不剥就是假红灯） */
+  
   const stripComments = (s: string): string => s
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^[ \t]*\/\/.*$/gm, "")
@@ -187,8 +187,8 @@ describe("A-1088 续 C 组 — 源码契约：这两条路径都**不许**吞异
 
   const readSrc = (rel: string): string => readFileSync(new URL(rel, import.meta.url), "utf8");
 
-  /* ⚠️ 取方法体必须用「下一个同类兄弟」当右界（否则会吃进邻居，形成假绿）。
-     controller.ts 里三个方法的顺序是 listWindows → focusWindow → captureWindow。 */
+  
+
   const ctlSrc = stripComments(readSrc("../../core-ts/src/screen/controller.ts"));
   const sliceBetween = (src: string, from: string, to: string): string => {
     const a = src.indexOf(from);

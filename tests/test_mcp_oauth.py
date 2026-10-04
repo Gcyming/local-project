@@ -47,7 +47,7 @@ class TestOAuthDiscovery:
             assert d["authorization_endpoint"] == "https://as.example/auth"
             assert d["token_endpoint"] == "https://as.example/token"
             assert d["registration_endpoint"] == "https://as.example/reg"
-            assert d["resource"] == "https://rs.example/mcp"  # RFC 9728 resource 字段优先
+            assert d["resource"] == "https://rs.example/mcp"  
         _run(scenario())
 
     def test_discover_oidc_fallback(self):
@@ -122,7 +122,7 @@ class TestOAuthPKCE:
     def test_generate_pkce_pair(self):
         from core.mcp_oauth import OAuthFlow
         verifier, challenge = OAuthFlow._generate_pkce()
-        assert 43 <= len(verifier) <= 128  # RFC 7636
+        assert 43 <= len(verifier) <= 128  
         assert challenge == OAuthFlow.challenge_from(verifier)
 
 
@@ -173,7 +173,7 @@ class TestOAuthToken:
                 with patch.object(mcp_oauth, "_http_json", fake_http):
                     token = await mgr.ensure_token()
                 assert token == "AT-new"
-                saved = mgr._store.load()  # 落盘持久化（重启后可用）
+                saved = mgr._store.load()  
                 assert saved["refresh_token"] == "RT-new"
                 assert saved["token_endpoint"] == "https://as.example/token"
         _run(scenario())
@@ -183,7 +183,7 @@ class TestOAuthToken:
         from core.mcp_oauth import OAuthManager
 
         async def fake_http(method, url, data=None, payload=None):
-            return None  # refresh 失败
+            return None  
 
         async def scenario():
             with patch.object(mcp_oauth, "_PROJECT_ROOT", tmp_path):
@@ -193,12 +193,12 @@ class TestOAuthToken:
                     "expires_at": time.time() - 10, "client_id": "cid",
                     "token_endpoint": "https://as.example/token", "resource": "https://rs.example",
                 }
-                mgr._store.save(mgr._tokens)  # 先落盘模拟磁盘缓存
+                mgr._store.save(mgr._tokens)  
                 with patch.object(mcp_oauth, "_http_json", fake_http):
                     ok = await mgr._do_refresh()
                 assert ok is False
-                assert mgr._tokens is None         # 内存清空
-                assert mgr._store.load() is None   # 磁盘无残留脏状态（审查建议 5）
+                assert mgr._tokens is None         
+                assert mgr._store.load() is None   
         _run(scenario())
 
 
@@ -228,7 +228,7 @@ class TestOAuthTokenStore:
             store = mcp_oauth.TokenStore("../evil name")
             store.save({"access_token": "AT"})
             assert store.load() is not None
-            # 目录段已 sanitize（[A-Za-z0-9_-]），落盘未逃逸 tmp_path
+            
             assert str(tmp_path.resolve()) in str(store._path.resolve())
             assert ".." not in store._path.parts
 
@@ -262,9 +262,9 @@ class TestOAuthIntegration:
             result = await t.request(
                 '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}', 1, timeout=5.0)
             assert result is not None and result["result"] == {"ok": True}
-            assert len(seen) == 2          # 401 → ensure_token → 重试一次
-            assert seen[0] is None         # 首次无 token，无 Authorization 头
-            assert seen[1] == "Bearer AT"  # 重试带上 OAuth token
+            assert len(seen) == 2          
+            assert seen[0] is None         
+            assert seen[1] == "Bearer AT"  
             assert www_auth_seen == ['Bearer resource_metadata="https://rs.example/meta"']
         _run(scenario())
 
@@ -299,7 +299,7 @@ class TestOAuthIntegration:
             mgr._do_authorize = fake_authorize
             r1, r2 = await asyncio.gather(mgr.ensure_token(), mgr.ensure_token())
             assert r1 == "AT" and r2 == "AT"
-            assert calls == 1  # 单飞：并发 401 只触发一次授权
+            assert calls == 1  
         _run(scenario())
 
     def test_static_auth_skips_oauth(self):
@@ -311,14 +311,14 @@ class TestOAuthIntegration:
             mgr._tokens = {"access_token": "AT-oauth", "expires_at": None}
             t = _HTTPTransport("http://x/mcp", {"Authorization": "Bearer static-xyz"}, "t", oauth=mgr)
             h = t._headers()
-            assert h["Authorization"] == "Bearer static-xyz"  # 静态 token 优先，OAuth 不覆盖
+            assert h["Authorization"] == "Bearer static-xyz"  
         _run(scenario())
 
     def test_refresh_fail_then_reauth(self, tmp_path):
         from core import mcp_oauth
 
         async def fake_http(method, url, data=None, payload=None):
-            return None  # refresh 失败
+            return None  
 
         async def scenario():
             with patch.object(mcp_oauth, "_PROJECT_ROOT", tmp_path):
@@ -337,8 +337,8 @@ class TestOAuthIntegration:
                 mgr._do_authorize = fake_authorize
                 with patch.object(mcp_oauth, "_http_json", fake_http):
                     token = await mgr.ensure_token()
-                assert token == "AT-new"  # refresh 失败 → clear → 后台重授权 → 新 token
-                assert mgr._store.load() is None  # fake_authorize 未落盘（仅内存）
+                assert token == "AT-new"  
+                assert mgr._store.load() is None  
         _run(scenario())
 
     def test_callback_server_flow(self):
@@ -360,7 +360,7 @@ class TestOAuthIntegration:
             captured["url"] = url
 
         async def scenario():
-            flow = OAuthFlow(redirect_port=18123)  # 非默认端口防冲突
+            flow = OAuthFlow(redirect_port=18123)  
             with patch.object(mcp_oauth, "_http_json", fake_http), \
                     patch.object(webbrowser, "open", fake_open):
                 fut = asyncio.ensure_future(flow.authorize(
@@ -368,7 +368,7 @@ class TestOAuthIntegration:
                      "token_endpoint": "https://as.example/token",
                      "resource": "https://rs.example"},
                     "cid", "https://rs.example"))
-                # 等 authorize URL 生成（webbrowser.open 被调）
+                
                 for _ in range(100):
                     if captured:
                         break
@@ -377,14 +377,14 @@ class TestOAuthIntegration:
                 assert q["code_challenge_method"] == ["S256"]
                 assert q["redirect_uri"] == ["http://127.0.0.1:18123/mcp/oauth/callback"]
                 state = q["state"][0]
-                # 模拟浏览器回调
+                
                 async with httpx.AsyncClient() as c:
                     resp = await c.get("http://127.0.0.1:18123/mcp/oauth/callback",
                                        params={"code": "test-code", "state": state})
                 assert resp.status_code == 200
                 result = await asyncio.wait_for(fut, 10)
                 assert result["access_token"] == "AT"
-                # PKCE 闭环：token 请求的 code_verifier 与 authorize URL 的 S256 challenge 匹配
+                
                 assert OAuthFlow.challenge_from(captured["data"]["code_verifier"]) == q["code_challenge"][0]
         _run(scenario())
 
@@ -428,5 +428,5 @@ class TestOAuthIntegration:
             server = _MCPServer("srv", t, oauth=mgr)
             ok = await server.start()
             assert ok is True
-            assert seen and seen[0] == "Bearer AT"  # initialize 带上了 OAuth token
+            assert seen and seen[0] == "Bearer AT"  
         _run(scenario())

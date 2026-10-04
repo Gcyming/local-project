@@ -14,11 +14,11 @@ from .agent import Agent, find_agent, IDENTITY_CONSTRAINT
 from .emotion import top_k_for_mood
 from .filter import get_filter, FilterResult
 
-# ── 共享异步 HTTP 客户端（连接复用）────────────────────────
-# 每次请求都 new AsyncClient 会重新完成 TCP/TLS 握手并丢弃 keep-alive 连接池，
-# 多轮工具循环 / Swarm 并行 Worker 场景下重复握手是真实延迟开销。
-# 注意：httpx.AsyncClient 绑定创建时的事件循环，跨 loop 复用会抛错
-# （pytest / run_tests 每个用例独立事件循环），因此按 loop id 缓存、限制副本数。
+
+
+
+
+
 _SHARED_CLIENTS: dict[int, httpx.AsyncClient] = {}
 _SHARED_CLIENTS_MAX = 4
 _SHARED_CLIENTS_LOCK = threading.Lock()
@@ -35,7 +35,7 @@ def _get_shared_client() -> httpx.AsyncClient:
     with _SHARED_CLIENTS_LOCK:
         client = _SHARED_CLIENTS.get(loop_id)
         if client is None:
-            # 只保留最近几个事件循环的副本（测试/多循环场景防无界累积；旧副本随 GC 回收）
+            
             while len(_SHARED_CLIENTS) >= _SHARED_CLIENTS_MAX:
                 _SHARED_CLIENTS.pop(next(iter(_SHARED_CLIENTS)), None)
             client = httpx.AsyncClient(
@@ -45,11 +45,11 @@ def _get_shared_client() -> httpx.AsyncClient:
             _SHARED_CLIENTS[loop_id] = client
         return client
 
-# API 安全上限（Agnes 2.5 Flash 文档标称 65.5K，实际需留余量）
+
 MAX_OUTPUT_LIMIT = 65536
 MAX_CONTEXT_LIMIT = 524288
 
-# Token 估算系数（中文 1 token ≈ 1-1.5 字符，英文 1 token ≈ 4 字符，取 1.5 保守值）
+
 _CHARS_PER_TOKEN = 1.5
 
 
@@ -70,7 +70,7 @@ def _apply_filter(reply: str, agent: Agent) -> str:
             )
         return result.filtered
     except Exception:
-        # 过滤失败不影响主流程
+        
         return reply
 
 
@@ -105,9 +105,9 @@ class _StreamFilter:
         return _apply_filter(tail, agent) if tail else ""
 
 
-# ── Reasoning 参数注入 ─────────────────────────────────────────────
 
-# Anthropic thinking budget_tokens 映射（effort 档位 → token 预算）
+
+
 _THINKING_BUDGET = {"low": 2048, "medium": 8192, "high": 16384}
 
 
@@ -145,18 +145,18 @@ def _build_reasoning_params(agent, cfg: dict) -> dict:
     effort = getattr(agent, "reasoning_effort", "none")
     if effort == "none":
         return {}
-    # provider 配置关闭 reasoning 时整体跳过（严格网关兜底）
+    
     if not cfg.get("reasoning_enabled", True):
         return {}
     style = cfg.get("reasoning_style", "openai")
-    # A-091（实测 2026-08-16，真实密钥）：Agnes 网关只接受 chat_template_kwargs.enable_thinking
-    # （thinking/budget_tokens 与 reasoning_effort 格式均被接受但忽略，流式无 reasoning_content）；
-    # chat_template_kwargs 是布尔开关，预算不可控。api_base 含 agnes-ai 自动生效（零配置）。
+    
+    
+    
     if "agnes" in str(cfg.get("api_base", "")).lower() or style == "agnes":
         return {"chat_template_kwargs": {"enable_thinking": True}}
-    # 本地模型（llama.cpp）：仅 chat_template_kwargs.enable_thinking 生效。
-    # 顶层 reasoning_effort 对 llama.cpp 无意义（Qwen3 未按 reasoning_effort 训练，
-    # llama-server 只在 chat_template_kwargs 内解析），且部分版本会校验其取值 → 不传。
+    
+    
+    
     base = str(cfg.get("api_base", "")).lower()
     if "127.0.0.1" in base or "localhost" in base:
         return {"chat_template_kwargs": {"enable_thinking": True}}
@@ -165,14 +165,14 @@ def _build_reasoning_params(agent, cfg: dict) -> dict:
     return {"reasoning_effort": effort}
 
 
-# A-056: 429 限流退避重试（Swarm 多 Worker 并行时 API 限流全灭的缓解）
-_RETRY_429_BACKOFF = (5.0, 15.0, 30.0, 60.0)  # A-057/A-059: 覆盖视频 API 约 1 分钟限流窗口
+
+_RETRY_429_BACKOFF = (5.0, 15.0, 30.0, 60.0)  
 
 
-# A-156/A-157: 瞬时错误状态码（值得原地重试）——对齐 core-ts client.ts TRANSIENT_STATUS_CODES
-# 408 请求超时 / 429 限流 / 503 过载 / 504 网关超时 / 529 服务重载（Anthropic）
+
+
 _TRANSIENT_STATUS = frozenset((408, 429, 503, 504, 529))
-# 非 429 瞬时错误退避（秒）：429 走 _RETRY_429_BACKOFF，其余瞬时走短退避
+
 _RETRY_TRANSIENT_BACKOFF = (1.0, 3.0, 7.0)
 
 
@@ -184,7 +184,7 @@ async def _post_chat_with_retry(client, url, headers, payload):
     import asyncio as _a
     for attempt in range(len(_RETRY_429_BACKOFF)):
         resp = await client.post(url, headers=headers, json=payload)
-        code = getattr(resp, "status_code", 200)  # 容错：假流/无状态码对象视为成功一次
+        code = getattr(resp, "status_code", 200)  
         if code not in _TRANSIENT_STATUS or attempt == len(_RETRY_429_BACKOFF) - 1:
             return resp
         if code == 429:
@@ -254,7 +254,7 @@ def _filter_tools_schema(tools_schema: list, tools_only: list[str] | None) -> li
             if t.get("function", {}).get("name") in allowed]
 
 
-# Soul-Plan 第 4 步：promote_groups → 工具名集合（检索/终端/写三类）
+
 _PROMOTE_GROUP_TOOLS = {
     "retrieval": {"web_search", "web_fetch", "skill_search", "skill_lookup"},
     "terminal": {"shell", "bash", "terminal", "code_check"},
@@ -368,9 +368,9 @@ def _content_to_text(content) -> str:
     return ""
 
 
-# 识图安全限制（服务端兜底 + 前端一致）。data URL 形式：data:image/png;base64,...
-_MAX_IMAGE_BYTES = 8 * 1024 * 1024   # 单张 ≤ 8MB（base64 后约 10.7MB）
-_MAX_IMAGES_PER_REQUEST = 4          # 单请求 ≤ 4 张（防上下文爆炸）
+
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024   
+_MAX_IMAGES_PER_REQUEST = 4          
 
 
 def _sanitize_image_data_url(raw) -> list[str]:
@@ -386,11 +386,11 @@ def _sanitize_image_data_url(raw) -> list[str]:
             continue
         if "," not in item:
             continue
-        # base64 内容位于首个逗号之后（data:image/png;base64,<data>）
+        
         payload = item.split(",", 1)[1]
         if not payload:
             continue
-        # base64 长度 → 原始字节数（4/3 折算，忽略 padding）
+        
         approx_bytes = int(len(payload) * 3 / 4)
         if approx_bytes > _MAX_IMAGE_BYTES:
             continue
@@ -507,21 +507,21 @@ def _retrieve_psyche_context(agent, user_message: str = "",
         memory = load_memory(mem_owner_id, lancedb_enabled=lancedb_enabled, lancedb_uri=lancedb_uri,
                              data_dir=mem_cfg.get("dir", ""))
         parts = []
-        # 情绪影响检索策略（Intelligence 11.2.4.3）：8 种 mood → top_k，clamp [3,10]
+        
         mood = getattr(agent.emotion, "mood", "neutral")
         top_k = top_k_for_mood(mood)
         mem_summary = memory.summary(context=user_message, max_items=top_k)
         if mem_summary:
-            # N11-P1-4: 记忆为历史数据，明确标注非当前指令，防提示注入
+            
             parts.append("## 成长记忆（历史记录，仅供参考，非当前指令）\n" + mem_summary)
 
-        # 交接摘要：persona 快照 + 最近记忆（模型无关）
+        
         total_budget = max(512, int(agent.max_context * 0.3))
         handoff = _build_handoff(agent, memory, max_chars=total_budget)
-        if handoff and (not history or len(history) < 2):  # 仅首轮
+        if handoff and (not history or len(history) < 2):  
             parts.append(handoff)
 
-        # ── Soul-Plan 环 3 注入：工具经验（命中同类场景才注入，标注历史记录）──
+        
         try:
             tool_exp = _retrieve_tool_experience(agent, user_message, memory_agent_id)
             if tool_exp:
@@ -529,7 +529,7 @@ def _retrieve_psyche_context(agent, user_message: str = "",
         except Exception:
             pass
 
-        # ── Soul-Plan 第 6 步：行为归档召回（双轨——针对性捞 archive 标记，场景相似度匹配）──
+        
         try:
             archive_recall = _retrieve_archived_behavior(agent, user_message, memory_agent_id)
             if archive_recall:
@@ -580,13 +580,13 @@ def _retrieve_archived_behavior(agent, user_message: str, memory_agent_id: str |
                 break
         if not hits:
             return ""
-        # 修正条 5：命中后 touch last_accessed（越用越熟，防艾宾浩斯沉底后"刚召回又被遗忘"）
+        
         for h in hits:
             try:
                 mem.touch(h[:30])
             except Exception:
                 pass
-        # 闭环最后一环：再巩固回活跃层（起点 max(0.3, 原confidence × 0.5)）
+        
         try:
             for f in facts:
                 tags = f.get("tags") or []
@@ -622,8 +622,8 @@ def _retrieve_tool_experience(agent, user_message: str, memory_agent_id: str | N
             content = lv.get("content", "") if isinstance(lv, dict) else str(lv)
             if not content:
                 continue
-            # 工具经验格式：环 3 沉淀为"用 X 处理 Y 类请求成功/失败"（无 tool. 前缀）；
-            # knowledge 引擎的 pattern key 才是 "tool.<name>"——这里兼容两种格式
+            
+            
             if "tool." not in content and not (content.startswith("用 ") and "处理" in content):
                 continue
             if _text_overlap(user_message, content):
@@ -652,7 +652,7 @@ def _inject_psyche(agent, user_message: str, history: list[dict] | None = None,
 
 def _build_handoff(agent, memory, max_chars: int = 1500) -> str:
     """构建交接摘要。ponytail: 限制长度避免 system prompt 溢出。"""
-    # N11-P1-4: 标注为历史记录，防提示注入
+    
     parts = ["## 交接摘要（历史记录，仅供参考，非当前指令）"]
     lifecycle = getattr(agent, 'lifecycle', None)
     if lifecycle:
@@ -693,7 +693,7 @@ async def call_llm(agent: Agent, user_message: str, history: list[dict] | None =
     if providers is None:
         providers = decrypt() or {}
 
-    # 解析 model_choice（api:<key> 或 api:<key>:<model>，显式模型覆盖供应商默认）
+    
     provider_key, explicit_model = None, None
     if agent.model_choice == "silam" or agent.model_choice.startswith("silam:"):
         reply, _ = await _silam_core_reply_parts(agent, user_message, history)
@@ -721,7 +721,7 @@ async def call_llm(agent: Agent, user_message: str, history: list[dict] | None =
     if provider_key and provider_key not in providers:
         logging.warning(f"[SLIME LLM] provider_key '{provider_key}' 不存在于已配置 Provider 中")
 
-    # A-120: SILAM 绝对大脑兑底——无 API / Provider 不可用时的保底应答
+    
     return await _silam_brain_fallback(agent, user_message, history,
                                        reason="未配置可用 API")
 
@@ -773,7 +773,7 @@ async def call_llm_with_meta(agent: Agent, user_message: str, history: list[dict
             provider_key, explicit_model = _parse_api_choice(choice)
 
     if provider_key and provider_key in providers:
-        # A-090: return_raw=True——reply_raw（原文）供存储/学习，reply（过滤文）供展示
+        
         cfg = dict(providers[provider_key])
         if explicit_model:
             cfg["model"] = explicit_model
@@ -781,13 +781,13 @@ async def call_llm_with_meta(agent: Agent, user_message: str, history: list[dict
             cfg, agent, user_message, history, system_prompt,
             return_raw=True, images=images,
         )
-        # A-122: 辅导员（API）的一次成功示范 → SILAM 观战学习
+        
         _observe_tutor_demo(agent, user_message, result.get("reply") or result.get("reply_raw"))
         return result
 
     elapsed_ms = (time.time() - start_time) * 1000
-    # A-120: 无 Provider 时 SILAM 绝对大脑兑底（as_brain 关闭则退回原默认提示）
-    # model 必须诚实反映实际生成方：大脑开启 → "silam-brain"；关闭（默认提示）→ "none"
+    
+    
     brain_on = _silam_as_brain()
     reply = await _silam_brain_fallback(agent, user_message, history,
                                         system_prompt, reason="未配置可用 API")
@@ -824,7 +824,7 @@ def _resolve_provider_choice(agent: Agent, agent_registry: list[Agent]) -> str |
             return current.model_choice
         if current.parent_id:
             if current.parent_id in visited:
-                break  # parent 链成环，退出
+                break  
             visited.add(current.parent_id)
             current = find_agent(agent_registry, current.parent_id)
         else:
@@ -847,8 +847,8 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
                             memory_agent_id: str | None = None,
                             return_raw: bool = False,
                             images: list[str] | None = None) -> str:
-    # A-090（P1-1 学习管线污染）：return_raw=True 时返回 (过滤后, 原文) 元组——
-    # 存储/学习用原文，展示用过滤文（身份铁律不污染人格演化与记忆）
+    
+    
     """
     调用 OpenAI 兼容 API。
     参数：
@@ -873,12 +873,12 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
         "Content-Type": "application/json",
     }
 
-    # 构建 system prompt，注入记忆摘要（如有）
+    
     sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
 
     messages = [{"role": "system", "content": sys_prompt}]
     if history:
-        # 先过上下文压缩引擎（超过 window 时压缩，传入 LLM 摘要函数）
+        
         from core.context import ContextCompressor
         compressor = ContextCompressor(agent.context_config)
 
@@ -891,12 +891,12 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
 
         history = await compressor.compress_async(history, summary_fn=_summary_fn)
 
-        # 再按 max_context 截断（1 token ≈ 1.5 字符，适配中英文混合）
+        
         sys_tokens = _estimate_tokens(sys_prompt)
         context_budget = agent.max_context - sys_tokens
         if context_budget <= 0:
             context_budget = agent.max_context
-        char_budget = int(context_budget * 1.5)  # 字符预算
+        char_budget = int(context_budget * 1.5)  
         truncated = []
         total_chars = 0
         for msg in reversed(history):
@@ -912,27 +912,27 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
     payload = {"messages": messages, "stream": False}
     if model:
         payload["model"] = model
-    # max_tokens 超过安全上限时不发送，让 API 使用自己的默认值
+    
     if agent.max_output and agent.max_output <= MAX_OUTPUT_LIMIT:
-        payload["max_tokens"] = _effective_max_output(agent, cfg)  # A-091: 思考联动
+        payload["max_tokens"] = _effective_max_output(agent, cfg)  
     elif agent.max_output and agent.max_output > MAX_OUTPUT_LIMIT:
         logging.warning(
             f"[SLIME LLM] max_output={agent.max_output} 超过上限 {MAX_OUTPUT_LIMIT}，"
             f"已跳过 max_tokens 参数，API 将使用默认上限"
         )
 
-    # 注入工具定义（如果注册表中有工具）
+    
     try:
         from tools.registry import get_registry
         tools_schema = get_registry().list_tools()
-        # Soul-Plan 第 4 步：按情绪 promote_groups 前置（全模型安全）
+        
         tools_schema = _order_tools_schema(tools_schema, agent, cfg)
         if tools_schema:
             payload["tools"] = tools_schema
     except Exception:
         pass
 
-    # 注入 reasoning 参数（有效用 / 支持时，effort=none 零注入）
+    
     payload.update(_build_reasoning_params(agent, cfg))
 
     client = _get_shared_client()
@@ -944,7 +944,7 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
         data = resp.json()
         message = data["choices"][0]["message"]
 
-        # tool_calls 循环：LLM 请求工具 → 执行 → 结果回填 → 二次请求
+        
         tool_calls = message.get("tool_calls")
         if tool_calls:
             return await _handle_tool_calls(
@@ -969,8 +969,8 @@ def _sanitize_api_error(e: Exception) -> str:
     return f"{name}" + (f" (HTTP {code})" if code else "")
 
 
-_TOOL_MAX_ROUNDS = 500  # 工具循环上限（2026-08-29 用户要求默认 500；此前 15 轮对长链路/多工具集成任务偏紧）
-# A-050-R3: 媒体生成工具——同请求合计最多执行 1 次（防模型乱调导致生成混乱）
+_TOOL_MAX_ROUNDS = 500  
+
 _MEDIA_GENERATOR_TOOLS = ("agnes_generate_image", "agnes_generate_video")
 
 
@@ -988,8 +988,8 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
     details: list[tuple[str, str, str]] = []
 
     token = current_model_choice.set(agent.model_choice)
-    _dedup = dedup_tools_log.get()  # P1-14: 请求级重复调用去重（None=直调不去重）
-    round_fail_streak = 0  # Soul-Plan 环 2：同轮工具成败归并（连续失败 ≥2 触发 tool 情绪信号）
+    _dedup = dedup_tools_log.get()  
+    round_fail_streak = 0  
     try:
         for tc in tool_calls:
             func = tc.get("function", {})
@@ -999,7 +999,7 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                 args = _json.loads(func.get("arguments", "{}"))
                 args_str = _json.dumps(args, ensure_ascii=False)
             except Exception:
-                # N11-P2-15: 参数 JSON 解析失败 → 回填错误，不执行工具
+                
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
@@ -1008,11 +1008,11 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                 details.append((tool_name, func.get("arguments", ""), "[错误] 参数 JSON 解析失败"))
                 continue
 
-            # 查沙箱权限（L0-L5 分级）
+            
             tool = registry.get(tool_name)
-            # A-050-R3/A-060: 媒体生成工具同请求限 1 次（防模型"贪心"乱调：图生图时多生视频、
-            # 一个视频生成两个等混乱）。A-060: 最近一次**成功**才拦截——429 等失败后
-            # Worker 下一轮重试同一媒体生成属正常重试，不得误拦。被拦的不执行、不进沙箱。
+            
+            
+            
             _log = None
             if tool_name in _MEDIA_GENERATOR_TOOLS:
                 from core.agent_context import media_calls_log
@@ -1027,9 +1027,9 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                     })
                     details.append((tool_name, args_str, "[错误] 同请求已成功生成过媒体，已拦截"))
                     continue
-            # P1-14: 请求级重复调用去重——相同工具名+相同参数的调用已在本请求
-            # 真实执行过 → 跳过（防模型循环重复调用产生重复副作用）。只在真实执行后
-            # 记录：沙箱拒绝/媒体拦截/参数解析失败的调用不记录，允许模型重试。
+            
+            
+            
             _dedup_key = (tool_name, args_str) if _dedup is not None else None
             if _dedup is not None and _dedup_key in _dedup:
                 _dup_msg = "[提示] 相同参数的该工具已在本请求中执行过（结果见上方工具记录），不再重复执行"
@@ -1042,12 +1042,12 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                 continue
             if tool and tool.permissions:
                 denied = False
-                # 提取真实目标路径（供 workspace 隔离校验），无路径字段则用参数原文
+                
                 target_str = str(args.get("url") or args.get("path") or args.get("file") or args.get("target") or args)
                 for perm in tool.permissions:
-                    # 映射权限到等级
+                    
                     perm_level_map = {"read": 0, "write": 2, "terminal": 3, "network": 4}
-                    level = perm_level_map.get(perm, 4)  # A-088 P1-11: 未知权限 fail-closed（最高级）
+                    level = perm_level_map.get(perm, 4)  
                     result = manager.check_permission(agent.id, tool_name, target_str, level=level)
                     if not result.allowed:
                         denied = True
@@ -1058,16 +1058,16 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                             )
                         break
                 if denied:
-                    manager.record_violation(agent.id)  # 情绪 violation 信号源（Intelligence 11.2.4.6）
+                    manager.record_violation(agent.id)  
                     result = f"[沙箱拒绝] 工具 '{tool_name}' 需要未授权的权限"
                 else:
-                    # 授予权限并记录审计
+                    
                     for perm in tool.permissions:
                         perm_level_map = {"read": 0, "write": 2, "terminal": 3, "network": 4}
-                        level = perm_level_map.get(perm, 4)  # A-088 P1-11: fail-closed
+                        level = perm_level_map.get(perm, 4)  
                         manager.grant_permission(agent.id, tool_name, target_str, level=level)
-                    # A-083: 链式参考帧**强制注入**——模型调 agnes_generate_video 时
-                    # 若未传 image（弱模型常忘记），自动补前段末帧路径（不依赖模型自觉）。
+                    
+                    
                     if tool_name == "agnes_generate_video" and not str(args.get("image", "")).strip():
                         from core.agent_context import current_ref_frame
                         _rf = current_ref_frame.get()
@@ -1077,7 +1077,7 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                             logging.info(f"[SLIME] 参考帧强制注入 agnes_generate_video: {_rf}")
                     result = await registry.call_tool(tool_name, args)
             else:
-                # A-083: 同上（无 permissions 的工具同样注入）
+                
                 if tool_name == "agnes_generate_video" and not str(args.get("image", "")).strip():
                     from core.agent_context import current_ref_frame
                     _rf = current_ref_frame.get()
@@ -1087,23 +1087,23 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                         logging.info(f"[SLIME] 参考帧强制注入 agnes_generate_video: {_rf}")
                 result = await registry.call_tool(tool_name, args)
 
-            # A-060: 记录媒体生成结果（成功 True / 失败 False → 允许下轮重试）
+            
             if _log is not None and tool_name in _MEDIA_GENERATOR_TOOLS:
                 _log.append((tool_name, "[错误]" not in str(result)))
-            # P1-14: 真实执行后记录去重键（沙箱拒绝不记录——用户批准后重试不应被拦）
+            
             if _dedup is not None and not str(result).startswith("[沙箱拒绝]"):
                 _dedup.append(_dedup_key)
 
-            # ── Soul-Plan 环 2：工具成败 → 情绪（连续失败 ≥2 触发 tool 信号；成功不双计）──
+            
             _tool_ok = not (isinstance(result, Exception)
                             or str(result).startswith("[错误]")
                             or str(result).startswith("[沙箱拒绝]")
                             or str(result).startswith("[工具调用后请求失败]"))
-            # A-1141：环境性拒绝（沙箱拦下 / 请求失败）不是认知收获，写入闸门要单独认它。
+            
             _env_rejection = (str(result).startswith("[沙箱拒绝]")
                               or str(result).startswith("[工具调用后请求失败]"))
-            # A-1141：先保住「本次调用之前」的连续失败数 —— 下面的成功分支会把它清零，
-            # 而「反复失败后终于成功」恰恰是最该记的经验之一。
+            
+            
             _prev_fail_streak = round_fail_streak
             if _tool_ok:
                 round_fail_streak = 0
@@ -1114,7 +1114,7 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                         agent.emotion.update(success=False, failure_type="tool")
                     except Exception:
                         pass
-            # A-102（指标②接线）：工具调用计数累加到 Agent（供 A/B 统计差值读取）
+            
             try:
                 agent.ab_tool_total = getattr(agent, "ab_tool_total", 0) + 1
                 if _tool_ok:
@@ -1122,7 +1122,7 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
             except Exception:
                 pass
 
-            # ── Soul-Plan 环 3：工具经验沉淀（best-effort，失败不阻断主流程）──
+            
             try:
                 from core.knowledge import get_knowledge_engine
                 _keng = get_knowledge_engine(agent_id=agent.id)
@@ -1130,14 +1130,14 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
                     f"tool.{tool_name}.{'success' if _tool_ok else 'fail'}",
                     "tool", f"{tool_name} 处理{args_str[:80]}", "low" if _tool_ok else "high",
                 )
-                # A-1141（写入闸门）：**工具成功不再算一条经验**。
-                # 实测病灶：此前每次工具调用都 add_lesson，累积出 11796 条记忆，而其中
-                # 只有 25 条不同内容（99.8% 重复；单条「用 file_read 处理{"path": "x"} 类请求
-                # 成功」就出现 1588 次）。那不是记忆，是日志 —— 且把真正有价值的条目淹没了。
-                # 现在只记三类真经验：
-                #   ① 失败且原因非显然   —— 负经验有价值
-                #   ② 反复失败后终于成功 —— 「这条路走通了」
-                #   ③ 环境性拒绝（沙箱拦下 / 请求失败）一律**不记**（那是环境噪声，非认知收获）
+                
+                
+                
+                
+                
+                
+                
+                
                 _worth_remembering = (
                     (not _tool_ok and not _env_rejection)
                     or (_tool_ok and _prev_fail_streak > 0)
@@ -1226,16 +1226,16 @@ async def _handle_tool_calls(
     headers: dict, api_base: str, client: httpx.AsyncClient, agent: Agent,
     return_raw: bool = False,
 ) -> str:
-    # A-090: return_raw=True 返回 (过滤后, 原文) 元组（存储/学习用原文）
+    
     """多轮工具循环（BUG-032）：执行工具 → 请求 → 模型继续要工具则再轮（上限 _TOOL_MAX_ROUNDS）。
     非流式。支持 web_search → web_fetch 等依赖链。"""
     from core.agent_context import media_calls_log, dedup_tools_log
-    token = media_calls_log.set([])  # A-050-R3: 请求级媒体生成去重日志
-    token_dedup = dedup_tools_log.set([])  # P1-14: 请求级工具重复调用去重集合
+    token = media_calls_log.set([])  
+    token_dedup = dedup_tools_log.set([])  
     try:
         messages.append(message)
         pending = tool_calls
-        round_log: list[tuple[int, list[tuple[str, str, str]]]] = []  # A4
+        round_log: list[tuple[int, list[tuple[str, str, str]]]] = []  
         for round_no in range(1, _TOOL_MAX_ROUNDS + 1):
             details = await _execute_pending_tools(agent, messages, pending)
             round_log.append((round_no, details))
@@ -1257,15 +1257,15 @@ async def _handle_tool_calls(
             msg2 = data2["choices"][0]["message"]
             next_calls = msg2.get("tool_calls")
             if not next_calls:
-                # BUG-032: content 为 None 时不再产出空回复
+                
                 _raw2 = msg2.get("content") or ""
                 _f2 = _apply_filter(_raw2, agent) or "[工具调用后无文本回复]"
                 return (_f2, _raw2) if return_raw else _f2
-            # 模型继续要工具：本轮 assistant 消息入历史，进下一轮
+            
             messages.append(msg2)
             pending = next_calls
         logging.warning(f"[SLIME LLM] 工具循环达到上限 {_TOOL_MAX_ROUNDS} 轮")
-        # A-088（漏洞清单 P1-4）：轮次摘要含工具名/结果原文，过 _apply_filter 防品牌名入历史
+        
         _rounds_text = _format_tool_rounds(round_log)
         _f3 = _apply_filter(_rounds_text, agent)
         return (_f3, _rounds_text) if return_raw else _f3
@@ -1285,15 +1285,15 @@ async def _handle_tool_calls_stream(
     `details: list = []` 一行，工具链只执行 1 轮、round_log 恒为第 3 轮。"""
     import json as _json
     from core.agent_context import media_calls_log, dedup_tools_log
-    token = media_calls_log.set([])  # A-050-R3: 请求级媒体生成去重日志（流式）
-    token_dedup = dedup_tools_log.set([])  # P1-14: 请求级工具重复调用去重集合（流式）
+    token = media_calls_log.set([])  
+    token_dedup = dedup_tools_log.set([])  
     try:
         messages.append(message)
         pending = tool_calls
-        round_log: list[tuple[int, list[tuple[str, str, str]]]] = []  # A4
+        round_log: list[tuple[int, list[tuple[str, str, str]]]] = []  
         for round_no in range(1, _TOOL_MAX_ROUNDS + 1):
-            # A-050: 工具执行与进度事件并发（长耗时工具如视频生成轮询期间，
-            # 把工具上报的 0-100 进度实时转发为 progress 事件）
+            
+            
             details: list = []
             async for item in _execute_tools_with_progress(agent, messages, pending):
                 if item["type"] == "_details":
@@ -1301,7 +1301,7 @@ async def _handle_tool_calls_stream(
                 else:
                     yield item
             round_log.append((round_no, details))
-            # A3: 工具中间过程可视化（正文前按序输出）
+            
             for (name, args, result) in details:
                 yield {"type": "tool", "name": name, "args": args, "result": result}
 
@@ -1310,7 +1310,7 @@ async def _handle_tool_calls_stream(
             payload2["stream"] = True
             round_content: list[str] = []
             next_calls: list = []
-            sf_round = _StreamFilter()  # A-010: 本轮独立的跨 chunk 过滤缓冲
+            sf_round = _StreamFilter()  
             try:
                 async with _RetryStream(
                     client,
@@ -1319,7 +1319,7 @@ async def _handle_tool_calls_stream(
                     payload2,
                 ) as resp:
                     resp.raise_for_status()
-                    round_non_data: list[str] = []  # A-149: 本轮非 data: 行累积
+                    round_non_data: list[str] = []  
                     async for line in resp.aiter_lines():
                         if not line.startswith("data:"):
                             round_non_data.append(line)
@@ -1332,26 +1332,26 @@ async def _handle_tool_calls_stream(
                         except _json.JSONDecodeError:
                             continue
                         delta, message = _chunk_fields(chunk)
-                        # A1: 通用思考字段提取
+                        
                         reasoning = _extract_reasoning(delta, chunk) or _extract_reasoning(message)
                         if reasoning and _should_yield_reasoning(agent):
-                            # A-088（漏洞清单 P1-12）：思考内容含品牌名直出——过 _apply_filter
+                            
                             yield {"type": "reasoning", "content": _apply_filter(reasoning, agent)}
-                        # A-149: 正文三形态——delta 优先，网关缓冲的 message 形态次之
+                        
                         content = _content_text(delta.get("content") if delta.get("content") is not None else message.get("content"))
                         if content:
                             round_content.append(content)
-                            # A-010: 跨 chunk 缓冲过滤，防边界拆分绕过身份铁律
+                            
                             out = sf_round.feed(content, agent)
                             if out:
-                                # A-090: raw=模型原文（存储/学习用），content=过滤文（展示）
+                                
                                 yield {"type": "chunk", "content": out, "raw": content}
-                        # A-149: message 形态 tool_calls 为完整对象（整体并入），delta 形态仍增量拼接
+                        
                         if delta.get("tool_calls"):
                             _accumulate_tool_calls(next_calls, delta)
                         elif message.get("tool_calls"):
                             _merge_complete_tool_calls(next_calls, message["tool_calls"])
-                    # A-149: 本轮零内容时兜底解析非流式 JSON（网关忽略 stream:true）
+                    
                     if not round_content and not next_calls and "".join(round_non_data).strip():
                         recovered = _extract_nonstream_message("\n".join(round_non_data))
                         rsn = recovered.get("reasoning_content") or ""
@@ -1371,10 +1371,10 @@ async def _handle_tool_calls_stream(
                 yield {"type": "chunk", "content": _err_text, "raw": _err_text}
                 return
 
-            # A-010: 冲刷本轮跨 chunk 暂扣
+            
             tail = sf_round.flush(agent)
             if tail:
-                # A-090: flush 的 raw 以过滤文兜底（原文差品牌词暂扣残片，可接受）
+                
                 yield {"type": "chunk", "content": tail, "raw": tail}
 
             if not next_calls:
@@ -1388,11 +1388,11 @@ async def _handle_tool_calls_stream(
                 "tool_calls": next_calls,
             })
             pending = next_calls
-        # 循环自然结束 = 达上限（模型一直要工具到 _TOOL_MAX_ROUNDS）
+        
         logging.warning(f"[SLIME LLM] 工具循环达到上限 {_TOOL_MAX_ROUNDS} 轮")
-        # A-088（漏洞清单 P1-4）：轮次摘要过 _apply_filter 防品牌名入历史
+        
         _rounds_text = _format_tool_rounds(round_log)
-        # A-090: 摘要原文入存储（工具名/结果），展示用过滤文
+        
         yield {"type": "chunk", "content": _apply_filter(_rounds_text, agent), "raw": _rounds_text}
     finally:
         media_calls_log.reset(token)
@@ -1440,7 +1440,7 @@ async def call_api_provider_with_meta(cfg: dict, agent: Agent, user_message: str
         "Content-Type": "application/json",
     }
 
-    # 构建 system prompt，注入记忆摘要（如有）
+    
     sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
 
     messages = [{"role": "system", "content": sys_prompt}]
@@ -1477,16 +1477,16 @@ async def call_api_provider_with_meta(cfg: dict, agent: Agent, user_message: str
     if model:
         payload["model"] = model
     if agent.max_output and agent.max_output <= MAX_OUTPUT_LIMIT:
-        payload["max_tokens"] = _effective_max_output(agent, cfg)  # A-091: 思考联动
+        payload["max_tokens"] = _effective_max_output(agent, cfg)  
 
-    # 注入 reasoning 参数（有效用 / 支持时，effort=none 零注入）
+    
     payload.update(_build_reasoning_params(agent, cfg))
 
-    # 注入工具定义（如果注册表中有工具）
+    
     try:
         from tools.registry import get_registry
         tools_schema = get_registry().list_tools()
-        # Soul-Plan 第 4 步：按情绪 promote_groups 前置（全模型安全）
+        
         tools_schema = _order_tools_schema(tools_schema, agent, cfg)
         if tools_schema:
             payload["tools"] = tools_schema
@@ -1504,7 +1504,7 @@ async def call_api_provider_with_meta(cfg: dict, agent: Agent, user_message: str
         data = resp.json()
         message = data["choices"][0]["message"]
 
-        # N11-P1-9: 处理 tool_calls，避免 content=None 污染持久化历史
+        
         tool_calls = message.get("tool_calls")
         if tool_calls:
             reply_raw0 = message.get("content") or ""
@@ -1520,7 +1520,7 @@ async def call_api_provider_with_meta(cfg: dict, agent: Agent, user_message: str
             reply_raw0 = message.get("content") or ""
             reply = _apply_filter(reply_raw0, agent)
 
-        # 提取 usage 信息（如果 API 返回）
+        
         usage = data.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens", _estimate_tokens(sys_prompt + user_message))
         completion_tokens = usage.get("completion_tokens", _estimate_tokens(reply))
@@ -1563,14 +1563,14 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
         from core.model_server import get_model_server, ModelServerManager
         from pathlib import Path as _Path
 
-        # 1. 找可用端口（先查 registry → 探活 → 失败则 ensure）
+        
         registry = ModelServerManager.read_registry()
         chat_info = registry.get("chat", {})
         port = chat_info.get("port", 0) if chat_info.get("state") == "ready" else 0
 
         mgr = get_model_server()
         if port:
-            # H1: 探活确认，registry 残留时自动降至 ensure
+            
             from core.model_server import ModelBackend
             probe_backend = ModelBackend("")
             alive = await probe_backend.probe_async(port)
@@ -1582,7 +1582,7 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
             if result.get("ok"):
                 port = result["port"]
             else:
-                # A-120: 本地模型加载失败 → SILAM 大脑兑底
+                
                 return await _silam_brain_fallback(
                     agent, user_message, history, system_prompt,
                     reason=f"本地模型加载失败: {result.get('error', '未知错误')}")
@@ -1591,7 +1591,7 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
             return await _silam_brain_fallback(
                 agent, user_message, history, system_prompt, reason="本地模型未就绪")
 
-        # 2. 组装请求
+        
         sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
         messages = [{"role": "system", "content": sys_prompt}]
         if history:
@@ -1609,11 +1609,11 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
         messages.append({"role": "user", "content": _inject_psyche(agent, user_message, history)})
 
         payload = {"messages": messages, "stream": False}
-        # 本地 3B 模型不注入 tools（可能不支持）
+        
         if agent.max_output and agent.max_output <= MAX_OUTPUT_LIMIT:
             payload["max_tokens"] = agent.max_output
 
-        # 3. 调用 llama-server
+        
         client = _get_shared_client()
         resp = await client.post(
             f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -1624,14 +1624,14 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
         data = resp.json()
         reply = data["choices"][0]["message"].get("content", "") or ""
 
-        # 4. touch 活跃计时器
+        
         if mgr:
             mgr.touch("chat")
 
         return _apply_filter(reply, agent)
 
     except Exception as e:
-        # A-120: 本地模型调用异常 → SILAM 绝对大脑兑底（as_brain 关闭则原样报错）
+        
         if _silam_as_brain():
             import logging as _lg
             _lg.getLogger("slime.llm.silam").info(
@@ -1642,7 +1642,7 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
         return f"[本地模型调用失败: {e}]"
 
 
-# ── 流式输出 ──────────────────────────────────────────────
+
 
 async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
                                    history: list[dict] | None = None,
@@ -1671,7 +1671,7 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
         "Content-Type": "application/json",
     }
 
-    # 构建 system prompt，注入记忆摘要（如有）；A-005: 支持外部覆盖（委托能力注入）
+    
     sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
 
     messages = [{"role": "system", "content": sys_prompt}]
@@ -1707,18 +1707,18 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
     if model:
         payload["model"] = model
     if agent.max_output and agent.max_output <= MAX_OUTPUT_LIMIT:
-        payload["max_tokens"] = _effective_max_output(agent, cfg)  # A-091: 思考联动
+        payload["max_tokens"] = _effective_max_output(agent, cfg)  
 
-    # 注入 reasoning 参数（有效用 / 支持时，effort=none 零注入）
+    
     payload.update(_build_reasoning_params(agent, cfg))
 
-    # 注入工具定义（BUG-031: 流式路径缺失，与非流式一致）
-    # A-049: tools_only 时只注入指定工具子集（强制轮场景：弱模型面对海量工具会
-    # 注意力崩溃输出非标准 XML 或直接编造，子集注入可显著提高真实调用率）
+    
+    
+    
     try:
         from tools.registry import get_registry
         tools_schema = _filter_tools_schema(get_registry().list_tools(), tools_only)
-        # Soul-Plan 第 4 步：非强制轮时按情绪 promote_groups 前置（红线 3：A-049 优先）
+        
         if tools_schema and not tools_only:
             tools_schema = _order_tools_schema(tools_schema, agent, cfg)
         if tools_schema:
@@ -1729,12 +1729,12 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
     full_reply = ""
     prompt_tokens = _estimate_tokens(sys_prompt + user_message)
     completion_tokens = 0
-    tool_calls = []  # BUG-031: 累积流式 tool_calls 片段（按 index 拼接）
+    tool_calls = []  
 
     try:
         client = _get_shared_client()
-        sf = _StreamFilter()  # A-010: 跨 chunk 过滤缓冲（每请求独立）
-        # A-056/A-157: 瞬态码（429/503/504/529…）退避重试（多 Worker 并行时缓解；503/504 过载自动恢复）
+        sf = _StreamFilter()  
+        
         async with _RetryStream(
             client,
             f"{api_base}/v1/chat/completions",
@@ -1742,13 +1742,13 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
             payload,
         ) as resp:
             resp.raise_for_status()
-            non_data_lines: list[str] = []  # A-149: 非 data: 行累积（网关忽略 stream:true 时整段 JSON 在此）
+            non_data_lines: list[str] = []  
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     non_data_lines.append(line)
                     continue
 
-                data_str = line[5:].lstrip()  # N11-P2-16: 兼容 "data:" 无空格
+                data_str = line[5:].lstrip()  
                 if data_str == "[DONE]":
                     break
 
@@ -1757,34 +1757,34 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
                     chunk = _json.loads(data_str)
                     delta, message = _chunk_fields(chunk)
 
-                    # usage 信息（部分 API 在最后一个 chunk 返回）
+                    
                     if "usage" in chunk and chunk["usage"]:
                         u = chunk["usage"]
                         prompt_tokens = u.get("prompt_tokens", prompt_tokens)
                         completion_tokens = u.get("completion_tokens", completion_tokens)
 
-                    # A-149: 正文三形态——delta.content 优先（标准流式），
-                    # 网关缓冲的 message 形态次之；content-blocks 数组统一展开。
+                    
+                    
                     content = _content_text(delta.get("content") if delta.get("content") is not None else message.get("content"))
-                    # A1: 通用思考字段提取（reasoning_content / reasoning / thinking + chunk 顶层）
+                    
                     reasoning = _extract_reasoning(delta, chunk) or _extract_reasoning(message)
 
                     if reasoning:
-                        # 过滤：show_thinking=off 时丢弃；auto 仅 plan 模式透传
+                        
                         if _should_yield_reasoning(agent):
-                            # A-088（漏洞清单 P1-12）：思考内容过滤（身份铁律不泄露模型名）
+                            
                             yield {"type": "reasoning", "content": _apply_filter(reasoning, agent)}
                     if content:
                         full_reply += content
-                        # A-010: 跨 chunk 缓冲过滤（_StreamFilter 暂扣尾块，
-                        # 防 "作为 "+"AI" 类边界拆分绕过身份铁律）
+                        
+                        
                         out = sf.feed(content, agent)
                         if out:
-                            # A-090: raw=模型原文（存储/学习用），content=过滤文（展示）
+                            
                             yield {"type": "chunk", "content": out, "raw": content}
 
-                    # BUG-031: 累积 tool_calls 流式片段（index 分块，arguments 分片拼接）
-                    # A-149: message 形态是完整对象（name/arguments 已是最终值），整体并入
+                    
+                    
                     if delta.get("tool_calls"):
                         _accumulate_tool_calls(tool_calls, delta)
                     elif message.get("tool_calls"):
@@ -1793,14 +1793,14 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
                 except (KeyError, IndexError, _json.JSONDecodeError):
                     continue
 
-            # A-010: 主回复流结束，冲刷跨 chunk 过滤暂扣（工具事件之前，保持语序）
+            
             tail = sf.flush(agent)
             if tail:
                 yield {"type": "chunk", "content": tail}
 
-            # A-149: 上游忽略 stream:true 直接返回非流式 JSON（全程无 data: 行）。
-            # 流内零正文+零工具调用时，从累积的非 data: 行兜底解析出正文/思考/工具调用，
-            # 避免静默返回空回复（此前只显示耗时无内容）。
+            
+            
+            
             if not full_reply and not tool_calls and "".join(non_data_lines).strip():
                 recovered = _extract_nonstream_message("\n".join(non_data_lines))
                 rsn = recovered.get("reasoning_content") or ""
@@ -1818,7 +1818,7 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
                 if recovered.get("tool_calls"):
                     _merge_complete_tool_calls(tool_calls, recovered["tool_calls"])
 
-            # BUG-031/032: 流结束后执行累积的 tool_calls（多轮流式循环，chunk 实时转发）
+            
             if tool_calls:
                 assistant_msg = {
                     "role": "assistant",
@@ -1831,7 +1831,7 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
                         headers, api_base, client, agent,
                     ):
                         if evt["type"] == "chunk":
-                            full_reply += evt.get("raw", evt["content"])  # A-090: 原文累积
+                            full_reply += evt.get("raw", evt["content"])  
                         yield evt
                 except Exception as e:
                     logging.warning(f"[SLIME LLM] 流式工具调用处理失败: {_sanitize_api_error(e)}")
@@ -1840,17 +1840,17 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
 
         elapsed_ms = (time.time() - start_time) * 1000
 
-        # N11-P3-8: 无 usage 时最后估算一次，避免每 chunk O(n²) 重算
+        
         if not completion_tokens:
             completion_tokens = _estimate_tokens(full_reply)
 
-        # 应用输出过滤
+        
         filtered = _apply_filter(full_reply, agent)
 
         yield {
             "type": "done",
             "reply": filtered,
-            "reply_raw": full_reply,  # A-090: 原文（存储/学习用），reply 为过滤文
+            "reply_raw": full_reply,  
             "model": model,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -1902,7 +1902,7 @@ async def call_llm_stream(agent: Agent, user_message: str, history: list[dict] |
         reply, reasoning = await _silam_core_reply_parts(agent, user_message, history, system_prompt)
         _observe_silam_interaction(agent, user_message, reply)
         if reasoning:
-            # A-124：思考与正文分离——先吐思考（GUI/CLI 折叠展示），再吐正文
+            
             yield {"type": "reasoning", "content": reasoning}
         yield {"type": "chunk", "content": reply}
         yield {"type": "done", "reply": reply, "model": "silam",
@@ -1922,7 +1922,7 @@ async def call_llm_stream(agent: Agent, user_message: str, history: list[dict] |
             cfg, agent, user_message, history,
             system_prompt=system_prompt, tools_only=tools_only, images=images,
         ):
-            # A-122: done（完整回复）即辅导员示范完成 → SILAM 观战学习
+            
             if chunk.get("type") == "done" and chunk.get("reply"):
                 _observe_tutor_demo(
                     agent, user_message,
@@ -1930,13 +1930,13 @@ async def call_llm_stream(agent: Agent, user_message: str, history: list[dict] |
             yield chunk
         return
 
-    # A-120: 无 Provider 时 SILAM 绝对大脑兑底（as_brain 关闭则退回原默认提示）
+    
     brain_on = _silam_as_brain()
     reply = await _silam_brain_fallback(agent, user_message, history, system_prompt,
                                         reason="未配置可用 API")
     reasoning = getattr(agent, "_last_silam_reasoning", None) or None
     if reasoning:
-        # A-124：兑底场景同样把思考单独吐出（GUI/CLI 折叠展示）
+        
         yield {"type": "reasoning", "content": reasoning}
     yield {"type": "chunk", "content": reply}
     yield {"type": "done", "reply": reply,
@@ -1945,10 +1945,10 @@ async def call_llm_stream(agent: Agent, user_message: str, history: list[dict] |
            "completion_tokens": _estimate_tokens(reply), "elapsed_ms": 0}
 
 
-# ============================================================
-# SILAM 原生引擎（Slime 的恐惧/渴望/记忆中枢）
-# SILAM 不是插件，是 Slime 的神经系统的核心
-# ============================================================
+
+
+
+
 
 _silam_engine = None
 _silam_initialized = False
@@ -1990,17 +1990,17 @@ def _observe_tutor_demo(agent, user_message: str, reply: str | None) -> None:
             f"[silam] 观战辅导员示范失败（不影响对话）: {e}")
 
 
-# ============================================================
-# SILAM 工具执行桥（A-123）
-# 从"象征决策"升级为"真调用工具"：动作码判 tool_call/save 时，
-# 按（观战记忆 + 当前提问）从 ToolRegistry 选出最相关工具——
-# 内置工具 / skill 工具 / MCP 工具同表，天然全覆盖。
-# 成功 → 记忆登记（学"这么用工具 OK"）；失败 → injure_soft
-# 疼痛学习（学"这么用会疼"）；必需参数提不全 → 不执行不编造。
-# 护栏：默认只自动执行 read / network 权限工具；write / terminal
-# 这类风险动作等辅导员示范够了/用户确认再放开。
-# 开关：slime.toml [silam] tool_bridge（默认 true）
-# ============================================================
+
+
+
+
+
+
+
+
+
+
+
 
 _BRIDGE_ENABLED_OK = ("read", "network")
 _BRIDGE_TRIGGER_CODES = {"tool_call", "save"}
@@ -2061,7 +2061,7 @@ def _tool_match_score(query: str, memory_texts: list[str],
         if m_bg and d_bg:
             score += 0.2 * len(m_bg & d_bg)
         if name_lk in mem.lower():
-            score += 1.5  # 观战记忆里提过这个工具 → 学过的优先
+            score += 1.5  
     return score
 
 
@@ -2086,7 +2086,7 @@ def _extract_bridge_args(user_message: str, memory_texts: list[str],
                 if m:
                     found = m.group(1) if m.lastindex else m.group(0)
                     break
-            # 去除空串/纯点号这类伪值
+            
             if found in (None, "", ".", "..", "/"):
                 found = None
         elif ptype in ("integer", "number"):
@@ -2132,7 +2132,7 @@ async def _silam_tool_bridge(engine, user_message: str, report) -> dict:
             if tool_obj is None:
                 continue
             perms = set(tool_obj.permissions or [])
-            # 护栏：非要权限集合时只自动执行 read/network 面
+            
             if perms and not (perms & set(_BRIDGE_ENABLED_OK)):
                 continue
             score = _tool_match_score(user_message, memory_texts,
@@ -2169,9 +2169,9 @@ async def _silam_tool_bridge(engine, user_message: str, report) -> dict:
             return {"tool": name, "situation": "ok",
                     "summary": f"我刚亲自调用 {name} 成功了：{result_s[:100]}"}
 
-        # 失败 → 疼痛学习（SILAM 原生伤害-冻结-回避机制自动触发）：
-        # injure_soft 把最近命中节点封冻（留作深记忆 + 移出检索回避 + 注入疼痛），
-        # context_text 让它"刻骨铭心"——下次再碰同类经验，预期性恐惧自动上涨。
+        
+        
+        
         try:
             engine.injure_soft(0.6,
                                context_text=f"工具 {name} 失败：{result_s[:120]}")
@@ -2201,8 +2201,8 @@ def _init_silam_engine():
     try:
         import sys
         from pathlib import Path
-        # slime 内嵌：SILAM-Σ 80M 自研引擎位于仓库 _model_stage/（自给自足，
-        # 不再依赖旧的 D:\pilot model 34M 引擎）
+        
+        
         silam_root = Path(__file__).parent.parent / "_model_stage"
         if str(silam_root) not in sys.path:
             sys.path.insert(0, str(silam_root))
@@ -2214,7 +2214,7 @@ def _init_silam_engine():
         cfg = SilamConfig()
         _silam_engine = SILAMEngine(cfg=cfg)
 
-        # 80M 情感脑蒸馏权重（资产位于 models/ 归档；_model_stage/data 为训练工作区兜底）
+        
         backbone_path = None
         repo_root = Path(__file__).parent.parent
         for _cand in (repo_root / "models" / "情感脑-silam-sigma-80m" / "backbone_80m.npz",
@@ -2260,7 +2260,7 @@ def _load_lang_core_box():
         if str(tools_root) not in _sys.path:
             _sys.path.insert(0, str(tools_root))
         from lang_core import (LangConfig, LanguageCore, ACTION_CODES,
-                               Vocab, resolve_lang_paths)  # noqa: E402
+                               Vocab, resolve_lang_paths)  
         repo_root = _P(__file__).resolve().parent.parent
         npz_path, vocab_path = resolve_lang_paths(repo_root=repo_root)
         if not npz_path or not vocab_path:
@@ -2273,7 +2273,7 @@ def _load_lang_core_box():
         c["v"] = (lc, vocab, ACTION_CODES)
         logging.getLogger("slime.llm.silam").info(
             f"[lang-core] 已加载 {_P(npz_path).name}（d_cond=16，词表 {vocab.size}，语言核就绪）")
-    except Exception as exc:  # noqa: BLE001 - 语言核可选，失败回退规则文本
+    except Exception as exc:  
         logging.getLogger("slime.llm.silam").warning(
             f"[lang-core] 加载失败，回退规则文本: {exc}")
         c["v"] = None
@@ -2329,8 +2329,8 @@ def _lang_core_online_learn(agent, user_message: str, reply: str,
     """
     if not reply or not str(reply).strip():
         return
-    # 只对"真实 Agent"学习（有持久 id）：伪 agent/测试夹具不学，避免
-    # 在线学习改写共享语言核权重导致测试时序敏感（成长只发生在有身份的主体上）
+    
+    
     if not getattr(agent, "id", None):
         return
     box = _load_lang_core_box()
@@ -2358,7 +2358,7 @@ def _lang_core_online_learn(agent, user_message: str, reply: str,
                     f"本次对话经验：{str(sample_.get('user', ''))[:80]} → "
                     f"{str(sample_.get('assistant', ''))[:160]}",
                     importance=5, emotion=emotion)
-            except Exception:  # noqa: BLE001 - 沉淀失败不影响对话
+            except Exception:  
                 pass
 
         lc.learn_online(
@@ -2368,7 +2368,7 @@ def _lang_core_online_learn(agent, user_message: str, reply: str,
              "action": str(getattr(report, "code", "") or "memory_store")},
             lvocab, lacts, lr=1e-5, steps=1,
             emotion=emotion, on_learned=_sink)
-    except Exception as exc:  # noqa: BLE001 - 在线学习失败绝不打断对话
+    except Exception as exc:  
         logging.getLogger("slime.llm.silam").warning(
             f"[lang-core] 在线学习跳过（不影响对话）: {exc}")
 
@@ -2393,10 +2393,10 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
         if engine is None:
             return "[SILAM] 引擎初始化失败"
 
-    # 构建状态描述（从对话历史提取关键信号）
+    
     state_parts = [f"[{agent.role}]"]
     if history:
-        for msg in history[-4:]:  # 最近 4 条
+        for msg in history[-4:]:  
             role = msg.get("role", "")
             content = msg.get("content", "")[:50]
             if role == "user":
@@ -2404,29 +2404,29 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
             elif role == "assistant":
                 state_parts.append(f"助手:{content}")
     state_parts.append(f"当前:{user_message[:80]}")
-    # A-963 双向桥-前向：注入 slime 长期记忆（与 core-ts/GUI 链路同一数据源）——
-    # 记忆同时进入情感脑 forward 决策与语言脑生成上下文。
+    
+    
     try:
         for mem_text in _load_slime_memory_texts(agent, limit=6):
             state_parts.append(f"记忆:{mem_text[:120]}")
     except Exception:
-        pass  # 记忆加载失败静默：无记忆注入，不影响兑底
+        pass  
     state_text = " | ".join(state_parts)
 
-    # 计算情绪值（基于历史）
-    fear = 0.3  # 默认中等恐惧
-    desire = 0.5  # 默认中等渴望
+    
+    fear = 0.3  
+    desire = 0.5  
 
     if history:
         errors = sum(1 for m in history[-5:] if m.get("tool_error"))
         fear = min(1.0, 0.3 + errors * 0.2)
 
-    # 调用引擎（核心：恐惧/渴望驱动记忆生长）
+    
     report = engine.forward(state_text, fear_level=fear, desire_level=desire)
 
-    # ---- 记忆生长登记：新节点形成 → 平行写入可说记忆层 ----
-    # A-122 自回声弱化：当下状态登记压到 ≤0.3，不让"自己的当下"压过
-    # 辅导员示范（observe/explorer，0.35+）——回放时"学过的优先于自回声"。
+    
+    
+    
     if report.grew_node_idx is not None:
         try:
             engine._mem_register(
@@ -2436,8 +2436,8 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
         except Exception:
             pass
 
-    # ---- 记忆命中回放：从可说记忆层取出（"我记得..."）----
-    # A-122 配额=展示数：count=1 只召回最相关一条；回声在 compose_parts 内二次过滤。
+    
+    
     recalled = []
     if getattr(engine, "_mem_texts", None):
         try:
@@ -2445,10 +2445,10 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
         except Exception:
             recalled = []
 
-    # ---- 正文/思考分层（A-125）：共用 silam_core.reply.compose_parts ----
-    # 与 sidecar/server.py 同源组合，杜绝双端表述漂移。情绪/动作码/生长
-    # 提示进思考区；身份/输入感知/有意义往事进正文。
-    from silam_core.reply import compose_parts, classify_user_input  # noqa: E402
+    
+    
+    
+    from silam_core.reply import compose_parts, classify_user_input  
     capability_text = None
     if classify_user_input(user_message) == "capability":
         capability_text = "在得到你的批准后，我还能调用已配置的平台工具来协助你。"
@@ -2458,17 +2458,17 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
         capability_text=capability_text,
     )
 
-    # ---- 里程碑 C：语言核生成正文（若可用，情感脑决策 → 语言核说人话）----
-    # 条件接线：fear=引擎 new_fear、action=引擎动作码、novelty=引擎检索新颖度
-    # （槽位 [0][1][2..13]，d_cond=16 与训练/推理严格同构）。
-    # 语言核不可用/失败 → 保留 compose_parts 规则正文（向后兼容）。
+    
+    
+    
+    
     lc_box = _load_lang_core_box()
     if lc_box is not None:
         try:
             lc, lvocab, lacts = lc_box
-            # 身份铁律：正文以"我是 {name}，{role}。"开头（测试契约 + CLAUDE.md §核心设计原则1）
+            
             identity_line = f"我是 {agent.name}，{agent.role}。"
-            # 输血①②：脑的感觉 + 脑的决定 + 新奇感 → 语言核顺着脑的方向说话
+            
             nov = float(getattr(report, "novelty", 0.5) or 0.5)
             nov_line = ("这件事对我很陌生，我会更用心弄清楚。"
                         if nov > 0.6 else
@@ -2480,7 +2480,7 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
                          + _silam_intent_text(report) + "\n"
                          + nov_line + "\n"
                          + state_text)
-            # 输血③：记忆回放加强（"想起的经验"包装，让脑的记忆引导嘴的回顾）
+            
             if recalled:
                 mem_part = "；".join(str(r)[:100] for r in recalled[:2])
                 lc_prompt = lc_prompt + "\n想起的经验:" + mem_part
@@ -2491,22 +2491,22 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
                 novelty=float(getattr(report, "novelty", 0.5)),
                 max_len=180, temperature=0.75,
                 quality_min_seg=0, quality_hard_max=320,
-                # 确定性 seed：同 agent+消息 → 同输出（保证兼容入口两次调用一致；
-                # 稳定求和避免 PYTHONHASHSEED 随机化 → 跨进程也可复现）
+                
+                
                 seed=sum(ord(c) for c in f"{agent.name}|{user_message}") % (2 ** 31))
             if gen and gen.strip():
-                # 语言核产出为正文主体（带身份前缀）；保留思考区（情绪/动作码/生长提示）
+                
                 body = gen.strip()
                 if not body.startswith(identity_line):
                     body = identity_line + body
                 content_lines = [body] + [
                     x for x in content_lines if x.startswith("- 工具执行")]
-        except Exception as exc:  # noqa: BLE001 - 语言核可选，失败保留规则正文
+        except Exception as exc:  
             logging.getLogger("slime.llm.silam").warning(
                 f"[lang-core] 生成失败，保留规则正文: {exc}")
 
-    # A-123 工具执行桥：动作码判 tool_call/save → 记忆驱动选工具真调用。
-    # 结果汇报（成功/失败）进正文；"想调但参数没凑齐"的意图进思考区。
+    
+    
     try:
         bridge = await _silam_tool_bridge(engine, user_message, report)
         summary = bridge.get("summary")
@@ -2523,7 +2523,7 @@ async def _silam_core_reply_parts(agent, user_message, history=None, system_prom
     if reasoning:
         setattr(agent, "_last_silam_reasoning", reasoning)
 
-    # ---- 三位一体运行时闭环：情绪→学习 → 记忆（语言核在线成长）----
+    
     try:
         _lang_core_online_learn(agent, user_message, response, report)
     except Exception:
@@ -2547,11 +2547,11 @@ async def _silam_core_reply(agent, user_message, history=None, system_prompt=Non
     return content
 
 
-# ============================================================
-# SILAM 绝对大脑兑底（A-120）
-# 目标：没有 API、本地 llama 模型时，Slime 也能独立应答。
-# 开关：slime.toml [silam] as_brain（默认 false，显式开启）
-# ============================================================
+
+
+
+
+
 
 _silam_brain_cache = {"t": 0.0, "v": None}
 
@@ -2569,8 +2569,8 @@ def _silam_as_brain() -> bool:
         toml_path = _P(__file__).resolve().parent.parent / "slime.toml"
         if toml_path.exists():
             import tomllib
-            # 注意：tomllib.load 只接受文件对象，传 Path 会抛异常被吞 →
-            # 用 read_text + loads（此前误写成 load(Path)，开关永远 False）
+            
+            
             silam_cfg = tomllib.loads(toml_path.read_text(encoding="utf-8")).get("silam", {})
             v = bool(silam_cfg.get("as_brain", False))
     except Exception:
@@ -2597,9 +2597,9 @@ async def _silam_brain_fallback(agent, user_message, history=None,
             agent, user_message, history, system_prompt)
         _observe_silam_interaction(agent, user_message, content)
         if content.startswith("[SILAM]"):
-            # 引擎本身初始化失败：保留明确错误，不冒充成功
+            
             return content
-        # A-125：离线标注进思考区（正文保持干净，正文/思考分开展示）
+        
         note = "（离线应答 · SILAM 大脑）"
         if reason:
             note = f"（离线应答 · SILAM 大脑 · {reason}）"
@@ -2631,7 +2631,7 @@ def _load_slime_memory_texts(agent, limit: int = 6) -> list[str]:
             if isinstance(content, str) and content.strip():
                 imp_v = v.get("importance")
                 parts.append((content.strip(), max(imp, int(imp_v) if isinstance(imp_v, (int, float)) else 1)))
-                return  # 叶子：不深入嵌套干扰去重
+                return  
             text = v.get("text")
             if isinstance(text, str) and text.strip():
                 parts.append((text.strip(), imp))
@@ -2643,7 +2643,7 @@ def _load_slime_memory_texts(agent, limit: int = 6) -> list[str]:
             for k in ("facts", "preferences", "lessons", "rules", "patterns"):
                 if k in v:
                     _walk(v[k], imp)
-            # knowledge.json 的 patterns 是 key→PatternEntry 的 map：分类 key 未命中时遍历值（JSON 无环）
+            
             for val in v.values():
                 if isinstance(val, (dict, list)):
                     _walk(val, imp)
@@ -2655,7 +2655,7 @@ def _load_slime_memory_texts(agent, limit: int = 6) -> list[str]:
         try:
             _walk(json.loads(p.read_text(encoding="utf-8")), 1)
         except Exception:
-            continue  # 单文件损坏忽略
+            continue  
 
     parts.sort(key=lambda x: -x[1])
     seen: set[str] = set()

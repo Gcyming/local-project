@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """A-094: 动态命令注册测试（技能/MCP → /<名> 斜杠命令）"""
 import io
 import shutil
@@ -32,10 +32,10 @@ class TestDynamicCommands:
         handlers, specs, pending = self._run(sd)
         assert "/ponytail" in handlers and "/banner-design" in handlers
         assert specs["/ponytail"]["group"] == "技能"
-        # 无参数 → 引导不注入 pending
+        
         handlers["/ponytail"]("")
         assert pending == []
-        # 有参数 → 包装消息注入 pending
+        
         handlers["/ponytail"]("写一个读文件的小函数")
         assert "使用技能 ponytail 处理：写一个读文件的小函数" in pending[0]
 
@@ -50,10 +50,10 @@ class TestDynamicCommands:
     def test_conflict_skipped(self, tmp_path):
         sd = self._mk_skills(tmp_path, ["skills", "think", "help", "my-custom-skill"])
         handlers, specs, pending = self._run(sd)
-        # "help"/"skills"/"think" 是内置命令（_CMD_SPECS 冲突）→ 动态不注册、不覆盖
+        
         for k in ("/help", "/skills", "/think"):
             assert k not in handlers, f"{k} 不应被动态注册"
-        # 非冲突技能正常注册
+        
         assert "/my-custom-skill" in handlers
 
     def test_no_skill_md_skipped(self, tmp_path):
@@ -76,14 +76,14 @@ class TestDynamicCommands:
         from slime_cli import _register_dynamic_commands
         empty = tmp_path / "no-skills"
         empty.mkdir()
-        # 模拟项目外 cwd（无 slime.toml 的临时目录）
+        
         old_cwd = os.getcwd()
         try:
             os.chdir(str(tmp_path))
             assert not (tmp_path / "slime.toml").exists()
             handlers, specs, pending = {}, {}, []
             _register_dynamic_commands(handlers, specs, pending, skills_dir=str(empty), mcp_names=None)
-            # 真实 slime.toml（browser/context7）应被读到
+            
             assert "/browser" in handlers and "/context7" in handlers, "项目外 cwd 也应注册 MCP 命令"
             assert specs["/browser"]["group"] == "MCP"
         finally:

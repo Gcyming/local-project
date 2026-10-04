@@ -1,56 +1,56 @@
-/**
- * gui/src/renderer/float-trace.ts —— A-1165：窗口化过渡的**页内自检录制器**。
- *
- * ## 为什么需要它（这轮全部的由来）
- *
- * 用户连续五轮报「窗口化时衔接动画抖动」，我提交了五个修复（A-1159 叠印 / A-1160 缩放 /
- * A-1161 滚动条槽 / A-1162 曲线不确定 / A-1164 右栏全黑），**全部被用户截图或录像推翻**。
- *
- * 复盘出的根本问题不是"猜错了"，而是**测量环境错了**：
- *   · 我的 CDP 探针跑在**隔离 root + 空会话 + 1332px** 里；
- *   · 用户那边是**真实长会话 + 最大化 2560px**。
- * 空会话挂载是瞬时的、长会话挂载要好几帧 —— 这正是"探针永远复现不出问题"的原因。
- * 我在一个**复现不出问题**的环境里，反复用同一把尺子向你保证"测出来一切正常"。
- *
- * 用户提供 30fps 录像后仍无法定案：动画是 60fps，**1 帧级的现象在 30fps 素材里被混叠**，
- * 录像的"出现-消失-出现"与探针的"单调"互相矛盾 ⇒ 真相落在两者都覆盖不到的尺度上。
- *
- * ⇒ 所以：**把尺子搬到用户机器上去**。在真实数据、真实窗口、真实 60fps 下逐帧记录，
- * 由用户触发一次并把结果交回。这比任何"我在旁边猜"都可靠。
- *
- * ## 用法
- *
- *   1) 按 `Ctrl+Shift+D` 开始录制（页面左上角出现提示，8 秒后自动停止）；
- *   2) 在这 8 秒内正常操作一次**窗口化**（或恢复）；
- *   3) 再按一次 `Ctrl+Shift+D` 立即收工并导出。
- *
- * 导出两样东西：
- *   · **摘要**：自动复制到剪贴板（同时打到 DevTools 控制台），直接粘给我即可；
- *   · **原始数据**：完整 JSON 自动下载（文件名带时间戳），体积大、要细看时再给我。
- *
- * 兜底：热键万一被占用，可在 DevTools 控制台执行 `__floatTrace.arm()` / `__floatTrace.stop()`。
- *
- * ## ⚠️⚠️ 观测扰动被观测（这条必须写在最前面）
- *
- * 本模块逐帧调用 `getBoundingClientRect()`（**强制同步布局**）与 `getComputedStyle()`
- * （**强制样式重算**）。这本身就是 App.tsx 里 A-1162 那段注释批评的同一个毛病 ——
- * 观测者会拖慢被观测者。诚实说明：
- *   · 录制的**目的是定位"谁在动"**，不是测量绝对耗时，所以几毫秒的扰动可接受；
- *   · 但如果抖动**只在不录制时出现**，那这份数据反而会骗人；
- *     ⇒ **务必同时录一次、不录一次，两份都给我**。
- *   · `PERF_LITE` 常量可把样式重算关掉（只留几何），代价是看不到 transform/opacity。
- */
 
-/** ⚠️ 置 true 则**不读** computed style（只测几何）。默认 false —— transform/opacity
- *  恰恰是最可能造成"位移"的属性，关掉就白录了。 */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const PERF_LITE = false;
 
-/** 单次录制时长上限（ms）。超过自动收工并导出，防止忘记停而一直在拖慢 App。 */
+
 const MAX_MS = 8000;
 
-/** 参与"当前正在动画"排查的选择器。
- *  ⚠️ 故意**不**用 `document.querySelectorAll("*")`：每帧遍历全文档是几千个元素，
- *     会把 App 拖垮，录出来的数据也就不可信了。 */
+
+
+
 const ANIM_WATCH = [
   ".app", ".titlebar", ".body", ".sidebar", ".main", ".chat-scroll", ".chat-panel",
   ".right-wrapper", ".right-sidebar", ".right-body", ".right-tabbar",
@@ -87,8 +87,8 @@ function say(msg: string, bad = false): void {
   console.log("[float-trace] " + msg);
 }
 
-/** 列出**当前**正在跑 transition/animation 的元素 —— 本录制器最有价值的一列。
- *  它直接回答「到底是什么在动」以及「是不是有东西在反复重播动画」。 */
+
+
 function animators(): string {
   const out: string[] = [];
   for (const sel of ANIM_WATCH) {
@@ -128,14 +128,14 @@ function sample(): void {
     row.push(cs.transitionProperty.slice(0, 40), cs.transitionDuration);
   } else { row.push("-", "-", "-"); }
 
-  /* 聊天区：宽度/滚动条槽/是否溢出/滚动位置。内容折行导致的"抖"全在这几列里。 */
+  
   const cs2 = document.querySelector<HTMLElement>(".chat-scroll");
   if (cs2) {
     row.push(Math.round(cs2.clientWidth), cs2.offsetWidth - cs2.clientWidth,
       cs2.scrollHeight > cs2.clientHeight ? 1 : 0, Math.round(cs2.scrollTop));
   } else { row.push(null, null, null, null); }
 
-  /* 浮窗中心那个点，屏幕上顶层是谁：命中浮窗=已绘制，命中 .main/body = **空洞**。 */
+  
   let hole = "no-host";
   if (host) {
     const r = host.getBoundingClientRect();
@@ -154,17 +154,17 @@ function sample(): void {
   row.push(...VARS.map((v) => bw.style.getPropertyValue(v).trim() || "-"));
   row.push(animators());
 
-  /* ⚠️⚠️ A-1168：左栏的「**是谁在动它**」取证。
-     背景：六轮修复全部落空，A-1167 的 `flex-shrink: 0` 加上去后**反转次数一字未变**
-     （40 次，与加之前完全相同）⇒ 那条模型是错的。
-     而实测 `sb.width` 只取 247 / 287 / 293 / 303 四个值，**247 不是任何代码里的常量**
-     ⇒ 不是 flex 压缩的产物（压缩量取决于容器余量，不会每次都精确落在同一个数）。
-     ⇒ 剩下的可能只有两类，而单看宽度**分不开**：
-        (a) 左栏被换/加了类（`collapsed` / `sidebar-no-min`，见 App.tsx:1929）⇒ CSS 改了宽度；
-        (b) 左栏的 `width` 属性被内联改写（state 或 --sidebar-w）。
-     ⇒ 这里把 className、**内联 style 原文**、以及 flex/width 全套计算样式逐帧记下来：
-        className 一变就能立刻区分 (a) 与 (b)，不用再猜。
-     ⚠️ 内联 style 原文可能很长，截断到 120 字符够用（宽度相关属性都在头部）。 */
+  
+
+
+
+
+
+
+
+
+
+
   {
     const sbEl = document.querySelector<HTMLElement>(".sidebar");
     if (!sbEl) { row.push("-", "-", "-", "-", "-", "-", "-"); }
@@ -191,9 +191,9 @@ function step(): void {
   raf = requestAnimationFrame(step);
 }
 
-/** 从时间序列里找**方向反转**——抖动的定义性特征。
- *  ⚠️ 只看单调性是不够的：A-1164 那次"整个面板由黑变亮"就是完全单调的，
- *     我的"方向反转"检测看不见它 —— 所以必须同时看 `anim` 列与 `hole` 列。 */
+
+
+
 function reversals(key: string, col: number): string[] {
   const vals = rows.map((r) => r[col]).filter((v): v is number => typeof v === "number");
   const rev: string[] = [];
@@ -249,8 +249,8 @@ function buildSummary(): string {
   const bodyCls = [...new Set(rows.map((r) => r[holeCol + 1]))];
   L.push("body.className 取值：" + JSON.stringify(bodyCls));
 
-  /* ⚠️ A-1168：左栏「被谁改动」的当场判定 —— 宽度反转出现时，看它是被换类还是被改宽度。
-     ⚠️ 阈值 1px：CSS 过渡的中间值每帧都在变，但**类**和**内联 width** 只在真正被改时变。 */
+  
+
   const sbBase = 1 + BOXES.length * 2 + 1 + 3 + 4 + 1 + 1 + VARS.length + 1;
   const cls = new Map<string, number>();
   const inl = new Map<string, number>();
@@ -275,9 +275,9 @@ function stop(reason = "手动收工"): void {
   const summary = buildSummary();
   console.log("[float-trace]\n" + summary);
   say("录制结束（" + reason + "），" + rows.length + " 帧");
-  rows.slice(0, 1).forEach(() => { /* keep shape */ });
+  rows.slice(0, 1).forEach(() => {  });
 
-  /* 原始数据下载（大头）。文件名带时间戳，方便用户报路径。 */
+  
   try {
     const payload = JSON.stringify({
       note: "A-1165 float-trace",
@@ -304,7 +304,7 @@ function stop(reason = "手动收工"): void {
     console.error("[float-trace] 导出失败", e);
   }
 
-  /* 摘要进剪贴板 —— 用户直接粘给我。失败也不要紧，控制台里有。 */
+  
   try {
     void navigator.clipboard?.writeText(summary);
     say("摘要已复制到剪贴板，原始 JSON 已下载");
@@ -323,7 +323,7 @@ function arm(): void {
   raf = requestAnimationFrame(step);
 }
 
-/** 安装热键。返回卸载函数（铁律 11：挂了什么就负责摘什么）。 */
+
 export function installFloatTrace(): () => void {
   const onKey = (e: KeyboardEvent): void => {
     if (!e.ctrlKey || !e.shiftKey) { return; }

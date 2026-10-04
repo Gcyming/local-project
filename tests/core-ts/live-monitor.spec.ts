@@ -1,17 +1,17 @@
-/**
- * tests/core-ts/live-monitor.spec.ts — 右栏实时监测的**取样通道**（A-982）。
- *
- * 背景：用户第三次反馈"右栏所有实时监测都不实时，Agent 输出完才跳变"。
- * 前两次修复都在**事件推送链**上找问题（debounce→throttle、压缩期不跳过…），
- * 但那条链上任何一处守卫失效都会让数值静默冻死且**不报错、测不出**：
- *   ① `p.sessionId !== sessionIdRef.current` 直接丢弃事件；
- *   ② 发送侧 120ms 节流 + 右栏 1s 合并，两窗口叠加；
- *   ③ 右栏卸载重挂（收起/展开、切会话）时订阅重建，重建瞬间的事件全落空。
- * 本次改成**拉取式**：ChatPanel 每帧写内存快照，右栏每 250ms 自己取。
- * 本文件锁死这条通道的语义（跨会话隔离、过期快照不采用）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-// A-990：从 `liveMonitor.ts` 直取（原先 import 整个 ChatPanel 组件，纯内存读写被拖进组件模块图）
+
 import { publishLiveMonitor, readLiveMonitor } from "../../gui/src/renderer/pages/liveMonitor.js";
 
 const snap = (sessionId: string) => ({

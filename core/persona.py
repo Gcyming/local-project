@@ -8,7 +8,7 @@ import copy
 from datetime import datetime, timezone
 
 
-# ── 空骨架模板 ────────────────────────────────────────────
+
 
 EMPTY = {
     "traits": [],
@@ -20,7 +20,7 @@ EMPTY = {
 }
 
 
-# ── 辅助函数 ──────────────────────────────────────────────
+
 
 def _normalize_traits(value: list) -> list:
     """
@@ -47,7 +47,7 @@ def _normalize_traits(value: list) -> list:
     return normalized
 
 
-# ── 人格类 ─────────────────────────────────────────────────
+
 
 class Persona:
     """Agent 人格画像，支持克隆和演化"""
@@ -56,12 +56,12 @@ class Persona:
         if data is None:
             self.data = copy.deepcopy(EMPTY)
         else:
-            # 安全合并：用 EMPTY 作为默认值，补全缺失字段
+            
             self.data = copy.deepcopy(EMPTY)
             for key in EMPTY:
                 if key in data:
                     if key == "traits":
-                        # traits 需要特殊处理：标准化格式
+                        
                         self.data[key] = _normalize_traits(data[key])
                     else:
                         self.data[key] = copy.deepcopy(data[key])
@@ -69,7 +69,7 @@ class Persona:
             self.data["created_at"] = datetime.now(timezone.utc).isoformat()
         self.data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    # ── 属性访问 ──────────────────────────────────────────
+    
 
     @property
     def traits(self) -> list:
@@ -102,7 +102,7 @@ class Persona:
     def interactions(self) -> list:
         return self.data["interactions"]
 
-    # ── 交互记录 ──────────────────────────────────────────
+    
 
     def add_interaction(self, user_msg: str, ai_reply: str, success: bool = True):
         """记录一次对话交互（保留最近 200 条）"""
@@ -112,18 +112,18 @@ class Persona:
             "success": success,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
-        # 只保留最近 200 条
+        
         if len(self.data["interactions"]) > 200:
             self.data["interactions"] = self.data["interactions"][-200:]
         self._touch()
 
-    # ── 克隆 ──────────────────────────────────────────────
+    
 
     def clone(self) -> "Persona":
         """深拷贝，用于分裂时创建子 Agent 人格"""
         return Persona(self.data)
 
-    # ── 序列化 ────────────────────────────────────────────
+    
 
     def to_dict(self) -> dict:
         return copy.deepcopy(self.data)
@@ -132,7 +132,7 @@ class Persona:
     def from_dict(cls, data: dict) -> "Persona":
         return cls(data)
 
-    # ── 内部 ──────────────────────────────────────────────
+    
 
     def _touch(self):
         self.data["updated_at"] = datetime.now(timezone.utc).isoformat()

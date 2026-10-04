@@ -1,8 +1,8 @@
-/**
- * tests/core-ts/skills.spec.ts — 技能引擎测试（对照 core/skill_engine.py 语义）。
- * 覆盖：真实 config/skills 加载（16 技能）/ frontmatter 回填 / manifest.yaml 解析 /
- * 指导模式调用 / 权限 fail-closed / search 评分 / skill_search/skill_lookup 工具注册 / symlink 拒绝。
- */
+
+
+
+
+
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, mkdir, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -52,7 +52,7 @@ license: MIT
       "Forces the laziest solution that actually works, simplest, shortest, most minimal. "
       + "Channels a senior dev who has seen everything: question whether the task needs to exist at all.",
     );
-    // 块后的同级键必须仍然是键，不能被吞进描述
+    
     expect(d.license).toBe("MIT");
   });
 
@@ -79,7 +79,7 @@ license: MIT
     expect(frontmatterDescription(md)).toBe(
       "Lazy but careful. Question whether the task needs to exist at all.",
     );
-    // 首行分隔符 `---` 绝不能被当成描述（旧实现就是这样把描述读空的）
+    
     expect(frontmatterDescription(md)).not.toBe("---");
   });
 
@@ -165,7 +165,7 @@ description: >
     const reg = new SkillRegistry({ skillDir: dir });
     expect(await reg.loadSkills()).toEqual(["ponytail"]);
     const s = reg.get("ponytail");
-    // 旧实现会把字面量 ">" 当描述（parseMiniYaml 不认块标量）
+    
     expect(s?.description).not.toBe(">");
     expect(s?.description).toContain("laziest solution");
     expect(s?.description).toContain("standard library");
@@ -195,10 +195,10 @@ description: >
     });
     const reg = new SkillRegistry({ skillDir: dir });
     await reg.loadSkills();
-    // 无回调也能调用指导（A-038：指导模式纯读不拦）
+    
     expect(await reg.callSkill("needy", {})).toContain("[技能 needy 指导]");
     expect(await reg.callSkill("nope", {})).toContain("[错误]");
-    // 有审批回调：指导模式行为不变
+    
     const reg2 = new SkillRegistry({ skillDir: dir, approvalCallback: () => true });
     await reg2.loadSkills();
     expect(await reg2.callSkill("needy2", {})).toContain("[技能 needy2 指导]");
@@ -237,7 +237,7 @@ description: >
     expect(all).toHaveLength(3);
     const hits = reg.search("浏览器", 10);
     expect(hits.map((h) => h.name).sort()).toEqual(["alpha", "gamma"]);
-    // limit 截断
+    
     expect(reg.search("浏览器", 1)).toHaveLength(1);
   });
 

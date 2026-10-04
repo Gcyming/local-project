@@ -1,12 +1,12 @@
-/**
- * delegate-subagent.spec.ts — 自动委派工具链路回归（GUI 装配注入 + 引擎工具化接线验收）。
- * 验证四件事：
- *  1. delegate_subagent / subagent_result 注册进默认注册表（模型工具循环可见，schema 含名称/描述/参数）；
- *  2. 未注入管理器 → 如实报错（不静默失败）；
- *  3. 注入管理器（模拟 gui main 启动时 setSubagentManager(subagents)）→ 点名/自动路由两分支；
- *  4. A-980-R30 **验收闭环**：前台调用会等子代理跑完并把产出（含状态/自评/产物/验收要求）交回主 Agent——
- *     这是修复前完全缺失的一环（当时是纯 fire-and-forget，回执谎称"由系统回收"，实际没人回收）。
- */
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach } from "vitest";
 import { getRegistry, resetRegistry } from "../../core-ts/src/tools/registry.js";
 import { registerBuiltinTools, setSubagentManager } from "../../core-ts/src/tools/builtin.js";
@@ -37,11 +37,11 @@ describe("delegate_subagent（自动委派工具链路）", () => {
     const schema = tool!.toLLMSchema() as { type: string; function: { name: string; description: string; parameters?: { properties?: Record<string, unknown>; required?: string[] } } };
     expect(schema.function.name).toBe("delegate_subagent");
     expect(schema.function.description).toContain("委派");
-    // 引擎工具循环可见性：注册表整体 schema 列表必须包含该工具
+    
     expect(reg.listTools().some((s) => String((s as { function?: { name?: string } }).function?.name) === "delegate_subagent")).toBe(true);
     const params = schema.function.parameters;
     expect(params?.properties?.task).toBeDefined();
-    expect(params?.properties?.model).toBeDefined(); // A-942：子代理专属模型参数对模型可见
+    expect(params?.properties?.model).toBeDefined(); 
     expect(params?.required ?? []).toContain("task");
   });
 
@@ -74,7 +74,7 @@ describe("delegate_subagent（自动委派工具链路）", () => {
     setSubagentManager({ delegate: (): FakeRun | null => null });
     const tool = getRegistry().get("delegate_subagent")!;
     const out = await tool.executeFn({ task: "聊聊今天的天气" });
-    // A-980-R30：只报"没有匹配"等于把模型逼回瞎猜，必须附上可用清单（无定义时也要说明"自己做完"）
+    
     expect(out).toContain("没有与任务匹配");
     expect(out).toContain("可用子代理");
   });
@@ -88,7 +88,7 @@ describe("delegate_subagent（自动委派工具链路）", () => {
     const bad = await tool.executeFn({ task: "帮我看看", agent: "不存在的角色" });
     expect(bad).toContain("没有名为「不存在的角色」");
     expect(bad).toContain("代码审查员");
-    // 点名命中 → 正常进入派发（此假实现无 wait，退化为回执）
+    
     const ok = await tool.executeFn({ task: "帮我看看", agent: "代码审查员" });
     expect(ok).toContain("代码审查员");
   });
@@ -110,19 +110,19 @@ describe("delegate_subagent（自动委派工具链路）", () => {
     const tool = getRegistry().get("delegate_subagent")!;
     const withModel = await tool.executeFn({ task: "审查这段代码", model: "api:cheap:light" });
     expect(passedModel).toBe("api:cheap:light");
-    expect(withModel).toContain("api:cheap:light"); // 回执标注模型，让用户可核验
-    // 未传 model → 不覆盖（走全局默认/继承）
+    expect(withModel).toContain("api:cheap:light"); 
+    
     await tool.executeFn({ task: "审查这段代码" });
     expect(passedModel).toBeUndefined();
   });
 });
-/* ─────────────────────────────────────────────────────────────────────────
-   A-980-R30：把"派发 → 执行 → **回收** → 验收"这条路补上。
-   修复前 delegate_subagent 是纯 fire-and-forget，回执写着"结果将在完成后由系统回收"，
-   而全仓库没有任何回收实现 → 主 Agent 永远看不到子代理产出 → 用户"从没见过两者的交互"。
-   ───────────────────────────────────────────────────────────────────────── */
 
-/** 假管理器：带 wait（模拟真实 SubAgentManager 的事件驱动等待） */
+
+
+
+
+
+
 function fakeManagerWithWait(final: FakeRun, opts: { onDelegate?: (o?: { agent?: string; model?: string }) => void } = {}) {
   return {
     delegate: (_task: string, o?: { agent?: string; model?: string }): FakeRun => {
@@ -131,8 +131,8 @@ function fakeManagerWithWait(final: FakeRun, opts: { onDelegate?: (o?: { agent?:
     },
     wait: async (id: string): Promise<FakeRun | undefined> => (id === final.id ? final : undefined),
     list: (): FakeRun[] => [final],
-    // A-1096：`source` 用 `as const` 收窄为字面量（装配侧接口已收窄为 "user" | "builtin"）。
-    // 不收窄的话这里会推断成 string，假实现与真实接口的契约就悄悄松掉了。
+    
+    
     catalog: () => [{ name: final.name, description: "专家", source: "builtin" as const }],
   };
 }
@@ -164,9 +164,9 @@ describe("A-980-R30 — 子代理结果回收与验收闭环", () => {
     expect(out).toContain("耗时 12.4s");
     expect(out).toContain("模型 api:cheap:light");
     expect(out).toContain("自评置信度 0.82");
-    expect(out).toContain("发现 2 处空指针风险");      // 摘要回流（不只是"已派发"）
+    expect(out).toContain("发现 2 处空指针风险");      
     expect(out).toContain("产物清单：review.md");
-    // 验收要求必须存在 —— 这是防"不加核对就转述"的唯一抓手
+    
     expect(out).toContain("验收要求");
     expect(out).toContain("不要直接当事实转述");
   });
@@ -177,7 +177,7 @@ describe("A-980-R30 — 子代理结果回收与验收闭环", () => {
     expect(out).toContain("状态：失败");
     expect(out).toContain("上游 429 限流");
     expect(out).toMatch(/重派|自己完成/);
-    expect(out).not.toContain("验收要求"); // 失败时不给验收话术，避免误导
+    expect(out).not.toContain("验收要求"); 
   });
 
   it("超时/取消态 → 区分原因并给下一步", async () => {
@@ -212,9 +212,9 @@ describe("A-980-R30 — 子代理结果回收与验收闭环", () => {
     const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "审查", background: true });
     expect(out).toContain("已派发·后台");
     expect(out).toContain("id=r-6");
-    expect(waited).toBe(false); // 后台模式不等待
+    expect(waited).toBe(false); 
 
-    // 收口：subagent_result 传 id → 走同一套验收包
+    
     const got = await getRegistry().get("subagent_result")!.executeFn({ id: "r-6" });
     expect(waited).toBe(true);
     expect(got).toContain("[子代理结果] 代码审查员");

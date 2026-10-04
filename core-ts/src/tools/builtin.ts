@@ -1,17 +1,17 @@
-/**
- * core-ts/src/tools/builtin.ts — 内置工具（Node 语义）。
- * 语义移植自 tools/builtin.py：
- * - file_read / file_list（只读，相对路径锚定项目根，拒绝符号链接，敏感文件屏蔽，256KB 上限）
- * - file_write（受控写入：项目根内、敏感黑名单、5MB 上限、原子写入）
- * - code_check（Python → py_compile 语义，Node 直接 node --check；JS/TS 同）
- * - web_fetch / web_search（network；Node 侧用内置 fetch 直连）
- */
+
+
+
+
+
+
+
+
 
 import { readdir, readFile, stat, writeFile, rename, mkdir, realpath, lstat, open, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, basename, extname, resolve, sep } from "node:path";
 import { PROJECT_ROOT } from "../paths.js";
-// A-980-R29：待办存储（路径/容错读取/归一化/复述渲染）是**唯一真源**，
-// 主进程（gui/src/main/index.ts）读同一份，别再在这里手搓路径与解析。
+
+
 import {
   readTodos, writeTodos, renderTodos, randomId,
   TODO_STATUSES, TODO_CONTENT_MAX,
@@ -21,12 +21,12 @@ import { randomUUID } from "node:crypto";
 import { execFile, exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
-// A-1121（②）：右栏打开请求的契约与触发（唯一出处；`setSidebarOpener` 也在这里）
+
 import { fireSidebarOpen, hasSidebarOpener, sessionIdFromArgs } from "../sidebarOpen.js";
-/* A-1144：右栏「挂载」的读取口（唯一产地 `sidebarMount.ts`；系统提示那边也用它）。 */
+
 import { sidebarMountSection } from "../sidebarMount.js";
-// A-1122（③）：文件改动账本 —— 「回滚（rollbackTo）时把磁盘也还原」的记账口径唯一出处。
-// 记账必须发生在**真正改动之前**（改完就再也拿不到"改前状态"）。
+
+
 import {
   recordFileChange, recordDirEntry, recordUnundoable, undoScopeOf, UNDO_DELETE_MAX_FILES,
   type UndoScope,
@@ -47,31 +47,31 @@ import type {
 } from "../screen/types.js";
 import { toOptimizedDataUrl } from "../screen/optimize.js";
 import { registerBrowserTools } from "./browser.js";
-// A-983：子代理执行预算的**唯一真源**（等待上限由它推导，避免两处手写字面量漂移）
+
 import { DEFAULT_EXEC_BUDGET_MS } from "../services/subagent.js";
 import { groupSubagentCatalog, renderSubagentCatalogLines } from "../services/subagentCatalog.js";
-// A-1093：改动标记的**唯一产地**（`[__slime_diff__]old|new[/__slime_diff__]`）。
-// 此前是下面 fileWrite 里一行内联模板串，与三处解析各写各的 —— 格式漂一次就全线失灵。
+
+
 import { buildDiffMarker } from "../diff_marker.js";
-// A-1137：联网检索的**唯一产地**（Bing/百度解析器 + 反爬节奏 + 验证码退避）。
-// webSearch 现在只是它的「文本形态适配器」——searchOnlineText() 逐字保持历史输出格式。
+
+
 import { searchOnlineText } from "../search/onlineSearch.js";
 
 const execFileP = promisify(execFile);
 const execP = promisify(execCb);
 
-/** 相对路径锚定项目根（core-ts/src/tools/ 与 dist/tools/ 上溯三层均指向项目根） */
+
 export { PROJECT_ROOT };
 
 const MAX_READ_BYTES = 262_144;
 const MAX_WRITE_BYTES = 5 * 1024 * 1024;
-/** 本地命令执行的输出上限（超出即截断并如实说明截断了多少） */
+
 const MAX_CMD_OUTPUT = 32 * 1024;
-/** 本地命令默认/最长超时 */
+
 const CMD_TIMEOUT_DEFAULT = 120_000;
 const CMD_TIMEOUT_MAX = 600_000;
-// 安全清单与 Python 侧 tools/builtin.py、同目录 classifier.ts 共用同一份来源：
-// shared/security-policy.yaml（scripts/gen_security_policy.py 生成）。
+
+
 const SENSITIVE_NAMES = new Set([".slime_pass", "providers.enc.json", "auth_token.enc", "auth_token.json"]);
 const WRITE_BLOCKED_NAMES = SENSITIVE_FILENAMES_SET;
 const WRITE_BLOCKED_DIRS = PROTECTED_DIRS_SET;
@@ -83,19 +83,19 @@ function projectRootPath(p: string, ws = ""): string {
   return join(PROJECT_ROOT, p);
 }
 
-/** 路径是否落在 root 之内（含 root 本身）。
- *
- *  ⚠️ Windows 磁盘大小写不敏感，而**同一个目录**在不同来源下的拼写不同：
- *  `realpath()` 返回磁盘上的规范拼写（如 `D:\pilot project`），而 `PROJECT_ROOT` 来自
- *  进程 cwd / `import.meta.url`，可能是小写形态（如 `d:\pilot project`）。
- *  逐字符 `startsWith` 在 win32 上因此会把**项目内的合法路径误判为「超出项目范围」**
- *  ——实测：先判 `d:\…`（通过），realpath 后再判 `D:\…`（被拒），
- *  症状是 file_read/file_write/file_list/code_check 对项目内**已存在**的文件一律报越界
- *  （不存在的新文件反而正常，因为那条路径不走 realpath 复核）。
- *
- *  为什么只放宽 win32：POSIX 上大小写敏感是**真实语义**（`/a/Proj` 与 `/a/proj` 是两个目录），
- *  放宽会让大小写敏感的 macOS 卷上出现真实沙箱逃逸。
- *  （case-insensitive 前缀比较在 core-ts/src/sandbox.ts 的 isSystemPath 已有先例。） */
+
+
+
+
+
+
+
+
+
+
+
+
+
 function isInsideRoot(abs: string, root: string): boolean {
   if (process.platform === "win32") {
     const a = abs.toLowerCase();
@@ -111,9 +111,9 @@ function isInsideProject(p: string, ws = ""): boolean {
   return allowedRoots.some((root) => isInsideRoot(abs, root));
 }
 
-/** 解析路径：字符串规范化 + （项目根 ∪ 工作目录）校验（不要求存在）；已存在时 realpath 防 symlink 逃逸。
- *  sandboxAllowed=true 表示沙箱已按用户授权放行（如工作目录外操作），跳过项目范围硬拒——
- *  但敏感文件/黑名单防护与「路径本身是符号链接」仍由调用方/下方继续强制，不做降级。 */
+
+
+
 async function resolveInProject(p: string, ws = "", sandboxAllowed = false): Promise<string> {
   const abs = resolve(projectRootPath(p, ws));
   if (!sandboxAllowed && !isInsideProject(abs, ws)) {
@@ -133,7 +133,7 @@ async function resolveInProject(p: string, ws = "", sandboxAllowed = false): Pro
     if (e instanceof RangeError || e instanceof Error && e.message === "禁止跟随符号链接") {
       throw e;
     }
-    return abs; // 不存在：由调用方做存在性检查
+    return abs; 
   }
 }
 
@@ -149,34 +149,34 @@ function isBlockedWritePath(p: string, ws = ""): boolean {
   return first !== undefined && WRITE_BLOCKED_DIRS.has(first.toLowerCase());
 }
 
-/**
- * 单次 file_read 返回内容的**字节**上限（= 上面 `MAX_READ_BYTES`，取值依据见该常量注释）。
- */
 
-/**
- * 默认返回行数 / 单次最大行数。
- * 默认 2000 行对齐 Claude Code（"默认只返回开头 2000 行，超过 2000 字符的单行会被截断"）。
- * 上限 20000 行是给"确实要看整份中等文件"留的口子 —— 仍受 256KB 分片字节上限约束。
- * 维护铁律：**任何"读不出来"都必须给出可继续的下一步**（下一段 offset、总行数、文件大小），
- * 否则就是上面那个"死路"。
- */
+
+
+
+
+
+
+
+
+
+
 const DEFAULT_READ_LINES = 2000;
 const MAX_READ_LINES = 20_000;
-/** 统计总行数时最多扫描的字节数：超过则报"总行数未知"，避免为了报个数把 700MB 读穿 */
+
 const MAX_SCAN_BYTES = 16 * 1024 * 1024;
-/** 单行超长时的截断长度（对齐 Claude Code 的 2000 字符/行），防止一行就把预算吃光 */
+
 const MAX_LINE_CHARS = 2000;
 
-/**
- * 流式读取文件的行区间 [offset, offset+limit)。
- *
- * 为什么不用 `readFile` 一次性读：用户实测 723MB 的文件也点进来了，一次性 utf-8 解码会
- * 直接把内存打爆（渲染进程/主进程 OOM 的慢性来源）。改成流式后内存只与"本次窗口"相关，
- * 且可以在收满窗口后就继续扫行计数、扫到 MAX_SCAN_BYTES 就收手。
- *
- * @returns lines（已按行切开，超长行按 MAX_LINE_CHARS 截断）、totalLines（可能为 undefined=未知）、
- *          hasMore（是否还有更多行）、sawEof（是否读到了文件末尾）
- */
+
+
+
+
+
+
+
+
+
+
 async function readLineWindow(
   abs: string, offset: number, limit: number,
 ): Promise<{ lines: string[]; totalLines?: number; hasMore: boolean; sawEof: boolean }> {
@@ -184,11 +184,11 @@ async function readLineWindow(
   try {
     const decoder = new TextDecoder("utf-8");
     const buf = Buffer.allocUnsafe(64 * 1024);
-    let pending = "";          // 跨 chunk 的半行（**有硬上限**，见 feed 注释）
-    let lineNo = 0;            // 已完成的行号（1-based）
+    let pending = "";          
+    let lineNo = 0;            
     let scanned = 0;
     let sawEof = false;
-    let skippingLong = false;  // 当前行已判定"超长" → 丢弃其余部分直到下一个换行
+    let skippingLong = false;  
     const lines: string[] = [];
 
     const pushLine = (text: string, forceTruncated = false): void => {
@@ -198,17 +198,17 @@ async function readLineWindow(
       lines.push(tooLong ? `${text.slice(0, MAX_LINE_CHARS)}… [本行超长已截断]` : text);
     };
 
-    /**
-     * 把一块解码文本并入缓冲并切行。
-     *
-     * ⚠️ **`pending` 必须有硬上限** —— 这是 A-984 那次"主进程卡死、界面点不动"的根因：
-     * 旧写法只有 `pending += decode(chunk)`，对**没有换行符的文件**（压缩成一行的 JSON / 长日志 /
-     * 单行 base64）`pending` 会一路涨到整份文件大小；而 JS 字符串 `+=` 是**重复拷贝**，
-     * 累积代价接近 O(n²) —— 一个几百 MB 的单行文件足以把主进程钉死数分钟并触发 GC 抖动。
-     * core-ts 跑在**主进程**里 → IPC 得不到服务 → 渲染层的按钮全部"点了没反应"。
-     * 现在一旦缓冲超过单行上限就：把该行按截断记一次、置 `skippingLong`、**清空缓冲**，
-     * 后续内容直接丢弃直到遇见换行 —— 内存与时间都变成与文件大小无关的常数。
-     */
+    
+
+
+
+
+
+
+
+
+
+
     const feed = (text: string): void => {
       pending += text;
       let nl = pending.indexOf("\n");
@@ -230,15 +230,15 @@ async function readLineWindow(
       if (bytesRead === 0) { sawEof = true; break; }
       scanned += bytesRead;
       feed(decoder.decode(buf.subarray(0, bytesRead), { stream: true }));
-      // A-984：扫描预算到期 → **无条件停**（旧写法要求 `lines.length >= limit` 才判预算，
-      // 而"整份文件没有换行符"时 lines 恒为 0，那个 break **永远不会触发** → 一路读到底）。
+      
+      
       if (scanned >= MAX_SCAN_BYTES) { break; }
     }
     if (sawEof) {
       feed(decoder.decode());
       if (pending.length > 0 && !skippingLong) { pushLine(pending.replace(/\r$/, "")); }
     }
-    // 只有真的读到 EOF 才敢给总行数（扫描预算截断时按"未知"回报，不编造）
+    
     const totalLines = sawEof ? lineNo : undefined;
     const hasMore = totalLines === undefined ? true : totalLines > offset + lines.length - 1;
     return { lines, totalLines, hasMore, sawEof };
@@ -247,15 +247,15 @@ async function readLineWindow(
   }
 }
 
-/** A-1036：旧版格式在提示里的可读名 */
+
 const OLE_KIND_LABEL: Record<string, string> = { doc: "DOC 97-2003", xls: "XLS 97-2003", ppt: "PPT 97-2003" };
 function docKindLabel(kind: string): string { return OLE_KIND_LABEL[kind] ?? kind.toUpperCase(); }
 
-/**
- * A-1036：把「文档 → 文本」的结果套用与纯文本**完全一致**的分页与字节上限语义。
- * 新格式（ZIP 容器）与旧版（OLE2）两条路径共用这一份实现 —— 此前是内联在 docx 分支里的，
- * 加旧版格式时要再抄一遍，抄一份漂一份。
- */
+
+
+
+
+
 function finishDocResult(
   extracted: { text: string; info: string[]; truncated: boolean },
   offset: number,
@@ -284,9 +284,9 @@ function finishDocResult(
   return `${head}${lines.join("\n")}`;
 }
 
-/**
- * 扩展名 → 生成格式的**唯一产地**。判据只用**目标路径的扩展名**（要生成什么由文件名说清）。
- */
+
+
+
 const DOC_CREATE_FORMATS: Record<string, DocFormat> = {
   ".docx": "docx",
   ".xlsx": "xlsx",
@@ -297,24 +297,24 @@ const DOC_CREATE_FORMATS: Record<string, DocFormat> = {
   ".txt": "txt",
 };
 
-/**
- * `docs_create` 的执行体：按扩展名生成**真正的** Office / 文档文件（不是只写文本）。
- *
- * ## 为什么需要它（2026-09-30 用户原话：「office 办公文件，slime 能不能读取并修改，
- * 用户有需求时，能否自己按用户要求，从零生成、创建？」）
- * 审计发现：`core-ts/src/office/docWrite.ts::writeDocument()` **早就实现了** docx/xlsx/pptx/pdf 的
- * 真容器生成（OOXML 部件齐全、有完整 round-trip 测试），IPC `slime:docs:create` 也接好了 ——
- * 但**没有任何 Agent 工具包装它**（`docs_create` 这条通道只有声明、零消费者）。
- * ⇒ 结果是：**能读、能画，但 Agent 自己一个字都生成不了**。本工具把那条断链接上。
- *
- * ## ⚠️ 边界与 `fileWrite` **同一套**（新工具绝不是绕过沙箱的口子）
- * 项目根 / 工作目录内 + 符号链接拒绝 + 敏感路径黑名单，全走同一条 `resolveInProject`。
- *
- * ## ⚠️ 只创建**新文件**，目标已存在就拒绝
- * `docWrite` 的产物是**二进制**，而"改动账本"（`recordFileChange`）记的是**字符串**旧内容 ⇒
- * 允许覆盖就会造出「能回滚、但回滚出来是个坏文件」的**假承诺**，比"不支持回滚"更坏。
- * 文本格式（.csv/.md/.txt）要覆盖请走 `file_write`（它本来就有账本与 diff）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async function docsCreate(args: Record<string, unknown>): Promise<string> {
   const path = String(args.path ?? "").trim();
   if (!path) { return "[错误] 缺少 path 参数"; }
@@ -336,12 +336,12 @@ async function docsCreate(args: Record<string, unknown>): Promise<string> {
     if (isBlockedWritePath(abs, ws)) {
       return `[错误] 敏感文件/目录禁止写入: ${path}`;
     }
-    /* ⚠️ **不许覆盖**：给一条可操作的出路，而不是只说"不行"。 */
+    
     try {
       await stat(abs);
       return `[错误] 目标已存在：${path}。本工具只**新建**文件（二进制文档不支持回滚，覆盖会造成`
         + `「能回滚但文件已坏」的假承诺）。请换一个路径，或先删掉它。`;
-    } catch { /* 不存在 = 正是我们要的 */ }
+    } catch {  }
 
     const r = await writeDocument({ path: abs, format, title, body });
     if (!r.ok) { return `[错误] 生成失败：${r.error}`; }
@@ -357,7 +357,7 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
     return "[错误] 缺少 path 参数";
   }
   const ws = String(args._workspace ?? "");
-  // 沙箱已按用户授权放行（工作目录外操作）→ 跳过项目范围硬拒；敏感文件防护仍生效
+  
   const sandboxAllowed = args._sandbox_allowed === true;
   const offset = clampInt(args.offset, 1, 1, 100_000_000);
   const limit = clampInt(args.limit, DEFAULT_READ_LINES, 1, MAX_READ_LINES);
@@ -373,22 +373,22 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
     } catch {
       return `[错误] 文件不存在: ${path}`;
     }
-    // A-978：**不再有"文件过大 → 拒绝读取"分支**。
-    // 旧实现 `if (fsize > MAX_READ_BYTES * 10) return "[错误] 文件过大（…MB），拒绝读取"` 是个**死路**：
-    // 返回的是一句错误、零字节内容，而 slime 既没有 offset/limit、也没有内容检索工具，
-    // 模型拿不到任何可继续的手段 —— 实测 6.2MB 的 JSON 直接读不了，Agent 只能去写 Python 脚本绕。
-    // （Claude Code 敢抛错是因为它同时提供 offset/limit + Grep 两条出路；照抄行为而不照抄退路 = 更糟。）
-    // 现在一律"读得到，只是读一段"：任何情况下都返回可用的分片 + 明确的续读指引。
-    // A-1034：Office 文档（docx/pptx/xlsx）本质是 ZIP+XML 容器，按 UTF-8 解码只会得到
-    // PK 开头的二进制乱码（用户实测「无法阅读 PPT / WORD / EXCEL」，Agent 只能反过来求用户贴内容）。
-    // 这里先分派到 doc_text 抽取正文，再套用与纯文本**同一套** offset/limit 分页语义。
+    
+    
+    
+    
+    
+    
+    
+    
+    
     const ext = extname(p).toLowerCase();
     const oleKind = oleKindFromExt(ext);
     const legacy = legacyBinaryName(ext);
     if (oleKind) {
-      // A-1036：旧版 .doc/.xls/.ppt 是 **OLE2 复合文档**，不是 ZIP —— 走 CFB 容器 + 各自的
-      // 流格式（.doc piece table / .xls BIFF SST / .ppt 文本原子）真解析，
-      // 不再只报"不支持"、也不再吐二进制乱码。
+      
+      
+      
       let extracted: ReturnType<typeof extractOleText>;
       try {
         extracted = extractOleText(await readFile(p), oleKind);
@@ -410,9 +410,9 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
     }
     const win = await readLineWindow(p, offset, limit);
     let content = win.lines.join("\n");
-    // 字节上限作用在**本次分片**上（不是文件大小）—— 一行 2000 字符 × 2000 行 ≈ 4MB 仍可能超预算
+    
     if (Buffer.byteLength(content, "utf-8") > MAX_READ_BYTES) {
-      // 按字节回退：逐步少给几行，直到落进预算（不切字符，保持行完整、行号可对齐）
+      
       let keep = win.lines.length;
       while (keep > 1 && Buffer.byteLength(win.lines.slice(0, keep).join("\n"), "utf-8") > MAX_READ_BYTES) {
         keep = Math.max(1, Math.floor(keep * 0.7));
@@ -423,8 +423,8 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
     }
     const lastLine = offset + win.lines.length - 1;
     const sizeMb = (fsize / 1024 / 1024).toFixed(1);
-    // A-984：**一行都没取到就绝不返回空串**。空结果等于什么都没给模型，它只会在 offset 上瞎试。
-    // 三种成因（offset 越界 / 该处无换行符 / 扫描预算用尽）都必须写清并给出下一步。
+    
+    
     if (win.lines.length === 0) {
       const known = win.totalLines !== undefined ? `该文件共 ${win.totalLines} 行。` : "";
       if (win.totalLines !== undefined && offset > win.totalLines) {
@@ -435,10 +435,10 @@ async function fileRead(args: Record<string, unknown>): Promise<string> {
         + `或 (b) offset 超出已扫描范围（单次最多扫描 ${Math.round(MAX_SCAN_BYTES / 1024 / 1024)}MB 用于定位行号）。`
         + `${known}共 ${sizeMb}MB。这类文件不适合逐行读取：请先用 file_list 确认目标，或从更靠前的 offset 读取。]`;
     }
-    // 读完 → **不加任何脚注**（保持"文件内容就是返回值"的契约：既省 token，也不让模型
-    // 以为每次读取都附带元信息；对齐 Claude Code —— 它只在截断时才加提示）。
+    
+    
     if (!win.hasMore) { return content; }
-    // 还有更多 → 必须给出**可直接复用**的下一页参数（对齐 Claude Code 的续读提示写法）
+    
     const total = win.totalLines !== undefined
       ? `共 ${win.totalLines} 行`
       : `共 ${sizeMb}MB（行数未知）`;
@@ -484,7 +484,7 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
   }
   const content = String(args.content ?? "");
   const ws = String(args._workspace ?? "");
-  // 沙箱已按用户授权放行（工作目录外写入）→ 跳过项目范围硬拒；敏感路径黑名单仍生效
+  
   const sandboxAllowed = args._sandbox_allowed === true;
   try {
     const p = projectRootPath(path, ws);
@@ -492,19 +492,19 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
     if (data.length > MAX_WRITE_BYTES) {
       return `[错误] 内容超过 ${MAX_WRITE_BYTES / (1024 * 1024)}MB 上限，拒绝写入`;
     }
-    const abs = await resolveInProject(p, ws, sandboxAllowed); // 项目根/工作目录内 + 符号链接拒绝（realpath 校验）
+    const abs = await resolveInProject(p, ws, sandboxAllowed); 
     if (isBlockedWritePath(abs, ws)) {
       return `[错误] 敏感文件/目录禁止写入: ${path}`;
     }
     await mkdir(dirname(abs), { recursive: true });
-    // A-918++：写入前读原内容（供 renderer 工具节点展开时显示 VS Code 风格 diff 块）
+    
     let oldContent = "";
     let existed = false;
-    try { oldContent = await readFile(abs, "utf-8"); existed = true; } catch { /* 新文件/无权限 → 视为空 */ }
-    /* A-1122（③）：把「改前状态」记进**改动账本** —— 回滚（rollbackTo）靠它把磁盘也还原。
-       必须在这里（真正写入**之前**）：事后无法重建旧内容。
-       ⚠️ 账本写失败**不阻断**写入（返回 false）——但这次改动就不可回滚了，
-          `_undo_note` 会把它带到回执里（静默失败 = 用户以为能回滚、实际不能）。 */
+    try { oldContent = await readFile(abs, "utf-8"); existed = true; } catch {  }
+    
+
+
+
     const undoOk = await recordFileChange(
       undoScopeOf(args),
       abs,
@@ -514,18 +514,18 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
     const tmp = join(dirname(abs), `${basename(abs)}.${randomUUID().slice(0, 8)}.tmp`);
     await writeFile(tmp, data);
     await rename(tmp, abs);
-    // A-918++：嵌入 diff 标记（旧 vs 新 base64 编码，renderer 端解析并渲染红绿行块；未变更不嵌）
-    //
-    // ⚠️ A-1093：**这一段是"写死"的，没有开关**。用户原话：「都给我显示……把这个会显示修改对比的
-    //    设定写死在 slime，反正以后也不会删掉。顶多改一下前端的 UI 表现样式。」
-    //    ⇒ 只要 `oldContent !== content` 就必须产出标记；标记会不会被显示、显示成什么样，
-    //      是**渲染层**的事（见 `gui/src/renderer/pages/chatProducts.ts` 的 `hasVisibleDiff`）。
-    //    ⇒ 任何"要不要带 diff""只在大改动时带"的所谓优化，都是把这行判据重新变成可选开关 = 回归。
-    //
-    // ⚠️ 标记构造走 `buildDiffMarker`（`core-ts/src/diff_marker.ts`，唯一产地）：
-    //    格式字符串散在产地与三个消费者里时，"改了一处"就等于"三处静默失效"。
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     const diffTag = buildDiffMarker(oldContent, content);
-    // A-1122：账本写失败时**如实说出来**（不阻断写入，但也不许让用户以为它能被回滚）
+    
     const undoNote = (!undoOk && undoScopeOf(args))
       ? "\n（⚠️ 本次改动未纳入回滚账本：账本写入失败，回滚这条消息时此文件不会被还原）"
       : "";
@@ -539,7 +539,7 @@ async function fileWrite(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-/** 递归统计目录下的条目数（用于删除回执里如实报"删了多少"）。失败按 0 计，不阻断删除。 */
+
 async function countEntries(dir: string): Promise<number> {
   let n = 0;
   try {
@@ -548,19 +548,19 @@ async function countEntries(dir: string): Promise<number> {
       n += 1;
       if (e.isDirectory()) { n += await countEntries(join(dir, e.name)); }
     }
-  } catch { /* 读不了就不报数 */ }
+  } catch {  }
   return n;
 }
 
-/**
- * A-1122：递归收集目录下的**文件与子目录**（供删除前把"改前状态"存进回滚账本）。
- *
- * `limit` 是**条目数**硬上限：超过就返回 `truncated=true`，由调用方 `recordUnundoable`
- * 如实报出 —— 递归删掉的目录可能是整个 `node_modules`，把它整份塞进账本既慢又没意义。
- * ⚠️ 目录也收：只收文件的话，"递归删掉一个含**空子目录**的目录"回滚后内容回来了、
- *    空目录却静默消失（骨架没了）。目录由 `recordDirEntry` + `mkdir` 还原。
- * ⚠️ 符号链接**跳过**（跟随会走出工作区）；读目录失败按 `truncated` 计（**不许**当成遍历成功）。
- */
+
+
+
+
+
+
+
+
+
 async function collectTree(dir: string, limit: number): Promise<{ dirs: string[]; files: string[]; truncated: boolean }> {
   const dirs: string[] = [];
   const files: string[] = [];
@@ -584,22 +584,22 @@ async function collectTree(dir: string, limit: number): Promise<{ dirs: string[]
   return { dirs, files, truncated: !ok };
 }
 
-/** 删除前采到的「改前状态」（删除**之后**才提交进账本 —— 见 `commitDeleteUndo` 的说明） */
+
 interface DeleteCapture {
   scope: UndoScope;
-  /** 被删对象本身的绝对路径（`recordUnundoable` 的归属与界面展示用） */
+  
   abs: string;
-  /** 递归删目录时收集到的子目录（还原时 `mkdir`） */
+  
   dirs: string[];
-  /** 待留痕的文件；`data=null` ⇒ 读不到改前内容（只能记 `skip`） */
+  
   files: Array<{ abs: string; data: Buffer | null }>;
-  /** 整个对象都还原不了的原因（目录过大 / 读取失败） */
+  
   unundoable?: string;
 }
 
-/**
- * 删除**之前**采集"改前状态"（删完就再也采集不到了）。无归属（CLI/测试未注入）时返 null。
- */
+
+
+
 async function captureDeleteUndo(
   args: Record<string, unknown>,
   abs: string,
@@ -620,16 +620,16 @@ async function captureDeleteUndo(
   return { scope, abs, dirs: [], files: [{ abs, data }] };
 }
 
-/**
- * 把采到的"改前状态"提交进账本。返回**要拼进回执的告警**（空串 = 全部留痕成功）。
- *
- * ⚠️ 为什么读在删之前、提交在删之后：
- *  · 内容必须在删除**之前**读（删完就没了，`captureDeleteUndo` 负责）；
- *  · 提交却在删除**成功之后** —— 否则"移入回收站失败"提前 `return` 时账本里会多出一条
- *    凭空出现的还原项（回滚会把一个从没被删过的文件再写一遍，且确认框里的数字虚高）。
- * ⚠️ 留不下痕时必须**出声**（`recordUnundoable` ⇒ `plan.blocked[]` ⇒ 界面横幅），
- *    绝不静默跳过 —— 用户以为回滚干净了是最糟的结果。
- */
+
+
+
+
+
+
+
+
+
+
 async function commitDeleteUndo(cap: DeleteCapture | null): Promise<string> {
   if (!cap) { return ""; }
   if (cap.unundoable) {
@@ -645,23 +645,23 @@ async function commitDeleteUndo(cap: DeleteCapture | null): Promise<string> {
   return ok ? "" : "\n（⚠️ 本次删除未完整纳入回滚账本：部分条目留痕失败，回滚时可能还原不了）";
 }
 
-/**
- * file_delete —— 删除文件 / 目录（用户报「Agent 说没有删除文件的能力」的**结构性根因**）。
- *
- * 【为什么必须新增】此前工具注册表里有 file_read/file_list/file_write，**独独没有删除**：
- * 于是模型面对"删掉那个文件"只能回答"我做不到"，或（更糟）把任务委派给子代理
- * ——子代理共用同一份注册表，同样做不到，最后整条任务失败。用户的怀疑（"是不是
- * Agent-Loop 让我去让子代理删、然后子代理删不掉"）在结果上完全正确：工具面缺能力时，
- * 任何编排都救不回来。补上能力，而不是去改 Agent-Loop 的委派策略。
- *
- * 【安全边界（多层，缺一不可）】
- *  ① 路径必须落在**工作目录 / 项目根**内（`resolveInProject`，含 realpath 复核 + 拒绝符号链接）；
- *  ② 敏感文件 / 受保护源码目录**一律拒删**（复用写入侧同一份清单，避免两套口径漂移）；
- *  ③ **拒绝删除根目录本身**（`.` / 工作目录 / 项目根）—— 那是"把整个工作区删了"，不是删文件；
- *  ④ 目录非空时必须显式 `recursive=true`（不给"顺手递归"的默认值）；
- *  ⑤ 首选**回收站**（装配层注入的 `shell.trashItem`）：可还原。未注入时才永久删除，
- *     并在回执里**明说**"已永久删除（未进回收站）"，绝不静默换语义。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async function fileDelete(args: Record<string, unknown>): Promise<string> {
   const path = String(args.path ?? "").trim();
   if (!path) { return "[错误] 缺少 path 参数"; }
@@ -673,7 +673,7 @@ async function fileDelete(args: Record<string, unknown>): Promise<string> {
     if (isBlockedWritePath(abs, ws)) {
       return `[错误] 敏感文件/目录禁止删除: ${path}`;
     }
-    // ③ 根目录本身不允许删（否则一次误判就抹掉整个工作区）
+    
     const root = resolve(ws || PROJECT_ROOT);
     if (resolve(abs).toLowerCase() === root.toLowerCase()) {
       return `[错误] 拒绝删除工作区根目录本身: ${path}（请指定根目录下的具体文件或子目录）`;
@@ -691,11 +691,11 @@ async function fileDelete(args: Record<string, unknown>): Promise<string> {
         return `[错误] 目录非空（${entryCount} 个条目）：${path}。确认要连同内容一起删除时，请显式传 recursive=true。`;
       }
     }
-    // A-1122（③）：**删除前**采集"改前状态"，供回滚（rollbackTo）把磁盘也还原。
-    // ⚠️ 必须在 `trash` / `rm` **之前**：删完就再也读不到旧内容了。
-    // ⚠️ 提交在删除**成功之后**（见 `commitDeleteUndo`）—— 提前 return 的分支不留账。
+    
+    
+    
     const captured = await captureDeleteUndo(args, abs, st.isDirectory());
-    // ⑤ 首选回收站（可还原）；未注入回收站能力时退化为永久删除，并如实标注
+    
     const trash = trashServiceRef;
     let viaTrash = false;
     if (trash) {
@@ -703,7 +703,7 @@ async function fileDelete(args: Record<string, unknown>): Promise<string> {
         const r = await trash.trash(abs);
         viaTrash = r?.ok === true;
         if (!viaTrash && r?.error) {
-          // 回收站失败 → 不静默改永久删除，把选择权交回模型/用户
+          
           return `[错误] 移入回收站失败（未执行永久删除）: ${path}: ${r.error}`;
         }
       } catch (e) {
@@ -726,7 +726,7 @@ async function fileDelete(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-/** 取命令执行的工作目录（默认工作区 → 项目根；越界一律拒绝） */
+
 function resolveCmdCwd(raw: string, ws: string, sandboxAllowed: boolean): string {
   const base = ws || PROJECT_ROOT;
   if (!raw) { return resolve(base); }
@@ -739,25 +739,25 @@ function resolveCmdCwd(raw: string, ws: string, sandboxAllowed: boolean): string
   return abs;
 }
 
-/**
- * terminal_run —— 在本机执行一条**终端命令**（用户报「脚本任务无法执行」的结构性根因）。
- *
- * 【为什么必须新增】`adb_shell` 只能在**安卓设备**上跑命令；本机没有任何命令执行工具，
- * 于是"写个脚本并运行它"这类任务在工具面上就是不可能的。而判据层其实**早就为它建好了**：
- *  · `classifier.ts` 有只读白名单（ls/cat/grep… → auto）、高危黑名单（`rm -rf /`、
- *    `curl | sh`、`dd/mkfs`、内网地址… → block）与变更类确认表（rm/mv/npm/pip… → confirm）；
- *  · `hard_rules.ts` 对 riskKind=terminal 走同一份 `assessAction`；
- *  · 设置里的「终端（terminal）」开关与 `policy.gateToolCall` 的双层闸门都按类别放行/拦截。
- *  缺的只有"最后那一脚"——把它们接到一个真的会执行命令的工具上。
- *
- * 【与开关的关系】本工具声明 `permissions: ["terminal"]`：
- *  · 开关**关** → 闸门直接拒绝并回传原因（模型无法绕过）；
- *  · 开关**开** → 免逐次审批，但**硬规则照旧生效**（高危命令仍 block，见 hard_rules）。
- *
- * 【执行口径】必须用 shell（`&&`、管道、重定向是用户脚本的常态），因此走
- *  `exec(cmd, {shell})`：POSIX 用 /bin/sh，Windows 用 cmd.exe。超时与输出上限都有硬值，
- *  超时**杀掉整个进程树**（否则子进程会挂着继续跑）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async function terminalRun(args: Record<string, unknown>): Promise<string> {
   const command = String(args.command ?? "").trim();
   if (!command) { return "[错误] 缺少 command 参数"; }
@@ -785,7 +785,7 @@ async function terminalRun(args: Record<string, unknown>): Promise<string> {
     const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
     return formatCmdOutput(out, 0, timeout, false);
   } catch (e) {
-    // exec 在非零退出码时也走 catch（e.code 是退出码）；超时 e.killed=true
+    
     const err = e as { code?: number | string; killed?: boolean; signal?: string; stdout?: string; stderr?: string; message?: string };
     const killed = err.killed === true || err.signal === "SIGKILL";
     const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
@@ -796,7 +796,7 @@ async function terminalRun(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-/** 命令输出格式化（截断 + 退出码如实上报；超时单独说清是"超时被杀"） */
+
 function formatCmdOutput(raw: string, code: number, timeout: number, killed: boolean): string {
   const text = raw.replace(/\r\n/g, "\n");
   const truncated = text.length > MAX_CMD_OUTPUT;
@@ -889,14 +889,14 @@ async function webFetch(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-/**
- * webSearch：联网检索（给模型读的文本形态）。
- *
- * ⚠️ 解析器、反爬节奏、验证码退避**全部收归** `core-ts/src/search/onlineSearch.ts`
- * （铁律 11：同一事实写在 N 个地方必然漂）。本函数现在只是"把一个 query 翻译成一次调用"，
- * 不再持有任何 DOM 结构知识 —— 否则搜索页（要结构化 items）就得再抄一份解析器，
- * 而"上游改了 DOM"时漏改任何一处都是**零报错的静默失效**。
- */
+
+
+
+
+
+
+
+
 async function webSearch(args: Record<string, unknown>): Promise<string> {
   const query = String(args.query ?? "");
   if (!query) {
@@ -905,23 +905,23 @@ async function webSearch(args: Record<string, unknown>): Promise<string> {
   return searchOnlineText(query, { maxResults: args.max_results });
 }
 
-/**
- * todo_write：让 Agent 把任务规划持久化到待办面板（session 级）。
- *
- * 为什么返回值要**复述整张表**：长任务平均要几十次工具调用，早期写下的计划会沉到
- * 上下文中段（"lost in the middle"）而失效。每次调用把计划重新写到上下文末尾，
- * 就是用 recency 偏置把目标顶回模型的高注意力区（Manus 的 `todo.md` 手法）。
- * 因此这个工具的价值有两半：**给用户看**（右侧栏待办面板）+ **给模型自己看**（复述锚定）。
- */
+
+
+
+
+
+
+
+
 async function todoWrite(args: Record<string, unknown>): Promise<string> {
   const sessionId = String(args.sessionId ?? "").trim();
-  // sessionId 由工具循环注入；缺失说明会话上下文没就绪（CLI/测试）。如实报错，
-  // 不要静默写进 `todos_.json` —— 那会得到一个界面永远看不见的"幽灵待办"。
+  
+  
   if (!sessionId) {
     return "[错误] 缺少 sessionId（会话上下文未就绪），本次待办未写入，也不会显示在待办面板。请继续任务，不要重复调用本工具。";
   }
   const actionRaw = String(args.action ?? "add").toLowerCase();
-  // 兼容旧的 update 名（语义并入 add 的按 id 合并）
+  
   const action = actionRaw === "update" ? "add" : actionRaw;
   if (action !== "add" && action !== "replace" && action !== "clear") {
     return `[错误] 未知 action「${actionRaw}」，只支持 add / replace / clear`;
@@ -935,9 +935,9 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
   } else {
     const itemsRaw = args.items;
     if (!Array.isArray(itemsRaw)) { return "[错误] todo_write 需要数组参数 items"; }
-    // ⚠️ 三个字段都必须是**可选**的：模型做增量更新时只会带 `{id, status}`（翻转某一项），
-    // 不能因为缺 content 就把这条丢掉、也不能擅自把 status 重置成 pending。
-    // （这正是本工具最常用的调用形态：完成一项 → 只发该 id 的 status。）
+    
+    
+    
     interface IncomingTodo { id: string; content: string; status?: TodoStatus; blockedBy?: string[]; blocks?: string[] }
     const incoming: IncomingTodo[] = itemsRaw
       .filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null)
@@ -950,8 +950,8 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
       }));
 
     if (action === "replace") {
-      // 整表重写（Claude Code TodoWrite / Codex update_plan 语义）：必须是带 content 的完整列表，
-      // 否则等于让模型误清空计划——宁可报错让它重发。
+      
+      
       const full = incoming.filter((it) => it.content.length > 0);
       if (full.length === 0) { return "[提示] replace 需要带 content 的完整任务列表，待办未变更"; }
       next = full.map((it) => ({
@@ -962,11 +962,11 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
         blocks: it.blocks,
       }));
     } else {
-      // add：**按 id 合并**——已有 id 就地更新、新 id 追加、未提及的项保留。
-      // 比"整表覆盖"宽容：模型只想翻某一项状态时不会误删整张计划（也天然避免了
-      // "模型只回传了变化项 → 其余计划全丢"这类事故）。
+      
+      
+      
       const byId = new Map(existing.map((t) => [t.id, t]));
-      // 合法项 = 有新内容（新增）或指向已存在的 id（局部更新）
+      
       const usable = incoming.filter((it) => it.content.length > 0 || (it.id !== "" && byId.has(it.id)));
       if (usable.length === 0) { return "[提示] 未收到有效任务项（新增项必须有 content），待办未变更"; }
       for (const it of usable) {
@@ -974,11 +974,11 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
         if (prev) {
           byId.set(prev.id, {
             ...prev,
-            content: it.content || prev.content,   // 只翻状态时不覆盖正文
-            status: it.status ?? prev.status,      // 未提供 status 时保持原状态
+            content: it.content || prev.content,   
+            status: it.status ?? prev.status,      
             blockedBy: it.blockedBy ?? prev.blockedBy,
             blocks: it.blocks ?? prev.blocks,
-            completedAt: prev.completedAt,         // 原样保留，由 store 的 normalizeTodos 决定是否打/撤戳
+            completedAt: prev.completedAt,         
           });
         } else {
           const nid = it.id || randomId();
@@ -991,7 +991,7 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
 
   let normalized: StoredTodo[];
   try {
-    // 归一化（单一 in_progress / completedAt 打戳）由 store 统一负责，工具与主进程同一口径
+    
     normalized = writeTodos(sessionId, next) ?? [];
   } catch (e) {
     return `[错误] 写入任务失败：${e instanceof Error ? e.message : String(e)}`;
@@ -1003,24 +1003,24 @@ async function todoWrite(args: Record<string, unknown>): Promise<string> {
 }
 
 
-// --- v2 自动委派：delegate_subagent / subagent_result 工具（主 Agent 对话中自行委派并**验收**）---
-//
-// ⚠️ A-980-R30 的核心修正：**结果必须回流**。
-// 此前 `delegate_subagent` 是纯 fire-and-forget，回执写的是"结果将在完成后由系统回收"，
-// 但**全仓库没有任何回收实现**——跑了就跑了，主 Agent 永远看不到子代理产出，
-// 于是"派发"与"验收"这两半都成了摆设（用户："都没见过 subagent 与主 agent 之间的派发与交互"）。
-//
-// 现在对齐 Claude Code 的 Agent 工具语义：**默认前台阻塞，子代理最终消息作为 tool result 回给主 Agent**；
-// 需要「派完先干别的、稍后再收」时才用 background:true，之后用 subagent_result 收口。
-// ⚠️ A-1106：**并行不需要 background** —— 同一轮里的多个工具调用本就并发执行
-//   （`tool_loop.executePendingTools` 用的是 `Promise.all`），所以「一次派 3 个独立子任务」
-//   在同一轮里连调 3 次本工具即可，三者并行跑、各自把结果交回。
-//   background 只解决「派完之后主 Agent 还想继续做别的事」这一种场景。
-// ⚠️ A-1106：前台等待**可被中断** —— 工具循环注入 `_signal`，用户点「停止生成」时
-//   `SubAgentManager.wait` 立刻收口（**只结束等待、不取消子代理**），不再出现"停止按钮没反应"。
-// 管理器由装配层（gui/src/main/index.ts）在启动时注入；未注入时如实报错。
 
-/** 子代理运行记录（装配层注入的实现至少要有这些字段；其余可选，缺失时降级展示） */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 interface SubAgentRunLike {
   id: string;
   name: string;
@@ -1030,60 +1030,60 @@ interface SubAgentRunLike {
   model?: string;
   startedAt?: number;
   finishedAt?: number;
-  /** 结构化自评（status/summary/artifacts/confidence），来自 outputSchema 契约 */
+  
   structured?: { status: string; summary: string; artifacts: string[]; confidence: number };
 }
 
-/** 注入接口：只有 delegate 是必需能力，其余按能力探测（兼容老装配与测试假实现） */
+
 interface SubAgentManagerLike {
-  // A-1114：overrides 增 `name` / `systemPrompt` / `toolsOnly` / `adhoc` —— 内联 spec（临时子代理）
-  // 走的就是这条既有通道（delegate 的 overrides），**不新增第二条派发入口**。
+  
+  
   delegate: (task: string, overrides?: { model?: string; agent?: string; agentId?: string; networkEnabled?: boolean; name?: string; systemPrompt?: string; toolsOnly?: string[]; adhoc?: boolean }) => SubAgentRunLike | null;
-  /** A-1106：第三参 `signal` = 中断通路（用户点「停止生成」时立刻结束等待，不取消子代理） */
+  
   wait?: (id: string, timeoutMs?: number, signal?: AbortSignal) => Promise<SubAgentRunLike | undefined>;
   list?: () => SubAgentRunLike[];
-  // A-1096：`source` 收窄为字面量联合（原先写 `string`）—— 共享渲染模块 `renderSubagentCatalogLines`
-  // 按 `"user" | "builtin"` 分组，宽类型会被静默放宽成"什么字符串都能传"，分组判据就失去类型保护。
+  
+  
   catalog?: () => Array<{ name: string; description: string; source: "user" | "builtin" }>;
 }
 
 let subagentManagerRef: SubAgentManagerLike | null = null;
 export function setSubagentManager(m: SubAgentManagerLike | null): void { subagentManagerRef = m; }
 
-/**
- * 等待上限缺省值 = 子代理默认执行预算 + 60s 收尾余量。
- *
- * A-980-R31：**必须严格大于执行预算**——两者都取同一值时，wait 超时与子代理自身 abort
- * 会在同一毫秒竞争，工具会概率性回一句"仍在执行"（明明刚刚才超时中断），把归因搞乱。
- * A-983：改为**从预算常量推导**而不是各写一个数字 —— 之前 `300s 预算 / 330s 等待` 是两处
- * 手写的字面量，预算一改就会静默变成"等待 < 预算"（那会让每次派发都在预算到期前被主 Agent 撤走，
- * 表现同样是"每次都超时"）。现在只有 `DEFAULT_EXEC_BUDGET_MS` 一个真源。
- */
+
+
+
+
+
+
+
+
+
 const SUBAGENT_WAIT_DEFAULT = DEFAULT_EXEC_BUDGET_MS + 60_000;
 const SUBAGENT_WAIT_MAX = SUBAGENT_WAIT_DEFAULT + 300_000;
 
-/** 供测试断言"等待 ≥ 预算"这条不变式（导出只为测试，运行时不依赖） */
+
 export const __SUBAGENT_BUDGETS = { waitDefault: SUBAGENT_WAIT_DEFAULT, waitMax: SUBAGENT_WAIT_MAX, execBudget: DEFAULT_EXEC_BUDGET_MS };
 
-/** 解析等待上限：非法/缺省 → 默认值；超上限 → 截断 */
+
 function resolveWaitMs(raw: unknown): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.min(n, SUBAGENT_WAIT_MAX) : SUBAGENT_WAIT_DEFAULT;
 }
 
-/**
- * A-1106：取出工具循环**注入**的中断信号（`_signal`）。
- *
- * 为什么用 `instanceof` 而不是信任入参：`_signal` 与 `_network_enabled` / `_workspace` /
- * `_agent_id` 同属「受信注入」的一族 —— 模型传上来的 JSON 参数里**不可能**有真的 AbortSignal，
- * 所以任何非 AbortSignal 的值都必须被丢弃（工具循环侧也会先 delete 再注入，双保险）。
- */
+
+
+
+
+
+
+
 function injectedSignal(args: Record<string, unknown>): AbortSignal | undefined {
   const raw = args._signal;
   return raw instanceof AbortSignal ? raw : undefined;
 }
 
-/** 回给主 Agent 的正文上限：子代理产出可能很长，全文落盘、只把摘要送进上下文（"压缩"原则） */
+
 const SUBAGENT_RESULT_MAX = 4000;
 
 const SUBAGENT_STATUS_TEXT: Record<string, string> = {
@@ -1095,23 +1095,23 @@ const SUBAGENT_STATUS_TEXT: Record<string, string> = {
   cancelled: "已取消",
 };
 
-/** 列出可用子代理清单（点名失败 / 无匹配时的可操作反馈——只报"没有匹配"等于把模型逼回瞎猜） */
+
 function subagentCatalogHint(): string {
   const cat = subagentManagerRef?.catalog?.() ?? [];
   if (cat.length === 0) { return "（当前没有任何已登记的子代理定义，直接自己完成即可）"; }
-  // A-1096：分组与标签改走 `services/subagentCatalog.ts` 的**唯一出处**。
-  // 此前这里与 `gui/src/main/index.ts::subagentCatalogSegment` 各写一遍分组 + 标签 ⇒
-  // 系统提示与工具回执会给出**两套互相矛盾的清单说法**，而两边都"看起来对"，最难查。
+  
+  
+  
   return renderSubagentCatalogLines(groupSubagentCatalog(cat)).join("\n");
 }
 
-/**
- * 把子代理终态渲染成**验收包**——这就是"回收端"。
- *
- * 三段式：① 头行（谁/状态/耗时/模型/自评置信度）→ ② 产出正文（截断）→ ③ **验收要求**。
- * 第 ③ 段不是客套：多智能体最大的失效模式是主 Agent 把子代理产出**不加核对地当事实转述**，
- * 所以这里显式要求它对照目标检查产出、并对不完整/存疑的结论负责（要么追问同类子代理、要么自己补）。
- */
+
+
+
+
+
+
+
 function renderSubAgentOutcome(run: SubAgentRunLike): string {
   const st = SUBAGENT_STATUS_TEXT[run.status] ?? run.status;
   const secs = run.startedAt && run.finishedAt ? `${((run.finishedAt - run.startedAt) / 1000).toFixed(1)}s` : "—";
@@ -1120,7 +1120,7 @@ function renderSubAgentOutcome(run: SubAgentRunLike): string {
   if (run.structured) { bits.push(`自评置信度 ${run.structured.confidence.toFixed(2)}`); }
   const head = `[子代理结果] ${run.name} · ${bits.join(" · ")}`;
 
-  // 失败/超时/取消：给可操作的下一步，而不是一段空结果
+  
   if (run.status !== "done") {
     const why = run.error ? `\n原因：${run.error}` : "";
     const advice = run.status === "timeout"
@@ -1128,8 +1128,8 @@ function renderSubAgentOutcome(run: SubAgentRunLike): string {
       : run.status === "cancelled"
         ? "该任务已被取消；如仍需该产出请重新派发。"
         : "可换模型/缩小范围后重派，或改为自己完成——不要假装它成功了。";
-    // A-980-R31：中断前的**部分产出必须交回**。此前这条分支只回一句"超时中断"，
-    // 子代理已经做出来的东西（哪怕只差最后一步）全部作废，主 Agent 也无从判断进度。
+    
+    
     const partialRaw = (run.result ?? "").trim();
     const partial = partialRaw
       ? `\n\n—— 中断前已产出（部分，可供参考/续做）——\n${
@@ -1166,9 +1166,9 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   if (!subagentManagerRef) { return "[错误] 子代理管理器未就绪（当前运行环境未装配 SubAgentManager）"; }
   const model = typeof args.model === "string" ? args.model.trim() : "";
   const wantAgent = typeof args.agent === "string" ? args.agent.trim() : "";
-  // A-1114 临时子代理（inline spec）：由主 Agent **现场**给出「角色 + 工具面 + 展示名」。
-  // 解析只在这一处；「有定义内容才算临时子代理」的判据与 SubAgentManager.delegate 同语义
-  // （只给 name 不构成定义 —— 那只是改展示名，不该绕过点名/自动路由变成第三种行为）。
+  
+  
+  
   const adhocName = typeof args.name === "string" ? args.name.trim() : "";
   const adhocSystem = typeof args.systemPrompt === "string" ? args.systemPrompt.trim() : "";
   const adhocTools = Array.isArray(args.tools)
@@ -1178,8 +1178,8 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
     : [];
   const background = args.background === true || args.background === "true";
   const waitMs = resolveWaitMs(args.timeoutMs);
-  // A-1106：本轮的中断信号（由工具循环注入，模型伪造不了）。前台等待据此可在
-  // 「停止生成」时立刻收口 —— 不再出现"按了停止还卡着等满 960s"。
+  
+  
   const signal = injectedSignal(args);
 
   const overrides: {
@@ -1194,18 +1194,18 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   if (model) { overrides.model = model; }
   if (wantAgent) { overrides.agent = wantAgent; }
   if (adhocSystem || adhocTools.length > 0) {
-    // 临时子代理：**不写盘、不进清单、跑完即弃**（落点全在 overrides，无任何持久化动作）。
+    
     overrides.adhoc = true;
     overrides.systemPrompt = adhocSystem || undefined;
     overrides.toolsOnly = adhocTools.length > 0 ? adhocTools : undefined;
     if (adhocName) { overrides.name = adhocName; }
   }
-  // 断链 C 修复：继承父请求的联网开关（tool_loop 注入的 _network_enabled，模型不可伪造）。
-  // 父关联网→子代理也关；父未传（如 CLI 环境）→ undefined，交由引擎缺省即开（A-918+ 语义）。
+  
+  
   overrides.networkEnabled = typeof args._network_enabled === "boolean" ? args._network_enabled : undefined;
   const run = subagentManagerRef.delegate(task, overrides);
   if (!run) {
-    // A-980-R30：点名/自动路由都没命中时，必须把**现有清单**告诉模型，否则它只会反复瞎试。
+    
     return [
       wantAgent
         ? `[提示] 没有名为「${wantAgent}」的子代理，本次未派发。`
@@ -1216,19 +1216,19 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   }
 
   const modelSuffix = model ? `（模型：${model}）` : "";
-  // 后台模式：只回执 id，之后用 subagent_result 收口（真并行场景：一次派发多个互不依赖的子任务）
+  
   if (background) {
     return `[已派发·后台] 子代理「${run.name}」开始执行（id=${run.id}${modelSuffix}）。` +
       `\n它不会阻塞你——你可以继续做别的子任务，之后用 subagent_result（id=${run.id}）取回结果并验收。`;
   }
-  // 前台模式（默认）：等它跑完，把产出作为 tool result 交回给你验收 ← 这就是缺失的"回收"
+  
   if (typeof subagentManagerRef.wait !== "function") {
-    // 老装配/测试假实现没有 wait：降级为后台回执，不让整条链路失败
+    
     return `[已委派] 子代理「${run.name}」已开始执行（id=${run.id}${modelSuffix}）。当前装配不支持等待结果，请稍后用 subagent_result（id=${run.id}）取回。`;
   }
   const final = await subagentManagerRef.wait(run.id, waitMs, signal);
-  // A-1106：中断优先于其它归因。否则会把「用户按了停止」误报成「超时/仍在执行」，
-  // 主 Agent 于是去重派一个用户其实已经不想再等的任务（也可能反过来一直空等）。
+  
+  
   if (signal?.aborted) {
     return `[已停止等待] 用户停止了本次生成，我不再等「${run.name}」（id=${run.id}）的结果。` +
       `\n⚠️ 该子代理**仍在后台继续执行**（没有被取消）；需要它的产出时用 subagent_result（id=${run.id}）取回。`;
@@ -1243,11 +1243,11 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   return renderSubAgentOutcome(final);
 }
 
-/**
- * subagent_result：取子代理结果快照（后台模式的收口端 + 主动查询）。
- * - 传 id：等它到终态后返回验收包（与前台委派的回收格式一致，主 Agent 用同一套逻辑验收）；
- * - 不传：列出本会话全部派发记录（名称 / 状态 / 摘要首行 / id），便于挑一个来收。
- */
+
+
+
+
+
 async function subagentResult(args: Record<string, unknown>): Promise<string> {
   if (!subagentManagerRef) { return "[错误] 子代理管理器未就绪（当前运行环境未装配 SubAgentManager）"; }
   const id = typeof args.id === "string" ? args.id.trim() : "";
@@ -1256,7 +1256,7 @@ async function subagentResult(args: Record<string, unknown>): Promise<string> {
     const waitMs = resolveWaitMs(args.timeoutMs);
     const signal = injectedSignal(args);
     const run = await subagentManagerRef.wait(id, waitMs, signal);
-    // A-1106：与 delegate_subagent 同口径 —— 中断优先归因，且不把「用户停止等待」报成「超时」。
+    
     if (signal?.aborted) {
       return `[已停止等待] 用户停止了本次生成，不再等 id=${id} 的结果。` +
         `\n⚠️ 该子代理**仍在后台继续执行**（没有被取消）；稍后再用 subagent_result（id=${id}）取回。`;
@@ -1280,46 +1280,46 @@ async function subagentResult(args: Record<string, unknown>): Promise<string> {
     "", "用 subagent_result（id=…）取某条的完整产出与验收提示。"].join("\n");
 }
 
-// --- 记忆自管理：memory_insert / memory_search / memory_forget 工具 ---
-// 记忆存储提供者由装配层（gui/src/main/index.ts）在启动时注入（对齐 setSubagentManager 模式）；
-// 工具循环在 runOneTool 注入 _agent_id 定位当前 Agent 的 MemoryStore。未注入时如实报错。
+
+
+
 let memoryStoreProviderRef: ((agentId: string) => MemoryStore | null) | null = null;
 export function setMemoryStoreProvider(p: typeof memoryStoreProviderRef): void { memoryStoreProviderRef = p; }
 
-// --- ADB 设备管理工具（A-918++）：操作 Android 设备 ---
-// 服务由装配层（gui/src/main/index.ts）在启动时注入（对齐 setSubagentManager 模式）；未注入时如实报错。
-// 接口最小化声明，避免 core-ts 反向依赖 gui 模块。
+
+
+
 interface AdbServiceLike {
   devices(): Promise<{ ok: boolean; devices?: Array<{ serial: string; state: string; model?: string; product?: string }>; error?: string }>;
-  /** 探测 adb 可执行文件是否就绪（含版本与来源） */
+  
   detect(): Promise<{ ok: boolean; path?: string; version?: string; source?: string; error?: string }>;
-  /** 下载官方 platform-tools 便携包并解压（缺失时的自愈路径） */
+  
   downloadPlatformTools(onProgress?: (p: unknown) => void): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
-  /** 启动 adb 服务（连模拟器前必须服务在跑；缺失时 adb devices 恒为空） */
+  
   startServer(): Promise<{ ok: boolean; version?: string; stdout?: string; stderr?: string; error?: string }>;
-  /** 无线连接设备（host 形如 127.0.0.1:7555） */
+  
   connect(host: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
   disconnect?(host: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
   shell(serial: string, command: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
   install(serial: string, apkPath: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
   uninstall?(serial: string, pkg: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
-  /** 重启设备（A-978 注册为工具；可选参数：空=正常重启，或 recovery/bootloader/sideload 等 adb 支持的参数） */
+  
   reboot?(serial: string, mode?: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
   screencap(serial: string): Promise<{ ok: boolean; pngBase64?: string; error?: string }>;
-  /** 设备 → 本机 */
+  
   pull(serial: string, remote: string, local: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
-  /** 本机 → 设备 */
+  
   push(serial: string, local: string, remote: string): Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>;
 }
 let adbServiceRef: AdbServiceLike | null = null;
 export function setAdbService(s: AdbServiceLike | null): void { adbServiceRef = s; }
 
-// --- 图形控制能力（screen_*）：slime 全程序级，不限于 ADB ---
-// 控制器由装配层注入（桌面后端 + Android 后端）；未注入时如实报错。
-// 直接复用 screen 模块的类型，避免结构性重复声明导致的接口漂移。
+
+
+
 interface ScreenControllerLike {
   listBackends(): string[];
-  /** A-1123：目标枚举**连同失败原因**一起回传（故障不许与"没有目标"同形） */
+  
   listTargetsReport(id?: "desktop" | "android"): Promise<{
     targets: DisplayInfo[];
     failures: Array<{ backend: "desktop" | "android"; error: string }>;
@@ -1328,31 +1328,31 @@ interface ScreenControllerLike {
   capture(id: "desktop" | "android", target?: string, opts?: { marks?: boolean }): Promise<ScreenCaptureResult>;
   perform(id: "desktop" | "android", action: ScreenAction, target?: string): Promise<ScreenActionResult>;
   isHalted(): boolean;
-  /** A-975 / A-1123：UI 层级元素导出（安卓元素级定位）——三态结果 */
+  
   uiDump(id: "desktop" | "android", target?: string): Promise<UiDumpOutcome>;
-  /** A-975：外部截屏（adb_screencap）登记坐标基准 */
+  
   noteCaptureBasis(id: "desktop" | "android", target: string | undefined, imageW: number, imageH: number, devW: number, devH: number): void;
-  /** A-977：枚举可见窗口（桌面） */
+  
   listWindows(id: "desktop" | "android"): Promise<Array<{ title: string; pid: number; x: number; y: number; width: number; height: number }>>;
-  /** A-977：按标题聚焦窗口（桌面） */
+  
   focusWindow(id: "desktop" | "android", title: string): Promise<{ focused: boolean; detail: string; rect?: { x: number; y: number; width: number; height: number } }>;
-  /** A-978：按窗口标题截取该窗口区域（桌面） */
+  
   captureWindow(id: "desktop" | "android", title: string, opts?: { marks?: boolean }): Promise<ScreenCaptureResult>;
 }
 let screenControllerRef: ScreenControllerLike | null = null;
 export function setScreenController(c: ScreenControllerLike | null): void { screenControllerRef = c; }
 
-/**
- * A-1123：把「命中校验」结果翻成回执里的一行 —— **唯一出处**（工具用它，守卫断言它）。
- *
- * 判据的三种形态在这里必须各自可读，不能合并：
- *   · `ratio === null` → **未判定**（没有差异度量/画面不可比）——说"未判定"，绝不说"未命中"；
- *   · `hit`           → 命中（带变化百分比；重试过就说明是第几次）；
- *   · `!hit`          → 未命中，**并给出下一步**（重新截图，而不是"换个坐标再试一次"）。
- *
- * 为什么要把"下一步"写进文案：模型看到"未命中"的本能反应是**重试同一坐标**——
- * 而点空的常见原因（被遮挡 / 窗口没聚焦 / 元素没渲染完）**换坐标也没用**，必须重新看画面。
- */
+
+
+
+
+
+
+
+
+
+
+
 export function describeVerify(v: ActionVerify): string {
   if (v.ratio === null) {
     return `命中校验：未判定（${v.note}）`;
@@ -1365,9 +1365,9 @@ export function describeVerify(v: ActionVerify): string {
     + `请重新 screen_capture 看清当前画面再决定下一步，不要盲目重复同一坐标。`;
 }
 
-// --- HTTP 静态服务搭建工具（A-918++）：把本地目录变成可访问的 HTTP 服务 ---
-// 服务由装配层（gui/src/main/index.ts）在启动时注入（对齐 setAdbService 模式）；未注入时如实报错。
-// 接口最小化声明，避免 core-ts 反向依赖 gui 模块。
+
+
+
 interface HttpServerEntryLike {
   id: string;
   dir: string;
@@ -1385,29 +1385,29 @@ interface HttpServerLike {
 let httpServerRef: HttpServerLike | null = null;
 export function setHttpServer(s: HttpServerLike | null): void { httpServerRef = s; }
 
-/** A-1121（②）：侧栏打开器已从本文件**搬到 `core-ts/src/sidebarOpen.ts`**（唯一出处）——
- *  它跨「工具层 → 主进程 → 渲染层」三个进程，而 gui 侧不该为了拿一个类型去 import 本文件。
- *  `setSidebarOpener` 的导入点随之改为 `sidebarOpen.js`（语义不变）。 */
 
-/** 删除动作的「进回收站」能力（由装配层注入；core-ts 不 import electron）。
- *
- *  ⚠️ 为什么必须注入而不是直接 `rm`：Agent 误删用户文件是**不可逆**事故。
- *  Electron 主进程有 `shell.trashItem()`（Win/macOS/Linux 都进系统回收站，用户可还原），
- *  但 core-ts 层不许 import electron（它在 CLI/服务器侧也要能跑）。
- *  ⇒ 与 setAdbService/setHttpServer 同一模式：装配层注入，未注入时退化为永久删除，
- *    并在**工具返回里如实写明"未进回收站"**（静默换语义是本项目的头号缺陷来源）。 */
+
+
+
+
+
+
+
+
+
+
 export interface TrashServiceLike {
   trash(absPath: string): Promise<{ ok: boolean; error?: string }>;
 }
 let trashServiceRef: TrashServiceLike | null = null;
 export function setTrashService(s: TrashServiceLike | null): void { trashServiceRef = s; }
 
-/** 解析工具入参中的当前 Agent id（由 tool_loop 注入，模型不可伪造） */
+
 function toolAgentId(args: Record<string, unknown>): string {
   return typeof args._agent_id === "string" ? args._agent_id : "";
 }
 
-/** 取当前 Agent 的记忆存储（未注入/未装配 → null） */
+
 function activeMemoryStore(agentId: string): MemoryStore | null {
   if (!memoryStoreProviderRef) { return null; }
   try { return memoryStoreProviderRef(agentId); } catch { return null; }
@@ -1460,18 +1460,18 @@ async function memoryForget(args: Record<string, unknown>): Promise<string> {
   return removed > 0 ? `[已遗忘] 删除 ${removed} 条记忆` : "[提示] 无匹配的记忆可遗忘";
 }
 
-/**
- * A-1116：把模型给的 `files` 收敛成**安全的、可写**的文件清单（纯函数，可单测）。
- *
- * 为什么必须收敛（不是"顺手校验一下"）：
- *   - 这是**模型可控的路径**第一次允许写"子目录"（原来 `http_create_app` 只写死 `dir/index.html`），
- *     于是 `../../config/agents.json` 这种一次手滑就能写到 apps 之外；
- *   - 绝对路径 / 盘符 / 任何 `..` 段一律**拒绝**（而不是"清洗后写入"）—— 清洗会静默改掉模型的意图，
- *     而它收到的是"成功"，于是它以为自己写了一处实际上并不存在的文件（假成功，比报错更难查）。
- *   - 目录型条目（以 `/` 结尾）与空路径直接跳过。
- *
- * 只作用于**写入位置**；调用方仍以 `dir` 为根，回执里如实列出真实落点。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 export function normalizeAppFiles(input: unknown): Array<{ path: string; content: string }> {
   if (!Array.isArray(input)) { return []; }
   const out: Array<{ path: string; content: string }> = [];
@@ -1493,15 +1493,15 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
   const registry = target ?? getRegistry();
   registry.register(new Tool({
     name: "delegate_subagent",
-    // A-980-R30：描述按 Anthropic《multi-agent research system》的两条原则重写——
-    // ①「教协调器如何委派」：task 必须写清目标 + 期望输出格式 + 边界（只写一句"研究半导体短缺"
-    //   会让多个子代理重复劳动，这是他们实测的第一大坑）；
-    // ②「按查询复杂度伸缩」：力量预算按复杂度分档（1 / 2–4 / 10+，见 DELEGATION_GUIDANCE 唯一出处）；
-    //    ⚠️ 这里**不重复那份分档文本**（第二产地 = 迟早漂移），只负责把「何时不用」收敛到
-    //    真正浪费的形状：一次工具调用就能拿到答案的（单文件读取 / 单文件精确查找）。
-    // 另注：调用是**阻塞等结果**的（可并行发多个），产出会作为工具结果交回给你验收。
-    //       A-1106：阻塞等待**可被「停止生成」中断**（工具循环注入 `_signal` ⇒
-    //       SubAgentManager.wait 提前收口）；中断只结束等待、**不取消**子代理。
+    
+    
+    
+    
+    
+    
+    
+    
+    
     description:
       "**委派**一个**独立、自包含**的子任务给专家子代理执行（独立上下文 + 独立工具面），它的产出会作为本次工具结果交回给你验收。\n" +
       "何时用：子任务能独立完成、不需要跟你来回确认，且产出较冗长（调研/审查/数据分析/批量处理），你不想让它污染主线上下文。\n" +
@@ -1528,8 +1528,8 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: delegateSubagent,
     permissions: ["read"],
   }));
-  // A-980-R30：收取端。前台委派已能拿到结果，这个工具服务于两种场景：
-  // ① background=true 派发后的收口；② 想看某次子代理运行的完整快照/历史记录。
+  
+  
   registry.register(new Tool({
     name: "subagent_result",
     description:
@@ -1547,9 +1547,9 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: subagentResult,
     permissions: ["read"],
   }));
-  /* 2026-09-30：把「Agent 自己从零生成 Office 文档」这条**断链**接上 ——
-     能力（`office/docWrite.ts`）与通道（`slime:docs:create`）本来都在，
-     缺的只是**一个给 Agent 用的工具**（审计时 `docs_create` 只有声明、零消费者）。 */
+  
+
+
   registry.register(new Tool({
     name: "docs_create",
     description:
@@ -1576,7 +1576,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: docsCreate,
     permissions: ["write"],
     riskKind: "write",
-    // 生成新文件属普通写入（受保护目录 / 敏感文件 / 越权路径仍由分类器拦）
+    
     autoApprovable: true,
   }));
   registry.register(new Tool({
@@ -1623,11 +1623,11 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: fileWrite,
     permissions: ["write"],
     riskKind: "write",
-    // 工作区内普通写入免审批（受保护源码目录 / 敏感文件 / 越权路径仍由分类器 block）
+    
     autoApprovable: true,
   }));
-  // 用户原话：「为什么还是无法执行删除？」—— 此前工具面里**根本没有删除能力**，
-  // 于是模型只能回"没有删除文件的能力"，或把任务委派给共用同一份注册表的子代理（同样做不到）。
+  
+  
   registry.register(new Tool({
     name: "file_delete",
     description:
@@ -1646,12 +1646,12 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: fileDelete,
     permissions: ["write"],
     riskKind: "write",
-    // 删除是破坏性动作：**不**声明 autoApprovable —— 用户开了「写」开关才免逐次审批
+    
     autoApprovable: false,
   }));
-  // 用户原话：「为什么还是无法执行删除、脚本任务？」—— 本机命令执行此前只有 adb_shell
-  // （那是**安卓设备**的 shell）。补上本机终端；判据层（分类器白/黑名单 + 硬规则 + 终端开关）
-  // 早已存在，这里只是把它们接到一个真的会执行命令的工具上。
+  
+  
+  
   registry.register(new Tool({
     name: "terminal_run",
     description:
@@ -1672,7 +1672,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: terminalRun,
     permissions: ["terminal"],
     riskKind: "terminal",
-    // 终端命令不自动放行：用户开了「终端」开关才免逐次审批（高危命令仍由硬规则 block）
+    
     autoApprovable: false,
   }));
   registry.register(new Tool({
@@ -1700,7 +1700,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: webFetch,
     permissions: ["network"],
     riskKind: "network",
-    // 只读型网络抓取（无副作用），且 URL 会走 SSRF 校验 → 免审批
+    
     autoApprovable: true,
   }));
   registry.register(new Tool({
@@ -1717,7 +1717,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: webSearch,
     permissions: ["network"],
     riskKind: "network",
-    // 只读检索（无副作用）→ 免审批
+    
     autoApprovable: true,
   }));
   registry.register(new Tool({
@@ -1747,7 +1747,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     },
     executeFn: async (args: Record<string, unknown>): Promise<string> => {
       const q = String(args.question ?? "");
-      // 无用户交互环境（CLI/测试/无 hook）时的兜底：如实说明无法询问，不编造用户回答
+      
       return q ? `[提示] 需要用户交互才能回答该问题，当前环境无可询问的用户界面。问题：${q}` : "[提示] ask_user 缺少 question 参数";
     },
     permissions: ["read"],
@@ -1789,15 +1789,15 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       required: [],
     },
     executeFn: todoWrite,
-    // ⚠️ 刻意声明为 `read`（A-980-R29 补注，**不要"顺手纠正"成 write**）：
-    // 它只写**本会话自己的** `data/todos_<sessionId>.json`，sessionId 由工具循环注入、模型无法伪造，
-    // 碰不到用户文件。若改成 write，每次规划都要走一次审批弹窗——而"先规划再执行"是要被鼓励的行为，
-    // 弹审批等于惩罚它，模型会退化成不规划。
-    // （`tests/core-ts/screen.spec.ts` 已把 todo_write 列在 read 类工具里，改动会立刻被测到。）
+    
+    
+    
+    
+    
     permissions: ["read"],
   }));
 
-  // --- E. Plan 一等对象（Claude Code Task System / Devin 拆解 对标）---
+  
   registry.register(new Tool({
     name: "plan_create",
     description: "把任务拆解为结构化 Plan（阶段列表顺序执行）。返回含 id 的 Plan JSON，此后用 plan_update 推进各阶段；适合多阶段任务，避免重复规划。",
@@ -1855,7 +1855,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     permissions: ["read"],
   }));
 
-  // --- 记忆自管理三工具（MemGPT OS 式：Agent 主动 insert/search/forget 自己的记忆）---
+  
   registry.register(new Tool({
     name: "memory_insert",
     description: "把一条值得长期记住的事实/偏好/经验写入你自己的成长记忆（跨会话保留）。仅用于确需长期记住的内容（用户偏好、项目约定、重要教训），不要记录转瞬即逝的对话细节。category 可选 fact/preference/lesson/event；source 标注来源（fact/preference 会沉淀到语义层）；confidence 0..1 表示把握。",
@@ -1875,7 +1875,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: memoryInsert,
     permissions: ["write"],
     riskKind: "write",
-    // 写的是该 Agent 自己的记忆库（_agent_id 由循环注入、模型不可伪造）→ 免审批
+    
     autoApprovable: true,
   }));
   registry.register(new Tool({
@@ -1908,15 +1908,15 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     executeFn: memoryForget,
     permissions: ["write"],
     riskKind: "write",
-    // 同 memory_insert：仅作用于该 Agent 自身记忆库 → 免审批
+    
     autoApprovable: true,
   }));
 
-  /* ── ADB 设备管理工具（A-918++）：直接操作已连接的 Android 设备 ── */
+  
 
-  /** 常见模拟器 / 设备的 ADB 默认端口（自动探测用，模型无需知道端口号）。
-   *  覆盖：MuMu 12(16384/16416/16448) / MuMu 老版(7555) / 雷电(5555) / 夜神(62001/62025/62026) /
-   *        AVD(5554/5555) / MEmu 逍遥(21503/21513) / 通用(5556/20060/6555) */
+  
+
+
   const ADB_SCAN_PORTS = [
     7555, 16384, 16416, 16448, 6555,
     5555, 5554, 5556,
@@ -1924,7 +1924,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     21503, 21513, 20060,
   ];
 
-  /** 设备列表为空时自动扫描常见端口并连接（主动探测，避免把排查甩给用户） */
+  
   async function autoScanAndConnect(): Promise<{ lines: string[]; connected: string[] }> {
     const lines: string[] = [];
     const connected: string[] = [];
@@ -1933,11 +1933,11 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       const addr = `127.0.0.1:${p}`;
       try {
         const r = await adbServiceRef.connect(addr);
-        // adb connect 即使目标不存在也常返回 exit 0（输出 "failed to connect"），故以 stdout 判定
+        
         const out = `${r?.stdout ?? ""}${r?.stderr ?? ""}`.toLowerCase();
         const ok = r?.ok && !out.includes("failed") && !out.includes("cannot") && !out.includes("refused");
         if (ok) { connected.push(addr); lines.push(`  ${addr} → 已连接`); }
-      } catch { /* 单端口失败继续 */ }
+      } catch {  }
     }
     return { lines, connected };
   }
@@ -1945,7 +1945,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
   async function adbDevices(_args: Record<string, unknown>): Promise<string> {
     if (!adbServiceRef) { return "[错误] ADB 服务未就绪（当前运行环境未装配 AdbService）"; }
     try {
-      // ① adb 本体是否就绪（未装时给出可执行的自愈指令，而不是让用户去开 cmd）
+      
       if (typeof adbServiceRef.detect === "function") {
         const det = await adbServiceRef.detect();
         if (!det?.ok) {
@@ -1960,7 +1960,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       if (!r?.ok) { return `[错误] 读取设备列表失败：${r?.error ?? "未知错误"}`; }
       let list = r.devices ?? [];
 
-      // ② 没有设备 → 自动扫描常见模拟器端口（MuMu/雷电/夜神/AVD/逍遥…）再复读一次
+      
       let scanInfo = "";
       if (list.length === 0) {
         const scan = await autoScanAndConnect();
@@ -1990,15 +1990,15 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     }
   }
 
-  /** 一键准备 ADB 环境：检测 → 缺失则下载 platform-tools → 启动 adb 服务 → 自动扫描连接设备。
-   *  这是「本机没装 adb」场景的自愈入口，也是模型最容易用对的一个工具。 */
+  
+
   async function adbSetup(args: Record<string, unknown>): Promise<string> {
     if (!adbServiceRef) { return "[错误] ADB 服务未就绪（当前运行环境未装配 AdbService）"; }
     const allowDownload = args.download !== false;
     const doConnect = args.connect !== false;
     const log: string[] = [];
     try {
-      // ① 检测
+      
       let det = typeof adbServiceRef.detect === "function" ? await adbServiceRef.detect() : null;
       if (!det?.ok) {
         if (!allowDownload) {
@@ -2021,13 +2021,13 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       log.push(`② adb 已就绪：${det?.version ?? "未知版本"}（来源 ${det?.source ?? "?"}）`);
       log.push(`   路径：${det?.path ?? "未知"}`);
 
-      // ③ 启动 adb 服务（服务没跑时 adb devices 恒为空）
+      
       if (typeof adbServiceRef.startServer === "function") {
         const s = await adbServiceRef.startServer();
         log.push(s?.ok ? `③ adb 服务已启动${s.version ? `（${s.version}）` : ""}` : `③ adb 服务启动失败：${s?.error ?? "未知"}`);
       }
 
-      // ④ 自动扫描并连接常见模拟器端口
+      
       if (doConnect) {
         const scan = await autoScanAndConnect();
         if (scan.connected.length > 0) {
@@ -2038,7 +2038,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
         }
       }
 
-      // ⑤ 复读设备列表
+      
       const dev = await adbServiceRef.devices();
       const list = dev.devices ?? [];
       log.push(list.length > 0
@@ -2088,19 +2088,19 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     try {
       const r = await adbServiceRef.screencap(serial);
       if (!r?.ok || !r.pngBase64) { return `[错误] 截图失败：${r?.error ?? "未知错误"}`; }
-      // A-975：把图像回传（此前只返回长度 → 模型根本看不到画面，只能瞎猜）。
-      // 走统一瘦身 + 标注通道，与 screen_capture 同一套基准。
+      
+      
       const opt = toOptimizedDataUrl(r.pngBase64, { grid: true });
       const kb = Math.round((opt.bytes || 0) / 1024);
       const imgSize = opt.width && opt.height ? `${opt.width}×${opt.height}` : "尺寸未知";
-      // 记录坐标基准：让随后的 screen_action 坐标按这张图的尺寸折算
+      
       if (opt.width && opt.height) {
         try {
           const info = await adbServiceRef.shell(serial, "wm size");
           const out = info.stdout ?? "";
           const m = out.match(/Override size:\s*(\d+)\s*x\s*(\d+)/i) ?? out.match(/Physical size:\s*(\d+)\s*x\s*(\d+)/i);
           if (m && screenControllerRef) { screenControllerRef.noteCaptureBasis("android", serial, opt.width, opt.height, Number(m[1]), Number(m[2])); }
-        } catch { /* 尺寸取不到不阻断 */ }
+        } catch {  }
       }
       return [
         `[已截图] ${serial}｜图像尺寸 ${imgSize}（${kb}KB，已叠加刻度网格）`,
@@ -2112,11 +2112,11 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     }
   }
 
-  /** 不传 host 时自动扫描常见模拟器端口并尝试连接；传 host 则直连该地址 */
+  
   async function adbConnect(args: Record<string, unknown>): Promise<string> {
     if (!adbServiceRef) { return "[错误] ADB 服务未就绪（当前运行环境未装配 AdbService）"; }
     const host = typeof args.host === "string" ? args.host.trim() : "";
-    // 未装 adb 时 connect 必然失败——先给自愈指引，别让模型误判为"端口不对"
+    
     if (typeof adbServiceRef.detect === "function") {
       const det = await adbServiceRef.detect();
       if (!det?.ok) {
@@ -2141,7 +2141,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
         const list = devs.devices ?? [];
         return `[已连接] ${host}\n${list.length ? "当前设备：\n" + list.map((d) => `serial=${d.serial} state=${d.state}${d.model ? ` model=${d.model}` : ""}`).join("\n") : "（暂未列出任何设备）"}`;
       }
-      // 自动扫描常见模拟器端口（复用统一的"真连接成功"判定）
+      
       const scan = await autoScanAndConnect();
       const devs = await adbServiceRef.devices();
       const list = devs.devices ?? [];
@@ -2252,7 +2252,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     permissions: ["network"],
   }));
 
-  /* ── HTTP 静态服务搭建工具（A-918++）：把本地目录变成可访问的 HTTP 服务 ── */
+  
   async function httpServe(args: Record<string, unknown>): Promise<string> {
     if (!httpServerRef) { return "[错误] HTTP 服务未就绪（当前运行环境未装配 HttpServer）"; }
     const dir = typeof args.dir === "string" ? args.dir.trim() : "";
@@ -2264,7 +2264,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       port = Math.round(n);
     }
     const spa = Boolean(args.spa);
-    // 监听范围：默认仅本机（127.0.0.1）；显式 host=0.0.0.0 才暴露到局域网
+    
     const rawHost = typeof args.host === "string" ? args.host.trim() : "";
     const host = rawHost || "127.0.0.1";
     const lan = host === "0.0.0.0" || host === "::" || (!/^(127\.|localhost$|::1$)/.test(host) && host !== "");
@@ -2341,9 +2341,9 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     permissions: ["read"],
   }));
 
-  /* ── HTTP 生成网页应用工具（A-918++）：根据自然语言需求生成自包含单页应用并起一个服务 ── */
+  
 
-  /** 生成小写短横线 slug（保留字母数字与中文，其余变分隔符，超长截断） */
+  
   function slugify(s: string): string {
     const base = (s || "").toLowerCase().trim();
     let out = base.replace(/[^a-z0-9一-龥]+/g, "-").replace(/^-+|-+$/g, "");
@@ -2351,7 +2351,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     return out.slice(0, 40);
   }
 
-  /** 按描述关键词选择模板类型 */
+  
   function pickAppKind(description: string, title?: string): "todo" | "calculator" | "timer" | "landing" | "form" | "fallback" {
     const t = `${title ?? ""} ${description}`.toLowerCase();
     if (/(待办|任务|清单|todo|to-do|todos?|checklist|打卡)/.test(t)) { return "todo"; }
@@ -2362,7 +2362,7 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     return "fallback";
   }
 
-  /** 各模板的页面正文（HTML 片段，含内联 CSS 由 wrapApp 统一包裹） */
+  
   function appBody(kind: string, title: string): string {
     const t = title.replace(/[<>&]/g, "");
     switch (kind) {
@@ -2476,7 +2476,7 @@ n.oninput=function(){try{localStorage.setItem('slime_note',n.value)}catch(e){}};
     }
   }
 
-  /** 包裹为完整自包含 HTML 文档（深色/浅色自适应 + 响应式） */
+  
   function wrapApp(title: string, body: string): string {
     const t = title.replace(/[<>&"]/g, "");
     return `<!DOCTYPE html>
@@ -2541,9 +2541,9 @@ ${body}
     }
     try {
       await mkdir(dir, { recursive: true });
-      /* A-1116：**支持任意多文件**（不再只能出固定模板）—— 这是"产出各式各样本地 web 程序"的关键。
-         `files` 传了就按它写（多文件 / 子目录都行）；不传才回落到模板。
-         ⚠️ 路径由 `normalizeAppFiles` 收敛在 dir 内（拒绝绝对路径与 `..`）。 */
+      
+
+
       const custom = normalizeAppFiles(args.files);
       const written: string[] = [];
       if (custom.length > 0) {
@@ -2559,7 +2559,7 @@ ${body}
         written.push(join(dir, "index.html"));
       }
       const filesLine = written.map((w) => `  - ${w}`).join("\n");
-      // 起一个静态服务，返回可点击地址
+      
       if (!httpServerRef) {
         return `[已生成] ${title}（类型=${kind}）\n已写入文件：\n${filesLine}\n（HTTP 服务未就绪，未能自动起服务；可在本地用浏览器直接打开 index.html）`;
       }
@@ -2567,9 +2567,9 @@ ${body}
       if (!r?.ok) { return `[已生成文件] ${title}（类型=${kind}）\n已写入文件：\n${filesLine}\n（启动服务失败：${r?.error ?? "未知错误"}；可直接用浏览器打开 index.html）`; }
       const urls = (r.urls ?? []).map((u) => `  - ${u}`).join("\n");
       const localUrl = `http://127.0.0.1:${r.port}`;
-      // A-918++ / A-1121：生成后自动在右侧栏浏览器打开。回执**按真实结果**写 ——
-      // 未装配界面时不能声称"已自动打开"（那是假陈述，用户会去找一个不存在的页签）。
-      // A-1142：带上发起会话 ⇒ 渲染层才知道这条请求归谁（否则会串到用户当前看的那个会话上）
+      
+      
+      
       const opened = fireSidebarOpen({ kind: "url", url: localUrl, name: title, sessionId: sessionIdFromArgs(args) });
       return [
         `[已生成网页应用] ${title}（类型=${kind}）`,
@@ -2586,9 +2586,9 @@ ${body}
 
   registry.register(new Tool({
     name: "http_create_app",
-    // A-1116：**从「6 个固定模板」升级为「能产出任意本地 web 程序」**。
-    // 关键不是模板数量，而是两件事：① `files` 让模型自己写任意多文件；② 描述里写清「做成什么样才算好」——
-    // 模型的能力上限取决于它知道什么，所以这段描述本身就是产出质量的一部分（别再退回一句话模板描述）。
+    
+    
+    
     description:
       "做一个**本地 web 程序**并直接跑起来（写完自动在右侧栏浏览器打开，用户立刻能看到）。\n"
       + "两种用法：\n"
@@ -2629,20 +2629,20 @@ ${body}
     permissions: ["network", "write"],
   }));
 
-  /* ══════════ A-1121（②）：右栏是 Agent 的工具栏 —— 终端 / 文件树也要能被打开 ══════════
-   *
-   * 现状对照：浏览器类 **12 个工具早已齐全**（`tools/browser.ts`，且会主动展开右栏），
-   * 而终端与文件树**一个工具都没有** —— Agent 说"你可以在终端里跑 npm run dev"，
-   * 却没法把终端打开给它看。这一组补齐的正是这个缺口。
-   *
-   * 【权限口径】两个工具都声明 `read` / `riskKind: "read"` / `autoApprovable: true`：
-   *   它们**不执行、不读盘、不联网**，只把界面切到一个页签（终端那个最多把命令**预填**进输入框，
-   *   是否回车由用户自己按）。声明成 `terminal` 会让"打开一个面板"每次都弹审批框 ——
-   *   与 ② 的目的（右栏 = 工具栏，随手可用）正好相反。
-   *   ⚠️ 别把 `prefill` 参数改名成 `cmd` / `command`：那是 `targetFromArgs` 认定的**终端命令字段**，
-   *      一旦改名，同一份字符串会以"终端命令"的身份进入硬规则/分类器，产生难以解释的误拦。 */
+  
+
+
+
+
+
+
+
+
+
+
+
   async function sidebarOpenTerminal(args: Record<string, unknown>): Promise<string> {
-    // 参数名刻意用 `prefill`（不是 cmd / command）——见上面对 targetFromArgs 的说明
+    
     const prefill = typeof args.prefill === "string" ? args.prefill.trim() : "";
     const name = typeof args.name === "string" ? args.name.trim() : "";
     if (!fireSidebarOpen({ kind: "terminal", cmd: prefill, name, sessionId: sessionIdFromArgs(args) })) {
@@ -2661,13 +2661,13 @@ ${body}
     const rel = typeof args.rel === "string" ? args.rel.trim() : "";
     let root = "";
     if (rawRoot) {
-      // 与 file_* 工具同一套解析口径（相对路径锚定工作目录 → 项目根），不做第二套
+      
       root = projectRootPath(rawRoot, ws);
       try {
         const st = await stat(root);
         if (!st.isDirectory()) { return `[错误] 不是目录：${root}`; }
       } catch {
-        // 目录不存在必须当场说 —— 否则界面会开出一个空树，用户读成"这里没有文件"
+        
         return `[错误] 目录不存在：${root}`;
       }
     }
@@ -2686,16 +2686,16 @@ ${body}
       : `[已打开] 右侧栏文件页：浏览根 ${root}`;
   }
 
-  /**
-   * sidebar_mount：读**右栏此刻挂载的内容**（A-1144）。
-   *
-   * 为什么系统提示里已经有一份摘要、还要单独一个工具：
-   *   ① 摘要是"每轮自动附"的**简报**（几行）；长对话里它会被上下文压缩挤到中段甚至丢掉，
-   *      这时模型需要一个能**主动再取一次**的入口；
-   *   ② 工具调用是**显式**的 —— 模型读到这里就等于承认"我知道了右栏有什么"，
-   *      比在系统提示里塞一段更容易被它当回事（recency + 显式动作）。
-   * ⚠️ 不能编：没有挂载时如实说"没有"，绝不许凭标题猜内容（那是最坏的一种幻觉）。
-   */
+  
+
+
+
+
+
+
+
+
+
   async function sidebarMountRead(args: Record<string, unknown>): Promise<string> {
     const text = sidebarMountSection(sessionIdFromArgs(args));
     if (!text) {
@@ -2767,7 +2767,7 @@ ${body}
     autoApprovable: true,
   }));
 
-  /* ── 补齐 ADB 文件通道（A-918++）：设备 ⇄ 本机 文件互传 ── */
+  
   async function adbPush(args: Record<string, unknown>): Promise<string> {
     if (!adbServiceRef) { return "[错误] ADB 服务未就绪（当前运行环境未装配 AdbService）"; }
     const serial = typeof args.serial === "string" ? args.serial.trim() : "";
@@ -2831,7 +2831,7 @@ ${body}
     riskKind: "write",
   }));
 
-  /* ── A-978：卸载 / 重启（此前只有 IPC，未注册为 Agent 工具）── */
+  
 
   async function adbUninstall(args: Record<string, unknown>): Promise<string> {
     if (!adbServiceRef) { return "[错误] ADB 服务未就绪（当前运行环境未装配 AdbService）"; }
@@ -2893,9 +2893,9 @@ ${body}
     riskKind: "write",
   }));
 
-  /* ── 图形控制能力（screen_*）：slime 全程序级，桌面与 Android 共用同一套动作语义 ── */
+  
 
-  /** 后端归一：缺省时按「有 desktop 就用 desktop」决定 */
+  
   function pickBackend(raw: unknown): "desktop" | "android" | null {
     const v = typeof raw === "string" ? raw.trim().toLowerCase() : "";
     if (v === "desktop" || v === "android") { return v; }
@@ -2914,7 +2914,7 @@ ${body}
       if (backends.length === 0) { return "[提示] 当前没有任何图形控制后端可用"; }
       const lines: string[] = [`可用图形控制后端：${backends.join("、")}`];
       for (const b of backends) {
-        // A-1123：走 `listTargetsReport` —— 失败原因**逐条列出**，不再与"没有目标"同形。
+        
         const rep = await screenControllerRef.listTargetsReport(b as "desktop" | "android");
         for (const f of rep.failures) {
           lines.push(`- ${f.backend}：枚举失败（${f.error}）——这是后端/宿主的问题，不是「没有目标」`);
@@ -2943,8 +2943,8 @@ ${body}
     const backend = pickBackend(args.backend);
     if (!backend) { return "[错误] backend 需为 desktop 或 android（见 screen_info 列出的可用后端）"; }
     const target = typeof args.target === "string" ? args.target.trim() : "";
-    const marks = args.marks !== false; // A-975：默认叠标注（网格 + 元素编号）
-    // A-978：按窗口截图（桌面）——只截指定窗口区域，画面聚焦、元素更大、更准
+    const marks = args.marks !== false; 
+    
     const winTitle = typeof args.window === "string" ? args.window.trim() : "";
     try {
       const r = winTitle
@@ -2968,8 +2968,8 @@ ${body}
         if (r.annotate.marks > 0) { bits.push(`${r.annotate.marks} 个可点元素编号框（① ② ③…）`); }
         if (bits.length > 0) { parts.push(`已叠加标注：${bits.join(" + ")}`); }
       }
-      // A-1014：成功但有保留的提示必须**显式回传**，否则模型会把"可能被遮挡的画面"
-      // 当成目标窗口的当前状态（按窗口截图时没抢到前台就是这种情况）。
+      
+      
       if (r.warning) { parts.push(`⚠️ ${r.warning}`); }
       parts.push(r.annotate?.marks ? "提示：优先用「编号框」或 screen_ui_dump + selector 点击，比目测坐标更准。" : "提示：对着网格刻度读数确定坐标。");
       if (r.dataUrl) { parts.push(`@@IMG@@${r.dataUrl}`); }
@@ -2979,9 +2979,9 @@ ${body}
     }
   }
 
-  /** A-975：导出 UI 层级元素（元素级定位，安卓最稳）
-   *  A-1123：桌面也支持了 —— 粒度是**窗口**（系统枚举的矩形，等价于"窗口级编号框"）。
-   *  两个后端都可调，但**粒度不同必须说清**（不说清 = 模型以为桌面也能拿到按钮级元素而反复重试）。 */
+  
+
+
   async function screenUiDump(args: Record<string, unknown>): Promise<string> {
     if (!screenControllerRef) { return "[错误] 图形控制未就绪（当前运行环境未装配 ScreenController）"; }
     const backend = pickBackend(args.backend);
@@ -2990,8 +2990,8 @@ ${body}
     const max = typeof args.limit === "number" && args.limit > 0 ? Math.min(200, args.limit) : 60;
     try {
       const dump = await screenControllerRef.uiDump(backend, target || undefined);
-      // A-1123：**导出故障**与**界面没有可操作元素**必须分两态（旧写法把两者压成同一句"未能导出元素层级"，
-      // 模型据此去修一个并不存在的 uiautomator 问题）。
+      
+      
       if (!dump.ok) {
         return `[错误] 元素层级导出失败（${dump.error ?? "未知原因"}）——这是后端/宿主的故障，不是「界面没有元素」。请检查设备连接/宿主是否存活后重试；其间可用 screen_capture 网格刻度目测定位。`;
       }
@@ -3001,7 +3001,7 @@ ${body}
           ? "[提示] 元素层级已导出成功，但当前桌面没有可见的顶层窗口（都可能已最小化或无标题）。若你确信某程序已打开，请先手动把它的窗口还原出来。"
           : "[提示] 元素层级已导出成功，但当前界面没有可操作元素（全屏画布/游戏/页面仍在加载都会这样）。请改用 screen_capture 的网格刻度目测定位。";
       }
-      // 只挑「可点 / 可滚 / 有文本」的前 N 个，避免淹没模型
+      
       const actionable = els.filter((e) => e.clickable || e.scrollable || e.text).slice(0, max);
       const lines: string[] = [
         backend === "desktop"
@@ -3035,10 +3035,10 @@ ${body}
       const n = Number(v);
       return Number.isFinite(n) ? n : undefined;
     };
-    // A-975：坐标语义（默认 image=所见图像像素；normalized=0-1000；device=物理像素）
+    
     const csRaw = typeof args.coordSpace === "string" ? args.coordSpace.trim().toLowerCase() : "";
     const coordSpace = (csRaw === "normalized" || csRaw === "device" || csRaw === "image") ? csRaw : undefined;
-    // A-975：元素定位（比坐标稳）
+    
     const selRaw = args.selector && typeof args.selector === "object" ? args.selector as Record<string, unknown> : null;
     const selector = selRaw ? {
       index: num(selRaw.index),
@@ -3064,8 +3064,8 @@ ${body}
       const r = await screenControllerRef.perform(backend, action, target || undefined);
       if (!r.ok) { return `[错误] 图形动作失败（${backend}/${kind}）：${r.error ?? "未知错误"}`; }
       const parts = [`[已执行] ${backend}｜${kind}｜${r.detail ?? "完成"}`];
-      // A-1123：命中校验结果**必须显式回传** —— 它是"动作有没有真的生效"的唯一判据，
-      // 而 `detail` 只陈述"输入已注入"（两者此前同形，这是"用起来总是糊涂"的另一半）。
+      
+      
       if (r.verify) { parts.push(describeVerify(r.verify)); }
       if (r.capture?.ok && r.capture.dataUrl) {
         const sz = r.capture.imageWidth && r.capture.imageHeight ? `${r.capture.imageWidth}×${r.capture.imageHeight}` : "尺寸未知";
@@ -3182,7 +3182,7 @@ ${body}
     riskKind: "write",
   }));
 
-  /* ── A-977：桌面窗口枚举 / 聚焦 —— 先聚焦目标窗口再操作，避免点错窗口 ── */
+  
 
   async function screenWindows(args: Record<string, unknown>): Promise<string> {
     if (!screenControllerRef) { return "[错误] 图形控制未就绪"; }
@@ -3190,11 +3190,11 @@ ${body}
     if (!backend) { return "[错误] backend 需为 desktop 或 android"; }
     try {
       const list = await screenControllerRef.listWindows(backend);
-      /* A-1088：空结果**不再与故障同态**。
-         走到这里（没抛）说明**枚举本身成功了**，只是本机确实没有带标题的顶层窗口
-         （都已最小化 / 无标题）。必须把这一点说清 —— 否则模型会把"没有窗口"
-         当成"工具坏了"，去反复重试或改代码修一个并不存在的故障。
-         真故障由 `listWindows` 抛出 → 走下面的 catch → `[错误] …`（两条路径措辞刻意不同）。 */
+      
+
+
+
+
       if (list.length === 0) {
         return backend === "android"
           ? "[提示] 窗口枚举仅支持桌面（desktop）后端。"
@@ -3221,9 +3221,9 @@ ${body}
     try {
       const r = await screenControllerRef.focusWindow(backend, title);
       const rect = r.rect ? `矩形(${r.rect.x},${r.rect.y},${r.rect.width},${r.rect.height})` : "";
-      // A-1014：没抢到前台**不再等同于"没找到窗口"**——窗口可能就在那儿、只是 Windows
-      // 拒绝把前台交给后台进程（SetForegroundWindow 的已知限制）。如实说明并给出下一步，
-      // 而不是让模型以为窗口不存在、反复重试同一个标题。
+      
+      
+      
       if (!r.focused) {
         return [
           `[未获得前台] ${r.detail}`,
@@ -3259,6 +3259,6 @@ ${body}
     riskKind: "write",
   }));
 
-  /* ── A-976：右侧栏浏览器控制（browser_*）——元素优先，比坐标点击稳 ── */
+  
   registerBrowserTools(registry);
 }

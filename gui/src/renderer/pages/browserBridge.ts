@@ -1,24 +1,24 @@
-/**
- * gui/src/renderer/pages/browserBridge.ts — 右侧栏浏览器「指令执行桥」（A-976）。
- *
- * 背景：Agent 的工具在主进程执行，而右侧栏浏览器是 renderer 里的 <webview>。
- * 主进程把指令（navigate/click/type/read/snapshot/screenshot…）下发到 renderer，
- * 本模块负责在**当前激活的浏览器页**上把指令落地，并把结果回传主进程。
- *
- * 关键设计（对齐业界做法）：
- *  1. **元素优先于坐标**：`snapshot` 枚举可点元素（含稳定序号 + 文本 + CSS 选择器 + 中心点），
- *     调用方优先用 selector/text/index 点击，等价于安卓的 uiautomator 路线。
- *  2. **真实鼠标事件**：点击用 `sendInputEvent`（mouseMove/Down/Up），而非 `el.click()`，
- *     以免绕过前端的真实事件逻辑（多数现代框架需要 real event）。
- *  3. **文本输入用原生 setter + input 事件**：兼容 React/Vue 受控组件（直接改 value 不触发框架更新）。
- *  4. **截图标注**：注入临时浮层画编号框（Set-of-Mark），截完即移除——纯页面内实现，不依赖 nativeImage。
- *  5. **就绪前提**：所有非导航操作都先确保 `dom-ready`（Electron 硬性要求，见 waitDomReady）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { SIDEBAR_OPEN_EVENT } from "./Markdown.js";
 import { isBrowserSchemeUrl } from "../../shared/ipc.js";
-// A-1044：把「正在操作右栏浏览器」上报给可视化浮层（呼吸灯边框 + 悬浮提示）
+
 import { publishOperationFocus, type OpFocusRect } from "./operationFocus.js";
-// A-1106b：webview 导航的唯一安全出口（纯模块，见 webviewNav.ts）
+
 import { safeLoadURL } from "./webviewNav.js";
 
 export interface BrowserTabInfo {
@@ -30,23 +30,23 @@ export interface BrowserTabInfo {
 
 export interface BrowserHost {
   listTabs(): BrowserTabInfo[];
-  /** 新建浏览器页；返回 tabId */
+  
   openTab(url?: string, activate?: boolean): string;
   closeTab(tabId?: string): boolean;
   activateTab(tabId: string): boolean;
   activeTabId(): string | null;
 }
 
-/**
- * A-976 修复：确保右侧栏处于展开状态。
- * 收起时 webview 被隐藏（display:none / 宽度 0）→ 元素 rect 全为 0、capturePage 空白，
- * Agent 的点击/截图必然失败。App 监听 SIDEBAR_OPEN_EVENT 即展开（忽略 detail），
- * 这里只带 kind 不带 url，避免顺带导航。
- */
+
+
+
+
+
+
 function expandSidebar(): void {
   try {
     window.dispatchEvent(new CustomEvent(SIDEBAR_OPEN_EVENT, { detail: { kind: "url" } }));
-  } catch { /* 忽略 */ }
+  } catch {  }
 }
 
 let host: BrowserHost | null = null;
@@ -55,7 +55,7 @@ export function setBrowserHost(h: BrowserHost | null): void {
   host = h;
 }
 
-/** webview 注册表：tabId → <webview> 实例（由 BrowserTabInstance 挂载/卸载时登记） */
+
 const webviews = new Map<string, any>();
 
 export function registerWebview(tabId: string, wv: unknown): void {
@@ -68,19 +68,19 @@ export function unregisterWebview(tabId: string): void {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/* ═══ A-1044：Agent 操作与用户操作「不互相吞掉」 ═══════════════════════════════
- * 用户原话：「Agent 操作 slime 内的一些地方时，我点击 slime 内的一些地方会失效，要重新点击。」
- *
- * 两个具体成因（都在本文件里，改动时必须同时守住）：
- *   ① `wv.focus()` 抢走**应用内焦点**：不聚焦的话 `sendInputEvent` 首次会被 Electron 丢弃
- *      （A-980-R11 既有结论，必须保留），但聚焦会把用户正在打字的输入框顶掉 ——
- *      用户接下来的按键全部落进网页。→ 操作结束后**把焦点还给用户**（人优先：只在焦点仍停在
- *      webview 上、即用户没去别处时才还；用户若自己挪走了焦点，绝不抢回来）。
- *   ② 聚焦还会让浏览器把目标元素 **scroll into view**（`focus()` 不带 `preventScroll`），
- *      用户正要点的东西在光标下被移走 → 点击落空。→ 一律带 `preventScroll: true`。
- * 另外把"正在操作哪一块"上报给可视化浮层（呼吸灯贴在被操作的 webview 上），让人优先看得见。 */
 
-/** 某个 webview 在**应用视口**里的矩形（呼吸灯贴它画）；拿不到就返回 null（退化为内容区边缘）。 */
+
+
+
+
+
+
+
+
+
+
+
+
 function webviewRectOf(wv: unknown): OpFocusRect | null {
   try {
     const r = (wv as HTMLElement).getBoundingClientRect();
@@ -89,32 +89,32 @@ function webviewRectOf(wv: unknown): OpFocusRect | null {
   } catch { return null; }
 }
 
-/** 把焦点还给用户原来聚焦的元素（人优先：只在焦点仍停在 webview 上时归还）。 */
+
 function restoreUserFocus(wv: unknown, prev: HTMLElement | null): void {
   try {
     if (!prev || prev === (wv as unknown as HTMLElement) || !prev.isConnected) { return; }
-    // 焦点已被用户挪到别处 → 说明用户另有意图，绝不抢回来
+    
     if (document.activeElement !== (wv as unknown as HTMLElement)) { return; }
     prev.focus();
-  } catch { /* 忽略 */ }
+  } catch {  }
 }
 
-/**
- * 一次「会注入输入」的操作：聚焦 webview（必要时）→ 播 begin（带被操作矩形）→ 执行 →
- * 播 end → 归还焦点。四件事绑在一起，就是为了没法只做一半（只聚焦不还焦点 = 用户报的那个 bug）。
- */
+
+
+
+
 async function withWebviewFocus<T>(wv: unknown, label: string, fn: () => Promise<T>): Promise<T> {
   const prev = (typeof document !== "undefined" ? document.activeElement : null) as HTMLElement | null;
   try {
-    // preventScroll：聚焦会把元素滚进视口，用户正要点的东西会被挪走（点击落空的成因②）
+    
     (wv as Electron.WebviewTag).focus({ preventScroll: true });
   } catch {
-    try { (wv as Electron.WebviewTag).focus(); } catch { /* 忽略：拿不到焦点不阻断操作 */ }
+    try { (wv as Electron.WebviewTag).focus(); } catch {  }
   }
-  // begin 必须在**注入之前**发：用户先看见"Agent 要动了"，才有机会把手挪开（人优先的可见化）
+  
   publishOperationFocus({ phase: "begin", target: "browser", label, rect: webviewRectOf(wv), waitingUser: false });
   try {
-    await sleep(30); // A-980-R11：焦点从宿主页移入 webview 的那一次点击可能被丢弃 → 短等
+    await sleep(30); 
     return await fn();
   } finally {
     publishOperationFocus({ phase: "end", target: "browser", label });
@@ -122,26 +122,26 @@ async function withWebviewFocus<T>(wv: unknown, label: string, fn: () => Promise
   }
 }
 
-/** 等待 webview 可见（A-980-R11：非激活 tab 是 display:none → rect 全 0，坐标点击必失败；
- *  activateTab 切页后 React 重渲染到 flex 有延迟，必须等 rect 恢复正尺寸再操作，杜绝"点了没反应"） */
+
+
 async function waitVisible(wv: any, timeoutMs = 2500): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       const r = (wv as HTMLElement).getBoundingClientRect();
       if (r.width > 0 && r.height > 0) { return true; }
-    } catch { /* 元素可能未挂载 */ }
+    } catch {  }
     if (Date.now() > deadline) { return false; }
     await sleep(60);
   }
 }
 
-/* ═══ A-980-R：弹窗被拒通知（登录弹窗不再卡死 Agent 循环） ═══
- * 主进程 setWindowOpenHandler 现对任何 webContents 一律拒绝 window.open，并把被拒 URL
- * 经 preload 广播（slime:browser:popup-notice）。RightSidebar 收到后派发同名 window 事件，
- * 本模块记下最新一次被拒 URL；下一次 click/snapshot/navigate 工具结果里带回给 Agent：
- * 「站点试图打开新窗口(URL)，已拦截；如确需登录可 browser_navigate 到该地址」——
- * 模型不会再对着被弹窗盖住的状态空转。 */
+
+
+
+
+
+
 let pendingPopupNotice: string | null = null;
 try {
   window.addEventListener("slime-browser-popup-notice", ((e: Event) => {
@@ -153,7 +153,7 @@ try {
     if (kind === "opened") {
       pendingPopupNotice = `已把 ${scheme}:// 链接交给系统打开${d.handler ? `（${d.handler}）` : ""}——链接目的已达成，无需在浏览器里再处理。`;
     } else if (kind === "need-install") {
-      // A-980-R4：浏览器唤起类协议（bitbrowser:// 等）→ 已拦截，不要求装客户端、不反复尝试
+      
       if (isBrowserSchemeUrl(url)) {
         pendingPopupNotice = `已拦截浏览器唤起链接（${scheme}://）——这类链接的目的是唤起另一款浏览器加载页面，对当前浏览无帮助，且外部浏览器收到指令会自己弹报错横幅；不要在浏览器里反复尝试。`;
       } else {
@@ -163,16 +163,16 @@ try {
       pendingPopupNotice = `站点刚试图弹出新窗口（${url}），已自动拦截（防弹窗盖页面卡死循环）。如确需在那里登录，可 browser_navigate 打开该地址。`;
     }
   }) as EventListener);
-} catch { /* 非浏览器环境（单测）忽略 */ }
+} catch {  }
 
-/** 取走（并清空）最近一次弹窗/协议通知文案；无则 null。 */
+
 function takePopupNotice(): string | null {
   const v = pendingPopupNotice;
   pendingPopupNotice = null;
   return v;
 }
 
-/** A-980-R2：深度链接真实打开——经主进程探测系统协议处理器：已注册→系统应用打开；未注册→返回缺应用诊断。 */
+
 async function tryOpenExternal(url: string): Promise<{ ok: boolean; handler?: string; error?: string }> {
   try {
     const api = (window as unknown as {
@@ -180,7 +180,7 @@ async function tryOpenExternal(url: string): Promise<{ ok: boolean; handler?: st
     }).slimeAPI?.protocol;
     const r = await api?.open?.(url);
     if (r?.ok) { return { ok: true, handler: r.handler }; }
-    // A-980-R4：浏览器唤起类协议（bitbrowser:// 等）→ 已拦截，不要求装客户端
+    
     if (r?.reason === "browser-scheme" || isBrowserSchemeUrl(url)) {
       return { ok: false, error: `已拦截浏览器唤起链接 ${(url.split(":")[0] || "").toLowerCase()}:// ——不唤醒外部浏览器` };
     }
@@ -190,57 +190,57 @@ async function tryOpenExternal(url: string): Promise<{ ok: boolean; handler?: st
   }
 }
 
-/* ═══ A-980：自定义协议链接守卫（bitbrowser:// 等） ═══
- * Windows 系统对话框「获取打开此'xxx'链接的应用」= 程序带着未知协议 URL 调了系统协议分发，
- * 系统没有注册该协议的应用就弹窗。webview 的 will-navigate **拦不住 loadURL/src 编程式导航**
- * （Electron 文档：will-navigate 仅覆盖用户点击/页面内导航），所以必须在**所有** URL 进入
- * webview 的入口（navigate/open/地址栏/openTab）做 scheme 白名单校验：非 Web 协议一律拒绝，
- * 根本不让 Chromium 把 bitbrowser:// 这类链接交给系统。
- *
- * ⚠️ A-1133（2026-09-28 事故）：**`file:` 已从这里移除**。
- * 之前白名单里带着 `file`，于是右栏浏览器可以加载本地文件 —— 而把 `.docx/.xlsx` 交给 Chromium
- * 的结果是 `ERR_FAILED (-2)` + 重试风暴（拖放默认导航正好就落在"加载本地文件"上，
- * 用户在控制台看到的就是不断重发的 `file:///…docx`）。
- * 本地文件现在**一律走文档通道**（`core-ts/src/office/*`：读取 + 预览 + 生成），
- * 连 PDF 也不走 `file://`（改由应用内静态服务出 `http://127.0.0.1:port/x.pdf`，
- * 这样不仅能渲染，还带上了正确的 Content-Type 与同源隔离）。
- * ⇒ 判据是**能力边界**：webview 只接"网络资源"，不接"磁盘路径"（本地文件的语义由文档通道负责）。 */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const SAFE_NAV_SCHEMES = new Set(["http", "https", "about", "data", "blob"]);
 
-/** URL 是否能安全交给右侧栏浏览器加载：http(s)/about/blank/data/blob 放行；`file:` 与未知协议拦截。 */
+
 export function isWebNavUrl(raw: string | undefined): boolean {
   const url = (raw ?? "").trim();
   if (!url || url === "about:blank") { return true; }
   const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url);
-  if (!m) { return true; } // 无 scheme（将由调用方补 https://）
+  if (!m) { return true; } 
   return SAFE_NAV_SCHEMES.has(m[1].toLowerCase());
 }
 
-/**
- * A-980-R6：**统一 URL 归一**——把「用户可见地址」转换成可被 webview 直接加载的完整 URL。
- * 背景（用户实测）：点击 Agent/聊天返回的链接 `127.0.0.1:8081`（无协议头）新建页**白屏**，
- * 手动在地址栏输入 `http://127.0.0.1:8081` 却能进——因为链接路径把裸地址原样塞进 webview
- * `src`（无 scheme → 加载无效），而地址栏 `go()` 会补 `https://`（对本地 IP:端口 又会错拼成
- * https）。归一规则（按序）：
- *   ① `host:数字端口`（如 127.0.0.1:8081 / localhost:3000/a）→ 补 `http://`（本地服务默认 HTTP）；
- *   ② `scheme://` 完整协议头（https://… / bitbrowser://…）→ 原样保留（非 Web 协议由守卫拦截）；
- *   ③ 特殊协议 about:/file:/data:/blob: → 原样保留；
- *   ④ 其余带冒号的未知协议（mailto:a@b）→ 原样保留，交给 isWebNavUrl 拦截（绝不补 http）；
- *   ⑤ 纯裸地址（douyin.com / www.bilibili.com/v/xx）→ 补 `http://`（域名侧自会 301 到 https）。
- * 统一在「进入右栏浏览器的所有入口」调用：链接点击（onOpen）、props.url 同步、地址栏 go()、
- * Agent browser_navigate。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function normalizeBrowserUrl(raw: string | undefined): string {
   const s = (raw ?? "").trim();
   if (!s || s === "about:blank") { return s; }
-  if (/^[a-zA-Z0-9][a-zA-Z0-9.-]*:\d+/.test(s)) { return `http://${s}`; }        // ① host:端口（域名/IP/localhost）
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) { return s; }                   // ② scheme://
-  if (/^(about|file|data|blob):/i.test(s)) { return s; }                       // ③ 特殊协议
-  if (s.includes(":")) { return s; }                                           // ④ 未知协议
-  return `http://${s}`;                                                        // ⑤ 裸地址
+  if (/^[a-zA-Z0-9][a-zA-Z0-9.-]*:\d+/.test(s)) { return `http://${s}`; }        
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) { return s; }                   
+  if (/^(about|file|data|blob):/i.test(s)) { return s; }                       
+  if (s.includes(":")) { return s; }                                           
+  return `http://${s}`;                                                        
 }
 
-/** 轮询等待某个 tab 的 webview 就绪（新建页后 React 挂载有延迟） */
+
 async function awaitWebview(tabId: string, timeoutMs = 4000): Promise<any | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -251,13 +251,13 @@ async function awaitWebview(tabId: string, timeoutMs = 4000): Promise<any | null
   }
 }
 
-/**
- * A-976 修复：**等待 webview 的 dom-ready**。
- * Electron 硬性要求——webview 未 emit `dom-ready` 之前，`executeJavaScript` / `sendInputEvent` /
- * `capturePage` 全部抛 "The WebView must be attached to the DOM and the dom-ready event emitted
- * before this method can be called"。而 `loadURL`（导航）**不需要** dom-ready，
- * 这正是"只能进网址、无法进行任何操作"的根因。
- */
+
+
+
+
+
+
+
 const domReady = new WeakMap<any, boolean>();
 
 async function waitDomReady(wv: any, timeoutMs = 8000): Promise<boolean> {
@@ -267,38 +267,38 @@ async function waitDomReady(wv: any, timeoutMs = 8000): Promise<boolean> {
     const ok = (): void => {
       if (done) { return; }
       done = true;
-      try { wv.removeEventListener("dom-ready", ok); wv.removeEventListener("did-fail-load", fail); } catch { /* 忽略 */ }
+      try { wv.removeEventListener("dom-ready", ok); wv.removeEventListener("did-fail-load", fail); } catch {  }
       domReady.set(wv, true);
       resolve(true);
     };
     const fail = (): void => {
       if (done) { return; }
       done = true;
-      try { wv.removeEventListener("dom-ready", ok); wv.removeEventListener("did-fail-load", fail); } catch { /* 忽略 */ }
+      try { wv.removeEventListener("dom-ready", ok); wv.removeEventListener("did-fail-load", fail); } catch {  }
       resolve(false);
     };
     try {
       wv.addEventListener("dom-ready", ok);
       wv.addEventListener("did-fail-load", fail);
-    } catch { /* 事件系统不可用 → 走超时 */ }
+    } catch {  }
     setTimeout(() => {
       if (done) { return; }
       done = true;
-      try { wv.removeEventListener("dom-ready", ok); wv.removeEventListener("did-fail-load", fail); } catch { /* 忽略 */ }
+      try { wv.removeEventListener("dom-ready", ok); wv.removeEventListener("did-fail-load", fail); } catch {  }
       resolve(domReady.get(wv) === true);
     }, timeoutMs);
   });
 }
 
-/** 导航到新文档后必须重置 ready 标记（新 document 需要重新 dom-ready） */
+
 function resetDomReady(wv: any): void {
   domReady.delete(wv);
 }
 
-/**
- * 在 webview 里执行 JS（带就绪保证 + 一次重试）。
- * 有些场景 dom-ready 刚 fire、执行上下文还没切换完，首次调用仍会抛——重试一次即可覆盖。
- */
+
+
+
+
 async function runJs(wv: any, code: string): Promise<any> {
   await waitDomReady(wv);
   try {
@@ -314,11 +314,11 @@ async function runJs(wv: any, code: string): Promise<any> {
   }
 }
 
-/** 等待 webview 加载完成（或超时；已加载则立即返回） */
+
 async function waitLoaded(wv: any, timeoutMs = 15000): Promise<void> {
   try {
     if (typeof wv.isLoading === "function" && !wv.isLoading()) { return; }
-  } catch { /* is-loading 不可用则直接等事件 */ }
+  } catch {  }
   await new Promise<void>((resolve) => {
     let done = false;
     const fin = (): void => {
@@ -327,21 +327,21 @@ async function waitLoaded(wv: any, timeoutMs = 15000): Promise<void> {
       try {
         wv.removeEventListener("did-stop-loading", fin);
         wv.removeEventListener("did-fail-load", fin);
-      } catch { /* 忽略 */ }
+      } catch {  }
       resolve();
     };
     try {
       wv.addEventListener("did-stop-loading", fin);
       wv.addEventListener("did-fail-load", fin);
-    } catch { /* 事件不可用则仅靠超时 */ }
+    } catch {  }
     setTimeout(fin, timeoutMs);
   });
 }
 
-/** 枚举可点元素的注入脚本（序号稳定：同一页面重复调用顺序一致）。
- *  A-980-R12：**穿透同源 iframe**——站点登录/功能常把按钮放进 iframe（跨域 iframe 读不到
- *  contentDocument 自动跳过），iframe 内元素坐标叠加 iframe 矩形偏移到宿主视口；带 frame 标记
- *  供模型感知（iframe 内元素的 selector 只在该 iframe 文档内有效，点击走坐标优先）。 */
+
+
+
+
 const COLLECT_JS = `(() => {
   const sel = "a,button,input,textarea,select,summary,label,[role=button],[role=link],[role=tab],video,[onclick],[contenteditable=true]";
   const vis = (el) => {
@@ -409,7 +409,7 @@ const COLLECT_JS = `(() => {
   return out;
 })()`;
 
-/** 收集文本型输入框（供 snapshot 提示） */
+
 const COLLECT_INPUTS_JS = `(() => {
   const out = [];
   for (const el of Array.from(document.querySelectorAll("input,textarea,[contenteditable=true]"))) {
@@ -425,14 +425,14 @@ const COLLECT_INPUTS_JS = `(() => {
   return out;
 })()`;
 
-/* ═══ A-980：动作后紧凑观察（点击即观察 / Click-and-Observe） ═══
- * 业界共识（Anthropic CU 工具结果回传状态；OSWorld-Human 论文：actions grouped per
- * observation 可省一多半回合，LLM planning 占任务耗时 75-94%，回合数减半 ≈ 耗时减半）：
- * 每次变更性动作（click/type/press/scroll/drag）执行后，直接回传**当前画面主要可交互元素**
- * 的紧凑清单，模型无需再额外调 browser_snapshot 看"点完之后发生了什么"——一次省 1 轮模型往返
- * （每轮 1-3s prefill + decode），正是"Agent 操控墨迹半天"的主要优化点。
- * 与完整 snapshot 的区别：只取视口内**面积最大**的 12 个元素（大卡片/视频封面优先），
- * 文本截断 40 字符，Token 开销极小；脚本确定性（同一画面重复调用结果一致）。 */
+
+
+
+
+
+
+
+
 const OBSERVE_JS = `(() => {
   const sel = "a,button,summary,label,[role=button],[role=link],[role=tab],video,[onclick]";
   const out = [];
@@ -460,18 +460,18 @@ const OBSERVE_JS = `(() => {
   return out.slice(0, 12).map((e, i) => ({ index: i + 1, tag: e.tag, text: e.text, x: e.x, y: e.y, w: e.w, h: e.h }));
 })()`;
 
-/**
- * A-980：动作后观察（点击即观察）。 settleMs 后取 OBSERVE_JS 结果转成紧凑文本；
- * 页面导航中 / DOM 不可用等失败场景返回一句提示（不中断动作结果）。
- */
+
+
+
+
 async function observeAfter(wv: any, settleMs: number): Promise<string> {
   await sleep(settleMs);
-  // 页面正在加载（点击后出现的新导航）→ executeJavaScript 会等新文档就绪而挂起——直接给提示，不等
+  
   try {
     if (typeof wv.isLoading === "function" && wv.isLoading()) {
       return "（页面加载中——可 browser_wait / browser_snapshot 查看新状态）";
     }
-  } catch { /* 不阻塞观察 */ }
+  } catch {  }
   try {
     const els = await wv.executeJavaScript(OBSERVE_JS);
     if (!Array.isArray(els) || els.length === 0) {
@@ -485,7 +485,7 @@ async function observeAfter(wv: any, settleMs: number): Promise<string> {
   }
 }
 
-/** 浮层标注：画编号框（截图用，截后移除） */
+
 function overlayJs(elements: Array<{ index: number; x: number; y: number; w: number; h: number; text: string }>): string {
   const data = JSON.stringify(elements);
   return `(() => {
@@ -510,22 +510,22 @@ function overlayJs(elements: Array<{ index: number; x: number; y: number; w: num
 
 const CLEAR_OVERLAY_JS = `(() => { const o = document.getElementById("__slime_som__"); if (o) o.remove(); return true; })()`;
 
-/* ── 拖拽轨迹（A-978：browser_drag）──
- * 业界共识（Playwright dragTo steps / page.mouse 序列、主流滑块验证码自动化方案）：
- * 拖拽不是"一步到位的 mousemove"，而是 按下 → 多步插值移动（缓动 + 微抖）→ 松开。
- * 多步中间事件让依赖 dragover / 逐帧 mousemove 的组件（canvas 滑块等）真正响应；
- * ease-out 缓动 + 小幅度随机抖动模拟人手轨迹，规避风控的机械直线特征。
- * 抽成纯函数：无 DOM / Electron 依赖，vitest 可直测（防"顺手优化正则"式回归）。 */
+
+
+
+
+
+
 export interface DragPoint { x: number; y: number; }
 
-/**
- * 生成拖拽移动路径（起点按下后、终点松开前的中间插值点序列，含精确终点）。
- * @param from  起点（按下位置）
- * @param to    终点（松开位置）
- * @param steps 中间步数（钳制 2..80）
- * @param jitter 是否叠加 ±2px 微抖动（默认 true，模拟人手；测试传 false 保证确定性）
- * @param rnd   随机源（默认 Math.random；测试可注入固定序列）
- */
+
+
+
+
+
+
+
+
 export function buildDragPath(
   from: DragPoint,
   to: DragPoint,
@@ -537,22 +537,22 @@ export function buildDragPath(
   const out: DragPoint[] = [];
   for (let i = 1; i <= n; i++) {
     const t = i / n;
-    // ease-out 缓动：开头移动快、接近终点减速，接近人手拖拽轨迹
+    
     const ease = 1 - (1 - t) * (1 - t);
     let x = from.x + (to.x - from.x) * ease;
     let y = from.y + (to.y - from.y) * ease;
     if (jitter) { x += rnd() * 4 - 2; y += rnd() * 4 - 2; }
     out.push({ x: Math.round(x), y: Math.round(y) });
   }
-  out.push({ x: Math.round(to.x), y: Math.round(to.y) }); // 确保精确落到终点（抖动不引入终点偏移）
+  out.push({ x: Math.round(to.x), y: Math.round(to.y) }); 
   return out;
 }
 
-/**
- * 解析拖拽/点击的定位点（与 browser_click 同语义，前缀化）：
- * 坐标优先（${prefix}x/${prefix}y）→ selector → index → text。
- * @param prefix 参数前缀："from" 或 "to"
- */
+
+
+
+
+
 async function resolvePoint(
   wv: any,
   cmd: Record<string, unknown>,
@@ -583,7 +583,7 @@ async function resolvePoint(
   return null;
 }
 
-/** 单条指令执行（主进程下行） */
+
 export async function executeBrowserCommand(cmd: Record<string, unknown>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   if (!host) { return { ok: false, error: "右侧栏未就绪（浏览器宿主未注册；请确认右侧栏已打开）" }; }
   const kind = String(cmd?.kind ?? "");
@@ -592,18 +592,18 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
   const curWv = async (): Promise<any> => {
     const id = curId();
     if (!id) { throw new Error("没有可用的浏览器页——请先 browser_navigate 打开一个网址"); }
-    // 激活目标页：隐藏（display:none）时元素 rect 为 0、capturePage 可能空白，
-    // 且让用户能看见 Agent 的操作过程（可解释性）。
-    expandSidebar();                 // 右侧栏收起时先展开（否则 webview 隐藏 → 操作必失败）
-    try { host!.activateTab(id); } catch { /* 忽略 */ }
-    // A-980-R11：先等 webview 可见再操作——非激活 tab display:none 切过来后 rect 为 0，
-    // 不等就发坐标点击/截图必然落空（"点了没反应"的高发原因之一）
+    
+    
+    expandSidebar();                 
+    try { host!.activateTab(id); } catch {  }
+    
+    
     const wv = await awaitWebview(id);
     if (!wv) { throw new Error("浏览器页尚未就绪（webview 未挂载）"); }
     await waitVisible(wv);
-    await sleep(40);               // 布局稳定余量
-    // ★ A-976 修复：必须等 dom-ready，否则 executeJavaScript/sendInputEvent/capturePage 全部被 Electron 拒绝
-    //（这正是"能导航、不能操作"的根因——loadURL 不需要 ready，其余操作都需要）。
+    await sleep(40);               
+    
+    
     const ok = await waitDomReady(wv, 6000);
     if (!ok) {
       throw new Error("浏览器页还没准备好（webview 尚未完成 dom-ready 或加载失败）——请先 browser_wait，或重新 browser_navigate 后再操作");
@@ -619,7 +619,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
       case "open": {
         expandSidebar();
         const url = typeof cmd.url === "string" ? cmd.url : undefined;
-        // A-980-R2：非 Web 协议不创建浏览器页，改为「真实打开」——探测系统处理器交给系统应用
+        
         if (url !== undefined && url.trim() && !isWebNavUrl(url)) {
           const ext = await tryOpenExternal(url.trim());
           if (ext.ok) { return { ok: true, data: { systemOpened: true, url: url.trim(), handler: ext.handler } }; }
@@ -641,10 +641,10 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
       case "navigate": {
         let url = String(cmd.url ?? "").trim();
         if (!url) { return { ok: false, error: "navigate 需要 url" }; }
-        // A-980-R6：统一归一（裸地址补 http://）——Agent 若给 127.0.0.1:8081 等裸地址也直接可加载
+        
         url = normalizeBrowserUrl(url);
-        // A-980-R2：非 Web 协议不再拒绝/不再 https 前缀化，改为「真实打开」——探测系统处理器，
-        // 已注册（装了对应客户端）→ 交给系统应用打开，链接目的达成、报错消失；未注册 → 明确诊断缺应用。
+        
+        
         if (!isWebNavUrl(url)) {
           const scheme = (url.split(":")[0] || "").toLowerCase();
           if (scheme === "slime") { return { ok: false, error: "slime:// 平台链接请使用平台内打开方式（如点击聊天里的链接）" }; }
@@ -652,27 +652,27 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
           if (ext.ok) { return { ok: true, data: { systemOpened: true, url, handler: ext.handler } }; }
           return { ok: false, error: ext.error };
         }
-        expandSidebar();               // 先展开右侧栏（收起时 webview 隐藏）
-        await sleep(40);               // A-980：120ms → 40ms（纯粹省去冗余等待）
+        expandSidebar();               
+        await sleep(40);               
         let id = curId();
         if (!id) { id = host.openTab(url, true); }
         let wv = await awaitWebview(id);
-        // 空白页可能刚建、webview 还在挂载：先等它出现
+        
         const deadline = Date.now() + 4000;
         while (!wv && Date.now() < deadline) { await sleep(80); wv = await awaitWebview(id, 300); }
         if (!wv) { return { ok: false, error: "浏览器页未就绪（webview 未挂载）" }; }
-        resetDomReady(wv);           // 新文档要重新 dom-ready
-        safeLoadURL(wv, url);        // A-1106b：唯一安全出口（reject 被接住，-3 不算错）
-        // A-980-R：**不再 waitLoaded（等整页加载完）**——重度站点（视频/富媒体）整页加载
-        // 可达 10-15s，Agent 只需 DOM 就绪即可 snapshot/点击；等整页加载是"打开网址墨迹半天"主因之一。
-        await waitDomReady(wv, 10000); // ★ 等新页面 dom-ready（后续操作才可用）
-        await sleep(150);            // 给 SPA 首屏渲染留时间（dom-ready 后骨架即出）
+        resetDomReady(wv);           
+        safeLoadURL(wv, url);        
+        
+        
+        await waitDomReady(wv, 10000); 
+        await sleep(150);            
         const finalUrl = ((): string => { try { return wv.getURL(); } catch { return url; } })();
         return { ok: true, data: { tabId: id, url: finalUrl, popupNotice: takePopupNotice() } };
       }
 
-      case "back": { const wv = await curWv(); try { wv.goBack(); } catch { /* noop */ } resetDomReady(wv); await waitDomReady(wv, 8000); await sleep(300); return { ok: true }; }
-      case "forward": { const wv = await curWv(); try { wv.goForward(); } catch { /* noop */ } resetDomReady(wv); await waitDomReady(wv, 8000); await sleep(300); return { ok: true }; }
+      case "back": { const wv = await curWv(); try { wv.goBack(); } catch {  } resetDomReady(wv); await waitDomReady(wv, 8000); await sleep(300); return { ok: true }; }
+      case "forward": { const wv = await curWv(); try { wv.goForward(); } catch {  } resetDomReady(wv); await waitDomReady(wv, 8000); await sleep(300); return { ok: true }; }
       case "reload": { const wv = await curWv(); resetDomReady(wv); wv.reload(); await waitDomReady(wv, 15000); await waitLoaded(wv); return { ok: true }; }
 
       case "read": {
@@ -692,7 +692,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         const inputs = await wv.executeJavaScript(COLLECT_INPUTS_JS);
         const list = (Array.isArray(els) ? els : []).slice(0, 80).map((e: any, i: number) => ({
           index: i + 1, tag: e.tag, text: e.text, selector: e.selector, x: e.x, y: e.y,
-          // A-980-R12：iframe 内元素标记（其 selector 只在 iframe 文档内有效，提示模型走坐标点击）
+          
           frame: e.frame ?? 0,
         }));
         return { ok: true, data: { url: meta?.url, title: meta?.title, elements: list, inputs, popupNotice: takePopupNotice() } };
@@ -706,7 +706,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         const cx = typeof cmd.x === "number" ? cmd.x : undefined;
         const cy = typeof cmd.y === "number" ? cmd.y : undefined;
         let pt: { x: number; y: number; what: string } | null = null;
-        // 显式坐标优先（页面像素坐标，与 getBoundingClientRect 同基准）
+        
         if (typeof cx === "number" && typeof cy === "number") {
           pt = { x: Math.round(cx), y: Math.round(cy), what: `坐标(${Math.round(cx)},${Math.round(cy)})` };
         }
@@ -724,14 +724,14 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
           if (r) { pt = r; }
         }
         if (!pt) { return { ok: false, error: `未找到可点元素（selector=${selector || "-"} text=${text || "-"} index=${index ?? "-"}）——请先 browser_snapshot 查看可用元素` }; }
-        // A-980-R11 + A-1044：聚焦 webview（否则失焦后首次 sendInputEvent 会被丢弃），
-        // 并在操作前后播"正在操作"事件、结束时把焦点还给用户（详见 withWebviewFocus）。
+        
+        
         return await withWebviewFocus(wv, `点击网页元素${pt.what ? `：${pt.what}` : ""}`, async () => {
           wv.sendInputEvent({ type: "mouseMove", x: pt.x, y: pt.y });
           wv.sendInputEvent({ type: "mouseDown", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
           await sleep(20);
           wv.sendInputEvent({ type: "mouseUp", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-          // A-980：点击即观察——点击后直接回传主要元素，省掉模型再调 browser_snapshot 的一整轮
+          
           const observe = await observeAfter(wv, 600);
           return { ok: true, data: { clicked: pt.what, x: pt.x, y: pt.y, observe, popupNotice: takePopupNotice() } };
         });
@@ -742,7 +742,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         const text = String(cmd.text ?? "");
         if (!text) { return { ok: false, error: "type 需要 text" }; }
         const selector = typeof cmd.selector === "string" ? cmd.selector : "";
-        // 原生 setter + input/change 事件：兼容 React/Vue 受控组件
+        
         const js = `(() => {
           const sel = ${JSON.stringify(selector)};
           let el = sel ? document.querySelector(sel) : document.activeElement;
@@ -765,7 +765,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         })()`;
         const done = await wv.executeJavaScript(js);
         if (!done) { return { ok: false, error: "未找到可输入的输入框（可传 selector 指定）" }; }
-        // A-1044：输入同样会抢焦点（页面内 `el.focus()`）→ 走统一的"播事件 + 还焦点"包装
+        
         return await withWebviewFocus(wv, `在网页中输入 ${text.length} 个字符`, async () => {
           if (cmd.submit) {
             wv.sendInputEvent({ type: "keyDown", keyCode: "Return" });
@@ -773,7 +773,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
             wv.sendInputEvent({ type: "keyUp", keyCode: "Return" });
             await sleep(600);
           }
-          // A-980：输入即观察（回车提交后页面往往变化，直接回传新状态主要元素）
+          
           const observe = await observeAfter(wv, cmd.submit ? 900 : 400);
           return { ok: true, data: { typed: text.slice(0, 40), submitted: Boolean(cmd.submit), observe } };
         });
@@ -783,11 +783,11 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         const wv = await curWv();
         const key = String(cmd.key ?? "");
         if (!key) { return { ok: false, error: "press 需要 key（如 Enter / Escape / Tab / ArrowDown）" }; }
-        // 键盘事件只会送到**聚焦**的元素/页面——聚焦 webview，否则按键落空（静默失效）
+        
         return await withWebviewFocus(wv, `向网页发送按键 ${key}`, async () => {
           wv.sendInputEvent({ type: "keyDown", keyCode: key });
           wv.sendInputEvent({ type: "keyUp", keyCode: key });
-          // A-980：按键即观察（Enter 提交等场景页面会变，回传新状态避免模型再快照）
+          
           const observe = await observeAfter(wv, 600);
           return { ok: true, data: { key, observe } };
         });
@@ -796,10 +796,10 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
       case "scroll": {
         const wv = await curWv();
         const dy = typeof cmd.delta === "number" ? cmd.delta : 600;
-        // A-1044：滚动不注入鼠标事件，但会移动页面内容 —— 也播一次可视化（用户看得见"Agent 在翻页"）
+        
         return await withWebviewFocus(wv, `滚动网页 ${Math.round(dy)}px`, async () => {
           await runJs(wv, `(window.scrollBy(0, ${Math.round(dy)}), true)`);
-          // A-980：滚动即观察（懒加载页面滚动后常出新内容，直接回传）
+          
           const observe = await observeAfter(wv, 450);
           return { ok: true, data: { scrolled: Math.round(dy), observe } };
         });
@@ -814,26 +814,26 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         const duration = Math.max(100, Math.min(8000, typeof cmd.durationMs === "number" ? cmd.durationMs : 800));
         const steps = typeof cmd.steps === "number" ? cmd.steps : 20;
         const jitter = cmd.jitter !== false;
-        // A-980-R11 + A-1044：拖拽同样先聚焦 webview（失焦后首次 sendInputEvent 会被丢弃），
-        // 并在结束时归还焦点（详见 withWebviewFocus）
+        
+        
         return await withWebviewFocus(wv, `拖拽网页元素：${from.what} → ${to.what}`, async () => {
-          // ① 移动到起点 → 按下（真实鼠标事件，canvas/pointer 监听都能收到）
+          
           wv.sendInputEvent({ type: "mouseMove", x: from.x, y: from.y });
           await sleep(60);
           wv.sendInputEvent({ type: "mouseDown", x: from.x, y: from.y, button: "left", clickCount: 1 });
-          // ② 按住停顿（真实用户按下后不会立即拖动）
+          
           await sleep(150);
-          // ③ 多步插值移动（缓动 + 微抖），每步一小段真实 mousemove
+          
           const stepMs = Math.max(5, Math.round(duration / steps));
           const path = buildDragPath(from, to, steps, jitter);
           for (const p of path) {
             wv.sendInputEvent({ type: "mouseMove", x: p.x, y: p.y });
             await sleep(stepMs);
           }
-          // ④ 终点松开
+          
           await sleep(80);
           wv.sendInputEvent({ type: "mouseUp", x: to.x, y: to.y, button: "left", clickCount: 1 });
-          // A-980：拖拽即观察（滑块是否归位等直接回传）
+          
           const observe = await observeAfter(wv, 500);
           return { ok: true, data: { dragged: `${from.what} → ${to.what}`, from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y }, durationMs: duration, steps: path.length, observe } };
         });
@@ -864,7 +864,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
         } catch (e) {
           return { ok: false, error: `截图失败：${e instanceof Error ? e.message : String(e)}` };
         }
-        if (marked > 0) { try { await wv.executeJavaScript(CLEAR_OVERLAY_JS); } catch { /* 忽略 */ } }
+        if (marked > 0) { try { await wv.executeJavaScript(CLEAR_OVERLAY_JS); } catch {  } }
         if (!dataUrl) { return { ok: false, error: "截图返回为空" }; }
         return { ok: true, data: { dataUrl, marks: marked } };
       }
@@ -874,7 +874,7 @@ export async function executeBrowserCommand(cmd: Record<string, unknown>): Promi
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // 就绪类竞态（dom-ready / 上下文切换）→ 稍等后**整条指令重试一次**，避免偶发失败被误报为"不支持"
+    
     if (!(cmd as { __retried?: boolean }).__retried && /dom-ready|attached to the DOM|not ready|destroyed|Cannot read/i.test(msg)) {
       await sleep(500);
       return executeBrowserCommand({ ...cmd, __retried: true });

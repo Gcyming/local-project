@@ -1,20 +1,20 @@
-/**
- * tests/gui/a1146-session-diff.spec.ts — 「右栏对比：本次会话的改动」的守卫（A-1146）。
- *
- * ## 用户原话
- * 「右侧边栏的对比功能还是限定死了在 git 仓库，我觉得应该可以像对话里面的一样，展现此次变动。」
- *
- * ## 为什么这不是"加个数据源"那么简单
- * 大量文件**根本不在 Git 仓库里**（新项目 / 临时脚本 / Agent 现生成的文件）⇒ 以前点「对比改动」
- * 只会得到一句"不在 Git 仓库内…请用聊天区工具卡查看" ⇒ 用户视角等于功能不存在。
- * 现在两个数据源在**同一处**合流：**会话产物（此次变动）优先，Git HEAD 兜底**。
- *
- * ## 三条必须钉死的不变量
- *  ① **取最新那一次**：同一文件被写多次、跨多个 assistant 序数时，要的是"此次变动"；
- *  ② **`diffTrimmed` 不许返回 null**（落盘限流摘掉了全文）—— 静默返回 null 会让界面
- *     以为"这次没改过"，而它其实改过（A-1029 的整条教训就是"限流可以，沉默不行"）；
- *  ③ **只认写入**：`file_read` 之类没有"变更"可比。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -72,7 +72,7 @@ describe("A-1146 ② 接线：右栏真的会去查会话产物", () => {
   it("`FileTab` 拿得到会话标识（主组件透传，否则子组件里没有数据源）", () => {
     expect(src).toContain("agentId?: string | null;");
     expect(src).toContain("sessionId?: string }): JSX.Element");
-    /* ⚠️ 锚 props 的**声明与调用两处**：只锚声明的话，主组件忘了往下传 ⇒ 一样拿不到数据。 */
+    
     expect(src).toContain("agentId={props.agentId}");
     expect(src).toContain("sessionId={props.sessionId}");
   });
@@ -85,7 +85,7 @@ describe("A-1146 ② 接线：右栏真的会去查会话产物", () => {
   it("渲染分支按来源取基准文本（会话用 old/new，Git 用 HEAD/当前）", () => {
     expect(src).toContain("useSession && sd ? sd.old : (diffHead ?? \"\")");
     expect(src).toContain("useSession && sd ? sd.new : preview.content");
-    /* 两份 diff 视图不许各写一份（样式与统计口径会漂） */
+    
     expect((src.match(/diffLinesFn\(/g) ?? []).length).toBe(1);
   });
 

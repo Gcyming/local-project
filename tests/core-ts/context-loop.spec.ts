@@ -1,16 +1,16 @@
-/**
- * tests/core-ts/context-loop.spec.ts — 上下文压缩 Agent-Loop 纯逻辑单测（A-1082）。
- *
- * 覆盖设计定稿 `docs/context-compaction-loop.md` 的硬不变量与新增环节：
- *   I1/I3 工具配对与角色交替 → `validateHistory`
- *   I2    切口 turn 对齐     → `planCut` / `trimTurnAligned`
- *   I4    体积真的下降       → `isRealShrink`
- *   I7    熔断               → `nextBreakerState`
- *   ⑤     理解总结环         → `buildResumeBlock` / `parseComprehend`
- *   §8.4  skip-stale         → `acceptSummary`
- *
- * 这些函数全部是**纯函数**，所以可以穷举；主进程的异步时序**不测**（本仓测不过来的那种）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   BREAKER_THRESHOLD, COMPREHEND_FIELDS, MIN_SHRINK_RATIO, RESUME_NOT_TASK_SENTINEL,
@@ -25,11 +25,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
-/** 去注释后的源码：`MAIN_C` 供跨层接线断言（见 A-1083 起的几组用例） */
+
 const stripComments = (rel: string): string =>
   readFileSync(join(ROOT, rel), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 const MAIN_C = stripComments("gui/src/main/index.ts");
-/** A-1084：引擎与 ChatService 的源码（接线断言用 —— 判据没接上等于没写） */
+
 const ENGINE_C = stripComments("core-ts/src/services/engine.ts");
 const CHAT_C = stripComments("core-ts/src/services/chat.ts");
 
@@ -44,8 +44,8 @@ const turns = (n: number): Array<{ role: string; content: string }> => {
 
 describe("planCut / trimTurnAligned · 切口只落在 turn 边界（I2）", () => {
   it("保留最后 K 整轮：返回第 K 个（从尾数）user 的下标", () => {
-    const msgs = turns(10); // 20 条，user 在偶数下标
-    expect(planCut(msgs, 3)).toBe(14); // 倒数第 3 个 user 是 u7 → 下标 14
+    const msgs = turns(10); 
+    expect(planCut(msgs, 3)).toBe(14); 
     expect(trimTurnAligned(msgs, 3).map((m) => m.content)).toEqual(["u7", "a7", "u8", "a8", "u9", "a9"]);
   });
 
@@ -317,21 +317,21 @@ describe("isRealShrink · 体积必须真的下降（I4）", () => {
 });
 
 
-/* ══════════════ A-1083：发送前**预算门**（从根上消灭「连接半天」） ══════════════ */
+
 
 describe("A-1083 planSend：能不能超，**发之前**就知道", () => {
   it("窗口未知（cap ≤ 0）⇒ 不猜、不拦（猜错会把能用的模型也拦掉）", () => {
     const p = planSend({ estimatedInput: 999_999, cap: 0 });
     expect(p.action).toBe("ok");
     expect(p.reason).toContain("未知");
-    // 上游已报超限、但窗口未知 ⇒ 仍然不拦（我们无从判断"压到多少才够"）
+    
     expect(planSend({ estimatedInput: 999_999, cap: -1, afterOverflow: true }).action).toBe("ok");
   });
 
   it("预留常量：给输出与下一轮工具留位（不留就会被「一调工具又超」打死）", () => {
     expect(RESERVE_OUTPUT_TOKENS).toBeGreaterThan(0);
     expect(RESERVE_NEXT_TOOL_TOKENS).toBeGreaterThan(0);
-    // 预算 = 窗口 − 两个预留：输入刚好等于预算 ⇒ 仍算够（边界不误伤）
+    
     const cap = 100_000;
     const budget = cap - RESERVE_OUTPUT_TOKENS - RESERVE_NEXT_TOOL_TOKENS;
     expect(planSend({ estimatedInput: budget, cap }).action).toBe("ok");
@@ -344,7 +344,7 @@ describe("A-1083 planSend：能不能超，**发之前**就知道", () => {
     expect(planSend({ estimatedInput: 99_000, cap }).trigger).toBe("budget");
     expect(planSend({ estimatedInput: 1_000, cap, ratioTriggered: true }).trigger).toBe("ratio");
     expect(planSend({ estimatedInput: 1_000, cap }).trigger).toBe("none");
-    // 优先级：三个同时成立时必须报最权威的那个
+    
     expect(planSend({ estimatedInput: 200_000, cap, afterOverflow: true, ratioTriggered: true }).trigger).toBe("overflow");
     expect(planSend({ estimatedInput: 200_000, cap, ratioTriggered: true }).trigger).toBe("budget");
   });
@@ -357,12 +357,12 @@ describe("A-1083 planSend：能不能超，**发之前**就知道", () => {
 
   it("🐛 **压无可压 ≠ 发不出去**：只有真的装不下（输入 > 窗口）才拒发", () => {
     const cap = 100_000;
-    /* 用户把阈值调低（占用早就过阈值、但离硬墙还很远）时，压无可压也必须**照常发送** ——
-       旧写法在这里会误伤（把能用的请求拦掉）。这是本判据最易写错的一处。 */
+    
+
     const byRatio = planSend({ estimatedInput: 5_000, cap, ratioTriggered: true, canShrink: false });
     expect(byRatio.action, "只是用户阈值到了、离硬墙还很远 → 必须放行").toBe("ok");
     expect(byRatio.reason).toContain("照常发送");
-    // 真装不下 ⇒ 拒发（这一条就是「连接半天」的根治）
+    
     const wall = planSend({ estimatedInput: 120_000, cap, canShrink: false });
     expect(wall.action).toBe("cannot-fit");
     expect(wall.headroom).toBeLessThan(0);
@@ -378,7 +378,7 @@ describe("A-1083 planSend：能不能超，**发之前**就知道", () => {
               const p = planSend({ estimatedInput: used, cap, afterOverflow: overflow, ratioTriggered: ratio, canShrink: shrink });
               expect(p.reason.length, JSON.stringify({ cap, used, overflow, ratio, shrink })).toBeGreaterThan(0);
               expect(["ok", "compact", "cannot-fit"], p.action).toContain(p.action);
-              // 不变量：action 与 headroom 不许互相矛盾
+              
               if (p.action === "cannot-fit") { expect(p.headroom).toBeLessThan(0); }
             }
           }
@@ -406,7 +406,7 @@ describe("A-1083 接线：预算门必须真的挂在压缩入口（唯一出处
     expect(MAIN_C).toContain("afterOverflow: force");
     expect(MAIN_C).toContain("ratioTriggered: needsCompress(");
     expect(MAIN_C).toContain("canShrink: !noRoomToCut");
-    // 收口之后，旧的散落判定不许再回来（每条都会让「force 忘了越过」的历史事故复发）
+    
     expect(MAIN_C, "旧的 `!force && used > histUsed` 散落判定又回来了 → 判据分裂成两处").not.toContain("if (!force && used > histUsed");
   });
 });
@@ -427,9 +427,9 @@ describe("A-1084 engine 侧保险门：装不下的请求**不许出网**（防�
   });
 
   it("输入 < 窗口 ⇒ 放行 —— **哪怕已过预算线**（引擎不许当第二个决策者）", () => {
-    // 输入 95K / 窗口 100K：已超「预算档」（100K − 输出13K − 工具20K = 67K），但没到硬墙。
-    // 若这里拦了 ⇒ 主进程放行的请求被引擎拦回 ⇒ 用户什么都发不出去（死锁），
-    // 而那个请求本来是**可能成功**的（只是输出空间小）。
+    
+    
+    
     expect(
       planEngineSend({ estimatedInput: 95_000, windowCap: 100_000 }).allow,
       "把预算档也算进引擎闸门 = 与主进程判据打架（死锁）",
@@ -448,11 +448,11 @@ describe("A-1084 engine 侧保险门：装不下的请求**不许出网**（防�
       (ENGINE_C.match(/this\.guardSend\(/g) ?? []).length,
       "只在一条发送路径上装了闸门（chat 与 stream 两条都要）",
     ).toBeGreaterThanOrEqual(2);
-    /* ⚠️ 必须锁**数量**（≥2）：engine 里 chat() 与 stream() 各有一处拒发文案，
-       只改一处时 `toContain` 仍绿 —— 那就是"探到一半的接线"（另一条路径仍然落进重连）。
-       这里刻意匹配**模板插值形态** `${LOCAL_PREFLIGHT_MARKER}`，而不是常量名本身 ——
-       后者会被 import 那一行满足（只要有 import 就算过，与文案无关 = 假绿）。
-       本仓同族教训：`toContain` 前先确认字串唯一；不唯一就必须带邻位上下文或锁数量。 */
+    
+
+
+
+
     expect(
       (ENGINE_C.match(/\$\{LOCAL_PREFLIGHT_MARKER\}/g) ?? []).length,
       "两条发送路径的拒发文案都必须带 LOCAL_PREFLIGHT_MARKER（只带一处 → 另一条路径落进 9 次重连）",
@@ -462,12 +462,12 @@ describe("A-1084 engine 侧保险门：装不下的请求**不许出网**（防�
   it("接线：windowCap 从主进程一路透传到引擎（缺任何一节 = 保险门永远放行 = 等于没做）", () => {
     expect(CHAT_C, "ChatRequest 没声明 windowCap").toMatch(/windowCap\?: number;/);
     expect(CHAT_C, "ChatService 没把 windowCap 透传给 engine").toContain("windowCap: req.windowCap");
-    /* ⚠️ A-1131 **迁移**（不是删）：原来断言的是
-       `resolveSessionWindowCap(agentId, loadingAgent?.model_choice` —— 即"用 Agent 的模型"。
-       而 A-1131 之后"本次要用的模型"是**会话覆盖优先**（`runModelChoice`），
-       所以形参从 `loadingAgent?.model_choice` 换成了同一个判据算出的 `runModelChoice`。
-       本条守卫的原意（"窗口上限必须按本次要用的模型解析后透传"）不变；
-       顺带把"那个判据必须是会话覆盖优先"也锁上 —— 否则 windowCap 会按错模型算（选小窗口模型时误放行）。 */
+    
+
+
+
+
+
     expect(MAIN_C, "主进程发送时没解析并透传 windowCap（必须用本次要用的模型）")
       .toMatch(/windowCap: await resolveSessionWindowCap\(agentId, runModelChoice\)/);
     expect(MAIN_C, "runModelChoice 不是「会话覆盖优先」算出来的 ⇒ 窗口上限按错模型算")
@@ -497,19 +497,19 @@ describe("A-1085 摘要覆盖不受 50 条静默上限（tailLimit：limit<=0 = 
   });
 
   it("接线：压缩摘要轮**读全量**，常规发送走命名常量（不许再出现裸 50）", () => {
-    // ⚠️ A-1106 迁移（**保留意图，不许删**）：A-1085 当初把「摘要轮」与「压缩后校验」
-    //    两处读全量写成同一个函数 `loadSessionHistory(…, { full: true })`，所以断言是「2 次」。
-    //    但 A-1106 把读盘拆成了两个入口 —— `loadRawHistoryWithMeta`（原始全量：判据 + 摘要素材）
-    //    与 `loadSessionHistory`（折叠视图：真实发送体积）——
-    //    **A-1085 的不变量没有变**：两处都必须 `full: true`（否则摘要只覆盖最后 50 条 ⇒
-    //    早期对话从不进入摘要，且 tokensAfter 与 used 不同源 ⇒ isRealShrink 失真）。
-    //    所以这里按**新形态**迁移，而不是把断言删掉。
+    
+    
+    
+    
+    
+    
+    
     const rawFull = (MAIN_C.match(/loadRawHistoryWithMeta\(sessionId, \{ full: true \}\)/g) ?? []).length;
     const viewFull = (MAIN_C.match(/loadSessionHistory\(sessionId, \{ full: true \}\)/g) ?? []).length;
     expect(rawFull, "摘要轮没读全量 ⇒ 早期对话从不进入摘要（静默丢上下文记忆）").toBe(1);
     expect(viewFull, "压缩后校验没读全量 ⇒ tokensAfter 与 used 不同源 ⇒ isRealShrink 失真").toBe(1);
-    // 兜底：带 `{ full: true }` 的读盘点只许这两处。新增第三处时必须一并审「它该不该读全量」，
-    // 而不是悄悄多出一个（多出来的那处若漏了 full，就是又一条静默丢记忆的路）。
+    
+    
     expect(
       (MAIN_C.match(/\{ full: true \}/g) ?? []).length,
       "多了一个读全量的入口（或有一处漏了 full）—— 请逐个审它是否该读全量",
@@ -535,7 +535,7 @@ describe("A-1086 可救模型挑选：压无可压时唯一有意义的出路", 
   });
 
   it("多个候选取**最省**的那个（不把用户甩到远超需要的模型上）", () => {
-    // 当前窗口 50K、需求 50K ⇒ 64K 那个刚好够（50K + 预留13K = 63K ≤ 64K）且是**最省**的
+    
     const picked = pickRescueModel(50_000, 50_000, [cand("huge", 1_000_000), cand("just", 64_000), cand("mid", 200_000)]);
     expect(picked?.id).toBe("just");
   });

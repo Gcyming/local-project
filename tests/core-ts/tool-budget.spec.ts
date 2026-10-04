@@ -1,15 +1,15 @@
-/**
- * tests/core-ts/tool-budget.spec.ts — 任务预算护栏（#4）回归：
- *  ToolLoop.run 在 maxToolCalls / maxTotalTokens / maxWallClockMs 任一达到时优雅收束——
- *  保留已产出内容，返回 budgetExhausted=true 与 budgetReason，末尾附预算提示。
- * 全部走 fake router（零真实网络）。
- */
+
+
+
+
+
+
 import { describe, expect, it, beforeEach } from "vitest";
 import { ToolLoop } from "../../core-ts/src/tool_loop.js";
 import { getRegistry, resetRegistry, Tool } from "../../core-ts/src/tools/registry.js";
 import type { ModelRouter } from "../../core-ts/src/router.js";
 
-/** 返回一个每轮都再要一次 ping 工具的假路由（内容为空，避免干扰 token 计数） */
+
 function pingForeverRouter(): ModelRouter {
   return {
     chat: async () => ({
@@ -58,13 +58,13 @@ describe("任务预算护栏（ToolLoop.run）", () => {
     expect(r.budgetExhausted).toBe(true);
     expect(r.budgetReason).toContain("工具调用");
     expect(r.text).toContain("[预算提示]");
-    // 已实际执行 2 次工具调用（round 粒度：达到上限即止）
+    
     expect(r.roundLog.length).toBe(2);
   });
 
   it("maxTotalTokens：token 预算耗尽即收束", async () => {
     const loop = makeLoop(pingForeverRouter());
-    // 种子消息 1000 字符 ≈ 600 tokens，上限设 400 → 第 2 轮检查即触发
+    
     const big = "a".repeat(1000);
     const r = await loop.run({
       agentId: "a1",

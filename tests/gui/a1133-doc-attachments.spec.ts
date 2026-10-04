@@ -1,11 +1,11 @@
-/**
- * tests/gui/a1133-doc-attachments.spec.ts — 文档附件「文本里带路径 / 界面上显示卡片」的守卫（A-1133）。
- *
- * 用户原话：「首先是输入栏，我不想要这种直接显示文件地址的方式，我自己都可以去复制文件地址，
- *   我要的是直接显示带图标的卡片。」
- * 两条需求同时成立：**界面不显示地址** + **Agent 必须拿到路径**（否则读不到文件）。
- * ⇒ 唯一解：路径编码进消息文本，渲染时拆出来变卡片。本文件锁这个编解码协议。
- */
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { DOC_ATTACH_MARK, baseNameOf, formatDocAttachments, splitDocAttachments } from "../../gui/src/renderer/pages/docAttachments.js";
 

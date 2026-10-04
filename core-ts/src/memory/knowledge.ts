@@ -1,10 +1,10 @@
-/**
- * core-ts/src/memory/knowledge.ts — 知识引擎（Pattern-Key 追踪 + 晋升管线 + 周期性审查）。
- * 语义移植自 core/knowledge.py（A-011 隔离、N10-M1/M3、PROMOTE_THRESHOLDS 全量对照）。
- *
- * 管线：事件触发 record_pattern → 达阈值 promote → Rule 积累 → generate_skill → Persona trait。
- * 持久化：Knowledge/{agent_id}/knowledge.json + rules/*.md + generated_skills/（Obsidian vault 语义）。
- */
+
+
+
+
+
+
+
 
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -15,19 +15,19 @@ export { PROJECT_ROOT };
 export const KNOWLEDGE_DIR = resolve(PROJECT_ROOT, "Knowledge", "Agent Memory");
 export const DATA_DIR = resolve(PROJECT_ROOT, "data");
 
-// 晋升阈值（对照 PROMOTE_THRESHOLDS）
+
 export const PROMOTE_THRESHOLDS = {
-  alert: 3, // 第 3 次出现 → 升级为高风险
-  rule: 5, // 第 5 次出现 → 晋升为行为规则
-  trait: 8, // 第 8 次出现 → 晋升为 persona 特征
-  skill: 10, // 第 10 次成功 → 生成为可复用技能
+  alert: 3, 
+  rule: 5, 
+  trait: 8, 
+  skill: 10, 
 } as const;
 
-// 输入校验（N10-M3）
+
 const VALID_CATEGORIES = new Set(["task", "security", "learning", "skill", "behavior", "preference"]);
 const VALID_PRIORITIES = new Set(["low", "medium", "high", "critical"]);
 const KEY_RE = /^[a-zA-Z0-9_.\-]+$/;
-// A-112: agent_id 仅允许安全字符（防御路径遍历；空串放行 = global 语义）
+
 const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function validateAgentId(agentId: string): void {
@@ -38,7 +38,7 @@ function validateAgentId(agentId: string): void {
 
 export const PRIORITY_WEIGHTS = { critical: 100, high: 50, medium: 20, low: 5 } as const;
 
-// ── 数据结构（对照 PatternEntry / KnowledgeRule） ─────────
+
 
 export interface PatternEntry {
   key: string;
@@ -94,31 +94,31 @@ export function ruleToMarkdown(rule: KnowledgeRule): string {
   ].join("\n");
 }
 
-// ── 向量化接入（对照 _vectorize / vectorize_knowledge） ────
+
 
 export interface VectorizeHook {
   (role: string, content: string, tags?: string): Promise<boolean>;
 }
 
-// ── Persona 联动（对照 agent_persona.traits + _touch） ────
+
 
 export interface PersonaLike {
   traits: Array<{ name: string; weight: number; [k: string]: unknown }>;
   _touch?: () => void;
 }
 
-/**
- * A-1035：把一条知识 pattern 落成 persona trait —— **唯一实现**。
- *
- * 为什么必须抽出来：写 trait 这件事原先只存在于 `review()` 内部（而且 `review` 没有任何
- * 生产调用者，见 A-1035 的接线修复）。现在有两个触发点：
- *   ① `recordPattern` 当场跨过 trait 阈值 → 立即生效
- *   ② 周期性 `review()` → 批量强化
- * 两处各写一遍必然漂（本项目"同一动作只有一个入口/一份实现"的规矩）。
- *
- * 语义：已存在同名 trait 则**加权**（上限 1.0），不存在则新建（权重 0.45 = 弱先验，
- * 需要后续重复强化才可信）。写入后调 `_touch()` 让 persona 的更新时间被发现。
- */
+
+
+
+
+
+
+
+
+
+
+
+
 export function applyTraitToPersona(
   persona: PersonaLike,
   traitName: string,
@@ -144,7 +144,7 @@ export function applyTraitToPersona(
   return { created: true, weight: 0.45 };
 }
 
-// ── KnowledgeEngine ──────────────────────────────────────
+
 
 export interface KnowledgeEngineOptions {
   dataDir?: string;
@@ -166,17 +166,17 @@ export class KnowledgeEngine {
     this.agentId = agentId;
     this.projectRoot = opts.projectRoot ?? PROJECT_ROOT;
     const base = opts.dataDir ? resolve(this.projectRoot, opts.dataDir) : KNOWLEDGE_DIR;
-    // A-011: 所有输出（knowledge.json / rules/ / generated_skills/）都锚定 base 目录
+    
     this.baseDir = base;
     this.jsonPath = resolve(base, agentId || "global", "knowledge.json");
     this.vectorize = opts.vectorize ?? null;
     this.load();
   }
 
-  // ── 持久化 ─────────────────────────────────────────────
+  
 
   private load(): void {
-    // 迁移：旧 data/ 位置有数据但新位置没有 → 移动
+    
     const oldPath = resolve(DATA_DIR, this.agentId || "global", "knowledge.json");
     if (existsSync(oldPath) && !existsSync(this.jsonPath)) {
       try {
@@ -222,12 +222,12 @@ export class KnowledgeEngine {
     renameSync(tmp, this.jsonPath);
   }
 
-  // ── Pattern 追踪 ───────────────────────────────────────
+  
 
-  /**
-   * 记录一个 Pattern 出现。返回 {action, ...} 指示触发晋升则 action 不为空。
-   * N10-M3: key/category/priority 白名单校验，非法输入降级为 safe defaults。
-   */
+  
+
+
+
   recordPattern(key: string, category = "task", description = "", priority = "medium"): Record<string, unknown> {
     if (typeof key !== "string" || !KEY_RE.test(key)) {
       console.warn(`[knowledge] 非法 pattern key: ${JSON.stringify(key)}`);
@@ -249,7 +249,7 @@ export class KnowledgeEngine {
 
     const result: Record<string, unknown> = { action: null, key, recurrence: p.recurrence };
 
-    // 检查晋升阈值
+    
     if (p.recurrence >= PROMOTE_THRESHOLDS.alert && p.priority !== "critical") {
       const escalate: Record<string, string> = { low: "medium", medium: "high", high: "critical" };
       p.priority = escalate[p.priority] ?? "high";
@@ -281,7 +281,7 @@ export class KnowledgeEngine {
     return result;
   }
 
-  /** 从 Pattern-Key 提取 trait 名。例: task.code-review.success → 代码审查（对照 _key_to_trait_name） */
+  
   private keyToTraitName(key: string): string {
     const parts = key.split(".");
     for (let i = parts.length - 1; i >= 0; i--) {
@@ -293,15 +293,15 @@ export class KnowledgeEngine {
     return parts.length ? parts[parts.length - 1].replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : key;
   }
 
-  /** 从 Pattern-Key 提取技能名（对照 _key_to_skill_name） */
+  
   private keyToSkillName(key: string): string {
     const parts = key.split(".");
     return parts.slice(1, 3).filter((p) => !["success", "fail"].includes(p)).map((p) => p.replace(/-/g, "_")).join("_");
   }
 
-  // ── 晋升管线 ───────────────────────────────────────────
+  
 
-  /** 将高频 Pattern 晋升为持久行为规则，写入 Knowledge/ 目录 */
+  
   promoteToRule(pattern: PatternEntry): KnowledgeRule | null {
     const now = new Date().toISOString();
     const ruleId = `rule_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
@@ -339,10 +339,10 @@ export class KnowledgeEngine {
     this.rules.push(rule);
     this.save();
 
-    // 写入 Knowledge 目录（Obsidian markdown）
+    
     this.writeRuleMarkdown(rule);
 
-    // 向量化：存入 LanceDB 供语义召回（失败不影响晋升主流程）
+    
     if (this.vectorize) {
       void this.vectorize(`rule:${rule.category}`, `${rule.title}\n${rule.content}`, "").catch(() => {});
     }
@@ -351,14 +351,14 @@ export class KnowledgeEngine {
     return rule;
   }
 
-  /** 将规则写入 rules/ 目录（A-011: 锚定实例 base 目录，尊重 data_dir 隔离） */
+  
   private writeRuleMarkdown(rule: KnowledgeRule): void {
     const targetDir = join(this.baseDir, "rules");
     mkdirSync(targetDir, { recursive: true });
     writeFileSync(join(targetDir, `${rule.id}.md`), ruleToMarkdown(rule), "utf8");
   }
 
-  /** 从成功的 Pattern 生成可复用技能模板，写入 generated_skills/（A-011 隔离） */
+  
   generateSkill(patternKey: string): { name: string; dir: string } | null {
     const pattern = this.patterns.get(patternKey);
     if (!pattern || pattern.recurrence < PROMOTE_THRESHOLDS.skill) return null;
@@ -401,12 +401,12 @@ export class KnowledgeEngine {
     return { name: skillName, dir: skillDir };
   }
 
-  // ── 审查与整理 ─────────────────────────────────────────
+  
 
-  /**
-   * 周期性审查：整理过时记忆、强化高频 trait、清理已解决的 pattern。
-   * 返回审查摘要（对照 KnowledgeEngine.review）。
-   */
+  
+
+
+
   review(agentPersona?: PersonaLike | null): {
     patterns_reviewed: number;
     patterns_resolved: number;
@@ -418,7 +418,7 @@ export class KnowledgeEngine {
     const now = new Date();
     const result = { patterns_reviewed: 0, patterns_resolved: 0, rules_updated: 0, traits_reinforced: 0, memories_decayed: 0, summary: [] as string[] };
 
-    // 1. 检查 pattern — 超过 90 天未出现的标记为 resolved
+    
     for (const [key, p] of [...this.patterns.entries()]) {
       result.patterns_reviewed += 1;
       let age = 0;
@@ -433,7 +433,7 @@ export class KnowledgeEngine {
       }
     }
 
-    // 2. 高 recurrence 的 pattern → 强化对应 trait（走唯一实现 applyTraitToPersona）
+    
     if (agentPersona) {
       for (const [key, p] of this.patterns.entries()) {
         if (p.recurrence >= PROMOTE_THRESHOLDS.trait && !p.resolved) {
@@ -445,7 +445,7 @@ export class KnowledgeEngine {
       }
     }
 
-    // 3. 写审查日志到 Knowledge 目录
+    
     const reviewMd = [
       `# Review ${now.toISOString().slice(0, 16).replace("T", " ")}`,
       "",
@@ -459,7 +459,7 @@ export class KnowledgeEngine {
     const stamp = now.toISOString().slice(0, 16).replace(/[-:T]/g, (c) => (c === "T" ? "_" : ""));
     writeFileSync(join(reviewDir, `review_${stamp}.md`), reviewMd, "utf8");
 
-    // 向量化审查摘要（供语义召回）
+    
     if (this.vectorize) {
       void this.vectorize("review", reviewMd.slice(0, 500), "").catch(() => {});
     }
@@ -468,7 +468,7 @@ export class KnowledgeEngine {
     return result;
   }
 
-  /** 返回所有达到 trait 晋升阈值的 pattern 对应的 trait 信号 */
+  
   getPromotableTraits(): Array<{ name: string; signal: number; source: string; recurrence: number }> {
     const signals: Array<{ name: string; signal: number; source: string; recurrence: number }> = [];
     for (const [key, p] of this.patterns.entries()) {
@@ -479,34 +479,34 @@ export class KnowledgeEngine {
     return signals;
   }
 
-  /** 获取所有高优先级未解决的 pattern */
+  
   getHighPriorityPatterns(): PatternEntry[] {
     return [...this.patterns.values()].filter((p) => (p.priority === "high" || p.priority === "critical") && !p.resolved);
   }
 
-  /**
-   * A-1035：自动生成技能的目录（供 SkillRegistry 当额外扫描根）。
-   *
-   * ⚠️ 必须与 `generateSkill()` 的写入路径**逐字一致**：它写的是
-   * `<baseDir>/generated_skills/<name>`，**不含 agentId 段**。
-   * 注意这是本引擎既有的不一致（`knowledge.json` 按 agentId 分目录，而 `rules/` 与
-   * `generated_skills/` 不分）—— 本访问器只负责如实反映现状，不去"顺手统一"，
-   * 因为改目录布局会让用户已有的 `rules/` 失联。要统一得单独一轮做迁移。
-   */
+  
+
+
+
+
+
+
+
+
   get generatedSkillsDir(): string {
     return resolve(this.baseDir, "generated_skills");
   }
 
-  /**
-   * A-1035：消费 `recordPattern` 的晋升结果 —— 知识→技能／知识→人格 **唯一入口**。
-   *
-   * ⚠️ 为什么不按 `result.action` 分派：`recordPattern` 里 action 是**逐档覆盖赋值**的
-   * （escalate → rule → trait → skill），命中 skill 时 action 只剩 `"promote_to_skill"`，
-   * 而 trait 阈值其实也同时越过了 —— 按 action 分派会**静默漏掉写 trait**。
-   * 所以这里按 pattern 自身的 recurrence **逐档独立判断**，action 只用来记录日志。
-   *
-   * 幂等：技能模板已存在则不再重写（避免每轮都刷同一份文件）。trait 写入是加权，天然可重复。
-   */
+  
+
+
+
+
+
+
+
+
+
   applyPromotion(
     result: Record<string, unknown>,
     persona?: PersonaLike | null,
@@ -545,10 +545,10 @@ export class KnowledgeEngine {
   }
 }
 
-// ── 全局缓存（按 agent_id+data_dir 键控，非单例） ───────
 
-/** A-970：知识引擎实例数上限（LRU 淘汰）。每个 KnowledgeEngine 持有 patterns/rules Map，
- *  无界累积会随 Agent 数量 / 会话数线性增长内存（长期运行 + 大量一次性 dataDir 时尤其明显）。 */
+
+
+
 const MAX_KNOWLEDGE_ENGINES = 64;
 
 const knowledgeCache = new Map<string, KnowledgeEngine>();
@@ -561,7 +561,7 @@ export function getKnowledgeEngine(agentId = "", opts: KnowledgeEngineOptions = 
   const key = cacheKey(agentId, opts.dataDir ?? "");
   const hit = knowledgeCache.get(key);
   if (hit) {
-    // LRU：命中即移到队尾（Map 迭代序 = 插入序），保证队首是最久未使用
+    
     knowledgeCache.delete(key);
     knowledgeCache.set(key, hit);
     return hit;
@@ -569,7 +569,7 @@ export function getKnowledgeEngine(agentId = "", opts: KnowledgeEngineOptions = 
   const engine = new KnowledgeEngine(agentId, opts);
   knowledgeCache.set(key, engine);
   if (knowledgeCache.size > MAX_KNOWLEDGE_ENGINES) {
-    // 淘汰最久未使用（队首），保证内存有界
+    
     const oldest = knowledgeCache.keys().next().value;
     if (oldest !== undefined) { knowledgeCache.delete(oldest); }
   }

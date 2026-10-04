@@ -1,24 +1,24 @@
-/**
- * gui/src/renderer/pages/GeneralPanel.tsx — 设置「通用」专栏。
- * - 开机自启开关：与安装器 HKCU Run 项语义一致（app.setLoginItemSettings）
- * - A-980-R26：系统通知开关（任务完成/需要选择/出错/意外终止）+ 可定制提示音（可上传音频）
- * - A-1108：全局降级池（用户自定义；**默认空 = 不跨供应商降级**）
- * - 卸载 Slime：启动 NSIS 卸载器（找不到时提示去控制面板/安装目录）
- *
- * ⚠️ A-1115：**主题选择已迁到「外观」栏**（`AppearancePanel.tsx`）。以后外观 / UI 设定一律进那一页，
- *    别再往本页加 —— 两个入口 = 两个真相源。主题清单的唯一出处是 `theme.ts::THEMES`。
- */
+
+
+
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { NotifyConfigDTO, FallbackPoolEntryDTO, ProviderSummary } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
-// A-980-R26：试听走渲染层播放器（主进程无音频能力），换音频后要让它失效缓存
+
 import { playCustomNotifySound, invalidateNotifySoundCache } from "../notifySound.js";
-// A-975：自动压缩配置变更广播（右栏阈值刻度线据此即时跟随）
+
 import { AUTOCOMPRESS_CFG_EVENT } from "./ChatPanel.js";
-// A-990-D：主页实时监测的消费币种偏好（localStorage + 广播；右栏「会话指标」跟随）
+
 import { readLedgerCurrencyPref, saveLedgerCurrencyPref, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
 
-/** 小药丸开关：与既有「已开启/已关闭」按钮同款样式，供通知/提示音两个开关复用 */
+
 function Pill(props: { on: boolean; disabled?: boolean; title?: string; onClick: () => void }): JSX.Element {
   return (
     <button
@@ -38,7 +38,7 @@ function Pill(props: { on: boolean; disabled?: boolean; title?: string; onClick:
   );
 }
 
-/** 次级小按钮（上传 / 试听 / 恢复默认 / 发送测试） */
+
 function MiniBtn(props: { children: React.ReactNode; disabled?: boolean; danger?: boolean; onClick: () => void }): JSX.Element {
   return (
     <button
@@ -62,10 +62,10 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
   const [exitMode, setExitModeState] = React.useState<"quit" | "background">("quit");
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
-  // A-916：请求频率（并发上限 / 断流重连基间隔）
+  
   const [reqCfg, setReqCfg] = React.useState<{ concurrency: number; reconnectBaseMs: number }>({ concurrency: 2, reconnectBaseMs: 3000 });
   const [reqBusy, setReqBusy] = React.useState(false);
-  // A-969：上下文自动压缩（发送前触发；开启 + 触发占比 + 动画/静默）
+  
   const [acCfg, setAcCfg] = React.useState<{ enabled: boolean; ratio: number; mode: "animated" | "silent" }>(() => {
     try {
       const raw = localStorage.getItem("slime_auto_compress");
@@ -74,18 +74,18 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         const ratio = typeof p.ratio === "number" && p.ratio >= 0.5 && p.ratio <= 0.97 ? p.ratio : 0.85;
         return { enabled: p.enabled !== false, ratio, mode: p.mode === "silent" ? "silent" : "animated" };
       }
-    } catch { /* ignore */ }
+    } catch {  }
     return { enabled: true, ratio: 0.85, mode: "animated" };
   });
-  // A-980-R26：系统通知 + 可定制提示音
+  
   const [nCfg, setNCfg] = React.useState<NotifyConfigDTO>({ enabled: false, soundEnabled: true, soundFile: null, soundName: null });
-  // A-1108：全局降级池（默认空 = 不降级）。顺序 = 尝试顺序；provider/model 是「当前要添加的那条」
+  
   const [fbEntries, setFbEntries] = React.useState<FallbackPoolEntryDTO[]>([]);
   const [fbProviders, setFbProviders] = React.useState<ProviderSummary[]>([]);
   const [fbProvider, setFbProvider] = React.useState<string>("");
   const [fbModel, setFbModel] = React.useState<string>("");
   const [fbBusy, setFbBusy] = React.useState(false);
-  // A-990-D：主页（右侧栏「会话指标」）实时监测的消费币种
+  
   const [ledgerCur, setLedgerCur] = React.useState<LedgerCurrencyPref>(() => readLedgerCurrencyPref());
   const [nBusy, setNBusy] = React.useState(false);
   const [soundBusy, setSoundBusy] = React.useState(false);
@@ -96,27 +96,27 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     window.setTimeout(() => setNotice(null), 4000);
   };
 
-  /** A-969：保存自动压缩配置（localStorage 内存态；ChatPanel 每次发送前实时读取） */
+  
   const saveAutoCompress = (next: { enabled?: boolean; ratio?: number; mode?: "animated" | "silent" }): void => {
     setAcCfg((prev) => {
       const merged = { ...prev, ...next };
       try {
         localStorage.setItem("slime_auto_compress", JSON.stringify(merged));
-        // A-975：广播变更——右栏阈值刻度线/距压缩余量据此立即跟随（此前要刷新界面才变）
+        
         window.dispatchEvent(new CustomEvent(AUTOCOMPRESS_CFG_EVENT, { detail: merged }));
-      } catch { /* ignore */ }
+      } catch {  }
       return merged;
     });
     showNotice(true, "上下文自动压缩配置已保存（聊天发送前自动生效）");
   };
 
-  /**
-   * A-1108：当前所选供应商的**可选模型**（引擎同口径：被显式关掉（selected:false）的模型不给选，
-   * 因为引擎解析降级池时也会丢弃它 —— 界面里能选、引擎却丢掉 = 静默失效）。
-   * ⚠️ 这里只做「下拉里列什么」，**不是**降级池的判据来源：真正的白名单在
-   * core-ts `services/fallbackPool.ts` 的 `resolveFallbackTargets`（唯一出处）。
-   * 没有模型列表的供应商（没探测过）改为手填模型 ID —— 否则它永远当不了降级目标。
-   */
+  
+
+
+
+
+
+
   const fbModelOptions = React.useMemo((): string[] => {
     const p = fbProviders.find((x) => x.key === fbProvider);
     const list = p && Array.isArray(p.models) ? p.models : [];
@@ -131,7 +131,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     return out;
   }, [fbProviders, fbProvider]);
 
-  /** 保存降级池（整体替换；主进程侧会再消毒一遍，返回的是**消毒后**的真实内容，以它为准重绘） */
+  
   async function saveFallbackEntries(next: FallbackPoolEntryDTO[], okText: string): Promise<boolean> {
     if (!api.current?.fallback?.set || fbBusy) { return false; }
     setFbBusy(true);
@@ -161,7 +161,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     void saveFallbackEntries(fbEntries.filter((_, i) => i !== index), `已从降级池移除：${hit?.provider ?? ""} / ${hit?.model ?? ""}`);
   }
 
-  /** 上移一位（顺序 = 尝试顺序，所以顺序本身是配置的一部分） */
+  
   function moveFallbackEntry(index: number): void {
     if (index <= 0) { return; }
     const next = [...fbEntries];
@@ -189,14 +189,14 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         });
       }).catch(() => {});
     }
-    // A-980-R26：通知配置（文件在 config/notifications.json，主进程读）
+    
     if (api.current?.notify?.get) {
       void api.current.notify.get().then((r: { ok: boolean; config: NotifyConfigDTO }) => {
         if (r?.config) { setNCfg(r.config); }
       }).catch(() => {});
     }
-    // A-1108：全局降级池 + 供应商摘要（下拉数据源，省一次往返）。读失败就当空池显示 ——
-    // 绝不能"读不出来就自己在内存里编一个池"，那正是这次要根除的病。
+    
+    
     if (api.current?.fallback?.get) {
       void api.current.fallback.get().then((r: { ok: boolean; entries?: FallbackPoolEntryDTO[]; providers?: ProviderSummary[] }) => {
         if (Array.isArray(r?.entries)) { setFbEntries(r.entries); }
@@ -205,7 +205,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     }
   }, []);
 
-  /** A-980-R26：改通知配置（局部合并；主进程写盘后回传最新全量） */
+  
   async function patchNotify(patch: Partial<Pick<NotifyConfigDTO, "enabled" | "soundEnabled">>, okText: string): Promise<void> {
     if (!api.current?.notify?.set || nBusy) { return; }
     setNBusy(true);
@@ -220,7 +220,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     }
   }
 
-  /** 上传自定义提示音（主进程弹文件框 → 拷贝进配置目录 → 回传新配置） */
+  
   async function pickSound(): Promise<void> {
     if (!api.current?.notify?.pickSound || soundBusy) { return; }
     setSoundBusy(true);
@@ -229,7 +229,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
       if (r?.canceled) { return; }
       if (r?.config) { setNCfg(r.config); }
       if (r?.ok) {
-        // 换了音频 → 让渲染层丢掉旧的 data URL 缓存，否则试听/通知还是旧声音
+        
         invalidateNotifySoundCache();
         showNotice(true, `已上传提示音：${r.name ?? "自定义音频"}`);
       } else {
@@ -242,7 +242,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     }
   }
 
-  /** 恢复系统默认提示音 */
+  
   async function removeSound(): Promise<void> {
     if (!api.current?.notify?.clearSound || soundBusy) { return; }
     setSoundBusy(true);
@@ -258,13 +258,13 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     }
   }
 
-  /** 试听（只在渲染层播，不弹通知） */
+  
   async function previewSound(): Promise<void> {
     const ok = await playCustomNotifySound();
     if (!ok) { showNotice(false, "试听失败：音频无法播放（格式不被支持或文件已丢失）"); }
   }
 
-  /** 发送测试通知（无视总开关，用来确认系统通知/提示音是否真的生效） */
+  
   async function sendTest(): Promise<void> {
     if (!api.current?.notify?.test || nBusy) { return; }
     setNBusy(true);
@@ -320,7 +320,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         showNotice(false, r.error ?? "启动卸载程序失败");
         setBusy(false);
       }
-      // 成功时应用即将退出，无需复位 busy
+      
     } catch (e) {
       showNotice(false, `启动卸载程序失败：${e instanceof Error ? e.message : String(e)}`);
       setBusy(false);
@@ -328,7 +328,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
   }
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>通用设置</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
@@ -347,7 +347,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         </div>
       )}
 
-      {/* A-916：请求频率调节（并发上限 / 断流重连基间隔） */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>请求频率</div>
         <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
@@ -402,9 +402,9 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         </div>
       </div>
 
-      {/* A-1115：主题选择已迁到「外观」栏（`AppearancePanel.tsx`）——本页不再渲染主题卡片。 */}
+      {}
 
-      {/* A-969：上下文自动压缩阈值设定 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1 }}>
@@ -451,7 +451,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         )}
       </div>
 
-      {/* A-1108：全局降级池（用户自定义；默认空 = 不降级） */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 600 }}>全局降级池</div>
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.6 }}>
@@ -521,7 +521,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         </div>
       </div>
 
-      {/* A-990-D：主页实时监测的消费币种（用户明确要求放在「通用」栏） */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 600 }}>消费币种（主页实时监测）</div>
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.6 }}>
@@ -548,7 +548,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         </label>
       </div>
 
-      {/* 开机自启 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1 }}>
@@ -573,7 +573,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         </div>
       </div>
 
-      {/* A-937：退出行为——直接退出 / 最小化到后台保留 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 600 }}>关闭应用时的行为</div>
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3, marginBottom: 10, lineHeight: 1.5 }}>
@@ -584,7 +584,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
             key={m}
             onClick={() => {
               if (exitMode === m || busy) { return; }
-              // A-967：preload 必须暴露 setExitMode，缺失时兜底报错复位，绝不卡死按钮
+              
               if (!api.current?.window?.setExitMode) {
                 showNotice(false, "当前版本不支持该设置，请升级应用");
                 return;
@@ -611,7 +611,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         ))}
       </div>
 
-      {/* A-980-R26：系统通知 + 可定制提示音 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1 }}>
@@ -632,7 +632,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
           <>
             <div style={{ height: 1, background: "var(--card-border, var(--border))", margin: "14px 0 12px" }} />
 
-            {/* 提示音总开关 */}
+            {}
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 600 }}>通知提示音</div>
@@ -688,7 +688,7 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         )}
       </div>
 
-      {/* 卸载 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1 }}>

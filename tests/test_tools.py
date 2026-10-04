@@ -74,7 +74,7 @@ class _FakeFetcher:
             self.concurrent -= 1
 
 
-# ── SSRF（16）────────────────────────────────────────────
+
 
 class TestSSRF:
     def test_loopback_v4(self):
@@ -111,19 +111,19 @@ class TestSSRF:
         assert _is_private_ip("2606:2800:220:1:248:1893:25c8:1946") is False
 
     def test_unparseable_rejected(self):
-        # 不可解析（127.1 简写 / hex / 十进制长整型）→ 拒绝
+        
         assert _is_private_ip("127.1") is True
         assert _is_private_ip("0x7f000001") is True
         assert _is_private_ip("2130706433") is True
 
     def test_userinfo_bypass(self):
-        # https://google.com@127.0.0.1/ → hostname 剥离 userinfo 后为 127.0.0.1 → 拒绝
+        
         f = WebFetcher(transport=_transport(lambda r: _html_response()))
         with pytest.raises(FetchError):
             f._pin("https://google.com@127.0.0.1/")
 
     def test_dual_stack_any_private_rejected(self):
-        # 双栈域名：v4 公网 + v6 内网 → 任一内网即拒
+        
         infos = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
             (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::1", 0, 0, 0)),
@@ -142,7 +142,7 @@ class TestSSRF:
                 _resolve_and_validate("localhost")
 
     def test_dns_rebinding_no_second_resolution(self):
-        # 首次返回公网、二次返回内网 → 断言实现无二次解析，直接钉扎首个公网 IP
+        
         calls = []
 
         def fake(host, *a, **k):
@@ -154,7 +154,7 @@ class TestSSRF:
         f = WebFetcher(transport=_transport(lambda r: _html_response()))
         with patch("core.fetcher.socket.getaddrinfo", side_effect=fake):
             pinned, host_header, sni = f._pin("https://example.com/path")
-        assert len(calls) == 1  # 无二次 DNS 解析
+        assert len(calls) == 1  
         assert "93.184.216.34" in pinned
         assert host_header == "example.com"
         assert sni == "example.com"
@@ -198,7 +198,7 @@ class TestSSRF:
         assert "[错误] 无效的端口" in result
 
 
-# ── 重定向（5）───────────────────────────────────────────
+
 
 class TestRedirect:
     def test_relative_location(self):
@@ -213,7 +213,7 @@ class TestRedirect:
         f = WebFetcher(transport=_transport(handler))
         with patch("core.fetcher.socket.getaddrinfo", side_effect=_resolve_mock):
             _run(f.fetch_raw("https://example.com/start"))
-        assert seen["final_path"] == "/next"  # urljoin 相对路径规范化
+        assert seen["final_path"] == "/next"  
 
     def test_redirect_to_internal_blocked(self):
         def handler(request):
@@ -245,7 +245,7 @@ class TestRedirect:
                 _run(f.fetch_raw("https://example.com/start"))
 
     def test_redirect_revalidates_each_hop(self):
-        # 第一跳到公网，第二跳到内网 → 逐跳重验拦截
+        
         def handler(request):
             if request.url.path == "/start":
                 return httpx.Response(302, headers={"location": "https://example.com/mid"})
@@ -259,7 +259,7 @@ class TestRedirect:
                 _run(f.fetch_raw("https://example.com/start"))
 
 
-# ── 协议（2）─────────────────────────────────────────────
+
 
 class TestProtocol:
     def test_file_rejected(self):
@@ -273,20 +273,20 @@ class TestProtocol:
             f._pin("ftp://example.com/file")
 
 
-# ── 响应（6）─────────────────────────────────────────────
+
 
 class TestResponse:
     def test_2mb_truncation(self):
         f = WebFetcher(transport=_transport(lambda r: _html_response()))
-        chunks = [b"a" * (1024 * 1024)] * 3  # 3 × 1MB 流式块
+        chunks = [b"a" * (1024 * 1024)] * 3  
         resp = _StreamResp(chunks)
         result = _run(f._read_response(resp))
-        assert len(result) == 2 * 1024 * 1024  # 2MB 累计中断
-        assert resp.aclosed is True  # 显式释放连接
+        assert len(result) == 2 * 1024 * 1024  
+        assert resp.aclosed is True  
 
     def test_chunked_no_content_length(self):
         f = WebFetcher(transport=_transport(lambda r: _html_response()))
-        chunks = [b"b" * (256 * 1024)] * 12  # chunked：无 Content-Length，多块累计
+        chunks = [b"b" * (256 * 1024)] * 12  
         resp = _StreamResp(chunks)
         result = _run(f._read_response(resp))
         assert len(result) == 2 * 1024 * 1024
@@ -319,7 +319,7 @@ class TestResponse:
         assert "非文本内容" in msg
 
     def test_wrong_charset_header_fallback(self):
-        # 头写 utf-8 实际 GBK → 启发式兜底
+        
         body = "<html>测试</html>".encode("gbk")
         f = WebFetcher(transport=_transport(
             lambda r: _html_response(content=body, headers={"content-type": "text/html; charset=utf-8"})))
@@ -329,14 +329,14 @@ class TestResponse:
         assert "测试" in result
 
 
-# ── 提取（7）─────────────────────────────────────────────
+
 
 class TestExtract:
     def test_article_semantic(self):
         html = "<html><title>T</title><body><nav>nav</nav><article><p>正文</p></article><footer>foot</footer></body></html>"
         result = extract_content(html)
         assert "正文" in result
-        assert "nav" not in result  # 噪声标签移除
+        assert "nav" not in result  
 
     def test_body_fallback(self):
         html = "<html><title>T</title><body><p>没有语义标签</p></body></html>"
@@ -372,7 +372,7 @@ class TestExtract:
         assert "a < b" in result
 
 
-# ── 反爬（6）─────────────────────────────────────────────
+
 
 class TestAntiCrawl:
     def _engine(self, fetcher):
@@ -381,7 +381,7 @@ class TestAntiCrawl:
         async def _no_delay():
             return None
 
-        e._delay = _no_delay  # 免真实延迟（真实 async 函数，替代 AsyncMock 免未 await 警告）
+        e._delay = _no_delay  
         return e
 
     def test_captcha_chinese(self):
@@ -401,7 +401,7 @@ class TestAntiCrawl:
         assert "人机验证" in result
 
     def test_normal_result_not_captcha(self):
-        # BUG-034: 正常结果页 + script 文件名含 "challenge" 子串 → 不应误判验证码
+        
         html = (
             '<html><body><ul><li class="b_algo"><h2><a href="https://a.com">标题A</a></h2>'
             '<div class="b_caption"><p>摘要A</p></div></li></ul>'
@@ -416,7 +416,7 @@ class TestAntiCrawl:
         assert "人机验证" not in result
 
     def test_real_captcha_page(self):
-        # BUG-034: 真验证码页（无结果 + 可见文本含关键词）→ 仍返回验证码文案
+        
         html = '<html><body><p>请完成安全验证，输入验证码后继续访问</p></body></html>'
         fetcher = _FakeFetcher()
         fetcher.responses = {"https://cn.bing.com/search?q=x": html}
@@ -460,13 +460,13 @@ class TestAntiCrawl:
         assert fetcher.max_concurrent <= 5
 
 
-# ── 沙箱/集成（2）────────────────────────────────────────
+
 
 class TestSandboxIntegration:
     def test_workspace_url_passthrough(self):
         from core.sandbox import SandboxManager, SandboxConfig
         mgr = SandboxManager(config=SandboxConfig(workspace="D:/workspace"))
-        # url 字段目标应放行（归 SSRF 管，不归路径隔离管）
+        
         assert mgr._validate_workspace("D:/workspace", '{"url": "https://example.com"}') is True
 
     def test_pinning_host_header_and_url(self):
@@ -487,7 +487,7 @@ class TestSandboxIntegration:
         assert captured["sni"] == "example.com"
 
 
-# ── DNS 异常（1）─────────────────────────────────────────
+
 
 class TestDNS:
     def test_getaddrinfo_raises(self):
@@ -586,7 +586,7 @@ class TestFileToolPathAnchoring:
         from tools.builtin import _file_list
         out = asyncio.run(_file_list({"path": "."}))
         assert "[错误]" not in out
-        assert "config" in out  # 项目根目录应包含 config/
+        assert "config" in out  
 
     def test_file_read_relative_anchored(self):
         import asyncio
@@ -610,7 +610,7 @@ class TestReasoningExtraction:
         assert _extract_reasoning({"reasoning_content": "r1"}) == "r1"
         assert _extract_reasoning({"reasoning": "r2"}) == "r2"
         assert _extract_reasoning({"thinking": "r3"}) == "r3"
-        # 优先级：reasoning_content > reasoning > thinking
+        
         assert _extract_reasoning({"reasoning_content": "a", "reasoning": "b", "thinking": "c"}) == "a"
 
     def test_chunk_top_level_fallback(self):
@@ -658,10 +658,10 @@ class TestReasoningParams:
         from core.llm import _build_reasoning_params
         assert _build_reasoning_params(self._make_agent("medium"),
                                        {"api_base": "https://api.agnes-ai.cn/v1"}) == {"chat_template_kwargs": {"enable_thinking": True}}
-        # 非 agnes api_base + 无 reasoning_style → openai 分支回归
+        
         assert _build_reasoning_params(self._make_agent("high"),
                                        {"api_base": "https://api.openai.com/v1"}) == {"reasoning_effort": "high"}
-        # 显式 style=agnes 优先
+        
         assert _build_reasoning_params(self._make_agent("low"),
                                        {"reasoning_style": "agnes"}) == {"chat_template_kwargs": {"enable_thinking": True}}
 
@@ -672,11 +672,11 @@ class TestReasoningParams:
         cfg = {"api_base": "https://api.agnes-ai.cn/v1"}
         assert _thinking_enabled(ag, cfg) is True
         assert _effective_max_output(ag, cfg) == 4096
-        # none → 不联动
+        
         assert _effective_max_output(self._make_agent("none"), cfg) == 2048
-        # 非 agnes → 不联动
+        
         assert _effective_max_output(ag, {"api_base": "https://api.openai.com/v1"}) == 2048
-        # 已是 8192 → 不变
+        
         from core.agent import Agent
         big = Agent(name="b", role="r", reasoning_effort="high", max_output=8192)
         assert _effective_max_output(big, cfg) == 8192

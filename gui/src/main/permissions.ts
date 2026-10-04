@@ -1,40 +1,40 @@
-/**
- * gui/src/main/permissions.ts — 全局权限控制（设置「权限」专栏后端）。
- * - 独立于引擎关键配置：写入 config/gui_permissions.json（备份 + 原子写），绝不触碰
- *   slime.toml / providers.enc.json / agents.json 等权威配置。
- * - globalApproval 作为会话级审批的兜底默认（无 sandbox_override 时使用）。
- * - approvalAllowPaths：自定义审批白名单（目录/仓库命中免审批，custom 档生效）。
- * - 工具权限与 MCP/技能开关：**已全部接入执行点**（不再是只落盘的假开关）——
- *   `toolRead/toolWrite/toolTerminal/screenEnabled/mcpEnabled/skillsEnabled` 六个开关由
- *   `gui/src/main/index.ts` 的 `setToolCategoryGate` 实时读取，每次工具调用都重新判定
- *   （改设置无需重启引擎）；`globalApproval` → 会话级审批兜底默认，且**对所有 Agent 统一下发**
- *   （无 sandbox_override 的 Agent 也按它下发，不再回落沙箱内置默认）；`approvalAllowPaths` → 审批白名单。
- *
- * - **开关的放行语义（唯一实现见 `core-ts/src/tools/grant.ts`）**：开启 = 该类别动作免逐次审批直接执行，
- *   关闭 = 该类别被直接拒绝。硬规则（越权路径 / 敏感文件 / 受保护源码目录 / 终端高危命令 / 内网地址）
- *   唯一实现见 `core-ts/src/tools/hard_rules.ts`，由工具闸门逐调用执行，**不随开关或审批档位降级**。
- *   判据见 `tests/core-ts/network-gate.spec.ts`（前缀闸门 + 行为对照）与 `tests/core-ts/a1057-*.spec.ts`。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
-/** 审批档位：manual 手动 / auto 自动 / none 无需 / custom 自定义（旧值 strict/confirm 兼容为 manual） */
+
 export type ApprovalMode = "manual" | "auto" | "none" | "custom";
 
 export interface GuiPermissions {
-  /** 全局默认审批模式（会话未单独配置时使用）；旧值 strict/confirm 读入时按 manual 兼容 */
+  
   globalApproval: ApprovalMode;
-  /** 自定义审批白名单（设置·权限·预设放行目录/仓库）：命中路径免审批 */
+  
   approvalAllowPaths: string[];
-  /** 工具权限类别（对应 Tool.permissions ∈ {read,write,terminal}；network 开关见 networkEnabled） */
+  
   toolRead: boolean;
   toolWrite: boolean;
-  /** terminal 类：shell / 命令执行 —— 含 ADB shell（需先开启才能操作设备命令行） */
+  
   toolTerminal: boolean;
-  /** 图形控制总开关（screen_* 工具：桌面鼠标键盘注入 + 安卓触摸控制）——高危，默认关闭 */
+  
   screenEnabled: boolean;
-  /** 全局功能开关 */
+  
   mcpEnabled: boolean;
   skillsEnabled: boolean;
 }

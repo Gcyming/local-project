@@ -1,16 +1,16 @@
-/**
- * tests/gui/a1133-drop-and-nav.spec.ts — 拖放分流与导航失败锁存的守卫（A-1133）。
- *
- * 事故（用户定性「重大事故」）：拖入 .docx/.pdf/.xlsx ⇒ 无休止
- * `GUEST_VIEW_MANAGER_CALL: ERR_FAILED (-2) loading 'file:///…docx'` + 文件夹疯狂生成无效文件 + 界面闪烁。
- * 两条判据是本轮修法的核心，都在这一个文件里锁住：
- *   ① `dropGuard.planFileDrop` —— 拖入的文件**怎么分流**（图片 / 文档 / 不支持）；
- *   ② `webviewNav.navAutoLoadAllowed` —— **自动重发**到底允不允许（"无休止"的闸门）。
- *
- * ⚠️ 两者都是**纯函数**，所以这里能真跑判据；变异脚本 `gui/scripts/mut-a1133-docs.mjs` 逐条弄红。
- *
- * ⚠️ 中文串里嵌引用一律「」。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { dropPlanIsEmpty, isFileDrag, planFileDrop } from "../../gui/src/renderer/pages/dropGuard.js";
 import {
@@ -35,9 +35,9 @@ describe("A-1133-A planFileDrop：拖入的文件怎么分流", () => {
   });
 
   it("⚠️ 老版格式（.doc/.xls/.ppt）**必须进文档通道**，不许拒（仓库的 OLE 解析器能真读它们）", () => {
-    /* 2026-09-28 用户当场拍到的事故：拖入 .ppt 弹「暂不支持」。
-       根因是我把 `fileKinds.legacy`（= 格式老）当成了"读不了"。
-       判据必须是 `parser === "none"` 才算读不了 —— 「格式老」与「读不了」是两件事。 */
+    
+
+
     const p = planFileDrop([f("旧.doc"), f("旧.xls"), f("旧.ppt")]);
     expect(p.documents.map((x) => x.index), "老版 Office 是可读文档，必须接住").toEqual([0, 1, 2]);
     expect(p.rejected, "不许把它们拒掉").toHaveLength(0);
@@ -87,7 +87,7 @@ describe("A-1133-B 导航失败锁存：自动重发的闸门（「无休止报�
     for (const trigger of ["attach", "url-change", "net"] as const) {
       expect(navAutoLoadAllowed(book, url, trigger, false), `${trigger} 通路还在重发已判死的地址`).toBe(false);
     }
-    /* 手动重试是唯一逃生口（用户的明确意图）—— 不许也被挡掉，否则错误页上的按钮是死的。 */
+    
     expect(navAutoLoadAllowed(book, url, "manual", true)).toBe(true);
   });
 

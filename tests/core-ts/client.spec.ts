@@ -2,16 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatClient, AnthropicClient, ResponsesClient, GoogleClient, UpstreamError, RETRY_429_BACKOFF, joinApiEndpoint } from "../../core-ts/src/llm/client.js";
 import type { ChatMessage, ChatResponse } from "../../shared/gen/schemas.js";
 
-/**
- * 取首个 choice 的 message。
- *
- * `ChatChoice.message` 在 `shared/gen/schemas.ts` 里是 **optional**（wire 上确实可能没有，
- * 例如只带 finish_reason 的响应），所以 `r.choices[0].message.content` 属于潜在的
- * undefined 解引用 —— 这就是本文件 7 条 TS2532 的共同根因。
- *
- * 用**显式抛错**而非 `?.`：这些用例断言的是具体文本，message 缺失即失败；
- * 写成 `?.` 会把"整个 message 没了"降级成 `expected undefined to be '答案'`，看不出真因。
- */
+
+
+
+
+
+
+
+
+
+
 function firstMessage(r: ChatResponse): ChatMessage {
   const m = r.choices[0]?.message;
   if (!m) { throw new Error("响应缺少 choices[0].message（schema 里该字段可选，但本用例要求它存在）"); }
@@ -43,19 +43,19 @@ describe("ChatClient（OpenAI 兼容，语义移植自 core/llm.py _RETRY_429_BA
       }) as unknown as typeof fetch;
       return new ChatClient({ baseUrl, fetchImpl });
     };
-    // 无 /v1
+    
     await mk("https://gw.example.com").chat({ messages: [] });
-    // 含 /v1
+    
     await mk("https://gw.example.com/v1").chat({ messages: [] });
-    // /v1 尾斜杠
+    
     await mk("https://gw.example.com/v1/").chat({ messages: [] });
-    // 已含完整路径
+    
     await mk("https://gw.example.com/v1/chat/completions").chat({ messages: [] });
-    // 完整路径 + 尾斜杠
+    
     await mk("https://gw.example.com/v1/chat/completions/").chat({ messages: [] });
-    // ⚠️ A-1008 回归：厂商 base 自带**非 /v1** 的版本段。智谱官方 base =
-    //    https://open.bigmodel.cn/api/paas/v4，旧逻辑只硬化 endsWith("/v1") →
-    //    拼出 /api/paas/v4/v1/chat/completions → 上游 404（用户实测群里某成员每轮发言都失败）。
+    
+    
+    
     await mk("https://open.bigmodel.cn/api/paas/v4").chat({ messages: [] });
     await mk("https://open.bigmodel.cn/api/paas/v4/").chat({ messages: [] });
     await mk("https://open.bigmodel.cn/api/paas/v4/chat/completions").chat({ messages: [] });
@@ -158,14 +158,14 @@ describe("ChatClient（OpenAI 兼容，语义移植自 core/llm.py _RETRY_429_BA
     const p = client.chat({ messages: [{ role: "user", content: "hi" }] }).catch((e) => {
       caught = e;
     });
-    await vi.advanceTimersByTimeAsync(15_000); // 抖动退避 1/3/7s 上限 11s
+    await vi.advanceTimersByTimeAsync(15_000); 
     await p;
     vi.useRealTimers();
     expect(caught).toBeInstanceOf(UpstreamError);
     expect((caught as UpstreamError).status).toBe(500);
     expect(calls.length).toBe(4);
 
-    // 502 同属瞬态集合（网关错误），耗尽后 status 透传
+    
     const fetch502 = vi.fn(async () => new Response("bad gateway", { status: 502 })) as unknown as typeof fetch;
     const client502 = new ChatClient({ baseUrl: "http://127.0.0.1:19100", fetchImpl: fetch502 });
     vi.useFakeTimers();
@@ -306,7 +306,7 @@ describe("ChatClient（OpenAI 兼容，语义移植自 core/llm.py _RETRY_429_BA
     const fetchImpl = vi.fn(async () =>
       new Response("should not happen", { status: 200 }),
     ) as unknown as typeof fetch;
-    controller.abort(); // 先拦截
+    controller.abort(); 
     const client = new ChatClient({ baseUrl: "http://127.0.0.1:19100", fetchImpl });
     const out = await client
       .chatStream({ messages: [{ role: "user", content: "hi" }] }, () => {}, controller.signal)
@@ -330,7 +330,7 @@ describe("ChatClient（OpenAI 兼容，语义移植自 core/llm.py _RETRY_429_BA
           init?.signal?.addEventListener("abort", () => c.error(new DOMException("Aborted", "AbortError")));
         },
         pull(c) {
-          // 只吐一次分片，之后保持流打开；外部 abort → 触发 fetch 取消
+          
           if (pulledOnce) {
             return;
           }
@@ -346,7 +346,7 @@ describe("ChatClient（OpenAI 兼容，语义移植自 core/llm.py _RETRY_429_BA
       .chatStream({ messages: [{ role: "user", content: "hi" }] }, (d) => deltas.push(d), controller.signal)
       .then(() => "resolved")
       .catch((e: unknown) => e);
-    // 等首个分片消费后中断
+    
     await new Promise((r) => setImmediate(r));
     expect(hookSignal?.aborted).toBe(false);
     controller.abort();
@@ -677,7 +677,7 @@ describe("AnthropicClient 网络重试对称（A-156：与 ChatClient 同一套�
     const p = client.chat({ messages: [] }).catch((e) => {
       caught = e;
     });
-    await vi.advanceTimersByTimeAsync(15_000); // 抖动退避 1/3/7s 上限 11s
+    await vi.advanceTimersByTimeAsync(15_000); 
     await p;
     vi.useRealTimers();
     expect(caught).toBeInstanceOf(UpstreamError);
@@ -773,8 +773,8 @@ describe("模型级/供应商级错误作用域（A-157：RegionError/Model unav
 
 describe("SSE 空闲看门狗（A-157：连接建立后长时间无数据 → 判定上游僵死抛 timeout）", () => {
   it("headers 到达后流空转超过 IDLE_STREAM_MS → 抛 UpstreamError(timeout)（不无限挂起）", async () => {
-    // 环境变量把看门狗调小（150ms），真实 timer 确定性验证。vi.resetModules 清缓存，
-    // 让动态 import 重新读取 SLIME_STREAM_IDLE_MS（模块级常量首次求值）
+    
+    
     const prevIdle = process.env.SLIME_STREAM_IDLE_MS;
     process.env.SLIME_STREAM_IDLE_MS = "150";
     try {
@@ -790,7 +790,7 @@ describe("SSE 空闲看门狗（A-157：连接建立后长时间无数据 → �
               enqueued = true;
               c.enqueue(enc.encode(`data: ${JSON.stringify({ id: "s1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: { content: "你" } }] })}\n\n`));
             }
-            // 后续 pull 不再 enqueue → 流保持打开但无数据（模拟上游 200 后静默断流）
+            
           },
         });
         return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
@@ -800,10 +800,10 @@ describe("SSE 空闲看门狗（A-157：连接建立后长时间无数据 → �
       const p = client.chatStream({ messages: [{ role: "user", content: "hi" }] }, (d) => deltas.push(d))
         .then(() => "resolved")
         .catch((e: unknown) => e);
-      // 首个 chunk 实时交付
+      
       await new Promise((r) => setTimeout(r, 400));
       expect(deltas).toEqual(["你"]);
-      // 继续空转超过 150ms 看门狗 → 抛 timeout
+      
       const out = await p;
       expect(out).toBeInstanceOf(UpstreamError);
       expect((out as UpstreamError).kind).toBe("timeout");
@@ -827,7 +827,7 @@ describe("缓存命中 token 采集（缓存命中率监测数据源）", () => 
     const resp = await client.chat({ messages: [{ role: "user", content: "hi" }] });
     expect(resp.usage?.cache_read_tokens).toBe(80);
     expect(resp.usage?.cache_creation_tokens).toBe(100);
-    // A-974-R8：OpenAI 兼容系 `prompt_tokens` 是总量（已含 cached）→ 标记 true，窗口占用不再重复加 cache
+    
     expect(resp.usage?.cache_read_in_prompt).toBe(true);
   });
 
@@ -863,8 +863,8 @@ describe("缓存命中 token 采集（缓存命中率监测数据源）", () => 
     expect(r.usage?.cache_read_tokens).toBe(90);
   });
 
-  // A-974-R6：DeepSeek 系网关的缓存命中字段名与 OpenAI 不同（prompt_cache_hit_tokens），
-  // 此前只读 prompt_tokens_details.cached_tokens → 命中率恒 0%（静默失效，必须有回归兜住）。
+  
+  
   it("OpenAI 流式：DeepSeek 的 prompt_cache_hit_tokens → cache_read_tokens", async () => {
     const fetchImpl = vi.fn(async () =>
       sseBody([
@@ -877,7 +877,7 @@ describe("缓存命中 token 采集（缓存命中率监测数据源）", () => 
     const r = await client.chatStream({ messages: [{ role: "user", content: "hi" }] }, () => undefined);
     expect(r.usage?.prompt_tokens).toBe(1000);
     expect(r.usage?.cache_read_tokens).toBe(640);
-    // 未命中部分（prompt_cache_miss_tokens）不单独计入——它本就在 prompt_tokens 里，重复计会虚高
+    
     expect(r.usage?.cache_creation_tokens).toBeUndefined();
   });
 
@@ -908,7 +908,7 @@ describe("缓存命中 token 采集（缓存命中率监测数据源）", () => 
     expect(resp.usage?.completion_tokens).toBe(20);
     expect(resp.usage?.cache_read_tokens).toBe(80);
     expect(resp.usage?.cache_creation_tokens).toBe(100);
-    // A-974-R8：Anthropic `input_tokens` 不含 cache → 标记 false，窗口占用须 prompt+cache_read
+    
     expect(resp.usage?.cache_read_in_prompt).toBe(false);
   });
 
@@ -1072,28 +1072,28 @@ describe("GoogleClient 真流式", () => {
 describe("newApiConfigMap（new-api/one-api 倍率配置解析）", () => {
   it("按 new-api 源码基准换算：1 倍率 = $2/1M tokens", async () => {
     const { newApiConfigMap } = await import("../../gui/src/main/providers.js");
-    // 源码 setting/ratio_setting/model_ratio.go 的 defaultModelRatio 真实值：
-    //   gpt-4o = 1.25（源码注释即标 "$2.5 / 1M tokens"）、deepseek-chat = 0.135（$0.27/1M）
+    
+    
     const m = newApiConfigMap({
       model_ratio: { "gpt-4o": 1.25, "deepseek-chat": 0.135, "bad": 0 },
       completion_ratio: { "gpt-4o": 4 },
     });
     expect(m.get("gpt-4o")?.pricing).toEqual({ prompt: 2.5, completion: 10 });
     expect(m.get("deepseek-chat")?.pricing?.prompt).toBeCloseTo(0.27, 5);
-    expect(m.has("bad")).toBe(false); // 非正数倍率跳过
+    expect(m.has("bad")).toBe(false); 
   });
 
   it("model_price 是「按次计费」单价，不作 token 定价；无 model_ratio → 空表", async () => {
     const { newApiConfigMap } = await import("../../gui/src/main/providers.js");
     expect(newApiConfigMap(null).size).toBe(0);
-    // 只有 model_price（图像/音乐/视频按次计费，如 dall-e-3=0.04/次）→ 不产出 token 定价
+    
     expect(newApiConfigMap({ model_price: { "dall-e-3": 0.04 } }).size).toBe(0);
   });
 
   it("cache_ratio × prompt 派生缓存价（实测 deepseek-chat 案例）", async () => {
     const { newApiConfigMap } = await import("../../gui/src/main/providers.js");
-    // deepseek-chat: ratio=0.135（$0.27/1M prompt），cache_ratio=0.25 → cacheRead = $0.0675/1M
-    // create_cache_ratio=1.0（官方同 prompt 价）→ cacheCreate = $0.27/1M
+    
+    
     const m = newApiConfigMap({
       model_ratio: { "deepseek-chat": 0.135 },
       cache_ratio: { "deepseek-chat": 0.25 },
@@ -1101,13 +1101,13 @@ describe("newApiConfigMap（new-api/one-api 倍率配置解析）", () => {
     });
     expect(m.get("deepseek-chat")?.pricing?.promptCacheRead).toBeCloseTo(0.0675, 5);
     expect(m.get("deepseek-chat")?.pricing?.promptCacheCreate).toBeCloseTo(0.27, 5);
-    // 没有 cache_ratio 的模型 → promptCacheRead undefined（不污染）
+    
     expect(m.get("deepseek-chat")?.pricing?.prompt).toBeCloseTo(0.27, 5);
   });
 
   it("billing_expr 解析为 ParsedBillingExpr（含 boundary + 各 tier 乘数）", async () => {
     const { newApiConfigMap } = await import("../../gui/src/main/providers.js");
-    // 真实 new-api v1.0 公式：gpt-6-astra 分档
+    
     const m = newApiConfigMap({
       model_ratio: { "gpt-6-astra": 5 },
       billing_expr: {
@@ -1177,21 +1177,21 @@ describe("parseBillingExpr（new-api 分档计费公式解析）", () => {
     expect(parseBillingExpr("garbage formula")?.tiers).toEqual([]);
     expect(parseBillingExpr("tier(bad quotes)")?.tiers).toEqual([]);
     expect(parseBillingExpr("tier()")?.tiers).toEqual([]);
-    // len 边界非数字 → 不当条件分支处理，当单 tier 解析失败 → tiers 空、boundary undefined
+    
     const r = parseBillingExpr("len <= abc ? tier(\"a\", p*1) : tier(\"b\", p*2)");
     expect(r?.boundary).toBeUndefined();
     expect(r?.tiers).toEqual([]);
   });
 });
 
-/* ─────────────────────────────────────────────────────────────
- * A-1008：API 端点拼接**唯一实现**的正交用例。
- *
- * 为什么单独立一组：上面那组走 ChatClient.chat()（含 fetch mock，只覆盖 openai 形态）。
- * 端点规则被 Chat / Anthropic / Responses / Gemini(含 streamGenerateContent) / thread_worker
- * **六处**调用 —— 必须在**规则层**穷举，否则「改一处漏四处」会再次发生
- * （智谱 /v4 被拼成 /v4/v1/chat/completions 即此类事故）。
- * ───────────────────────────────────────────────────────────── */
+
+
+
+
+
+
+
+
 describe("joinApiEndpoint（A-1008 端点拼接唯一实现）", () => {
   it("base 无版本段 → 补上 path 的版本段", () => {
     expect(joinApiEndpoint("https://gw.example.com", "/v1/chat/completions"))

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """Soul-Plan 第 7 步：行为生命周期测试（归档→召回→再巩固，docs/soul-plan.md）"""
 from core.agent import Agent
 from core.behavior import BehaviorStore
@@ -11,7 +11,7 @@ class TestBehaviorArchive:
     def test_decay_marks_archive(self):
         bs = BehaviorStore()
         p = bs.reinforce("处理批量文件", ["file_read", "file_write"], source="x")
-        p.confidence = 0.1  # 模拟衰减至低置信度
+        p.confidence = 0.1  
         from datetime import datetime, timedelta, timezone
         p.last_reinforced = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
         weakened, archived = bs.decay(days=30)
@@ -29,7 +29,7 @@ class TestBehaviorArchive:
         rp = bs.reconsolidate("场景A", ["s1"], archived_confidence=0.8)
         assert rp.confidence == max(0.3, 0.8 * 0.5)
         rp2 = bs.reconsolidate("场景B", ["s2"], archived_confidence=0.2)
-        assert rp2.confidence == 0.3  # 下限 0.3
+        assert rp2.confidence == 0.3  
 
     def test_archive_recall_with_overlap(self):
         agent = Agent(name="T", role="t")

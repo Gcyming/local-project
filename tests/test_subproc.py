@@ -27,14 +27,14 @@ import pytest
 
 from core.subproc import decode_console, run_text
 
-# 用户截图里那条崩溃的精确字节：`0xbb in position 2`（GBK 的常见首字节）
+
 CRASH_BYTES = b"\x01\x02\xbb\x03"
-# GBK 编码的「中文」——**不是**合法 UTF-8（`\xd6` 之后 `\xd0` 不是续接字节，utf-8 直接拒绝）
+
 GBK_ZHONGWEN = b"\xd6\xd0\xce\xc4"
-# UTF-8 编码的「中文」——cp936 **也拒绝**它（实测），所以两种顺序都能解对 ⇒ 不是顺序的判据
+
 UTF8_ZHONGWEN = "中文".encode("utf-8")
-# ⚠️ 「一」的 GBK 字节 `d2 bb` **同时也是合法 UTF-8**（解成 `U+04BB һ`）
-#    实测：21791 个 GBK 双字节码位里有 1920 个（8.8%）是这种"两边都合法"的 ⇒ 它才是顺序的判据
+
+
 GBK_YI = "一".encode("gbk")
 
 IS_WINDOWS = sys.platform == "win32"
@@ -45,7 +45,7 @@ class TestDecodeConsoleNeverRaises:
 
     def test_真实崩溃字节不再抛(self):
         """截图里那条 `0xbb` —— 旧写法在这一步抛 UnicodeDecodeError，线程死。"""
-        out = decode_console(CRASH_BYTES)          # 旧写法：CRASH_BYTES.decode("utf-8") 抛
+        out = decode_console(CRASH_BYTES)          
         assert isinstance(out, str)
 
     def test_属性穷举_任意单字节都不抛(self):
@@ -151,7 +151,7 @@ class TestRunTextContract:
             return_value=subprocess.CompletedProcess(["x"], 0, GBK_ZHONGWEN, b""),
         ):
             r = run_text(["x"])
-        assert r.stdout != ""            # ← 旧写法：空
+        assert r.stdout != ""            
         assert isinstance(r.stdout, str)
 
     def test_timeout_语义与_subprocess_一致(self):
@@ -201,7 +201,7 @@ class TestRealChild:
     def test_真实子进程吐_gbk_字节时不崩_且有输出(self):
         code = "import sys;sys.stdout.buffer.write(b'\\xd6\\xd0\\xce\\xc4')"
         r = run_text([sys.executable, "-c", code], timeout=20)
-        assert r.stdout != ""            # 旧写法（text=True）这里拿不到任何东西
+        assert r.stdout != ""            
         assert isinstance(r.stdout, str)
         if IS_WINDOWS:
             assert r.stdout == "中文"

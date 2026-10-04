@@ -24,7 +24,7 @@ describe("OutputFilter（身份铁律过滤，语义移植自 core/filter.py）"
     const r = filter.filter("作为一个人工智能语言模型，我可以帮助您");
     expect(r.filtered).toContain("作为 slime 平台");
     expect(r.filtered).not.toContain("作为一个");
-    expect(r.filtered).toContain("人工智能语言模型"); // Python 原语义：残词保留
+    expect(r.filtered).toContain("人工智能语言模型"); 
   });
 
   it("替换英文 AI 身份表述", () => {
@@ -46,7 +46,7 @@ describe("OutputFilter（身份铁律过滤，语义移植自 core/filter.py）"
   it("拦截模型技术细节（要求'细节词'后 20 字符内跟'模型'，对齐 Python）", () => {
     const hit = filter.filter("我的训练数据来自公开语料构建的模型");
     expect(hit.filtered).not.toContain("训练数据");
-    const miss = filter.filter("我的训练数据来自公开语料，上下文窗口为 128K"); // 无"模型"后缀 → 不命中（Python 同）
+    const miss = filter.filter("我的训练数据来自公开语料，上下文窗口为 128K"); 
     expect(miss.filtered).toBe("我的训练数据来自公开语料，上下文窗口为 128K");
   });
 

@@ -50,7 +50,7 @@ _MODELS = {
     "ModelUnloadResponse": ModelUnloadResponse,
 }
 
-# invalid fixtures 与模型名映射（_bad/_missing 后缀剔除）
+
 _INVALID_MODELS = {
     "ChatRequest_missing_messages": ChatRequest,
     "ChatMessage_bad_role": ChatMessage,

@@ -1,9 +1,9 @@
-/**
- * tests/core-ts/memory-tools.spec.ts — 记忆三件套（#3）回归：
- *  1. MemoryStore 溯源字段（source/confidence/created_at）+ search + forget；
- *  2. memory_insert / memory_search / memory_forget 工具链路（provider 注入 + _agent_id 定位）。
- * 隔离：dataDir 指向临时目录，不触碰生产 Knowledge/。
- */
+
+
+
+
+
+
 import { describe, expect, it, beforeEach, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,7 +31,7 @@ describe("MemoryStore 溯源 + search + forget", () => {
     expect(f.confidence).toBe(0.9);
     expect(typeof f.created_at).toBe("string");
     expect(Date.parse(f.created_at ?? "")).not.toBeNaN();
-    // layer 由 source 派生：preference → semantic
+    
     expect(f.layer).toBe("semantic");
   });
 
@@ -51,10 +51,10 @@ describe("MemoryStore 溯源 + search + forget", () => {
     m.addFact("用户喜欢 Python 语言");
     m.addPreference("editor", "vscode");
     m.addFact("用户喜欢 Rust 语言");
-    // 相关词命中 → Python 排最前
+    
     const all = m.search("python 语言", { limit: 3 });
     expect(all.split("\n")[0]).toContain("Python");
-    // 分类过滤：只回 preference
+    
     const prefs = m.search("", { category: "preference" });
     expect(prefs).toContain("editor");
     expect(prefs).not.toContain("Python");
@@ -68,11 +68,11 @@ describe("MemoryStore 溯源 + search + forget", () => {
     m.storeCategorized("fact", "无关条目", ["y"]);
     expect(m.getFacts().length).toBe(3);
 
-    // 按 topic 删除含 "相关" 的条目（两条命中，第三条"无关条目"不命中）
+    
     const n = m.forget({ topic: "相关" });
     expect(n).toBe(2);
     expect(m.getFacts().length).toBe(1);
-    // 剩余条目不应残留指向已删 id 的 links/backlinks
+    
     for (const f of m.getFacts()) {
       expect(f.links?.length ?? 0).toBe(0);
       expect(f.backlinks?.length ?? 0).toBe(0);
@@ -86,7 +86,7 @@ describe("MemoryStore 溯源 + search + forget", () => {
     const n = m.forget({ before: beforeAll });
     expect(n).toBe(1);
     expect(m.getFacts().length).toBe(0);
-    expect(m.forget({ before: beforeAll })).toBe(0); // 已空，无匹配
+    expect(m.forget({ before: beforeAll })).toBe(0); 
   });
 });
 
@@ -123,7 +123,7 @@ describe("memory_insert / search / forget 工具链路", () => {
     const ins = await insert.executeFn({ _agent_id: "tool_agent", content: "用户偏好深色主题", category: "preference", tags: ["ui"], source: "preference", confidence: 0.8 });
     expect(ins).toContain("已记忆");
 
-    // 真实落到了注入的 store
+    
     expect(store.getFacts().length).toBe(1);
     expect(store.getFacts()[0].source).toBe("preference");
 

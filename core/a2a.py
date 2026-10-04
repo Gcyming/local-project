@@ -13,11 +13,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-# 历史消息上限（防御性限制，防止极端场景内存泄漏）
+
 MAX_HISTORY = 500
-# 消息 TTL（秒），超过此时间的消息自动回收（N10-L1）
-HISTORY_TTL = 86400  # 24h
-# 单条消息内容上限（A-112: 防超长内容占满队列/内存；LLM 输出受 MAX_OUTPUT 间接约束，此处兜底）
+
+HISTORY_TTL = 86400  
+
 MAX_CONTENT = 100_000
 
 
@@ -35,13 +35,13 @@ def _truncate_content(content: str, from_agent: str) -> str:
 class A2AMessage:
     """A2A 消息"""
     id: str
-    from_agent: str       # 发送者 Agent 名称
-    to_agent: str         # 接收者（"broadcast" = 广播给所有人）
-    content: str          # 消息内容
-    msg_type: str = "info"  # info / request / response / alert / done
+    from_agent: str       
+    to_agent: str         
+    content: str          
+    msg_type: str = "info"  
     timestamp: float = field(default_factory=time.time)
-    request_id: str = ""    # 关联的请求 ID（response 用）
-    in_reply_to: str = ""   # 回复哪条消息
+    request_id: str = ""    
+    in_reply_to: str = ""   
 
 
 class A2ABus:
@@ -51,9 +51,9 @@ class A2ABus:
     """
 
     def __init__(self):
-        self._queues: dict[str, asyncio.Queue] = {}  # agent_name -> queue
-        self._history: list[A2AMessage] = []         # 所有消息历史
-        self._warnings: list[str] = []               # 未投递警告
+        self._queues: dict[str, asyncio.Queue] = {}  
+        self._history: list[A2AMessage] = []         
+        self._warnings: list[str] = []               
 
     def register(self, agent_name: str):
         """注册一个 Agent 到总线"""
@@ -81,20 +81,20 @@ class A2ABus:
             in_reply_to=in_reply_to,
         )
         self._history.append(msg)
-        # 防御性截断 + TTL 清理（N10-L1）
+        
         self._prune_history()
         delivered = False
 
         if to_agent == "broadcast":
-            # 广播给所有已注册的 Agent（除发送者）
+            
             for name, q in self._queues.items():
                 if name != from_agent:
                     await q.put(msg)
-            delivered = len(self._queues) > 1  # 有除自己外的 Agent
+            delivered = len(self._queues) > 1  
             if not delivered:
                 self._warnings.append(f"[broadcast] {from_agent} → 无其他 Agent 在线")
         else:
-            # 点对点
+            
             q = self._queues.get(to_agent)
             if q:
                 await q.put(msg)
@@ -136,7 +136,7 @@ class A2ABus:
             return [m for m in self._history
                     if m.from_agent == agent_name
                     or m.to_agent == agent_name
-                    or m.to_agent == "broadcast"]  # 广播也属于该 Agent 的可见范围
+                    or m.to_agent == "broadcast"]  
         return list(self._history)
 
     def get_shared_context(self, agent_name: str = "") -> str:
@@ -148,11 +148,11 @@ class A2ABus:
         if not self._history:
             return ""
 
-        # 筛选不属于当前 Agent 自己的消息（避免重复）
+        
         relevant = []
         for msg in self._history[-30:]:
             if agent_name and msg.from_agent == agent_name:
-                continue  # 不发自己的消息
+                continue  
             if msg.msg_type == "done":
                 relevant.append(f"- [{msg.from_agent}] ✓ 已完成: {msg.content}")
             elif msg.msg_type == "alert":
@@ -168,7 +168,7 @@ class A2ABus:
             return ""
 
         lines = ["## 其他 Agent 的进展："]
-        lines.extend(relevant[-20:])  # 最近 20 条
+        lines.extend(relevant[-20:])  
         return "\n".join(lines)
 
     def get_warnings(self) -> list[str]:
@@ -189,11 +189,11 @@ class A2ABus:
         self._warnings.clear()
 
 
-# ── 常驻 A2A 总线（服务级生命周期）────────────────────────────
 
-# 委托标记协议：Agent 回复中的 <DELEGATE> 会被解析并路由到子 Agent
-# 格式：<DELEGATE name="子Agent名">子任务描述</DELEGATE>
-# 子 Agent 完成后，结果通过 <DELEGATE_RESULT name="子Agent名">结果</DELEGATE_RESULT> 回传
+
+
+
+
 
 _DELEGATE_RE = _re.compile(
     r'<DELEGATE\s+name="([^"]+)"\s*>(.*?)</DELEGATE>',
@@ -214,11 +214,11 @@ def parse_delegations(reply: str) -> list[dict]:
     open_tag = "<DELEGATE"
     close_tag = "</DELEGATE>"
     while True:
-        # 找开标签 <DELEGATE name="...">
+        
         idx = reply.find(open_tag, pos)
         if idx == -1:
             break
-        # 提取 name 属性
+        
         tag_end = reply.find(">", idx)
         if tag_end == -1:
             break
@@ -231,14 +231,14 @@ def parse_delegations(reply: str) -> list[dict]:
         if not name:
             pos = tag_end + 1
             continue
-        # 从 > 之后开始计数嵌套深度，找平衡闭合标签
+        
         depth = 1
         scan = tag_end + 1
         while depth > 0 and scan < len(reply):
             next_open = reply.find(open_tag, scan)
             next_close = reply.find(close_tag, scan)
             if next_close == -1:
-                break  # 无闭合标签，放弃
+                break  
             if next_open != -1 and next_open < next_close:
                 depth += 1
                 scan = next_open + len(open_tag)
@@ -269,7 +269,7 @@ def build_delegation_prompt(children: list[dict], all_agents: list[str] | None =
         "",
     ]
 
-    # 点对点委托
+    
     if children:
         lines.append("### 点对点委托")
         lines.append("将子任务委托给特定子 Agent：")
@@ -278,7 +278,7 @@ def build_delegation_prompt(children: list[dict], all_agents: list[str] | None =
             lines.append(f"- **{c['name']}**（{c.get('role', '')}）→ `<DELEGATE name=\"{c['name']}\">具体子任务</DELEGATE>`")
         lines.append("")
 
-    # 广播
+    
     if all_agents:
         other_agents = [n for n in all_agents if n not in {c.get('name', '') for c in children}]
         all_names = [c['name'] for c in children] + other_agents
@@ -297,7 +297,7 @@ def build_delegation_prompt(children: list[dict], all_agents: list[str] | None =
     lines.append("5. 委托/广播结果会自动回填，你可以基于结果继续回复用户")
     return "\n".join(lines)
 
-# 广播标记正则
+
 _BROADCAST_RE = _re.compile(
     r'<BROADCAST\s*>(.*?)</BROADCAST>',
     _re.DOTALL,
@@ -314,7 +314,7 @@ def strip_delegation_tags(text: str) -> str:
     """移除委托和广播标记，返回干净的显示文本。
     N10-S1: 平衡标签移除——逐对匹配开闭标签，不依赖非贪婪正则。
     """
-    # 移除 <DELEGATE>...</DELEGATE>（平衡解析）
+    
     while True:
         idx = text.find("<DELEGATE")
         if idx == -1:
@@ -322,7 +322,7 @@ def strip_delegation_tags(text: str) -> str:
         tag_end = text.find(">", idx)
         if tag_end == -1:
             break
-        # 找平衡闭合标签
+        
         depth = 1
         scan = tag_end + 1
         found = False
@@ -343,11 +343,11 @@ def strip_delegation_tags(text: str) -> str:
                 scan = nc + len("</DELEGATE>")
         if not found:
             break
-    # 移除 <DELEGATE_RESULT>...</DELEGATE_RESULT>
+    
     text = _DELEGATE_RESULT_RE.sub("", text)
-    # 移除 <BROADCAST>...</BROADCAST>
+    
     text = _BROADCAST_RE.sub("", text)
-    # 清理残留的孤立闭合标签（如绕过攻击遗留的 </DELEGATE>）
+    
     text = text.replace("</DELEGATE>", "").replace("</DELEGATE_RESULT>", "")
     return text.strip()
 
@@ -367,7 +367,7 @@ class ServerA2ABus:
     """
 
     _instance: "ServerA2ABus | None" = None
-    _instance_lock = threading.Lock()  # N10-M4: 竞态保护
+    _instance_lock = threading.Lock()  
 
     def __init__(self):
         import asyncio

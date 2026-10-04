@@ -1,12 +1,12 @@
-/**
- * session-member-effort.spec.ts — 群聊成员推理强度（A-1011）派生/纯函数回归。
- * 只测 core-ts/src/services/sessions.ts 的两个纯函数，不碰 fs、不写 config/（目录已加固，任何写入都会 PermissionError）。
- * 锁死语义：
- *  - memberEffortsOf：仅收录 { id, effort } 形态；纯 string / 仅 model 无 effort 不产生键；空/undefined 输入返回 {}。
- *  - applyMemberEffort：写入升级 string→对象、对象补 effort；清除后无 model 还原纯 string、有 model 保留对象；
- *    effort=null 与 effort="" 等价；id 未命中返回 null 且不修改原数组；未命中/变化时返回新数组（引用语义由 null 表达"未命中"）。
- *  - memberIdsOf / memberModelsOf 对带 effort 的新成员形态不得退化（回归保护）。
- */
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   type MemberEntry,
@@ -56,7 +56,7 @@ describe("applyMemberEffort（写入）", () => {
     const arr: MemberEntry[] = ["a", kept];
     const out = applyMemberEffort(arr, "a", "low");
     expect(out).not.toBeNull();
-    expect(out![1]).toBe(kept); // 同引用
+    expect(out![1]).toBe(kept); 
   });
 
   it("返回的是新数组（不修改入参）", () => {

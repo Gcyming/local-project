@@ -1,6 +1,6 @@
-/**
- * observability-memory.spec.ts — D 可观测 trace 骨架 + C 记忆三层/实体图谱 骨架回归 + 存储层集成。
- */
+
+
+
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +20,7 @@ describe("trace（D：全链路可观测骨架）", () => {
     const t5 = attachEval(emitEvent(t4, "done", "turn:done"), "completion", true);
     const s = summarize(t5);
     expect(s.total).toBe(4);
-    expect(s.ended).toBe(3); // tool + (attach)eval + done 均闭合；route span 尚未 endSpan
+    expect(s.ended).toBe(3); 
     expect(s.durationMs).toBeGreaterThanOrEqual(0);
     expect(s.failed).toBe(false);
   });
@@ -80,7 +80,7 @@ describe("实体图谱（C：graph CRUD）", () => {
     );
     expect(byType(g, "task").map((e) => e.id)).toEqual(["t1"]);
     const rels = neighbors(g, "u1").map((n) => n.relation).sort();
-    expect(rels).toEqual(["属于", "提出"]); // 双向边两个方向都在
+    expect(rels).toEqual(["属于", "提出"]); 
   });
 
   it("同向边权重叠加；删除实体连带清边", () => {
@@ -141,7 +141,7 @@ describe("三层记忆 → MemoryStore 集成（C：图层持久化 + consolidat
     expect(pruned).toBe(0);
     expect(s.getByLayer("working")).toHaveLength(0);
     expect(s.getByLayer("episodic").map((f) => f.category)).toEqual(["plan"]);
-    expect(s.getByLayer("semantic")).toHaveLength(1); // preference 仍在
+    expect(s.getByLayer("semantic")).toHaveLength(1); 
   });
 
   it("consolidateLayers：episodic 过期且无访问 → prune；过高访问 → 沉淀 semantic", () => {
@@ -150,7 +150,7 @@ describe("三层记忆 → MemoryStore 集成（C：图层持久化 + consolidat
     const dir = join(root, "mem", agentId);
     mkdirSync(dir, { recursive: true });
     const now = Date.now();
-    // 注入 40 天前的两条 episodic（一条冷、一条被多次访问）
+    
     const oldStr = (oldTs: number) => new Date(oldTs).toISOString();
     writeFileSync(join(dir, "memory.json"), JSON.stringify({
       facts: [
@@ -162,8 +162,8 @@ describe("三层记忆 → MemoryStore 集成（C：图层持久化 + consolidat
     }), "utf8");
     const s = new MemoryStore(agentId, { projectRoot: root, dataDir: "mem" });
     const { moved, pruned } = s.consolidateLayers(now);
-    expect(pruned).toBe(1); // 冷事件剔除
-    expect(moved).toBe(1);  // 热事件沉淀 semantic
+    expect(pruned).toBe(1); 
+    expect(moved).toBe(1);  
     expect(s.getByLayer("semantic").map((f) => f.id).sort()).toEqual(["h1", "p1"]);
     expect(s.getByLayer("episodic")).toHaveLength(0);
   });
@@ -179,7 +179,7 @@ describe("三层记忆 → MemoryStore 集成（C：图层持久化 + consolidat
     const g = s.getGraph();
     expect(g.entities).toHaveLength(2);
     expect(neighbors(g, "user:alice")[0]?.entity.id).toBe("task:42");
-    // 重建 store（新实例）→ 懒加载图谱还原
+    
     const s2 = new MemoryStore("t-ag", { projectRoot: lastRoot, dataDir: "mem" });
     expect(s2.getGraph().edges).toHaveLength(2);
   });
@@ -244,7 +244,7 @@ describe("多路召回集成（C：retrieveFromStore 图谱通道 + 分层过滤
     for (const it of res.items) {
       expect(typeof it.layer).toBe("string");
     }
-    // 分层过滤：限定 semantic（fact → semantic）仍能召回
+    
     const sem = await retrieveFromStore(s, { query: "重构鉴权", topK: 8, layers: ["semantic"] });
     expect(sem.items.filter((i) => i.layer !== "semantic")).toHaveLength(0);
   });

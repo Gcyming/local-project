@@ -51,7 +51,7 @@ class TestSafeIO(unittest.TestCase):
             p.write_text(json.dumps({"v": "good"}), encoding="utf-8")
             (Path(td) / "state.json.bak").write_text(
                 json.dumps({"v": "good"}), encoding="utf-8")
-            # 模拟崩溃截断：半截 JSON
+            
             p.write_text('{"v": "goo', encoding="utf-8")
             self.assertEqual(read_json_safe(p, default=None), {"v": "good"})
 
@@ -60,7 +60,7 @@ class TestSafeIO(unittest.TestCase):
         from core.safe_io import read_text_safe
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "state.json"
-            p.write_bytes(b"\xff\xfe\x00bad bytes")  # 非 UTF-8
+            p.write_bytes(b"\xff\xfe\x00bad bytes")  
             read_text_safe(p)
             self.assertTrue((Path(td) / "state.json.corrupt").exists(),
                             "坏文件应改名 .corrupt 留证，而不是被悄悄覆盖")
@@ -124,11 +124,11 @@ class TestCrashRecoveryIntegration(unittest.TestCase):
                          "model_choice": "api:x", "max_context": 4096,
                          "max_output": 2048, "enabled_tools": [],
                          "temperature": 0.7, "personality": ""}]
-                # 写两次：第一次建文件，第二次才产出 .bak（.bak 是"覆盖前留旧"，
-                # 首次写入没有旧内容可留）——真实崩溃必然发生在覆盖写时。
+                
+                
                 atomic_write_text(real, json.dumps(good, ensure_ascii=False))
                 atomic_write_text(real, json.dumps(good, ensure_ascii=False))
-                real.write_text('[{"id": "a1", "na', encoding="utf-8")  # 崩溃截断
+                real.write_text('[{"id": "a1", "na', encoding="utf-8")  
                 agents = A.load_agents()
                 self.assertTrue(len(agents) >= 1, "应从 .bak 恢复出 Agent")
                 self.assertEqual(agents[0].name, "小明")
@@ -164,8 +164,8 @@ class TestEncryptionCrashRecovery(unittest.TestCase):
             encrypt({"openai": {"api_key": "sk-should-survive-crash"}}, str(p))
             good = p.read_text(encoding="utf-8")
 
-            # 模拟崩溃现场：主文件是**未加固**的半截内容（真实崩溃时写还没走到
-            # _harden_file 那一步），同目录里有上一版的 .bak。
+            
+            
             sim = Path(td) / "sim"
             sim.mkdir()
             crashed = sim / "providers.enc.json"
@@ -182,8 +182,8 @@ class TestEncryptionCrashRecovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "providers.enc.json"
             encrypt({"v": 1}, str(p))
-            encrypt({"v": 2}, str(p))   # 此时 .bak 应是 v1
-            encrypt({"v": 3}, str(p))   # 此时 .bak 应是 v2
+            encrypt({"v": 2}, str(p))   
+            encrypt({"v": 3}, str(p))   
             bak = Path(td) / "providers.enc.json.bak"
             self.assertTrue(bak.exists(), "应保留 .bak")
             from core.encryption import decrypt

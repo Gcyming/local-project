@@ -34,50 +34,50 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# A-047: 相对路径/裸文件名统一锚定项目根核验（与 tools/builtin.py A-036 一致），
-# 避免多进程/服务模式下 Worker 写文件根目录与核验方 cwd 不一致导致真实文件误报缺失
+
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 完成态声称动词：出现任一即触发全回复路径核验
+
 _CLAIM_VERBS = ("已保存", "保存到", "已生成", "已创建", "已写入", "已下载", "已导出")
 
-# A-048-R6（用户实测漏检）：模型用"文件大小 1,034,594 字节 + 完整路径"表格形式声称
-# 完成态（规避"已保存/已生成"动词）→ 出现这些证据性描述同样触发路径核验
+
+
 _EVIDENCE_PHRASES = ("文件大小", "完整路径", "时长")
 
-# 兼容既有导入点（slime_server.py 等按此名导入）：保留原常量名与内容。
-# ⚠️ 触发判定**不再**直接用这个元组 —— 见 _SIZE_CLAIM_HIT_RE。
+
+
 _EVIDENCE_HINTS = ("字节", "kb", "mb", "文件大小", "完整路径", "时长")
 
-# A-987（精度修复）：把 `字节/kb/mb` 当**裸子串**匹配会误触发 —— 英文 "number"/"remember"
-# 里就含 "mb"、`kb` 也能出现在无关标识符里。一段跟文件毫无关系的英文说明会让整段文本
-# 进入路径核验，把误报面凭空放大。证据性描述的正确形态是"**数字 + 单位**"，用词边界锚定。
+
+
+
 _SIZE_CLAIM_HIT_RE = re.compile(r"\d[\d,]*\s*(?:字节|bytes?|kb|mb)\b", re.IGNORECASE)
 
-# URL 段（http/https 起始）：不是本地路径，核验前剔除（防盘符分支误抓/误报）
+
 _URL_RE = re.compile(r'https?://[^\s"\'<>，。、]+', re.IGNORECASE)
 
-# A-050-R（用户实测护栏误报）：模型把 URL 中的域名/品牌词改写为"slime 平台"后，
-# URL 含空格被 _URL_RE 截断，残余片段（如"平台-ai.cn/videos/…"）被 _PATH_RE 当相对路径
-# 核验 → 误报"文件不存在"。域名样式片段（<name>.<tld>/…）判定为 URL 残片，跳过核验。
+
+
+
 _DOMAIN_FRAGMENT_RE = re.compile(
     r'^[a-z0-9\u4e00-\u9fff-]+\.(?:cn|com|net|org|io|space|ai|top|xyz|cc|me)(?:[/\\]|$)',
     re.IGNORECASE,
 )
 
-# 围栏代码块（``` 或 ~~~）。见 _IGNORE_FENCED_BLOCKS 注释。
+
 _FENCED_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
 
-# 是否跳过围栏代码块内的路径核验（默认 True）。
-# 依据①：厂商共识里的"验证"针对的是**对工作结果的声称**；围栏块里绝大多数是**示例代码**
-#        （`C:\Users\demo\output.png` 这类模板路径），核验它们纯属制造假阳性。
-# 依据②：行内反引号（`` `D:\…` ``）**不在此列** —— A-048-R6 记录的真实事故恰恰是
-#        模型在表格里用行内反引号声称产出，那种情形必须继续拦。
-# 需要恢复旧行为时把这一个开关置 False 即可（唯一改动点）。
+
+
+
+
+
+
 _IGNORE_FENCED_BLOCKS = True
 
-# 已知扩展名：既是"这是个文件"的判据，也是**天然的终止符**。
-# 有了它才能做到"既允许路径含空格、又不把后面整句中文吞进来"（见 _PATH_RE ①）。
+
+
 _KNOWN_EXT = (
     "png|jpe?g|webp|gif|bmp|ico|svg|"
     "mp4|mov|mkv|avi|webm|mp3|wav|m4a|"
@@ -87,19 +87,19 @@ _KNOWN_EXT = (
     "log|zip|tar|gz|7z|rar|npz|npy|pkl|db|sqlite|woff2?|ttf|otf|lock"
 )
 
-# 路径提取正则（单一捕获组，调用方按 group(1) / m[1] 取值）
-# - ① Windows 盘符绝对路径，**允许空格**，惰性收尾到第一个已知扩展名
-# - ② Windows 盘符绝对路径，不含空格（兼容无扩展名的目录/自定义文件名）
-# - ③ 常见扩展名的裸文件名 / 相对路径，允许空格，同样惰性收尾
-# 前置字符含反引号（markdown 代码包裹的路径，A-048-R6：模型常用 `D:\...` 形式）
-#
-# A-987 根因（用户实测假指控）：旧版 ① 写成 `[^\s"\'`<>\uFF08\uFF09)\u3002，。]+`，
-# **把空格排除在外** —— 而项目自己就在 `D:\pilot project\`，于是
-# `D:\pilot project\data\real_claim_probe.png` 被截断成 `D:\pilot`（以及相对分支再吐出
-# 一个碎片 `project\data\real_claim_probe.png`），**每一个真实文件都被报成"幻觉"**，
-# 而 Merger 把这条当硬信号直接写进 errors。
-# 现在改为"惰性收尾到第一个已知扩展名"：扩展名是天然的终止符，既容得下空格，
-# 又不会跨句吞并（`a.png 和 b.png` 必须切成两条，而不是拼成一条不存在的路径）。
+
+
+
+
+
+
+
+
+
+
+
+
+
 _PATH_RE = re.compile(
     r'(?<=[\s"\'`：：（(])'
     r'('
@@ -110,11 +110,11 @@ _PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 候选路径尾部要剥掉的分隔/句读：Windows 文件名本就不允许以 `.` 或空格结尾，
-# 也不允许含 `:` `/` `\` `?` `*` `"` `<` `>` `|`，所以剥离它们是**无损**的。
+
+
 _TRAILING_JUNK = " \t.,;:!?、，；：。！？)]}）】"
 
-# 绝对路径开头（①/② 两条分支的产物）：用于把"散文碎片"过滤限定在相对分支上
+
 _ABS_HEAD_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -141,10 +141,10 @@ class ClaimIssue:
     """一条"未通过核验"的声称。`detail` 供人/模型直接阅读，其余字段供调用方按级别处置。"""
 
     path: str
-    kind: str  # "missing"（声称存在的文件不存在）| "size_mismatch"（数值不实）
-    severity: str  # "high"（可直接作为硬信号）| "medium"（仅建议提示）
+    kind: str  
+    severity: str  
     detail: str
-    # 同目录下最接近的真实文件名（"是不是想写 X？"）—— 把指控变成可自我纠正的反馈
+    
     suggestion: str | None = None
 
 
@@ -181,14 +181,14 @@ def audit_claims(reply: str) -> ClaimAudit:
         if n_fenced:
             audit.skipped["fenced_block"] = n_fenced
 
-    # A-048-R6: 触发条件 = 声称动词 OR 证据性描述（数字+字节/KB/MB、文件大小/完整路径/时长）
-    # ——模型会规避"已保存"类动词，改用"文件大小 1,034,594 字节 + 完整路径"表格声称
+    
+    
     has_claim_verb = any(v in text for v in _CLAIM_VERBS)
     has_evidence = any(h in text for h in _EVIDENCE_PHRASES) or bool(_SIZE_CLAIM_HIT_RE.search(text))
     if not has_claim_verb and not has_evidence:
         return audit
 
-    # 剔除 URL 段（https://… 不是本地路径；盘符分支会把 "s://…" 误当路径）
+    
     cleaned, n_url = _URL_RE.subn(" ", text)
     if n_url:
         audit.skipped["url"] = n_url
@@ -198,13 +198,13 @@ def audit_claims(reply: str) -> ClaimAudit:
         p = m.group(1).strip(_TRAILING_JUNK)
         if not p:
             continue
-        # A-050-R: 域名样式片段（模型改写 URL 的残片，如"平台-ai.cn/videos/…"）
-        # 不是本地路径，跳过核验（此前被当相对路径 → 误报"文件不存在"）
+        
+        
         if _DOMAIN_FRAGMENT_RE.match(p):
             audit.skipped["domain_fragment"] = audit.skipped.get("domain_fragment", 0) + 1
             continue
-        # A-987（精度）：相对分支吞进来的散文/URL 残片（如 "3. See docs/x.md"）——
-        # 报出去只会是一条看不懂的垃圾路径。绝对路径不受此判定（见函数注释）。
+        
+        
         if not _ABS_HEAD_RE.match(p) and _looks_like_prose_fragment(p):
             audit.skipped["prose_fragment"] = audit.skipped.get("prose_fragment", 0) + 1
             continue
@@ -216,23 +216,23 @@ def audit_claims(reply: str) -> ClaimAudit:
         try:
             raw = raw.resolve()
         except OSError:
-            continue  # 无法解析（如非法路径）不核验
-        # A-047-SEC（security-review MEDIUM-2）：相对路径含 .. 时 resolve 后可能逃出
-        # 项目根——相对路径探测范围限制在项目内；绝对路径为用户明示位置，保留核验
+            continue  
+        
+        
         if not is_abs and not raw.is_relative_to(_PROJECT_ROOT):
             audit.skipped["escape"] = audit.skipped.get("escape", 0) + 1
             continue
 
         found = _resolve_existing(raw)
         if found is None:
-            # A-987（精度优先）：候选可能只是**被截断的解析碎片**（真实路径含空格被切开）。
-            # 只要它仍是某个真实条目的前缀，就判定为解析噪声 —— 放行，绝不指控。
+            
+            
             if _looks_like_truncated_fragment(raw):
                 audit.skipped["truncated_fragment"] = audit.skipped.get("truncated_fragment", 0) + 1
                 continue
-            # A-050-R2（用户实测误报）：模型只转述裸文件名（如"1786793001_4cdfec6f.mp4"），
-            # 文件真实存在于 data/generated/{images,videos}/ 子目录——项目根核验误报。
-            # 无路径分隔符的裸文件名先查媒体产出目录，存在则不算未核实声称。
+            
+            
+            
             if "/" not in p and "\\" not in p and _exists_in_generated(p):
                 audit.skipped["generated_dir"] = audit.skipped.get("generated_dir", 0) + 1
                 continue
@@ -244,8 +244,8 @@ def audit_claims(reply: str) -> ClaimAudit:
                 suggestion=_closest_sibling(raw),
             ))
         else:
-            # A-087（漏洞清单 P1-3）：路径存在但声称的字节数与真实值严重不符
-            # （如"文件大小 1,034,594 字节"指向真实文件但实际 2,920,440）→ 假数值拦截
+            
+            
             issue = _check_size_claim(text, p, found)
             if issue is not None and issue.detail not in seen:
                 seen.add(issue.detail)
@@ -306,7 +306,7 @@ def _looks_like_truncated_fragment(raw: Path) -> bool:
     **对真实文件喊狼来了的代价远大于漏掉一条**。"""
     frag = ""
     cur = raw
-    for _ in range(16):  # 深度上限：正常路径不会被截断 16 层
+    for _ in range(16):  
         parent = cur.parent
         if parent == cur:
             return False
@@ -359,7 +359,7 @@ def _check_size_claim(reply: str, path: str, raw: Path) -> ClaimIssue | None:
     if real <= 0:
         return None
     best = min(sizes, key=lambda s: abs(s[0] - real))
-    if abs(best[0] - real) > max(real * 0.15, 512):  # A-088: 绝对下限 2048→512（小文件假数值漏报）
+    if abs(best[0] - real) > max(real * 0.15, 512):  
         detail = f"{path}（声称 {best[0]} 字节，实际 {real} 字节，数值不实）"
         return ClaimIssue(path=path, kind="size_mismatch", severity="high", detail=detail)
     return None

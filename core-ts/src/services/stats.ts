@@ -1,8 +1,8 @@
-/**
- * core-ts/src/services/stats.ts — StatsService（面板数据：模型服务器 + Agent 统计）。
- * - modelServers：ModelServerManager.status() 快照（端口/状态/VRAM）
- * - agents：Agent 树/数量/生命周期分布/会话历史统计
- */
+
+
+
+
+
 
 import { AgentRegistry } from "./agents.js";
 import { getModelServer } from "../model_server.js";
@@ -17,7 +17,7 @@ export interface ServerStatusItem {
   [key: string]: unknown;
 }
 
-// ── 异常告警（v2.8 可观测性：sidecar 崩溃/OOM/检索超时 → 日志 + stats 状态 + 可选通知钩子）─
+
 
 export type AlarmSeverity = "info" | "warning" | "critical";
 
@@ -30,7 +30,7 @@ export interface AlarmRecord {
 }
 
 export interface AlarmBusOptions {
-  /** 可选通知钩子（如推送到桌面通知/日志聚合） */
+  
   notify?: (alarm: AlarmRecord) => void;
   maxRecords?: number;
 }
@@ -61,7 +61,7 @@ export class AlarmBus {
     try {
       this.notify?.(alarm);
     } catch {
-      // 通知钩子失败不影响主流程
+      
     }
     return alarm;
   }
@@ -75,7 +75,7 @@ export class AlarmBus {
   }
 }
 
-/** 进程级单例（服务层默认注入点） */
+
 export let alarmBusSingleton: AlarmBus | null = null;
 export function getAlarmBus(): AlarmBus {
   if (!alarmBusSingleton) {
@@ -125,7 +125,7 @@ export class StatsService {
     }
   }
 
-  /** Agent 树统计（对齐 Python agent_tree 的面板口径） */
+  
   async agentsStats(): Promise<StatsSnapshot["agents"]> {
     const agents = await this.registry.loadedAgents;
     const byLifecycle: Record<string, number> = {};

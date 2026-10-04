@@ -157,7 +157,7 @@ class TestChatCompletions:
             assert resp.status_code == 200
             assert resp.headers["content-type"].startswith("text/event-stream")
             assert b"[DONE]" in resp.content
-            assert "我是测试".encode("utf-8") not in resp.content  # 透传原始 SSE，不做二次包装
+            assert "我是测试".encode("utf-8") not in resp.content  
 
     @pytest.mark.asyncio
     async def test_chat_model_unavailable(self, tmp_path):
@@ -219,8 +219,8 @@ class TestRetrieve:
             contents = {i["content"] for i in data["items"]}
             assert "用户喜欢喝咖啡" in contents
             assert "咖啡店在楼下" in contents
-            assert "咖啡店老板是老王" in contents  # 2 跳链接遍历到达
-            assert "三十天前的旧教训" not in contents  # 无关条目不召回
+            assert "咖啡店老板是老王" in contents  
+            assert "三十天前的旧教训" not in contents  
             assert data["stages"]["link_walked"] >= 3
             for item in data["items"]:
                 assert "weight" in item
@@ -254,7 +254,7 @@ class TestRetrieve:
                 "agent_id": agent_id, "query": "", "top_k": 3, "max_hops": 1,
             })
             contents = [i["content"] for i in resp.json()["items"]]
-            assert contents[0] == "BGE-M3 向量维度 1024"  # importance 8 无衰减
+            assert contents[0] == "BGE-M3 向量维度 1024"  
 
     @pytest.mark.asyncio
     async def test_retrieve_invalid_agent_id(self, tmp_path):

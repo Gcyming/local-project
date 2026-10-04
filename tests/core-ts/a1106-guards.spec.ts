@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1106-guards.spec.ts — A-1106：四处「静默失效」修复的守卫。
- *
- * 本轮的四处修复有一个共同形态：**过 tsc、过构建、过所有既有逻辑测试，只在用户眼里翻车**。
- * 所以每条都必须有**能变异**（改坏 → 红）的守卫，否则等于没修。
- *
- * ① **MCP 广场「打开几秒后自己变样」**（McpPanel / marketView）
- *    旧行为：打开广场就联网拉全量 registry，网络一返回 `hasRegistry` 把内置精选**整个替换**掉。
- *    用户正想装的那 20 条（唯一带准确安装命令的）当场消失、无声无息。
- *
- * ② **RPM 限流器在生产链路里一次都没被调用**（router.createRouteClient / gui main clientFactory）
- *    根因 = **重复产地**：main 为了注入 Chromium fetch 另抄了一份 clientFactory，**漏了 `rateLimit`**，
- *    而 `chat()` 的限流分支是 `if (rateLimit)` ⇒ 恒假。测试走的是 router 里那份 ⇒ 全绿也发现不了。
- *
- * ③ **压缩只可能发生一次**（noRoomToCut 拿**折叠视图**判 ⇒ 恒真 ⇒ canShrink 恒假）
- *    设计定稿要求「再次达阈值 ⇒ 回到 ①」的多环压缩在实现里**结构性不可达**，
- *    而 `priorSummary` 递进路径成了死代码 ⇒ 二次压缩之间的轮次**从不进入任何摘要**（丢记忆）。
- *
- * ④ **降幅不足的假压缩永不熔断** + **摘要被输出上限腰斩却当完整摘要写进去**
- *    `ok` 只看「摘要非 null 且产物合法」，不看 `realShrink` ⇒ 白花调用且用户永远发不出去；
- *    `max_tokens: 1024` 触顶时半截文本 `trim()` 后非空 ⇒ 被当完整摘要 ⇒ **静默丢早期上下文**。
- *
- * ⚠️ 中文句子里不许夹 ASCII 双引号（一律「」）——否则会把整份 spec 打成 0 用例。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -32,16 +32,16 @@ import { marketSource } from "../../gui/src/renderer/pages/marketView.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readSrc = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再断言（注释里会**故意**写出旧写法/新写法的说明，不剥就是假红或假绿） */
+
 const stripComments = (s: string): string => s
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^[ \t]*\/\/.*$/gm, "");
-/** 出现次数 —— 断言「唯一产地」时必须先证明它唯一，`toContain` 对同名多产地恒绿 */
+
 function countOf(hay: string, needle: string): number {
   return hay.split(needle).length - 1;
 }
 
-/* ═════════════════ A 组：MCP 广场「归谁」的判据（纯逻辑）═════════════════ */
+
 
 describe("A-1106 A 组 — MCP 广场数据源判据（「过一会自己变样」的根因判据化）", () => {
   it("A1 没搜过 ⇒ 内置精选（**打开广场不许被 registry 接管**）", () => {
@@ -67,7 +67,7 @@ describe("A-1106 A 组 — MCP 广场数据源判据（「过一会自己变样�
   });
 });
 
-/* ═════════════════ B 组：广场的接线（判据唯一出处 + 打开不联网）═════════════════ */
+
 
 const MCP = stripComments(readSrc("gui/src/renderer/pages/McpPanel.tsx"));
 
@@ -101,9 +101,9 @@ describe("A-1106 B 组 — 广场接线：唯一判据出处 + 打开不联网",
   });
 });
 
-/* ═════════════════ C 组：createRouteClient 真的把 rateLimit 传进 client（行为）═════════════════ */
 
-/** 四家 api_format 各一条路由 —— 生产链路（含降级）会在这四种之间切换，漏哪家都是漏 */
+
+
 const ROUTES: Array<{ fmt: string; extra: Partial<RouteEntry> }> = [
   { fmt: "openai", extra: { baseUrl: "https://api.openai.com/v1", api_format: "openai", model: "gpt-4o-mini" } },
   { fmt: "anthropic", extra: { baseUrl: "https://api.anthropic.com/v1/messages", api_format: "anthropic", model: "claude-sonnet-4" } },
@@ -145,7 +145,7 @@ describe("A-1106 C 组 — createRouteClient 必须给每条路由都带上 rate
   });
 });
 
-/* ═════════════════ D 组：生产工厂不许另抄一份 ═════════════════ */
+
 
 const MAIN_SRC = stripComments(readSrc("gui/src/main/index.ts"));
 
@@ -169,7 +169,7 @@ describe("A-1106 D 组 — 生产 clientFactory 必须复用唯一实现（漏 r
   });
 });
 
-/* ═════════════════ E 组：压缩判据必须看「原始全量」 ═════════════════ */
+
 
 describe("A-1106 E 组 — 压缩判据看原始全量（看折叠视图 ⇒ 恒为「压无可压」⇒ 只压得了一次）", () => {
   it("E1 读盘与折叠拆成两步（压缩必须同时拿到「全量」与「折叠视图」）", () => {
@@ -179,15 +179,15 @@ describe("A-1106 E 组 — 压缩判据看原始全量（看折叠视图 ⇒ 恒
 
   it("E2 ⚠️ noRoomToCut 必须用**原始全量长度**（用折叠视图 ⇒ 恒真 ⇒ 多环压缩结构性不可达）", () => {
     expect(MAIN_SRC).toContain("const noRoomToCut = historyAll.length <= DEFAULT_TAIL_KEEP * 2 + 2;");
-    // 反向：这一行里绝不许出现折叠视图
+    
     const line = MAIN_SRC.split("\n").find((l) => l.includes("const noRoomToCut =")) ?? "";
     expect(line, "noRoomToCut 又拿折叠视图判了 —— 折叠视图恒为「摘要头+尾巴」，判据必然恒真").not.toContain("historyView");
     expect(line).not.toContain("foldSessionHistory");
   });
 
   it("E3 触发判据 / 历史指纹 / 摘要素材**三处**都必须用 historyAll（任一退回折叠视图 = 静默丢一段记忆）", () => {
-    // A-1106：第 4 个参数**单位是轮数**，必须过 countTurns（旧写法传 historyAll.length =
-    // 消息条数 ⇒ 6 轮门槛实际 2-3 轮就放行）。迁移自旧断言 `…ratio, historyAll.length),`。
+    
+    
     expect(MAIN_SRC).toContain("ratioTriggered: needsCompress(used, cap, ratio, countTurns(historyAll)),");
     expect(MAIN_SRC, "单位错配回归：触发判据又直接拿消息条数当轮数了").not.toContain("ratioTriggered: needsCompress(used, cap, ratio, historyAll.length),");
     expect(MAIN_SRC).toContain("const key = historyFingerprint(historyAll);");
@@ -203,7 +203,7 @@ describe("A-1106 E 组 — 压缩判据看原始全量（看折叠视图 ⇒ 恒
   });
 });
 
-/* ═════════════════ F 组：假压缩必须能被熔断 ═════════════════ */
+
 
 describe("A-1106 F 组 — 降幅不足的假压缩必须计入失败（否则熔断器永不开闸）", () => {
   it("F1 熔断判据必须含 realShrink（只看「摘要非 null 且产物合法」= 假压缩每次都算成功）", () => {
@@ -224,7 +224,7 @@ describe("A-1106 F 组 — 降幅不足的假压缩必须计入失败（否则�
   });
 });
 
-/* ═════════════════ G 组：摘要不许被输出上限腰斩却当完整摘要 ═════════════════ */
+
 
 const ENG_SRC = stripComments(readSrc("core-ts/src/services/engine.ts"));
 

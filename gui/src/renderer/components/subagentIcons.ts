@@ -1,16 +1,16 @@
-/**
- * gui/src/renderer/components/subagentIcons.ts — 子代理头像图标库（A-980-R31）。
- *
- * ⚠️ **本文件由 gui/scripts/gen-subagent-icons.mjs 生成，请勿手改路径数据。**
- * 源图标库：D:\pilot project\gui\icon\icon_1cdszr8as42（39 个单色 SVG，viewBox 0 0 1024 1024）。
- * 换图标库 → 重跑：node gui/scripts/gen-subagent-icons.mjs [图标目录] [输出文件]
- *
- * 每个图标含两条路径：① 细圆环底框（约 10/1024 线宽）② 字形/图形本体。
- * 渲染时统一用 currentColor，颜色由调用方（按名字着色）决定。
- */
+
+
+
+
+
+
+
+
+
+
 export const SUBAGENT_ICON_VIEWBOX = "0 0 1024 1024";
 
-/** key → 路径 d 列表 */
+
 export const SUBAGENT_ICONS: Record<string, string[]> = {
   "-": [
     "M512.255872 25.075462c269.177411 0 487.18041 218.002999 487.18041 487.18041s-218.002999 487.18041-487.18041 487.18041-487.18041-218.514743-487.18041-487.18041c0-269.177411 218.002999-487.18041 487.18041-487.18041m0-20.469765C231.82009 4.605697 4.605697 231.82009 4.605697 512.255872s227.214393 507.650175 507.650175 507.650175 507.650175-227.214393 507.650175-507.650175c0-280.435782-227.214393-507.650175-507.650175-507.650175z",
@@ -170,18 +170,18 @@ export const SUBAGENT_ICONS: Record<string, string[]> = {
   ],
 };
 
-/** 兜底图标（中文名 / emoji / 无首字母时使用） */
+
 export const SUBAGENT_ICON_FALLBACK = "head";
 
-/** 全部可用 key（断言/调试用） */
+
 export const SUBAGENT_ICON_KEYS: string[] = ["-","0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","_","head"];
 
-/**
- * 按名字首字符选图标 key。
- *
- * 规则（与用户约定一致）：字母 → 对应大写字母图标；数字 → 数字图标；
- * `-` / `_` → 对应符号图标；全角字母先 NFKC 归一化；其余（中文/emoji/未知符号）→ head 兜底。
- */
+
+
+
+
+
+
 export function pickSubagentIconKey(name: string): string {
   const chars = [...(name ?? "").trim()];
   const first = chars[0];
@@ -190,7 +190,7 @@ export function pickSubagentIconKey(name: string): string {
   if (SUBAGENT_ICONS[up] && /^[A-Z]$/.test(up)) { return up; }
   if (/^[0-9]$/.test(first)) { return first; }
   if (first === "-" || first === "_") { return first; }
-  // 全角/带圈字母等：归一化后再试一次（Ａ → A、ⓐ → a）
+  
   const nf = first.normalize("NFKC").toUpperCase();
   if (/^[A-Z]$/.test(nf) && SUBAGENT_ICONS[nf]) { return nf; }
   return SUBAGENT_ICON_FALLBACK;

@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+
 """生成一个 24 页的互联测试站点，用于端到端验证爬虫→索引→服务。"""
 import os
 import pathlib
@@ -39,7 +39,7 @@ def link(name, label):
 
 pages = {}
 for name, title, body in TOPICS:
-    # 环形互联：每页链接 index + 后面 4 页，保证 BFS 能遍历全站
+    
     names = [n for n, _, _ in TOPICS]
     titles = {n: t for n, t, _ in TOPICS}
     i = names.index(name)

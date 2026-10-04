@@ -1,16 +1,16 @@
-/**
- * gui/src/renderer/pages/MindHubPanel.tsx — 心智中枢（记忆/学习/进化/情绪整合栏目）。
- * - 依赖状态：llama.cpp / BGE-M3 / 本地模型（不在 git 仓库，换设备需手动就位）
- * - 向量工具：bge = 真实 BGE-M3 嵌入（高优）；basic = LanceDB + 哈希占位向量（基础）
- * - 情绪调节：PAD 三轴滑块 + 8 种情绪编码表一键套用（仅调基线，不影响自动演化）
- * - 记忆：存储位置展示 + 可改根目录（重启生效）
- * - 学习：book-to-skill（拖入文档 → 生成技能 SKILL.md → 化为己用）
- * - 进化：规划占位
- */
+
+
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot, DownloadProgressInfo } from "../../shared/ipc.js";
 import { CheckIcon, CloseIcon, PlusIcon } from "../components/Icon.js";
-/** A-1038：下载/解压阶段文案（唯一实现） */
+
 import { phaseLabel } from "../../shared/downloadPhase.js";
 import { confirmAsync, alertAsync } from "../dialog.js";
 
@@ -19,7 +19,7 @@ const MOOD_CN: Record<string, string> = {
   concerned: "谨慎", frustrated: "受挫", angry: "愤怒", disgusted: "厌恶",
 };
 
-/** 8 种情绪编码表（与 core-ts/mind/emotion.ts MOODS 对齐） */
+
 const MOOD_DEFS: Array<{ key: string; cn: string; valence: number; arousal: number; dominance: number }> = [
   { key: "happy", cn: "快乐", valence: 0.7, arousal: 0.65, dominance: 0.7 },
   { key: "content", cn: "满足", valence: 0.4, arousal: 0.2, dominance: 0.7 },
@@ -33,7 +33,7 @@ const MOOD_DEFS: Array<{ key: string; cn: string; valence: number; arousal: numb
 
 const pct = (v: number, lo: number, hi: number): number => Math.round(((v - lo) / (hi - lo)) * 100);
 
-/** 自定义情绪存储键（localStorage，前端偏好） */
+
 const CUSTOM_MOODS_KEY = "slime.custom_moods";
 
 interface CustomMood {
@@ -59,11 +59,11 @@ function saveCustomMoods(list: CustomMood[]): void {
   try {
     localStorage.setItem(CUSTOM_MOODS_KEY, JSON.stringify(list));
   } catch {
-    // localStorage 不可用时静默失败（自定义情绪仅本机偏好）
+    
   }
 }
 
-/** PAD → 最近情绪点（与 core-ts/mind/emotion.ts nearestMood 同逻辑） */
+
 function nearestMood(v: number, a: number, d: number): string {
   let best = "neutral";
   let bestDist = Infinity;
@@ -106,18 +106,18 @@ function SectionCard({ title, children }: { title: string; children: React.React
   );
 }
 
-/**
- * 路径展示：短路径完整显示（允许在 `\` 处折行），长路径省略中间部分、末尾高亮文件名，
- * 悬停 tooltip 显示完整路径。绝不在文件名中间拦腰截断。
- * 关键：容器必须设 `minWidth: 0`（flex 子项默认 minWidth=auto 会强制溢出断行）。
- */
+
+
+
+
+
 function DispPath({ path }: { path: string }): JSX.Element {
   if (!path) {
     return <span style={{ color: "var(--text-dim)" }}>（未配置）</span>;
   }
   const segs = path.split(/[\\/]/).filter(Boolean);
   const fileName = segs[segs.length - 1] ?? path;
-  // 短路径（<=60 字符）：完整显示，用零宽空格让浏览器优先在 `\` 处折行
+  
   if (path.length <= 60) {
     const withBreaks = path.replace(/[\\/]/g, (m) => `${m}\u200B`);
     return (
@@ -129,7 +129,7 @@ function DispPath({ path }: { path: string }): JSX.Element {
       </span>
     );
   }
-  // 长路径：显示 "C:\Users\MR\…\fileName"，文件名完整不截断
+  
   const head = segs.slice(0, 3).join("\\");
   return (
     <span
@@ -142,7 +142,7 @@ function DispPath({ path }: { path: string }): JSX.Element {
   );
 }
 
-/** 依赖下载控件：进度条 + 暂停/继续/取消 */
+
 function DownloadControls({
   target, dl,
 }: {
@@ -193,8 +193,8 @@ function DownloadControls({
   return (
     <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
       {bar(t.percent)}
-      {/* A-1038：显示阶段（下载中/解压中/配置中）+ 明细。只给百分比时，
-          解压期的用户看到的是"100% 却半天不动"，等于没有进度。 */}
+      {
+}
       <span style={{ fontSize: 10.5, color: "var(--text-muted)", minWidth: 46 }}>
         {t.percent}%{" "}
         <span style={{ color: "var(--text-dim)" }}>
@@ -216,7 +216,7 @@ export default function MindHubPanel({
   const [agents, setAgents] = React.useState<Array<{ id: string; name: string }>>([]);
   const [agentId, setAgentId] = React.useState<string>(selectedAgentId ?? "");
   const [emotion, setEmotion] = React.useState<EmotionSnapshot | null>(null);
-  /** 本地预览（套用情绪表/拖滑块时即时反馈，保存才写服务器） */
+  
   const [preview, setPreview] = React.useState<EmotionSnapshot | null>(null);
   const [valence, setValence] = React.useState(0);
   const [arousal, setArousal] = React.useState(30);
@@ -226,18 +226,18 @@ export default function MindHubPanel({
   const [skillFile, setSkillFile] = React.useState<{ name: string; content: string } | null>(null);
   const [skillResult, setSkillResult] = React.useState("");
   const [dragOver, setDragOver] = React.useState(false);
-  /** 依赖定位反馈消息（按 key） */
+  
   const [locateMsg, setLocateMsg] = React.useState<Record<string, string>>({});
-  /** 自定义情绪（localStorage 持久化） */
+  
   const [customMoods, setCustomMoods] = React.useState<CustomMood[]>(loadCustomMoods);
   const [customAdding, setCustomAdding] = React.useState(false);
   const [customName, setCustomName] = React.useState("");
-  /** 进化快照（生命周期 + 人格特质 + 行为/交互积累） */
+  
   const [evolution, setEvolution] = React.useState<EvolutionSnapshot | null>(null);
 
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
 
-  /** 依赖定位：auto=项目文件夹内自动检索；pick=手动选择。命中写入 slime.toml 并刷新状态 */
+  
   async function locateDep(key: "llama_bin" | "model_path" | "models_dir", mode: "auto" | "pick"): Promise<void> {
     if (!api?.mind?.locateDep) return;
     const res = await api.mind.locateDep(mode, key).catch((e: unknown) => ({ found: false, error: String(e) }));
@@ -274,30 +274,30 @@ export default function MindHubPanel({
         }
       }).catch(console.error);
     }
-    // 下载状态：App 层全局订阅（本组件卸载时进度不丢失，见 App.tsx）；未注入时本地拉快照兜底
+    
     if (api?.mind && !dl) {
       void api.mind.downloadSnapshot("llama").then((p: DownloadProgressInfo) => setDl0((prev) => ({ ...prev, llama: p }))).catch(() => {});
       void api.mind.downloadSnapshot("bge").then((p: DownloadProgressInfo) => setDl0((prev) => ({ ...prev, bge: p }))).catch(() => {});
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [selectedAgentId]);
 
-  /**
-   * 目标 Agent 变化 → 重新推导记忆 / 向量库的真实路径。
-   * 这两条路径是 per-Agent 的（`<根>/<agentId>/…`），跟「目标 Agent」联动才不会是陈旧值 ——
-   * 此前它们取自主进程返回的静态字符串模板，切 Agent 也不会变。
-   */
+  
+
+
+
+
   React.useEffect(() => {
     if (!agentId) return;
     void reloadConfig(agentId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [agentId]);
 
-  // 无全局 dl（未从 App 注入）时兜底：本地快照
+  
   const [dl0, setDl0] = React.useState<Record<string, DownloadProgressInfo>>({});
   const dlMap = dl ?? dl0;
 
-  // 下载中轮询兜底：即使推送事件偶发丢失，进度条也能实时刷新（1s 拉一次快照）
+  
   React.useEffect(() => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!api?.mind?.downloadSnapshot) return;
@@ -312,12 +312,12 @@ export default function MindHubPanel({
       }).catch(() => {});
     }, 1000);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [dlMap.llama?.state, dlMap.bge?.state]);
 
-  // 下载完成 → 刷新依赖状态：左侧 ✅/❌ 图标跟随真实文件状态（此前 cfg 只在挂载时加载一次，
-  // 下载完成后图标仍停留 ❌ 而右侧已显示"已下载"）。立即刷一次 + 延迟 2s 再刷一次：
-  // bge 归位是同步的，llama 解压 + 改写 llama_bin 是异步的（finishLlama）。
+  
+  
+  
   const prevDoneRef = React.useRef<Record<string, boolean>>({});
   React.useEffect(() => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
@@ -334,7 +334,7 @@ export default function MindHubPanel({
       prevDoneRef.current[target] = isDone;
     }
     return () => { if (timer) window.clearTimeout(timer); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [dlMap.llama?.state, dlMap.bge?.state]);
 
   React.useEffect(() => {
@@ -348,7 +348,7 @@ export default function MindHubPanel({
     }).catch(console.error);
   }, [agentId]);
 
-  /** 进化快照：随选中 Agent 加载（生命周期 + 特质权重 + 行为/交互积累） */
+  
   React.useEffect(() => {
     if (!agentId || !api?.mind?.evolutionGet) return;
     void api.mind.evolutionGet(agentId).then((e: EvolutionSnapshot) => {
@@ -356,7 +356,7 @@ export default function MindHubPanel({
     }).catch(console.error);
   }, [agentId]);
 
-  /** 一键套用情绪编码表：立即进入预览态（高亮跟随），可微调后再保存 */
+  
   function applyMood(m: { key: string; valence: number; arousal: number; dominance: number }): void {
     setValence(pct(m.valence, -1, 1));
     setArousal(pct(m.arousal, 0, 1));
@@ -368,7 +368,7 @@ export default function MindHubPanel({
     });
   }
 
-  /** 添加自定义情绪：以当前滑块 PAD 值为基线，保存到 localStorage */
+  
   function addCustomMood(): void {
     const name = customName.trim();
     if (!name) { return; }
@@ -391,14 +391,14 @@ export default function MindHubPanel({
     window.setTimeout(() => setSaved(""), 4000);
   }
 
-  /** 删除自定义情绪 */
+  
   function removeCustomMood(key: string): void {
     const next = customMoods.filter((m) => m.key !== key);
     setCustomMoods(next);
     saveCustomMoods(next);
   }
 
-  /** 滑块微调：同步预览 mood（最近邻）；首拖（无 preview）时从当前 emotion 构造基线 */
+  
   function onSliderChange(kind: "v" | "a" | "d", v: number): void {
     if (kind === "v") setValence(v);
     if (kind === "a") setArousal(v);
@@ -441,31 +441,31 @@ export default function MindHubPanel({
     }
   }
 
-  /**
-   * 拉取配置。**必须带 agentId** —— 记忆/向量库的展示路径是按目标 Agent 推导的真实绝对路径，
-   * 不带就只会得到 `memoryPaths: null`（界面据此提示先选 Agent，而不是显示 `data/<agentId>/…` 假路径）。
-   */
+  
+
+
+
   async function reloadConfig(id?: string): Promise<void> {
     if (!api?.mind?.configGet) return;
     const c = await api.mind.configGet(id || undefined).catch(console.error);
     if (c) { setCfg(c as MindConfigInfo); }
   }
 
-  /** 改记忆存储位置：一个根目录同时决定「记忆本体」与「向量库」两处（见 core-ts resolveMemoryPaths） */
+  
   async function pickMemoryRoot(): Promise<void> {
     if (!api?.conversations?.pickFolder || !api?.mind?.configSet) return;
     const picked = await api.conversations.pickFolder();
     if (picked.ok && picked.path) {
       const res = await api.mind.configSet({ memoryRoot: picked.path });
       setCfg((prev) => (prev ? { ...prev, memoryRoot: res.memoryRoot } : prev));
-      // 两个地址都要跟着刷新（否则又回到"只有一个变了"的观感）
+      
       await reloadConfig(agentId);
       setSaved("存储位置已更新：记忆本体与向量库都在新根目录下（重启后生效；已有数据在下次使用时迁入）");
       window.setTimeout(() => setSaved(""), 8000);
     }
   }
 
-  /** 恢复默认存储位置（`""` = 用内置默认根）。没有这个出口时，自定义根是"单向门"——改了就回不去 */
+  
   async function resetMemoryRoot(): Promise<void> {
     if (!api?.mind?.configSet) return;
     const res = await api.mind.configSet({ memoryRoot: "" });
@@ -481,7 +481,7 @@ export default function MindHubPanel({
     setCfg((prev) => (prev ? { ...prev, vectorTool: res.vectorTool } : prev));
   }
 
-  /** 重置本地数据（清空 Provider/Agent/会话与历史；记忆保留）。确认后执行并整页刷新 */
+  
   async function handleResetData(): Promise<void> {
     const a = (window as unknown as { slimeAPI?: any }).slimeAPI;
     if (!a?.data?.reset) { return; }
@@ -505,10 +505,10 @@ export default function MindHubPanel({
 
   async function convertToSkill(): Promise<void> {
     if (!skillName.trim() || !skillFile) return;
-    /* A-1019 ④：取值点（本组件 238 行）之后的第一层裸访问必须有守卫 ——
-       漏了这道检查，preload 未就绪时 `api.mind` 直接抛 TypeError，
-       被 ErrorBoundary 换成「界面渲染出错」整页白屏（而不是这一处静默降级）。
-       同文件 locateDep 一直是这么写的，这里此前漏了。 */
+    
+
+
+
     if (!api?.mind?.bookToSkill) { return; }
     const res = await api.mind.bookToSkill(skillName.trim(), skillFile.content)
       .catch((e: unknown) => ({ ok: false, error: String(e) }));
@@ -521,7 +521,7 @@ export default function MindHubPanel({
     }
   }
 
-  /** 拖放/选择文件 → 读取文本 */
+  
   function readFile(file: File): void {
     if (!file) return;
     if (file.size > 2 * 1024 * 1024) {
@@ -543,9 +543,9 @@ export default function MindHubPanel({
   const moodCn = shown ? (MOOD_CN[shown.mood] ?? shown.mood) : "—";
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 28）。 */
+    
     <div className="settings-pane" style={{ padding: "12px 0", overflowY: "auto", height: "100%" }}>
-      {/* 依赖状态 */}
+      {}
       <SectionCard title="依赖状态（换设备部署检查 + 一键下载）">
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
           代码与依赖清单在 GitHub 仓库内（pnpm-lock.yaml / requirements.txt 锁版本），
@@ -574,9 +574,9 @@ export default function MindHubPanel({
             )}
           </div>
         ))}
-        {/* A-1041：LanceDB 是「内嵌组件」—— 297MB 原生库不再随默认安装包分发。
-            未就位必须**如实展示**（不静默）：否则用户只会看到"向量检索没结果"，
-            却不知道是组件没装。 */}
+        {
+
+}
         {cfg && (
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12 }}>
             <span style={{ color: cfg.lancedb.ok ? "var(--ok, #4ade80)" : "var(--warning)" }}>
@@ -615,7 +615,7 @@ export default function MindHubPanel({
         </div>
       </SectionCard>
 
-      {/* 向量工具 */}
+      {}
       <SectionCard title="向量工具（记忆检索的嵌入方式）">
         <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
           {([
@@ -643,7 +643,7 @@ export default function MindHubPanel({
         </div>
       </SectionCard>
 
-      {/* 情绪调节 */}
+      {}
       <SectionCard title="情绪调节（手动拉情绪基线，不影响自动演化）">
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>目标 Agent：</span>
@@ -690,7 +690,7 @@ export default function MindHubPanel({
             </button>
           ))}
         </div>
-        {/* 自定义情绪：以当前滑块 PAD 值为基线保存 */}
+        {}
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
           自定义情绪（先拖动上方滑块到目标 PAD 值，再命名添加；可一键套用 / 删除）：
         </div>
@@ -751,14 +751,14 @@ export default function MindHubPanel({
         </div>
       </SectionCard>
 
-      {/* 记忆 */}
+      {}
       <SectionCard title="记忆（存储位置）">
-        {/*
-          两条路径都来自主进程按「目标 Agent」推导的**真实绝对路径**（唯一实现 core-ts resolveMemoryPaths）。
-          此前这里显示的是 `data/<agentId>/lancedb` 这种字面模板 —— 假信息，且永不变化，
-          于是用户改了存储位置只看到上面一行变，误以为"只能改一个"。
-          现在自定义根目录同时决定两处，两行都会跟着变。
-        */}
+        {
+
+
+
+
+}
         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
           <div><span style={{ color: "var(--text-muted)" }}>记忆本体（memory.json）：</span>
             <span style={{ fontSize: 11, wordBreak: "break-all" }}>
@@ -781,7 +781,7 @@ export default function MindHubPanel({
             </button>
           ) : null}
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {/* 一个根目录管两处存储；重启生效 */}
+            {}
             {cfg?.memoryRoot
               ? `当前自定义根目录：${cfg.memoryRoot}（记忆本体与向量库都在此目录下；重启后生效）`
               : "当前为默认位置（重启后生效变更）"}
@@ -789,7 +789,7 @@ export default function MindHubPanel({
         </div>
       </SectionCard>
 
-      {/* 学习：book-to-skill */}
+      {}
       <SectionCard title="学习 · book-to-skill（文档 → 技能，化为己用）">
         <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
           拖入或选择一份文档（.md / .txt 等文本，≤2MB），生成专属技能（config/skills/&lt;名称&gt;/SKILL.md）。
@@ -845,7 +845,7 @@ export default function MindHubPanel({
         )}
       </SectionCard>
 
-      {/* 进化：生命周期 + 人格特质权重曲线 + 行为/交互积累 */}
+      {}
       <SectionCard title="进化（人格特质权重 + 行为沉淀）">
         {!evolution?.ok ? (
           <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>

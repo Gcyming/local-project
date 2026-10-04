@@ -45,7 +45,7 @@ describe("TokenStore", () => {
     it("白名单同时接受 provider:模型 写法", () => {
       const s = new TokenStore([{ key: "slime_k3", models: ["gpt-4o"] }]);
       const d = s.resolve("slime_k3")!;
-      expect(s.checkModel(d, "openai:gpt-4o")).toBe(true); // bare 命中
+      expect(s.checkModel(d, "openai:gpt-4o")).toBe(true); 
       expect(s.checkModel(d, "openai:claude")).toBe(false);
     });
 
@@ -71,9 +71,9 @@ describe("TokenStore", () => {
       let t = 0;
       const s = new TokenStore([{ key: "slime_rate", ratePerMin: 2 }], { now: () => t });
       const d = s.resolve("slime_rate")!;
-      expect(s.checkRate(d).ok).toBe(true); t += 1000; // t=1000
-      expect(s.checkRate(d).ok).toBe(true); t += 1000; // t=2000
-      const third = s.checkRate(d); // t=2000 时已有 2 条，触发拒绝
+      expect(s.checkRate(d).ok).toBe(true); t += 1000; 
+      expect(s.checkRate(d).ok).toBe(true); t += 1000; 
+      const third = s.checkRate(d); 
       t += 1000;
       expect(third.ok).toBe(false);
       expect(third.reason).toBe("rate");
@@ -83,8 +83,8 @@ describe("TokenStore", () => {
       let t = 0;
       const s = new TokenStore([{ key: "slime_rate2", ratePerMin: 1 }], { now: () => t });
       const d = s.resolve("slime_rate2")!;
-      expect(s.checkRate(d).ok).toBe(true); // t=0
-      t = MIN + 1000; // 下一个窗口
+      expect(s.checkRate(d).ok).toBe(true); 
+      t = MIN + 1000; 
       expect(s.checkRate(d).ok).toBe(true);
     });
 
@@ -104,9 +104,9 @@ describe("TokenStore", () => {
       let day = new Date("2026-09-11T00:00:00Z");
       const s = new TokenStore([{ key: "slime_quota2", dailyQuota: 1 }], { dateNow: () => day });
       const d = s.resolve("slime_quota2")!;
-      expect(s.checkRate(d).ok).toBe(true); // 第1天
-      expect(s.checkRate(d).ok).toBe(false); // 第1天耗尽
-      day = new Date("2026-09-12T00:00:00Z"); // 第2天
+      expect(s.checkRate(d).ok).toBe(true); 
+      expect(s.checkRate(d).ok).toBe(false); 
+      day = new Date("2026-09-12T00:00:00Z"); 
       expect(s.checkRate(d).ok).toBe(true);
     });
 
@@ -114,8 +114,8 @@ describe("TokenStore", () => {
       const dateNow = vi.fn(() => new Date("2026-09-11T00:00:00Z"));
       const s = new TokenStore([{ key: "slime_mix", ratePerMin: 10, dailyQuota: 1 }], { dateNow });
       const d = s.resolve("slime_mix")!;
-      expect(s.checkRate(d).ok).toBe(true); // 1
-      const over = s.checkRate(d); // 配额第2次耗尽
+      expect(s.checkRate(d).ok).toBe(true); 
+      const over = s.checkRate(d); 
       expect(over.ok).toBe(false);
       expect(over.reason).toBe("quota");
     });
@@ -146,7 +146,7 @@ describe("TokenStore", () => {
       const k = TokenStore.generateKey();
       expect(k.startsWith("slime_")).toBe(true);
       expect(k.length).toBeGreaterThanOrEqual(24);
-      expect(k).not.toBe(TokenStore.generateKey()); // 随机性
+      expect(k).not.toBe(TokenStore.generateKey()); 
     });
   });
 });

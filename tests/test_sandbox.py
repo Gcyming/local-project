@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 
-# ── 权限分级模型 ───────────────────────────────────────────
+
 
 
 class TestPermissionLevel:
@@ -50,7 +50,7 @@ class TestPermissionLevel:
         assert "系统操作" in PermissionLevel.L5.display_name()
 
 
-# ── SandboxConfig ─────────────────────────────────────────
+
 
 
 class TestSandboxConfig:
@@ -94,7 +94,7 @@ class TestSandboxConfig:
         assert SandboxConfig(default_level="relaxed").default_level_as_int() == 5
 
 
-# ── SandboxManager 核心功能 ───────────────────────────────
+
 
 
 class TestSandboxManagerCore:
@@ -155,7 +155,7 @@ class TestSandboxManagerCore:
         from core.sandbox import SandboxManager, SandboxConfig
         cfg = SandboxConfig(require_approval_tools=["sensitive_tool"])
         mgr = SandboxManager(config=cfg)
-        # 无回调时，需确认的操作返回 False
+        
         allowed, reason = mgr.grant_permission("agent_test", "sensitive_tool", "/tmp", level=0)
         assert not allowed
         assert "确认" in reason
@@ -195,7 +195,7 @@ class TestSandboxManagerCore:
         assert mgr1 is mgr2
 
 
-# ── Agent 级配置覆盖 ──────────────────────────────────────
+
 
 
 class TestAgentConfigOverride:
@@ -208,7 +208,7 @@ class TestAgentConfigOverride:
     def test_agent_config_override(self):
         from core.sandbox import SandboxManager, SandboxConfig
         mgr = SandboxManager()
-        # Agent 级配置允许 L2 自动通过
+        
         agent_cfg = SandboxConfig(auto_approve_levels=[0, 1, 2])
         mgr.set_agent_config("agent_special", agent_cfg)
         result = mgr.check_permission("agent_special", "file_write", "/tmp/test.txt", level=2)
@@ -217,14 +217,14 @@ class TestAgentConfigOverride:
     def test_agent_config_isolation(self):
         from core.sandbox import SandboxManager, SandboxConfig
         mgr = SandboxManager()
-        agent_cfg = SandboxConfig(deny_levels=[5, 4])  # 更严格
+        agent_cfg = SandboxConfig(deny_levels=[5, 4])  
         mgr.set_agent_config("agent_strict", agent_cfg)
-        # agent_strict 的 L4 被禁止
+        
         result = mgr.check_permission("agent_strict", "pip", "install", level=4)
         assert not result.allowed
-        # 其他 Agent 的 L4 仍需确认（不在 deny 中）
+        
         result2 = mgr.check_permission("agent_normal", "pip", "install", level=4)
-        assert not result2.allowed  # 需确认=不允许
+        assert not result2.allowed  
 
     def test_remove_agent_config(self):
         from core.sandbox import SandboxManager, SandboxConfig
@@ -233,12 +233,12 @@ class TestAgentConfigOverride:
         mgr.set_agent_config("agent_test", agent_cfg)
         assert mgr.check_permission("agent_test", "pytest", "/tmp", level=3).allowed
         mgr.remove_agent_config("agent_test")
-        # 移除后回退到全局默认
+        
         result = mgr.check_permission("agent_test", "pytest", "/tmp", level=3)
-        assert not result.allowed  # L3 需确认
+        assert not result.allowed  
 
 
-# ── 权限继承 ───────────────────────────────────────────────
+
 
 
 class TestPermissionInheritance:
@@ -251,11 +251,11 @@ class TestPermissionInheritance:
     def test_child_inherits_parent_config(self):
         from core.sandbox import SandboxManager, SandboxConfig
         mgr = SandboxManager()
-        # 父 Agent 允许 L2
+        
         parent_cfg = SandboxConfig(auto_approve_levels=[0, 1, 2], inherit_from_parent=True)
         mgr.set_agent_config("parent_agent", parent_cfg)
         mgr.register_agent("child_agent", parent_id="parent_agent", name="子Agent")
-        # 子 Agent 应继承父 Agent 的 L2 自动批准
+        
         result = mgr.check_permission("child_agent", "file_write", "/tmp/test.txt", level=2)
         assert result.allowed
 
@@ -265,22 +265,22 @@ class TestPermissionInheritance:
         parent_cfg = SandboxConfig(auto_approve_levels=[0, 1, 2], inherit_from_parent=False)
         mgr.set_agent_config("parent_agent", parent_cfg)
         mgr.register_agent("child_agent", parent_id="parent_agent", name="子Agent")
-        # 继承被禁止，子 Agent 使用全局默认
+        
         result = mgr.check_permission("child_agent", "file_write", "/tmp/test.txt", level=2)
-        assert not result.allowed  # 全局默认 L2 需确认
+        assert not result.allowed  
 
     def test_child_override_takes_precedence(self):
         from core.sandbox import SandboxManager, SandboxConfig
         mgr = SandboxManager()
-        # 父 Agent 允许 L2-L4
+        
         parent_cfg = SandboxConfig(auto_approve_levels=[0, 1, 2, 3, 4], inherit_from_parent=True)
         mgr.set_agent_config("parent_agent", parent_cfg)
         mgr.register_agent("child_agent", parent_id="parent_agent", name="子Agent")
-        # 子 Agent 自己的配置更严格
+        
         child_cfg = SandboxConfig(auto_approve_levels=[0, 1], deny_levels=[5, 4])
         mgr.set_agent_config("child_agent", child_cfg)
         result = mgr.check_permission("child_agent", "pip", "install", level=4)
-        assert not result.allowed  # 子 Agent 自己禁止 L4
+        assert not result.allowed  
 
     def test_child_workspace_not_inherited(self):
         from core.sandbox import SandboxManager, SandboxConfig
@@ -289,10 +289,10 @@ class TestPermissionInheritance:
         mgr.set_agent_config("parent_agent", parent_cfg)
         mgr.register_agent("child_agent", parent_id="parent_agent")
         child_config = mgr._get_agent_config("child_agent")
-        assert child_config.workspace == ""  # 子 Agent 不继承工作目录
+        assert child_config.workspace == ""  
 
 
-# ── 工作目录隔离 ───────────────────────────────────────────
+
 
 
 class TestWorkspaceIsolation:
@@ -318,7 +318,7 @@ class TestWorkspaceIsolation:
         os.makedirs(work_dir, exist_ok=True)
         cfg = SandboxConfig(workspace=work_dir)
         mgr = SandboxManager(config=cfg)
-        # 尝试访问工作目录外的路径
+        
         outside = str(tmp_path / "outside.txt")
         allowed, reason = mgr.grant_permission("agent_test", "file_write", outside, level=0)
         assert not allowed
@@ -328,7 +328,7 @@ class TestWorkspaceIsolation:
         from core.sandbox import SandboxManager, SandboxConfig
         cfg = SandboxConfig(workspace="")
         mgr = SandboxManager(config=cfg)
-        # workspace 为空，不限制路径
+        
         allowed, _ = mgr.grant_permission("agent_test", "file_read", "/anywhere/test.txt", level=0)
         assert allowed
 
@@ -351,15 +351,15 @@ class TestWorkspaceIsolation:
             workspace=work_dir,
             auto_approve_levels=[0, 1, 2],
         ))
-        # 工作目录内允许
+        
         inside = os.path.join(work_dir, "file.txt")
         assert mgr.check_permission("isolated_agent", "file_write", inside, level=2).allowed
-        # 工作目录外拒绝
+        
         outside = str(tmp_path / "outside.txt")
         assert not mgr.check_permission("isolated_agent", "file_write", outside, level=2).allowed
 
 
-# ── 确认回调 ───────────────────────────────────────────────
+
 
 
 class TestApprovalCallback:
@@ -397,7 +397,7 @@ class TestApprovalCallback:
 
     def test_no_callback_denies_l2(self):
         from core.sandbox import SandboxManager
-        mgr = SandboxManager()  # 无回调
+        mgr = SandboxManager()  
         allowed, reason = mgr.grant_permission("agent_test", "file_write", "/tmp/test.txt", level=2)
         assert not allowed
         assert "确认" in reason
@@ -405,10 +405,10 @@ class TestApprovalCallback:
     def test_set_callback_after_init(self):
         from core.sandbox import SandboxManager, ApprovalDecision, PermissionRequest
         mgr = SandboxManager()
-        # 初始无回调，L2 被拒
+        
         allowed, _ = mgr.grant_permission("agent_test", "file_write", "/tmp", level=2)
         assert not allowed
-        # 设置回调后允许
+        
         mgr.set_approval_callback(lambda req: ApprovalDecision(approved=True, request_id=req.request_id))
         allowed, reason = mgr.grant_permission("agent_test", "file_write", "/tmp", level=2)
         assert allowed
@@ -428,7 +428,7 @@ class TestApprovalCallback:
         assert len(received_request.get("actions", [])) == 1
 
 
-# ── 权限提升 ───────────────────────────────────────────────
+
 
 
 class TestPermissionUpgrade:
@@ -441,7 +441,7 @@ class TestPermissionUpgrade:
     def test_main_agent_no_upgrade_needed(self):
         from core.sandbox import SandboxManager
         mgr = SandboxManager()
-        # 主 Agent（无 parent_id）无需提升
+        
         mgr.register_agent("main_agent", parent_id="")
         allowed, reason = mgr.request_permission_upgrade("main_agent", 3)
         assert allowed
@@ -453,13 +453,13 @@ class TestPermissionUpgrade:
             return ApprovalDecision(approved=True, request_id=req.request_id)
         mgr = SandboxManager(approval_callback=approve)
         mgr.register_agent("child_agent", parent_id="main_agent", name="子Agent")
-        # L3 原本需确认
+        
         assert not mgr.check_permission("child_agent", "pytest", "/tmp", level=3).allowed
-        # 申请提升
+        
         allowed, reason = mgr.request_permission_upgrade("child_agent", 3, reason="需要运行测试")
         assert allowed
         assert "批准" in reason
-        # 提升后 L3 自动批准
+        
         assert mgr.check_permission("child_agent", "pytest", "/tmp", level=3).allowed
 
     def test_child_upgrade_denied(self):
@@ -476,21 +476,21 @@ class TestPermissionUpgrade:
         from core.sandbox import SandboxManager
         mgr = SandboxManager()
         mgr.register_agent("child_agent", parent_id="main_agent")
-        # L5 被禁止
+        
         allowed, reason = mgr.request_permission_upgrade("child_agent", 5)
         assert not allowed
         assert "禁止" in reason
 
     def test_child_upgrade_no_callback(self):
         from core.sandbox import SandboxManager
-        mgr = SandboxManager()  # 无回调
+        mgr = SandboxManager()  
         mgr.register_agent("child_agent", parent_id="main_agent")
         allowed, reason = mgr.request_permission_upgrade("child_agent", 3)
         assert not allowed
         assert "确认" in reason
 
 
-# ── 异常检测 ───────────────────────────────────────────────
+
 
 
 class TestAnomalyDetector:
@@ -551,7 +551,7 @@ class TestAnomalyDetector:
         assert len(detector._iteration_counters) == 0
 
 
-# ── 审计日志 ───────────────────────────────────────────────
+
 
 
 class TestAuditLog:
@@ -635,7 +635,7 @@ class TestAuditLog:
         assert all(e["agent_id"] == "agent_b" for e in b_entries)
 
 
-# ── 风险评分 ───────────────────────────────────────────────
+
 
 
 class TestRiskScore:
@@ -661,7 +661,7 @@ class TestRiskScore:
         from core.sandbox import SandboxManager
         mgr = SandboxManager()
         score = mgr.calculate_risk_score("file_write", {"target": "/etc/passwd"})
-        assert score > 0.3  # 系统路径加分
+        assert score > 0.3  
 
     def test_score_capped_at_1(self):
         from core.sandbox import SandboxManager
@@ -670,7 +670,7 @@ class TestRiskScore:
         assert score <= 1.0
 
 
-# ── Agent 配置加载 ────────────────────────────────────────
+
 
 
 class TestAgentConfigLoading:
@@ -698,15 +698,15 @@ class TestAgentConfigLoading:
             MockAgent("agent_child", parent_id="agent_main", name="子Agent"),
         ]
         count = load_agent_sandbox_configs(agents)
-        assert count == 1  # 只有主 Agent 有 override
+        assert count == 1  
 
         mgr = get_sandbox_manager()
-        # 主 Agent 配置已加载
+        
         config = mgr._get_agent_config("agent_main")
         assert config.default_level == "moderated"
         assert "file_read" in config.auto_approve_tools
 
-        # 子 Agent 已注册
+        
         assert "agent_child" in mgr._agent_registry
         assert mgr._agent_registry["agent_child"]["parent_id"] == "agent_main"
 
@@ -720,7 +720,7 @@ class TestAgentConfigLoading:
         assert info["task_id"] == "task_001"
 
 
-# ── A-002: 工具名单通配匹配 ────────────────────────────────
+
 
 
 class TestToolGlobMatching:
@@ -736,7 +736,7 @@ class TestToolGlobMatching:
         assert _tool_matches("mcp_browser_navigate", ["mcp_browser_*"])
         assert not _tool_matches("mcp_browser_navigate", ["mcp_res_*"])
         assert not _tool_matches("mcp_browser_navigate", [])
-        # 精确名与通配混合
+        
         assert _tool_matches("web_fetch", ["web_fetch", "mcp_*"])
 
     def test_auto_approve_glob(self):
@@ -749,7 +749,7 @@ class TestToolGlobMatching:
                                       "https://example.com", level=4)
         assert not result.allowed, "L4 MCP 工具不应被 mcp_* 通配自动批准"
         assert "需要用户确认" in result.reason
-        # 低权限（read/L0）MCP 工具仍自动批准（保留 MCP 可用性）
+        
         r2 = mgr.check_permission("agent_a", "mcp_read_file", "x", level=0)
         assert r2.allowed, "低权限 MCP 工具应自动批准"
 
@@ -802,9 +802,9 @@ class TestAgentOverrideMerge:
         load_agent_sandbox_configs([MockAgent()])
         mgr = get_sandbox_manager()
         cfg = mgr._get_agent_config("agent_m")
-        # 全局默认等级保留
+        
         assert cfg.auto_approve_levels == [0, 1]
-        # 列表字段并集：全局 mcp_* + override web_fetch 都在
+        
         assert "web_fetch" in cfg.auto_approve_tools
         assert "mcp_*" in cfg.auto_approve_tools
 
@@ -824,10 +824,10 @@ class TestAgentOverrideMerge:
         mgr = get_sandbox_manager()
         cfg = mgr._get_agent_config("agent_m")
         assert cfg.default_level == "moderated"
-        assert cfg.auto_approve_levels == [0, 1]  # 全局默认保留
+        assert cfg.auto_approve_levels == [0, 1]  
 
 
-# ── 数据类测试 ────────────────────────────────────────────
+
 
 
 class TestDataClasses:
@@ -877,7 +877,7 @@ class TestDataClasses:
         assert "危险操作" in result.anomaly_alerts
 
 
-# ── 向后兼容层测试 ────────────────────────────────────────
+
 
 
 class TestBackwardCompat:
@@ -915,10 +915,10 @@ class TestBackwardCompat:
     def test_sandbox_with_agent_id(self):
         from core.sandbox import create_default_sandbox, get_sandbox_manager, SandboxConfig, reset_sandbox_manager
         reset_sandbox_manager()
-        # 使用全局单例设置 Agent 配置
+        
         mgr = get_sandbox_manager()
         mgr.set_agent_config("agent_test", SandboxConfig(auto_approve_levels=[0, 1, 2]))
-        # 创建带 agent_id 的沙箱（使用全局 manager）
+        
         s = create_default_sandbox(agent_id="agent_test")
-        # 通过全局 SandboxManager 检查 L2
+        
         assert s.require_write("test_tool")

@@ -1,13 +1,13 @@
-/**
- * A-1061③ 守卫：工具**阶段命名**（状态行说"在做什么类型的事"）。
- *
- * 用户原话：「优化最下方的阶段监测返回，增加阶段描述，涵盖生成脚本中，执行命令中，调取工具中，
- * 等等等等，总之……记得**同步命好每个阶段的标题名字**，为现在这个做好铺垫」。
- *
- * 这条的验收点有两个，缺一不可：
- *   ① **阶段真的分类对了**（真模块真值表，不是搜字符串）—— 拿仓内**真实工具名**逐个过；
- *   ② **标题只有一个出处**（`TOOL_STAGE_TITLES`）—— 组件不许自己再写一份中文（否则必然漂移）。
- */
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,7 +23,7 @@ const code = (rel: string): string =>
 
 const PANEL = "gui/src/renderer/pages/ChatPanel.tsx";
 
-/** 仓内**真实**工具名（来自 core-ts/src/tools/*.ts 的注册清单；改了工具集要同步这里） */
+
 const REAL_TOOLS = [
   "adb_connect", "adb_devices", "adb_install", "adb_pull", "adb_push", "adb_reboot",
   "adb_screencap", "adb_setup", "adb_shell", "adb_uninstall", "ask_user",
@@ -96,7 +96,7 @@ describe("A-1061③ 阶段分类：拿真实工具名逐个过", () => {
   });
 
   it("prefix 规则的**顺序**：adb_screencap 必须落「操作屏幕」而不是「执行命令」", () => {
-    // 这是顺序敏感性的代表：`adb_` 是更宽的前缀，screen 规则必须排在它前面
+    
     expect(classifyToolStage("adb_screencap")).toBe("screen-control");
     expect(classifyToolStage("adb_shell")).toBe("run-command");
   });
@@ -125,7 +125,7 @@ describe("A-1061③ 状态行：阶段化标题接进 deriveLiveStatus（且向�
   it("接线：ChatPanel 真的把原始工具名传进去了", () => {
     const src = code(PANEL);
     expect(src).toContain("lastToolName: toolEvents.length > 0 ? toolEvents[toolEvents.length - 1]!.name : \"\",");
-    // 标题只许来自 liveStatus（组件里不许再写一份中文阶段名）
+    
     for (const t of Object.values(TOOL_STAGE_TITLES)) {
       if (t === "正在调用工具") { continue; }
       expect(src, `组件里出现硬编码阶段标题「${t}」，应改用 toolStageTitle()`).not.toContain(t);
@@ -133,7 +133,7 @@ describe("A-1061③ 状态行：阶段化标题接进 deriveLiveStatus（且向�
   });
 
   it("[反例] 断言能抓住坏写法（守卫自检）", () => {
-    // 顺序颠倒的实现（adb_ 规则在先）会把 adb_screencap 判成执行命令
+    
     const wrong = (n: string): ToolStage => (n.startsWith("adb_") ? "run-command" : n.startsWith("screen_") ? "screen-control" : "tool");
     expect(wrong("adb_screencap")).toBe("run-command");
     expect(classifyToolStage("adb_screencap")).toBe("screen-control");

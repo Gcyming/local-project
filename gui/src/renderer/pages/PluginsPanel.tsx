@@ -1,21 +1,21 @@
-/**
- * gui/src/renderer/pages/PluginsPanel.tsx — 插件页（统一清单）。
- *
- * 为何是「统一清单」而不是再做一个技能页：技能库（`SkillsPanel`）与 MCP 接入
- * （`McpPanel`）各自已经有完整的管理面，插件页再抄一遍只会得到两个会漂移的产地。
- * 这里做的是**跨两类能力的一个视图**，回答用户在别处答不上的问题：
- *   「我手上到底有哪些扩展能力？它们分别从哪来？哪些是 Agent 自己造的？」
- *
- * A-1140：新增「来源」维度。取值来自 SKILL.md frontmatter 的 `origin` 声明：
- *   · `agent`  —— Agent 自建（创造模式的产物）
- *   · `market` —— 官方技能仓库安装
- *   · `user`   —— 用户自备
- *   · 空       —— 未声明
- *
- * ⚠️ 这是**声明值，不是可信归属** —— 任何写入方都能伪造 `origin`。
- *    因此它只用于展示与筛选，**任何安全判定都不得依赖它**（权限走 core/permissions.py 与沙箱）。
- *    界面上也据此措辞：「声明来源」而非「来源」。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 
 interface SkillRow {
@@ -24,7 +24,7 @@ interface SkillRow {
   hasSkillMd: boolean;
   hasManifest: boolean;
   enabled: boolean;
-  /** A-1140：声明来源（可能为空串） */
+  
   origin?: string;
 }
 
@@ -102,7 +102,7 @@ export default function PluginsPanel(): JSX.Element {
     void refresh();
   }, [refresh]);
 
-  /* ── 统计 ── */
+  
   const stats = React.useMemo(() => {
     const byOrigin: Record<string, number> = { agent: 0, market: 0, user: 0, "": 0 };
     for (const s of skills) { byOrigin[originOf(s).key] = (byOrigin[originOf(s).key] ?? 0) + 1; }
@@ -115,7 +115,7 @@ export default function PluginsPanel(): JSX.Element {
     };
   }, [skills, mcp]);
 
-  /* ── 过滤 ── */
+  
   const q = query.trim().toLowerCase();
   const shown = React.useMemo(() => {
     return skills.filter((s) => {
@@ -125,7 +125,7 @@ export default function PluginsPanel(): JSX.Element {
     });
   }, [skills, q, originFilter]);
 
-  /* ── 操作 ── */
+  
   async function toggleSkill(s: SkillRow): Promise<void> {
     if (!api.current?.extras?.skillToggle) { return; }
     setBusy(`skill:${s.name}`);
@@ -175,7 +175,7 @@ export default function PluginsPanel(): JSX.Element {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, paddingBottom: 20 }}>
-      {/* 头 */}
+      {}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 14, fontWeight: 800 }}>插件</span>
         <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
@@ -196,7 +196,7 @@ export default function PluginsPanel(): JSX.Element {
         }}>{notice.text}</div>
       )}
 
-      {/* 来源说明 —— 明确「声明值 ≠ 可信归属」，避免用户把它当安全属性 */}
+      {}
       <div style={{
         padding: "9px 12px", borderRadius: 9, fontSize: 12,
         border: "1px dashed var(--border-hover)", color: "var(--text-muted)",
@@ -205,7 +205,7 @@ export default function PluginsPanel(): JSX.Element {
         <b>它是技能自己声明的，不能作为安全依据</b> —— 权限判定始终走沙箱与权限配置，不看这里。
       </div>
 
-      {/* 工具栏 */}
+      {}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <input className="input-field" value={query} spellCheck={false}
           placeholder="搜索技能名或描述…" style={{ flex: 1, minWidth: 180, fontSize: 12.5 }}
@@ -228,7 +228,7 @@ export default function PluginsPanel(): JSX.Element {
         ))}
       </div>
 
-      {/* 技能清单 */}
+      {}
       <div style={{ border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", overflow: "hidden" }}>
         <div style={{ padding: "7px 11px", borderBottom: "1px solid var(--border)", fontSize: 12.5, fontWeight: 700 }}>
           技能（{shown.length}{shown.length !== skills.length ? ` / ${skills.length}` : ""}）
@@ -270,7 +270,7 @@ export default function PluginsPanel(): JSX.Element {
         })}
       </div>
 
-      {/* MCP 清单 */}
+      {}
       <div style={{ border: "1px solid var(--card-border)", borderRadius: 10, background: "var(--card-surface)", overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 11px", borderBottom: "1px solid var(--border)" }}>
           <span style={{ fontSize: 12.5, fontWeight: 700 }}>MCP 服务器（{mcp.length}）</span>

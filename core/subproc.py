@@ -126,7 +126,7 @@ def _console_encoding() -> str:
         try:
             return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
         except Exception:
-            pass  # ctypes 不可用（极少见）→ 退回 locale
+            pass  
     try:
         return locale.getpreferredencoding(False)
     except Exception:
@@ -142,14 +142,14 @@ def decode_console(raw: bytes | str | None) -> str:
     if raw is None:
         return ""
     if isinstance(raw, str):
-        # 已经解码过（例如被 mock 替换成 text 模式的返回值）⇒ 原样放行，别重复解。
+        
         return raw
     for enc in (_console_encoding(), "utf-8"):
         try:
             return raw.decode(enc)
         except (UnicodeDecodeError, LookupError):
             continue
-    # 兜底：两个都不成立时也只换字符，不抛（抛 = 整条调用链的判据作废）。
+    
     try:
         return raw.decode(_console_encoding(), "replace")
     except Exception:
@@ -184,11 +184,11 @@ def run_text(
     proc = subprocess.run(
         cmd,
         capture_output=True,
-        text=False,          # ← 关键：解码不发生在 reader 线程里
+        text=False,          
         timeout=timeout,
         cwd=cwd,
         env=env,
-        check=False,         # check 由本函数自己做（要带上已解码的 output）
+        check=False,         
         **kwargs,
     )
     out = decode_console(proc.stdout)

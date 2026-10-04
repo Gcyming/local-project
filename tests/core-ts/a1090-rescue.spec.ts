@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1090-rescue.spec.ts — A-1090：把「压无可压」的出路真正交到用户手上。
- *
- * ## 本轮修的三个缺陷（都是"看起来在工作"的形态）
- *
- * | # | 缺陷 | 用户看到什么 |
- * |---|---|---|
- * | ① | 候选只带**裸 model id**，没有可写入 `model_choice` 的选择串 | 想「一键切换」也切不了 —— `api:<供应商key>:<模型id>` 拼不出来，拼错就切到一个不存在的模型 |
- * | ② | `formatRescueHint(undefined)` 与 `(null)` 输出**同一句话**（「**已查过**…没有候选」） | 引擎侧保险门**根本没查过**模型清单，却替一个没做过的检查背书 ⇒ 用户放弃了「换模型」这条本可能走得通的路 |
- * | ③ | 只有建议、没有出口；且红字横幅被 `resetStreamUI()` 同一批 setState 清成 null | 「一键切换」不存在；连错误提示都只在"切走再切回"时才冒出来 |
- *
- * ## 判据分工
- *
- *   A 段 = `pickRescueModel` 的排序键（必须与调用方去重键同源）
- *   B 段 = `formatRescueHint` / `formatCannotFit` 的**三态**（没查 / 查过没有 / 找到了）
- *   C 段 = 主进程 `suggestWiderChatModel` 回带 `choice` + 「没查成」返回 `undefined`
- *   D 段 = 渲染层接线（`await` 写盘 / 不留死横幅 / 按钮文案唯一产地）
- *   E 段 = 按钮文案与动作**同源**（说反话是 A-1062 那一族）
- *
- * 变异见 `gui/scripts/mut-a1090-rescue.mjs`。
- *
- * ⚠️ 中文文案一律用「」，不许夹 ASCII 双引号（否则整份 spec 会被打成 0 用例）。
- * ⚠️ 整文件 `toContain` 之前必须先确认字串**唯一**（本仓同族教训：同名多产地 ⇒ 删掉目标那处仍然绿）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,7 +37,7 @@ import { rescueSwitchLabel, RESCUE_SWITCH_TITLE } from "../../gui/src/renderer/p
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
-/** 剥注释：ChatPanel 的讲解注释里**故意**写着旧写法，不剥会自伤（同 `resume-outcome.spec.ts`）。 */
+
 function stripComments(src: string): string {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -49,22 +49,22 @@ const panelSrc = stripComments(readFileSync(join(ROOT, "gui", "src", "renderer",
 const ipcSrc = readFileSync(join(ROOT, "gui", "src", "shared", "ipc.ts"), "utf8");
 const streamErrSrc = stripComments(readFileSync(join(ROOT, "gui", "src", "renderer", "pages", "streamErrors.ts"), "utf8"));
 
-/** 出现次数（写守卫时先自查唯一性 —— 不唯一就必须带邻位上下文）。 */
+
 const count = (src: string, needle: string): number => src.split(needle).length - 1;
 
-/** 候选构造器（`choice` 可选，便于断言"老输入行为不变"）。 */
+
 const cand = (id: string, cap: number, choice?: string): CapCandidate =>
   choice === undefined ? { id, cap } : { id, cap, choice };
 
 describe("A-1090 A. 可救模型必须自带「可直接写入的选择串」", () => {
   it("平手（同 cap）按 `choice ?? id` 排 —— 与调用方去重键**同源**", () => {
-    /* id 顺序与 choice 顺序**刻意相反**：若判据退回按 `id` 排，这里会取到另一条。
-       同 cap 的两条：id="a-model"（choice="api:zz:flat"）与 id="b-model"（choice="api:aa:flat"）。
-       按 choice 排 ⇒ "api:aa:flat" 胜（= b-model）；按 id 排 ⇒ "a-model" 胜。两者可区分。 */
+    
+
+
     const a = cand("a-model", 200_000, "api:zz:flat");
     const b = cand("b-model", 200_000, "api:aa:flat");
     expect(pickRescueModel(10_000, 1_000, [a, b])?.choice).toBe("api:aa:flat");
-    // 入参顺序一换答案不变（确定性）
+    
     expect(pickRescueModel(10_000, 1_000, [b, a])?.choice).toBe("api:aa:flat");
   });
 
@@ -82,7 +82,7 @@ describe("A-1090 A. 可救模型必须自带「可直接写入的选择串」", 
   });
 
   it("`choice` 不参与「装得下」的判据（cap 才是唯一依据）", () => {
-    // 有一条 choice 很"漂亮"但窗口不够：它不许被选中
+    
     const chosen = pickRescueModel(300_000, 1_000, [
       cand("too-small", 100_000, "api:aaa:tiny"),
       cand("big-enough", 400_000, "api:zzz:huge"),
@@ -96,7 +96,7 @@ describe("A-1090 B. 「没查」≠「查过没有」（三态不许合并）", 
     const txt = formatRescueHint(undefined);
     expect(txt, "「没查」被说成「查过没有」= 替一个没做过的检查背书").not.toContain("已查过");
     expect(txt, "必须如实说没检查").toContain("没有检查");
-    // 且必须给出**可自行操作**的方向（否则等于"什么都不说"）
+    
     expect(txt).toMatch(/换模型|模型选择器/);
   });
 
@@ -139,8 +139,8 @@ describe("A-1090 C. 主进程 `suggestWiderChatModel`：回带 choice + 「没�
   });
 
   it("没有供应商 key 就**不能**登记该候选（拼不出可用串 ⇒ 宁可少一条出路，也不给一条点了没用的）", () => {
-    /* ⚠️ 必须锁**整行**：只断言「去重用了 ch」的话，「候选没把 ch 带进列表」这条回归照样绿
-       （dedup 与 push 是两个地方，`ch` 只在一处被消费也满足 `toContain("ch")`）。 */
+    
+
     expect(mainSrc, "缺 key 时仍然登记 ⇒ 切到一个不存在的模型（静默失败）")
       .toContain("if (!mid || !ch || c <= 0 || seen.has(ch)) { return; }");
     expect(mainSrc, "候选列表里没带选择串 ⇒ 渲染层永远拿不到 choice（按钮切不过去）")
@@ -169,8 +169,8 @@ describe("A-1090 C. 主进程 `suggestWiderChatModel`：回带 choice + 「没�
   });
 
   it("两条「压无可压」路径都回带**结构化** `rescueModel`（只有文本时渲染层点不了）", () => {
-    /* ⚠️ 两条路径的锚点必须各自**唯一**：`{ rescueModel: rescue }` 这个子串在两处都出现，
-       直接数它只会得到一个恒等式（本仓同族教训：整文件 `toContain` 前先确认唯一性）。 */
+    
+
     expect(count(mainSrc, "...(rescue ? { rescueModel: rescue } : {}),"), "拒发路径没回带结构化候选")
       .toBe(1);
     expect(count(mainSrc, "...(stillOverflow && rescue ? { rescueModel: rescue } : {}),"), "压完仍超限路径没回带结构化候选")
@@ -199,7 +199,7 @@ describe("A-1090 D. 渲染层接线：await 写盘 / 不留死横幅 / 文案唯
     expect(panelSrc).toContain("{rescueSwitchLabel(rescueAction.model)}");
     expect(panelSrc, "组件里又手拼了一份按钮文案 ⇒ 改一处漂移一处（文案与动作说反话的温床）")
       .not.toContain("并继续本轮");
-    // 按钮的悬停说明同样来自唯一产地
+    
     expect(panelSrc).toContain("title={RESCUE_SWITCH_TITLE}");
   });
 

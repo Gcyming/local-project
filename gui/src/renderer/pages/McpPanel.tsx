@@ -1,15 +1,15 @@
-/**
- * gui/src/renderer/pages/McpPanel.tsx — 设置「MCP 接入」专栏。
- * 从供应商界面剥离，独立管理：查看 MCP 服务器（来自 slime.toml [[mcp_servers]]）、
- * 启用/停用（注释/取消注释该块）。工具的开放与关闭受全局「权限」开关约束。
- */
+
+
+
+
+
 import React, { type JSX } from "react";
 import type { McpServerInfo } from "../../shared/ipc.js";
 import { confirmAsync } from "../dialog.js";
 import { marketSource } from "./marketView.js";
 import { localizeServerTags } from "../../../../core-ts/src/services/marketLocalize.js";
 
-/** A-918++：内置 MCP 插件广场目录（业界常用 MCP 服务器一键安装；envHint 提示需要的环境变量） */
+
 const MCP_MARKETPLACE: Array<{
   name: string; desc: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; envHint?: string; tags?: string[];
 }> = [
@@ -42,35 +42,35 @@ export default function McpPanel(): JSX.Element {
   const [busy, setBusy] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
 
-  // A-918++：GUI 表单新增 MCP 服务器（此前只能手动编辑 slime.toml，小白无从下手）
+  
   const [addOpen, setAddOpen] = React.useState(false);
   const [adding, setAdding] = React.useState(false);
   const [form, setForm] = React.useState<{ name: string; kind: "stdio" | "http"; command: string; args: string; url: string; env: string }>({
     name: "", kind: "stdio", command: "", args: "", url: "", env: "",
   });
-  // A-918++：插件广场（官方 registry 联网优先 + 预制兜底）
+  
   const [marketOpen, setMarketOpen] = React.useState(false);
   const [installing, setInstalling] = React.useState<string | null>(null);
-  // A-918++：广场搜索/过滤
+  
   const [marketQuery, setMarketQuery] = React.useState("");
-  // A-918++：官方 registry 联网结果（Linux Foundation MCP registry）
+  
   const [registryServers, setRegistryServers] = React.useState<Array<{
     name: string; displayName: string; description: string; source: string;
     install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string };
   }> | null>(null);
   const [registryLoading, setRegistryLoading] = React.useState(false);
   const [registryError, setRegistryError] = React.useState("");
-  // A-1106：**最近一次生效的搜索词** —— 列表「归谁」只由它决定（空 = 内置精选视图）。
-  // 不能直接用 `marketQuery` 判定：那样用户一打字、还没回车，列表就会在两种数据源间跳变。
+  
+  
   const [registryQuery, setRegistryQuery] = React.useState("");
-  // A-1106：**真正发给上游的检索词**（中文输入会被展开成英文）+ 「没认出来」标记。
-  // 两者都只用于**如实显示**——用户搜了中文，界面必须说清实际搜的是什么（不许静默）。
+  
+  
   const [registryApplied, setRegistryApplied] = React.useState("");
   const [registryUnrecognized, setRegistryUnrecognized] = React.useState(false);
-  // A-918++：列表只渲染前 20 条（防 60+ 卡片全量渲染卡顿）+「显示更多」
+  
   const [showAll, setShowAll] = React.useState(false);
 
-  /** 联网拉取官方 MCP registry（**只在用户主动搜索时**调用；空词 = 重置回内置精选） */
+  
   const loadRegistry = React.useCallback(async (force = false, q = ""): Promise<void> => {
     if (!api.current?.extras?.mcpRegistrySearch) { return; }
     if (!force && registryServers !== null && !q) { return; }
@@ -81,9 +81,9 @@ export default function McpPanel(): JSX.Element {
       const res = await api.current.extras.mcpRegistrySearch(term || undefined);
       if (res?.ok && Array.isArray(res.servers)) {
         setRegistryServers(res.servers);
-        // A-1106：只有「用户主动搜索且搜到了」才让 registry 结果接管列表；空词 = 回到内置精选
+        
         setRegistryQuery(term);
-        // 如实记录"上游实际收到的检索词"（中文会被展开成英文）与"没认出来"
+        
         setRegistryApplied(res.appliedQuery ?? term);
         setRegistryUnrecognized(res.unrecognized === true);
       } else { setRegistryError(res?.error ?? "联网搜索失败"); }
@@ -94,17 +94,17 @@ export default function McpPanel(): JSX.Element {
     }
   }, [registryServers]);
 
-  // A-1106：**打开广场不再自动联网**（原为 `if (marketOpen) { void loadRegistry(); }`）。
-  // 旧行为：一打开就拉全量 registry，网络返回后 `hasRegistry` 把整个列表替换成 registry 的
-  // 30 条按字母序通用目录项（`ac.inference.sh/mcp` 之类），用户正想装的内置精选
-  // （filesystem / playwright / memory …，只有它们带准确安装命令）**当场消失、无声无息**
-  // —— 用户报「刚打开是内置精选，过一会就变成 registry 了」。
-  // 现在：内置精选常驻；registry 只在用户按回车 / 点「联网搜索」时接管（见下方 useRegistry）。
+  
+  
+  
+  
+  
+  
   React.useEffect(() => {
     if (marketOpen) { setShowAll(false); }
   }, [marketOpen]);
 
-  /** 从官方 registry 一键安装 */
+  
   async function installFromRegistry(card: {
     name: string; displayName: string; description: string; source: string;
     install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string };
@@ -149,7 +149,7 @@ export default function McpPanel(): JSX.Element {
     void load();
   }, [load]);
 
-  /** 一键安装插件广场目录项 */
+  
   async function installFromMarket(item: typeof MCP_MARKETPLACE[number]): Promise<void> {
     if (!api.current?.extras?.mcpAdd) { return; }
     setInstalling(item.name);
@@ -166,7 +166,7 @@ export default function McpPanel(): JSX.Element {
         args: item.args,
         url: item.url,
         env: Object.keys(env).length > 0 ? env : undefined,
-        force: true, // A-918++：内置精选为可信源，跳过危险特征检测
+        force: true, 
       });
       if (res?.ok) {
         showNotice(true, `MCP 服务器「${item.name}」已安装${item.envHint ? `，请补全环境变量 ${item.envHint.split("=")[0]}` : ""}`);
@@ -181,7 +181,7 @@ export default function McpPanel(): JSX.Element {
     }
   }
 
-  /** 提交新增 MCP 服务器表单 */
+  
   async function submitAdd(force = false): Promise<void> {
     if (!api.current?.extras?.mcpAdd) { return; }
     if (!form.name.trim()) { showNotice(false, "名称必填"); return; }
@@ -206,7 +206,7 @@ export default function McpPanel(): JSX.Element {
         env: Object.keys(env).length > 0 ? env : undefined,
         force,
       });
-      // A-918++：命中危险特征 → 二次确认后 force 重发（安全护栏）
+      
       if (!res?.ok && res?.riskWarning && Array.isArray(res.riskWarning) && !force) {
         const yes = await confirmAsync(
           `命令含可疑特征，确定继续添加「${form.name.trim()}」？`,
@@ -249,7 +249,7 @@ export default function McpPanel(): JSX.Element {
     }
   }
 
-  /** 打开 MCP 配置所在目录（slime.toml 项目根） */
+  
   async function openFolder(): Promise<void> {
     if (!api.current?.extras?.mcpOpen) { return; }
     const res = await api.current.extras.mcpOpen().catch((e: unknown) => ({ ok: false, error: String(e) }));
@@ -258,7 +258,7 @@ export default function McpPanel(): JSX.Element {
     }
   }
 
-  /** 删除 MCP 服务器（从 slime.toml 移除块） */
+  
   async function remove(m: McpServerInfo): Promise<void> {
     if (!api.current?.extras?.mcpDelete) { return; }
     if (!(await confirmAsync(`确定删除 MCP 服务器「${m.name}」？`, "其 [[mcp_servers]] 配置块将从 slime.toml 移除（自动备份 .bak）。"))) { return; }
@@ -279,7 +279,7 @@ export default function McpPanel(): JSX.Element {
   }
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>MCP 接入</h2>
@@ -300,10 +300,10 @@ export default function McpPanel(): JSX.Element {
         本专栏负责接入/开关，协议的详细调试仍在供应商弹窗的「参数文件调试」里。
       </div>
 
-      {/* A-918++：GUI 表单新增 MCP 服务器（直达，不再要求手动编辑 slime.toml） */}
-      {/* A-1015：常驻 + 高度插值（此前 `{addOpen && …}` 展开/收起都是瞬时跳变，与侧栏节奏不一致）。
-          wrapper 两层是必需的：.collapse(grid 容器) > 纯 div(grid 行，负责 overflow 裁切) → 原卡片。
-          内容缩进**刻意不动**——这一带刚出过结构事故（A-999），只加壳不重排，把 diff 压到最小。 */}
+      {}
+      {
+
+}
       <div className={`collapse${addOpen ? " is-open" : ""}`}>
       <div>
         <div className="card" style={{ padding: "14px 16px", marginBottom: 14 }}>
@@ -365,37 +365,37 @@ export default function McpPanel(): JSX.Element {
       </div>
       </div>
 
-      {/* A-918++：插件广场——官方 MCP registry（Linux Foundation）联网搜索 + 内置精选兜底 */}
-      {/* A-1015：同样常驻 + 高度插值。常驻后的额外成本可忽略：搜索框只在 marketOpen
-          时可见，所以 marketQuery 变化必然发生在展开态，不存在"收起时因输入而重渲染列表"。 */}
+      {}
+      {
+}
       <div className={`collapse${marketOpen ? " is-open" : ""}`}>
       <div>
       {(() => {
         const q = marketQuery.trim().toLowerCase();
         const regList = (registryServers ?? []).map((s) => ({ ...s, __registry: true as const }));
         const builtinList = MCP_MARKETPLACE.map((m) => ({ ...m, name: m.name, desc: m.desc, tags: m.tags }));
-        // A-1106：**registry 结果只在用户主动搜索过（registryQuery 非空）时才接管列表**。
-        // 旧的 `hasRegistry` 只看「联网是否拿到数据」⇒ 打开广场自动联网一返回，内置精选就被
-        // registry 全量目录无声替换掉（用户报的症状）。现在内置精选是默认视图、永不被替换。
-        // ⚠️ 判据**不在这里内联**：唯一出处是 `marketView.ts` 的 `marketSource()`（纯逻辑、可测）。
-        //    内联一份 = 两个产地，改一处漏一处（A-1100 同型）。
+        
+        
+        
+        
+        
         const useRegistry = marketSource(registryQuery, registryServers?.length ?? 0) === "registry";
         const viewList: Array<{ name: string; desc: string; tags?: string[]; registry: boolean; installCmd?: string; needEnv?: boolean; kind?: string }> =
           useRegistry
             ? regList.map((s) => ({
                 name: s.displayName, desc: s.description, registry: true,
-                // A-1106：registry 的描述是**英文原文**，给人一眼看得懂的**中文类别标签**
-                // （唯一出处 `marketLocalize.localizeServerTags`，不翻译整句以免半中半英）。
+                
+                
                 tags: localizeServerTags(s.displayName, s.description),
                 installCmd: s.install?.kind === "stdio" ? `${s.install.command} ${s.install.args.join(" ")}` : s.install?.kind === "http" ? s.install.url : "",
                 needEnv: (s.install?.kind === "stdio" && s.install.envHints.length > 0) || false,
                 kind: s.install?.kind,
               }))
             : builtinList.map((m) => ({ name: m.name, desc: m.desc, tags: m.tags, registry: false }));
-        /* A-1106：本地二次过滤**只对内置精选做**。
-           registry 的结果**已经由上游按检索词筛过**（检索词还可能被 `expandMarketQuery`
-           展开成英文）——此处若再拿用户输入的**中文**去比英文字段，必然全部落空 ⇒ 得到空列表。
-           （这正是"修一个坏一个"的典型形态：不处理它，中文搜索会稳定显示"没找到"。） */
+        
+
+
+
         const filtered = !useRegistry && q
           ? viewList.filter((it) => it.name.toLowerCase().includes(q) || it.desc.toLowerCase().includes(q) || (it.tags ?? []).some((t) => t.toLowerCase().includes(q)))
           : viewList;
@@ -413,7 +413,7 @@ export default function McpPanel(): JSX.Element {
               value={marketQuery}
               onChange={(e) => {
                 setMarketQuery(e.target.value);
-                // A-1106：**清空输入框 = 回到内置精选**（否则列表会停在旧搜索结果上，用户看不出怎么回去）
+                
                 if (e.target.value.trim() === "") { setRegistryQuery(""); }
               }}
               onKeyDown={(e) => { if (e.key === "Enter" && q) { void loadRegistry(true, marketQuery.trim()); } }} />
@@ -424,9 +424,9 @@ export default function McpPanel(): JSX.Element {
           </div>
           <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginBottom: 10, lineHeight: 1.6 }}>
             {registryLoading ? "正在检索官方 MCP 目录（registry.modelcontextprotocol.io，Linux Foundation 维护）…" :
-              /* A-1106：**如实显示实际检索词** —— 中文输入会被展开成英文再发给上游，
-                 用户有权知道"我搜的这个词到底变成了什么"（瞒着他就变成"为什么搜不到"）。
-                 另外「没认出来」的情形必须点名 + 给可操作建议，不许静默按原词搜一遍了事。 */
+              
+
+
               useRegistry ? `来源：MCP 官方目录（全球权威索引）。按「${registryQuery}」检索`
                 + (registryApplied && registryApplied.toLowerCase() !== registryQuery.toLowerCase() ? `（实际检索词：${registryApplied}）` : "")
                 + (registryUnrecognized ? `。⚠️ 未收录「${registryQuery}」对应的英文关键词，已按原词搜索 —— 多半搜不到，换个说法或直接输英文（如 browser / database / filesystem）` : "")
@@ -437,8 +437,8 @@ export default function McpPanel(): JSX.Element {
           {filtered.length === 0 ? (
             <div style={{ padding: "20px", textAlign: "center", color: "var(--text-dim)", fontSize: 12.5 }}>
               {!useRegistry && q ? `「${marketQuery}」暂无本地匹配——按回车联网搜官方目录`
-                /* A-1106：registry 模式下 0 条**不是**"没找到匹配"，而是**上游就没返回**。
-                   两种情况必须分开说：前者是本地筛选结果，后者要提示换检索词。 */
+                
+
                 : useRegistry ? `官方目录没有与「${registryQuery}」（检索词：${registryApplied || registryQuery}）匹配的条目 —— 换个关键词试试，或清空搜索框回到内置精选`
                 : `没找到匹配「${marketQuery}」的插件`}
             </div>
@@ -459,8 +459,8 @@ export default function McpPanel(): JSX.Element {
                       {isInstalled ? <span style={{ marginLeft: 6, fontSize: 11, color: "var(--success)", fontWeight: 400 }}>已安装</span> : null}
                     </div>
                     <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>{item.desc || "（无描述）"}</div>
-                    {/* A-1106：**中文类别标签**（内置精选的 tags 此前是死数据 —— 定义了却从没渲染过）。
-                        registry 条目的描述是英文原文，标签给人一眼看得懂的类别线索。 */}
+                    {
+}
                     {(item.tags ?? []).length > 0 && (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
                         {(item.tags ?? []).map((t) => (
@@ -507,7 +507,7 @@ export default function McpPanel(): JSX.Element {
       })()}
       </div>
       </div>
-      {/* A-1015：marketOpen 闭（原为 `{marketOpen && (() => …)()}` 条件渲染 → 常驻 + 高度插值） */}
+      {}
 
       {notice && (
         <div style={{

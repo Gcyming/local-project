@@ -1,27 +1,27 @@
-/**
- * tests/core-ts/a1106-skills-square.spec.ts — A-1106 续：技能广场的 MCP 广场**同款**缺陷。
- *
- * 用户原话：「你就看看 skill 的广场，看看有没有 mcp 广场同款的问题」。
- *
- * 逐条比对 MCP 广场那三件缺陷，技能广场**三件全中**：
- *
- * | # | MCP 广场的缺陷 | 技能广场的旧形态 |
- * |---|---|---|
- * | ① | 打开广场就联网，网络一返回把内置精选**整个替换**掉 | `useEffect(() => { if (marketOpen) { void loadMarket(); } })`；判据是 `marketOnline !== null` |
- * | ② | 列表「归谁」的判据内联在组件里 | 同上（`marketOnline !== null` 就是判据本体，没有唯一出处函数） |
- * | ③ | 官方 registry 全是英文，中文用户无从下手 | 官方仓库（`anthropics/skills`）的 name/description 是**英文原文**，且中文检索词恒搜不到 |
- *
- * ## 两个广场的**数据源形态不同**（所以判据不能照抄）
- *
- *    · MCP registry = **搜索后端**：请求信号 = 搜索词非空（`marketSource`）。
- *    · 技能官方仓库 = **一次性拉全量 + 本地过滤**：请求信号 = 用户点过「拉取官方仓库」
- *      （`onlineSourceActive(requestedOnline, count)`）。
- *
- *  而本地过滤必须带上**原输入 + 展开后英文关键词的并集**：预制列表是中文、官方仓库是英文，
- *  只带其中一边必然"修一个坏一个"。
- *
- * ⚠️ 中文句子里不许夹 ASCII 双引号（一律「」）——否则会把整份 spec 打成 0 用例。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -30,7 +30,7 @@ import { marketNeedles, filterMarketItems, onlineSourceActive } from "../../gui/
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const readSrc = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
-/** 剥注释后再断言（注释里会**故意**写出旧写法/新写法的说明，不剥就是假红或假绿） */
+
 const stripComments = (s: string): string => s
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^[ \t]*\/\/.*$/gm, "");
@@ -38,7 +38,7 @@ const countOf = (hay: string, needle: string): number => hay.split(needle).lengt
 
 const SKILLS = stripComments(readSrc("gui/src/renderer/pages/SkillsPanel.tsx"));
 
-/* ═════════════════ S 组：判据与接线（静默失效家族 ⑬ 的同款形态）═════════════════ */
+
 
 describe("A-1106 S 组 — 技能广场：拉取由用户发起、判据唯一出处、中文可搜", () => {
   it("S1 联网判据必须来自 `onlineSourceActive`，**不许**退化成「联网有没有数据」", () => {
@@ -60,8 +60,8 @@ describe("A-1106 S 组 — 技能广场：拉取由用户发起、判据唯一�
 
   it("S3 联网只许由**显式动作**发起（按钮），不许有第二条自发路径", () => {
     expect(SKILLS).toContain("onClick={() => void loadMarket(true)}");
-    // `loadMarket(` 的调用点只有两处：按钮（显式）与 saveToken（**条件**，见 S5）。
-    // 定义处写的是 `const loadMarket = React.useCallback(` ⇒ 不含 `loadMarket(`，不计入。
+    
+    
     expect(countOf(SKILLS, "loadMarket("), "loadMarket 的调用点：按钮 1 + saveToken 条件 1").toBe(2);
   });
 
@@ -99,7 +99,7 @@ describe("A-1106 S 组 — 技能广场：拉取由用户发起、判据唯一�
   });
 });
 
-/* ═════════════════ T 组：本地匹配关键词（纯逻辑）═════════════════ */
+
 
 describe("A-1106 T 组 — 技能广场的本地匹配关键词（两个数据源语言不同）", () => {
   it("T1 `marketNeedles` = **原输入 + 展开词**的并集（只带一边必然「修一个坏一个」）", () => {

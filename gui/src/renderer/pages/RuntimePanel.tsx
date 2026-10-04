@@ -1,8 +1,8 @@
-/**
- * gui/src/renderer/pages/RuntimePanel.tsx — 设置「运行环境」专栏（A-918++）。
- * 列出随包配套工具：Node / Python / Git / llama.cpp / 本地模型 的路径·版本·大小·就绪状态；
- * 图标用 gui/icon/icon_fpbc119q3rk 官方 SVG（非 emoji）；缺失项提供「下载/修复」动作。
- */
+
+
+
+
+
 import React, { type JSX } from "react";
 import nodeIcon from "../../../icon/icon_fpbc119q3rk/Nodejs.svg";
 import pythonIcon from "../../../icon/icon_fpbc119q3rk/python.svg";
@@ -32,7 +32,7 @@ const KIND_META: Record<RuntimeItem["kind"], { icon: string; brief: string }> = 
   adb: { icon: adbIcon, brief: "Android 调试桥（ADB）" },
 };
 
-/** SVG 单色图标 → 主题亮灰（配合深色 UI） */
+
 const imgFilter: React.CSSProperties = { filter: "brightness(0) invert(0.72)", opacity: 0.95 };
 
 export default function RuntimePanel(): JSX.Element {
@@ -40,15 +40,15 @@ export default function RuntimePanel(): JSX.Element {
   const [items, setItems] = React.useState<RuntimeItem[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
-  /** 成功/失败小提示（复用 error 区，加 ok 标记） */
+  
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
   const showNotice = (ok: boolean, text: string): void => {
     setNotice({ ok, text });
     window.setTimeout(() => setNotice(null), 4000);
   };
-  // 下载中的 target（llama/bge）→ 按钮显示进度文案
+  
   const [downloading, setDownloading] = React.useState<Record<string, number>>({});
-  // A-918++：重建 venv 状态（长时间异步）
+  
   const [rebuildingVenv, setRebuildingVenv] = React.useState(false);
 
   const load = React.useCallback(async (): Promise<void> => {
@@ -76,13 +76,13 @@ export default function RuntimePanel(): JSX.Element {
   async function runAction(it: RuntimeItem): Promise<void> {
     if (!it.action) { return; }
     const a = it.action;
-    // llama/bge → 内置下载器直接下载（复用 MindHubPanel 的 mind.download 链路）
+    
     if (a.kind === "download" && a.target && api?.mind?.download) {
       const t = a.target;
       setDownloading((p) => ({ ...p, [t]: 0 }));
       const res = await api.mind.download(t).catch((e: unknown) => ({ ok: false, error: String(e) }));
       if (!res?.ok) { setError(res?.error ?? "下载启动失败"); }
-      // 定时拉下载进度（2s 后停止轮询；完成由用户手动刷新）
+      
       const t0 = Date.now();
       const poll = window.setInterval(() => {
         void (api.mind.downloadSnapshot?.(t) as Promise<{ percent?: number; done?: boolean }> | undefined)
@@ -94,7 +94,7 @@ export default function RuntimePanel(): JSX.Element {
       }, 1500);
       return;
     }
-    // A-918++：ADB —— 下载 platform-tools（缺失时）
+    
     if (a.kind === "adbDownload" && api?.adb?.download) {
       showNotice(true, "开始下载 platform-tools…");
       const res = await api.adb.download().catch((e: unknown) => ({ ok: false, error: String(e) }));
@@ -102,20 +102,20 @@ export default function RuntimePanel(): JSX.Element {
       else { setError(res?.error ?? "下载失败"); }
       return;
     }
-    // A-918++：ADB —— 启动服务（adb start-server）
+    
     if (a.kind === "adbStart" && api?.adb?.startServer) {
       const res = await api.adb.startServer().catch((e: unknown) => ({ ok: false, error: String(e) }));
       if (res?.ok) { showNotice(true, `ADB 服务已启动${res.version ? `（${res.version}）` : ""}`); await load(); }
       else { setError(res?.error ?? "ADB 服务启动失败（检查 platform-tools 是否完整）"); }
       return;
     }
-    // 其他动作（打开官网/目录）
+    
     if (!api?.runtime?.open) { return; }
     const res = await api.runtime.open(a).catch((e: unknown) => ({ ok: false, error: String(e) }));
     if (!res?.ok) { setError(res?.error ?? "动作失败"); }
   }
 
-  /** A-918++：重建 Python venv（用户已装 Python 后一键重建） */
+  
   async function rebuildVenv(): Promise<void> {
     if (!api?.runtime?.installPython) { setError("安装 Python API 未就绪"); return; }
     setRebuildingVenv(true);
@@ -132,10 +132,10 @@ export default function RuntimePanel(): JSX.Element {
     }
   }
 
-  /* ── 阶段 C：老版 Office（.doc/.xls/.ppt）保真预览的前置依赖 ──────────────────────
-     为什么放「运行环境」而不是别处：它和 Node/Python/Git 一样是**机器级外部依赖**，
-     不是某个文件的属性 ⇒ 归到这一类用户才能在"文件打不开"时找到它。
-     ⚠️ 判据只有一处（主进程 `libreofficeConvert.ts`）—— 这里**不许**自己拼安装路径。 */
+  
+
+
+
   interface LoProbe { found: boolean; path: string; version: string; hint: string }
   const [lo, setLo] = React.useState<LoProbe | null>(null);
   const [loBusy, setLoBusy] = React.useState(false);
@@ -146,13 +146,13 @@ export default function RuntimePanel(): JSX.Element {
     try {
       const r = await api.office.libreofficeProbe(force) as LoProbe;
       setLo(r);
-    } catch { /* 未就绪时静默：这一栏是补充信息，不该把整页打成错误 */ }
+    } catch {  }
     finally { setLoBusy(false); }
   }, [api]);
 
   React.useEffect(() => { void loadLo(); }, [loadLo]);
 
-  /* ── 图形控制能力（screen_*）：后端/目标一览 + 紧急停止 + 截图预览 ── */
+  
   interface ScreenInfo {
     enabled: boolean;
     halted: boolean;
@@ -168,7 +168,7 @@ export default function RuntimePanel(): JSX.Element {
     try {
       const res = await api.screen.info() as ScreenInfo;
       setScreen(res);
-    } catch { /* 未就绪时静默 */ }
+    } catch {  }
   }, [api]);
 
   React.useEffect(() => {
@@ -200,7 +200,7 @@ export default function RuntimePanel(): JSX.Element {
   }
 
   const renderAction = (it: RuntimeItem): JSX.Element | null => {
-    // A-918++：不再限"未就绪"——ADB 就绪时也要显示「启动 ADB 服务」按钮
+    
     if (!it.action) { return null; }
     const a = it.action;
     const d = a.kind === "download" && a.target ? downloading[a.target] : undefined;
@@ -211,7 +211,7 @@ export default function RuntimePanel(): JSX.Element {
         {d !== undefined ? (d > 0 ? `下载中 ${d}%` : "开始下载…") : a.label}
       </button>
     );
-    // python 缺失额外加"重建 venv"次按钮（用户装好 Python 后用）
+    
     if (it.kind === "python") {
       return (
         <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
@@ -228,7 +228,7 @@ export default function RuntimePanel(): JSX.Element {
   };
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
         <h2 style={{ fontSize: 18, margin: 0, flex: 1 }}>运行环境</h2>
@@ -291,9 +291,9 @@ export default function RuntimePanel(): JSX.Element {
         </div>
       )}
 
-      {/* ── 阶段 C：老版 Office 文件的保真预览（可选外部依赖） ───────────────────────
-          用户 2026-09-29 决策：「先探测本机已有的，缺了再提示下载」。这里就是那个"提示下载"的落点，
-          也是他装完之后回来**复检**的地方（「重新检测」会 force 跳过缓存）。 */}
+      {
+
+}
       <div style={{ marginTop: 18 }}>
         <h2 style={{ fontSize: 15, margin: "0 0 4px" }}>文档预览增强</h2>
         <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 10 }}>
@@ -317,14 +317,14 @@ export default function RuntimePanel(): JSX.Element {
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, fontFamily: "Consolas, monospace", wordBreak: "break-all" }}>{lo.path}</div>
             )}
             {lo && !lo.found && (
-              /* ⚠️ 提示必须**可操作**（给下载入口），不是"不支持"三个字。
-                 文案来自主进程的 `LO_DOWNLOAD_HINT`（唯一产地）—— 两处各写一份必然漂。 */
+              
+
               <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{lo.hint}</div>
             )}
           </div>
           {lo && !lo.found && (
             <button className="btn primary" style={{ padding: "5px 14px", fontSize: 12, flexShrink: 0, whiteSpace: "nowrap" }}
-              onClick={() => { try { window.open("https://www.libreoffice.org/download/download-libreoffice/", "_blank"); } catch { /* 忽略 */ } }}>
+              onClick={() => { try { window.open("https://www.libreoffice.org/download/download-libreoffice/", "_blank"); } catch {  } }}>
               前往下载
             </button>
           )}
@@ -337,7 +337,7 @@ export default function RuntimePanel(): JSX.Element {
         </div>
       </div>
 
-      {/* ── 图形控制能力（桌面 + 安卓统一）：可用目标一览 / 截图预览 / 紧急停止 ── */}
+      {}
       <div style={{ marginTop: 18 }}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
           <h2 style={{ fontSize: 15, margin: 0, flex: 1 }}>图形控制能力</h2>

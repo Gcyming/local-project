@@ -12,49 +12,49 @@ from pathlib import Path
 from typing import Optional
 
 
-# ── 生命周期状态 ──────────────────────────────────────────
+
 
 class AgentLifecycle(Enum):
-    BIRTH = "birth"              # 刚创建，空人格
-    GROWTH = "growth"            # 对话积累中
-    SPECIALIZING = "specializing"  # 开始专业化
-    MATURITY = "maturity"        # 人格稳定
-    WISE = "wise"                # 经验老道
-    DYING = "dying"              # 不再活跃
-    DEATH = "death"              # 归档不删除
+    BIRTH = "birth"              
+    GROWTH = "growth"            
+    SPECIALIZING = "specializing"  
+    MATURITY = "maturity"        
+    WISE = "wise"                
+    DYING = "dying"              
+    DEATH = "death"              
 
 
-# 生命周期的自然流转规则
+
 LIFECYCLE_TRANSITIONS = {
-    AgentLifecycle.BIRTH:       AgentLifecycle.GROWTH,       # 首次对话后
-    AgentLifecycle.GROWTH:      AgentLifecycle.SPECIALIZING, # 积累足够后
-    AgentLifecycle.SPECIALIZING: AgentLifecycle.MATURITY,    # 专精后
-    AgentLifecycle.MATURITY:    AgentLifecycle.WISE,         # 长期稳定
-    AgentLifecycle.WISE:        AgentLifecycle.DYING,        # 不再活跃
-    AgentLifecycle.DYING:       AgentLifecycle.DEATH,        # 长期不活跃
-    AgentLifecycle.DEATH:       AgentLifecycle.DEATH,        # 终态
+    AgentLifecycle.BIRTH:       AgentLifecycle.GROWTH,       
+    AgentLifecycle.GROWTH:      AgentLifecycle.SPECIALIZING, 
+    AgentLifecycle.SPECIALIZING: AgentLifecycle.MATURITY,    
+    AgentLifecycle.MATURITY:    AgentLifecycle.WISE,         
+    AgentLifecycle.WISE:        AgentLifecycle.DYING,        
+    AgentLifecycle.DYING:       AgentLifecycle.DEATH,        
+    AgentLifecycle.DEATH:       AgentLifecycle.DEATH,        
 }
 
-# 触发状态转换的交互次数阈值
+
 INTERACTION_THRESHOLDS = {
-    AgentLifecycle.BIRTH: 1,       # 1 次对话 → GROWTH
-    AgentLifecycle.GROWTH: 20,     # 20 次 → SPECIALIZING
-    AgentLifecycle.SPECIALIZING: 100,  # 100 次 → MATURITY
-    AgentLifecycle.MATURITY: 500,  # 500 次 → WISE
+    AgentLifecycle.BIRTH: 1,       
+    AgentLifecycle.GROWTH: 20,     
+    AgentLifecycle.SPECIALIZING: 100,  
+    AgentLifecycle.MATURITY: 500,  
 }
 
-# 生命周期晋升所需的最低成功率（低于此值则延迟晋升）
+
 MIN_SUCCESS_RATE_FOR_PROMOTION = {
-    AgentLifecycle.GROWTH: 0.4,       # 40% 成功率即可晋升
-    AgentLifecycle.SPECIALIZING: 0.5,  # 50%
-    AgentLifecycle.MATURITY: 0.6,      # 60%
-    AgentLifecycle.WISE: 0.7,          # 70%
+    AgentLifecycle.GROWTH: 0.4,       
+    AgentLifecycle.SPECIALIZING: 0.5,  
+    AgentLifecycle.MATURITY: 0.6,      
+    AgentLifecycle.WISE: 0.7,          
 }
 
-# 高错误率阈值（超过则触发降级警告）
-HIGH_ERROR_RATE_THRESHOLD = 0.5  # 50% 错误率 → 警告
 
-# 遗忘阈值（天）
+HIGH_ERROR_RATE_THRESHOLD = 0.5  
+
+
 DEFAULT_FORGET_THRESHOLD_DAYS = 30
 
 
@@ -69,7 +69,7 @@ class EvolutionEngine:
         self._successful_interactions: int = 0
         self._last_active: datetime | None = None
 
-    # ── 生命周期 ──────────────────────────────────────────
+    
 
     @property
     def lifecycle(self) -> AgentLifecycle:
@@ -86,13 +86,13 @@ class EvolutionEngine:
             self._successful_interactions += 1
         self._last_active = datetime.now(timezone.utc)
 
-        # 计算当前成功率
+        
         success_rate = (
             self._successful_interactions / self._total_interactions
             if self._total_interactions > 0 else 0
         )
 
-        # 检查生命周期转换（需满足成功率阈值）
+        
         for stage, threshold in INTERACTION_THRESHOLDS.items():
             if self._lifecycle == stage and self._total_interactions >= threshold:
                 min_rate = MIN_SUCCESS_RATE_FOR_PROMOTION.get(stage, 0.5)
@@ -110,9 +110,9 @@ class EvolutionEngine:
                         f"[evolve] Agent {self.agent_id} 延迟晋升 {stage.value}: "
                         f"成功率 {success_rate:.1%} < 所需 {min_rate:.1%}"
                     )
-                    break  # 当前阶段不晋升，后续阶段也不检查
+                    break  
 
-        # 高错误率警告
+        
         if (self._total_interactions >= 10
                 and (1 - success_rate) > HIGH_ERROR_RATE_THRESHOLD
                 and self._lifecycle not in (AgentLifecycle.BIRTH, AgentLifecycle.DYING, AgentLifecycle.DEATH)):
@@ -134,7 +134,7 @@ class EvolutionEngine:
             return True
         return False
 
-    # ── 强化/弱化/遗忘 ─────────────────────────────────────
+    
 
     def strength_trait(self, persona, trait_index: int, boost: float = 0.1):
         """强化某个 trait（提升权重）"""
@@ -183,23 +183,23 @@ class EvolutionEngine:
         success = interaction_result.get("success", True)
         self.record_interaction(success)
 
-        # 处理 LLM 提取的特征信号（自动发现/强化/弱化 trait）
+        
         for ts in interaction_result.get("trait_signals", []):
             self._apply_trait_signal(persona, ts.get("name", ""), ts.get("signal", 1))
 
-        # 成功 → 强化已有 trait（兼容旧的手动索引方式）
+        
         for idx in interaction_result.get("traits_reinforced", []):
             self.strength_trait(persona, idx, boost=0.15)
 
-        # 失败 → 弱化已有 trait
+        
         for idx in interaction_result.get("traits_weakened", []):
             self.weaken_trait(persona, idx, decay=0.15)
 
-        # 定期清理过期 trait
+        
         if self._total_interactions % 50 == 0:
             self.forget_stale(persona)
 
-        # 检查不活跃
+        
         self.check_inactivity()
 
     def _apply_trait_signal(self, persona, name: str, signal: int):
@@ -207,7 +207,7 @@ class EvolutionEngine:
         if not name or not name.strip():
             return
         name = name.strip()
-        # 查找已存在的 trait
+        
         for i, trait in enumerate(persona.traits):
             if isinstance(trait, dict) and trait.get("name", "").lower() == name.lower():
                 if signal >= 1:
@@ -215,7 +215,7 @@ class EvolutionEngine:
                 else:
                     self.weaken_trait(persona, i, decay=0.12)
                 return
-        # 不存在 → 自动创建新 trait（仅正向信号）
+        
         if signal >= 1:
             new_trait = {"name": name, "weight": 0.35, "last_used": datetime.now(timezone.utc).isoformat()}
             persona.traits.append(new_trait)
@@ -254,7 +254,7 @@ class EvolutionEngine:
             return ""
         return f"\n## 当前成长阶段\n{stage_prompt}\n"
 
-    # ── 序列化 ────────────────────────────────────────────
+    
 
     def to_dict(self) -> dict:
         return {

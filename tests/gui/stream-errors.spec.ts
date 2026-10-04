@@ -1,21 +1,21 @@
-/**
- * 守卫：流式失败的两件纯逻辑 —— ①"该不该跳过自动重连" ②"给用户什么诱因文案"。
- *
- * ## 本文件锁住的那个真实缺陷（用户原话）
- *
- * 「我**以前定下的十次请求失败的重连阈值**呢？」
- *
- * 阈值一直在（`ChatPanel` 的 `MAX_RETRY = 9` → 共 10 次尝试）。被吃掉的是**重连本身**：
- * 旧 `isPermanentStreamError` 第一段是 `/401|403|404/i.test(msg)` —— **裸三位数字子串匹配**，
- * 而递给它的 `msg` 形如 `上游错误 400: {……完整响应体……}`。响应体里出现 `404` / `401`
- * 这类数字极其常见（request id、token 计数、分页、数组下标、base64 片段），
- * 于是**任意**一个 400/500 都可能被判成"不可恢复"→ `failReconnect(msg, 0)` → **零次重连**。
- *
- * ⇒ 判据必须只认**我们/上游给出的状态码形态**（`上游错误 NNN` / `HTTP NNN`），
- * 不许对整串做裸数字扫描。下面第 1 组用例就是"响应体里带数字"的回归。
- *
- * 变异见 `gui/scripts/mut-a1063-streamerrors.mjs`。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const PANEL_C = readFileSync(join(ROOT, "gui/src/renderer/pages/ChatPanel.tsx"), "utf8")
   .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
-/** 真实形态：client.ts 的 UpstreamError 把完整响应体拼进 message */
+
 const upstream = (status: number, body: string): string => `上游错误 ${status}: ${body}`;
 
 describe("streamErrors · upstreamStatusOf：只认状态码形态，不扫裸数字", () => {
@@ -68,10 +68,10 @@ describe("streamErrors · isPermanentStreamError：不可恢复才跳过重连",
   });
 
   it("🐛 回归：400/502 的响应体里出现 401/403/404 数字 → **仍然可重连**", () => {
-    // 旧实现（/401|403|404/ 裸匹配）在这两条上都会误判为"不可恢复"，从而零次重连
+    
     expect(isPermanentStreamError(upstream(400, '{"request_id":"req_2e4041a","usage":{"max_tokens":4096}}'))).toBe(false);
     expect(isPermanentStreamError(upstream(502, '{"n":4011,"msg":"bad gateway"}'))).toBe(false);
-    // [反例] 守卫自检：证明这段文字**确实**能被旧的裸匹配抓住，否则这组用例就是空转
+    
     expect(/401|403|404/.test(upstream(400, '{"request_id":"req_2e4041a"}'))).toBe(true);
   });
 
@@ -133,9 +133,9 @@ describe("streamErrors · explainStreamError：重连耗尽时的可操作文案
 
 describe("A-1081 · isContextOverflowError：上下文超限是**第三类**（终态·可压缩）", () => {
   it("① 各家**真实**错误散文都命中 —— 含被 200 字符截断的 OpenAI 形态", () => {
-    /* ⚠️ 这条最关键：`client.ts` 对响应体做了 `slice(0, 200)`，而 OpenAI 把
-       `"code":"context_length_exceeded"` 放在**末尾** ⇒ 被截掉。
-       所以判据必须以**散文句**为主判据（它总在 message 开头），只靠 code 必然漏判。 */
+    
+
+
     expect(isContextOverflowError(upstream(400, `{"error":{"message":"This model's maximum context length is 131072 tokens. However, you req`))).toBe(true);
     expect(isContextOverflowError(upstream(400, '{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213482 tokens > 200000 maximum"}}'))).toBe(true);
     expect(isContextOverflowError(upstream(400, '{"error":{"message":"exceeded model token limit: 131072 (requested: 140000)"}}'))).toBe(true);
@@ -148,7 +148,7 @@ describe("A-1081 · isContextOverflowError：上下文超限是**第三类**（�
   it("🐛 **裸 400 不许**被判成超限（超限 = 400 + 特定散文，缺一不可）", () => {
     expect(isContextOverflowError(upstream(400, '{"error":{"message":"unknown parameter: foo"}}'))).toBe(false);
     expect(isContextOverflowError(upstream(400, '{"error":{"message":"invalid api key"}}'))).toBe(false);
-    // "token" 单独出现不算：必须是"上下文/输入**过长**"的语义
+    
     expect(isContextOverflowError(upstream(400, "invalid token count field"))).toBe(false);
     expect(CONTEXT_OVERFLOW_STATUSES.includes(400), "400 混进超限状态码 → 任何 400 都会被压缩+重试，掩盖真因").toBe(false);
   });
@@ -186,7 +186,7 @@ describe("A-1081 接线：反应式压缩必须排在 **9 次重连之前**，�
       .toContain("force = false");
     expect(PANEL_C, "force 绕过了用户的 cfg.enabled 开关（设置即权威，不许偷偷压）")
       .toContain("if (!force && used < cap * cfg.ratio)");
-    // 顺序铁律：`cfg.enabled`（用户开关）必须在 force 那条**之前**判定 —— 否则 force 会把开关一起绕过
+    
     const enabledAt = PANEL_C.indexOf("if (!cfg.enabled)");
     const forceAt = PANEL_C.indexOf("if (!force && used < cap * cfg.ratio)");
     expect(enabledAt, "找不到用户开关判定").toBeGreaterThan(-1);
@@ -209,14 +209,14 @@ describe("A-1081 接线：反应式压缩必须排在 **9 次重连之前**，�
 
 describe("A-1084 · 本地判定必须走「超限」这条处置（否则落进 9 次重连、且每次都被拦回）", () => {
   it("🐛 引擎保险门的拒发错误**必须**被判成超限类", () => {
-    /* 场景：引擎算出来装不下 ⇒ **请求根本没发出去** ⇒ 上游一个字都不会说。
-       若判据只认上游散文，这条错误会被当成瞬时故障 ⇒ 走 9 次重连，
-       而每一次都会被保险门原样拦回 —— 比不做这道门还糟（用户看到"重连了 9 次还是不行"）。 */
+    
+
+
     expect(
       isContextOverflowError(`${LOCAL_PREFLIGHT_MARKER}\n⚠️ 本次请求**未发送** —— 上下文装不下该模型的窗口。`),
       "本地拒发没被判成超限 → 会去重连 9 次",
     ).toBe(true);
-    // 只带标记（文案改了）也认：判据认的是**身份**，不是某一句措辞
+    
     expect(isContextOverflowError(LOCAL_PREFLIGHT_MARKER)).toBe(true);
   });
 

@@ -18,12 +18,12 @@ SILAM_ROOT = Path(__file__).resolve().parent.parent / "_model_stage"
 if str(SILAM_ROOT) not in sys.path:
     sys.path.append(str(SILAM_ROOT))
 
-from tools.registry import Tool, get_registry  # noqa: E402
+from tools.registry import Tool, get_registry  
 
-from silam_core.config import SilamConfig  # noqa: E402
-from silam_core.engine import SILAMEngine  # noqa: E402
+from silam_core.config import SilamConfig  
+from silam_core.engine import SILAMEngine  
 
-from core import llm as llm_mod  # noqa: E402
+from core import llm as llm_mod  
 
 
 def _mk_tool(name, desc, execute_fn, permissions=("read",),
@@ -67,27 +67,27 @@ class TestSilamToolBridge:
 
     def setup_method(self):
         self.reg = get_registry()
-        # 先清理（run_tests 下断言失败可能跳过 teardown → 残留 → 覆盖拒绝）
+        
         self._clear_tools()
-        # 1) 只读“读文件”假工具（会被选中）
+        
         self.echo, self.echo_state = _mk_tool(
             "silam_echo_r",
             "读取本地文件内容的事实性工具。",
             lambda args: f"读到内容：{dict(args)}")
         self.reg.register(self.echo)
-        # 2) 只读但执行必报错（失败学习路径）
+        
         self.boom, self.boom_state = _mk_tool(
             "silam_boom_r",
             "读取目标文件存在性的事实性工具。",
             lambda args: "[错误] 目标文件不存在")
         self.reg.register(self.boom)
-        # 3) write 权限（护栏必须挡住）
+        
         self.guard, self.guard_state = _mk_tool(
             "silam_write_guard",
             "把内容写入文件的事实性工具。",
             lambda args: "已写入", permissions=("write",))
         self.reg.register(self.guard)
-        # 4) 双必需参数（缺参 → 不执行）
+        
         self.need_both, self.need_state = _mk_tool(
             "silam_need_both",
             "需要两个事实参数的认知工具。",
@@ -101,7 +101,7 @@ class TestSilamToolBridge:
         self.engine._mem_register(
             "辅导员的示范：读文件要用 silam_echo_r",
             strength=0.5, source="observe")
-        # 复位开关缓存，保证读取真实 slime.toml 配置
+        
         llm_mod._bridge_cfg_cache = {"t": 0.0, "v": None}
 
     def teardown_method(self):

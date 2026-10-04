@@ -1,23 +1,23 @@
-/**
- * tests/core-ts/a1025-guards.spec.ts — S4「本地模型子系统：身份 / 状态 / 空闲回收」守卫。
- *
- * 这一族盯的是同一类病：**同一个事实有多个产地，且没有一方会抱怨**。
- *
- *  S4-A 身份：这个端口上跑的是哪个模型？此前只能靠**裸路径字符串**比较回答，
- *        而"同一个模型"在系统里有三种写法（用户填的、配置文件里的、相对 vs 绝对），
- *        任一处写法不同就永久判否 —— A-1017「模型已就绪却每轮弹加载面板」是这个病的一支。
- *        现改为给 llama-server 下发 `-a/--alias`，让**运行中的实例自述身份**。
- *
- *  S4-B 状态：端口上"有没有东西"此前只有布尔答案，于是**加载中**（503 `unavailable_error`）
- *        与"什么都没有"被压成同一个答案 → `probeLive` 判否 → `findFreePort` 跳过该端口
- *        → 在隔壁端口又拉起一个**同样的模型** → 白占双份显存。
- *        现在 `loading` 是一等状态：等它就绪并认领；等超时宁可报错也不重复拉起。
- *        同时把本机端点的 IO 原语收口到 `core-ts/src/local_server_io.ts`
- *        （此前只有 gui 层有，core-ts 用不到 → 才被迫各写一份探测）。
- *
- * ⚠️ 验收标准是**变异测试**（gui/scripts/mut-a1025-alias.mjs）：
- *    写完必须逐条把源码改坏、确认它变红。"通过但锁错对象"比没有守卫更糟。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it, vi, beforeEach, afterAll } from "vitest";
 import { mkdtempSync, readdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,18 +39,18 @@ const execMock = vi.mocked(execFileSync);
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const MODEL_SERVER = join(ROOT, "core-ts/src/model_server.ts");
 
-/** 读文本并统一换行 —— 本仓库检出是 CRLF，`\n` 字面量断言会全线假红。 */
+
 const read = (p: string): string => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 
-/** 去注释：守卫必须盯**代码**。对注释敏感会把"写了解释"误判成"改了行为"。 */
+
 function stripComments(src: string): string {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-/** 收集 core-ts/src 与 gui/src 下的全部实现文件（排除 d.ts 与产物目录）。
- *  放在模块级：S4-B 与 S4-D 都要用它做"全仓唯一产地 / 必须有生产读取者"的取证。 */
+
+
 function implFiles(): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
@@ -69,16 +69,16 @@ function implFiles(): string[] {
   return out;
 }
 
-/** 跨进程契约：主进程入口。S4-D 的作废点就挂在这里。 */
+
 const GUI_INDEX = join(ROOT, "gui/src/main/index.ts");
 
-/** 测试专用高位端口（避开生产 8999/18082 与 model_server.spec.ts 的 19511/19521） */
+
 const CHAT_PORT_START = 19731;
 const FAKE_PID = 7391;
 
-/** 夹具配置**按真实类型**声明（而非对象字面量推断）：否则 `embedding.idle_unload_min`
- *  这类真实存在的键会被窄化成"不存在"，守卫就只能靠 `as any` 硬塞。
- *  `chat` / `embedding` 在真实类型里是可选的，但夹具永远提供 → 收窄成必填，省掉断言噪音。 */
+
+
+
 type TestCfg = Omit<ModelServerConfig, "chat" | "embedding"> & {
   chat: Record<string, unknown>;
   embedding: Record<string, unknown>;
@@ -101,8 +101,8 @@ function makeCfg(tmp: string): TestCfg {
   };
 }
 
-/** execFileSync 按命令分派。**故意不返回 "llama-server"**：stop() 的校验会因此早退，
- *  不会掉进 processAlive 的 5s 等待循环（测试不该为了"优雅"多跑五秒）。 */
+
+
 function dispatchExec(impl: (cmd: string, args: string[]) => string) {
   execMock.mockImplementation(((cmd: string, args: string[]) => impl(cmd, args)) as never);
 }
@@ -110,7 +110,7 @@ function dispatchExec(impl: (cmd: string, args: string[]) => string) {
 const okFetch = (): typeof fetch =>
   (async () => ({ status: 200, json: async () => ({ status: "ok" }) })) as unknown as typeof fetch;
 
-/** S4-B：probeImpl 返回**能力快照**（三态 state + 服务器自述身份） */
+
 const readyCap = (alias?: string): LocalServerCapability =>
   ({ ...emptyCapability("ready"), effectiveCtx: 8192, alias: alias ?? null });
 const loadingCap = (): LocalServerCapability => emptyCapability("loading");
@@ -118,7 +118,7 @@ const loadingCap = (): LocalServerCapability => emptyCapability("loading");
 const liveProbe = (ports: number[]) =>
   async (port: number) => (ports.includes(port) ? readyCap() : emptyCapability("down"));
 
-/** 一套夹具：llama-server + 模型文件都"存在"，无活实例，无 GPU（跳过显存预检）。 */
+
 function fixture() {
   const tmp = mkdtempSync(join(tmpdir(), "a1025-"));
   writeFileSync(join(tmp, "llama-server.exe"), "");
@@ -133,7 +133,7 @@ function fixture() {
   return { tmp, cfg, mgr };
 }
 
-/** 从第 n 次 spawn 调用里取 argv */
+
 function argvOf(call = 0): string[] {
   return (spawnMock.mock.calls[call]?.[1] ?? []) as string[];
 }
@@ -141,7 +141,7 @@ function argvOf(call = 0): string[] {
 beforeEach(() => {
   vi.clearAllMocks();
   spawnMock.mockReturnValue({ pid: FAKE_PID, kill: vi.fn() } as never);
-  // 默认：nvidia-smi / tasklist 全部返回空 → 无 GPU、无存活 PID
+  
   dispatchExec(() => "");
 });
 
@@ -149,9 +149,9 @@ afterAll(() => {
   vi.restoreAllMocks();
 });
 
-// ══════════════════════════════════════════════════════════
-// S4-A 行为：别名真的下发到 llama-server 的 argv 里
-// ══════════════════════════════════════════════════════════
+
+
+
 
 describe("S4-A：--alias 下发到真实 spawn 的 argv", () => {
   it("ensure(chat, path, id) → argv 带 `-a <id>`，路径仍照常下发", async () => {
@@ -165,7 +165,7 @@ describe("S4-A：--alias 下发到真实 spawn 的 argv", () => {
       const argv = argvOf(0);
       expect(argv[argv.indexOf("-a") + 1]).toBe("qwen3-1.7b");
       expect(argv[argv.indexOf("-m") + 1]).toBe(modelPath);
-      // 别名不得破坏既有参数（防重排 argv 时把 -ngl/-c 弄丢）
+      
       expect(argv[argv.indexOf("-c") + 1]).toBe("8192");
       expect(argv).toContain("--reasoning-format");
     } finally {
@@ -188,7 +188,7 @@ describe("S4-A：--alias 下发到真实 spawn 的 argv", () => {
   it("没有 id（走 models_dir 兜底）→ 别名取文件名去扩展名，仍然下发", async () => {
     const { tmp, mgr } = fixture();
     try {
-      // 传空 modelName：ensureLocked 会用 models_dir 里排序第一的 gguf 兜底
+      
       const result = await mgr.ensure("chat", "", "");
       expect(result.ok).toBe(true);
       const argv = argvOf(0);
@@ -199,17 +199,17 @@ describe("S4-A：--alias 下发到真实 spawn 的 argv", () => {
   });
 });
 
-// ══════════════════════════════════════════════════════════
-// S4-A 行为：复用判同改为「别名优先」
-// ══════════════════════════════════════════════════════════
+
+
+
 
 describe("S4-A：复用判同别名优先（路径写法不再决定身份）", () => {
-  /** 造一个"进程活着 + /health ok"的假象，让 reuseIfReady 能走到复用分支 */
+  
   function withLivePid() {
     dispatchExec((cmd, args) => {
       if (cmd === "tasklist") {
         const pidArg = args.find((a) => a.startsWith("PID eq "))?.replace("PID eq ", "");
-        // 只回 PID 本身、不回 "llama-server"：processAlive=true，verifyLlamaServerPid=false
+        
         return pidArg === String(FAKE_PID) ? `${FAKE_PID}\n` : "INFO: No tasks are running.";
       }
       return "";
@@ -226,12 +226,12 @@ describe("S4-A：复用判同别名优先（路径写法不再决定身份）", 
       const port = first.port;
       withLivePid();
 
-      // 同一个模型，但调用方这次拿的是**另一个路径字符串**（如配置里存的相对路径）
+      
       const second = await mgr.ensure("chat", "models/chat/qwen3.gguf", "qwen3");
       expect(second.ok).toBe(true);
       expect(second.state).toBe("reused");
       expect(second.port).toBe(port);
-      expect(spawnMock).toHaveBeenCalledTimes(1); // ★ 没有第二次拉起
+      expect(spawnMock).toHaveBeenCalledTimes(1); 
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -269,13 +269,13 @@ describe("S4-A：复用判同别名优先（路径写法不再决定身份）", 
   });
 });
 
-// ══════════════════════════════════════════════════════════
-// S4-B 行为：加载中是**一等状态**，绝不重复拉起同一个模型
-// ══════════════════════════════════════════════════════════
+
+
+
 
 describe("S4-B：端口上已有实例正在加载 → 等它，不重复拉起", () => {
-  /** 造一个 tmp 工作区 + 按需构造管理器（`startup_timeout` 是**构造期**读取的，
-   *  所以必须在 `new ModelServerManager` 之前改 cfg，不能事后改）。 */
+  
+
   function makeEnv(probeImpl: (port: number) => Promise<LocalServerCapability>, startupTimeout: number) {
     const tmp = mkdtempSync(join(tmpdir(), "a1025-"));
     writeFileSync(join(tmp, "llama-server.exe"), "");
@@ -289,7 +289,7 @@ describe("S4-B：端口上已有实例正在加载 → 等它，不重复拉起"
     return { tmp, cfg, mgr };
   }
 
-  /** 加载中的端口：前 N 次探测报 loading，之后报 ready（模拟加载完成） */
+  
   function loadingThenReady(port: number, flipsAfter: number) {
     let n = 0;
     return async (p: number): Promise<LocalServerCapability> => {
@@ -333,7 +333,7 @@ describe("S4-B：端口上已有实例正在加载 → 等它，不重复拉起"
     const { tmp, mgr } = makeEnv(async (p) => {
       if (p !== CHAT_PORT_START) { return emptyCapability("down"); }
       n += 1;
-      // 第 1 次（probeLive 扫描）报 loading；之后（等待循环）报 down = 进程没了
+      
       return n === 1 ? loadingCap() : emptyCapability("down");
     }, 10);
     try {
@@ -347,15 +347,15 @@ describe("S4-B：端口上已有实例正在加载 → 等它，不重复拉起"
   });
 
   it("★ 等待期间状态**抖动**（就绪后又变回 loading）→ 仍拒绝，不许拉起第二个", async () => {
-    /* 两次探测之间状态抖动是真实存在的（大模型加载会被并发请求打断/重排）。
-     * 这道闸门的意义：只要**最终**不是 ready/down，就既不能认领也不能重拉 —— 宁可报错。 */
+    
+
     let n = 0;
     const { tmp, mgr } = makeEnv(async (p) => {
       if (p !== CHAT_PORT_START) { return emptyCapability("down"); }
       n += 1;
-      if (n === 1) { return loadingCap(); }  // probeLive 扫描：加载中
-      if (n === 2) { return readyCap(); }    // 等待循环：就绪
-      return loadingCap();                   // 重新探测：又回到加载中（抖动）
+      if (n === 1) { return loadingCap(); }  
+      if (n === 2) { return readyCap(); }    
+      return loadingCap();                   
     }, 10);
     try {
       const result = await mgr.ensure("chat", join(tmp, "model-a.gguf"), "qwen3");
@@ -373,7 +373,7 @@ describe("S4-B：端口上已有实例正在加载 → 等它，不重复拉起"
     );
     try {
       const result = await mgr.ensure("chat", join(tmp, "model-a.gguf"), "qwen3");
-      // 不能认领别人的端口：要么另起一个（真实"未加载"语义），要么明确报错；总之不许回 external
+      
       expect(result.state).not.toBe("external");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -381,13 +381,13 @@ describe("S4-B：端口上已有实例正在加载 → 等它，不重复拉起"
   });
 });
 
-// ══════════════════════════════════════════════════════════
-// S4-C 行为：空闲卸载前必须先问服务器「你忙不忙」
-// ══════════════════════════════════════════════════════════
+
+
+
 
 describe("S4-C：空闲到点先问 /slots，忙就不卸", () => {
-  /** 管理器的 `_idle` 是私有的、计时器最短 1 分钟 —— 直接测 `touch` + 手动触发那条路径
-   *  既慢又脆。这里用 `vi.useFakeTimers` 把 1 分钟压成瞬时。 */
+  
+
   function busyFetch(slotsBody: unknown, ok = true): typeof fetch {
     return (async (url: string) => {
       if (String(url).endsWith("/slots")) {
@@ -397,7 +397,7 @@ describe("S4-C：空闲到点先问 /slots，忙就不卸", () => {
     }) as unknown as typeof fetch;
   }
 
-  /** 造一个"已就绪的 chat 实例"，并把 idle_unload_min 设成 1 分钟 */
+  
   async function readyChatMgr(fetchImpl: typeof fetch) {
     const tmp = mkdtempSync(join(tmpdir(), "a1025-"));
     writeFileSync(join(tmp, "llama-server.exe"), "");
@@ -423,7 +423,7 @@ describe("S4-C：空闲到点先问 /slots，忙就不卸", () => {
     try {
       const { tmp, mgr } = await readyChatMgr(busyFetch([{ id: 0, is_processing: true }]));
       await vi.advanceTimersByTimeAsync(61_000);
-      // 仍在服务：状态还是 ready（没有 release）
+      
       expect(mgr.getPort("chat")).toBeGreaterThan(0);
       expect(mgr.status().find((s) => s.role === "chat")?.state).toBe("ready");
       rmSync(tmp, { recursive: true, force: true });
@@ -488,7 +488,7 @@ describe("S4-C：空闲到点先问 /slots，忙就不卸", () => {
       return { tmp, mgr, cfg };
     })();
     const s = stripComments(read(MODEL_SERVER));
-    // 结构断言：不许再有 `role === "embedding"` 的无条件早退
+    
     expect(s, "embedding 又被无条件跳过 → 用户设的 idle_unload_min 再次成为死开关")
       .not.toMatch(/idleMin <= 0 \|\| role === "embedding"/);
     expect(s, "常驻实例的跳过理由必须写明（否则又变成静默失效）").toContain("persistent = true");
@@ -516,7 +516,7 @@ describe("S4-B 结构：三态与 IO 原语的单一产地", () => {
 
   it("★ 等待超时**必须 return**，绝不许落到下方的 backend.start（那会起第二个同模型进程）", () => {
     const s = src();
-    // 超时分支里出现"正在加载"那句文案 + 紧跟一个 return
+    
     const idx = s.indexOf("上已有 llama-server 正在加载，等待");
     expect(idx, "超时文案不见了（说明超时被当成可继续的情形）").toBeGreaterThan(0);
     const before = s.slice(Math.max(0, idx - 400), idx);
@@ -538,7 +538,7 @@ describe("S4-B 结构：三态与 IO 原语的单一产地", () => {
     const hits: string[] = [];
     for (const f of implFiles()) {
       if (stripComments(read(f)).includes("${stripApiSuffix(base)}/props")) {
-        // Windows 路径分隔符是 `\`，断言里用 `/`（本仓库其余路径断言同理，别在这里假红）
+        
         hits.push(f.replace(ROOT, "").replace(/\\/g, "/"));
       }
     }
@@ -556,15 +556,15 @@ describe("S4-B 结构：三态与 IO 原语的单一产地", () => {
   it("IO 原语模块只做 IO：不得自己判定状态（状态判定只许在 model_introspect）", () => {
     const io = stripComments(read(IO));
     expect(io).toContain("readLocalCapability(");
-    // 不许在 IO 层出现"自己看状态码下结论"的写法
+    
     expect(io).not.toMatch(/status === 200/);
     expect(io).not.toMatch(/state\s*=\s*"(ready|loading|down)"/);
   });
 });
 
-// ══════════════════════════════════════════════════════════
-// S4-A 结构：单一产地
-// ══════════════════════════════════════════════════════════
+
+
+
 
 describe("S4-A 结构：别名清洗 / 身份判据 / argv 产地都必须唯一", () => {
   const src = () => stripComments(read(MODEL_SERVER));
@@ -601,9 +601,9 @@ describe("S4-A 结构：别名清洗 / 身份判据 / argv 产地都必须唯一
     const s = src();
     const marks = s.split("external: true,");
     expect(marks.length - 1, "外部采纳路径应当只有一处").toBe(1);
-    // 从 `external: true,` 到该对象字面量收尾之间：
-    //   必须有 cap.alias（服务器自述 = 真身份）
-    //   不许有 modelName / target()（那是"我们想要的" = 编造的身份，会让下游比对**通过**）
+    
+    
+    
     const tail = marks[1]!.slice(0, marks[1]!.indexOf("};"));
     expect(tail, "外部实例必须记录服务器自述的别名").toContain("cap.alias");
     expect(tail, "外部实例不许把「我们想要的别名」写成身份").not.toContain("modelName");
@@ -611,15 +611,15 @@ describe("S4-A 结构：别名清洗 / 身份判据 / argv 产地都必须唯一
   });
 });
 
-// ══════════════════════════════════════════════════════════
-// S4-D 跨进程契约：能力缓存必须被生命周期事件作废
-// ══════════════════════════════════════════════════════════
+
+
+
 
 describe("S4-D 契约：能力缓存的作废点必须真实存在（开关必须有读取者）", () => {
   it("★ clearLocalCapabilityCache 必须有**生产读取者**（此前只有测试在调 → 注释在说谎）", () => {
     const users: string[] = [];
     for (const f of implFiles()) {
-      if (f.endsWith("localServerProbe.ts")) { continue; } // 定义处不算读取者
+      if (f.endsWith("localServerProbe.ts")) { continue; } 
       if (stripComments(read(f)).includes("clearLocalCapabilityCache(")) {
         users.push(f.replace(ROOT, "").replace(/\\/g, "/"));
       }
@@ -644,9 +644,9 @@ describe("S4-D 契约：能力缓存的作废点必须真实存在（开关必�
   });
 
   it("★ probeManagedChatCapability 问询时**不传 alias** → key 退化成「端口」，同端口换模型必然命中旧条目", () => {
-    /* 这条断言锁的是"为什么必须靠事件作废、而不能靠缓存 key 自己分开"。
-     * `getLocalCapability` 的 key 形如 `base|alias`，但下面这个调用点不传 alias，
-     * 于是 alias 恒为 "" —— 模型切换发生在**同一个端口**上时 key 完全相同。 */
+    
+
+
     const p = stripComments(read(join(ROOT, "gui/src/main/localServerProbe.ts")));
     const at = p.indexOf("export async function probeManagedChatCapability");
     expect(at, "函数不见了").toBeGreaterThan(0);

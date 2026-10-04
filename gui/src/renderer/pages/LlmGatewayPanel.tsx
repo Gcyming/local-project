@@ -1,13 +1,13 @@
-/**
- * gui/src/renderer/pages/LlmGatewayPanel.tsx — 设置「LLM 网关」专栏。
- * - 开关：启用/停用 slime 专属 LLM 转发网关（OpenAI 兼容入口）
- * - 端口 + 独立 API Key 配置
- * - 运行状态（运行中/已停止/错误）+ 调用示例
- * - 令牌管理（B 档：每令牌独立速率/日配额/模型白名单，映射 new-api 的"我的令牌"）
- */
+
+
+
+
+
+
+
 import React, { type JSX } from "react";
 
-/** 令牌（渲染层视图）：与 shared/ipc 的 LlmGatewayTokenDTO 同构 */
+
 interface TokenRow {
   key: string;
   label?: string;
@@ -38,17 +38,17 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
   const [status, setStatus] = React.useState<GatewayStatus | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
-  const [editing, setEditing] = React.useState<string | null>(null); // 正在编辑的令牌 key（null=新增）
-  const [showForm, setShowForm] = React.useState(false);            // 是否显示令牌表单（新增/编辑共用）
-  const [copied, setCopied] = React.useState<string | null>(null); // 刚复制的令牌 key
+  const [editing, setEditing] = React.useState<string | null>(null); 
+  const [showForm, setShowForm] = React.useState(false);            
+  const [copied, setCopied] = React.useState<string | null>(null); 
   const api = React.useRef<any>(null);
 
-  /** 新增/编辑令牌表单（编辑时预填现有值） */
+  
   const emptyForm = React.useCallback(() => ({
     label: "",
     ratePerMin: 0,
     dailyQuota: 0,
-    models: "" as string, // 渲染层用逗号分隔文本，提交时拆分
+    models: "" as string, 
     note: "",
   }), []);
   const [form, setForm] = React.useState(emptyForm);
@@ -80,7 +80,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
     const w = window as unknown as { slimeAPI?: any };
     api.current = w.slimeAPI;
     void refresh();
-    // 状态轮询（3s）
+    
     const t = window.setInterval(() => {
       if (api.current?.llmGateway?.status) {
         void api.current.llmGateway.status().then((s: GatewayStatus) => setStatus(s));
@@ -100,13 +100,13 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
     }
   }
 
-  /** 复制令牌到剪贴板（脱敏回显） */
+  
   async function copyToken(key: string): Promise<void> {
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(key);
       } else {
-        // 降级：临时 textarea
+        
         const ta = document.createElement("textarea");
         ta.value = key;
         ta.style.position = "fixed";
@@ -123,7 +123,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
     }
   }
 
-  /** 脱敏 key：前 6 位 + … + 后 4 位 */
+  
   function maskKey(key: string): string {
     if (key.length <= 12) { return key.slice(0, 2) + "…" + key.slice(-2); }
     return key.slice(0, 6) + "…" + key.slice(-4);
@@ -163,7 +163,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
     }
   }
 
-  // ── 令牌 CRUD（B 档）────────────────────
+  
   function modelsFromForm(): string[] {
     return form.models
       .split(",")
@@ -211,7 +211,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
     if (!fn || busy) { return; }
     setBusy(true);
     try {
-      const active = t.active === false; // 切换
+      const active = t.active === false; 
       const r = await fn(t.key, active);
       if (r?.status) { setStatus(r.status); }
       if (r?.tokens) { setCfg((p) => ({ ...p, tokens: r.tokens })); }
@@ -243,7 +243,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
 
   const running = status?.running ?? false;
 
-  // 令牌管理表格的复用样式
+  
   const gridCols = "1.1fr 1.5fr 0.6fr 1.6fr 1fr 1.5fr";
   const gridHead: React.CSSProperties = {
     padding: "9px 12px", background: "var(--bg-hover)", fontSize: 11.5, fontWeight: 600,
@@ -277,7 +277,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
   const tokens: TokenRow[] = cfg.tokens ?? [];
 
   return (
-    /* A-1119：左地板归 `SettingsDialog` 内容区（16px），此处 paddingLeft 必须为 0（否则叠加成 32）。 */
+    
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
       <h2 style={{ fontSize: 18, margin: "0 0 4px" }}>LLM 网关（slime 内置）</h2>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 14 }}>
@@ -295,7 +295,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
         </div>
       )}
 
-      {/* 开关 + 状态 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ flex: 1 }}>
@@ -328,7 +328,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
         </div>
       </div>
 
-      {/* 端口 + API Key */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>监听配置</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 12, alignItems: "end" }}>
@@ -385,7 +385,7 @@ const LlmGatewayPanel = React.memo(function LlmGatewayPanel(): JSX.Element {
         )}
       </div>
 
-      {/* 调用示例 */}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>调用示例</div>
         <pre style={{
@@ -404,11 +404,11 @@ curl -X POST http://127.0.0.1:${cfg.port}/v1/chat/completions \\
 # 强制指定供应商（provider:model 语法）
   -d '{"model":"anthropic:claude-sonnet-4-20250514", ...}'`}</pre>
         <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.5 }}>
-          在 Cherry Studio 等第三方客户端里，把 API 地址填 <code>http://127.0.0.1:{cfg.port}/v1</code>、Key 填上方的独立 Key（或 slime 全局 token），即可复用 slime 已配置的全部上游模型。
+          在 Cherry Studio 等第三方客户端里，把 API 地址填 <code>http:
         </div>
       </div>
 
-      {/* 令牌管理（B 档：映射 new-api 的"我的令牌"）*/}
+      {}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>令牌管理</div>
@@ -426,7 +426,7 @@ curl -X POST http://127.0.0.1:${cfg.port}/v1/chat/completions \\
           每个令牌可独立配置「模型白名单 + 每分钟速率 + 日配额」，映射 new-api 的"我的令牌"。第三方工具在 Cherry Studio 里把 Key 填成下表任意一个令牌即可使用。
         </div>
 
-        {/* 新增 / 编辑表单 */}
+        {}
         {showForm && (
           <div style={{
             padding: 12, borderRadius: 8, border: "1px solid var(--accent)",
@@ -478,7 +478,7 @@ curl -X POST http://127.0.0.1:${cfg.port}/v1/chat/completions \\
           </div>
         )}
 
-        {/* 令牌表格 */}
+        {}
         {tokens.length > 0 ? (
           <div style={{ overflowX: "auto" }}>
             <div style={{ display: "grid", gridTemplateColumns: gridCols, minWidth: 700 }}>
@@ -499,13 +499,13 @@ curl -X POST http://127.0.0.1:${cfg.port}/v1/chat/completions \\
                 const isEditing = editing === t.key;
                 return (
                   <React.Fragment key={t.key}>
-                    {/* 名称 */}
+                    {}
                     <div style={{ ...gridRow, display: "grid" }}>
                       <span style={{ color: active ? "var(--text)" : "var(--text-dim)" }}>
                         {t.label || maskKey(t.key)}
                       </span>
                     </div>
-                    {/* 令牌 */}
+                    {}
                     <div style={{ ...gridRow, display: "grid" }}>
                       <button
                         onClick={() => void copyToken(t.key)}
@@ -517,19 +517,19 @@ curl -X POST http://127.0.0.1:${cfg.port}/v1/chat/completions \\
                         {copied === t.key ? "已复制 ✓" : maskKey(t.key)}
                       </button>
                     </div>
-                    {/* 状态 */}
+                    {}
                     <div style={{ ...gridRow, display: "grid" }}>
                       {active ? <span style={activeBadge}>有效</span> : <span style={inactiveBadge}>停用</span>}
                     </div>
-                    {/* 允许模型 */}
+                    {}
                     <div style={{ ...gridRow, display: "grid", color: "var(--text-muted)" }}>
                       {modelsTxt}
                     </div>
-                    {/* 速率/配额 */}
+                    {}
                     <div style={{ ...gridRow, display: "grid", color: "var(--text-muted)" }}>
                       {rateTxt}{quotaTxt}
                     </div>
-                    {/* 操作 */}
+                    {}
                     <div style={{ ...gridRow, display: "grid" }}>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         <button onClick={() => void toggleToken(t)} style={toggleBtn} title={active ? "停用该令牌" : "启用该令牌"}>

@@ -48,13 +48,13 @@ class TestSkillRegistry:
             names = [h["name"] for h in hits]
             assert "demo_code_review" in names
 
-            # 名称命中权重高于描述命中：amazon 同时是 scraper 的名称与 tag
+            
             hits2 = reg.search("amazon")
             assert hits2[0]["name"] == "amazon_scraper"
 
             assert reg.search("不存在的关键词xyz") == []
 
-            # 空查询列出全部（截断上限）
+            
             all_hits = reg.search("", limit=1)
             assert len(all_hits) == 1
         finally:
@@ -75,7 +75,7 @@ class TestSkillRegistry:
             names = get_tool_registry().list_tool_names()
             assert "skill_search" in names
             assert "skill_lookup" in names
-            assert "skill_demo_code_review" not in names  # A-004 核心断言
+            assert "skill_demo_code_review" not in names  
         finally:
             self._cleanup()
 
@@ -99,7 +99,7 @@ class TestSkillRegistry:
             result3 = asyncio.run(reg.call_tool("skill_lookup", {}))
             assert "错误" in result3
 
-            # 未加载技能名 → 报错不崩溃
+            
             result4 = asyncio.run(reg.call_tool("skill_lookup", {"name": "nope"}))
             assert "未找到" in result4
         finally:
@@ -116,7 +116,7 @@ class TestSkillRegistry:
 
             load_all_skills(skill_dir=tmp_path)
             n1 = len(get_tool_registry().list_tool_names())
-            load_all_skills(skill_dir=tmp_path)  # 模拟 /skills/load 热更新
+            load_all_skills(skill_dir=tmp_path)  
             n2 = len(get_tool_registry().list_tool_names())
             assert n1 == n2
         finally:
@@ -138,8 +138,8 @@ class TestSkillRegistry:
             load_all_skills(skill_dir=tmp_path)
 
             r = asyncio.run(get_tool_registry().call_tool("skill_lookup", {"name": "net_skill"}))
-            assert "读代码" in r          # SKILL.md 正文正常返回
-            assert "权限不足" not in r     # 不再被 network 权限拦截
+            assert "读代码" in r          
+            assert "权限不足" not in r     
         finally:
             self._cleanup()
 
@@ -151,16 +151,16 @@ class TestSkillRegistry:
             reset_skill()
             reset_tool()
 
-            loaded = load_all_skills(skill_dir=tmp_path)  # 空目录
+            loaded = load_all_skills(skill_dir=tmp_path)  
             assert loaded == []
             names = get_tool_registry().list_tool_names()
             assert "skill_search" in names and "skill_lookup" in names
 
             r = asyncio.run(get_tool_registry().call_tool("skill_search", {"query": "任何词"}))
-            assert "未找到" in r  # 空注册表友好提示
+            assert "未找到" in r  
 
-            # system prompt 在空技能集下不崩溃、不注入技能段（工具能力清单里出现
-            # "检索可用技能"字样是 skill_search 工具描述，属正确行为，只断言段标题）
+            
+            
             from core.agent import Agent
             a = Agent(name="Slime", role="测试")
             prompt = a.get_system_prompt()
@@ -176,7 +176,7 @@ class TestFrontmatterOnlySkill:
         d = tmp_path / name
         d.mkdir(parents=True, exist_ok=True)
         if body is None:
-            body = ("指导正文段落。" + chr(10)) * 400  # ~2800 字符（>2000 验证不截断）
+            body = ("指导正文段落。" + chr(10)) * 400  
         fm = frontmatter or (
             "---" + chr(10) + "name: ponytail" + chr(10) + "description: Forces the laziest solution that actually works" + chr(10)
             + "tags: [minimal, lazy]" + chr(10) + "---" + chr(10)

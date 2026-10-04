@@ -1,8 +1,8 @@
-/**
- * markdown.spec.ts — 轻量 Markdown 渲染器的「段落保形」判定回归锚点（A-906）。
- * preserveBreaks 决定段落是 pre-wrap 原样保留（示例/配置/对齐文本）还是折叠单换行为空格（流式散文）。
- * 锚定用户实际痛点：中文长文本/示例 的换行、缩进、空格不得被渲染层打散。
- */
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { preserveBreaks, normalizeBrokenLines, tightenCjkSpacing, normalizeInlineTables, normalizeMarkdownBlocks } from "../../gui/src/renderer/pages/Markdown.js";
 
@@ -41,7 +41,7 @@ describe("Markdown preserveBreaks（段落保形判定）", () => {
   });
 
   it("A-907：token 碎片化换行（逐词断行）→ 不保形，折叠拼接", () => {
-    // 用户实拍形态：389\nk\nstars、（\n风\n铃\n）等碎片行占多数
+    
     expect(preserveBreaks("重要\n发现\n：\n1\n)\nOpen\nCl\naw")).toBe(false);
     expect(preserveBreaks("389\nk\nstars\n、\n81\n.7\nk\nforks")).toBe(false);
   });
@@ -77,7 +77,7 @@ describe("normalizeBrokenLines（token 碎片化换行就地净化，A-922/A-927
     expect(normalizeBrokenLines("")).toBe("");
   });
   it("A-918++：短列表项不误折叠（列表结构保留，防 markdown 退化）", () => {
-    // 列表项天然短行（≤4 字符），不应被误判为 token 碎片折叠成一行
+    
     const src = "优点：\n- 快\n- 稳\n- 省";
     expect(normalizeBrokenLines(src)).toBe(src);
     const ol = "步骤：\n1. 建\n2. 改\n3. 测";

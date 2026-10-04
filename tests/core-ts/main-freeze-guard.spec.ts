@@ -1,18 +1,18 @@
-/**
- * tests/core-ts/main-freeze-guard.spec.ts — 「主进程卡死 / 界面点不动」的源码守卫（A-984）。
- *
- * 用户实测：slime 卡住、点按钮没反应。现场唯一线索是 `data/audit.jsonl` 在那一刻**停止写入**
- * —— 反推主进程事件循环被长时间独占（渲染层 IPC 全排队）。
- * 事后归因发现两条**必然卡死**的实现缺陷，都在上一轮新加的流式文件读取里：
- *
- *   ① `pending += decode(chunk)` 无上限：对**没有换行符的文件**（压缩成一行的 JSON / 长日志）
- *      缓冲会涨到整份文件大小，而 JS 字符串 `+=` 是重复拷贝 → 代价接近 O(n²)；
- *   ② 扫描预算的退出条件写成 `lines.length >= limit && scanned >= MAX_SCAN_BYTES`，
- *      而单行文件 `lines` 恒为 0 → 那个 break **永远不会触发** → 一路读到底。
- *
- * 行为级回归在 `file-read-paging.spec.ts`（20MB 单行文件必须常数时间返回）。
- * 本文件补**源码守卫**：这些是"改回去不报错、只在真机上卡死"的写法，必须逐字钉住。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -31,7 +31,7 @@ describe("A-984：无换行符 / 超长单行文件的读取必须有硬上限",
   });
 
   it("扫描预算必须是**无条件**硬闸（不得再要求「窗口已收满」才判）", () => {
-    // 旧写法（要求 lines.length >= limit）在单行文件上永不触发 —— 这行断言就是防它回来
+    
     expect(src).not.toContain("if (lines.length >= limit && scanned >= MAX_SCAN_BYTES)");
     expect(src).toContain("if (scanned >= MAX_SCAN_BYTES) { break; }");
   });
@@ -51,7 +51,7 @@ describe("A-984：主进程卡死看门狗（把下次卡顿变成可归因的�
     expect(w).toContain("export function startMainWatchdog");
     expect(w).toContain("export function markMainActivity");
     expect(w).toContain("timer.unref?.()");
-    expect(w).toContain("watchdog.log"); // 必须落盘 —— 打包后终端日志看不到
+    expect(w).toContain("watchdog.log"); 
   });
 
   it("看门狗已在 app 启动时开启，并在工具事件处留下现场标记", () => {

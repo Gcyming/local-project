@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-# ── Windows VT 终端启用 ──────────────────────────────────
+
 
 if sys.platform == "win32":
     import ctypes
@@ -22,7 +22,7 @@ if sys.platform == "win32":
     ENABLE_PROCESSED_OUTPUT = 0x0001
     INVALID_HANDLE_VALUE = -1
 
-    for std_handle in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+    for std_handle in (-11, -12):  
         handle = kernel32.GetStdHandle(std_handle)
         if handle != INVALID_HANDLE_VALUE:
             mode = ctypes.c_ulong()
@@ -30,12 +30,12 @@ if sys.platform == "win32":
                 kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)
 
 
-# ── CJK 宽度计算 ─────────────────────────────────────────
+
 
 try:
     from wcwidth import wcswidth
 except ImportError:
-    # fallback: 简单版（中文=2，英文=1）
+    
     def wcswidth(text: str) -> int:
         w = 0
         for ch in text:
@@ -50,7 +50,7 @@ def _safe_wcswidth(text: str) -> int:
     """安全的 wcswidth，对 emoji / 控制字符返回 -1 时回退为 1"""
     w = wcswidth(text)
     if w <= 0:
-        # 单个字符宽度未知时，保守按 1 列处理
+        
         return max(1, len(text))
     return w
 
@@ -78,7 +78,7 @@ def _truncate(text: str, max_width: int) -> str:
     return result
 
 
-# ── ANSI 转义码 ──────────────────────────────────────────
+
 
 ESC = "\033["
 CLEAR = ESC + "2J"
@@ -101,13 +101,13 @@ MAGENTA = ESC + "35m"
 @dataclass
 class PaneState:
     """单个面板的状态"""
-    name: str           # Agent 名称
-    task: str = ""      # 当前任务描述
-    status: str = "idle"  # idle / queued / running / done / failed
+    name: str           
+    task: str = ""      
+    status: str = "idle"  
     output_lines: list[str] = field(default_factory=list)
     progress: str = ""
 
-    # 状态图标映射
+    
     _ICONS = {
         "idle": ("○", GRAY),
         "queued": ("⏳", MAGENTA),
@@ -152,14 +152,14 @@ class Multiplexer:
         self._running = False
         self._term_w = shutil.get_terminal_size().columns
         self._term_h = shutil.get_terminal_size().lines
-        self._last_render = 0.0  # 节流时间戳
+        self._last_render = 0.0  
         self._render_lock = threading.Lock()
 
     def start(self):
         """进入分屏模式（清屏 + 隐藏光标）"""
-        _ensure_output_encoding_safe()  # A-026: 任何编码环境下图标输出不崩溃
+        _ensure_output_encoding_safe()  
         self._running = True
-        self._last_render = time.time()  # 初始化节流时间戳
+        self._last_render = time.time()  
         self._term_w = shutil.get_terminal_size().columns
         self._term_h = shutil.get_terminal_size().lines
         sys.stdout.write(CLEAR + HOME + HIDE_CURSOR)
@@ -198,7 +198,7 @@ class Multiplexer:
         if now - self._last_render < 0.1:
             return
         with self._render_lock:
-            # 二次检查，避免锁等待期间已被其他线程渲染
+            
             if now - self._last_render < 0.1:
                 return
             self._last_render = now
@@ -209,16 +209,16 @@ class Multiplexer:
         if not self._running:
             return
 
-        # 重新获取终端尺寸
+        
         self._term_w = shutil.get_terminal_size().columns
         self._term_h = shutil.get_terminal_size().lines
 
         w = self._term_w
         h = self._term_h
 
-        # 计算布局
-        header_h = 4   # 标题栏
-        footer_h = 1   # 底部状态栏
+        
+        header_h = 4   
+        footer_h = 1   
         pane_area_h = h - header_h - footer_h
 
         num_panes = len(self.panes)
@@ -227,15 +227,15 @@ class Multiplexer:
         pane_h = max(3, pane_area_h // num_panes)
 
         buf = []
-        # 先清屏再定位到左上角，根除残影
+        
         buf.append(CLEAR + HOME)
 
-        # ── 标题栏 ──
+        
         title_line = f" {self.title} "
         buf.append(f"{BOLD}{CYAN}{title_line}{RESET}")
         buf.append(f"{GRAY}{'─' * w}{RESET}")
 
-        # 状态统计
+        
         queued = sum(1 for p in self.panes.values() if p.status == "queued")
         running = sum(1 for p in self.panes.values() if p.status == "running")
         done = sum(1 for p in self.panes.values() if p.status in ("done", "failed"))
@@ -253,13 +253,13 @@ class Multiplexer:
         buf.append(f"{' '.join(stats_parts)}")
         buf.append(f"{GRAY}{'─' * w}{RESET}")
 
-        # ── 面板区域 ──
+        
         pane_names = list(self.panes.keys())
         for idx, name in enumerate(pane_names):
             pane = self.panes[name]
             is_last = (idx == num_panes - 1)
 
-            # 面板标题
+            
             icon = pane.status_icon()
             sc = pane.status_color()
             title_text = f"╭─ {icon} {name} {sc}[{pane.status}]{RESET}"
@@ -267,19 +267,19 @@ class Multiplexer:
             pad = max(0, w - 2 - title_w)
             buf.append(f"{BOLD}{CYAN}{title_text}{'─' * pad}{RESET}")
 
-            # 任务描述
+            
             if pane.task:
                 task_display = _truncate(pane.task, w - 4)
                 buf.append(f"{DIM}│ {task_display}{RESET}")
             else:
                 buf.append(f"{DIM}│{RESET}")
 
-            # 进度
+            
             if pane.progress:
                 progress_display = _truncate(pane.progress, w - 4)
                 buf.append(f"{DIM}│ {progress_display}{RESET}")
 
-            # 输出内容（限制行数）
+            
             used_top = 3 if pane.task else 2
             if pane.progress:
                 used_top += 1
@@ -289,14 +289,14 @@ class Multiplexer:
                 line_display = _truncate(line, w - 4)
                 buf.append(f"{WHITE}│ {line_display}{RESET}")
 
-            # 填充空行
+            
             for _ in range(max(0, max_lines - len(lines))):
                 buf.append(f"{DIM}│{RESET}")
 
-            # 面板底部
+            
             buf.append(f"{CYAN}╰{'─' * (w - 2)}{RESET}")
 
-        # ── 底部状态栏 ──
+        
         done_count = sum(1 for p in self.panes.values() if p.status == "done")
         failed_count = sum(1 for p in self.panes.values() if p.status == "failed")
         running_count = sum(1 for p in self.panes.values() if p.status == "running")
@@ -312,7 +312,7 @@ class Multiplexer:
         else:
             buf.append(f"{YELLOW} {running_count} running | {done_count}/{num_panes} done {RESET}")
 
-        # 写入终端
+        
         output = "\n".join(buf)
         sys.stdout.write(output)
         sys.stdout.flush()

@@ -1,17 +1,17 @@
-/**
- * core-ts/src/social/wecom.ts — 企业微信适配器（语义移植自 social/base.py）。
- * - SHA1 签名校验（A-021：hmac.compare_digest 恒定时间）
- * - P1-19：时间戳 5 分钟新鲜度窗口防重放
- * - N11-P3-3：per-chat_id 速率限制（60s 窗口 / 10 条）
- * - receive→LLM→send 流程交由 SocialService 编排（此处仅协议与发送）
- *
- * 研究门结论（§9.5B.4）：个人微信 wechaty TS 长弃维护（最后发布 2022-05，全 puppet 已弃用，
- * 协议漂移+封号风险不适宜 7×24），仅此例外回退 sidecar；企业微信官方 HTTP API 无 RPA 风险，
- * 直接移植为 TS 原生实现。
- */
+
+
+
+
+
+
+
+
+
+
+
 import { createHash, timingSafeEqual } from "node:crypto";
 
-const TS_FRESHNESS_WINDOW = 300; // P1-19: 5 分钟
+const TS_FRESHNESS_WINDOW = 300; 
 
 export interface WeComMessage {
   chat_id: string;
@@ -50,7 +50,7 @@ export class WeComAdapter {
     this.verifyToken = opts.verifyToken ?? "";
   }
 
-  /** per-chat_id 速率限制（N11-P3-3）：返回 true=允许 */
+  
   checkRateLimit(chatId: string): boolean {
     const now = Date.now();
     for (const [cid, [t]] of this.rateBuckets) {
@@ -72,7 +72,7 @@ export class WeComAdapter {
     return true;
   }
 
-  /** 企业微信签名校验（URL 验证含 echostr / 消息验签） */
+  
   verify(params: WeComVerifyParams): boolean {
     const { msg_signature, timestamp, nonce, echostr } = params;
     const isUrlVerify = Boolean(echostr);
@@ -101,7 +101,7 @@ export class WeComAdapter {
       ? [this.verifyToken, timestamp, nonce, echostr!]
       : [this.verifyToken, timestamp, nonce];
     const digest = createHash("sha1").update(parts.slice().sort().join("")).digest("hex");
-    // A-021：恒定时间比较；缓冲长不一致（即签名不匹配）提前拒绝，防时序侧信道
+    
     const sigBuf = Buffer.from(msg_signature, "utf8");
     const digBuf = Buffer.from(digest, "utf8");
     if (sigBuf.length !== digBuf.length) {
@@ -110,7 +110,7 @@ export class WeComAdapter {
     return timingSafeEqual(sigBuf, digBuf);
   }
 
-  /** 获取 access_token（自动刷新；corpSecret 仅请求作用域内使用） */
+  
   private async getAccessToken(): Promise<string> {
     if (!this.corpSecret) {
       return "";
@@ -133,7 +133,7 @@ export class WeComAdapter {
     }
   }
 
-  /** 通过企业微信 webhook 发送文本消息（chatId 在 webhook 模式下不透传，与 Python 语义一致） */
+  
   async send(_chatId: string, text: string): Promise<boolean> {
     if (!this.webhookUrl) {
       console.warn("[social/wecom] webhook_url 未配置");
@@ -161,7 +161,7 @@ export class WeComAdapter {
     }
   }
 
-  /** 发送消息到群聊/用户（调用 access_token 路径，可选） */
+  
   async sendToUser(chatId: string, text: string): Promise<boolean> {
     const token = await this.getAccessToken();
     if (!token) {

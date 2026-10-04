@@ -27,32 +27,32 @@ class TaskState(Enum):
 class SubTask:
     """子任务"""
     id: str
-    name: str           # 子 Agent 名称（用户可命名）
-    description: str    # 任务描述
+    name: str           
+    description: str    
     state: TaskState = TaskState.PENDING
     result: str = ""
     error: str = ""
-    progress: str = ""  # 实时进度文本
+    progress: str = ""  
     started_at: float = 0.0
     finished_at: float = 0.0
-    agent_id: str = ""  # 执行该任务的 Agent ID
-    provider_key: str = ""  # 使用的 Provider
-    rounds: int = 0     # 已执行轮次
-    agent_name: str = ""  # A-053: 角色路由命中的持久子 Agent 名（空=临时 Worker）
-    round: int = 1        # A-055: 轮次编号（轮次分工制：前一轮全部完成后才执行下一轮）
-    ref_frame: str = ""  # A-063: 链式参考帧（前一段视频末帧，本段图生视频参考图）
+    agent_id: str = ""  
+    provider_key: str = ""  
+    rounds: int = 0     
+    agent_name: str = ""  
+    round: int = 1        
+    ref_frame: str = ""  
 
 
 @dataclass
 class SwarmPlan:
     """分裂计划"""
     task_id: str
-    original_task: str       # 用户原始任务
+    original_task: str       
     subtasks: list[SubTask] = field(default_factory=list)
-    max_splits: int = 1      # Provider 数量上限
-    max_workers: int = 1     # 最大并发数
+    max_splits: int = 1      
+    max_workers: int = 1     
     created_at: float = field(default_factory=time.time)
-    global_spec: str = ""    # A-057: 全局规格（风格/光线/色调/场景/人物/镜头语言），所有段共享保证联动
+    global_spec: str = ""    
 
 
 class SwarmOrchestrator:
@@ -72,7 +72,7 @@ class SwarmOrchestrator:
         self.providers = providers
         self.max_splits = max(1, len(providers))
         self.plans: dict[str, SwarmPlan] = {}
-        # A-916：请求频率并发上限（config/requests.json，GUI 可调；默认 2 → 避免并发突发触发上游节流）
+        
         self.requests_concurrency = self._load_requests_concurrency()
 
     @staticmethod
@@ -117,18 +117,18 @@ class SwarmOrchestrator:
             task_id=task_id,
             original_task=original_task,
             max_splits=self.max_splits,
-            # A-916：并发 = min(调用方上限, Provider 数, 配置并发上限)——防并发突发触发节流
+            
             max_workers=min(max_workers, self.max_splits, self.requests_concurrency),
         )
 
         provider_keys = self.get_provider_keys()
 
-        # 保留全部子任务，只用 max_workers 限并发（排队分批，不丢任务）
+        
         for i, desc in enumerate(subtask_descriptions):
             name = subtask_names[i] if i < len(subtask_names) else f"Worker-{i + 1}"
             provider_key = provider_keys[i % len(provider_keys)] if provider_keys else ""
             agent_name = subtask_agents[i] if subtask_agents and i < len(subtask_agents) else ""
-            # A-055: 轮次编号（rounds 拆解时传入；默认 1）
+            
             round_no = int(subtask_rounds[i]) if subtask_rounds and i < len(subtask_rounds) else 1
 
             subtask = SubTask(

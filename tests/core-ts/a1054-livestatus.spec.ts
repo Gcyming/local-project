@@ -1,16 +1,16 @@
-/**
- * tests/core-ts/a1054-livestatus.spec.ts — 底部「实时状态行」文案推导的守卫。
- *
- * 被测：`gui/src/renderer/pages/liveStatus.ts`（纯逻辑）。
- *
- * 锁三件最容易被改坏、且坏了不会被任何报错发现的事：
- *  ① **优先级顺序**（等用户 > 压缩 > 停止 > 输出 > 工具 > 思考 > 等首包）；
- *  ② **等待用户输入时不许播扫光**（播了就是在骗用户"它还在跑、你等着就好"）；
- *  ③ **上限未知时不显示百分比**（0%/∞ 比不显示更糟——右栏已是同一口径）。
- *
- * ⚠️ 文案断言只锚「有没有说清这件事」，不逐字锁死；行为断言锚 `kind`。
- * ⚠️ 验收标准是**变异测试**（见 `gui/scripts/mut-a1054.mjs`）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   buildDetail,
@@ -55,7 +55,7 @@ describe("A-1054 状态行：token 估算与次要信息", () => {
   });
 
   it("上限未知（cap=0）→ 不显示百分比；有上限才显示，且封顶 99%", () => {
-    // 反空转：这两条必须给出不同结果，否则"不显示百分比"的守卫是假的
+    
     expect(buildDetail({ loading: true, ctxUsed: 5000, ctxCap: 0 })).not.toContain("%");
     expect(buildDetail({ loading: true, ctxUsed: 50_000, ctxCap: 100_000 })).toContain("50%");
     expect(buildDetail({ loading: true, ctxUsed: 200_000, ctxCap: 100_000 })).toContain("99%");
@@ -83,8 +83,8 @@ describe("A-1054 状态行：阶段推导（优先级即规格）", () => {
   });
 
   it("等审批**不受 loading 影响**：等待态本身就是「这一轮停在这里等你」，必须显示", () => {
-    // 反空转：如果这条不成立，就可以把 `if (!loading) return null` 提到最前而**所有测试仍绿**
-    // —— 那是等价变异体（守卫锁不到）。
+    
+    
     expect(deriveLiveStatus({ loading: false, awaitingApproval: true })?.kind).toBe("awaiting-approval");
     expect(deriveLiveStatus({ loading: false, awaitingAnswer: true })?.kind).toBe("awaiting-answer");
   });

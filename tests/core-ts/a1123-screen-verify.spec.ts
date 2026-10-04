@@ -1,23 +1,23 @@
-/**
- * tests/core-ts/a1123-screen-verify.spec.ts — 屏幕控制「业界优秀」三件事的回归守卫。
- *
- * 覆盖（对应 `docs/A-1116-handover-todo.md` §3 ⑤ 的三个差距）：
- *   ① **命中校验 + 未命中自动重试一次** —— 判据：「点击一个按钮后，能在回执里看到
- *      「命中校验」结果（命中/未命中），未命中时自动重试一次。」
- *   ② **元素级定位**：桌面补上窗口级数据源（粒度是窗口，不是控件），
- *      并把「导出故障」与「seletor 没匹配」分成两态。
- *   ③ **两处静默点出声**：`controller.listTargets` 的 catch 吞、`uiDump` 的 catch 返 []。
- *
- * 【本文件锁的到底是什么】不是"函数返回了什么"，而是**用户/模型看到的那句话**：
- *   · `detail` 只陈述"输入已注入"，它与"效果已发生"此前**逐字同形** ——
- *     点空 / 被遮挡 / 没聚焦 / 没渲染完，四种情形回执与成功一模一样；
- *   · 「没有判据」(`ratio === null`) 被当成「未命中」会把一次其实成功的点击**再点一遍**
- *     （对外就是一次多余的、可能触发完全不同行为的双击）⇒ 必须分两态。
- *
- * ⚠️ 中文断言名一律用「」，不许夹 ASCII 双引号（本轮为此炸过 3 次 spec）。
- * ⚠️ `setImageDiffer` 是**模块级全局**（与 setImageOptimizer 同款注入点）⇒ 每个用例
- *    afterEach 必须复位，否则上一条留下的差异度量会污染后面所有用例（假绿/假红都可能）。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { ScreenController } from "../../core-ts/src/screen/controller.js";
@@ -35,13 +35,13 @@ import { ToolRegistry } from "../../core-ts/src/tools/registry.js";
 import { registerBuiltinTools, setScreenController, describeVerify } from "../../core-ts/src/tools/builtin.js";
 import type { ActionVerify } from "../../core-ts/src/screen/types.js";
 
-/* ───────────────────────── 脚手架 ───────────────────────── */
 
-/**
- * 假差异度量：把"两张图 → 差异率"直接写进**第二张图的 base64**里。
- *   `after:<ratio>` → 该差异率；`after:null` → 无法比较；`boom` → 抛错。
- * 这样测试数据本身就是判据表，不需要额外的映射表（少一处会漂移的产地）。
- */
+
+
+
+
+
+
 const differ = (a: string, b: string): number | null => {
   void a;
   if (b === "boom") { throw new Error("差异度量炸了"); }
@@ -55,18 +55,18 @@ const differ = (a: string, b: string): number | null => {
 class FakeBackend implements ScreenBackend {
   readonly id: ScreenBackendId;
   readonly actions = new Set<ScreenAction["kind"]>(["click", "mouse_move", "wait", "scroll", "type"]);
-  /** 按调用序号返回的 pngBase64（超出则重复最后一个） */
+  
   pngs: string[] = ["before", "after:0.5"];
   performed: ScreenAction[] = [];
   captureCalls: Array<{ marks?: boolean } | undefined> = [];
-  /** 第 N 次 `perform` 失败（0 = 不失败）—— 用来测"重试时动作本身失败" */
+  
   performFailOn = 0;
-  /** 第 N 次 `capture` 失败（返回 ok:false）—— 用来测"参考图取不到" */
+  
   captureFailOn = 0;
-  /** 元素层级导出：null = 返回空数组；函数 = 用它的行为（可抛错） */
+  
   dumpImpl: (() => Promise<UiElement[]>) | null = null;
 
-  /** `id` 可配：C 组的「一个抛错、一个正常」必须是**两个不同 id**（同 id 会把前一个覆盖掉 ⇒ 假绿） */
+  
   constructor(id: ScreenBackendId = "desktop") { this.id = id; }
 
   async listTargets(): Promise<DisplayInfo[]> { return [await this.displayInfo()]; }
@@ -79,7 +79,7 @@ class FakeBackend implements ScreenBackend {
       return { ok: false, error: "截图失败（模拟）" };
     }
     const png = this.pngs[Math.min(this.captureCalls.length - 1, this.pngs.length - 1)] ?? "P";
-    // ⚠️ 图像尺寸刻意与设备尺寸**不同**（1000×500 → 图像 1000×500 等值；见 A10 用 noteCaptureBasis 自设基准）
+    
     return { ok: true, pngBase64: png, dataUrl: `data:image/png;base64,${png}`, width: 1000, height: 500, imageWidth: 1000, imageHeight: 500 };
   }
   async perform(action: ScreenAction): Promise<ScreenActionResult> {
@@ -95,13 +95,13 @@ class FakeBackend implements ScreenBackend {
   }
 }
 
-/** 一个**没有** uiDump 能力的后端（语义 = 该后端没有元素树，不是故障） */
+
 class NoDumpBackend extends FakeBackend {
-  // @ts-expect-error 刻意去掉可选能力（模拟"该后端没有元素树"）
+  
   uiDump = undefined;
 }
 
-/** 枚举目标一定抛错的后端 */
+
 class FaultTargetsBackend extends FakeBackend {
   async listTargets(): Promise<DisplayInfo[]> { throw new Error("宿主已退出（模拟）"); }
 }
@@ -112,15 +112,15 @@ function mk(be: ScreenBackend = new FakeBackend()): { ctl: ScreenController; be:
   return { ctl, be: be as FakeBackend };
 }
 
-/** device 空间的点击（不需要截图基准） */
+
 const clickAt = (x = 10, y = 10): ScreenAction => ({ kind: "click", x, y, coordSpace: "device" });
 
 afterEach(() => {
-  setImageDiffer(null);      // 全局注入点必须复位（否则污染同文件后续用例）
-  setScreenController(null); // 全局单例同理
+  setImageDiffer(null);      
+  setScreenController(null); 
 });
 
-/* ───────────────────── A 组：命中校验（controller.perform） ───────────────────── */
+
 
 describe("A-1123 A 组 — 命中校验：动作有没有真的生效", () => {
   it("A1 画面有变化 ⇒ 命中，且**不重试**（只注入一次）", async () => {
@@ -202,14 +202,14 @@ describe("A-1123 A 组 — 命中校验：动作有没有真的生效", () => {
     be.pngs = ["before", "after:0"];
     const r = await ctl.perform("desktop", { kind: "mouse_move", x: 1, y: 1, coordSpace: "device" });
     expect(r.verify).toBeUndefined();
-    // 复截仍有（autoCapture 管），但**没有**额外的参考图 ⇒ 只调了一次截图
+    
     expect(be.captureCalls).toHaveLength(1);
   });
 
   it("A8 `wait` 不做校验、也不复截", async () => {
     const { ctl, be } = mk();
     setImageDiffer(differ);
-    // 基准用 noteCaptureBasis 自设：本用例要断言"截图次数为 0"，不能为了建基准先截一张
+    
     ctl.noteCaptureBasis("desktop", undefined, 1000, 500, 1000, 500, 0, 0);
     const r = await ctl.perform("desktop", { kind: "wait", durationMs: 1 });
     expect(r.ok).toBe(true);
@@ -233,14 +233,14 @@ describe("A-1123 A 组 — 命中校验：动作有没有真的生效", () => {
     const { ctl, be } = mk();
     setImageDiffer(differ);
     be.pngs = ["before", "after:0.5"];
-    // 模拟"模型刚按窗口截过图"：图像 200×100 → 设备 1000×500（比例 5）
+    
     ctl.noteCaptureBasis("desktop", undefined, 200, 100, 1000, 500, 0, 0);
     const r = await ctl.perform("desktop", { kind: "click", x: 100, y: 50 });
     expect(r.ok).toBe(true);
-    // 若参考图走了 `this.capture`（会 rememberBasis），基准会被 1000×1000 覆盖 ⇒ 比例变 1 ⇒ x=100
+    
     expect(be.performed[0].x).toBe(500);
     expect(be.performed[0].y).toBe(250);
-    // 且参考图必须是 backend.capture 直调 + 不叠标注
+    
     expect(be.captureCalls[0]).toEqual({ marks: false });
   });
 
@@ -279,7 +279,7 @@ describe("A-1123 A 组 — 命中校验：动作有没有真的生效", () => {
   });
 });
 
-/* ─────────────── B 组：元素层级导出的三态（旧实现是静默点之一） ─────────────── */
+
 
 describe("A-1123 B 组 — uiDump 三态：不支持 / 导出故障 / 导出成功但没有元素", () => {
   it("B1 导出**抛错** ⇒ ok:false 并带原文（旧实现吞成空数组）", async () => {
@@ -316,7 +316,7 @@ describe("A-1123 B 组 — uiDump 三态：不支持 / 导出故障 / 导出成�
     const r = await ctl.perform("desktop", { kind: "click", selector: { index: 99 }, coordSpace: "device" });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/元素定位失败/);
-    // 必须报**已导出多少元素**：0 个 与 60 个 的下一步完全不同（后者该先 screen_ui_dump 看看/下滑翻页）
+    
     expect(r.error).toMatch(/已导出 \d+ 个元素/);
   });
 
@@ -343,12 +343,12 @@ describe("A-1123 B 组 — uiDump 三态：不支持 / 导出故障 / 导出成�
   });
 });
 
-/* ─────────────── C 组：目标枚举的失败原因（旧实现是静默点之二） ─────────────── */
+
 
 describe("A-1123 C 组 — listTargetsReport：失败原因不许被吞", () => {
   it("C1 一个后端抛错、另一个正常 ⇒ 失败归集进 failures，正常目标仍在 targets", async () => {
     const ctl = new ScreenController();
-    // ⚠️ 必须是**两个不同 id**：同 id 第二次 register 会覆盖前一个（那样本用例会静默变成"全正常"）
+    
     ctl.register(new FaultTargetsBackend("desktop"));
     ctl.register(new FakeBackend("android"));
     const rep = await ctl.listTargetsReport();
@@ -375,7 +375,7 @@ describe("A-1123 C 组 — listTargetsReport：失败原因不许被吞", () => 
   });
 });
 
-/* ─────────────── D 组：工具层措辞（用户/模型真正看到的那一层） ─────────────── */
+
 
 describe("A-1123 D 组 — 回执措辞：模型靠这几句话决定下一步", () => {
   const runAction = async (be: FakeBackend, action: ScreenAction): Promise<string> => {
@@ -463,8 +463,8 @@ describe("A-1123 D 组 — 回执措辞：模型靠这几句话决定下一步",
     expect(out).toMatch(/枚举失败/);
     expect(out).toMatch(/宿主已退出/);
     expect(out).toMatch(/不是「没有目标」/);
-    // 故障态**不许**再附一句「无可用目标」—— 那正是"枚举坏了"与"真的没有目标"同形的老毛病
-    // （两句话一起出现时，模型会读后一句，于是去查一个并不存在的"没有目标"）
+    
+    
     expect(out).not.toMatch(/无可用目标/);
   });
 
@@ -475,10 +475,10 @@ describe("A-1123 D 组 — 回执措辞：模型靠这几句话决定下一步",
   });
 });
 
-/* ─────────────── E 组：装配层与文案唯一出处 ─────────────── */
+
 
 describe("A-1123 E 组 — 装配点与文案唯一出处", () => {
-  /** 剥掉块注释与行注释后再断言（否则注释里引用的写法会把断言骗过） */
+  
   const codeOf = (rel: string): string =>
     readFileSync(rel, "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -495,7 +495,7 @@ describe("A-1123 E 组 — 装配点与文案唯一出处", () => {
   it("E2 差异度量的比较入口是**唯一实现**（controller 只调 imageDiffRatio，不自己比像素）", () => {
     const ctl = codeOf("core-ts/src/screen/controller.ts");
     expect(ctl).toContain("imageDiffRatio(");
-    // 不许在 controller 里出现逐像素比较（那会是第二份判据）
+    
     expect(ctl).not.toMatch(/toBitmap|createFromBuffer/);
   });
 
@@ -510,10 +510,10 @@ describe("A-1123 E 组 — 装配点与文案唯一出处", () => {
     const none: ActionVerify = { hit: true, ratio: null, attempts: 1, note: "未装配画面差异度量" };
     expect(describeVerify(hit)).toMatch(/✓ 命中/);
     expect(describeVerify(miss)).toMatch(/✗ 未命中/);
-    // 未命中必须给出**可操作的下一步**：重新截图，而不是把同一坐标再点一遍
+    
     expect(describeVerify(miss)).toMatch(/重新 screen_capture/);
     expect(describeVerify(miss)).not.toMatch(/未判定/);
-    // 「重试才生效」与「第一次就中」不许同形
+    
     const lateHit: ActionVerify = { hit: true, ratio: 0.4, attempts: 2, note: "首次未命中，自动重试后检测到画面可见变化" };
     expect(describeVerify(lateHit)).toMatch(/第 2 次尝试才生效/);
     expect(describeVerify(none)).toMatch(/未判定/);
@@ -524,13 +524,13 @@ describe("A-1123 E 组 — 装配点与文案唯一出处", () => {
     const d = codeOf("core-ts/src/screen/backends/desktop.ts");
     expect(d).toMatch(/async uiDump\(\): Promise<UiElement\[\]>/);
     expect(d).toContain("marksSpace");
-    // 编号框坐标必须减掉虚拟桌面原点（图像空间），否则副屏在左/上时框画到图外
+    
     expect(d).toMatch(/x1: w\.x - originX/);
   });
 
   it("E6 参考图与编号框用的是**不同**坐标空间（判据不许只有一个产地混用）", () => {
     const d = codeOf("core-ts/src/screen/backends/desktop.ts");
-    // uiDump（用于点击）返回原样虚拟坐标；capture（用于画框）减 origin
+    
     expect(d).toMatch(/center: \{ x: Math\.round\(w\.x \+ w\.width \/ 2\), y: Math\.round\(w\.y \+ w\.height \/ 2\) \}/);
     expect(d).toMatch(/x1: w\.x - originX, y1: w\.y - originY/);
   });

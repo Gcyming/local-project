@@ -1,20 +1,20 @@
-/**
- * A-1040 守卫：记忆「存储位置」= 一根管两处（memory.json + LanceDB），界面显示真实路径。
- *
- * **用户实测**（心智中枢 → 记忆（存储位置））：「这个位置自定义改地址只能改一个」——
- * 面板并列显示两条路径，却只有一个「更改存储位置…」按钮，而且改完只有第一条跟着变。
- *
- * 根因是结构性的，不是显示层的锅：
- *   ① `core-ts/store.ts` 曾写死
- *        `this.lancedbUri = opts.lancedbUri ?? resolve(DATA_DIR, agentId, "lancedb"); // LanceDB 保持原位`
- *      → 自定义根目录**只作用于 memory.json**，向量库被钉在默认 `data/` 里一动不动。
- *      而向量库恰恰是"记忆存储"里体积最大的那一半。
- *   ② `gui/src/main/index.ts` 的 configGet 返回的是**字符串模板**
- *        `lance: resolve(PROJECT_ROOT, "data", "<agentId>", "lancedb")`
- *      —— 字面 `<agentId>`，既不是真实路径、也永不随设置变化（假信息，用户拿到也没法用）。
- *
- * 本文件把"两者同根 + 路径同源"钉死。改回去**不会报错**，只在真机上表现为"只有一个地址会变"。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it, afterAll } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,7 +32,7 @@ afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
 });
 
-/** 记录 connect 拿到的 uri，并返回一个"空库"桩（openTable 抛错 → 走 createTable 分支）。 */
+
 function stubLance(seen: string[]): { connect: (uri: string) => Promise<never> } {
   const db = {
     openTable: async (): Promise<never> => { throw new Error("no table"); },
@@ -63,7 +63,7 @@ describe("A-1040 ① resolveMemoryPaths：一个根目录同时决定两处存�
     const custom = "/tmp/custom-root";
     const p = resolveMemoryPaths("ag1", { projectRoot: root, dataDir: custom });
     expect(p.memoryJson).toBe(resolve(custom, "ag1", "memory.json"));
-    // 这就是用户报的"只能改一个"：这一条以前会落回 <root>/data/…（与自定义根无关）
+    
     expect(p.lanceDir).toBe(resolve(custom, "ag1", "lancedb"));
     expect(p.lanceDir.startsWith(resolve(custom))).toBe(true);
   });

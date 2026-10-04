@@ -1,6 +1,6 @@
-/**
- * grouptalk.spec.ts — 群聊发言调度引擎（A-950）：@ 解析 / 顺序生成 / 抢答回放 / 流式回调。
- */
+
+
+
 import { describe, it, expect } from "vitest";
 import { parseMentions, runGroupTalk, defaultRebuttalFilter, type GroupTalkParticipant, type StreamEmit } from "../../core-ts/src/services/grouptalk.js";
 
@@ -39,14 +39,14 @@ describe("runGroupTalk", () => {
     expect(out.transcript.map((l) => l.speaker)).toEqual(["用户", "甲"]);
     expect(rs).toEqual(["想…"]);
     expect(chunks).toEqual(["第", "一段"]);
-    expect(b.prompts).toHaveLength(0); // 未被点名不发
+    expect(b.prompts).toHaveLength(0); 
   });
 
   it("seq：顺序非并发，后一个能看到前一个的发言", async () => {
     const a = mk("A", "R", 5); const bS = mk("B", "R", 0);
     await runGroupTalk({ members: [bS, a], topic: "T", mode: "seq", order: ["A", "B"] });
     expect(a.prompts).toHaveLength(1);
-    expect(bS.prompts[0]).toContain("A观点1"); // B 的 prompt 包含 A 已产出原文
+    expect(bS.prompts[0]).toContain("A观点1"); 
   });
 
   it("contest：并行预研、按完成顺序逐个回放（先快者先上台），有分歧则两轮", async () => {
@@ -54,9 +54,9 @@ describe("runGroupTalk", () => {
     const order: string[] = [];
     const { transcript } = await runGroupTalk({ members: [slow, fast], topic: "实现这个功能，是我们来讨论一下方案？", mode: "contest",
       onSpeechEnd: (m) => order.push(m.name) });
-    expect(order[0]).toBe("快"); // 完成先上台
+    expect(order[0]).toBe("快"); 
     expect(order[1]).toBe("慢");
-    expect(order.length).toBe(4); // 有任务意图 → 预研回放 + 互看回应轮
+    expect(order.length).toBe(4); 
     expect(transcript[1]?.speaker).toBe("快");
     expect(transcript[2]?.speaker).toBe("慢");
   });
@@ -64,7 +64,7 @@ describe("runGroupTalk", () => {
   it("contest 互看：第二轮回应轮能看到第一轮全体观点（prompt 含他人名）", async () => {
     const a = mk("A"); const b = mk("B");
     await runGroupTalk({ members: [a, b], topic: "把这个优化方案落地，来讨论一下步骤？", mode: "contest" });
-    // 每成员两段发言（预研 + 回应）；回应段的 prompt 应含其他成员第一轮观点名
+    
     expect(a.prompts).toHaveLength(2);
     expect(b.prompts).toHaveLength(2);
     expect(a.prompts[1]).toContain("B观点1");
@@ -82,7 +82,7 @@ describe("runGroupTalk", () => {
     const a = mk("A"); const b = mk("B");
     const ends: string[] = [];
     await runGroupTalk({ members: [a, b], topic: "大家好", mode: "contest", onSpeechEnd: (m) => ends.push(m.name) });
-    expect(ends.length).toBe(2); // 各一次（无回应轮）
+    expect(ends.length).toBe(2); 
     expect(a.prompts).toHaveLength(1);
     expect(b.prompts).toHaveLength(1);
   });
@@ -91,10 +91,10 @@ describe("runGroupTalk", () => {
     const a = mk("A"); const b = mk("B");
     const ends: string[] = [];
     await runGroupTalk({ members: [a, b], topic: "我们讨论一下怎么优化", mode: "contest", onSpeechEnd: (m) => ends.push(m.name) });
-    expect(ends.length).toBe(4); // 两轮
+    expect(ends.length).toBe(4); 
     const single: string[] = [];
     await runGroupTalk({ members: [a, b], topic: "我们讨论一下怎么优化", mode: "contest", rebuttalFilter: () => false, onSpeechEnd: (m) => single.push(m.name) });
-    expect(single.length).toBe(2); // 显式关闭 → 单轮
+    expect(single.length).toBe(2); 
   });
 });
 
@@ -110,8 +110,8 @@ describe("defaultRebuttalFilter（A-959 回应轮收敛判定）", () => {
   });
   it("有任务意图且存在分歧（观点互不重合）→ true 保留回应轮；高度一致 → false", () => {
     const same = [{ speaker: "A", content: "我觉得用方案一更好，因为简单可靠稳当省心" }, { speaker: "B", content: "我觉得用方案一更好，因为简单可靠稳当省心" }];
-    expect(defaultRebuttalFilter("怎么优化方案", same)).toBe(false); // 高度一致 → 已收敛
+    expect(defaultRebuttalFilter("怎么优化方案", same)).toBe(false); 
     const diff = [{ speaker: "A", content: "我主张用方案一，快" }, { speaker: "B", content: "我坚持方案二，稳" }];
-    expect(defaultRebuttalFilter("怎么优化方案", diff)).toBe(true); // 分歧 → 保留回应轮
+    expect(defaultRebuttalFilter("怎么优化方案", diff)).toBe(true); 
   });
 });

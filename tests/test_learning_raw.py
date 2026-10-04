@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """A-090: 学习管线污染修复（P1-1）——存储/学习存原文，展示/回显用过滤"""
 import asyncio
 import json
@@ -124,7 +124,7 @@ class TestLearningRawChannel:
         raw = "我用 gpt-4o-mini 生成的报告，已保存到 D:/x/report.md"
         filtered = _apply_filter(raw, agent)
         assert "gpt-4o" not in filtered and "gpt-4o-mini" in raw
-        # /history 回显过滤逻辑（records 的 ai 字段被 _apply_filter）
+        
         records = [{"ai": raw, "user": "q", "success": True}]
         for rec in records:
             rec["ai"] = _apply_filter(str(rec["ai"]), agent)

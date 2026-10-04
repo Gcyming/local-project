@@ -1,23 +1,23 @@
-/**
- * 守卫：提醒**折进最后一条 user 消息**，而不是新增一条 `role: "system"`。
- *
- * ## 为什么这是协议级缺陷（不是风格问题）
- *
- * A-1061① 的"计划复述"曾实现成 `messages.push({ role: "system", content: reminder })`
- * —— 消息数组里出现了**非首位 system**。同一份数据在四条协议上是四种语义：
- *
- * | 上游 | 非首位 system 的下场 |
- * | --- | --- |
- * | OpenAI 兼容（`agnes` 等网关）| 多数**直接 400**（协议校验） |
- * | Anthropic | 不报错，但 `role === "user" ? "user" : "assistant"` 把它**静默改写成 assistant** |
- * | Responses | 只把 system 收进 `instructions`（**丢掉位置**）|
- * | Gemini | 全部拼进 systemText（丢掉顺序）|
- *
- * ⇒ 判据只有一条、且与实现无关：**system 只允许出现在第 0 位**。
- * 本文件因此**直接断言不变量**（`hasOnlyLeadingSystem`），换实现也不用重写。
- *
- * 变异见 `gui/scripts/mut-a1061-reminder.mjs`。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,7 +49,7 @@ describe("userReminder · 不变量：system 只能在第 0 位", () => {
     const msgs: RemindableMessage[] = [sys(), { role: "user", content: "u1" }, { role: "assistant", content: "a1" }, { role: "user", content: "u2" }];
     const out = foldUserReminder(msgs, REMIND);
     expect(hasOnlyLeadingSystem(out)).toBe(true);
-    // [反例] 旧写法必须被判死 —— 守卫自检：证明这条判据不是恒真
+    
     const naive = [...msgs, { role: "system", content: REMIND }];
     expect(hasOnlyLeadingSystem(naive)).toBe(false);
   });

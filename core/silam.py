@@ -20,9 +20,9 @@ from typing import AsyncIterator
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "pilot model"))
-from silam_core.engine import SILAMEngine  # noqa: E402
-from silam_core.config import SilamConfig  # noqa: E402
-from silam_core.pretrained import load_pretrained  # noqa: E402
+from silam_core.engine import SILAMEngine  
+from silam_core.config import SilamConfig  
+from silam_core.pretrained import load_pretrained  
 
 logger = logging.getLogger("slime.silam")
 
@@ -75,19 +75,19 @@ class SilamProvider:
         if not self.initialize():
             return {"error": "SILAM 未初始化", "choices": []}
 
-        # 提取状态文本（从 last user message）
+        
         state_text = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 state_text = msg.get("content", "")
                 break
 
-        # 调用 SILAM 引擎
+        
         fear = kwargs.get("fear_level")
         desire = kwargs.get("desire_level")
         r = self.engine.forward(state_text, fear_level=fear, desire_level=desire)
 
-        # 构建 OpenAI 兼容响应
+        
         action = r.tool_call
         response_text = self._format_response(r)
 
@@ -122,7 +122,7 @@ class SilamProvider:
         choice = result["choices"][0]["message"]
         content = choice["content"]
 
-        # 模拟流式输出（实际是即时返回）
+        
         yield self._sse_event("chat.completion.chunk", result["id"], content[:50])
         yield self._sse_event("chat.completion.chunk", result["id"], content[50:])
         yield self._sse_event("chat.completion.chunk", result["id"], "")
@@ -156,7 +156,7 @@ class SilamProvider:
         }
 
 
-# 模块级单例
+
 _silam_provider: SilamProvider | None = None
 
 

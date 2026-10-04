@@ -1,10 +1,10 @@
-/**
- * core-ts/src/services/swarm.ts — SwarmService（slime_server.py /swarm/report 语义移植 + 调度封装）。
- * - report：Swarm 任务完成上报（A-031）——输入校验（task/summary 非空、results ≤16、
- *   state 白名单、字段截断）→ _post_process_swarm 管线（记忆提取 → 演化 → 知识 pattern
- *   task.swarm.* → 行为 reinforce（swarm_extracted）→ 情绪（novelty/violation）→ 巩固 → 保存）
- * - dispatch：Swarm 任务调度封装（拆解 → SwarmExecutor.run → 合并），复用 core-ts executor/merger
- */
+
+
+
+
+
+
+
 
 import { RunOptions, RunResult, SwarmExecutor, WorkerAgentSpec } from "../executor.js";
 import { sandboxGateFrom } from "../tool_loop.js";
@@ -37,19 +37,19 @@ export interface SwarmReportResult {
 
 export interface SwarmServiceOptions {
   registry: AgentRegistry;
-  /** 调度执行器（缺省用 engine 组装 SwarmExecutor；Electron 主进程/CLI 注入覆盖） */
+  
   dispatchRunner?: (agent: AgentState, opts: RunOptions) => Promise<RunResult>;
-  /** 真执行器（SlimeEngine）；未提供且无 dispatchRunner → 501 */
+  
   engine?: SlimeEngine;
   postProcess?: PostProcessHooks;
-  /** 记忆提取开关（slime.toml memory.enabled；5B.3 接线配置读取，缺省 false） */
+  
   memoryEnabled?: boolean;
-  /** 知识引擎数据目录（测试隔离用；缺省项目 Knowledge 目录） */
+  
   dataDir?: string;
   logger?: Pick<Console, "warn" | "info" | "debug">;
 }
 
-/** 输入清洗（对齐 slime_server.py swarm_report：state 白名单 + 字段截断） */
+
 export function cleanSwarmResults(results: unknown): Array<{
   name: string;
   state: "done" | "failed";
@@ -100,13 +100,13 @@ export class SwarmService {
     this.logger = opts.logger ?? console;
   }
 
-  /** 默认调度：用 SlimeEngine 组装 SwarmExecutor（真执行器接线，A1 闭环） */
+  
   private async runWithEngine(engine: SlimeEngine, agent: AgentState, runOpts: RunOptions): Promise<RunResult> {
     const router = await engine.routerFor(agent);
     if (!router) {
       throw new ChatServiceError(503, "主 Agent 未配置可用模型路由（provider 缺失），无法调度 Swarm");
     }
-    // 持久子 Agent 名单（config/agents.json 其余 Agent，A-053 角色路由）
+    
     const roster: WorkerAgentSpec[] = this.registry.loadedAgents
       .filter((a) => a.id !== agent.id)
       .map((a) => ({
@@ -127,7 +127,7 @@ export class SwarmService {
     return executor.run(runOpts);
   }
 
-  /** Swarm 任务调度（CLI/Electron 入口；拆解/执行/合并全在 executor 内） */
+  
   async dispatch(agentId: string, task: string, opts: Partial<RunOptions> = {}): Promise<RunResult> {
     const agent = await this.registry.findAgent(agentId);
     if (!agent) {
@@ -140,7 +140,7 @@ export class SwarmService {
     return this.dispatchRunner(agent, runOptions);
   }
 
-  /** Swarm 任务完成上报（A-031）：主 Agent 沉淀本次 Swarm 经验（记忆/演化/行为） */
+  
   async report(agentId: string, req: SwarmReportRequest): Promise<SwarmReportResult> {
     const agent = await this.registry.findAgent(agentId);
     if (!agent) {
@@ -161,7 +161,7 @@ export class SwarmService {
     return { ok: true, ...outcome };
   }
 
-  /** _post_process_swarm 语义（与 _post_process_chat 同管线，输入侧为任务与合并总结） */
+  
   async postProcessSwarm(
     agent: AgentState,
     task: string,
@@ -201,7 +201,7 @@ export class SwarmService {
       this.logger.debug("[slime] Swarm 演化引擎未接线（5B.3 迁移后启用），跳过");
     }
 
-    // 知识引擎：Swarm 成功/失败 pattern
+    
     try {
       const { getKnowledgeEngine } = await import("../memory/knowledge.js");
       const ke = getKnowledgeEngine(agent.id, this.dataDir ? { dataDir: this.dataDir } : {});
@@ -215,7 +215,7 @@ export class SwarmService {
       this.logger.debug(`[slime] Swarm 知识引擎更新失败: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // L3→L2 沉淀：提取的行为模式 → 行为模式库
+    
     const { BehaviorStore, ConsolidationEngine } = await import("../mind/behavior.js");
     const behavior = BehaviorStore.fromDict(agent.behavior);
     for (const bp of behaviorPatterns) {
@@ -227,7 +227,7 @@ export class SwarmService {
       });
     }
 
-    // 情绪更新（novelty 基于任务；violation/praise 不适用）
+    
     const { EmotionalState } = await import("../mind/emotion.js");
     const emotion = new EmotionalState(agent.emotion as Record<string, unknown>);
     const novelty = await detectNovelty(agent.id, task, historyUserLoader);
@@ -240,12 +240,12 @@ export class SwarmService {
       praise: false,
     });
 
-    // 巩固（每 50 次交互触发）
+    
     try {
       const ce = new ConsolidationEngine();
       const total = agent.persona?.interactions?.length ?? 0;
       if (ce.shouldConsolidate(total)) {
-        // A-1035：与 chat 管线同源 —— Swarm 路径此前也是"知识→心智"断线的那一份
+        
         let ke: Awaited<ReturnType<typeof import("../memory/knowledge.js").getKnowledgeEngine>> | null = null;
         try {
           const { getKnowledgeEngine } = await import("../memory/knowledge.js");
@@ -266,7 +266,7 @@ export class SwarmService {
             this.logger.info(`[slime] Swarm 知识审查: 强化 trait ${rv.traits_reinforced} · 归档 pattern ${rv.patterns_resolved}`);
           }
         }
-        // C-记忆三层：与行为巩固同频触发记忆分层巩固（working→episodic；episodic 高访问→semantic）
+        
         try {
           const { consolidateMemoryNow } = await import("../memory/store.js");
           consolidateMemoryNow(agent.id, this.dataDir ? { dataDir: this.dataDir } : {});

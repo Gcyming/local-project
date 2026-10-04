@@ -1,10 +1,10 @@
-/**
- * tests/core-ts/probe-persist.spec.ts — 实时能力快照落盘（第 2 层探针跨重启保留）测试。
- * 用 os.tmpdir() 临时文件做 IO 隔离（不碰真实 config/），验证：
- * - save/load 往返（原子写 + 字段保留）
- * - 缺失文件 / 损坏 JSON / 版本不符 → 空快照（冷启动重探，不抛）
- * - hydrate 进 LiveProbeCache（只保留未过期条目）
- */
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,10 +67,10 @@ describe("损坏 / 缺失 / 版本不符的容错", () => {
 
   it("缺必要字段的条目被跳过（provider/model/ts 非字符串/数字）", () => {
     const bad = { version: 1, snapshots: [
-      { provider: "p", model: "m", ts: 5 },                // 合法
-      { provider: "x", model: 42, ts: 5 },                  // model 非字符串 → 丢弃
-      { provider: "y", model: "m" },                         // 缺 ts → 丢弃
-      "garbage",                                              // 非对象 → 丢弃
+      { provider: "p", model: "m", ts: 5 },                
+      { provider: "x", model: 42, ts: 5 },                  
+      { provider: "y", model: "m" },                         
+      "garbage",                                              
     ] };
     writeFileSync(file, JSON.stringify(bad), "utf8");
     const loaded = loadProbeSnapshots(file);
@@ -86,8 +86,8 @@ describe("LiveProbeCache ↔ 持久化 联动", () => {
     writer.put({ provider: "p", model: "m", ts: t, toolCalls: true });
     expect(persistLiveProbeCache(writer, file)).toBe(true);
 
-    // 模拟"重启"：新建 cache（TTL 相同），从盘恢复
-    const reader = new LiveProbeCache({ ttlMs: 60_000, now: () => t + 10_000 }); // 10s 后，仍在 TTL 内
+    
+    const reader = new LiveProbeCache({ ttlMs: 60_000, now: () => t + 10_000 }); 
     const restored = hydrateLiveProbeCache(reader, file);
     expect(restored).toBe(1);
     expect(reader.get("p", "m")?.toolCalls).toBe(true);
@@ -99,7 +99,7 @@ describe("LiveProbeCache ↔ 持久化 联动", () => {
     writer.put({ provider: "p", model: "old", ts: t });
     expect(persistLiveProbeCache(writer, file)).toBe(true);
 
-    // 重启时 now 已远超 TTL（旧快照在盘上就过期了）
+    
     const reader = new LiveProbeCache({ ttlMs: 60_000, now: () => t + 1_000_000 });
     const restored = hydrateLiveProbeCache(reader, file);
     expect(restored).toBe(0);

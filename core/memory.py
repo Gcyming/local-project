@@ -17,9 +17,9 @@ from typing import Optional
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT / "data"
-_KNOWLEDGE_MEMORY_DIR = _PROJECT_ROOT / "Knowledge" / "Agent Memory"  # 新默认：外置大脑
+_KNOWLEDGE_MEMORY_DIR = _PROJECT_ROOT / "Knowledge" / "Agent Memory"  
 
-# A-112: agent_id 仅允许安全字符（防御路径遍历；空串放行 = global 语义）
+
 _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -29,9 +29,9 @@ def _validate_agent_id(agent_id: str):
         raise ValueError(f"[memory] 非法 agent_id: {agent_id!r}")
 
 
-# ── 辅助函数 ────────────────────────────────────────────────
 
-# A-1139：CJK 连续段（中日韩）。中文没有空格，空白分词对中文恒为 1 个 token。
+
+
 _CJK_RUN_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]+"
 )
@@ -85,9 +85,9 @@ def _emotion_importance(base: int, emotion: dict | None) -> int:
     if not emotion:
         return base
     try:
-        v = abs(float(emotion.get("valence", 0.0) or 0.0))   # -1~1 → 0~1
-        a = min(1.0, max(0.0, float(emotion.get("arousal", 0.0) or 0.0)))  # 0~1
-        boost = int(round(2.0 * v * (0.5 + a)))              # 强度 → 0~3
+        v = abs(float(emotion.get("valence", 0.0) or 0.0))   
+        a = min(1.0, max(0.0, float(emotion.get("arousal", 0.0) or 0.0)))  
+        boost = int(round(2.0 * v * (0.5 + a)))              
     except (TypeError, ValueError):
         return base
     return min(10, max(1, int(base) + boost))
@@ -104,7 +104,7 @@ def _rank_by_relevance(items: list, context: str, content_key: str = "content") 
         text = item.get(content_key, "") if isinstance(item, dict) else str(item)
         if not isinstance(text, str):
             text = str(text)
-        # Jaccard + importance bonus
+        
         relevance = _text_similarity(context, text)
         imp = item.get("importance", 5) if isinstance(item, dict) else 5
         return relevance * 10 + imp * 0.1
@@ -112,21 +112,21 @@ def _rank_by_relevance(items: list, context: str, content_key: str = "content") 
     return sorted(items, key=score, reverse=True)
 
 
-# ── 相似度阈值（A-1139 校准）──────────────────────────────
-# 依据：真实语料 15 组「同模板应合并」对 / 285 组「不同模板不应合并」对，
-# 对 _tokens 的 V3 方案做阈值扫描（temp_test_dir/probe_threshold_sweep.py）。
-#   · 去重 0.75：召回 0.867 / 误判 9/285（F1 0.703）。**刻意保召回不保精度** ——
-#     这个问题上的代价是不对称的：漏合并 = 垃圾永久累积（实测已累积 11658 条
-#     lesson 而只有 25 条不同内容），误合并 = 少存一条。0.80 虽然 F1 更高（0.800）
-#     但召回掉到 0.800，故不采用。
-#   · 建链 0.70：原值 0.3 在中文下从未生效；换 V3 后 0.3 会误链 42%（120/285）。
-#     0.70 把误链压到 16%，同时保住同模板族的连通。注意两分布**有重叠**
-#     （不应合并 max=0.882 ≈ 同模板 max=0.889），不存在完美阈值。
+
+
+
+
+
+
+
+
+
+
 _DEDUP_THRESHOLD = 0.75
 _LINK_THRESHOLD = 0.70
 
-# ── 艾宾浩斯遗忘 ──────────────────────────────────────────
-_EBBINGHAUS_TAU = 5.0  # 遗忘半衰期（天）
+
+_EBBINGHAUS_TAU = 5.0  
 
 def forgetting_factor(days_since_access: float, importance: int) -> float:
     """艾宾浩斯遗忘因子：时间衰减 × 重要性加权。返回 [0,1]。
@@ -149,18 +149,18 @@ def _effective_weight(item: dict, context: str = "") -> float:
         return ff * (1.0 + _text_similarity(context, item.get("content", "")))
     return ff
 
-# ── 成长型记忆结构 ────────────────────────────────────────
+
 
 MEMORY_TEMPLATE = {
-    "facts": [],           # 学到的事实知识
-    "preferences": [],     # 用户偏好
-    "skills_unlocked": [], # 解锁的技能
-    "lessons": [],         # 经验教训
+    "facts": [],           
+    "preferences": [],     
+    "skills_unlocked": [], 
+    "lessons": [],         
     "created_at": None,
     "updated_at": None,
 }
 
-# ── LanceDB（可选）─────────────────────────────────────────
+
 
 _LANCEDB_AVAILABLE = False
 try:
@@ -184,7 +184,7 @@ def _get_embed_dim() -> int:
     return 1024
 
 
-# 简易向量维度（字符级哈希占位；从 slime.toml [model_server.embedding].dim 读取）
+
 _EMBED_DIM = _get_embed_dim()
 
 
@@ -226,9 +226,9 @@ def _embed(text: str) -> Optional[list[float]]:
                 return [float(v) for v in data["data"][0]["embedding"]]
     except Exception:
         pass
-    # A-1139：**不再回退伪嵌入**。返回 None，让调用方显式走「无向量」分支
-    # （跳过向量写入 / recall 返回空 → 回落 JSON 关键词）。原 _hash_embed 已删除：
-    # 它产出的向量让任意两段无关文本余弦都在 0.94~0.99，等价于噪声，却伪装成成功。
+    
+    
+    
     return None
 
 
@@ -263,7 +263,7 @@ def vectorize_knowledge(agent_id: str, role: str, content: str,
             table = db.create_table(table_name, schema=_memory_table_schema())
         vec = _embed(content)
         if vec is None:
-            # A-1139：无向量可用（BGE-M3 不可达）→ 不写，让调用方知道没成功
+            
             return False
         table.add([{"role": role, "content": content, "vector": vec, "tags": ""}])
         return True
@@ -279,32 +279,32 @@ class MemoryStore:
                  data_dir: str = ""):
         _validate_agent_id(agent_id)
         self.agent_id = agent_id
-        # 相对路径锚定项目根
+        
         base = Path(data_dir) if data_dir else _KNOWLEDGE_MEMORY_DIR
         if not base.is_absolute():
             base = _PROJECT_ROOT / base
         self._json_path = base / agent_id / "memory.json"
         self._data: dict = {}
         self._lancedb_enabled = lancedb_enabled and _LANCEDB_AVAILABLE
-        self._lancedb_uri = lancedb_uri or str(_DATA_DIR / agent_id / "lancedb")  # LanceDB 保持原位
+        self._lancedb_uri = lancedb_uri or str(_DATA_DIR / agent_id / "lancedb")  
         self._lance_table = None
-        # A-1139（D4）：索引与 JSON 失配的标记。
-        # JSON 是唯一真相源，LanceDB 只是**派生索引**；但此前二者是「双写且无对账」——
-        # 索引写失败、进程被杀、或因维度/字段不匹配 drop_table 之后，索引就永久少一截，
-        # 而**没有任何信号**告诉调用方「你现在的语义召回是残缺的」。
-        # 本标记就是那个信号：置位 = 索引不完整，应调 `reindex()` 从 JSON 重灌。
+        
+        
+        
+        
+        
         self._index_stale = False
         import threading
-        self._lock = threading.Lock()  # N9-H9: per-agent 写锁防并发覆盖
+        self._lock = threading.Lock()  
         self._load()
 
-    # ── JSON 存储 ──────────────────────────────────────────
+    
 
     def _load(self):
         """从 JSON 加载记忆，优先新位置，自动从旧位置迁移"""
         new_path = self._json_path
         old_path = _DATA_DIR / self.agent_id / "memory.json"
-        # 迁移：旧位置有数据但新位置没有 → 复制到新位置
+        
         if old_path.exists() and not new_path.exists():
             try:
                 new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -314,8 +314,8 @@ class MemoryStore:
             except OSError as e:
                 logging.warning(f"[memory] 迁移失败: {e}")
         if new_path.exists():
-            # A-989：主文件损坏时回退 .bak（上一份完好记忆），并把坏文件改名 .corrupt 留证。
-            # 此前解析失败就直接换成空模板 = 静默丢掉用户全部记忆。
+            
+            
             from core.safe_io import read_json_safe
             loaded = read_json_safe(self._json_path, default=None)
             if isinstance(loaded, dict):
@@ -327,7 +327,7 @@ class MemoryStore:
         else:
             import copy
             self._data = copy.deepcopy(MEMORY_TEMPLATE)
-        # BUG-005: 老数据补填 last_accessed（fallback 到 timestamp）
+        
         for f in self._data.get("facts", []):
             if isinstance(f, dict) and "last_accessed" not in f:
                 f["last_accessed"] = f.get("timestamp", "")
@@ -346,7 +346,7 @@ class MemoryStore:
         data = json.dumps(self._data, ensure_ascii=False, indent=2)
         atomic_write_text(self._json_path, data)
 
-    # ── 读写接口 ───────────────────────────────────────────
+    
 
     def _store_categorized(self, category: str, content: str, tags: list | None = None,
                            importance: int = 5, extra: dict | None = None,
@@ -385,7 +385,7 @@ class MemoryStore:
             if self._lance_table is None:
                 return
             vec = _embed(content)
-            # A-1139：无向量就只留 JSON（真相源），不往索引里塞半条
+            
             if vec is None:
                 return
             self._lance_table.add([{
@@ -416,19 +416,19 @@ class MemoryStore:
         ⚠️ 直接调用本函数的路径（目前只有 `add_preference`）必须自己处理返回值并补索引。
         """
         tags = tags or []
-        # 去重：检查同 category 内相似度 >75% 的事实（N11-P2-10）
+        
         for existing in self._data.get("facts", []):
             if existing.get("category") != category:
                 continue
             if _text_similarity(content.lower(), existing.get("content", "").lower()) > _DEDUP_THRESHOLD:
                 existing["repeated"] = existing.get("repeated", 0) + 1
                 self._save()
-                return False  # A-1139：去重命中 ⇒ 没有新条目，调用方不必写索引
+                return False  
 
         new_id = _mem_id(content)
         tag_set = set(tags)
         links = []
-        # 自动关联：tags 重叠 OR 内容相似（BUG-011: 无 tags 时用内容相似度兜底）
+        
         for existing in self._data.get("facts", []):
             if existing.get("id") == new_id:
                 continue
@@ -445,7 +445,7 @@ class MemoryStore:
                 existing.setdefault("backlinks", [])
                 if new_id not in existing["backlinks"]:
                     existing["backlinks"].append(new_id)
-                # BUG-014: 关联访问刷新旧记忆 last_accessed（越用越熟）
+                
                 existing["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
         self._data.setdefault("facts", []).append({
@@ -455,15 +455,15 @@ class MemoryStore:
             "tags": tags,
             "importance": max(1, min(10, importance)),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "last_accessed": datetime.now(timezone.utc).isoformat(),  # 艾宾浩斯遗忘
-            "links": links,        # 主动引用的记忆 ID（BUG-003）
-            "backlinks": [],       # 被引用的记忆 ID（自动维护）
+            "last_accessed": datetime.now(timezone.utc).isoformat(),  
+            "links": links,        
+            "backlinks": [],       
             "repeated": 0,
             **(extra or {}),
         })
         self._save()
-        # A-1139（D3）：向量索引**不在这里做** —— 嵌入是同步 HTTP 往返（timeout 2s），
-        # 不能占着 per-agent 锁。由调用方 `_store_categorized` 在出锁后经 `_index_vector` 补写。
+        
+        
         return True
 
     def add_fact(self, fact: str, importance: int = 5,
@@ -485,10 +485,10 @@ class MemoryStore:
                     self._save()
                     return
             stored = self._store_categorized_locked("preference", content, tags=tags, importance=6)
-        # A-1139（D3）：索引在**锁外**补写 —— 与 `_store_categorized` 同口径。
-        # 本函数是唯一绕过 `_store_categorized` 直接调 `_store_categorized_locked` 的路径；
-        # 向量写入随 D3 拆走后若不在这里补这一步，偏好就会永久不进语义索引
-        #（静默失效：功能「在」，只是再也搜不到）。
+        
+        
+        
+        
         if stored:
             self._index_vector("preference", content, tags)
 
@@ -546,22 +546,22 @@ class MemoryStore:
     def summary(self, context: str = "", max_items: int = 10) -> str:
         """生成记忆摘要（JSON 关键词 + LanceDB 语义检索 + 图谱联想，合并去重）"""
         parts = []
-        # 过滤脏数据：只保留含 content 的 dict（提前过滤，供索引复用）
+        
         facts = [f for f in self.get_facts() if isinstance(f, dict) and isinstance(f.get("content"), str)]
 
-        # 艾宾浩斯：按有效权重排序（遗忘因子 × 相关性），沉睡记忆沉底但可唤醒
+        
         ranked = sorted(facts, key=lambda f: _effective_weight(f, context), reverse=True)
         selected = ranked[:max_items]
-        # 被访问的记忆更新 last_accessed（越用越熟）
+        
         for f in selected:
             f["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
-        # 索引（BUG-009: 用 dict 索引替代 O(N²) 遍历）
+        
         content_to_fact = {f["content"]: f for f in facts}
         id_to_fact = {f.get("id"): f for f in facts if f.get("id")}
         known = {f["content"] for f in facts}
 
-        # LanceDB 语义检索（可选，补充关键词遗漏的条目）
+        
         semantic_items = []
         seeds = []
         if context and self._lancedb_enabled:
@@ -570,12 +570,12 @@ class MemoryStore:
                 semantic_items = [r for r in recalled if r.get("content", "") not in known]
                 seeds = recalled
             except Exception:
-                pass  # LanceDB 不可用时静默跳过，不影响主流程
+                pass  
 
-        # 图谱联想（BUG-006: 不依赖 LanceDB；种子优先向量召回，fallback 到 ranked 前 3）
+        
         graph_items = []
         if context:
-            # BUG-012: 对 seeds 按 content 去重，避免重复 content 导致索引覆盖
+            
             unique_seeds = []
             seen_seed_contents = set()
             for s in seeds:
@@ -591,7 +591,7 @@ class MemoryStore:
             for seed_fact in seed_facts:
                 for link_id in seed_fact.get("links", []) + seed_fact.get("backlinks", []):
                     linked = id_to_fact.get(link_id)
-                    # BUG-007/008: content 非空且不在已知主 facts 中
+                    
                     if (linked and linked.get("id") not in seen
                             and linked.get("content", "") not in known):
                         seen.add(linked["id"])
@@ -599,10 +599,10 @@ class MemoryStore:
 
         if selected or semantic_items or graph_items:
             lines = [f"- [{f.get('category', 'fact')}] {f['content']}" for f in selected]
-            # 追加图谱联想结果（带来源标记）
+            
             for gf in graph_items[:3]:
                 lines.append(f"- [关联] {gf['content']}")
-            # 追加语义检索结果（带来源标记）
+            
             for item in semantic_items[:3]:
                 lines.append(f"- {item['content']}")
             parts.append("## 已知事实\n" + "\n".join(lines))
@@ -623,9 +623,9 @@ class MemoryStore:
 
     def to_dict(self) -> dict:
         import copy
-        return copy.deepcopy(self._data)  # N11-P2-9: 深拷贝，防调用方篡改内部状态
+        return copy.deepcopy(self._data)  
 
-    # ── LanceDB 接口（可选，默认关闭）──────────────────────
+    
 
     def _init_lancedb(self):
         """初始化 LanceDB 连接（表已存在时 open_table，维度不匹配则重建）"""
@@ -637,11 +637,11 @@ class MemoryStore:
             table_name = f"memory_{self.agent_id}"
             try:
                 self._lance_table = db.open_table(table_name)
-                # H3: 检查已有表的向量维度是否匹配当前 _EMBED_DIM
+                
                 schema = self._lance_table.schema
                 vec_field = next((f for f in schema if f.name == "vector"), None)
                 if vec_field and hasattr(vec_field, 'type'):
-                    dim_attr = (getattr(vec_field.type, 'list_size', None)  # pyarrow FixedSizeListType
+                    dim_attr = (getattr(vec_field.type, 'list_size', None)  
                                 or getattr(vec_field.type, 'dim', None)
                                 or getattr(vec_field.type, 'dimension', None))
                     if dim_attr and dim_attr != _EMBED_DIM:
@@ -653,7 +653,7 @@ class MemoryStore:
                         db.drop_table(table_name)
                         self._lance_table = db.create_table(table_name, schema=_memory_table_schema())
                         self._index_stale = True
-                # V1: 检查已有表是否缺 tags 字段（旧 schema 无此列）
+                
                 field_names = {f.name for f in self._lance_table.schema}
                 if "tags" not in field_names:
                     logging.warning("[memory] 旧表缺 tags 字段，重建空表（索引已标记 stale，调 reindex() 回填）")
@@ -677,7 +677,7 @@ class MemoryStore:
         try:
             vec = _embed(content)
             if vec is None:
-                return False  # A-1139：无向量可用，不写半条
+                return False  
             self._lance_table.add([{
                 "role": role, "content": content, "vector": vec, "tags": tags,
             }])
@@ -690,30 +690,30 @@ class MemoryStore:
         """LanceDB 语义检索（可选 category 过滤）"""
         if not self._lancedb_enabled:
             return []
-        # A-027: 新加载的 store 尚未初始化 LanceDB 表 —— 此前此处直接返回 []，
-        # 导致 /memory/recall 与 summary() 的语义召回全链路静默失效
-        # （API 每次请求都是新 store，仅剩词级回退，BGE-M3 向量形同虚设）
+        
+        
+        
         if self._lance_table is None:
             self._init_lancedb()
         if self._lance_table is None:
             return []
         try:
             vec = _embed(query)
-            # A-1139：查询向量拿不到 → 返回空，让调用方回落 JSON 关键词检索
-            #（此前会拿伪嵌入去搜，返回一堆「看起来 98% 相似」的噪声且不报错）
+            
+            
             if vec is None:
                 logging.info("[memory] embedding 不可用，语义召回跳过（回落关键词）")
                 return []
             q = self._lance_table.search(vec)
             if categories:
-                # 单引号转义防注入
+                
                 safe_cats = [c.replace("'", "''") for c in categories]
                 cat_filter = " OR ".join(f"role = '{c}'" for c in safe_cats)
                 q = q.where(cat_filter)
             results = q.limit(top_k).to_list()
             return [{"role": r.get("role", ""), "content": r.get("content", ""),
                      "tags": r.get("tags", "")} for r in results
-                    if r.get("content", "").strip()]  # 过滤种子行
+                    if r.get("content", "").strip()]  
         except Exception as e:
             logging.warning(f"[memory] LanceDB recall 失败: {e}")
             return []
@@ -741,7 +741,7 @@ class MemoryStore:
                  if isinstance(f, dict) and isinstance(f.get("content"), str)
                  and f["content"].strip()]
 
-        # ① 探针：嵌入不可用就放弃，**不动旧表**（旧索引可能仍是好的）
+        
         if facts and _embed("reindex-probe") is None:
             logging.warning("[memory] reindex 中止：embedding 不可用，旧索引保持原样")
             return {"ok": False, "written": 0, "skipped": 0, "total": len(facts),
@@ -754,7 +754,7 @@ class MemoryStore:
             try:
                 db.drop_table(table_name)
             except Exception:
-                pass  # 原本就没有这张表
+                pass  
             table = db.create_table(table_name, schema=_memory_table_schema())
             self._lance_table = table
 
@@ -781,20 +781,20 @@ class MemoryStore:
                 table.add(batch)
                 written += len(batch)
 
-            # 有跳过 ⇒ 索引仍不完整，stale 标记保持置位（不谎报「已完全对上」）
+            
             self._index_stale = skipped > 0
             logging.info(
                 f"[memory] reindex 完成: 写入 {written} 条 / 跳过 {skipped} 条 / 共 {len(facts)} 条")
             return {"ok": True, "written": written, "skipped": skipped, "total": len(facts)}
         except Exception as e:
-            # 失败时**如实置 stale** —— 索引此刻确实不可信
+            
             self._index_stale = True
             logging.warning(f"[memory] reindex 失败: {e}")
             return {"ok": False, "written": 0, "skipped": 0, "total": len(facts),
                     "error": str(e)}
 
 
-# ── 便捷函数 ──────────────────────────────────────────────
+
 
 def load_memory(agent_id: str, lancedb_enabled: bool = False,
                 lancedb_uri: str = "", data_dir: str = "") -> MemoryStore:
@@ -823,7 +823,7 @@ async def extract_memories_from_chat(
             "behavior_patterns": [],
         }
 
-    # 读取分类枚举配置
+    
     categories = ["fact", "preference", "lesson", "rule", "skill", "insight", "user_profile"]
     try:
         toml_path = _PROJECT_ROOT / "slime.toml"
@@ -883,13 +883,13 @@ AI 回复: {ai_reply}
         count = {"facts": 0, "preferences": 0, "lessons": 0}
         trait_signals = []
 
-        # 新格式 entries（优先）
+        
         for entry in data.get("entries", []):
             content = entry.get("content", "")
             if not content:
                 continue
             cat = entry.get("category", "fact")
-            # 归一化：不在枚举内 → 兜底 fact
+            
             if cat not in categories:
                 cat = "fact"
             tags = entry.get("tags", [])
@@ -897,7 +897,7 @@ AI 回复: {ai_reply}
             await memory._store_categorized_async(cat, content, tags=tags, importance=imp)
             count["facts"] = count.get("facts", 0) + 1
 
-        # 旧格式兼容：facts / preferences / lessons
+        
         for fact in data.get("facts", []):
             await memory._store_categorized_async("fact", str(fact))
             count["facts"] += 1
@@ -916,14 +916,14 @@ AI 回复: {ai_reply}
             trait_signals.append({"name": t.get("name", ""), "signal": t.get("signal", 1)})
         count["traits"] = len(trait_signals)
 
-        # 用户情绪（BUG-002）
+        
         try:
             user_sentiment = float(data.get("user_sentiment", 0.0))
         except (ValueError, TypeError):
             user_sentiment = 0.0
         user_sentiment = max(-1.0, min(1.0, user_sentiment))
 
-        # 行为模式（BUG-001/019）：只保留有有效步骤的，携带 decision_rationale
+        
         behavior_patterns = []
         for bp in data.get("behavior_patterns", []):
             if not isinstance(bp, dict):

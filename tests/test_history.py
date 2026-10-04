@@ -23,10 +23,10 @@ class TestHistory:
             history.append("a1", "u1", "r1")
             history.append("a1", "u2", "r2")
             assert history.pop_last("a1") is True
-            history.append("a1", "u3", "r3")  # 修复前：与 r1 拼成 "}{" 行 → 双双丢失
+            history.append("a1", "u3", "r3")  
             records = history.load(agent_id="a1")
             assert [r["user"] for r in records] == ["u1", "u3"]
-            # 文件每行都必须是合法 JSON（无拼接行）
+            
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     json.loads(line)
@@ -73,7 +73,7 @@ class TestHistory:
             records = history.load()
             assert len(records) == 1
             assert records[0]["agent_id"] == "a2"
-            history.append("a2", "u4", "r4")  # 锁内读改写后的继续追加
+            history.append("a2", "u4", "r4")  
             assert len(history.load()) == 2
 
     def test_remove_agent_preserves_bad_lines(self, tmp_path):
@@ -87,7 +87,7 @@ class TestHistory:
             records = history.load()
             assert len(records) == 1
             assert records[0]["agent_id"] == "a2"
-            assert "BAD-LINE" in path.read_text(encoding="utf-8")  # 坏行保留原文
+            assert "BAD-LINE" in path.read_text(encoding="utf-8")  
 
     def test_remove_agent_nonexistent_file(self, tmp_path):
         from core import history
@@ -102,11 +102,11 @@ class TestMemoryRecallLazyInit:
         from core import memory as mem
         from unittest.mock import patch
         store = mem.MemoryStore(agent_id="t1", lancedb_enabled=True, data_dir=str(tmp_path))
-        assert store._lance_table is None  # 新 store 未初始化表
+        assert store._lance_table is None  
         with patch.object(store, "_init_lancedb") as m:
             r = store.recall("任意查询")
-        m.assert_called_once()  # 懒初始化被触发
-        assert r == []  # 表未真正初始化（mock），但路径正确返回空而非异常
+        m.assert_called_once()  
+        assert r == []  
 
     def test_recall_disabled_returns_empty_without_init(self, tmp_path):
         from core import memory as mem
@@ -114,4 +114,4 @@ class TestMemoryRecallLazyInit:
         store = mem.MemoryStore(agent_id="t2", lancedb_enabled=False, data_dir=str(tmp_path))
         with patch.object(store, "_init_lancedb") as m:
             assert store.recall("q") == []
-        m.assert_not_called()  # 未启用时不初始化
+        m.assert_not_called()  

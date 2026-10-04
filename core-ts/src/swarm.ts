@@ -1,10 +1,10 @@
-/**
- * core-ts/src/swarm.ts — Swarm 编排器（状态机 + 分裂计划）。
- * 语义移植自 core/swarm.py：
- * - TaskState 五态：pending → queued → running → done / failed
- * - SubTask 全字段（含 A-053 agent_name 角色路由、A-055 round 轮次、A-063 ref_frame）
- * - SwarmPlan（max_splits=provider 数；max_workers=min(请求, max_splits)，排队分批不丢任务）
- */
+
+
+
+
+
+
+
 
 export enum TaskState {
   PENDING = "pending",
@@ -16,7 +16,7 @@ export enum TaskState {
 
 export interface SubTask {
   id: string;
-  name: string; // 子 Agent 名称（用户可命名）
+  name: string; 
   description: string;
   state: TaskState;
   result: string;
@@ -27,9 +27,9 @@ export interface SubTask {
   agent_id: string;
   provider_key: string;
   rounds: number;
-  agent_name: string; // A-053: 角色路由命中的持久子 Agent 名（空=临时 Worker）
-  round: number; // A-055: 轮次编号
-  ref_frame: string; // A-063: 链式参考帧
+  agent_name: string; 
+  round: number; 
+  ref_frame: string; 
 }
 
 export function makeSubTask(partial: Partial<SubTask> & { id: string; name: string; description: string }): SubTask {
@@ -57,7 +57,7 @@ export interface SwarmPlan {
   max_splits: number;
   max_workers: number;
   created_at: number;
-  global_spec: string; // A-057: 全局规格（风格/光线/色调/场景/人物/镜头语言）
+  global_spec: string; 
 }
 
 export interface CreatePlanOptions {
@@ -116,7 +116,7 @@ export class SwarmOrchestrator {
     return plan;
   }
 
-  /** 第 i 个子任务分配的 provider key（轮转分配，key 名由调用方以 n 个占位生成） */
+  
   private providerKeyFor(i: number): string {
     return `p${(i % this.maxSplits) + 1}`;
   }

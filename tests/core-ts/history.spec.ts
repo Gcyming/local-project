@@ -1,9 +1,9 @@
-/**
- * tests/core-ts/history.spec.ts — core-ts history store 测试（P0: clear/retry 支持）。
- *
- * 策略：HISTORY_PATH 是模块级常量，测试通过 fs 文件操作绕过。
- * 每个测试用独立临时目录 + 独立 HISTORY_PATH 写入/读取。
- */
+
+
+
+
+
+
 import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, writeFile, rm, readFile, appendFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -129,7 +129,7 @@ describe("truncateHistoryFrom（A-161 回滚持久化一致性）", () => {
     const path = join(dir, "history.jsonl");
     process.env.SLIME_HISTORY_PATH = path;
     try {
-      vi.resetModules(); // 清模块缓存 → 动态 import 重读 SLIME_HISTORY_PATH
+      vi.resetModules(); 
       const { truncateHistoryFromExport } = await import("../../core-ts/src/services/history.js");
       await writeHistory(path, [
         { agent_id: "a1", user: "问1", ai: "答1", success: true, session_id: "s1" },
@@ -138,11 +138,11 @@ describe("truncateHistoryFrom（A-161 回滚持久化一致性）", () => {
         { agent_id: "a2", user: "别删我", ai: "ok", success: true, session_id: "s9" },
       ]);
       const removed = await truncateHistoryFromExport("a1", "s1", "问2");
-      expect(removed).toBe(2); // 问2+问3 删除
+      expect(removed).toBe(2); 
       const remaining = await readHistory(path);
       expect(remaining).toHaveLength(2);
       expect(remaining[0].user).toBe("问1");
-      expect(remaining[1].agent_id).toBe("a2"); // 其他会话记录保留
+      expect(remaining[1].agent_id).toBe("a2"); 
     } finally {
       delete process.env.SLIME_HISTORY_PATH;
       if (prev !== undefined) { process.env.SLIME_HISTORY_PATH = prev; }
@@ -156,7 +156,7 @@ describe("truncateHistoryFrom（A-161 回滚持久化一致性）", () => {
     const path = join(dir, "history.jsonl");
     process.env.SLIME_HISTORY_PATH = path;
     try {
-      vi.resetModules(); // 清模块缓存 → 动态 import 重读 SLIME_HISTORY_PATH
+      vi.resetModules(); 
       const { truncateHistoryFromExport } = await import("../../core-ts/src/services/history.js");
       await writeHistory(path, [
         { agent_id: "a1", user: "问1", ai: "答1", success: true, session_id: "s1" },
@@ -192,11 +192,11 @@ describe("A-966 attachTimelineToRecord（时间线随历史落库，重启恢复
       ];
       expect(await attachTimelineToRecord("a1", "s1", tl)).toBe(true);
       const recs = await readHistory(path);
-      // 附着到 a1/s1 的**最后一条**（非首条）、且跨会话 a2 不受影响
+      
       expect(recs[1].timeline).toEqual(tl);
       expect(recs[0].timeline).toBeUndefined();
       expect(recs[2].timeline).toBeUndefined();
-      // 空 timeline / 空会话 → false 且不改文件
+      
       expect(await attachTimelineToRecord("a1", "s1", [])).toBe(false);
       expect(await attachTimelineToRecord("nobody", "s1", tl)).toBe(false);
     } finally {
@@ -215,7 +215,7 @@ describe("A-966 attachTimelineToRecord（时间线随历史落库，重启恢复
       vi.resetModules();
       const { attachTimelineToRecord } = await import("../../core-ts/src/services/history.js");
       await writeHistory(path, [
-        { agent_id: "a1", user: "q1", ai: "r1", success: true }, // 无 session_id
+        { agent_id: "a1", user: "q1", ai: "r1", success: true }, 
       ]);
       const tl = [{ kind: "think", text: "旧链路回退" }];
       expect(await attachTimelineToRecord("a1", "sX", tl)).toBe(true);

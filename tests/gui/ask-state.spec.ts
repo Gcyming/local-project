@@ -1,8 +1,8 @@
-/**
- * tests/gui/ask-state.spec.ts — F：PermissionDialog（ask_user 决策分叉窗口）状态机纯逻辑。
- * 生产源 askState.ts 与 ChatPanel 弹窗同源（buildAskDecision/initialAskSelection/canSubmitAsk
- * 已接入 ChatPanel 三处），测试即生产，杜绝"测试未接生产"偏差。
- */
+
+
+
+
+
 import { describe, it, expect } from "vitest";
 import {
   buildAskDecision,

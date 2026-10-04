@@ -1,22 +1,22 @@
-/**
- * tests/core-ts/a1027-guards.spec.ts — 「`marker@0` 工具留痕整条不可见」的守卫。
- *
- * 用户裁决项（原话："修，解析成 tool 节点"）。缺陷链（三个环节，缺一不成立）：
- *   ① **产地**：`core-ts/src/services/chat.ts` 的 `composeToolCallBlock()` 在**无思考模型**下
- *      把工具块写成**整段** reasoning —— marker 落在偏移 **0**（`reasoningBuf` 为空时
- *      `reasoningBuf = toolBlock`）。有思考的模型是追加在末尾，所以这个形态只出现在无思考模型上。
- *   ② **消费**：渲染层用 `/\n?### 工具调用记录\n[\s\S]*$/` 从 marker **一路砍到文本结尾** →
- *      对 marker@0 的记录，reasoning 被砍成空串。
- *   ③ **兜底**：历史记录里 `stages` 整个字段都**不存在**（实测 6 条 marker@0 记录全部如此）
- *      → 时间线长度 0 → 渲染处 `return null` → **整个思考面板不渲染**：按钮在、点它没反应。
- *
- * 所以修法不是"换个正则"，而是**把工具块解析成 tool 节点**：留痕本来就是工具信息，
- * 丢掉它才是错的。守卫必须同时覆盖"解析正确"与"解析结果真的接到了渲染上"两件事 ——
- * 只测前者就是 A-1022 那种"改坏了守卫还挺绿"的假修。
- *
- * ⚠️ 每条守卫都必须过**变异测试**（见 `gui/scripts/mut-a1027-tooltrace.mjs`）。
- *    断言一律用**结构锚点**（函数名/属性名/整块形态），不用"起点 + N 字符"的取样窗口。
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,11 +40,11 @@ const chatSrc = readFileSync(CHAT_PANEL, "utf8");
 const thinkSrc = readFileSync(THINKING_TEXT, "utf8");
 const coreSrc = readFileSync(CORE_CHAT, "utf8");
 
-/**
- * 剥掉注释再断言。
- * 本轮的修复代码里**故意**在注释里写了旧正则与旧字面量（解释"为什么不能这样"），
- * 不对注释脱敏就会自己把自己判红 —— 最后被人"顺手删掉守卫"收场。
- */
+
+
+
+
+
 function stripComments(src: string): string {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -53,22 +53,22 @@ function stripComments(src: string): string {
 const chatCode = stripComments(chatSrc);
 const thinkCode = stripComments(thinkSrc);
 
-/**
- * 工具栏表替身：**形状必须与真实 `TOOL_LABELS` 一致**（键 = 工具名，值 = `{label}`）。
- * ⚠️ 早先这里写成了"展示名 → {name,label}"的反向表，配上 `resolveToolEntry` 后键被当成
- *    工具名解释，第一步反查就命中了错误的 name（`{name:"网络搜索"}`）—— 替身形状错 = 守卫失效。
- */
+
+
+
+
+
 const LOOKUP = {
   web_search: { label: "网络搜索" },
   file_read: { label: "读取文件" },
   file_list: { label: "列出文件" },
   ask_user: { label: "询问用户" },
-  // A-975 那批的**裸名**：core-ts 展示名表没覆盖 → 落盘原样写了工具名
+  
   screen_capture: { label: "屏幕截图" },
 } as const;
 const lookup = (e: string) => resolveToolEntry(e, LOOKUP);
 
-/** 复刻渲染层兜底时间线的**纯逻辑部分**（JSX 那一层由结构守卫钉死）。 */
+
 function fallbackTimeline(reasoning: string, existingTools: Array<{ name?: string; label?: string }> = []) {
   const trace = splitToolTrace(reasoning);
   return {
@@ -110,7 +110,7 @@ describe("A-1027 ①：marker@0 不再砍空 —— 工具块被解析成节点"
   });
 
   it("结构化来源优先：已被 `stages.tools` 覆盖的条目不再重复出节点", () => {
-    // 新格式里两条来源同时存在（reasoning 落块 + stages.tools 结构化）→ 不去重就会显示两遍
+    
     const existing = [{ name: "web_search", label: "网络搜索" }];
     const out = fallbackTimeline("### 工具调用记录\n- ⟳ 网络搜索\n- ⟳ 读取文件", existing);
     const labels = out.steps.filter((s) => s.kind === "tool").map((s) => s.label);
@@ -148,8 +148,8 @@ describe("A-1027 ②：解析器本身的三条硬约束", () => {
   });
 
   it("块终点（通用规则）：块后**任何**非列表行都终止块，且该行之后的列表项不得再被当成留痕", () => {
-    // 这是"块跑到文末"这个原始病灶的反面：终止规则只有一条（首个非列表行），
-    // 去掉 `inBlock = false` 后，后面章节自己的列表项会被吃进留痕节点里。
+    
+    
     const src = "### 工具调用记录\n- ⟳ 网络搜索\n\n### 结论\n- 这一条是结论自己的列表项";
     const out = splitToolTrace(src);
     expect(out.traces, "块已经结束了，后面章节的列表项还进了留痕").toEqual(["网络搜索"]);
@@ -166,7 +166,7 @@ describe("A-1027 ②：解析器本身的三条硬约束", () => {
   });
 
   it("composeToolTrace 与 core-ts 的输出**逐字节一致**（同一个格式，两份实现）", () => {
-    // core-ts：`### 工具调用记录\n${lines.join("\n")}`，lines = `- ⟳ ${toolDisplayName(n)}`
+    
     expect(composeToolTrace(["⟳ 网络搜索", "⟳ 读取文件"]))
       .toBe("### 工具调用记录\n- ⟳ 网络搜索\n- ⟳ 读取文件");
     expect(composeToolTrace([]), "空条目不许产出空块（否则历史里会留下一句光秃秃的标题）").toBe("");
@@ -182,9 +182,9 @@ describe("A-1027 ③：解析结果必须真的接到渲染上（否则是假修
   });
 
   it("解析出的工具节点真的进了 timeline 数组", () => {
-    // A-1034：断言从"整行字面量"改为"映射表达式必须产出 name/label（可带其它字段）"——
-    // 原写法只要给节点加一个字段（例如 A-1034 补的 result）就会误红，
-    // 而它真正要守的是"解析出来必须渲染"，不是"字段不能增加"。
+    
+    
+    
     const m = /\.\.\.tracedTools\.map\(\(t\) => \(\{([\s\S]{0,220}?)\}\)\)/.exec(chatCode);
     expect(m, "解析出来却不渲染 = 白修：找不到 tracedTools 的映射表达式").not.toBeNull();
     const body = m![1];
@@ -214,14 +214,14 @@ describe("A-1027 ③：解析结果必须真的接到渲染上（否则是假修
       .not.toContain("\"### 工具调用记录");
     expect(thinkCode).toContain("export function composeToolTrace(");
     expect(chatCode).toContain("composeToolTrace(");
-    // 旧手写形态（模板串里裸写标题）不得复活
+    
     expect(chatCode, "手写块格式复活 → 改一处漂一处")
       .not.toMatch(/`### 工具调用记录\\n/);
   });
 
   it("跨进程格式一致性：渲染层的标题常量 == core-ts 组装器里的字面量", () => {
-    // 渲染层不 import core-ts（避免把主进程图谱打进浏览器构建）→ 只能钉死两边字面量：
-    // core-ts 组装器写出的块，渲染层必须能认出标题。改一边不改另一边 → 留痕整条又不可见。
+    
+    
     const coreHeading = "### 工具调用记录";
     expect(coreSrc, "core-ts 侧组装器的标题字面量不在了（改名前请先改本守卫）").toContain(`\`${coreHeading}\\n`);
     expect(TOOL_TRACE_HEADING, "★ 两边标题不一致：core-ts 写的块，渲染层将解析不出来").toBe(coreHeading);
@@ -230,9 +230,9 @@ describe("A-1027 ③：解析结果必须真的接到渲染上（否则是假修
 });
 
 describe("A-1027 ④：工具条目反查 —— 纯逻辑就必须**行为**可测", () => {
-  // ⚠️ 这一段是 A-1027 变异 ③ 漏网后的补课：反查原先住在 `ChatPanel.tsx`（带图标表），
-  //    守卫只能断言"那几行在不在"，把它短路成 `return null` 依然全绿。
-  //    纯逻辑搬进 `thinkingText.ts` 后，用注入的替代表就能直接测 —— 短路立刻变红。
+  
+  
+  
   const TABLE = { web_search: { label: "网络搜索" }, screen_capture: { label: "屏幕截图" } };
 
   it("① 按**展示名**反查：core-ts 落盘写的是展示名 → 必须能拿回工具名（否则图标全退化）", () => {
@@ -283,7 +283,7 @@ describe("A-1027 ⑤：真实语料核对（config/history.jsonl）", () => {
 
   it.skipIf(!has)("marker@0（无思考模型）这一类：旧实现必然零节点，新实现必须有工具节点", () => {
     const atZero = withMarker.filter((r) => (r.reasoning ?? "").startsWith(TOOL_TRACE_HEADING));
-    if (atZero.length === 0) { return; }  // 语料里暂时没有这类记录 → 不假红
+    if (atZero.length === 0) { return; }  
     for (const r of atZero) {
       const legacy = (r.reasoning ?? "").replace(/\n?### 工具调用记录\n[\s\S]*$/g, "");
       expect(legacy.trim(), "前提核对：这类记录的旧实现产物确实为空").toBe("");

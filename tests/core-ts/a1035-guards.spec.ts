@@ -1,10 +1,10 @@
-/**
- * A-1035 守卫：心智 ↔ 记忆 ↔ 知识 三方闭环 + 知识驱动能力调用。
- *
- * 这一轮修的是一整批**"有实现、没接线"**：函数都写好了、测试也全绿，
- * 但生产代码里根本没有调用者 —— 于是对外宣称的能力实际不存在。
- * 所以本文件的重点不是"函数能不能跑"，而是**接线是否真的接上了**。
- */
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +23,7 @@ beforeEach(() => {
 });
 function cleanup(): void { rmSync(dir, { recursive: true, force: true }); }
 
-/** 造一个达到 skill 阈值的 pattern（阈值 10） */
+
 function seedPattern(ke: KnowledgeEngine, key: string, times: number, category = "learning"): Record<string, unknown> {
   let last: Record<string, unknown> = {};
   for (let i = 0; i < times; i += 1) { last = ke.recordPattern(key, category, "测试用", "low"); }
@@ -49,12 +49,12 @@ describe("A-1035 ① 知识 → 人格（trait 写入不再只在死代码里）
   });
 
   it("★ applyPromotion 在 action 只报最高一档时，**仍然**写下低档的 trait", () => {
-    // 这正是最容易漏的一条：recordPattern 的 action 是逐档覆盖赋值，
-    // 命中 skill 阈值时 action 只剩 "promote_to_skill"，按 action 分派就会漏写 trait。
+    
+    
     const ke = new KnowledgeEngine("a1", { dataDir: dir });
     const persona = { traits: [] as Array<{ name: string; weight: number }> };
     const result = seedPattern(ke, "task.demo.success", 10, "learning");
-    expect(result.action).toBe("promote_to_skill");      // 最高档确实是 skill
+    expect(result.action).toBe("promote_to_skill");      
     const out = ke.applyPromotion(result, persona);
     expect(out.trait, "低档 trait 不能被跳过").toBeTruthy();
     expect(persona.traits.length).toBe(1);
@@ -199,7 +199,7 @@ describe("A-1035 ④ 接线守卫（函数写对了但没人调用 = 白写）",
     const src = readText("gui/src/main/index.ts");
     expect(src).toMatch(/await loadAllSkills\(\{ registry: getRegistry\(\), extraDirs \}\)/);
     expect(src).toMatch(/async function refreshAgentSkills\(/);
-    // 初始化与每轮对话前都要刷（否则上一轮生成的技能下一轮搜不到）
+    
     expect((src.match(/refreshAgentSkills\(\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 

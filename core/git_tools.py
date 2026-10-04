@@ -22,7 +22,7 @@ log = logging.getLogger("slime.core.git_tools")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WORKTREES_DIR = PROJECT_ROOT / ".slime-worktrees"
-MAX_FORK_DEPTH = 2  # CLAUDE.md 硬上限
+MAX_FORK_DEPTH = 2  
 
 
 @dataclass
@@ -92,7 +92,7 @@ async def ensure_agent_worktree(
     if "[拒绝]" in msg or "[失败]" in msg:
         raise RuntimeError(msg)
 
-    # 解析返回的 worktree 路径（第一行 ✅ 后面不解析，直接按约定拼回来）
+    
     expected = WORKTREES_DIR / sess_slug / (re.sub(r"[^A-Za-z0-9_\-]+", "-", worker_id)[:64] or worker_id)
     return AgentWorktree(
         worktree_path=expected,
@@ -107,7 +107,7 @@ async def cleanup_agent_worktree(worktree_path: str | Path, *, force: bool = Fal
     from tools.git import git_worktree_remove
     msg = await git_worktree_remove({"worktree_path": str(worktree_path), "force": force})
     if "[失败]" in msg and force is False:
-        # 自动重试一次 force
+        
         msg2 = await git_worktree_remove({"worktree_path": str(worktree_path), "force": True})
         if "[失败]" in msg2:
             raise RuntimeError(msg2)

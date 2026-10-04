@@ -1,9 +1,9 @@
-/**
- * tests/core-ts/chat_service.spec.ts — ChatService 全语义测试（slime_server.py /chat、/chat/analyze、/chat/stream 对照）。
- * 覆盖：Swarm 分析解析（A-015）/ 生成类请求判定（A-049/A-085）/ 失败前缀黑名单（A-087）/
- * chat 全流程（委托路由/A2A 排水/持久化/后台 post-process）/ stream 事件流（{seq,type,data}/
- * 强制工具轮/委托心跳/done 单收尾/断连补漏）。
- */
+
+
+
+
+
+
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { rmSync } from "node:fs";
@@ -48,7 +48,7 @@ class FakeEngine implements ChatEngine {
     elapsedMs: 42,
   });
   streamImpl: (opts: ChatEngineCall) => AsyncIterable<EngineChunk> = async function* () {};
-  /** A-049 强制轮专用（toolsOnly 传入时走这里） */
+  
   forcedStreamImpl: (opts: ChatEngineCall) => AsyncIterable<EngineChunk> = async function* () {};
 
   chat = vi.fn(async (opts: ChatEngineCall) => this.chatImpl(opts));
@@ -64,10 +64,10 @@ function quietLogger(): Pick<Console, "warn" | "info" | "debug"> {
   return { warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
 }
 
-// A-1035：把知识/技能的落盘根挪到临时目录 —— 否则后处理链路会把自动生成的技能
-// 写进仓库真实的 Knowledge/（gitignored 但仍是污染，且难察觉）。
+
+
 const knowTmp = await mkdtemp(join(tmpdir(), "slime-chat-know-"));
-process.on("exit", () => { try { rmSync(knowTmp, { recursive: true, force: true }); } catch { /* 尽力而为 */ } });
+process.on("exit", () => { try { rmSync(knowTmp, { recursive: true, force: true }); } catch {  } });
 
 describe("parseSwarmAnalysis（A-015）", () => {
   it("整体 JSON 解析成功", () => {
@@ -140,8 +140,8 @@ describe("ChatService.analyze", () => {
   it("解析失败 → 降级 chat + 告警日志", async () => {
     engine.chatImpl = async () => ({ reply: "我不会 JSON。" });
     const logger = quietLogger();
-    // A-1017：**必须**注入内存 history —— 缺省值是 fileHistoryStore，会把测试数据写进
-    // 真实 config/history.jsonl（本轮幽灵会话事故的源头之一）。
+    
+    
     const svc = new ChatService({ registry: reg, engine, dataDir: knowTmp, history: memoryHistoryStore(), logger });
     const r = await svc.analyze("agent_test1", "hello");
     expect(r.action).toBe("chat");
@@ -171,7 +171,7 @@ describe("ChatService.chat", () => {
 
   afterEach(async () => {
     ServerA2ABus.reset();
-    // Windows 上 tmp+rename 与 rm 存在短暂竞态 → 短重试
+    
     for (let i = 0; i < 5; i++) {
       try {
         await rm(dir, { recursive: true, force: true });
@@ -243,7 +243,7 @@ describe("ChatService.chat", () => {
       }
       return { reply: '<DELEGATE name="子一">完成任务X</DELEGATE>', replyRaw: "raw" };
     };
-    // followup 整合走 engine.stream（流式）——A-049 测试以外默认空，这里给委托场景补上
+    
     engine.streamImpl = async function* () {
       yield { type: "chunk", content: "整合完毕" };
       yield { type: "done", reply: "整合完毕", reply_raw: "整合完毕" };
@@ -253,7 +253,7 @@ describe("ChatService.chat", () => {
 
     const r = await service.chat("agent_test1", { message: "去干点活" });
     expect(r.reply).toBe("整合完毕");
-    // 委托结果经 sendResult 回传父 Agent（子→父），父 inbox 里应有 response
+    
     const pending = bus.drainAll("TestAgent");
     expect(pending.some((m) => m.msg_type === "response" && m.from_agent === "子一")).toBe(true);
   });
@@ -294,7 +294,7 @@ describe("ChatService.chat", () => {
       }
       return { reply: `我整合了：${opts.message.slice(0, 60)}`, replyRaw: "raw" };
     };
-    // stream 主流程走 engine.stream，这里 mock 一段 done
+    
     engine.streamImpl = async function* () {
       yield { type: "chunk", content: "整合完成" };
       yield { type: "done", reply: "整合完成", reply_raw: "整合完成" };
@@ -305,10 +305,10 @@ describe("ChatService.chat", () => {
     })) {
       evs.push(ev);
     }
-    // 目标 Agent 被真实调用了一次（显式传唤不依赖主模型输出标签）
+    
     expect(childCalled).toBe(1);
     expect(evs.some((e) => e.type === "done")).toBe(true);
-    // 委派结果经 A2A result 记入总线历史（父=TestAgent 相关），drain 由 effectiveMessage 消费
+    
     const hist = bus.getHistory("TestAgent");
     expect(hist.some((m) => m.msg_type === "response" && m.from_agent === "子二")).toBe(true);
   });
@@ -318,7 +318,7 @@ describe("ChatService.chat", () => {
     const dataDir = await mkdtemp(join(tmpdir(), "slime-ke-"));
     const svc = new ChatService({
       registry: reg, engine, history, bus, alarms, logger: quietLogger(),
-      // A-1035：svc.chat() 会走默认后处理链路 —— 不给 dataDir 它就把生成物写进仓库 Knowledge/
+      
       dataDir: knowTmp,
       postProcess: { extractMemory: async () => ({ traitSignals: [{ name: "靠谱" }], userSentiment: 0.8, behaviorPatterns: [{ scenario: "答对", steps: ["a", "b"] }] }) },
     });
@@ -387,7 +387,7 @@ describe("ChatService.stream", () => {
     };
     const evs = await collect(service.stream("agent_test1", { message: "hi" }));
     const types = evs.map((e) => e.type);
-    // 前沿裸思考缓冲会合并首段 body chunk（"你"+"好" → 判定 bodyStart 后一次放行），故为 chunk+done 两事件
+    
     expect(types).toEqual(["chunk", "done"]);
     expect(evs[0].seq).toBe(1);
     expect(evs[1].seq).toBe(2);
@@ -445,7 +445,7 @@ describe("ChatService.stream", () => {
 
     const evs = await collect(service.stream("agent_test1", { message: "帮我生成一张图片" }));
     const types = evs.map((e) => e.type);
-    // 强制轮 tool 事件出现在 done 之前
+    
     expect(types).toContain("tool");
     const toolIdx = types.indexOf("tool");
     const doneIdx = types.indexOf("done");
@@ -470,7 +470,7 @@ describe("ChatService.stream", () => {
       yield { type: "done", reply: "图片已生成", reply_raw: "raw" };
     };
     const evs = await collect(service.stream("agent_test1", { message: "生成一张图" }));
-    expect(evs.map((e) => e.type)).not.toContain("tool2"); // 只有原有 tool 事件
+    expect(evs.map((e) => e.type)).not.toContain("tool2"); 
     expect(evs.map((e) => e.type).filter((t) => t === "tool")).toHaveLength(1);
   });
 
@@ -500,12 +500,12 @@ describe("ChatService.stream", () => {
   it("客户端中途断开 → [截断] 标记入历史", async () => {
     engine.streamImpl = async function* () {
       yield { type: "chunk", content: "一半" };
-      // 模拟断流：直接结束（无 done）
+      
     };
     const gen = service.stream("agent_test1", { message: "hi" });
-    await gen.next(); // 消费第一个 chunk 后停止
+    await gen.next(); 
     await gen.return(undefined);
-    // finally 应已持久化截断回复
+    
     expect(history.records).toHaveLength(1);
     expect(history.records[0].ai).toContain("[截断]");
   });
@@ -516,13 +516,13 @@ describe("ChatService.stream", () => {
       yield { type: "chunk", content: "放" };
       yield { type: "done", reply: "重放", reply_raw: "重放" };
     };
-    // 先跑完一次（缓冲保留在会话内；re-resume 需同一 streamId——本实现按流内缓冲，
-    // resumeSeq>0 且无历史缓冲时仅续发新事件，因此这里验证 seq 连续性）
+    
+    
     const gen = service.stream("agent_test1", { message: "hi" });
     const evs = await collect(gen);
-    // 前沿缓冲把 "重"+"放" 扣留到 flush 后一次放行 → chunk + done 两事件（seq 连续）
+    
     expect(evs.map((e) => e.seq)).toEqual([1, 2]);
-    // 新流 + resumeSeq=2 → 无缓冲可重放（缓冲 per-stream），但 seq 从 1 重新开始（新流）
+    
     const gen2 = service.stream("agent_test1", { message: "hi" }, 2);
     const evs2 = await collect(gen2);
     expect(evs2.length).toBeGreaterThan(0);
@@ -613,7 +613,7 @@ describe("extractThinkingFromReply（思考泄漏剥离）", () => {
   });
 
   it("A-966 工具调用 XML 泄漏剥离：<dots_function_call>/<invoke>/<parameter> 从正文移除、并入思考区", () => {
-    // 用户实测形态一：dots_ 前缀伪函数块（无空格属性名 namequery）
+    
     const r1 = extractThinkingFromReply(
       "【大聪明】<dots_function_call>\n<invoke name=\"web_search\">\n<parameter namequery>hypernetwork 大模型架构原理讲解</parameter>\n</invoke>\n</dots_function_call>\n" +
         "hypernetwork 是我在 2022 年提出的一种在大模型内叠加小模块的技术……",
@@ -624,18 +624,18 @@ describe("extractThinkingFromReply（思考泄漏剥离）", () => {
     expect(r1.reasoning).toContain("web_search");
     expect(r1.reasoning).toContain("hypernetwork 大模型架构原理讲解");
 
-    // 用户实测形态二：属性名正常但整体为 XML 声明（无引号未闭合文本）
+    
     const r2 = extractThinkingFromReply(
       "我先查一下资料。\n<ignore><dots_function_call><invoke name=\"web_search\"><parameter name=\"query\">原理</parameter></invoke></dots_function_call></ignore>\n" +
         "结论是：",
     );
     expect(r2.cleanReply).toContain("我先查一下资料。");
     expect(r2.cleanReply).toContain("结论是：");
-    expect(r2.cleanReply).not.toContain("<"); // 无任何 XML 标签残留
+    expect(r2.cleanReply).not.toContain("<"); 
     expect(r2.cleanReply).not.toContain("function_call");
     expect(r2.reasoning).toContain("web_search");
 
-    // 形态三：游离 <parameter> 残片（外层剥离后裸露）
+    
     const r3 = extractThinkingFromReply("好的。<parameter name=\"query\">xxx</parameter> 请看结论。");
     expect(r3.cleanReply).toBe("好的。 请看结论。");
     expect(r3.reasoning).toContain("xxx");
@@ -643,7 +643,7 @@ describe("extractThinkingFromReply（思考泄漏剥离）", () => {
 });
 
 describe("createThinkingStripper（流式思考剥离，云端/本地思考模型共用）", () => {
-  /** 模拟引擎逐 chunk 推送，返回剥离后的正文流与最终 reasoning */
+  
   function run(chunks: string[], reasoningEvents: string[] = []): { out: string[]; reasoning: string; eventReasoning: string } {
     const reasoningRef: { v: string } = { v: "" };
     const s = createThinkingStripper(() => reasoningRef.v);
@@ -765,7 +765,7 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
     expect(reasoning).toBe("");
   });
 
-  // ── 无标记裸思考（流式，生产实测 test1 你好场景） ──
+  
   it("流式裸思考：单 chunk 内思考+正文（无 reasoning event，纯 content 泄漏）→ 剥离，正文干净", () => {
     const raw =
       "用户只是说\"你好\"，这是一个简单的问候。我需要以test1的身份来回应。根据我的设定，我应该简短地介绍自己，并且保持自然、平静的语气。不需要使用任何工具，直接回复即可。\n你好！我是 test1，试验。有什么需要我帮忙的吗？";
@@ -776,8 +776,8 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
   });
 
   it("流式裸思考：跨 chunk 拆分（思考在前几个 chunk，正文在后续 chunk）→ 逐 chunk 不泄漏到正文", () => {
-    // 模拟流式逐字/逐词推送，每个 push 返回的 chunk 必须不含思考内容
-    const reasoningRef: { v: string } = { v: "" }; // 无 reasoning event（最严重路径）
+    
+    const reasoningRef: { v: string } = { v: "" }; 
     const s = createThinkingStripper(() => reasoningRef.v);
     const chunks = [
       "用户发送了\"你好\"，这是一个简单的问候。",
@@ -788,7 +788,7 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
     const pushResults: string[] = [];
     for (const c of chunks) {
       const clean = s.push(c);
-      // 关键：流式过程中返回的正文不得包含任何思考性文字
+      
       if (clean) {
         expect(clean).not.toContain("角色设定");
         expect(clean).not.toContain("我需要保持角色");
@@ -816,7 +816,7 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
   it("流式裸思考：无 reasoning event + 重复前缀（模型把思考重复写进 content）→ 全部剥离", () => {
     const reasoningRef: { v: string } = { v: "" };
     const s = createThinkingStripper(() => reasoningRef.v);
-    // 模拟：思考先出现在 reasoning_content（注入 reasoningRef），再完整出现在 content（重复写），后跟正文
+    
     const preThink = "用户说你好。我需要保持角色。用中文回应。";
     reasoningRef.v = preThink + "\n";
     const content = preThink + "\n" + preThink + "\n你好！我是test1。";
@@ -824,7 +824,7 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
     const tail = s.flush();
     const full = push + tail;
     expect(full).toBe("你好！我是test1。");
-    // reasoning 里仍保留思考内容（展示用折叠区）
+    
     expect(s.reasoning).toContain("保持角色");
   });
 
@@ -837,17 +837,17 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
   it("流式裸思考：长分析（列表项延续思考）+ 正文锚点 → 剥离思考，正文完整", () => {
     const raw =
       "用户要求我分析和检测该文件夹内的项目。我需要：\n1. 首先列出目录内容，了解项目结构\n2. 然后阅读关键文件来理解项目功能和构成\n从系统提示中，我看到工作目录已经设置好。\n我已经读取了项目的核心配置文件，现在可以概述这个项目了。\n以下是项目分析报告：\n项目名称：Fengling，本地 AI 编程助手。";
-    const { out, reasoning } = run([raw.slice(0, 60), raw.slice(60, 200), raw.slice(200)]); // 跨 3 chunk
+    const { out, reasoning } = run([raw.slice(0, 60), raw.slice(60, 200), raw.slice(200)]); 
     expect(out.join("")).toBe("以下是项目分析报告：\n项目名称：Fengling，本地 AI 编程助手。");
     expect(reasoning).toContain("我需要");
     expect(reasoning).toContain("阅读关键文件");
   });
 
   it("流式裸思考：flush 兜底（思考特征积累未到阈值 + 流结束）→ 仍正确剥离", () => {
-    // 场景：流式推送过程中权重刚好 <3 时流结束（极端），flush 应走 splitUntaggedThinking 兜底
+    
     const reasoningRef: { v: string } = { v: "" };
     const s = createThinkingStripper(() => reasoningRef.v);
-    // 分 chunk 推：最后 chunk 到达前仍未判定（模拟流式权重在最后一行才过阈值）
+    
     const c1 = s.push("用户发送了\"你好\"。根据我的角色设定，我需要保持角色。");
     const c2 = s.push("我需要用中文回应。\n你好！");
     const c3 = s.flush();
@@ -862,7 +862,7 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
     expect(reasoning).toBe("");
   });
 
-  // ── A-175: 逐词换行思考（token-by-token，模型把思考每词一行输出且无标签） ──
+  
   it("逐词换行思考（每行1-2字，单 chunk）→ 整体剥离到 reasoning，正文干净", () => {
     const raw = "好\n，让\n我\n继续\n读取\n更多\n关\n键\n文\n件\n。\n\n以下是项目分析报告：";
     const { out, reasoning } = run([raw]);
@@ -893,10 +893,10 @@ describe("createThinkingStripper（流式思考剥离，云端/本地思考模�
     const reasoningRef: { v: string } = { v: "" };
     const s = createThinkingStripper(() => reasoningRef.v);
     const pushResults: string[] = [];
-    // 第一段正常正文（started=true 后）
+    
     const c1 = s.push("我先列出项目文件。\n");
     pushResults.push(c1);
-    // 工具轮后模型输出逐词换行思考（此前已 started，unagged 层不再拦截 → 必须由 tbt 层处理）
+    
     const think = "好\n，让\n我\n看\n一下\n这\n个\n项\n目\n的\n功\n能\n。";
     const c2 = s.push(think);
     pushResults.push(c2);
@@ -1037,19 +1037,19 @@ describe("splitUntaggedThinking（无标记裸思考剥离，对照 agentero 孤
   });
 
   it("同行思考但正文锚词是思考自身（用户说你好）→ 不误切", () => {
-    // 思考特征后紧跟的「你好」若实为思考，锚词切分会误伤；这里模拟思考含「你好」开头→无正文则不剥
+    
     const r = splitUntaggedThinking("根据我的角色设定，用户对我说你好。我需要保持角色。");
     expect(r.cleanReply).toBe("根据我的角色设定，用户对我说你好。我需要保持角色。");
     expect(r.reasoning).toBe("");
   });
 
   it("思考句内含「所以」等词 → 不把思考内部误切成正文", () => {
-    // 「所以」出现在思考句内部（因果关系），其后仍是思考内容，不应触发正文切分
+    
     const r = splitUntaggedThinking(
       "根据我的身份设定，我是 test1，所以需要用中文回应，保持平静。\n你好！我是 test1。",
     );
-    // 因 weight=2（身份设定2+用中文回应2+我是弱0…strong足），但「所以」在思考内部。
-    // 期望：正文从换行后「你好」开始
+    
+    
     expect(r.cleanReply).toBe("你好！我是 test1。");
   });
 });

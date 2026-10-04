@@ -12,7 +12,7 @@ import hashlib
 import json
 import logging
 
-# A-096: 重连上限 10 次（退避 1→60s，约 10 分钟；达上限放弃，/mcp start 手动拉起）
+
 _MCP_MAX_RECONNECT = 10
 import os
 import re
@@ -28,26 +28,26 @@ from core.mcp_oauth import OAuthFlow, OAuthManager
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# MCP JSON-RPC 版本
+
 _JSONRPC = "2.0"
-# 协议版本：2025-11-25 为最新（新 SDK LATEST），旧 server 会经 SUPPORTED_PROTOCOL_VERSIONS 协商下调
+
 _PROTOCOL_VERSION = "2025-11-25"
 
-# 安全限制
-_MAX_HEADER_BYTES = 16 * 1024           # Content-Length 头最大 16KB（N10-M10）
-_MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 响应体最大 10MB（N10-H3）
-_MAX_MEDIA_BYTES = 10 * 1024 * 1024      # 单文件媒体落盘上限（P0-4）
-_REQUEST_TIMEOUT = 30.0                 # 单次 RPC 超时（N10-L3）
-_MAX_BRIDGED = 64                       # 每个 Server 最多桥接的资源/提示数
 
-# image/audio/video content 落盘时的中文标签
+_MAX_HEADER_BYTES = 16 * 1024           
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024  
+_MAX_MEDIA_BYTES = 10 * 1024 * 1024      
+_REQUEST_TIMEOUT = 30.0                 
+_MAX_BRIDGED = 64                       
+
+
 _MEDIA_LABEL = {"image": "图片", "audio": "音频", "video": "视频"}
 
-# 合法工具权限值（与 tools/registry.py:32 一致）
+
 _VALID_PERMISSIONS = {"read", "write", "terminal", "network"}
 
 
-# ── 传输抽象 ──────────────────────────────────────────────
+
 
 
 class _Transport(ABC):
@@ -75,8 +75,8 @@ class _Transport(ABC):
 class _StdioTransport(_Transport):
     """stdio 子进程传输（JSONL / Content-Length 双帧格式，后台 reader 循环）。"""
 
-    # A-113: MCP 子进程环境白名单——不继承完整父环境（防本地恶意 MCP server 窃取
-    # 父进程里的 API keys 等敏感变量）；slime.toml 的 env 字段可显式补充所需变量
+    
+    
     _ENV_ALLOWLIST = {
         "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
         "TEMP", "TMP", "USERNAME", "USERPROFILE", "HOME",
@@ -93,21 +93,21 @@ class _StdioTransport(_Transport):
         self.env = env
         self.name = name
         self._proc: subprocess.Popen | None = None
-        self._lock = asyncio.Lock()  # 写 stdin 统一锁（request + notify 共用）
-        # stdio 帧格式：jsonl（MCP 2025+，`{json}\n`）| content_length（MCP 2024，LSP 风格）
+        self._lock = asyncio.Lock()  
+        
         self._framing = "jsonl" if framing == "jsonl" else "content_length"
-        # 后台 reader 循环：req_id → 待决 Future（单线程独占读，无读竞争）
+        
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
-        self._on_notification: Callable[[dict], Awaitable[None]] | None = None  # 通知回调（P1-3）
-        self._on_close: Callable[[], Awaitable[None]] | None = None  # 自然死亡回调（P2-1）
+        self._on_notification: Callable[[dict], Awaitable[None]] | None = None  
+        self._on_close: Callable[[], Awaitable[None]] | None = None  
 
     async def start(self) -> bool:
         if self._proc is not None:
             return True
         try:
-            # A-113: 白名单继承基础环境变量，self.env 显式补充（不再全量 os.environ）
+            
             merged_env = {k: v for k, v in os.environ.items() if k in _StdioTransport._ENV_ALLOWLIST}
             if self.env:
                 merged_env.update(self.env)
@@ -119,7 +119,7 @@ class _StdioTransport(_Transport):
                 env=merged_env,
                 text=False,
             )
-            # 后台 reader + stderr drain（P0-1 / P0-2）
+            
             self._reader_task = asyncio.create_task(self._reader_loop())
             self._stderr_task = asyncio.create_task(self._stderr_drain())
             return True
@@ -129,10 +129,10 @@ class _StdioTransport(_Transport):
 
     async def close(self):
         proc, self._proc = self._proc, None
-        # 先终止进程树（关闭 stdout/stderr，让阻塞的 reader/stderr 读返回 EOF）
+        
         if proc:
             self._terminate_tree(proc)
-        # 再取消后台任务 + 清空 pending
+        
         for task in (self._reader_task, self._stderr_task):
             if task and not task.done():
                 task.cancel()
@@ -193,7 +193,7 @@ class _StdioTransport(_Transport):
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
-            # 超时不 kill 进程（P1-1 缓解）：只丢弃本次 pending，reader 循环继续
+            
             self._pending.pop(req_id, None)
             logging.warning(f"[mcp] {self.name}: 请求超时 (id={req_id})")
             return None
@@ -207,15 +207,15 @@ class _StdioTransport(_Transport):
                 logging.warning(f"[mcp] {self.name}: reader 异常: {e}")
                 break
             if frame is None:
-                break  # EOF / 进程退出
+                break  
             self._dispatch(frame)
-        # 进程退出：清空所有 pending，让在途 request 返回 None
+        
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_result(None)
         self._pending.clear()
-        # 自然死亡（非 close()：close 先置 _proc=None 再取消任务，此处不会命中）
-        # → 置 running=False 防后续 request 写死 stdin，并触发重连（P2-1，审查发现 5）
+        
+        
         if self._proc is not None:
             self._proc = None
             if self._on_close:
@@ -250,7 +250,7 @@ class _StdioTransport(_Transport):
             else:
                 logging.warning(f"[mcp] {self.name}: 迟到/未知响应 id={rid} 丢弃")
         else:
-            # notification（无 id）：日志 + 异步分发回调（P1-3，审查发现 3：回调异步化不卡读循环）
+            
             logging.info(f"[mcp] {self.name}: notification {frame.get('method', '')}")
             if self._on_notification:
                 try:
@@ -363,12 +363,12 @@ class _HTTPTransport(_Transport):
         self.extra_headers = headers or {}
         self.name = name
         self._session_id: str | None = None
-        self._oauth = oauth  # P2-5: OAuth 2.1 管理器（None = 不启用）
+        self._oauth = oauth  
         self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
 
     async def start(self) -> bool:
-        # HTTP 无状态，连通性由 initialize 握手验证；
-        # close() 后重开 client（P2-5：warmup 失败关闭 transport 后仍可 start_one 重试）
+        
+        
         if self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
         return True
@@ -386,7 +386,7 @@ class _HTTPTransport(_Transport):
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
-        # P2-5 优先级：静态 headers 有显式 Authorization → 跳过 OAuth（用户静态 token 意图明确）
+        
         static_auth = self.extra_headers and any(
             k.lower() == "authorization" for k in self.extra_headers)
         if self._oauth and not static_auth:
@@ -401,12 +401,12 @@ class _HTTPTransport(_Transport):
         data, status, www_auth = await self._request_once(
             payload, req_id, timeout, retryable_401=self._oauth is not None)
         if data is None and status == 401 and self._oauth is not None:
-            # P2-5: 401 → 快速确保 token（refresh <5s 或后台授权单飞）→ 重试最多 1 次
+            
             try:
                 token = await asyncio.wait_for(
                     self._oauth.ensure_token(www_auth), timeout=timeout)
             except asyncio.TimeoutError:
-                # 慢授权（浏览器）超出本次请求窗口：任务靠 shield 独立存活，下次请求即成功
+                
                 logging.warning(f"[mcp] {self.name}: OAuth 授权等待超时（后台授权继续）")
                 token = None
             if token:
@@ -422,8 +422,8 @@ class _HTTPTransport(_Transport):
         False（无 oauth / 重试后仍 401）保持旧语义：body 解析后经 _MCPServerError 透出细节。
         """
         try:
-            # 用 stream 逐行读 SSE（P0-3 简单档）：content-type 是 event-stream 时命中 id 即返回，
-            # 不等完整 body；否则按普通 JSON 读完解析。
+            
+            
             async with self._client.stream(
                 "POST", self.url, content=payload, headers=self._headers(), timeout=timeout
             ) as resp:
@@ -435,8 +435,8 @@ class _HTTPTransport(_Transport):
                     return None, 401, resp.headers.get("WWW-Authenticate")
                 ctype = resp.headers.get("content-type", "")
                 if "text/event-stream" in ctype:
-                    # 问题1：server 定期发 keep-alive ping 时 httpx read 超时不会触发，
-                    # 必须用 wait_for 兜底（超时返回 None，与 stdio 语义一致）
+                    
+                    
                     try:
                         return await asyncio.wait_for(
                             self._read_sse_stream(resp, req_id), timeout=timeout
@@ -493,7 +493,7 @@ class _HTTPTransport(_Transport):
             pass
 
 
-# ── MCP Server 连接 ───────────────────────────────────────
+
 
 
 class _MCPServerError(Exception):
@@ -515,23 +515,23 @@ class _MCPServer:
         self._transport = transport
         self._timeout = timeout
         self.tool_permissions = tool_permissions or {}
-        self._oauth = oauth  # P2-5: OAuth 管理器（仅 HTTP 远程 server 配置）
-        self.last_error: str | None = None  # P2-1: 最近一次断连/重连错误
+        self._oauth = oauth  
+        self.last_error: str | None = None  
         self._next_id = 0
-        self._refresh_lock = asyncio.Lock()  # list_changed 并发刷新串行化（收尾观察项 2）
+        self._refresh_lock = asyncio.Lock()  
         self.tools: list[dict] = []
         self.resources: list[dict] = []
         self.prompts: list[dict] = []
 
-    # ── 生命周期 ──────────────────────────────────────
+    
 
     async def start(self) -> bool:
         if not await self._transport.start():
             return False
         try:
-            # P2-5: HTTP + OAuth → 预热授权（长窗口，浏览器授权不落在请求超时窗口内）。
-            # 失败 = 用户取消/发现失败 → 关闭 transport 返回 False（server 不启动），
-            # 可经 start_one 重试；status() 显示 pending/expired，工具调用提示"未授权"。
+            
+            
+            
             if self._oauth is not None:
                 logging.info(f"[mcp] {self.name}: 等待 OAuth 授权（请在浏览器完成授权）")
                 if not await self._oauth.warmup():
@@ -545,11 +545,11 @@ class _MCPServer:
                 "clientInfo": {"name": "slime", "version": "0.3.0"},
             }
             flip = getattr(self._transport, "flip_framing", None)
-            # stdio 握手探测：帧格式不符时用短超时快速失败 → 切换帧格式 → 重启子进程重试。
-            # 实测补充（2026-08-14）：Python MCP server（serena/headroom，JSONL）冷启动 4-8s，
-            # 会越过 5s 探测窗口 → 误 flip 到 Content-Length → 必失败。探测超时但进程仍存活
-            # 多半是启动慢，先同帧格式重试一次（全超时）；帧错配的 server 通常直接退出，
-            # 此时才走 flip（EOF 会立即触发，不额外等待）。
+            
+            
+            
+            
+            
             init = await self._request("initialize", params, timeout=5.0 if flip else None)
             if init is None and flip is not None:
                 if self._transport.running:
@@ -581,10 +581,10 @@ class _MCPServer:
     def running(self) -> bool:
         return self._transport.running
 
-    # ── 能力发现 ──────────────────────────────────────
+    
 
     async def _discover(self):
-        # 每个能力独立容错：不支持的 Server 返回 error（Method not found）即跳过
+        
         r = await self._list_capability("tools/list")
         if r and isinstance(r, dict):
             self.tools = [t for t in r.get("tools", []) if isinstance(t, dict)]
@@ -607,7 +607,7 @@ class _MCPServer:
             logging.info(f"[mcp] {self.name}: {method} 不可用: {e.message}")
             return None
 
-    # ── JSON-RPC ──────────────────────────────────────
+    
 
     def _next_request_id(self) -> int:
         self._next_id += 1
@@ -633,14 +633,14 @@ class _MCPServer:
         payload = json.dumps({"jsonrpc": _JSONRPC, "method": method, "params": params})
         await self._transport.notify(payload)
 
-    # ── 能力调用 ──────────────────────────────────────
+    
 
     async def call_tool(self, tool_name: str, args: dict) -> str:
         try:
             result = await self._request("tools/call", {"name": tool_name, "arguments": args})
         except _MCPServerError as e:
-            # A-042: 失败统一 [错误] 前缀（与内置工具/技能引擎一致），
-            # 反幻觉协议以 "[错误] 开头 = 失败" 为识别信号
+            
+            
             return f"[错误] MCP 工具 '{tool_name}' 调用失败: {e.message} (code={e.code})"
         if result is None:
             return f"[错误] MCP 工具 '{tool_name}' 调用失败：服务无响应"
@@ -714,7 +714,7 @@ class _MCPServer:
         if len(data) > _MAX_MEDIA_BYTES:
             logging.warning(f"[mcp] {self.name}: {kind} 超 {_MAX_MEDIA_BYTES}B，跳过落盘")
             return None
-        # mimeType → 扩展名；缺失时按类型默认（image→png / audio、video→bin）
+        
         ext = ""
         if mime and "/" in mime:
             ext = mime.rsplit("/", 1)[1].split(";")[0].split("+")[0].lower()
@@ -722,12 +722,12 @@ class _MCPServer:
         if not ext:
             ext = {"image": ".png", "audio": ".bin", "video": ".bin"}.get(kind, ".bin")
         digest = hashlib.sha256(data).hexdigest()[:16]
-        # 目录段 sanitize（审查发现 2）：server name 只保留 [A-Za-z0-9_-]，防 `..` 路径逃逸
+        
         safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", self.name)
         d = _PROJECT_ROOT / "data" / "mcp" / safe_name
         d.mkdir(parents=True, exist_ok=True)
         path = d / f"{digest}{ext}"
-        if not path.exists():  # 同内容自动去重
+        if not path.exists():  
             try:
                 path.write_bytes(data)
             except OSError as e:
@@ -736,7 +736,7 @@ class _MCPServer:
         return str(path)
 
 
-# ── MCP 客户端管理器 ──────────────────────────────────────
+
 
 
 class MCPClient:
@@ -744,11 +744,11 @@ class MCPClient:
 
     def __init__(self):
         self._servers: dict[str, _MCPServer] = {}
-        # slime_tool_name → (server_name, kind, mcp_name_or_uri)
+        
         self._tool_map: dict[str, tuple[str, str, str]] = {}
-        self._reconnect_tasks: dict[str, asyncio.Task] = {}  # P2-1: server_name → 重连任务
+        self._reconnect_tasks: dict[str, asyncio.Task] = {}  
 
-    # ── 服务器管理 ────────────────────────────────────
+    
 
     def add_server(self, name: str, command: str = "", args: list[str] | None = None,
                    env: dict | None = None, url: str = "", headers: dict | None = None,
@@ -790,8 +790,8 @@ class MCPClient:
 
     async def start_all(self) -> dict[str, bool]:
         names = list(self._servers.keys())
-        # P2-2: 并发启动，每 server 独立超时，单 server 卡死不拖累全部；
-        # P2-5: oauth server 放宽至 360s（warmup 浏览器授权最长 ~300s），非 oauth 保持 60s
+        
+        
         results = await asyncio.gather(
             *(asyncio.wait_for(
                 self._servers[n].start(),
@@ -814,7 +814,7 @@ class MCPClient:
         server = self._servers.get(name)
         if not server:
             return False
-        # P2-5: oauth server 放宽外壳超时至 360s（warmup 浏览器授权最长 ~300s）；非 oauth 不加外壳
+        
         if server._oauth is not None:
             try:
                 ok = await asyncio.wait_for(server.start(), timeout=360.0)
@@ -829,14 +829,14 @@ class MCPClient:
         return ok
 
     async def stop_all(self):
-        # 取消在途重连任务（P2-1）
+        
         for task in self._reconnect_tasks.values():
             if not task.done():
                 task.cancel()
         self._reconnect_tasks.clear()
         for server in self._servers.values():
             await server.stop()
-        # 先摘 registry（此时 _tool_map 仍有内容），再清空映射
+        
         self._unregister_all_tools()
         self._tool_map.clear()
 
@@ -860,13 +860,13 @@ class MCPClient:
                 "resources": len(srv.resources),
                 "prompts": len(srv.prompts),
                 "last_error": srv.last_error,
-                # P2-5: pending / authorized / expired / none（未配置 oauth 恒为 none）
+                
                 "oauth": srv._oauth.status() if srv._oauth is not None else "none",
             }
             for name, srv in self._servers.items()
         ]
 
-    # ── 能力调用路由 ──────────────────────────────────
+    
 
     async def call_tool(self, slime_name: str, args: dict) -> str:
         entry = self._tool_map.get(slime_name)
@@ -875,7 +875,7 @@ class MCPClient:
         server_name, kind, orig = entry
         server = self._servers.get(server_name)
         if not server or not server.running:
-            # P2-5: 区分"未授权"与"服务无响应"——oauth server 未授权时给出可行动的提示
+            
             if server is not None and server._oauth is not None and server._oauth.status() != "authorized":
                 return f"[错误] MCP Server '{server_name}' 未授权（请完成浏览器授权后重试）"
             return f"[错误] MCP Server '{server_name}' 未运行"
@@ -885,13 +885,13 @@ class MCPClient:
             return await server.read_resource(orig)
         return await server.get_prompt(orig, args)
 
-    # ── 桥接 ─────────────────────────────────────────
+    
 
     def _register_capabilities(self, server_name: str, server: _MCPServer):
         from tools.registry import Tool, get_registry
         registry = get_registry()
 
-        # tools → 按 per-server 权限映射（P2-3），缺省 network
+        
         for t in server.tools:
             name = t.get("name", "")
             if not name:
@@ -906,7 +906,7 @@ class MCPClient:
                 permissions=self._resolve_tool_permissions(server, name),
             ))
 
-        # resources → read 级（只读数据）
+        
         for i, r in enumerate(server.resources):
             uri = r.get("uri", "")
             if not uri:
@@ -922,7 +922,7 @@ class MCPClient:
                 permissions=["read"],
             ))
 
-        # prompts → read 级（只读提示）
+        
         for p in server.prompts:
             name = p.get("name", "")
             if not name:
@@ -998,7 +998,7 @@ class MCPClient:
             self._tool_map.pop(t, None)
         self._unregister_tools(to_remove)
 
-    # ── 通知 / 重连接线（P1-3 / P2-1）─────────────────────
+    
 
     def _wire_server(self, name: str, server: _MCPServer):
         """给 stdio 传输挂通知回调与断连回调（HTTP 无 reader 循环，跳过）。"""
@@ -1010,8 +1010,8 @@ class MCPClient:
 
     def _make_notification_handler(self, name: str):
         async def handler(frame: dict):
-            # 包 try/except（收尾观察项 1）：_refresh_server_tools 若抛非 _MCPServerError
-            # 异常（如传输层意外），在此吞掉，否则 create_task 的任务异常无人 retrieve
+            
+            
             try:
                 if frame.get("method") == "notifications/tools/list_changed":
                     await self._refresh_server_tools(name)
@@ -1029,7 +1029,7 @@ class MCPClient:
         server = self._servers.get(name)
         if not server or not server.running:
             return
-        # per-server 刷新锁（收尾观察项 2）：防并发 list_changed 交错 _unregister/_register 重复注册
+        
         async with server._refresh_lock:
             if not server.running:
                 return
@@ -1079,7 +1079,7 @@ class MCPClient:
         logging.warning(f"[mcp] {name}: 重连放弃（{_MCP_MAX_RECONNECT} 次）")
 
 
-# ── 全局单例 ────────────────────────────────────────────
+
 
 _client: MCPClient | None = None
 

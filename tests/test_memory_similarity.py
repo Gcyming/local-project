@@ -73,13 +73,13 @@ class TestChineseSimilarity:
         """
         from core.memory import _text_similarity, _tokens
         para = _text_similarity("用户喜欢用 Python 写脚本", "用户偏好使用 Python 编程")
-        # 旧口径（纯词级）复算，用于对比
-        old_tokens = lambda t: {w for w in t.lower().split() if w}  # noqa: E731
+        
+        old_tokens = lambda t: {w for w in t.lower().split() if w}  
         a_old, b_old = old_tokens("用户喜欢用 Python 写脚本"), old_tokens("用户偏好使用 Python 编程")
         old = len(a_old & b_old) / len(a_old | b_old)
         assert old == 0.2, "旧口径基线变了，本护栏需重新校准"
         assert para != old, "新实现与旧实现给出相同结果 —— 可能已被改回空白分词"
-        # 新实现必须真的用上了 CJK n-gram
+        
         assert len(_tokens("用户喜欢用")) > 1
 
     def test_english_behaviour_unchanged(self):

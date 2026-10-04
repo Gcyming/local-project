@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """Soul-Plan 第 7 步：情绪身份叙事测试（docs/soul-plan.md）"""
 from core.emotion import EmotionalState
 
@@ -27,7 +27,7 @@ class TestEmotionIdentity:
         e.update(success=True, praise=True)
         e2 = EmotionalState.from_dict(e.to_dict())
         assert e2.events == e.events
-        # 旧数据（无 events）兼容
+        
         old = {"valence": 0.1, "arousal": 0.3, "dominance": 0.5, "mood": "neutral",
                "relational_depth": 0.0, "last_updated": None}
         e3 = EmotionalState.from_dict(old)
@@ -35,13 +35,13 @@ class TestEmotionIdentity:
         assert e.clone().events == e.events
 
     def test_behavior_hint_levels(self):
-        # 修正条 1/2：frustrated=0（聚焦）、angry=1（抑制）、concerned/disgusted=2（确认）
+        
         def mk(fails, ftype="tool"):
             e = EmotionalState()
             for _ in range(fails):
                 e.update(success=False, failure_type=ftype)
             return e
-        fr = mk(6)  # tool 渐进 → frustrated
+        fr = mk(6)  
         assert fr.current_behavior_hint["caution_level"] == 0
         assert "terminal" in fr.current_behavior_hint["promote_groups"]
         ag = EmotionalState()
@@ -59,7 +59,7 @@ class TestEmotionIdentity:
         e.update(success=True, praise=True)
         ip = e.to_identity_prompt()
         assert "当前情绪" in ip and "最近感受" in ip
-        # frustrated 聚焦台词
+        
         fr = EmotionalState()
         for _ in range(6):
             fr.update(success=False, failure_type="tool")
@@ -72,7 +72,7 @@ class TestEmotionIdentity:
             e.update(success=False, failure_type="tool")
         assert e.consecutive_failures == 0
         assert e.mood != "angry"
-        # None=默认 task 语义仍计入
+        
         e2 = EmotionalState()
         for _ in range(3):
             e2.update(success=False)

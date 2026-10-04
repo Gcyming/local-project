@@ -1,22 +1,22 @@
-/**
- * gui/src/renderer/pages/browserErrors.ts — 内嵌浏览器加载失败的**可读归因**（A-1018）。
- *
- * 为什么单独成文件：这是纯逻辑（无 JSX、无 hook），按项目铁律不许住在 `.tsx` 里。
- *
- * 编码取值依据：Chromium `net/base/net_error_list.h`（`NET_ERROR(NAME, value)` 宏）。
- * ⚠️ 本轮取证受限说明：本机到 chromium.googlesource.com / raw.githubusercontent.com 的直连被拦，
- * 未能拉到该头文件原文；下列取值经**两个独立来源交叉核对**：
- *   ① 华为 ArkWeb 文档逐条复刻了 Chromium 的这份错误码表（ERR_CONNECTION_RESET -101、
- *      ERR_NAME_NOT_RESOLVED -105、ERR_INTERNET_DISCONNECTED -106、ERR_CONNECTION_TIMED_OUT -118…）；
- *   ② 引用该头文件原文的工程文档（NET_ERROR(CONNECTION_REFUSED, -102)、
- *      NET_ERROR(NAME_NOT_RESOLVED, -105)、NET_ERROR(CONNECTION_RESET, -101)、
- *      NET_ERROR(INTERNET_DISCONNECTED, -106)、NET_ERROR(TIMED_OUT, -7)）。
- * **并顺手修掉了旧表里的两个错项**：`-130` 被当成"证书错误"（该值不在证书段 200-299 内）、
- * `-201` 被当成"连接被重置"（`-201` 实为 ERR_CERT_DATE_INVALID；连接被重置是 `-101`）。
- * 以"-201 显示成连接被重置"为例，用户会照着"检查网络"排查，而真因是**系统时间不对** —— 归因错了比没有归因更糟。
- */
 
-/** Chromium 常量名（展示用，"标识"作用：用户可拿它去搜） */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 const ERR_NAMES: Record<number, string> = {
   "-2": "ERR_FAILED",
   "-3": "ERR_ABORTED",
@@ -42,7 +42,7 @@ const ERR_NAMES: Record<number, string> = {
   "-324": "ERR_EMPTY_RESPONSE",
 };
 
-/** 一句话说清"哪一步坏了" */
+
 const ERR_TITLES: Record<number, string> = {
   "-3": "加载被中止（多半是站点自己取消了这次导航）",
   "-7": "连接超时",
@@ -63,14 +63,14 @@ const ERR_TITLES: Record<number, string> = {
   "-201": "证书已过期或尚未生效（通常是你本机时间不对）",
   "-202": "证书签发机构不受信任（自签证书 / 代理做了 HTTPS 拦截）",
   "-310": "重定向次数过多",
-  /* A-1021 实测补录：`http://127.0.0.1:1/` 报的正是 -312（Chromium 的"受限端口"名单）。
-   * 与 -109(ADDRESS_UNREACHABLE) 的区别很重要：-109 是"到不了"，-312 是"浏览器根本不发"——
-   * 用户换成 8080 就能通，所以建议必须指向"换端口"而不是"查网络"。 */
+  
+
+
   "-312": "端口被浏览器禁用（Chromium 的受限端口名单内，请求根本不会发出）",
   "-324": "服务器没有返回任何数据（站点可能已经挂了）",
 };
 
-/** 可操作建议（这才是"原因/标识"之外用户真正需要的东西） */
+
 const ERR_HINTS: Record<number, string> = {
   "-7": "站点可能很慢或不可达。稍后重试，或检查是否需要走代理。",
   "-21": "网络切换/重连导致。点「重试」重新加载即可。",
@@ -94,22 +94,22 @@ const ERR_HINTS: Record<number, string> = {
   "-324": "服务器接受了连接但没发数据。稍后重试；持续如此说明站点故障。",
 };
 
-/** 失败标题（未知码给兜底文案，不假装知道） */
+
 export function failTitle(code: number): string {
   return ERR_TITLES[code] ?? `加载失败（未收录的错误码 ${code}）`;
 }
 
-/** 可操作建议 */
+
 export function failHint(code: number): string {
   return ERR_HINTS[code] ?? "可先点「重试」；若稳定复现，把错误码连同网址反馈给开发者。";
 }
 
-/** Chromium 错误常量名（"标识"）；未收录返回空串，由调用方决定是否展示 */
+
 export function failCodeName(code: number): string {
   return ERR_NAMES[code] ?? "";
 }
 
-/** 是否为"站点自己取消了本次导航"这类**不该报警**的情形（Chromium 在跳转/停止时会抛 -3） */
+
 export function isBenignAbort(code: number): boolean {
   return code === -3;
 }

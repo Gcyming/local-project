@@ -1,12 +1,12 @@
-/**
- * A-1044 守卫（GUI 侧）：**操作可视化浮层 + 焦点归还**的接线与判据。
- *
- * 与 `tests/core-ts/a1044-guards.spec.ts` 分工：那边守"让位裁决与空闲探针"，这边守
- *   · `operationFocus.ts` 的状态机（判据唯一实现，纯逻辑直测）；
- *   · 浮层的三条硬约束（不吞点击 / 常驻挂载切类名 / 提示可永久隐藏）；
- *   · `browserBridge` 的**焦点归还**（用户报的"点击/输入被吞"在应用内的成因）；
- *   · 跨进程契约：主进程发的字段名 == preload 收的字段名 == 渲染层翻译的字段名（漂移不报错）。
- */
+
+
+
+
+
+
+
+
+
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -94,7 +94,7 @@ describe("A-1044 ①：可视化状态机（纯逻辑）", () => {
   describe("提示的永久隐藏（localStorage）", () => {
     const store = new Map<string, string>();
     beforeEach(() => {
-      // @ts-expect-error 测试内注入最小 window（本仓 vitest 是 node 环境，无 DOM）
+      
       globalThis.window = {
         localStorage: {
           getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
@@ -104,7 +104,7 @@ describe("A-1044 ①：可视化状态机（纯逻辑）", () => {
     });
     afterEach(() => {
       store.clear();
-      // @ts-expect-error 清理注入
+      
       delete globalThis.window;
     });
 
@@ -118,7 +118,7 @@ describe("A-1044 ①：可视化状态机（纯逻辑）", () => {
     });
 
     it("localStorage 不可用 → 按“未隐藏”处理，绝不抛（弹提示失败不该炸界面）", () => {
-      // @ts-expect-error 故意打断 localStorage
+      
       globalThis.window = {};
       expect(readOpFocusHintHidden()).toBe(false);
       expect(() => writeOpFocusHintHidden(true)).not.toThrow();
@@ -132,7 +132,7 @@ describe("A-1044 ②：浮层的三条硬约束", () => {
   it("常驻挂载 + 切类名（禁止条件渲染，否则结构上不可能有进出场）", () => {
     const src = overlay();
     expect(src).toMatch(/is-on/);
-    // 反向：不许出现 `{active && (<div` / `{st.active && (` 这种条件挂载
+    
     expect(src, "浮层必须常驻挂载").not.toMatch(/\{\s*st\.active\s*&&\s*\(/);
   });
 
@@ -223,8 +223,8 @@ describe("A-1044 ④：跨进程契约（漂移不报错，只会让界面永远
     const src = stripComments(read(F_MAIN));
     expect(src).toMatch(/screenCtl\.onOperationFocus\s*=/);
     expect(src, "转发必须兜异常：渲染层/窗口的问题不许影响动作").toMatch(/onOperationFocus\s*=[\s\S]{0,300}?catch/);
-    // ⚠️ 上面两条对"死代码架空"免疫：`if (false) screenCtl.onOperationFocus = …` 里子串照样命中。
-    // 订阅必须是**可达的语句级赋值**（行首即 screenCtl.onOperationFocus），且不被恒假分支包住。
+    
+    
     expect(src, "订阅不许被 if(false)/if(0) 之类的死代码架空").not.toMatch(
       /if\s*\(\s*(?:false|0)\s*\)[^;\n]{0,120}?onOperationFocus\s*=/,
     );
