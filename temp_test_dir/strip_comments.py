@@ -48,6 +48,32 @@ FFFD = "\uFFFD"
 
 # ── TS / JS ────────────────────────────────────────────────────────────────
 
+def _prev_word(text: str, i: int) -> str:
+    """取 `i` 之前紧邻的那个标识符（跳过空白）。
+
+    A-1143：正则字面量的判据不能只看 `/` 前面的**单个字符** —— 还要看**词**。
+    `return /^https?:\\/\\//i` 里的 `/` 前面是 `n`（return 的末字母），
+    不在运算符集里，于是正则没被识别；词法继续走，走到正则内部 `\\/\\//` 那对
+    相邻的 `/` 时判定为行注释，**把剩下的整行删掉**。
+    实测后果：`gui/src/shared/releaseNotes.ts` 的 `safeHref` 被截成
+    `return /^https?:\\/\\`，Vite 报 `Unterminated regular expression`。
+    """
+    j = i - 1
+    while j >= 0 and text[j] in " \t\r\n":
+        j -= 1
+    k = j
+    while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+        k -= 1
+    return text[k + 1:j + 1]
+
+
+# 这些关键字之后出现的 `/` 一定是正则，不是除号
+REGEX_KEYWORDS = frozenset((
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "case", "do", "else", "yield", "await",
+))
+
+
 def strip_js(text: str):
     """返回 (新文本, 删除的注释行数)。逐字符状态机。"""
     out = []
@@ -94,7 +120,11 @@ def strip_js(text: str):
         #     const a = /['"]/;  const b = "http://x";
         #   `'` 开引号后一路吞到行尾换行，机器回到「代码态」时正停在 `http://x";` 上，
         #   于是 `//x";` 被判定为行注释而**删除**。那是数据损坏，不是格式问题。
-        if ch == "/" and (prev_sig is None or prev_sig in REGEX_PREV):
+        # A-1143：判据补上**关键字**（见 _prev_word / REGEX_KEYWORDS）—— 只看前一个字符
+        #   会漏掉 `return /…/`，那正是 releaseNotes.ts 被截断的原因。
+        if ch == "/" and (prev_sig is None
+                          or prev_sig in REGEX_PREV
+                          or _prev_word(text, i) in REGEX_KEYWORDS):
             k = i + 1
             in_class = False
             while k < n:
@@ -279,7 +309,9 @@ def has_unterminated(text: str) -> bool:
                     in_block = True
                     i += 2
                     continue
-                if ch == "/" and (prev_sig is None or prev_sig in REGEX_PREV):
+                if ch == "/" and (prev_sig is None
+                                  or prev_sig in REGEX_PREV
+                                  or _prev_word(line, i) in REGEX_KEYWORDS):
                     i += 1
                     while i < n:
                         c2 = line[i]
