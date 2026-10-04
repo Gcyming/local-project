@@ -1657,7 +1657,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         // 弹�?�知不出现在渲染层，故不受渲染层切会话过滤影响）
         notifyUser({
           kind: "choice",
-          title: `${ui.agentName || "Agent"} �?要你选择`,
+          title: `${ui.agentName || "Agent"} 需要你选择`,
           body: (ui.question || ui.header || "有一个待确认的选择").slice(0, 160),
         });
         try {
@@ -2341,7 +2341,7 @@ function buildPermOptions(req: {
   return [
     {
       id: "allow-once",
-      label: "允�?通过",
+      label: "允许通过",
       hint: `放行 ${actionLabel}（${riskHint}）—— 下次同类操作仍会再次询问。把「安全与权限」里对应类别（读 / 写 / 终端）的开关打开即可免去询问。`,
     },
     {
@@ -2352,12 +2352,12 @@ function buildPermOptions(req: {
     {
       id: "deny",
       label: "拒绝通过",
-      hint: `阻�?该操作，Agent 会收到拒绝原因并尝试其他方�?。`,
+      hint: `阻止该操作，Agent 会收到拒绝原因并尝试其他方案。`,
     },
     {
       id: "custom",
       label: "其他需求",
-      hint: `�?��你的具体指示（例如：�?��许�?�?${targetText}、改用指定目录�?�暂停操作等临时�?求）。`,
+      hint: `填写你的具体指示（例如：只允许读取 ${targetText}、改用指定目录、暂停操作等临时需求）。`,
       customPlaceholder: "输入你的指示…",
     },
   ];
@@ -2973,7 +2973,7 @@ function createWindow(): void {
     // A-980-R26：意外终�?�?系统通知（用户可能�?在别的窗口，页面白屏他看不到�?
     notifyUser({
       kind: "aborted",
-      title: "slime 意�?终�?",
+      title: "slime 意外终止",
       body: `界面进程异常退出（${details.reason}），已自动重载恢复；进行中的生成可能已中断。`,
     });
     try { mainWindow?.webContents.reload(); } catch { /* ignore */ }
@@ -3624,7 +3624,7 @@ function registerIpcHandlers(): void {
         return {
           ok: true, skipped: true, used, cap, breakerOpen: true,
           ...(force ? { stillOverflow: true } : {}),
-          reason: `压缩已熔�?��同一段历史连�?${compressBreaker.failures} 次压缩失败）：本段历史无法靠压缩救回，�?换窗口更大的模型，或�?�?�?��会话`,
+          reason: `压缩已熔断（同一段历史连续 ${compressBreaker.failures} 次压缩失败）：本段历史无法靠压缩救回，请换窗口更大的模型，或开一个新会话`,
         };
       }
       const startGen = meta.summaryGeneration ?? 0;
@@ -4378,7 +4378,7 @@ function registerIpcHandlers(): void {
   /** 选择工作�?��（项�?��件夹�?*/
   handleTrusted<void>("slime:sessions:pickFolder", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
     const openOpts: Electron.OpenDialogOptions = {
-      title: "选择项目工作�?��（Agent 的�?写将限制在�?�?��内）",
+      title: "选择项目工作目录（Agent 的读写将限制在此目录内）",
       properties: ["openDirectory", "createDirectory"],
     };
     const open = mainWindow
@@ -4625,7 +4625,7 @@ function registerIpcHandlers(): void {
     try {
       const win = new BrowserWindow({
         width: 920, height: 720, minWidth: 640, minHeight: 480,
-        title: "GitHub 授权 �?登录后生�?Token 并�?制，回到 slime 粘贴保存",
+        title: "GitHub 授权 — 登录后生成 Token 并复制，回到 slime 粘贴保存",
         autoHideMenuBar: true,
         backgroundColor: "#0d1117",
         webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
@@ -5327,7 +5327,7 @@ function registerIpcHandlers(): void {
   /** 导入文件（�?话�?）：返回�?���?��，供聊天输入区引用为附件 */
   handleTrusted<void>("slime:files:pick", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
     const openOpts: Electron.OpenDialogOptions = {
-      title: "选择要加入�?话的文件（图�?/ 文档等）",
+      title: "选择要加入会话的文件（图片 / 文档等）",
       properties: ["openFile"],
     };
     const open = mainWindow
@@ -6103,7 +6103,7 @@ function registerIpcHandlers(): void {
       }
       return {
         ok: false,
-        error: `文件不存�?��${normalizeTargetPath(typeof p?.rel === "string" ? p.rel : "")}`,
+        error: `文件不存在：${normalizeTargetPath(typeof p?.rel === "string" ? p.rel : "")}`,
         tried: candidates,
       };
     },
