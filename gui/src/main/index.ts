@@ -5940,7 +5940,7 @@ function registerIpcHandlers(): void {
       const res = saveLocalModel(p);
       if (res.ok) {
         engine?.refreshProviders();
-        console.info(`[gui:main] �?��模型已保存并生效: ${p.id}`);
+        console.info(`[gui:main] 本地模型已保存并生效: ${p.id}`);
       }
       return res;
     },
@@ -5950,7 +5950,7 @@ function registerIpcHandlers(): void {
     const res = removeLocalModel(p.id);
     if (res.ok) {
       engine?.refreshProviders();
-      console.info(`[gui:main] �?��模型已删除并生效: ${p.id}`);
+      console.info(`[gui:main] 本地模型已删除并生效: ${p.id}`);
     }
     return res;
   });
@@ -7768,7 +7768,7 @@ function initModelServerManager(): void {
         } else {
           w.webContents.send("slime:model:loading", { loading: false });
           if (ev.state === "ready") { console.info(`[gui:main] 本地模型已就绪: ${ev.modelName}`); }
-          else if (ev.error) { console.warn(`[gui:main] �?��模型�?���?${ev.state}): ${ev.modelName} �?${ev.error}`); }
+          else if (ev.error) { console.warn(`[gui:main] 本地模型状态异常 (${ev.state}): ${ev.modelName} → ${ev.error}`); }
         }
       },
     });
