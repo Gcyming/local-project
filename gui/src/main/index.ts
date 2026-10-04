@@ -184,7 +184,7 @@ const setSubagentModels = (models: unknown): { ok: true; defaultModels: string[]
   const out: string[] = [];
   for (const [i, item] of list.entries()) {
     const r = normalizeSubagentModelValue(typeof item === "string" ? item : "");
-    if (!r.ok) { return { ok: false, error: `�?${i + 1} 项：${r.error}` }; }
+    if (!r.ok) { return { ok: false, error: `第 ${i + 1} 项：${r.error}` }; }
     // "inherit" �?不�?�?的占位，不是档位 �?不进池（�?normalizeModelPool 同口径）�?
     if (r.value && r.value !== "inherit") { out.push(r.value); }
   }
@@ -1548,7 +1548,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         // 渲染层异常：立即拒绝
         clearTimeout(timer);
         pendingPerms.delete(ui.requestId);
-        resolve({ requestId: req.requestId, approved: false, approvedActions: [], deniedActions: req.actions.map((a) => a.action), reason: "渲染层不�?��", autoApproved: false });
+        resolve({ requestId: req.requestId, approved: false, approvedActions: [], deniedActions: req.actions.map((a) => a.action), reason: "渲染层不可用", autoApproved: false });
       }
     });
   });
@@ -3565,7 +3565,7 @@ function registerIpcHandlers(): void {
          而不�?��等一�?��报错（这正是「连接半天还�?��连�?�的残留形�?�）�?
          `stale` 那条**�?*回带 —�??期间已有�?��压缩落地，重试是有意义的�?*/
       if (historyAll.length < 6) {
-        return { ok: true, skipped: true, reason: "历史过短（不�?6 条），压缩无意义", used: 0, cap, ...(force ? { stillOverflow: true } : {}) };
+        return { ok: true, skipped: true, reason: "历史过短（不足 6 条），压缩无意义", used: 0, cap, ...(force ? { stillOverflow: true } : {}) };
       }
       // A-974-R3：占用口径取「历史轮次估算�?�与「渲染层实测输入侧占用�?�的**较大�?*�?
       // 实测�?= 上游 prompt_tokens + cache_read（含系统提示/记忆/�?�?工具定义/工作区注入）�?
@@ -4384,7 +4384,7 @@ function registerIpcHandlers(): void {
     const open = mainWindow
       ? await dialog.showOpenDialog(mainWindow, openOpts)
       : await dialog.showOpenDialog(openOpts);
-    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消�?�择" }; }
+    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
     return { ok: true, path: open.filePaths[0] };
   });
 
@@ -4556,7 +4556,7 @@ function registerIpcHandlers(): void {
       try {
         mkdirSync(dir, { recursive: true });
       } catch (e) {
-        return { ok: false, error: `�?能目录创建失败：${e instanceof Error ? e.message : String(e)}` };
+        return { ok: false, error: `技能目录创建失败：${e instanceof Error ? e.message : String(e)}` };
       }
     }
     const err = await shell.openPath(dir);
@@ -4567,7 +4567,7 @@ function registerIpcHandlers(): void {
   handleTrusted<void>("slime:extras:mcpOpen", async () => {
     const root = PROJECT_ROOT;
     if (!existsSync(root)) {
-      return { ok: false, error: `项目�?��不存�?��${root}` };
+      return { ok: false, error: `项目路径不存在：${root}` };
     }
     const err = await shell.openPath(root);
     return { ok: !err, error: err || undefined };
@@ -4655,7 +4655,7 @@ function registerIpcHandlers(): void {
     const items: Array<{ kind: string; label: string; path?: string; version?: string; sizeText?: string; ok: boolean; note?: string; source: string; action?: { label: string; kind: string; url?: string; path?: string; target?: string } }> = [];
     try {
       // Node（Electron 内嵌）
-      items.push({ kind: "node", label: "Node.js", version: `v${process.versions.node}`, ok: true, source: "bundled", note: "GUI �?Electron 内嵌 Node 驱动" });
+      items.push({ kind: "node", label: "Node.js", version: `v${process.versions.node}`, ok: true, source: "bundled", note: "GUI 由 Electron 内嵌 Node 驱动" });
       // Python venv（随包）—�??随包依赖，必须走 resolveBundled（开发模式在项目根，不在 gui/�?
       const pyExe = process.platform === "win32"
         ? resolveBundled("runtime/venv/Scripts/python.exe")
@@ -5333,7 +5333,7 @@ function registerIpcHandlers(): void {
     const open = mainWindow
       ? await dialog.showOpenDialog(mainWindow, openOpts)
       : await dialog.showOpenDialog(openOpts);
-    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消�?�择" }; }
+    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
     return { ok: true, path: open.filePaths[0] };
   });
 
@@ -5354,7 +5354,7 @@ function registerIpcHandlers(): void {
     const open = mainWindow
       ? await dialog.showOpenDialog(mainWindow, openOpts)
       : await dialog.showOpenDialog(openOpts);
-    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消�?�择" }; }
+    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
     const MIME: Record<string, string> = {
       ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
       ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
@@ -5606,7 +5606,7 @@ function registerIpcHandlers(): void {
     }
     const content = (payload.content ?? "").trim();
     if (!content) {
-      return { ok: false, error: "文档内�?为空" };
+      return { ok: false, error: "文档内容为空" };
     }
     const dir = resolve(PROJECT_ROOT, "config", "skills", name);
     mkdirSync(dir, { recursive: true });
@@ -5967,7 +5967,7 @@ function registerIpcHandlers(): void {
     const open = mainWindow
       ? await dialog.showOpenDialog(mainWindow, openOpts)
       : await dialog.showOpenDialog(openOpts);
-    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消�?�择" }; }
+    if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
     return { ok: true, path: open.filePaths[0] };
   });
 
@@ -6027,21 +6027,21 @@ function registerIpcHandlers(): void {
     try {
       const root = resolve(p.root || "");
       if (!root) {
-        return { ok: false, error: `工作根异常（${root}），已拒绝�?取` };
+        return { ok: false, error: `工作根异常（${root}），已拒绝读取` };
       }
       if (!existsSync(root)) {
-        return { ok: false, error: `工作�?��不存�?��${root}` };
+        return { ok: false, error: `工作目录不存在：${root}` };
       }
       // 相�?�?��规范化后拼接，校验仍�?root 内（root 为盘符根时其�?��已带尾分隔�?�?
       const rel = (p.rel ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
       const dir = rel ? resolve(root, ...rel.split("/")) : root;
       const rootNorm = root.endsWith(sep) ? root : root + sep;
       if (dir !== root && !dir.startsWith(rootNorm)) {
-        return { ok: false, error: "�?��越界：仅允�?访问当前�?��内部" };
+        return { ok: false, error: "路径越界：仅允许访问当前目录内部" };
       }
       const st = statSync(dir);
       if (!st.isDirectory()) {
-        return { ok: false, error: "�?��不是�?��" };
+        return { ok: false, error: "路径不是目录" };
       }
       const entries: WorkspaceEntry[] = readdirSync(dir, { withFileTypes: true })
         .filter((d) => !d.name.startsWith("."))
@@ -6114,17 +6114,17 @@ function registerIpcHandlers(): void {
     try {
       const root = resolve(p.root || "");
       if (!root) {
-        return { ok: false, error: `工作根异常（${root}），已拒绝�?取` };
+        return { ok: false, error: `工作根异常（${root}），已拒绝读取` };
       }
       if (!existsSync(root)) {
-        return { ok: false, error: `工作�?��不存�?��${root}` };
+        return { ok: false, error: `工作目录不存在：${root}` };
       }
       const rel = (p.rel ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
       if (!rel) { return { ok: false, error: "缺少文件路径" }; }
       const filePath = resolve(root, ...rel.split("/"));
       const fileRootNorm = root.endsWith(sep) ? root : root + sep;
       if (!filePath.startsWith(fileRootNorm)) {
-        return { ok: false, error: "�?��越界：仅允�?访问当前�?��内部" };
+        return { ok: false, error: "路径越界：仅允许访问当前目录内部" };
       }
       if (!existsSync(filePath)) { return { ok: false, error: `文件不存在：${filePath}` }; }
       const st = statSync(filePath);
@@ -6177,8 +6177,8 @@ function registerIpcHandlers(): void {
   handleTrusted<{ path: string }>("slime:workspace:readFileAbs", (_event, p): WorkspaceReadFileResult => {
     try {
       const abs = typeof p.path === "string" ? p.path.trim().replace(/^["']|["']$/g, "") : "";
-      if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
-      if (!existsSync(abs)) { return { ok: false, error: `文件不存�?��${abs}` }; }
+      if (!abs) { return { ok: false, error: "缺少文件路径" }; }
+      if (!existsSync(abs)) { return { ok: false, error: `文件不存在：${abs}` }; }
       const st = statSync(abs);
       if (st.isDirectory()) { return { ok: false, error: `不是文件（是目录）：${abs}` }; }
       const IMG_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
@@ -6222,8 +6222,8 @@ function registerIpcHandlers(): void {
   /** A-980-R8：用系统默�?应用（关联程序）打开文件—�?�word/pdf/ppt/excel 等右侧栏�??的格�?*/
   handleTrusted<{ path: string }>("slime:shell:openPath", async (_event, p): Promise<{ ok: boolean; error?: string }> => {
     const abs = (typeof p?.path === "string" ? p.path : "").trim().replace(/^["']|["']$/g, "");
-    if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
-    if (!existsSync(abs)) { return { ok: false, error: `文件不存�?��${abs}` }; }
+    if (!abs) { return { ok: false, error: "缺少文件路径" }; }
+    if (!existsSync(abs)) { return { ok: false, error: `文件不存在：${abs}` }; }
     const err = await shell.openPath(abs);
     return err ? { ok: false, error: err } : { ok: true };
   });
@@ -6237,9 +6237,9 @@ function registerIpcHandlers(): void {
         但只接受**绝�?�?��**：相对路径的�?��取决于工作目录，静默解析会变成�?二个产地�?*/
   handleTrusted<{ path: string }>("slime:docs:read", async (_event, p) => {
     const abs = (typeof p?.path === "string" ? p.path : "").trim().replace(/^["']|["']$/g, "");
-    if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
+    if (!abs) { return { ok: false, error: "缺少文件路径" }; }
     if (!isAbsolutePath(abs)) { return { ok: false, error: `需要绝对路径：${abs}` }; }
-    if (!existsSync(abs)) { return { ok: false, error: `文件不存�?��${abs}` }; }
+    if (!existsSync(abs)) { return { ok: false, error: `文件不存在：${abs}` }; }
     try {
       const ext = (abs.slice(abs.lastIndexOf(".")) || "").toLowerCase();
       // �?Office 2007+（docx/xlsx/pptx）：既有 READ 实现（带段落/表格/按页轻结构）
@@ -6333,7 +6333,7 @@ function registerIpcHandlers(): void {
    */
   handleTrusted<{ path?: string; name?: string; open?: boolean }>("slime:docs:renderPage", async (_event, p) => {
     const abs = (typeof p?.path === "string" ? p.path : "").trim();
-    if (!abs) { return { ok: false, error: "缺少文件�?��" }; }
+    if (!abs) { return { ok: false, error: "缺少文件路径" }; }
     if (!isAbsolutePath(abs)) { return { ok: false, error: `需要绝对路径：${abs}` }; }
     const plan = planRender(abs);
     /* ⚠️⚠️ **HTML 文件：服务它�?在目录�?�直接打�?它本�?*�?026-09-30 用户实测「HTML 反�?�无法显示�?�）�?
@@ -6430,7 +6430,7 @@ function registerIpcHandlers(): void {
   handleTrusted<{ spec: { path: string; format: string; title?: string; body: string } }>("slime:docs:create", async (_event, p) => {
     const spec = p?.spec;
     const abs = (typeof spec?.path === "string" ? spec.path : "").trim();
-    if (!abs) { return { ok: false, error: "缺少输出�?��" }; }
+    if (!abs) { return { ok: false, error: "缺少输出路径" }; }
     if (!isAbsolutePath(abs)) { return { ok: false, error: `需要绝对路径：${abs}` }; }
     return await writeDocument({ path: abs, format: spec.format as DocFormat, title: spec.title, body: spec.body ?? "" });
   });
@@ -6473,13 +6473,13 @@ function registerIpcHandlers(): void {
         const parentRel = (p.parentRel ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
         const parentDir = parentRel ? resolve(root, ...parentRel.split("/")) : root;
         if (parentDir !== root && !parentDir.startsWith(root + sep)) {
-          return { ok: false, error: "�?��越界" };
+          return { ok: false, error: "路径越界" };
         }
         const name = (p.name ?? "").trim();
         if (!name) { return { ok: false, error: "名称不能为空" }; }
         const fullPath = join(parentDir, name);
         if (fullPath !== root && !fullPath.startsWith(root + sep)) {
-          return { ok: false, error: "�?��越界" };
+          return { ok: false, error: "路径越界" };
         }
         if (existsSync(fullPath)) { return { ok: false, error: `已存在同名项：${name}` }; }
         if (p.isDir) {
@@ -6655,7 +6655,7 @@ function registerIpcHandlers(): void {
     if (cm.code !== 0) {
       const err = cm.stderr.trim();
       if (err.includes("nothing to commit") || err.includes("no changes added")) {
-        return { ok: false, error: "没有�?��交的更改" };
+        return { ok: false, error: "没有需要提交的更改" };
       }
       return { ok: false, error: err || "git commit 失败" };
     }
@@ -6715,7 +6715,7 @@ function registerIpcHandlers(): void {
       const open = mainWindow
         ? await dialog.showOpenDialog(mainWindow, openOpts)
         : await dialog.showOpenDialog(openOpts);
-      if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消�?�择" }; }
+      if (open.canceled || open.filePaths.length === 0) { return { ok: false, error: "已取消选择" }; }
       const parent = open.filePaths[0];
       const name = url.split("/").pop()?.replace(/\.git$/i, "") || "repo";
       const target = join(parent, name);
