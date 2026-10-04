@@ -1212,7 +1212,7 @@ function termSpawnError(file: string, profileId: string, e: unknown): TermResult
     code: null,
     profileId,
     /* 探测与执行之间有窗口期（卸载 / �?PATH）⇒ 必须说清"怎么�?，�?�不�?���?ENOENT�?*/
-    error: `无法�?�� ${file}�?{msg}。�?终�?配置�?��已�?卸载或路径已变，�?��终�?标�?栏切换到其它 shell。`,
+    error: `无法启动 ${file}：${msg}。该终端配置可能已被卸载或路径已变，请把终端标签栏切换到其它 shell。`,
   };
 }
 
@@ -2342,12 +2342,12 @@ function buildPermOptions(req: {
     {
       id: "allow-once",
       label: "允�?通过",
-      hint: `放�? ${actionLabel}�?{riskHint}）�?�下次同类操作仍会再次�?�??��?�把「�?�?�?权限」里对应类别（�? / �?/ 终�?）的�?关打�?即可免�?询问。`,
+      hint: `放行 ${actionLabel}（${riskHint}）—— 下次同类操作仍会再次询问。把「安全与权限」里对应类别（读 / 写 / 终端）的开关打开即可免去询问。`,
     },
     {
       id: "allow-session",
       label: "本次会话全部允许",
-      hint: `放�? ${actionLabel}�?{riskHint}），且本次会话内�?Agent 的同类操作不再�?�??�`,
+      hint: `放行 ${actionLabel}（${riskHint}），且本次会话内该 Agent 的同类操作不再询问。`,
     },
     {
       id: "deny",
@@ -2649,7 +2649,7 @@ async function suggestWiderChatModel(requiredTokens: number, currentCap: number)
     if (picked) {
       console.info(`[gui:main] 上下文救回建议（${picked.label ?? picked.id}，${picked.cap} tokens，本次需 ${Math.round(requiredTokens)}）→ ${picked.choice ?? picked.id}`);
     } else {
-      console.info(`[gui:main] 上下文救回：已查 ${candidates.length} �??��?�，没有能�?�?�?{Math.round(requiredTokens)} 的更大窗口模型`);
+      console.info(`[gui:main] 上下文救回：已查 ${candidates.length} 个候选，没有能装下 ${Math.round(requiredTokens)} 的更大窗口模型`);
     }
     return picked;
   } catch (e) {
