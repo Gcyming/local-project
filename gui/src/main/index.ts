@@ -938,7 +938,7 @@ async function* streamGroupTalkFlow(opts: {
             agent: thinking,
             message: prompt,
             history: [],
-            systemPrompt: `${agent.identity_prompt || `你是 ${agent.name}，你的角色是：${agent.role}`}\n\n输出规范：�?文只输出你的观点（≤200 字�?�一段�?�直接可读），严禁在正文�?���?<thinking> 标�?、�?��?�过程�?�草稿�?�自我�?查或任何元叙述；思�?�只能作为你的内部过程�?��?�?�?新信�?��调用 web_search / web_fetch（仅联网工具），并注明来源�?�\n\n�??�输出约束：必须直接围绕�??输出有信�?��的实质内容；严�?输出「我在听/请�?得更明确/你想�?���?先给�?���?我�?在衡量�?�这类空泛确认�?�反�?��等待或仅�?��介绍（身份声明最多一句话前缀，�?文须立即进入实质回答）；若�?题看似不完整，按�?�?��的意图直接作答并顺带询问�?��的待�??点�?�`,
+            systemPrompt: `${agent.identity_prompt || `你是 ${agent.name}，你的角色是：${agent.role}`}\n\n输出规范：正文只输出你的观点（≤200 字、一段、直接可读），严禁在正文中出现 <thinking> 标签、思考过程、草稿、自我检查或任何元叙述；思考只能作为你的内部过程。如需最新信息可调用 web_search / web_fetch（仅联网工具），并注明来源。\n\n硬性输出约束：必须直接围绕议题输出有信息量的实质内容；严禁输出「我在听/请说得更明确/你想问什么/先给个目标/我正在衡量」这类空泛确认、反问式等待或仅自我介绍（身份声明最多一句话前缀，正文须立即进入实质回答）；若议题看似不完整，按最可能的意图直接作答并顺带询问唯一的待确认点。`,
             toolsOnly: opts.networkEnabled ? ["web_search", "web_fetch"] : [],
             maxTokens: 2048,
             networkEnabled: opts.networkEnabled,
@@ -1146,7 +1146,7 @@ function handleTrusted<T>(
   if (REGISTERED_CHANNELS.has(channel)) {
     console.error(
       `[gui:main] ⚠️ IPC channel 重复注册: "${channel}" —— 旧的 handler 已被覆盖。` +
-      `多半�?加了�?handler 却忘删旧�?，�?�?gui/src/main/index.ts 里删掉其�?��处�?�`,
+      `多半是"加了新 handler 却忘删旧的"，请在 gui/src/main/index.ts 里删掉其中一处。`,
     );
     try {
       ipcMain.removeHandler(channel);
