@@ -183,18 +183,14 @@ async def _code_check(args: dict) -> str:
             py_compile.compile(str(p), doraise=True)
             return f"语法校验通过: {path}（Python）"
         if suffix in (".js", ".mjs", ".cjs"):
-            import subprocess
-            r = subprocess.run(
-                ["node", "--check", str(p)], capture_output=True, text=True, timeout=30,
-            )
+            from core.subproc import run_text   # A-1134：text=True 无 errors ⇒ reader 线程会崩
+            r = run_text(["node", "--check", str(p)], timeout=30)
             if r.returncode == 0:
                 return f"语法校验通过: {path}（JavaScript）"
             return f"[错误] JavaScript 语法错误: {(r.stderr or r.stdout or '').strip()[:300]}"
         if suffix == ".ts":
-            import subprocess
-            r = subprocess.run(
-                ["node", "--check", str(p)], capture_output=True, text=True, timeout=30,
-            )
+            from core.subproc import run_text   # A-1134（同上）
+            r = run_text(["node", "--check", str(p)], timeout=30)
             if r.returncode == 0:
                 return f"语法校验通过: {path}（TypeScript 基础语法）"
             return f"[错误] TypeScript 语法错误: {(r.stderr or r.stdout or '').strip()[:300]}"

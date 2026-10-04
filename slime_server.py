@@ -1632,6 +1632,31 @@ def recall_agent_memory(agent_id: str, req: dict):
     return {"query": query, "top_k": top_k, "results": results}
 
 
+@app.post("/agents/{agent_id}/memory/reindex")
+def reindex_agent_memory(agent_id: str):
+    """从 JSON 真相源重建该 Agent 的 LanceDB 语义索引（A-1139 / 缺陷 D4）。
+
+    「双写无对账」的修复入口：当索引被视为不可信的派生数据（写入失败、进程被杀、
+    因维度或字段不匹配被 drop_table）时，用真相源整表重灌。
+
+    ⚠️ 逐条调嵌入，记忆多时耗时较长（万条量级为分钟级）——这是**维护操作**，不是热路径。
+    """
+    agent = find_agent(agents, agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent 不存在")
+    memory_cfg = _SLIME_CONFIG.get("memory", {})
+    lancedb_cfg = memory_cfg.get("lancedb", {}) if isinstance(memory_cfg.get("lancedb"), dict) else {}
+    if not lancedb_cfg.get("enabled", False):
+        raise HTTPException(400, "LanceDB 未启用（见 slime.toml [memory.lancedb].enabled）")
+    memory = load_memory(agent_id, lancedb_enabled=True,
+                         lancedb_uri=lancedb_cfg.get("uri", ""),
+                         data_dir=memory_cfg.get("dir", ""))
+    result = memory.reindex()
+    if not result.get("ok"):
+        raise HTTPException(500, result.get("error", "重建索引失败"))
+    return result
+
+
 async def _post_process_swarm(agent, task: str, summary: str,
                               results: list[dict], providers: dict) -> dict:
     """Swarm 任务后处理（A-031）：让主 Agent 从 Swarm 经验中成长。

@@ -182,16 +182,28 @@ describe("A-1155 ④ 浮层稳态宽**不许**直接取 `100%`（`.body` 含左�
     ).toBe(false);
   });
 
-  it("过渡期宽仍走 `var(--right-target-w)`（浮层铺满的过渡对象）", () => {
+  it("浮层过渡的宽度对象仍在（**内容**侧 `var(--right-target-w)`，A-1179 后容器不再给宽度）", () => {
+    /* ⚠️⚠️ A-1179 更新：过渡期**容器**（`.right-wrapper`）不再给宽度 ⇒ 回落 `auto` ⇒ 贴合内容。
+       理由：容器旧宽来自内联的非浮层分支 = `auto` ⇒ **`auto` 不参与插值** ⇒ 容器硬跳；
+       而内容还在 0.5s 过渡途中 ⇒ 中间露出约 380px 空白 ⇒ **一帧黑屏**（实测 380 → 0px）。
+       ⇒ 过渡的宽度对象**搬到了内容侧**（`.right-sidebar` 的 CSS 规则，锚在
+       `a1152-float-stability.spec.ts` 与 `a1153-decouple`）—— 这才是"不死锁"的真正保证。
+       ⚠️ 本 spec 只读 App.tsx（没有 CSS_CODE），所以这里只钉**分流形状**；
+         CSS 那半条由 `a1179-float-enter-blank.spec.ts` 的兄弟断言覆盖。 */
     expect(
-      /mainIsFloatLayout \? "var\(--right-target-w\)"/.test(APP_CODE),
-      "过渡期宽不是 `var(--right-target-w)` ⇒ 浮层过渡没有过渡对象（宽不动 = done 死锁）",
+      /mainIsFloatLayout \? \(rightExitAnim \? "var\(--right-target-w\)" : undefined\) : "auto"/.test(APP_CODE),
+      "浮层过渡分支的形状不对 ⇒ 要么容器又硬跳（黑屏）、要么退场期丢宽度（A-1157-R2）",
+    ).toBe(true);
+    /* 过渡对象必须仍在写：变量若不写，内容侧就没有过渡对象（宽不动 = done 死锁）。 */
+    expect(
+      /setProperty\("--right-target-w"/.test(APP_CODE),
+      "过渡期不再写 `--right-target-w` ⇒ 内容宽度失去过渡对象（done 死锁）",
     ).toBe(true);
   });
 
   it("非浮层态回落 `auto`（普通展开逐字不变）", () => {
     expect(
-      /mainIsFloatLayout \? "var\(--right-target-w\)" : "auto"/.test(APP_CODE),
+      /mainIsFloatLayout \? \(rightExitAnim \? "var\(--right-target-w\)" : undefined\) : "auto"/.test(APP_CODE),
       "非浮层态没回落 `auto` ⇒ 普通展开会被内联宽污染",
     ).toBe(true);
   });
@@ -308,34 +320,5 @@ describe("A-1162 时长单源：`GEOM_FADE_MS` ≡ CSS `transition: width` 时�
       expect(APP_CODE, `魔数 ${k} 还在：它们是"宽度是外部量、我不知道它何时停"的补丁，收工时刻因此随帧率漂`)
         .not.toMatch(new RegExp(k));
     }
-  });
-});
-/* ⚠️⚠️⚠️ A-1164：右栏**不许**有进场/退场淡入淡出。
-   证据（用户实拍录像逐帧取证，2560×1600）：
-     静止态  右栏内容区 mean=28.6 / p95=133.0
-     过渡中  右栏内容区 mean=10.9 / p95=**10.0**
-   p95 从 133 掉到 10 ⇒ 不是"变暗"，是**亮字整个消失** ⇒ 过渡期间整块面板几乎是全黑的，
-   收工瞬间又变亮。右栏有**不透明背景**，它是在自己家的矩形里平移，淡入淡出只会让
-   一整块面板在滑动的同时由黑变亮 —— 这正是用户说的"抽搐/闪烁"。
-   ⚠️ 当初那段注释自己就写着「绝大部分过渡时间右栏都是半透明 ⇒ 观感乱七八糟」，
-     却把它当成**要往前调的参数**，而没有质疑"右栏根本不该淡" —— 这是本条的由来。 */
-describe("A-1164 右栏全程不透明（淡入淡出会让整块面板在平移时由黑变亮）", () => {
-  const body = fnBody(APP_CODE, "animateRightSidebar");
-
-  it("onFrame **不再**按进度写 `opacity`", () => {
-    expect(body, "右栏 onFrame 又开始写 opacity ⇒ 又会半透明地漂进来")
-      .not.toMatch(/\.style\.opacity\s*=/);
-  });
-
-  it("过渡起点**不再**把整个右栏砸成 opacity 0", () => {
-    expect(body, "又把右栏砸成全透明，却没有恢复代码 ⇒ 会永久停在 opacity 0")
-      .not.toMatch(/\.style\.opacity\s*=\s*"0"/);
-  });
-
-  it("**左栏**的淡入淡出不受影响（它没有不透明背景铺满，淡入是有意义的）", () => {
-    /* ⚠️ 反向守卫：防止有人把本条的修复"顺手"扩大成"全局删掉淡入淡出"。
-       左栏是窄条、底下就是页面底色，淡入确实用来柔化；右栏是整块不透明面板，不需要。 */
-    const left = fnBody(APP_CODE, "animateLeftSidebar");
-    expect(left, "左栏的淡入淡出被误删了 —— 本条只针对右栏").toMatch(/\.style\.opacity\s*=/);
   });
 });

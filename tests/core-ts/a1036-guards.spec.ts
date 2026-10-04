@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isOle2, openCfb } from "../../core-ts/src/cfb.js";
-import { extractOleText, oleKindFromExt, legacyBinaryName } from "../../core-ts/src/doc_text.js";
+import { extractOleText, oleKindFromExt, legacyBinaryName, cleanWordText } from "../../core-ts/src/doc_text.js";
 
 const ROOT = resolve(__dirname, "../..");
 const SECTOR = 512;
@@ -111,13 +111,20 @@ describe("A-1036 ① CFB 容器读取", () => {
 });
 
 describe("A-1036 ② 旧版格式文本抽取（.ppt 文本原子）", () => {
-  it("从合成 CFB 里抽出 TextCharsAtom 的文字", () => {
+  /* ⚠️ 2026-09-28 迁移（不是删除）：A-1133 把"哪些文本原子算正文"的判据从"流里全部"收紧成
+     **只在 `Slide`(0x03ee) 容器内**（真实文件 `jeny_第二章.ppt` 实测：837 个原子里 618 个在 Slide，
+     167 在 Notes、52 在 MainMaster —— 不区分容器会把「单击此处编辑母版标题样式」摆到第一屏）。
+     ⇒ 下面的夹具从"原子裸放在流里"改成"原子在 Slide 容器内"，**原断言意图一字未变**
+     （能抽出文字 / 容器必须下钻）。反向判据（母版、备注的原子**不许**进正文）在
+     `tests/core-ts/a1133-ppt-slides.spec.ts`。 */
+  it("从合成 CFB 里抽出 Slide 容器内 TextCharsAtom 的文字", () => {
     const text = "第一页标题\u000d正文一句话";
     const atom = pptRecord(0x0fa0, Buffer.from(text, "utf16le"));
+    const slide = pptRecord(0x03ee, atom, 0x0f);
     // ⚠️ 必须把整个流撑到 >4096：CFB 规定小于 miniCutoff 的流存在 **mini stream** 里，
     // 而本夹具只造了普通 FAT 链（没造 mini stream）→ 太短会读到空。
     const pad = pptRecord(0x0fa8, Buffer.from("padding".repeat(900), "latin1"));
-    const cfb = buildCfb("PowerPoint Document", Buffer.concat([atom, pad]));
+    const cfb = buildCfb("PowerPoint Document", Buffer.concat([slide, pad]));
     expect(cfb.length).toBeGreaterThan(4096);
     const r = extractOleText(cfb, "ppt");
     expect(r.text).toContain("第一页标题");
@@ -126,10 +133,12 @@ describe("A-1036 ② 旧版格式文本抽取（.ppt 文本原子）", () => {
   });
 
   it("容器记录（recVer=0xF）必须下钻而不是整体跳过", () => {
-    // 把原子包在 Document 容器里：容器 recLen 覆盖子记录 —— 若实现把容器整块跳过，
-    // 就一个文本块都抽不到（这正是实测踩到的 bug，故用夹具钉死）。
+    // 把原子包在 Document(0x03e8) → Slide(0x03ee) **两层**容器里：容器 recLen 覆盖子记录 ——
+    // 若实现把容器整块跳过，就一个文本块都抽不到（这正是实测踩到的 bug，故用夹具钉死）。
+    // 多包一层 Slide 是因为 A-1133 之后"算不算正文"还要求祖先链里有 Slide（见上方迁移说明）。
     const inner = pptRecord(0x0fa0, Buffer.from("容器内的文字", "utf16le"));
-    const container = pptRecord(0x03e8, inner, 0x0f);
+    const slide = pptRecord(0x03ee, inner, 0x0f);
+    const container = pptRecord(0x03e8, slide, 0x0f);
     const pad = pptRecord(0x0fa8, Buffer.from("x".repeat(5000), "latin1"));
     const r = extractOleText(buildCfb("PowerPoint Document", Buffer.concat([container, pad])), "ppt");
     expect(r.text).toContain("容器内的文字");
@@ -139,6 +148,73 @@ describe("A-1036 ② 旧版格式文本抽取（.ppt 文本原子）", () => {
     expect(() => extractOleText(buildCfb("Workbook", Buffer.alloc(5000)), "ppt"))
       .toThrow(/缺少 PowerPoint Document 流/);
     expect(() => extractOleText(Buffer.from("naive"), "doc")).toThrow(/不是 OLE2/);
+  });
+});
+
+describe("A-1133 ④ Word 控制字符清洗：**换行必须活下来**（.doc 段落结构）", () => {
+  /* ## 为什么单为这个函数写一组（2026-09-28 实测打回）
+     用户抱怨「连正常换行都不会」。上一轮查到 docx 那一半（`paragraphBlocks` 按空行分段），
+     修完**广谱验收** Downloads 里 28 个办公文件才发现 .doc 这一半：
+       · `EDA第九组实验一报告.doc`（3623 字）实测 `\n = 0`、`\r = 0` ⇒ **整篇挤成一块**。
+     根因是 `cleanWordText` 里**正则顺序自相矛盾**：
+       第 2 行把 `\x0D`→`\n`、`\x07`→`\t`；
+       第 4 行的字符类 `[\x00-\x06\x08-\x0A\x0E-\x1F]` 里那个 `\x08-\x0A` **含 `\x09` 与 `\x0A`**
+       ⇒ 把上一行刚生成的 `\t` / `\n` 又当控制字符清掉 ⇒ **换行从未生效过**。
+     ⚠️ 它**不报错、不丢字**（文本一个字都没少），只是结构静默消失 —— 所以下面必须断言
+        「换行/制表符真的在」，只断言"含某个词"是抓不住的（这正是它藏了这么久的原因）。 */
+
+  it("段落标记 → 换行，且**不被后续清理抹掉**（bug 的精确判据）", () => {
+    const out = cleanWordText("第一段\r第二段\r第三段");
+    expect(out, "段落标记 0x0D 必须变成换行").toBe("第一段\n第二段\n第三段");
+    expect(out.split("\n"), "三行就是三行 —— 少了说明换行被后面的字符类清掉了").toHaveLength(3);
+  });
+
+  it("单元格结束（0x07）→ 制表符，同样必须存活", () => {
+    expect(cleanWordText("甲\x07乙")).toBe("甲\t乙");
+  });
+
+  it("软换行 / 分页（0x0B / 0x0C）也算结构 → 换行", () => {
+    expect(cleanWordText("上\x0b下")).toBe("上\n下");
+    expect(cleanWordText("前\x0c后")).toBe("前\n后");
+  });
+
+  it("该清的还是清（域标记 + 真控制字符），别修出新洞", () => {
+    expect(cleanWordText("a\x14b\x15c\x13d")).toBe("abcd");   // 13/14/15 = 域标记
+    expect(cleanWordText("a\x00b\x01c\x02d")).toBe("ab￼cd");  // 0x00/0x02 清掉；0x01 是对象占位符 → ￼
+    expect(cleanWordText("a\x1fb")).toBe("ab");
+  });
+
+  it("连续空段落被压到最多一个空行（`\\n{3,}` → `\\n\\n`）", () => {
+    expect(cleanWordText("甲\r\r\r\r乙")).toBe("甲\n\n乙");
+  });
+
+  it("端到端：合成 .doc 流里抽出的正文**带换行**（不是一整块）", () => {
+    /* 夹具：WordDocument 流里放 UTF-16 正文，段落用 0x0D 分隔；**不造 0Table** ⇒ 走兜底扫描，
+       再经 `cleanWordText` 出去 —— 与真实 .doc 的出口是同一条。
+       ⚠️ 必须把流撑到 >4096：CFB 规定小于 miniCutoff 的流存在 **mini stream** 里，
+       而本夹具只造了普通 FAT 链（没造 mini stream）→ 太短会读到空。 */
+    /* ⚠️ 流**本身**必须撑到 >4096 字节：CFB 规定小于 miniCutoff(4096) 的流存在 **mini stream** 里，
+       而本夹具只造了普通 FAT 链（没造 mini stream）⇒ 流太小会**读到空**（不是断言失败，是夹具假）。
+       实测：23 字 × 20 遍 × 3 段 = 2764 字节 → 抽出来是空字符串；改成 ×60 遍即 >4096。 */
+    const para = "这是一段足够长的正文内容用来验证段落结构不会消失".repeat(60);
+    const text = `${para}\r${para}\r${para}`;
+    /* ⚠️ A-1136 阶段 C（2026-09-29）加了 `wIdent === 0xA5EC` 的规范判据 ——
+       夹具必须**真的写一个合法 FIB 头**，否则会被（正确地）拒掉：
+       本用例原本把正文直接放流开头，首两字节 `0x8FD9`（"这"）被当成 wIdent ⇒ 判"不是 Word"。
+       修法不是放宽判据（判据是对的、且正为真实损坏文件而设），而是**让夹具更逼真**：
+       前面补 512 字节的 FIB（wIdent=0xA5EC / nFib=193 / flags=0），正文接在后面。
+       `nFib<0x0A` 之类走不到的字段保持 0 即可 —— 本用例是走**兜底扫描**那条路（不造 0Table）。 */
+    const fibHead = Buffer.alloc(512, 0);
+    fibHead.writeUInt16LE(0xa5ec, 0x0000);   // wIdent（MS-DOC 2.5.1 规范值）
+    fibHead.writeUInt16LE(193, 0x0002);      // nFib = 193（Word 97）
+    fibHead.writeUInt16LE(0, 0x000A);        // fibBase.flags：无加密、无混淆
+    const stream = Buffer.concat([fibHead, Buffer.from(text, "utf16le")]);
+    const cfb = buildCfb("WordDocument", stream);
+    expect(stream.length).toBeGreaterThan(4096);
+    expect(cfb.length).toBeGreaterThan(4096);
+    const r = extractOleText(cfb, "doc");
+    expect(r.text, "抽出的正文必须保留段落结构").toContain("\n");
+    expect(r.text.split("\n").filter((l) => l.trim()).length, "三段就该是三行").toBeGreaterThanOrEqual(3);
   });
 });
 

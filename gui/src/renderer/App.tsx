@@ -369,13 +369,33 @@ function clampFloatPos(x: number, y: number): { x: number; y: number } {
 /** A-980-R17：悬浮窗最小化后的图标尺寸（正方形，显示 app 图标） */
 const FLOAT_ICON_SIZE = 44;
 
+/**
+ * ⚠️⚠️⚠️ A-1173：悬浮窗几何过渡的**时长（ms）**——**唯一产地**。
+ *
+ * 为什么必须单源：`runGeometrySyncFade` 是**时间驱动**的（`u = 已过时长 / duration`，
+ * 收工判据只有 `u >= 1`）。它的 `duration` 与 CSS 那条 `transition` 的时长**必须相等**，
+ * 否则"几何还在滑、透明度（或收工判定）已经到位"，又是一次半拍错位。
+ *
+ * 实测（`probe-a1173-float-jerk.mjs`，退出窗口化）：本组时长 400ms，而
+ * `startFloatGeometryFade` 原先**没传 duration** ⇒ 落回 `GEOM_FADE_MS`（280）
+ * ⇒ **提前 120ms 收工** ⇒ 收工那一刻浮窗**还有 36px 宽**就被切成内联聊天区
+ * （`host 567+36` → `240+661`，一帧跳完）⇒ 用户看到的「退出窗口化时右栏抽搐、闪动」。
+ *
+ * ⚠️ 下面两条字符串**由本常量拼接**（不是手抄的 `0.4s`）——
+ *    否则"常量是 400、字符串写着 0.4s"迟早会漂成两个产地（铁律 11）。
+ *    守卫：`tests/core-ts/a1173-anim-duration-sync.spec.ts` 校验拼接结果与
+ *    `startFloatGeometryFade` 的 `duration` **同源**。
+ */
+export const FLOAT_TRANSITION_MS = 400;
+const FLOAT_EASE = "cubic-bezier(0,0,0.2,1)";
 /** A-980-R19：悬浮窗宽高过渡基线（拖拽调尺寸期间临时禁用，见 startFloatResize）
  *  A-980-R30：0.3s → 0.4s——与侧栏放慢同一诉求：凸显几何同步的渐隐渐显
  *  A-980-R34：0.4s → 0.5s——用户"展开跟收起的动画再长一点"，与侧栏同节奏放缓
- *  A-980-R35：0.5s → 0.4s（用户"又太长了"）；缓动改 decelerate cubic-bezier(0,0,0.2,1)——由快到慢 */
-const FLOAT_TRANSITION = "height 0.4s cubic-bezier(0,0,0.2,1), width 0.4s cubic-bezier(0,0,0.2,1)";
+ *  A-980-R35：0.5s → 0.4s（用户"又太长了"）；缓动改 decelerate cubic-bezier(0,0,0.2,1)——由快到慢
+ *  A-1173：时长改由 `FLOAT_TRANSITION_MS` 拼接（单源，见上）。 */
+const FLOAT_TRANSITION = `height ${FLOAT_TRANSITION_MS}ms ${FLOAT_EASE}, width ${FLOAT_TRANSITION_MS}ms ${FLOAT_EASE}`;
 /** A-980-R19：还原展开时的完整过渡（含 top/left——展开方向自适应需要位置与尺寸同步动） */
-const FLOAT_TRANSITION_FULL = `top 0.4s cubic-bezier(0,0,0.2,1), left 0.4s cubic-bezier(0,0,0.2,1), ${FLOAT_TRANSITION}`;
+const FLOAT_TRANSITION_FULL = `top ${FLOAT_TRANSITION_MS}ms ${FLOAT_EASE}, left ${FLOAT_TRANSITION_MS}ms ${FLOAT_EASE}, ${FLOAT_TRANSITION}`;
 
 /** A-980-R19：悬浮窗整体（尺寸 + 位置）钳制在窗口内——哪里有位置往哪里去，
  *  空间不足时整体上移/左移，保证完整可见不跑出界面（clampFloatPos 只保证能拖回，不保证不越界） */
@@ -427,6 +447,40 @@ const FADE_VISIBLE_HI = 0.90;
 const LEFT_FADE_LO = 0.40;
 const LEFT_FADE_HI = 0.95;
 
+/**
+ * ⚠️⚠️⚠️ A-1174：**收起方向**专用的可见性窗口 —— 与上面那组**故意不对称**。
+ *
+ * ## 为什么必须另起一组
+ * `runGeometrySyncFade` 在 A-1162 之后是**时间驱动**：喂进渐变带公式的 `w = full × u`
+ * 是**虚拟宽**（与时间**线性**）。而面板的**实际宽度**由 CSS 走的是
+ * `cubic-bezier(0,0,0.2,1)`（**先快后慢**）⇒ 两者**不同步**：
+ *
+ *  | u（时间比例） | 虚拟宽 `240u` | 实际宽 `240×(1−ease(u))` |
+ *  |---|---|---|
+ *  | 0.27 | 64 | **96**（40%） |
+ *  | 0.50 | 120 | 38（16%） |
+ *
+ * ⇒ 上面的 `[0.40, 0.95]` 是**按实际宽度**定的语义（"95% 宽开始淡出、40% 宽全透明"），
+ *   直接拿它当**虚拟宽**的比例用，等价于把"全透明"推迟到**实际宽度只剩 96px 之后**
+ *   —— 而那段宽度里内容早已被 `overflow: hidden` 裁没了 ⇒ **肉眼看不到任何渐出**
+ *   （用户原话：「折叠的渐出衔接动画直接没了」）。
+ *   实测（`probe-a1173-leftfade.mjs`）：`209ms 实际宽=59px 而 opacity=0.998`。
+ *
+ * ## 这组数怎么来的（不是试出来的）
+ * 要还原"**面板还有 100% 宽时开始淡出、40% 宽时完全透明**"这条几何语义：
+ *   · 起点：实际宽 240（100%）⇔ `u=0` ⇒ 虚拟宽 0 ⇒ **`LO = 0`**
+ *   · 终点：实际宽 96（40%）⇔ 解 `ease(u) = 1 − 96/240 = 0.6`
+ *     ⇒ 对 `cubic-bezier(0,0,0.2,1)` 解 `x(s)=0.269, y(s)=0.6` ⇒ `u ≈ 0.268`
+ *     ⇒ 虚拟宽 `240 × 0.268 ≈ 64` ⇒ **`HI = 64/240 ≈ 0.27`**
+ *
+ * ⚠️ 展开方向**不动**（继续用 `LEFT_FADE_LO/HI`）——用户对展开的渐进是满意的，
+ *    而且展开时 `p` 直接随 `w` 增大，`[0.40,0.95]` 恰好落在"宽的时候"，本来就对。
+ * ⚠️ 若将来改用**实测宽**驱动透明度（那就天然同拍了），这组常量应当一起删掉；
+ *    但那时要付 A-1162 记下的代价：每帧 `getBoundingClientRect()` 是一次强制同步布局（7~11ms/帧）。
+ */
+const LEFT_FADE_COLLAPSE_LO = 0;
+const LEFT_FADE_COLLAPSE_HI = 0.27;
+
 /** A-980-R33：内联聊天区淡入不再用固定像素窗口——改为与侧栏/悬浮窗同一套**比例窗口**
  *  （FADE_VISIBLE_LO/HI，见 startInlineChatRevealFade 的 full 参数：full=主区目标宽度）。
  *  此前 [140,380]/[320,560] 是绝对像素，窗口大小一变就"过窄/过宽"，不符合
@@ -453,8 +507,126 @@ const CHAT_MIN_W = 380;
  *  收工判据只剩 `u >= 1` 一条。魔数全部作废（不是调参，是**结构性地不再需要**）。
  *
  *  ⚠️ 若改了本常量，**必须同步改** `index.css` 里对应的 `transition: width` 时长，
- *     否则"几何还在滑、透明度已经到位"（或反之），又是一种半拍错位。 */
-export const GEOM_FADE_MS = 280;
+ *     否则"几何还在滑、透明度已经到位"（或反之），又是一种半拍错位。
+ *
+ * ⚠️⚠️⚠️ A-1186：本常量曾是 **280**，而 CSS 侧`.right-sidebar` 的
+ *   `transition: width 0.5s` = **500ms** ⇒ **两半不同拍**：
+ *     引擎在 280ms 就 `u >= 1` 收工 ⇒ 跑 `done` 分支**摘掉 opacity**
+ *     ⇒ 而 CSS 的宽度**还要继续走到 500ms**
+ *     ⇒ **后 220ms 是「全不透明 + 宽度仍在缩」**⇒ 文字挤在里面显现。
+ *   这正是用户截图里的现象（收起的尾帧仍见文字），也是「**临近收起时文本又出现**」的根因。
+ *   ⚠️ `SIDEBAR_WIDTH_MS`（左栏）本来就是 500、与 CSS 一致 —— **只有右栏/聊天区/浮窗
+ *     落回本常量**才踩这个坑。现在本常量 = 500 = CSS 时长，三者同步。
+ *   ⚠️ 这是**结构性问题不是调参**：凡"CSS 过渡 + rAF 进度"配对，两侧时长必须同源。 */
+export const GEOM_FADE_MS = 500;
+
+/**
+ * ⚠️⚠️⚠️ A-1173：**左侧栏**的宽度过渡时长（ms）。
+ *
+ * 必须与 `index.css` 里 `.sidebar { transition: width … }` 的时长**逐字相等**（当前 0.5s）。
+ * 为什么不能沿用 `GEOM_FADE_MS`（280）：`runGeometrySyncFade` 是**时间驱动**的
+ * （`u = 已过时长 / duration`，收工判据只有 `u >= 1`）——
+ * 若 `duration` **小于** CSS 的宽度过渡时长，透明度会**提前 220ms 收工**，
+ * 而收工时那一帧会 `opacity` 复位（回到 1）⇒ **宽度还没归零、文本已经重新可见**
+ * = 用户报的「先渐出消失，再在最后几帧闪出文本」。
+ * 真机实测（`probe-a1173-leftfade.mjs`，修复前）：`t=226ms 宽=51px opacity 0 → 0.545`
+ * → `t=344ms 宽=16px opacity=1`（复位）→ `t=499ms 宽=0`。
+ *
+ * ⚠️ 本常量**不只**是"调参"：它让「几何（CSS transition）」与「透明度（rAF）」两半
+ *    有共同的终点。守卫 `tests/core-ts/a1173-leftfade-sync.spec.ts` 从**两份文本**
+ *    分别取值再比对 —— 手抄一个期望值迟早与两边都漂，而比较会一直"通过"。
+ */
+export const SIDEBAR_WIDTH_MS = 500;
+
+/**
+ * ⚠️⚠️⚠️ A-1190：**聊天页「让位」淡出**的时长（ms）——与侧边栏**宽度过渡同源**。
+ *
+ * 用户原话：「中间的渐入渐出都是与侧边栏**错开**设计的，即刻意的错开侧边栏与聊天页的
+ * 消失、出现时间……改成**同步**的吧」。
+ *  ⇒ 判据：「同步」= 两侧时长/缓动**同源**（同一个常量、同一条曲线），而不是"各调一个数去凑观感"。
+ *    所以它**不是**独立魔数，而是 `SIDEBAR_WIDTH_MS` 的别名。
+ *  ⚠️ 缓动同源在 CSS 侧：`.chat-scroll` 用与 `.sidebar` 相同的 `cubic-bezier(0,0,0.2,1)`。
+ *  ⚠️ 时长由 App 写进 CSS 变量（见 RO 的 `mark()`）—— CSS 与 TS **只此一个产地**
+ *    （铁律 39/59：CSS 过渡与几何时长必须同源）：
+ *      · `--chat-fade-out-dur`（挂 `slime-fading` 那一向）· `--chat-fade-in-dur`（摘类那一向）
+ *  ⚠️⚠️ A-1190②：本常量现在只服务**拖拽 / 窗口 resize** 那条路（"淡出 → 停住 → 淡入"三段式，
+ *    总时长 2× 是它**固有**的，因为淡入必须等宽度停住）。
+ *    **几何动画（点按钮）那条路不走它** —— 走 `CHAT_DIP_*` 的"凹陷"（两段都落进 500ms 内），
+ *    否则总时长翻倍 = 用户报的「错开」。
+ */
+const CHAT_FADE_MS = SIDEBAR_WIDTH_MS;
+
+/**
+ * ⚠️ A-1190：**拖动路径专用**的短时长（ms）。
+ *
+ * 为什么拖动不能也用 `CHAT_FADE_MS`（500）：`slime-resizing`（A-1152 的「跳过布局」性能优化）
+ * **只能在 opacity 过渡播完之后**才挂 —— 同帧挂会让 `content-visibility: hidden` 直接杀掉过渡
+ * （见 A-1152 ⑫）⇒ 淡出时长 = 那条约 500ms 优化窗口的**起点**。
+ * 而拖动时宽度是**命令式即时**变化的（`slime-dragging` 已禁掉宽度过渡、跟手），聊天区每帧全量重排
+ * （实测 1000 条消息 dtP95 12.2ms → 6.2ms，见 index.css 那段）——
+ * 把优化推迟 500ms，等于在**拖动最需要它的那一段**上失效。
+ *  ⇒ 拖动走 120ms：这个值与侧边栏**内容**收起的淡出窗（`LEFT_FADE_COLLAPSE_*` ≈ 0～135ms）
+ *    同拍 —— 即拖动路径下"聊天页淡出"与"侧边栏内容淡出"依然是同步的。
+ *  ⚠️ 判据是 `body.slime-dragging`（拖动期的状态类），不是"谁调用的 mark"。
+ */
+const CHAT_FADE_DRAG_MS = 120;
+
+/**
+ * ⚠️ A-1190：宽度"停住"多久算**变化结束**（⇒ 恢复淡入）。
+ *
+ * 这是本轮修掉的那半「刻意错开」：此前是
+ * `150ms（进 slime-resizing）→ 160ms（摘 slime-resizing）` = **变化停止后 310ms 才开始恢复**，
+ * 而侧边栏的几何动画在**宽度到位那一帧**就收工 ⇒ 聊天页比侧边栏晚约 300ms 才回来
+ * （用户：「错开侧边栏与聊天页的消失、出现时间」）。
+ *  ⇒ 现在只等 40ms（"确实停住了"的最小确认窗，与几何引擎"宽度停住即 done"同判据）。
+ *  ⚠️ 不能小到 0：窗口 resize 路径也走这条，`0` 会把"逐帧变化"误判成结束。
+ *  ⚠️ 拖动路径**不走**这条（`slime-dragging` 期不自动恢复，由 `onUp`/`onCancel` 的
+ *    `endChatFreeze()` 负责）—— 否则拖动中途停顿一次就会闪一次"淡入→再淡出"。
+ */
+const CHAT_SETTLE_MS = 40;
+
+/**
+ * ⚠️⚠️⚠️ A-1190②：**几何动画期的「凹陷」淡出**（淡出 + 淡入，两段都落进侧边栏那 500ms 里）。
+ *
+ * 用户原话：「**点击折叠、展开按钮时**，侧边栏与中间对话栏的动画还是没同步」。
+ * ## 实测病根（`probe-a1190-chat-fade.mjs`，真机 CDP 逐帧）
+ *   点「收起左栏」：`slime-fading` 在 30ms 挂上、opacity 到 0 于 518ms，
+ *   随后 533ms 才起步淡入、**1020ms** 才回到 1 —— 而侧边栏宽度 **486ms** 就到位了。
+ *   ⇒ 聊天页动画总时长 **≈ 1024ms = 侧边栏的 2 倍**，**后半段 500ms 侧边栏完全静止、
+ *     只有聊天页还在动** —— 这就是用户看到的"错开"。
+ * ## 为什么旧结构**不可能**同步
+ *   `slime-fading` 的淡入只能发生在"宽度停住"（≈ `SIDEBAR_WIDTH_MS`）**之后**，
+ *   而淡入自己又要一整个 `CHAT_FADE_MS` ⇒ **时长必然是 2 × `SIDEBAR_WIDTH_MS`**。
+ *   ⇒ 正解不是调参，而是把**淡入搬进那 500ms 里**（下面这条"凹陷"曲线）。
+ * ## 三个窗口**逐字取自侧边栏内容自己的那两组常量**（铁律 11：同一事实只留一个产地）
+ *   ```
+ *      t=0        1
+ *      t=135ms    0   ← `LEFT_FADE_COLLAPSE_HI` × `SIDEBAR_WIDTH_MS`
+ *                       与**侧边栏内容消失**同一瞬间（收起窗 `[0, 0.27]`）
+ *      t=200ms    0   ← `LEFT_FADE_LO` × `SIDEBAR_WIDTH_MS`
+ *                       与**侧边栏内容开始出现**同一瞬间（展开窗 `[0.40, 0.95]`）
+ *      t=475ms    1   ← `(LEFT_FADE_HI − LEFT_FADE_LO)` × `SIDEBAR_WIDTH_MS`
+ *                       与侧边栏内容淡入完毕同一瞬间
+ *   ```
+ *   ⇒ 三个动效（侧边栏宽度、侧边栏内容、聊天页内容）**同起同落**，这正是用户要的"同步"。
+ *   ⚠️ 时间轴按**比例**换算（`u = 已过时长 / duration`），与 `runGeometrySyncFade`
+ *     把窗口喂给"虚拟宽度"的算法**逐字同源** —— 侧边栏内容出现在 u=0.40 那一拍，
+ *     聊天页内容也出现在 u=0.40 那一拍。
+ *   ⚠️ 量纲是**时间**不是宽度：侧边栏内容的窗是"虚拟宽度的比例"，
+ *     而 `runGeometrySyncFade` 里 `虚拟宽 = full × u` ⇒ 比例 × duration = **毫秒**。
+ */
+const CHAT_DIP_OUT_MS = Math.round(SIDEBAR_WIDTH_MS * (LEFT_FADE_COLLAPSE_HI - LEFT_FADE_COLLAPSE_LO));
+const CHAT_DIP_IN_AT_MS = Math.round(SIDEBAR_WIDTH_MS * LEFT_FADE_LO);
+const CHAT_DIP_IN_MS = Math.round(SIDEBAR_WIDTH_MS * (LEFT_FADE_HI - LEFT_FADE_LO));
+
+/**
+ * ⚠️ A-1190②：**几何动画窗口**的尾巴（ms）。
+ *
+ * 宽度过渡收工那一帧 RO 仍可能回调一次（`SIDEBAR_WIDTH_MS` 到点与"最后一次尺寸变化"
+ * 是同一拍）。多守 60ms 是为了让那一拍被认成"几何动画"而不是"拖拽 / 窗口 resize"
+ * —— 否则它会立刻又起一轮 `mark()` 的淡出（观感 = 淡入之后又闪一下黑）。
+ */
+const CHAT_GEOM_TAIL_MS = 60;
 
 /** A-980-R27：侧栏拖拽的「收起」吸附带——距**几何下限**多少像素以内算拖到底。
  *  必须是相对量，不能写死绝对像素：旧实现用 300px（左栏），而左栏下限是 240、
@@ -613,7 +785,29 @@ function runGeometrySyncFade(
     if (done) { return; }
     raf = window.requestAnimationFrame(step);
   };
+  /* ⚠️⚠️⚠️ A-1188：**这一行是整条 rAF 链的"启动"**，不是重复代码 —— 绝不许删。
+     上面 `step` 末尾那行只在"已经开始"之后才起作用（自己调度自己），
+     而**首次调度必须在这里**。少了这一行，引擎**一帧都不会跑**：
+       · `onFrame` 永不执行 ⇒ 写进去的 `opacity` 永远没人改回来；
+       · `done` 永不触发 ⇒ `setRightMin0(false)` / 变量摘除 / 状态回滚全部静默失踪。
+     ## 实测（`probe-a1187-sidebar-fade.mjs`，真机 CDP 逐帧，修复前）
+       ```
+       ① 收起左栏 : 内联 opacity 全程 "-"（引擎一次都没写）· 计算 opacity 恒 1  ⇒ 无淡出
+       ② 展开左栏 : 内联 opacity 恒 "0"，512ms 后仍是 0   ⇒ **左栏展开后内容全透明、看不见**
+       ③ 收起右栏 : opacity 恒 1
+       ④ 展开右栏 : 496ms 后仍挂着 right-wrapper-anim（done 从未触发 ⇒ 收尾清理没跑）
+       ```
+     ⇒ 用户现象「侧边栏淡入淡出效果都没了」「左侧边栏展开甚至都异常了」= 同一条根因。
+     ## 为什么既有守卫没拦住（铁律 5：静默失效必补守卫 + 变异）
+       `a1173` / `a1174` / `a1175` 全是**形状**断言（查窗口常量、查 done 里有没有摘变量），
+       没有一条锚"**引擎真的会开始跑**"这个不变量 ⇒ 常量对、窗口对、语法合法，
+       只是**从来没启动**，全部测试照样绿。
+       ⇒ 已补 `a1188-fade-engine-starts.spec.ts`（断言启动调用位于 `return` 之前）+
+          `mut-a1188-engine-start.mjs`（删掉该行必须让守卫变红）。
+     ⚠️ 别把它挪进 `step` 里当"首帧补跑"：那不是启动，是自递归；也别改成"cancel 时补跑
+        `onFrame(1, true)`"—— 调用点会在新动画开头立即 cancel 上一次（A-1186 的教训）。 */
   raf = window.requestAnimationFrame(step);
+
   return () => {
     cancelled = true;
     if (raf) { window.cancelAnimationFrame(raf); }
@@ -718,7 +912,41 @@ export default function App(): JSX.Element {
   /** A-1153：`endChatFreeze` 的一次性兜底定时器句柄。
    *  ⚠️ 必须**存句柄并可被清**——见 endChatFreeze 的说明（那里曾是无限递归）。 */
   const chatFreezeFallbackRef = React.useRef(0);
-  /** ⚠️⚠️ A-1154：拖动"两阶段"里那个 **140ms 定时器**（`slime-fading` → `slime-resizing`）的句柄。
+  /** ⚠️⚠️ A-1190：**「宽度停住 ⇒ 恢复」的定时器**句柄（由 RO 的 `mark()` 起表）。
+   *
+   *  它取代了旧实现里 `150ms → slime-resizing → 160ms → 摘` 那对固定延时
+   *  （合起来让聊天页**比侧边栏晚 310ms** 才淡入回来 = 用户说的「刻意错开」）。
+   *  ⚠️ 必须存句柄：`endChatFreeze()` 一旦恢复，本轮就结束了 —— 停着的定时器若还到点，
+   *    会对着**已经变化完的稳态**再调一次 endChatFreeze（多余的摘类 ⇒ 与下一次淡出互踩）。 */
+  const chatSettleTimerRef = React.useRef(0);
+  /** ⚠️⚠️ A-1190②：**这一轮宽度变化来自「几何动画」吗**（两侧栏的宽度在走 CSS 过渡）。
+   *
+   *  由 `animateLeftSidebar` / `animateRightSidebar` 在**起点**置位，`SIDEBAR_WIDTH_MS +
+   *  CHAT_GEOM_TAIL_MS` 后自清（见 `beginChatGeomFade`）。
+   *  它只用来让 RO 的 `mark()` **分流**：几何动画 ⇒ 走"凹陷"淡出（同起同落）；
+   *  其余（拖拽 / 窗口 resize）⇒ 走原有的"淡出 → 停住 → 淡入"。
+   *  ⚠️ 不能靠"有没有 `slime-dragging`"来判：窗口 resize 也没有 `slime-dragging`，
+   *     却在时间上同样是"一直变、停住算完"，与几何动画的区别只有"是谁在推宽度"。
+   *  ⚠️ 也不能由按钮直接起表（不经过 RO）：浮层态下点按钮时，浮窗宽**不变** ⇒ 聊天区
+   *     根本没有被挤压 ⇒ 不该有任何淡出（A-1190① 的不变量）。由 RO 起表天然守住这点。 */
+  const chatGeomAnimRef = React.useRef(false);
+  /** A-1190②：`chatGeomAnimRef` 的自清定时器句柄（见上）。 */
+  const chatGeomTimerRef = React.useRef(0);
+  /** A-1190②：**"凹陷"淡出是否在飞**。
+   *  · `true` 期间 `mark()` **整个让位**（RO 在过渡期每帧都回调，若不挡，`startChatDip`
+   *    会被逐帧重启 ⇒ 那条"t=200ms 摘类"的定时器**永远到不了点** ⇒ 聊天页一直黑到宽度停住，
+   *    又多出 200ms 尾巴 —— 与"每帧重置"是同一个坑）；
+   *  · 由 `startChatDip` 置位、`SIDEBAR_WIDTH_MS` 后自清（= 宽度过渡收工那一拍）。 */
+  const chatDipActiveRef = React.useRef(false);
+  /** A-1190②：凹陷的**淡入起点**（t=`CHAT_DIP_IN_AT_MS`，摘 `slime-fading`）定时器句柄。 */
+  const chatDipInTimerRef = React.useRef(0);
+  /** A-1190②：凹陷的**收工**（t=`SIDEBAR_WIDTH_MS`，清 `chatDipActiveRef`）定时器句柄。 */
+  const chatDipEndTimerRef = React.useRef(0);
+  /** ⚠️⚠️ A-1154：淡出"两阶段"里那条**阶段定时器**（`slime-fading` → `slime-resizing`）的句柄。
+   *
+   *  ⚠️ A-1190：它的**起表点从两个 resizer 的起点搬到了 RO 的 `mark()`**（淡出的唯一触发源），
+   *    时长也从写死的 140ms 改成与本次过渡同源（`CHAT_FADE_MS` / `CHAT_FADE_DRAG_MS`）。
+   *    句柄语义、"必须在 `endChatFreeze()` 里取消"这条约束**一字未改**。
    *
    *  此前它是**裸 `window.setTimeout`、不存句柄** ⇒ `endChatFreeze()` 无法取消它。
    *  真机 CDP 实测到的闪烁机制（用户原话「一拖拽，对话页就会出现闪烁问题」）：
@@ -744,6 +972,33 @@ export default function App(): JSX.Element {
    *  渐入永远看不到。动画 done 后复位。 */
   const [leftMin0, setLeftMin0] = React.useState(false);
   const [rightMin0, setRightMin0] = React.useState(false);
+  /* ⚠️⚠️⚠️ A-1175：**过渡期变量必须在"本轮提交之后"才摘** —— 这是消除
+     「窗口化那一瞬有一帧 661px 抖动」的关键。
+     ## 为什么不能在 `runGeometrySyncFade` 的 done 里同步摘
+     那个 done 里同时还有一次 `setRightMin0(false)`（React state、**异步提交**），
+     而"摘变量"是**同步**的 ⇒ 两者之间必然夹着一个 **IACVT 帧**：
+       `rw` 的内联宽度那一帧仍写着 `var(--right-target-w)`，而变量已经不存在
+       ⇒ 按 invalid-at-computed-value 处理 ⇒ 回落到 `auto`（= 内容宽 **431px**）
+       ⇒ `.right-sidebar` 的 `100%` 跟着变成 431 ⇒ 右栏一帧缩掉 661px 再弹回。
+     真机实测（`probe-a1175-enter-jerk.mjs`，ResizeObserver + layout-shift，进入窗口化）：
+       `289ms rw 宽 1092 → 431 (Δ-661)  cls="…right-wrapper-anim" inlineW="var(--right-target-w)"`
+       `294ms rw 宽 431 → 1092 (Δ+661)  cls="right-wrapper"          inlineW="calc(100% - var(--left-w, 0px))"`
+       同时 `layout-shift value=0.3891`（来源 `right-sidebar`；0.25 就已算"差"）
+       ⇒ 用户原话「窗口化那一瞬，有一帧异常抖动、抽搐」。
+     ## 为什么挂 effect 而不是延时
+     试过 `setTimeout(…, 32)` —— **仍然太早**（实测提交发生在 done 之后约 35ms，那一帧照样是 431）。
+     固定延时治不了"提交时刻不确定"；而 effect 跑的时候 React **一定已经提交**，
+     此时内联宽度已是 `calc(100% - var(--left-w, 0px))`、不再读这个变量 ⇒ 摘除绝对安全。
+     ⚠️ 不要用 rAF 等：窗口 hidden（最小化/后台）时 rAF 会被停掉 ⇒ 变量永远摘不掉。 */
+  React.useEffect(() => {
+    if (rightMin0) { return; }
+    const rw = rightWrapperRef.current;
+    if (!rw) { return; }
+    rw.style.removeProperty("--right-target-w");
+    /* A-1155：`--right-body-pin` 一并在这里摘 —— 起点那次摘是为了"本轮不被上一轮残值污染"，
+       这次摘是为了"本轮自己钉的值在过渡结束后归零"。 */
+    rw.style.removeProperty("--right-body-pin");
+  }, [rightMin0]);
   /* ⚠️⚠️ A-1157-R2：**退场专用**过渡标志 `right-wrapper-exit`（只排除铺满规则）。
      为什么必须另立一个类、而不能复用 `right-wrapper-anim`（实测走了两轮弯路）：
        `right-wrapper-anim` 那条声明是 `width: var(--right-target-w) !important`，
@@ -756,6 +1011,14 @@ export default function App(): JSX.Element {
   const [rightExitAnim, setRightExitAnim] = React.useState(false);
   /** A-980-R17：最小化图标「拖动 vs 点击」区分——拖动超过阈值后松手的 click 不触发还原 */
   const floatDragMovedRef = React.useRef(false);
+  /* ⚠️⚠️⚠️ A-1177：**左栏是否正在被拖动**（`handleSidebarResize` 全程为真）。
+     为什么要一个 ref 而不是 `document.body.classList.contains("slime-dragging")`：
+     ① `attachLeftWidthObserver` 的 `sync` 由 **ResizeObserver 逐帧**触发
+        ⇒ 每帧读一次 classList 是**强制样式重算**（A-1162 记过这条代价，实测 7~11ms/帧）；
+     ② 语义也更准：那条类名表达的是"拖动期语义集合"，而这里要问的是
+        "**左栏**是否在被拖"（右栏拖动不该影响 `--left-w`）。
+     ⚠️ 写/摘必须成对：`onUp` / `onCancel` 都要摘（铁律 11）。 */
+  const leftDraggingRef = React.useRef(false);
   /** A-980-R15：悬浮窗尺寸/位置（标题栏可拖动、右下角可调大小；按会话记忆） */
   /* ⚠️⚠️ A-1152：初始浮窗尺寸必须**跟着窗口算**，不能硬编码。
    用户实测（并给了正确方向）：「界面缩放时各个页面似乎不会等比自适应保持大小比例，
@@ -867,27 +1130,36 @@ export default function App(): JSX.Element {
     if (!el || typeof ResizeObserver === "undefined") { return; }
     const sync = (): void => {
       if (floatStateRef.current === "none") { return; }
-      /* ⚠️⚠️⚠️ A-1166：写**目标宽度**，**不写实测宽度** —— 这一行是六轮抖动的总闸门。
-         用户自检数据（`Ctrl+Shift+D`，真实长会话 + 最大化 1707px）逐帧实测：
-             sb.width   303 → **257** → 295 → 302 → 303      ← 源头：左栏在弹
-             rw.width   1404 → **1450** → 1412 → 1405 → 1404  ← = 1707 − 左栏宽
-             rs.left    257 → 508 → 578 → 610 → 638 → 666
-             host.left  315 → 396 → 420 → 432 → 442 → 452    ← 浮窗位置跟着走
-             host.width 666 → 504 → 455 → 433 → 412 → 392    ← 被推着挤缩
-         `.right-wrapper` 在浮层态的宽度是 `calc(100% - var(--left-w))`（App.tsx:817-819），
-         而 `rs.left` / 浮窗默认 x（`floatBoxDefaultPos.x = (sidebarOpen ? sidebarWidth : 0) + 12`）
-         也都由左栏宽决定 ⇒ **左栏一弹，整条链一起弹**。
-         1404→1450→1412 的"冲过头再回落"（1450 = 1707−257，1412 = 1707−295）说明
-         `--left-w` **逐帧跟着实测值走** —— 正是本函数原先那行 `el.getBoundingClientRect()`。
-         ⚠️ 闭环：`.sidebar` 常驻 `transition: 0.5s` ⇒ 它**每一帧宽度都在变** ⇒
-            ResizeObserver 每帧触发 ⇒ 每帧把**动画中的中间值**写回 `--left-w`
-            ⇒ 布局再被这个中间值影响 ⇒ 再观测。**观测→写回→再观测。**
-         ⇒ 保留 ResizeObserver 作为**触发器**（窗口 resize 时 CSS 侧的 `--sidebar-w`
-            会变，仍需要有人去刷新），但写入的必须是**目标值** `sidebarWidthRef.current`，
-            **不是**那一帧量到的中间值。
+      /* ⚠️⚠️⚠️ A-1177：**拖拽左栏期间必须跳过本函数** ——
+         拖动时左栏走「零 React 重渲染 + 每帧写内联宽」（A-1152），`sidebarWidth` **不动**
+         ⇒ 本函数按 A-1172 的语义写 `sidebarWidthRef.current`，那正是**拖动起点**的宽度
+         ⇒ 它会在拖动中途被 RO 触发、**覆盖掉 `onMove` 逐帧写的真实值**
+         ⇒ 右栏瞬间跳回起点 ⇒ 错位（实测 `probe-a1177-drag-gap.mjs` 一帧：
+           `left-w=520px` 而 `sb.w=280px` ⇒ 错位 240px）。
+         ⇒ 拖拽期以 `onMove` 为**唯一权威**（它每帧写 `--left-w`），RO 那条让位。
+         ⚠️ 判断用 `slimeDraggingRef`（ref）而不是 `document.body.classList.contains`：
+            后者每帧读一次 classList 是**强制样式重算**（A-1162 记过这条代价）。 */
+      if (leftDraggingRef.current) { return; }
+      /* ⚠️⚠️⚠️ A-1172：写「**目标占位宽**」= `sidebarOpenRef.current ? sidebarWidthRef.current : 0`。
+         这一行同时被**两个互相拉扯**的不变量约束，只有这个形式能同时满足：
+           · **A-1166**（`tests/core-ts/a1166-left-w-feedback.spec.ts`）：**不许**写实测派生值。
+             `.sidebar` 常驻 `transition: 0.5s` ⇒ 写实测 = 每帧把动画中间值写回
+             ⇒ 与 ResizeObserver 构成「观测 → 写回 → 再观测」⇒ 六处方向反转（用户实测）。
+           · **A-1172**（`tests/core-ts/a1172-leftw-collapse.spec.ts`）：**必须**反映折叠。
+             `--left-w` 的唯一消费者是 `calc(100% - var(--left-w, 0px))`；
+             折叠时左栏占位 0 ⇒ 变量必须 0，否则右栏左侧空出 240px。
+             真机实测（`probe-a1170-float-left.mjs`，1332px 窗口）：
+               S1 左栏展开：`--left-w=240px` `rw={l:240,w:1092,r:1332}` ✓
+               S2 左栏折叠：`--left-w=240px`（应为 0）`rw={l:240,w:1092,r:1332}` ❌ 左侧留白 240
+             为什么是 240 而不是 0：`animateLeftSidebar` **只翻转 `sidebarOpen`、
+             `sidebarWidth` 不动**（它记的是「展开时多宽」，本来就该那样）
+             ⇒ 只要写入用的是裸 `sidebarWidthRef.current`，折叠后它必然还是展开宽。
+         ⚠️ 两种「顺手」的写法各违反一条：裸 `sidebarWidthRef.current` 违反 A-1172；
+             `el.getBoundingClientRect().width` 违反 A-1166。写**目标占位宽**两者都满足。
          ⚠️ 为什么不干脆删掉 ResizeObserver：窗口 resize 时左栏宽是 `vw×17.5%`（index.css 的
-            `--sidebar-w`），那条路**不经过** React state，删了就再也同步不上。 */
-      rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(sidebarWidthRef.current)}px`);
+            `--sidebar-w`），那条路**不经过** React state ⇒ 本函数是它唯一的**触发器**，
+            删了就再也同步不上。 */
+      rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(sidebarOpenRef.current ? sidebarWidthRef.current : 0)}px`);
     };
     const ro = new ResizeObserver(sync);
     ro.observe(el);
@@ -931,38 +1203,159 @@ export default function App(): JSX.Element {
     return () => { window.removeEventListener("resize", onWinResize); if (rafId) { window.cancelAnimationFrame(rafId); } };
   }, [rightCustom]);
 
-  /* A-1152：窗口缩放期间让聊天区让位（结束后自动恢复）。 */
+  /* A-1152：聊天区让位（结束后自动恢复）。
+   *  ⚠️⚠️⚠️ A-1181：触发源从「窗口 resize」改成「聊天区容器宽度真的在变」。
+   *
+   *## 为什么必须是"宽度变化"而不是"谁在动"
+   *  原实现是`window.addEventListener("resize", mark)` ⇒ **文本淡出被绑在「窗口大小变化」上**：
+   *  · 窗口化后拖左右栏 → 窗口**没动**，但拖栏路径各自有挂 `slime-fading` ⇒ **文本照样淡出**
+   *    （用户：「窗口化后，拖拽改变左右侧边栏比例，窗口内的文本会消失」）；
+   *  · 改窗口大小 → 淡出（这条本身没错，但**理由不是"窗口变了"，而是"聊天区宽度变了"**）。
+   *  用户原话：「窗口化后，左右侧边栏的比例变化就跟窗口没关系了，反倒是窗口大小才跟其有关系」
+   *  —— **决定文本要不要让位的不是"谁在动"，而是"聊天区盒子有没有在重排"**。
+   *
+   *## 判据
+   *  `ResizeObserver` 观察**聊天区那个滚动容器**（`.chat-scroll` 的父盒子，即承载它的 `.main`）
+   *  · 它在**任何**导致聊天区宽度变化的操作里都会变：拖左栏、拖右栏、改窗口大小、
+   *    **点折叠/展开按钮**（走的是 width 过渡 ⇒ 同样逐帧变宽）。
+   *  · 反过来，**拖栏时若聊天区宽度没变**（例如浮层态右栏在动、聊天区被 `flex-shrink` 挡住），
+   *    就不该淡出 ⇒ 这正是"按宽度变化"而不是"按谁在动"的价值。
+   *
+   *## 为什么这样能覆盖"点按钮"
+   *  `animateLeftSidebar` / `animateRightSidebar` 都是**给容器宽度加 CSS 过渡**
+   *  ⇒ 过渡期间 `.main` 的宽度**逐帧变化** ⇒ RO 每帧触发 ⇒ 淡出自然发生。
+   *
+   *## ⚠️⚠️⚠️ A-1190：**本 RO 是淡出的唯一触发源**（用户两个诉求都在这里收口）
+   *  用户原话：「现在的消失判定是一点击侧边栏的边缘，还没有拖拽就消失，这不对，改成只有发生
+   *  **实质性比例变化**才会消失。还有，现在中间的渐入渐出都是与侧边栏**错开**设计的，
+   *  即刻意的错开侧边栏与聊天页的消失、出现时间，这不对……改成**同步**的吧」。
+   *
+   *  ### ① 触发：从"按下了"改成"宽度真的变了"
+   *  旧实现里两个 resizer 的 `pointerdown` **无条件**挂 `slime-fading` ⇒ 用户只是**点一下**
+   *  分栏边缘（还没拖动）聊天页就开始淡出。现在起点只挂 `slime-dragging`（它管"禁宽度过渡、
+   *  跟手"，与淡出无关），淡出完全交给本 RO —— 它的判据本来就是"宽度真的变了"，
+   *  也就是用户说的"**实质性比例变化**"。
+   *  ⚠️ 铁律 50：淡出触发源绑盒子宽度变化，不绑"谁在动"。
+   *
+   *  ### ② 时序：与侧边栏同步
+   *  · 时长：写进两个 CSS 变量 `--chat-fade-out-dur` / `--chat-fade-in-dur`
+   *    （`CHAT_FADE_MS` / `CHAT_FADE_DRAG_MS`），与侧边栏宽度过渡**同源**；
+   *    缓动在 CSS 侧与 `.sidebar` 同一条曲线（铁律 39/59）。
+   *  · 恢复时刻：从"变化停止后 310ms"改成"停住 `CHAT_SETTLE_MS` 即恢复"（与几何 done 同判据）。
+   *  · ⚠️⚠️⚠️ A-1190②：**几何动画（点按钮）不走这条三段式** —— 走 `startChatDip` 的
+   *    "凹陷"（淡出 135ms + 淡入 275ms **都落进侧边栏那 500ms**）。
+   *    原因：三段式的总时长恒为 2 × `SIDEBAR_WIDTH_MS`，后半段侧边栏完全静止
+   *    ⇒ 用户报的「点击折叠、展开按钮时……还是没同步」。实测与推导见 `CHAT_DIP_*` 常量。
+   *
+   *## 保留的两阶段（A-1152 的坑，不能改）
+   *  先只挂 `slime-fading`（此时 `content-visibility` 仍 visible ⇒ opacity 过渡能播）
+   *  → **淡出走完**后再挂 `slime-resizing`（跳过布局；此时已看不见）。
+   *  ⚠️ 同一帧挂两个类 ⇒ 元素立刻 `content-visibility: hidden` ⇒ 过渡永不播放
+   *    （用户实测「我要的对话文本渐出消失衔接动画没有」）。
+   */
   React.useEffect(() => {
-    if (floatState === "none") { return; }
-    let t = 0;
-    /* A-1152：淡出 → 跳过布局 → 恢复，三段各自的定时器（t=淡出，t2=恢复） */
-    let t2 = 0;
+    /* ⚠️ 不再按 `floatState` 门控：按钮折叠/展开在**两种态**下都要让位。
+       若这里加 `if (floatState === "none") return`，浮层态点按钮就不会淡出。 */
+    let lastW = -1;
+    let lastOutDur = 0;
+    let lastInDur = 0;
     const mark = (): void => {
-      /* ⚠️ A-1152：**同样必须两阶段**（与拖动路径同一个坑）。
-         缩放期间容器宽度每帧都在变 ⇒ 聊天区每帧重排 ⇒ 要`content-visibility: hidden`；
-         但**不能与淡出同帧挂** —— 那会让元素立刻跳过渲染 ⇒ 过渡永不播放（用户实测
-         「我要的渐出消失衔接动画没有」）。
-         ⇒ 先只挂 fading，等淡出走完（或150ms 兜底）再挂 resizing。 */
-      window.clearTimeout(t);
-      if (!document.body.classList.contains("slime-resizing")) {
-        document.body.classList.add("slime-fading");
+      /* ⓪ ⚠️⚠️⚠️ A-1190②：**几何动画走另一条路**（"凹陷"），且**整个让位**。
+         用户原话：「点击折叠、展开按钮时，侧边栏与中间对话栏的动画还是没同步」。
+         下面 ①~③ 是"淡出 → 停住 → 淡入"三段式：淡入**必须**等宽度停住才开始，
+         于是总时长恒为 2 × `SIDEBAR_WIDTH_MS` —— 后半段侧边栏完全静止、只有聊天页在动，
+         这就是用户说的"错开"。几何动画的宽度时长是**已知的** `SIDEBAR_WIDTH_MS`
+         ⇒ 有条件把淡入搬进同一段里（`startChatDip`）。
+         ⚠️ 两条判据的先后：先问"凹陷在飞吗"（在飞 ⇒ 直接让位，绝不重启它）、
+            再问"这轮是几何动画吗"。反过来会让过渡期的每帧都重启一次凹陷，
+            那条"t=200ms 摘类"的定时器就永远到不了点。
+         ⚠️ 分流放在 `mark()` 里（而不是由按钮直接起表）是**为了守住 A-1190①**：
+            浮层态点按钮时聊天区宽度**没变** ⇒ RO 不回调 ⇒ 不会有任何淡出。 */
+      if (chatDipActiveRef.current) { return; }
+      if (chatGeomAnimRef.current) { startChatDip(); return; }
+      /* ① 淡出。时长**按"宽度是怎么变的"分流**：
+         · 拖动 = 宽度命令式即时变（无过渡可同步）⇒ 短时长，好让 A-1152 的「跳过布局」尽早生效
+           （它只能在淡出走完后才挂，见下方 ②）；
+         · 几何/窗口 = 宽度走 CSS 过渡 ⇒ 用与侧边栏**同源**的时长。
+         ⚠️ 写 CSS 变量而不是"再写一条类规则"：`.chat-scroll` 的 `transition` 读这两个变量
+           ⇒ 时长在 CSS/TS 之间**只有一个产地**（铁律 39/59）。
+         ⚠️ A-1190②：**两个方向各一个变量** —— 挂类（淡出）读 `--chat-fade-out-dur`、
+            摘类（淡入）读 `--chat-fade-in-dur`。此前是一个 `--chat-fade-dur` 两向共用，
+            于是"淡出 135ms + 淡入 275ms"这种**凹陷**在结构上表达不出来。
+         ⚠️ 只在**值真的变了**时才写：本函数在过渡/拖动期间每帧都会被调用，
+           逐帧写同一个值虽则是 no-op，但没必要每次都碰 `body.style`。 */
+      const outDur = document.body.classList.contains("slime-dragging") ? CHAT_FADE_DRAG_MS : CHAT_FADE_MS;
+      if (outDur !== lastOutDur) {
+        lastOutDur = outDur;
+        document.body.style.setProperty("--chat-fade-out-dur", `${outDur}ms`);
       }
-      t = window.setTimeout(() => {
-        document.body.classList.remove("slime-fading");
-        document.body.classList.add("slime-resizing");
-        clearTimeout(t2);
-        t2 = window.setTimeout(() => {
-          document.body.classList.remove("slime-resizing");
-        }, 160);
-      }, 150);
+      if (lastInDur !== CHAT_FADE_MS) {
+        lastInDur = CHAT_FADE_MS;
+        document.body.style.setProperty("--chat-fade-in-dur", `${CHAT_FADE_MS}ms`);
+      }
+      document.body.classList.add("slime-fading");
+      /* ② 淡出走完 ⇒ 进入"跳过布局"。
+         ⚠️ 时点必须 == 本次过渡时长（同源）：早了 = 过渡被腰斩（观感"淡到一半突然消失"），
+            晚了 = 白白多跑几帧重排（长会话掉帧）。
+         ⚠️⚠️ **本轮只起一次**（`current === 0` 且 resizing 还没挂）—— 否则每帧都被下面
+            重置，拖着不松手就**永远到不了点**，A-1152 的跳过布局整段失效（长会话拖动掉帧）。 */
+      if (dragPhaseTimerRef.current === 0 && !document.body.classList.contains("slime-resizing")) {
+        dragPhaseTimerRef.current = window.setTimeout(() => {
+          dragPhaseTimerRef.current = 0;
+          /* ⚠️ A-1154 的竞争守卫：本轮若已结束（`endChatFreeze` 跑过、fading 已摘）⇒ 本阶段作废。
+             没有它，短促拖拽松手后这条回调仍会把 `slime-resizing` 挂上、且再没人摘
+             （观感 = 聊天区闪烁 + 残留隐藏）。 */
+          if (!document.body.classList.contains("slime-fading")) { return; }
+          document.body.classList.add("slime-resizing");
+        }, outDur);
+      }
+      /* ③ 宽度停住 ⇒ 变化结束 ⇒ 恢复（淡入）。
+         ⚠️ 这条定时器**必须每帧重置**（与 ② 相反）：它判的是"停住了没有"，
+            每帧都动就永远不该到点。
+         ⚠️ `slime-dragging` 期**不**自动恢复：拖动中途的停顿不是"结束"，
+            真正的结束由 `onUp` / `onCancel` / `blur` 三条路各自调 `endChatFreeze()`。
+         ⚠️ 这条取代了旧实现那对 `150ms / 160ms` 固定延时 —— 它们正是"刻意错开"的来源。 */
+      window.clearTimeout(chatSettleTimerRef.current);
+      chatSettleTimerRef.current = window.setTimeout(() => {
+        chatSettleTimerRef.current = 0;
+        if (document.body.classList.contains("slime-dragging")) { return; }
+        endChatFreeze();
+      }, CHAT_SETTLE_MS);
     };
-    window.addEventListener("resize", mark);
+    const host = chatHostRef.current;
+    const target = host?.parentElement ?? host;
+    if (!target || typeof ResizeObserver === "undefined") {
+      /* 兜底：拿不到观察目标时退回窗口 resize（旧行为，至少不会静默失效）。 */
+      window.addEventListener("resize", mark);
+      return () => {
+        window.removeEventListener("resize", mark);
+        window.clearTimeout(dragPhaseTimerRef.current);
+        window.clearTimeout(chatSettleTimerRef.current);
+        endChatFreeze();
+      };
+    }
+    const ro = new ResizeObserver(() => {
+      const w = Math.round(target.getBoundingClientRect().width);
+      /* ⚠️ 只认**宽度真的变了**：RO 会因高度变化（消息流入、流式输出）也触发，
+         那不该让文本淡出（用户正在看的内容在增长，不是被挤压）。 */
+      if (w === lastW) { return; }
+      const first = lastW < 0;
+      lastW = w;
+      if (first) { return; }   // 首次记录不算"变化"
+      mark();
+    });
+    ro.observe(target);
+    lastW = Math.round(target.getBoundingClientRect().width);
     return () => {
-      window.removeEventListener("resize", mark);
-      window.clearTimeout(t);
-      window.clearTimeout(t2);
+      ro.disconnect();
+      window.clearTimeout(dragPhaseTimerRef.current);
+      window.clearTimeout(chatSettleTimerRef.current);
       endChatFreeze();
     };
+    /* ⚠️⚠️ A-1190：deps 里带 `floatState` —— 浮层切换会**换掉聊天的宿主元素**
+       （同一个 ref 的元素在浮窗/内联两个挂载点之间搬家），其 `parentElement` 随之改变。
+       不重绑就会一直观察**搬走前那个**盒子 ⇒ 浮层态下的让位判定整段失灵。
+       `lastW` 在每次重跑时重新采样，"首次记录不算变化"那条分支会吃掉这次跳变。 */
   }, [floatState]);
   const floatPosRef = React.useRef(floatPos);
   floatPosRef.current = floatPos;
@@ -1044,6 +1437,13 @@ export default function App(): JSX.Element {
              不清就会把上一次的超宽目标留给下一次展开（过渡方向错乱）。 */
           rw.style.removeProperty("--right-target-w");
           rw.style.removeProperty("--right-body-pin");
+          /* ⚠️⚠️⚠️ A-1189：fade 的写入节点是**内层 `.right-sidebar`**（不是本 wrapper，见
+             `animateRightSidebar` 展开支 `rsEnter` 那段）。本条是引擎唯一的"取消但不重启"
+             路径 ⇒ 必须在这里也清内层：否则切会话时若右栏恰好停在一帧半透明、
+             或停在收起收工钉下的 `"0"`，那个值会**永久残留**在该元素上
+             （`opacity` 不在 React 的 style 对象里 ⇒ diff 永远不会把它当变化重写）。 */
+          const rsReset = rw.querySelector<HTMLElement>(".right-sidebar");
+          if (rsReset) { rsReset.style.removeProperty("opacity"); }
         }
         const fi = floatInnerRef.current;
         if (fi) { fi.style.opacity = ""; }
@@ -1200,6 +1600,18 @@ export default function App(): JSX.Element {
 
   const sidebarWidthRef = React.useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
+  /* ⚠️⚠️ A-1172：`sidebarOpen` 的 ref（与 `sidebarWidthRef` 同一条「render 期刷新」路线）。
+     为什么需要它：`--left-w`（浮层稳态宽的另一半）必须反映**左栏**是否**折叠** ——
+     折叠时左栏占位为 0 ⇒ 这个变量必须是 0，否则 `calc(100% − 240px)` 会让右栏
+     左侧空出一整条（实测：`probe-a1170-float-left.mjs`，正是用户报的
+     「左侧边栏折叠后布局异常」）。
+     ⚠️ 但它**不能**写左栏的**实测宽度** —— 那会逐帧把动画中间值写回，
+       与 ResizeObserver 构成「观测→写回→再观测」的闭环（A-1166 实测的六轮抖动源头，
+       守卫见 `tests/core-ts/a1166-left-w-feedback.spec.ts`，**那条不变量必须继续成立**）。
+     ⇒ 取「**目标占位宽**」：`sidebarOpen ? sidebarWidth : 0`
+        —— 既是**目标值**（满足 A-1166），又能**反映折叠**（满足 A-1172）。 */
+  const sidebarOpenRef = React.useRef(sidebarOpen);
+  sidebarOpenRef.current = sidebarOpen;
   const rightWidthRef = React.useRef(rightWidth);
   rightWidthRef.current = rightWidth;
 
@@ -2205,7 +2617,13 @@ export default function App(): JSX.Element {
               floatRef.current = el;
               inlineChatRef.current = el;
             }}
-            className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}
+            /* ⚠️⚠️⚠️ A-1173：**用呈现模式 `hostIsFloat`，不用业务状态 `mainIsFloatLayout`**。
+               原写法（`mainIsFloatLayout ? … : …`）与下面 `style` 的判据**不同源**：
+               `style` 用 `hostIsFloat`、`className` 用业务状态 ⇒ 只要两者有一帧不同步，
+               宿主就会"类还是浮窗、盒模已是内联"（或反之），那正是 A-1171 要治的跳变。
+               A-1158/A-1171 的既有结论：呈现模式必须由 `hostIsFloat` 统管
+               （`mainIsFloatLayout || floatClosing || floatAnimOut || floatAnim === "in"`）。 */
+            className={hostIsFloat ? "float-window" : "inline-chat-host"}
             /* ⚠️⚠️⚠️ A-1171：**呈现模式与业务状态解耦** —— 退场动画走完前不切成内联。
                用户自检数据（1239 帧；A-1169/A-1170 之后剩余的 14 次反转**全部**在此，
                三次操作各命中一次：3618 / 5606 / 7461ms）。逐帧实测那个切换点：
@@ -2282,9 +2700,12 @@ export default function App(): JSX.Element {
 
 
 
-        {/* 右侧栏（工作树 / 任务 / 终端 / 浏览器）——A-980-R24：外层 wrapper 承载几何同步渐隐渐显
-            （opacity 逐帧 = smoothstep(实测宽/展开宽)，与 .right-sidebar 的 width 过渡同拍；无固定时间点）。
-            ⚠️ 该 wrapper 是 `<webview>` 的祖先：opacity 只在过渡期间存在，结束即清空，切勿改为常驻值 */}
+        {/* 右侧栏（工作树 / 任务 / 终端 / 浏览器）——A-980-R24：几何同步渐隐渐显由 App 侧 rAF 逐帧写入。
+            ⚠️⚠️ A-1189 更正：**写入目标是内层 `.right-sidebar`，不是本 wrapper**
+              （铁律 53：本 wrapper 是 `<webview>` 的祖先、且自身无背景 ⇒ 不该承载 fade；
+               真正带背景带内容的是内层）。
+              opacity 只在**过渡期间**存在，收工即清空（展开）或钉 `0`（收起，此时宽度也是 0）；
+              窗口与时序见 `animateRightSidebar`：展开 `p`、收起 `1 - p`，与左栏同源常量。 */}
         {/* A-975-R4：wrapper 允许被收缩（flexShrink: 1）——右栏内部 min-width:260 兜底，
             这样窗口变窄时右栏会先让位，而不是把聊天区挤没 */}
         <div
@@ -2401,7 +2822,30 @@ export default function App(): JSX.Element {
                  ⚠️ `var(--left-w)` 未定义 ⇒ 整条 `calc` IACVT ⇒ 回落 `auto`
                    ⇒ 与上面 `--right-target-w` 同一套"未定义即让位"语义，普通展开不受影响。 */
             width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"
-              : (mainIsFloatLayout ? "var(--right-target-w)" : "auto") }}
+              /* ⚠️⚠️⚠️ A-1179：过渡期（`rightMin0` 且**非退场期**）**不给容器宽度**
+                 ⇒ 回落到 `auto` ⇒ 容器宽度 = **内容宽**（`.right-sidebar` 由
+                 `--right-target-w` 驱动、自己在过渡、旧宽是 px **可插值**）
+                 ⇒ 容器**永远贴合内容** ⇒ 结构上不可能出现"容器已到位、内容还在长"的空白。
+                 ## 根因（用户 trace `float-trace-2026-10-04T10-26-12.json`，窗口 1707 宽）
+                   `t=507ms rw=768+939  rs=768+939`（一致）
+                   `t=514ms rw=268+1439 rs=725+982`  ← 容器一步到位、内容还在途中
+                   `t=519ms rw=268+1439 rs=649+1059` ← 空白 286px，**峰值 380px**
+                 那段空白落在 `.app` 的 `var(--bg)`（不透明深色）⇒ **用户看到一帧黑屏/闪**。
+                 ## 为什么"给容器加过渡"这条走不通（实测两次都失败）
+                   · 容器旧宽来自**内联**的非浮层分支 = **`auto`** ⇒ **`auto` 不参与插值**
+                     ⇒ 无论 CSS 写多少 `transition`，它都是**硬跳**（A-1176 注释已记这条）。
+                   · 试过"两段式写变量 + `void offsetWidth` 强制同步布局"⇒ 实测空白 **582→662px**，
+                     **完全没改善** —— 内联宽读的变量在 React 提交那帧已是目标值，没有"旧值"可插值。
+                 ⇒ 结论：容器不该有宽度，宽度是**内容**的事。
+                 ⚠️⚠️ **必须排除退场期**（实测踩过）：`dismissFloat` 走`right-wrapper-exit`，
+                    它要求容器**保持铺满**（A-1157-R2：`right-wrapper-anim` 那条是
+                    `width: var(...) !important`，退场期不写该变量 ⇒ IACVT ⇒ 回落 `auto`）。
+                    一旦这里也返回 `undefined`，退场期容器就变成内容宽 ⇒
+                    实测 `|rw.width − rs.width|` 峰值 **657px**（修之前是 0）⇒ 退出方向反而坏了。
+                 ⚠️ 与 A-1155"过渡期不给宽度会死锁"那段注释不矛盾：那次锁的是**内容**
+                   （`rightWidth` state 被钉死）⇒ 内容不变；现在内容由 `--right-target-w`
+                   驱动、**每轮都在变** ⇒ auto 跟随 ⇒ 不锁。 */
+              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto") }}
         >
         <RightSidebar
           open={rightOpen}
@@ -2497,6 +2941,82 @@ export default function App(): JSX.Element {
    *  残留、拖拽脱离鼠标自己跟着走（用户实测"拖拽变窄卡住、强行拉动还会拽动左侧边栏"）。
    *  指针捕获后事件一律回到本元素，不再被 guest 截走；blur / pointercancel 仍是兜底。 */
 
+  /* ⚠️⚠️ A-1190②：**几何动画期的「凹陷」淡出** —— 三个函数 = 一条完整的生命周期。
+     ·
+     * `beginChatGeomFade()`：几何动画**起点**（`animateLeftSidebar` / `animateRightSidebar`）
+     *   置位"这一轮是几何动画"，窗口 = `SIDEBAR_WIDTH_MS + CHAT_GEOM_TAIL_MS`。
+     * `startChatDip()`：RO 的 `mark()` 判定"确实在几何动画里、且宽度真的变了"时调用 ——
+     *   淡出 135ms → 停 → 淡入 275ms，**两段都落在侧边栏那 500ms 内**（推导见 `CHAT_DIP_*`）。
+     * `cancelChatDip()`：交给别的路径（拖拽起点）或强制收工（`endChatFreeze`）时清干净。
+     *
+     * ## 为什么起表点是 RO 而不是按钮（这条决定了 A-1190① 不被破坏）
+     *   用户诉求①是「只有发生**实质性比例变化**才消失」。若由按钮直接起表，浮层态下
+     *   点按钮（聊天区宽度**没变**）也会凹陷一次 = 平白无故黑一下。
+     *   由 RO 起表 ⇒ "盒子真的变宽了"这个判据天然是**前置条件**（A-1190① 的同一条不变量）。
+     *   ⚠️ 代价是起表比点击晚 ≤1 帧（RO 回调在尺寸变化那一帧之后）⇒ 三个窗口相对
+     *     侧边栏自己的窗口**整体平移 ≤16ms**。不值得为它引入"点击时刻"第二条时间轴。 */
+  function beginChatGeomFade(): void {
+    cancelChatDip(); // 快速连点：上一轮凹陷作废，本轮由 RO 重新起表（铁律 22：推进责任只留一处）
+    chatGeomAnimRef.current = true;
+    window.clearTimeout(chatGeomTimerRef.current);
+    chatGeomTimerRef.current = window.setTimeout(() => {
+      chatGeomTimerRef.current = 0;
+      chatGeomAnimRef.current = false;
+    }, SIDEBAR_WIDTH_MS + CHAT_GEOM_TAIL_MS);
+  }
+
+  function cancelChatDip(): void {
+    window.clearTimeout(chatDipInTimerRef.current);
+    chatDipInTimerRef.current = 0;
+    window.clearTimeout(chatDipEndTimerRef.current);
+    chatDipEndTimerRef.current = 0;
+    window.clearTimeout(chatGeomTimerRef.current);
+    chatGeomTimerRef.current = 0;
+    chatDipActiveRef.current = false;
+    chatGeomAnimRef.current = false;
+    /* ⚠️ 这里**不摘** `slime-fading`：接手的路径决定它怎么用 ——
+       拖拽 = RO 的 `mark()` 会立刻重新挂上并接管两个时长变量；
+       几何动画 = 下一次 `startChatDip` 自己挂。
+       在这里摘掉反而会在"凹陷的淡出半途"把内容瞬间弹回不透明（一个可见的闪）。 */
+  }
+
+  function startChatDip(): void {
+    /* ⚠️ 同一轮**只起一次**（RO 在过渡期每帧都回调）：重复调用会把下面那条
+       "t=`CHAT_DIP_IN_AT_MS` 摘类"的定时器逐帧重置 ⇒ 永远到不了点 ⇒ 内容一直黑到宽度停住，
+       又多出一条 200ms 尾巴。这与 A-1152 ② 的"阶段定时器只起一次"是同一个坑。 */
+    if (chatDipActiveRef.current) { return; }
+    chatDipActiveRef.current = true;
+    /* ⚠️ 接管聊天页的淡出状态：把"三段式"留下的两条定时器清掉。
+       否则窗口 resize 刚结束（`chatSettleTimerRef` 还差 40ms 到点）就点按钮，
+       那条**迟到的恢复**会在凹陷播到一半时把类摘掉 ⇒ 凹陷的淡入提前发生。 */
+    window.clearTimeout(dragPhaseTimerRef.current);
+    dragPhaseTimerRef.current = 0;
+    window.clearTimeout(chatSettleTimerRef.current);
+    chatSettleTimerRef.current = 0;
+    window.clearTimeout(chatFreezeFallbackRef.current);
+    chatFreezeFallbackRef.current = 0;
+    /* 两个方向的时长**各写一个变量**（挂类读 out、摘类读 in）——
+       必须在挂类**之前**写：transition 时长取的是"变化后样式"里解析出来的值。 */
+    document.body.style.setProperty("--chat-fade-out-dur", `${CHAT_DIP_OUT_MS}ms`);
+    document.body.style.setProperty("--chat-fade-in-dur", `${CHAT_DIP_IN_MS}ms`);
+    document.body.classList.add("slime-fading");
+    window.clearTimeout(chatDipInTimerRef.current);
+    window.clearTimeout(chatDipEndTimerRef.current);
+    /* t=`CHAT_DIP_IN_AT_MS`（200ms）：摘类 ⇒ 走**常驻**那条过渡回到 1，历时 `CHAT_DIP_IN_MS`
+       （275ms）⇒ t=475ms 淡入完毕 —— 与**侧边栏内容**淡入完毕同一瞬间。
+       这一步就是"同步"的全部秘密：淡入不再是"等宽度停住之后另起一段"。 */
+    chatDipInTimerRef.current = window.setTimeout(() => {
+      chatDipInTimerRef.current = 0;
+      document.body.classList.remove("slime-fading");
+    }, CHAT_DIP_IN_AT_MS);
+    /* t=`SIDEBAR_WIDTH_MS`（500ms）：本轮作废 = 侧边栏宽度过渡收工那一拍。
+       它同时兜住"宽度过渡最后一帧的 RO 回调"—— 没有它会立刻又起一轮新的淡出（观感 = 闪黑）。 */
+    chatDipEndTimerRef.current = window.setTimeout(() => {
+      chatDipEndTimerRef.current = 0;
+      chatDipActiveRef.current = false;
+    }, SIDEBAR_WIDTH_MS);
+  }
+
   /* A-1152：**渐入恢复** —— 拖动/缩放结束时不能硬摘类（内容会瞬间跳回 100% 不透明）。
      ⚠️ 三段时序：摘 `slime-resizing`（恢复渲染 + 允许 opacity 过渡）→ 下一帧摘 `slime-fading`
      （触发 opacity 0→1 的过渡）⇒ 内容**淡入**回来。
@@ -2515,11 +3035,14 @@ export default function App(): JSX.Element {
     document.body.classList.remove("slime-resizing");
     // A-1153：拖动期的"禁宽度过渡"标志也在这里摘（它与 resizing 同生命周期）
     document.body.classList.remove("slime-dragging");
-    /* ⚠️⚠️ A-1154：**必须先取消那条 140ms 的阶段定时器**，否则它在松手后才把
+    /* ⚠️⚠️ A-1154：**必须先取消那条阶段定时器**（`fading → resizing`），否则它在松手后才把
        `slime-resizing` 挂上（且再没人摘）⇒ 聊天区闪烁 + 残留隐藏（见 dragPhaseTimerRef 注释）。
        取消之后本函数自己按"已是拖动结束"的语义摘两类 —— 顺序不变。 */
     window.clearTimeout(dragPhaseTimerRef.current);
     dragPhaseTimerRef.current = 0;
+    // ⚠️ A-1190：本轮已恢复 ⇒ 取消"宽度停住 ⇒ 恢复"定时器（见 chatSettleTimerRef）。
+    window.clearTimeout(chatSettleTimerRef.current);
+    chatSettleTimerRef.current = 0;
     requestAnimationFrame(() => {
       document.body.classList.remove("slime-fading");
     });
@@ -2528,11 +3051,23 @@ export default function App(): JSX.Element {
     chatFreezeFallbackRef.current = window.setTimeout(() => {
       document.body.classList.remove("slime-fading");
     }, 200);
+    /* ⚠️ A-1190②：凹陷的两条定时器也必须在这里清掉 —— 否则它们在"本轮已恢复"之后到点，
+       会把随后**新一轮**淡出刚挂上的 `slime-fading` 提前摘掉（= 淡出被腰斩）。
+       ⚠️ 放在最后一行是**语义无关的**：它只清定时器、不碰 DOM，而同一个同步块里
+          上面已经排好的"下一帧摘 fading"不受它影响 ⇒ 顺序不改变结果。
+          之所以仍写在最后而不是插进上面那堆 `clearTimeout` 中间：`a1152 ⑫` 有一条形状
+          守卫钉着"函数开头 500 字符内必须出现两次 `classList.remove(...)`"——
+          往那中间插代码会把两次 remove 推出窗口（守卫是死的、代码是活的，别让守卫管错东西）。 */
+    cancelChatDip();
   }
 
   function handleSidebarResize(e: React.PointerEvent): void {
     e.preventDefault();
     setSidebarCustom(true); // A-1018：一旦用户手动拖过，就按 px 记住（不再走 CSS 比例自适应）
+    /* ⚠️⚠️ A-1177：标记「左栏正在被拖动」—— 让 `attachLeftWidthObserver` 的 `sync` 让位
+       （否则它会按 A-1172 的语义写拖动**起点**的宽度、覆盖掉 `onMove` 的逐帧真值）。
+       摘除在 `onUp` / `onCancel` 两处（成对，铁律 11）。 */
+    leftDraggingRef.current = true;
     /* ⚠️⚠️ A-1153：**拖动第一帧就禁掉宽度过渡**，否则不跟手。
        此前 `transition: none` 只由 `slime-resizing` 提供，而那个类是 **140ms 之后**才挂的
        （两阶段设计要求"先 fading 后 resizing"，见下面注释）⇒ **拖动头 140ms 内**
@@ -2542,36 +3077,37 @@ export default function App(): JSX.Element {
          （它只作用于 `.sidebar` / `.right-sidebar` 的 width，不碰 `.chat-scroll` 的 opacity 过渡）。
        ⚠️ 摘除统一在 `endChatFreeze()`（松手/取消/失焦三条路都走它）。 */
     document.body.classList.add("slime-dragging");
+    /* ⚠️⚠️ A-1190②：拖拽**接管**聊天页的淡出 —— 把"几何动画窗口"与"凹陷"一起作废。
+       不这么做的话：上一次点按钮留下的凹陷若还在飞（≤500ms），`mark()` 会一直让位给它，
+       而凹陷那条"t=200ms 摘类"的定时器到点就把内容放出来、**且拖动期间再没人管**
+       ⇒ 拖着拖着文本就露出来了（= A-1190 要治的现象在拖拽路径上复发）。
+       ⚠️ 这里**不摘** `slime-fading`（见 `cancelChatDip` 的说明）：RO 会立刻用拖动时长接管它。 */
+    cancelChatDip();
     const captureEl = e.currentTarget as HTMLElement;
     try { captureEl.setPointerCapture(e.pointerId); } catch { /* 指针 id 已失效则忽略 */ }
-    /* A-1152：聊天区淡出**必须分两阶段**（用户实测「我要的对话文本渐出消失衔接动画没有」）。
-       ⚠️⚠️ 上一轮写错了时序：`slime-resizing` 与 `slime-fading` **同一帧**挂上，
-         而 `slime-resizing` 带 `content-visibility: hidden` ⇒ **元素立刻跳过渲染**
-         ⇒ opacity 过渡**根本不会执行**（没有任何一帧被绘制）⇒ 观感就是"啪地消失"。
-       ⇒ 正确顺序：**先只挂 fading**（此时 `content-visibility` 仍为 visible，过渡能播）
-         → 过渡结束后**再挂 resizing**（跳过布局；此时已看不见，跳过不改变观感）。
-       ⚠️ `slime-resizing` 里还有拖动期必需的 `transition: none`（跟手），
-         所以它不能提前挂—— 提前挂会把淡出过渡也一起关掉。 */
-    document.body.classList.add("slime-fading");
-    /* 兜底：transitionend 可能不来（元素被 display 影响 / 用户极快松手）。
-       140ms 后无论如何进入第二阶段，绝不卡在"半透明 + 还在重排"的中间态。
-       ⚠️⚠️ A-1154：句柄必须存进 ref 并在 `endChatFreeze()` 里取消 —— 否则**短促拖拽**
-         松手后它才到点，把 `slime-resizing` 挂上且再没人摘 ⇒ 闪烁 + 聊天区残留隐藏。 */
-    window.clearTimeout(dragPhaseTimerRef.current);
-    dragPhaseTimerRef.current = window.setTimeout(() => {
-      dragPhaseTimerRef.current = 0;
-      /* ⚠️ 到点时若这一轮拖动已经结束（`slime-dragging` 已被 endChatFreeze 摘掉）⇒ 本阶段作废。
-         这条是"定时器与结束边界竞争"的守卫：没有它，上面那个 clearTimeout 一旦被
-         某条未覆盖的路径绕过（如 renderer 卡顿导致的延迟回调），延迟回调仍会污染。 */
-      if (!document.body.classList.contains("slime-dragging")) { return; }
-      document.body.classList.remove("slime-fading");
-      document.body.classList.add("slime-resizing");
-    }, 140);
+    /* ⚠️⚠️⚠️ A-1190：**这里不再挂 `slime-fading`**（保留 `slime-dragging` 就够）。
+       用户原话：「现在的消失判定是一点击侧边栏的边缘，还没有拖拽就消失，这不对，改成只有发生
+       **实质性比例变化**才会消失」。
+       旧实现是 `pointerdown` **无条件**挂 `slime-fading` + 起一条 140ms 阶段定时器 ⇒ 用户只是
+       **点一下**分栏边缘（还没拖动）聊天页就开始淡出（`probe` 实测 down 帧 opacity 就到 0.85）。
+       ⇒ 现在淡出**只有一个触发源**：观察聊天区盒子的 `ResizeObserver`
+         （判据 = "宽度真的变了"，即用户说的"实质性比例变化"；见上方那段 effect）。
+         拖动时宽度逐帧变 ⇒ RO 逐帧触发 ⇒ 淡出照旧发生，只是**从"真的动了"那一刻起算**。
+       ⚠️ `slime-dragging` **不能**跟着删：它管的是"拖动期禁宽度过渡 + 光标 + 禁选区"
+         （A-1153/A-1154 的跟手修复），与淡出无关，且必须在**第一帧**就挂上。
+       ⚠️ 两阶段（`fading → resizing`）与左右栏各自的判据全部搬进 RO 的 `mark()`
+         —— 同一件事只留一个产地（铁律 11）。 */
     const startX = e.clientX;
     /* ⚠️⚠️ A-1154：与右栏同一处修复 —— 基准取 **DOM 实测宽度**，不取 `sidebarWidthRef.current`（state）。
        `.sidebar` 有 `max-width: 520px` 与 `min-width: 240px`，且窗口变窄时会被 flex 压缩
        ⇒ state 与实宽的错位会和右栏一样表现为"不跟手 / 到上限后完全无响应"。 */
     const asideEl = leftSidebarRef.current;
+    /* ⚠️⚠️ A-1173：**拖拽是"用户手动把它拉回来"，必须顺手清掉收起动画留下的 `opacity: 0`**。
+       收起动画收工时会把内联 `opacity` 钉成 `"0"`（见 `animateLeftSidebar` 的说明：
+       那是为了防"最后几 px 闪出文本"）⇒ 若用户接着在折叠态把左栏拖宽，
+       宽度长回来了而透明度仍是 0 ⇒ **左栏隐形**（比闪烁更糟）。
+       ⇒ 在拖拽起点无条件复位成 CSS 常态（拖动期不做淡入淡出，视觉上也是对的）。 */
+    if (asideEl) { asideEl.style.removeProperty("opacity"); }
     const startWidth = asideEl ? asideEl.getBoundingClientRect().width : sidebarWidthRef.current;
     let lastW = startWidth;
     /* A-1152：**拖动期间直接改 DOM 的 style.width，零 React 重渲染**；松手才 setSidebarWidth 落 state。
@@ -2591,20 +3127,35 @@ export default function App(): JSX.Element {
       // 左栏：鼠标向右 → 变宽（范围 240–520，**不给占满全屏**）
       lastW = Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, ev.clientX - startX + startWidth));
       if (asideEl) { asideEl.style.width = `${lastW}px`; }
+      /* ⚠️⚠️⚠️ A-1177：**浮层态下必须逐帧把左栏实宽同步给 `--left-w`**。
+         为什么需要：浮层态右栏容器的宽度是「窗口宽 − 左栏占位变量」，而那个变量写的是
+         **目标占位宽** `sidebarOpen ? sidebarWidth : 0`（A-1172 定的语义）——
+         而拖动为了"零 React 重渲染"**不动 state**（松手才落，见本函数上方注释）
+         ⇒ **拖拽期间那个变量一直停在拖动开始前的值** ⇒ 右栏纹丝不动、而左栏已经拖开了
+         ⇒ 两者边界脱节（用户看到的"中间分隔线分开 / 空白区域"）。
+         真机实测（`probe-a1177-drag-gap.mjs`）：拖到最宽再松手后
+         `sb.w=240` 而 `rw.l=520` ⇒ **错位 280px**。
+         ⚠️ 这里写的是 `lastW`（刚算出的**目标**宽，一个 number），
+            不是 `getBoundingClientRect()` ⇒ 不触碰 A-1166 那条"不许写实测派生值"的红线
+            （那条防的是"逐帧把**动画中间值**喂回去"形成观测闭环；拖动路径没有这个闭环）。 */
+      if (floatStateRef.current !== "none") {
+        rightWrapperRef.current?.style.setProperty("--left-w", `${lastW}px`);
+      }
     };
     const onUp = (): void => {
+      leftDraggingRef.current = false; // A-1177：与起点那处成对（铁律 11）
       endChatFreeze();
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
       document.removeEventListener('pointercancel', onCancel);
       window.removeEventListener('blur', onCancel);
       try { captureEl.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
-      // 清掉拖动期写下的内联 width：否则 React 认为 prop 未变而不再写回，会留下脏内联值
-      if (asideEl) { asideEl.style.width = ""; }
       // A-980-R27：只有**真拖到几何下限**（240 + 吸附带）才收起。旧的 `<= 300` 是绝对像素，
       // 把「刚比下限宽一点」的整段区间都算成"拖到底"——左栏默认宽才 262，于是收起后重新
       // 拉宽，宽度一从下限起步就又触发收起，观感就是"左栏拉不开"。
       if (lastW <= SIDEBAR_MIN_W + SIDEBAR_SNAP_W) {
+        // 走收起 ⇒ 清掉拖动期写下的内联宽（`.collapsed` 的 `width: 0 !important` 会接管）
+        if (asideEl) { asideEl.style.width = ""; }
         // 下次展开用的宽度 = **这次拖拽开始前的宽度**（用户真正想要的那个宽度）。
         // 若拖之前本来就贴着下限（没有可留念的宽度），回落到按屏幕比例算的默认宽——
         // 保证下次展开出来的宽度一定在吸附带之外，不会一展开就又被自己"拖到底"。
@@ -2618,17 +3169,40 @@ export default function App(): JSX.Element {
         return;
       }
       const w = Math.round(Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, lastW)));
+      /* ⚠️⚠️⚠️ A-1177：**不要清空内联宽 —— 要把它钉成最终生效值 `w`**。
+         原来这里（以及函数开头）都写 `asideEl.style.width = ""`，注释理由是
+         "否则 React 认为 prop 未变而不再写回，会留下脏内联值"。那个理由**只对了一半**：
+         React 的 style diff 比的是**上次渲染下发的 style 对象** —— 命令式清空之后
+         React **并不知道**，于是下次渲染若 `sidebarWidth` 恰好没变就**不会重写**内联宽
+         ⇒ `sb` 回落到 CSS 的 `clamp(240px, 17.5vw, 520px)`（本机窗口下正好 240）
+         ⇒ 而 `--left-w` 已经是 520 ⇒ **错位 280px**（实测 `probe-a1177-drag-gap.mjs`）。
+         ⇒ 正确做法：把内联宽**钉成 `w`**（与 `setSidebarWidth(w)` 即将下发的值是同一个）
+           ⇒ 命令式写的与 React 下发的**逐字一致** ⇒ 不管 React 重不重写都对。 */
+      if (asideEl) { asideEl.style.width = `${w}px`; }
+      if (floatStateRef.current !== "none") {
+        rightWrapperRef.current?.style.setProperty("--left-w", `${w}px`);
+      }
       setSidebarWidth(w);
       localStorage.setItem('slime_sidebar_w', String(w));
     };
     const onCancel = (): void => {
+      leftDraggingRef.current = false; // A-1177：与起点那处成对（铁律 11）
       endChatFreeze();
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
       document.removeEventListener('pointercancel', onCancel);
       window.removeEventListener('blur', onCancel);
-      // 失焦/指针作废：用户并没有"松手"，不判吸附收起；但当前几何必须落 state 并清掉内联 width
-      if (asideEl) { asideEl.style.width = ""; }
+      // 失焦/指针作废：用户并没有"松手"，不判吸附收起；但当前几何必须落 state
+      /* ⚠️⚠️⚠️ A-1177：与 `onUp` 同一条修正 —— **钉成最终值、不要清空**。
+         清空会让 `sb` 回落到 CSS 的 `clamp(...)`，而 `--left-w` 还停在拖动中的值
+         ⇒ 两者错位（实测 280px）。见 `onUp` 里那段完整说明。
+         ⚠️ `Math.round` **内联**在 `setSidebarWidth(Math.round(` 里：
+            守卫 `a1154-drag-baseline` ③ 钉的正是这个形状，抽成中间变量会让它假红（实测踩过）。 */
+      const wCancel = Math.round(Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, lastW)));
+      if (asideEl) { asideEl.style.width = `${wCancel}px`; }
+      if (floatStateRef.current !== "none") {
+        rightWrapperRef.current?.style.setProperty("--left-w", `${wCancel}px`);
+      }
       setSidebarWidth(Math.round(Math.max(SIDEBAR_MIN_W, Math.min(SIDEBAR_MAX_W, lastW))));
     };
     document.addEventListener('pointermove', onMove);
@@ -2644,30 +3218,18 @@ export default function App(): JSX.Element {
     /* ⚠️⚠️ A-1153：与左栏同一处修复 —— 拖动第一帧就禁宽度过渡（见 handleSidebarResize 的说明）。
        右栏同样把 `transition: none` 延迟到 140ms 后的 `slime-resizing`，导致拖动头段不跟手。 */
     document.body.classList.add("slime-dragging");
+    cancelChatDip(); // ⚠️ A-1190②：与左栏**逐字同一条** —— 拖拽接管聊天页淡出（理由见 handleSidebarResize）
     const captureEl = e.currentTarget as HTMLElement;
     // A-980-R27：与左栏同一套——指针捕获，避免指针划过 `<webview>`（OOPIF）时
     // mousemove/mouseup 被 guest 进程吃掉 → 拖拽卡死且 slime-resizing 残留
     try { captureEl.setPointerCapture(e.pointerId); } catch { /* 指针 id 已失效则忽略 */ }
-    /* A-1152：聊天区淡出**必须分两阶段**（用户实测「我要的对话文本渐出消失衔接动画没有」）。
-       ⚠️⚠️ 上一轮写错了时序：`slime-resizing` 与 `slime-fading` **同一帧**挂上，
-         而 `slime-resizing` 带 `content-visibility: hidden` ⇒ **元素立刻跳过渲染**
-         ⇒ opacity 过渡**根本不会执行**（没有任何一帧被绘制）⇒ 观感就是"啪地消失"。
-       ⇒ 正确顺序：**先只挂 fading**（此时 `content-visibility` 仍为 visible，过渡能播）
-         → 过渡结束后**再挂 resizing**（跳过布局；此时已看不见，跳过不改变观感）。
-       ⚠️ `slime-resizing` 里还有拖动期必需的 `transition: none`（跟手），
-         所以它不能提前挂—— 提前挂会把淡出过渡也一起关掉。 */
-    document.body.classList.add("slime-fading");
-    /* 兜底：transitionend 可能不来（元素被 display 影响 / 用户极快松手）。
-       140ms 后无论如何进入第二阶段，绝不卡在"半透明 + 还在重排"的中间态。
-       ⚠️⚠️ A-1154：与左栏同一处修复 —— 句柄存 ref、`endChatFreeze()` 里取消，
-         并在到点时校验"本轮拖动是否已结束"（见 dragPhaseTimerRef 的详细说明）。 */
-    window.clearTimeout(dragPhaseTimerRef.current);
-    dragPhaseTimerRef.current = window.setTimeout(() => {
-      dragPhaseTimerRef.current = 0;
-      if (!document.body.classList.contains("slime-dragging")) { return; }
-      document.body.classList.remove("slime-fading");
-      document.body.classList.add("slime-resizing");
-    }, 140);
+    /* ⚠️⚠️⚠️ A-1190：与左栏**逐字同一条**——这里不再挂 `slime-fading`，也不起阶段定时器。
+       淡出的唯一触发源是观察聊天区盒子的 `ResizeObserver`（判据 = "宽度真的变了"）。
+       理由与完整说明见 `handleSidebarResize` 同一处注释（用户诉求①：点一下边缘就淡出是不对的）。
+       ⚠️ 右栏还有一条自己的理由：浮层态下拖右栏时聊天区宽度**不变**
+         （右栏在 `flex-shrink` 里让位）⇒ RO **本来就不会触发** ⇒ 不淡出。
+         A-1181 当年靠 `floatStateRef` 手写分流，现在这条分流**由判据本身天然给出**
+         （同一个事实不再写两处 —— 铁律 11）。 */
     const startX = e.clientX;
     /* ⚠️⚠️ A-1154：`startWidth` 必须取 **DOM 实测宽度**，不能取 `rightWidthRef.current`（state）。
        真机 CDP 实测（`probe-drag-robust.mjs`，可见窗口 + 真实输入）抓到一条确定性失败：
@@ -2683,6 +3245,11 @@ export default function App(): JSX.Element {
        ⇒ 基准取实测宽后，"鼠标位移 → 宽度变化"在**任何** state/实宽错位下都严格 1:1。 */
     const asideEl = document.querySelector<HTMLElement>(".right-sidebar");
     const startWidth = asideEl ? asideEl.getBoundingClientRect().width : rightWidthRef.current;
+    /* ⚠️⚠️⚠️ A-1189：与左栏 A-1173 同一条兜底 —— 收起动画收工时会把内层的内联 `opacity`
+       钉成 `"0"`（见 `animateRightSidebar` 收起支的 done），用户在**折叠态**手动把它拖宽时
+       必须先清掉，否则右栏整块隐形（`handleSidebarResize` 起始就是同一处、同一理由）。
+       ⚠️ 只摘 `opacity`：不能顺手写 `1` —— 写死 1 会盖掉正在跑的动画帧（同 A-1173 的结论）。 */
+    if (asideEl) { asideEl.style.removeProperty("opacity"); }
     let lastW = startWidth;
     // A-918++ 修复「拖动卡死 + 宽度不更新」：此前 onMove → rAF → setRightWidth 每帧触发 App 整树
     // 重渲染（ChatPanel/RightSidebar/设置面板全重渲）→ 主线程阻塞 → 鼠标卡死、宽度跟不上。
@@ -2769,6 +3336,13 @@ export default function App(): JSX.Element {
   function animateLeftSidebar(nextOpen: boolean): void {
     leftFadeCancelRef.current?.();
     leftFadeCancelRef.current = null;
+    /* ⚠️⚠️ A-1190②：声明"这一轮宽度变化来自**几何动画**"（宽度走 CSS 过渡、
+       时长 `SIDEBAR_WIDTH_MS`）⇒ RO 的 `mark()` 会给聊天页走**"凹陷"淡出**
+       （淡出+淡入都落进那 500ms），而不是"淡出 → 停住 → 淡入"三段式（总时长 2×）。
+       ⚠️ 这里**只置位、不起表**：真正的起表在 RO（"聊天区盒子真的变了宽"）——
+          这样才能同时守住 A-1190①（浮层态点按钮、浮窗宽不变 ⇒ 不该有任何淡出）。
+       窗口到期自清（见 `beginChatGeomFade`）。 */
+    beginChatGeomFade();
     const el = leftSidebarRef.current;
     // 展开：先把内容置 0（否则会先闪一帧全不透明），再交给几何同步逐帧放开
     if (nextOpen && el) {
@@ -2784,7 +3358,28 @@ export default function App(): JSX.Element {
         if (done) { setLeftMin0(false); }
         const node = leftSidebarRef.current;
         if (!node) { return; }
-        node.style.opacity = done ? "" : String(p);
+        /* ⚠️⚠️⚠️ A-1173：**按方向取反** —— `runGeometrySyncFade` 是个「渐**入**」引擎：
+           它把虚拟宽度算成 `w = min + span × u`（**0 → full**），于是 `p` 从 0 涨到 1。
+           而**收起**时左栏实际宽度是 `240 → 0`，方向**恰好相反** ⇒ 直接拿 `p` 当 opacity，
+           就是把「渐出」跑成了「渐入」：第一帧 `w=0 ⇒ p=0`（瞬间全透明），
+           随后 `p` 一路涨回 1（**文本重新可见**）。
+           真机实测（`probe-a1173-leftfade.mjs`，修复前）：
+             `t=31ms 宽=208 opacity=0`（**第二帧就没了**）
+             → `t=226ms 宽=51 opacity=0.545`（开始回升）
+             → `t=344ms 宽=16 opacity=1`（复位）
+           ⇒ 正是用户说的「先渐出消失、再在最后几帧闪出文本」。
+           ⇒ 展开用 `p`（0→1）、收起用 `1 - p`（1→0），两端都平滑、都与宽度同拍。
+           ⚠️ `done` 时**按方向**复位：展开写 `""`（回 CSS 的 1）；收起写 `"0"` ——
+              因为收工那一帧宽度可能还差最后几 px（rAF 粒度与 CSS transition 的结束时刻
+              不会逐像素一致），此时若复位成 1，那几 px 里的文本仍会露出来
+              （就是用户看到的「闪出」）。
+              ⚠️ 残留的 `opacity: 0` 由**拖拽路径**兜底清掉（`handleSidebarResize` 起始 ——
+                 否则在折叠态手动拖宽会让左栏隐形）。 */
+        if (done) {
+          if (nextOpen) { node.style.removeProperty("opacity"); } else { node.style.opacity = "0"; }
+        } else {
+          node.style.opacity = String(nextOpen ? p : 1 - p);
+        }
         /* ⚠️⚠️ A-1155-R7：**浮层态下左栏宽度变化必须同步给 `--left-w`**。
            用户明确要求「浮层时左栏保持可见，但不影响用户能手动折叠」——
            左栏一折（240→0 或 0→240），浮层稳态的 `calc(100% - var(--left-w))` 就得跟着变，
@@ -2794,18 +3389,35 @@ export default function App(): JSX.Element {
               `--left-w` 只喂宽度计算、不触发额外合成（wrapper 自己的 width 过渡负责平滑）。
            ⚠️ `node.style.opacity` 的 done 复位仍走原路，这里只多写一个变量。 */
         if (floatStateRef.current !== "none") {
-          /* ⚠️⚠️⚠️ A-1166：同样**不写实测宽度**。这是**第二条**逐帧闭环 ——
-             本回调就是 `animateLeftSidebar` 的 rAF onFrame，每一帧都在跑；
-             而 `.sidebar` 常驻 `transition: 0.5s`，它自己每一帧宽度都在变
-             ⇒ 把动画中间值写回 `--left-w` ⇒ 喂 `calc(100% - var(--left-w))`
-             ⇒ 右栏宽度跟着逐帧变 ⇒ 右栏左缘与浮窗默认 x 又跟着变。
-             ⇒ 一律写目标值 `sidebarWidthRef.current`。 */
-          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(sidebarWidthRef.current)}px`);
+          /* ⚠️⚠️⚠️ A-1172：与 `attachLeftWidthObserver` 的 `sync` **同一条判据、同一个量** ——
+             写「**目标占位宽**」`sidebarOpenRef.current ? sidebarWidthRef.current : 0`。
+             （铁律 11：同一事实写两处就必漂 ⇒ 两处必须逐字同源，改动请成对改。）
+             ⚠️ A-1166 曾经在这两处都写裸 `sidebarWidthRef.current`（目标展开宽）——
+               它切断了「观测→写回→再观测」的闭环（那条不变量**必须保留**），
+               但代价是**折叠左栏后这个变量停在展开宽** ⇒ 右栏左侧空出 240px
+               （用户现象「左侧边栏折叠后布局异常」）。
+             ⚠️ 也**不能**改成写本帧实测宽（`node.getBoundingClientRect().width`）：
+               本回调就是逐帧 rAF，写实测等于把动画中间值再喂回去
+               ⇒ 又回到 A-1166 要消灭的那个闭环（守卫 `a1166-left-w-feedback.spec.ts` ④ 明令禁止）。
+             ⇒ 目标占位宽是唯一同时满足两者的形式。 */
+          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(sidebarOpenRef.current ? sidebarWidthRef.current : 0)}px`);
         }
       },
       // A-980-R34：左栏用专属提前窗 [0.40,0.95]——渐出从 95% 宽就开始、渐入从 40% 宽就启动，
       // 比右栏 [0.45,0.90] 时机更早（带宽 55% 也更宽，窄栏下依然明显）
-      { min: 0, full: sidebarWidthRef.current, loRatio: LEFT_FADE_LO, hiRatio: LEFT_FADE_HI },
+      /* ⚠️⚠️⚠️ A-1173：`duration` **必须显式传左栏自己的宽度过渡时长**（`SIDEBAR_WIDTH_MS`
+         = index.css 里 `.sidebar { transition: width 0.5s }`）。
+         不传就落回 `GEOM_FADE_MS`（280）—— 比 CSS 的 500ms **短 220ms** ⇒
+         透明度提前收工、而宽度还在滑 ⇒ 收工那帧的 `opacity` 复位让文本重新可见
+         （用户现象「先渐出消失再闪出文本」）。实测见 `probe-a1173-leftfade.mjs`。
+         ⚠️⚠️⚠️ A-1174：**可见性窗口按方向取不同的那一组** ——
+         展开用 `[LEFT_FADE_LO, LEFT_FADE_HI]`（按实际宽度语义，落在"宽的时候"，本来就对）；
+         收起用 `[LEFT_FADE_COLLAPSE_LO, LEFT_FADE_COLLAPSE_HI]`（按"实际宽度 100%→40%"反算出的
+         虚拟宽比例，见那组常量的推导）—— 否则渐出会晚到"实际宽度只剩几十 px"才发生，
+         那一段内容已被裁掉 ⇒ 肉眼看不到渐出（用户原话「折叠的渐出衔接动画直接没了」）。 */
+      nextOpen
+        ? { min: 0, full: sidebarWidthRef.current, loRatio: LEFT_FADE_LO, hiRatio: LEFT_FADE_HI, duration: SIDEBAR_WIDTH_MS }
+        : { min: 0, full: sidebarWidthRef.current, loRatio: LEFT_FADE_COLLAPSE_LO, hiRatio: LEFT_FADE_COLLAPSE_HI, duration: SIDEBAR_WIDTH_MS },
     );
   }
 
@@ -2881,12 +3493,20 @@ export default function App(): JSX.Element {
    *  ⚠️ 历史坑（务必保留此约束）：右栏 wrapper 里嵌着 `<webview>`（Chromium OOPIF），
    *  祖先一旦**永久**带着 opacity<1 / backdrop-filter / filter，guest 会被放进独立合成层，
    *  造成「页面能渲染、鼠标命中测试失效」= "能进网站但什么都点不动"。
-   *  这里的 opacity 只在**过渡期间**存在（动画结束立刻清空为 CSS 常态 1），不构成永久合成条件。
+   *  这里的 opacity 只在**过渡期间**存在（展开收工立刻清空回 CSS 常态 1；
+   *  收起收工钉 `0`，但那一刻宽度也已归 0 ⇒ 不构成"可见却点不动"的条件），不构成永久合成条件。
+   *  ⚠️⚠️ A-1189：fade 的**写入节点是内层 `.right-sidebar`**（不是 wrapper）—— 见展开支里
+   *  `rsEnter` 那段注释（铁律 53：wrapper 是 `<webview>` 的祖先、无背景，不该承载 fade）。
    *  A-980-R27：原注释里的"1s 硬兜底保证复位"已随几何化内核删除——复位靠"宽度停住即 done"这条
    *  必然成立的判据（过渡跑完宽度一定停）；唯一的"取消但不重启"路径是切会话，那里会显式清空 opacity。 */
   function animateRightSidebar(nextOpen: boolean, nextWidth?: number, isFloat?: boolean): void {
     rightFadeCancelRef.current?.();
     rightFadeCancelRef.current = null;
+    /* ⚠️⚠️ A-1190②：与左栏**逐字同一条** —— 声明"这一轮是几何动画"，让聊天页走"凹陷"淡出
+       （用户原话：「点击折叠、展开按钮时，侧边栏与中间对话栏的动画还是没同步」）。
+       ⚠️ 右栏的宽度过渡同样是 `SIDEBAR_WIDTH_MS`（`runGeometrySyncFade` 里显式传的同一个常量）
+          ⇒ 与凹陷的三个窗口**同一个时钟**。 */
+    beginChatGeomFade();
     /* ⚠️⚠️ A-1155：**取消上一次过渡 = 它的 done 回调永远不会跑** ⇒ 必须在这里补做清理**。
        `runGeometrySyncFade` 的 `onFrame(_, true)` 是**上一次过渡结束时**才执行清理的唯一时机；
        而本行刚把上一次 cancel 掉（切会话/连点/普通展开都会走到）⇒ 那次 done 被丢掉
@@ -2941,14 +3561,36 @@ export default function App(): JSX.Element {
         : (nextWidth !== undefined && nextWidth > window.innerWidth * 0.8);
       if (nextWidth !== undefined && !isFloatExpand) { setRightWidth(nextWidth); }
       if (el && isFloatExpand) { el.style.setProperty("--right-target-w", `${Math.round(nextWidth!)}px`); }
-      /* ⚠️⚠️⚠️ A-1164：**删掉**原本这里的 `el.style.opacity = "0"`。
-         它把整个右栏砸成全透明，再由几何进度拉回来 ⇒ 实拍录像里过渡中右栏内容区
-         p95 只有 10.0（静止态是 133.0）⇒ 一整块面板在平移的同时由黑变亮 = "抽搐"。
-         ⚠️ 必须**连同 onFrame 里的 opacity 写入一起删**：只删这一处的话，收工时
-         没有任何代码去恢复，**右栏会永久停在 opacity 0**（比抽搐更糟）。
-         两处成对删除，正是铁律 11 的"写/摘成对"反过来用：此处原本就是一处**只写不摘**。 */
+      /* ⚠️⚠️⚠️ A-1189：**恢复右栏的几何同步淡入淡出**（用户：「右侧边栏的渐入渐出动画又没了，
+         只有衔接动画啊」）。
+         ## 为什么恢复（而不是继续沿用 A-1164 的"删除"）
+           A-1164 的删除是**实拍证据**换来的（铁律 52：不要推翻用实拍换来的决策）——
+           当时的证据是：过渡中右栏内容区 p95 = 10.0，静止态 133.0 ⇒ **亮字整块消失**
+           ⇒ 整块面板在平移的同时由黑变亮 = "抽搐"。
+           ⚠️ 但那份证据的**成因**是当时那条支的可见窗口带 `[0.06, 0.42]`：
+             · 展开：`opacity = p` 在 `u = 0.42` 就到 1（早）；
+             · 收起：`opacity = 1 - p` 在 `u = 0.06`（30ms）就归 **0**
+               ⇒ 收起后 94% 的时间整块面板是全透明的（p95 = 10 正是这一刻）。
+           ⇒ 真正的病根是**收起方向的窗口定反了**，不是"右栏不该淡"。
+         ## 本轮做法：与左栏**逐字同语言**（用户：「你做成左侧边栏那样就行，照做」）
+           · 展开 `opacity = p`，窗口 `[LEFT_FADE_LO, LEFT_FADE_HI]`（= 0.40 / 0.95，**淡入晚**）；
+           · 收起 `opacity = 1 - p`，窗口 `[LEFT_FADE_COLLAPSE_LO, LEFT_FADE_COLLAPSE_HI]`
+             （= 0 / 0.27，**淡出早**，见 A-1174 的反算推导）；
+           · `done`：展开 `removeProperty("opacity")`、收起钉 `"0"`（与左栏逐字相同）。
+           ⇒ 两组窗口都**不在过渡中段长时间半透明**，正是绕开 A-1164 那条证据的取法。
+         ⚠️ 写的是**内层 `.right-sidebar`，不是容器 `.right-wrapper`**（铁律 53 / A-980-R24）：
+            容器是 `<webview>` 的祖先且**无背景**，真正带背景带内容的是内层。
+         ⚠️ 展开起点**必须**同步把它压到 `"0"`：展开窗口 `[0.40, 0.95]` 在 `u < 0.40` 时恒有
+            `p === 0`，而引擎的首帧要等第一次 rAF —— 不压 0 的话，前 40% 会**先全不透明地
+            长出来、再突然掉到 0 重淡**（一帧闪）。与左栏 `animateLeftSidebar` 里那句
+            `el.style.opacity = "0"` 是同一处、同一理由。
+         ⚠️ 残留的 `opacity: 0`（收起收工钉的）由**拖拽路径**兜底清掉
+            （`handleRightbarResize` 起始，对称于左栏 `handleSidebarResize`）——
+            否则在折叠态手动拖宽会让右栏隐形。 */
+      const rsEnter = el?.querySelector<HTMLElement>(".right-sidebar") ?? null;
+      if (rsEnter) { rsEnter.style.opacity = "0"; }
       // A-980-R34：展开期间临时解除内部 .right-sidebar 的 min-width（CSS: .right-wrapper-no-min .right-sidebar
-      // { min-width: 0 }）——否则 260px 下限把展开钳在下限之上，渐变带 [0.45,0.90]×full 进不去，
+      // { min-width: 0 }）——否则 260px 下限把展开钳在下限之上，渐变带 [0.40,0.95]×full 进不去，
       // 窄栏展开看不到渐入。done 后复位。
       setRightOpen(true);
       setRightMin0(true);
@@ -3002,50 +3644,61 @@ export default function App(): JSX.Element {
            ⇒ 改量真正在动的那个盒子：淡入淡出重新跟随真实的宽度运动。
            ⚠️ `querySelector` 每次一帧跑一次，开销可忽略（单层子树、无通配符）。 */
         () => rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null,
-        (_p, done) => {
+        (p, done) => {
           if (done) {
             setRightMin0(false);
             setRightWebviewPin(null);
-            /* A-1152：钉宽变量只在过渡期有意义 ⇒ 与 `right-wrapper-anim` 同时摘掉，
-               否则稳定态会一直钉着旧值（窗口 resize 后内容不跟随）。
-               A-1153：`--right-target-w` 同理（成对写/摘，铁律 11）——残留会让下一次
-               普通展开误用上一次的超宽目标 ⇒ 过渡方向错乱。 */
-            const rw = rightWrapperRef.current;
-            rw?.style.removeProperty("--right-body-pin");
-            rw?.style.removeProperty("--right-target-w");
+            /* ⚠️⚠️⚠️ A-1175：**这里不许再摘 `--right-target-w` / `--right-body-pin`**。
+               本 done 里同时有 `setRightMin0(false)`（React state、**异步提交**）——
+               若在此处**同步**摘 `--right-target-w`，两者之间必然夹一个 **IACVT 帧**：
+               内联宽度那一帧仍写着 `var(--right-target-w)` 而变量已不存在 ⇒ 回落 `auto`
+               （内容宽 **431px**）⇒ `.right-sidebar` 的 `100%` 跟着变成 431
+               ⇒ 右栏一帧缩掉 661px 再弹回（实测 `layout-shift value=0.3891`）
+               = 用户原话「窗口化那一瞬有一帧异常抖动、抽搐」。
+               ⚠️ `setTimeout(…, 32)` 治不了（实测提交比 done 晚约 35ms）⇒ 只能挂 effect。
+               ⇒ 摘除统一由 `React.useEffect(…, [rightMin0])` 承担（见本组件顶部那处；
+                 effect 跑的时候 React **一定已经提交**，此时内联宽度已换成
+                 `calc(100% - var(--left-w, 0px))`，不再读这个变量）。
+               ⚠️ 守卫 `a1174-leftward-fade-and-enter.spec.ts` 的 A-1175 条是**次数**判据：
+                  本函数内这两个变量的 `removeProperty` 各自只许剩 **2 处**
+                  （函数入口 reset + 收起支起点）。在这里加回来会立刻变红。 */
           }
-          const node = rightWrapperRef.current;
+          /* ⚠️⚠️⚠️ A-1189：右栏的进场淡入 —— 与左栏**逐字同语言**。
+             ⚠️ 节点必须是**内层 `.right-sidebar`**（铁律 53 / A-980-R24：容器
+                `.right-wrapper` 是 `<webview>` 的祖先，不承载 fade；且它无背景）。
+             ⚠️ 历史（A-1164）曾整段删除这里的 opacity 写入，理由是"实拍录像里过渡中
+                右栏内容区 p95 掉到 10.0 = 亮字整块消失"。那条证据的**成因**是当时
+                收起支的窗口 `[0.06, 0.42]` 让 `1 - p` 在 `u = 0.06` 就归零
+                （94% 的时间全透明）—— 现在两组窗口按 A-1174 反算过，不在中段长时间半透明。
+                完整推导见本支起点（`rsEnter`）那段注释。 */
+          const node = rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null;
           if (!node) { return; }
-          /* ⚠️⚠️⚠️ A-1164：**右栏不再有进场淡入淡出** —— 全程保持不透明。
-             证据（用户实拍录像逐帧取证，2560×1600）：
-               · 静止态   右栏内容区 mean=28.6 / p95=133.0
-               · 过渡中   右栏内容区 mean=10.9 / p95=**10.0**
-             p95 从 133 掉到 10 ⇒ 不是"变暗"，是**亮字整个消失** ⇒ 过渡期间整个右栏
-             几乎是全黑的，收工瞬间又变亮。
-             源头是本回调里原本那句 `node.style.opacity = done ? "" : String(p)`，
-             配合 `animateRightSidebar` 里的 `el.style.opacity = "0"`：
-             把**整个右栏**压到全透明，再用几何进度拉回来。
-             ⚠️ 为什么当初写错了：那段注释自己就记着「绝大部分过渡时间右栏都是半透明
-                ⇒ 观感乱七八糟」，却把它当成**要往前调的参数**（把可见窗口提前），
-                而没有质疑"右栏**根本不该淡**"。
-                右栏有**不透明背景**，它是在自己家的矩形里平移，不存在"淡入才不突兀"；
-                淡入只会让一整块面板**在滑动的同时由黑变亮** —— 而这正是"抽搐/闪烁"。
-             ⚠️ 为什么我的探针四轮都没发现：`opacity` 0→1 是**单调**的，
-                "方向反转"检测完全看不到它 —— 我测到的"单调"恰恰是它看起来正常的原因。 */
-          if (done) { node.style.removeProperty("opacity"); }
+          if (done) {
+            /* ⚠️ A-1173：`done` 时**按方向**复位 —— 展开摘除（回 CSS 常态 1）、
+               收起钉 `"0"`（收工那一帧宽度可能还差最后几 px，若复位成 1，那几 px 里的
+               文本仍会露出来 = 用户看到的「尾帧闪出文本」）。 */
+            if (nextOpen) { node.style.removeProperty("opacity"); } else { node.style.opacity = "0"; }
+          } else {
+            /* ⚠️ A-1173：引擎是「渐**入**」的（`p: 0 → 1`），而收起时实际宽度是 `full → 0`
+               ⇒ 直接拿 `p` 当 opacity 会把渐出跑成渐入（先瞬间透明、再涨回来）。 */
+            node.style.opacity = String(nextOpen ? p : 1 - p);
+          }
         },
-        /* ⚠️⚠️ A-1152：**窗口化（大幅展开）时透明度带要更早**（用户反馈「衔接动画也做得
-           乱七八糟」）。默认带是 `[0.45, 0.90] × full`，而窗口化时 `full = 整窗宽`
-           ⇒ 要涨到 90%×1388≈1250px 才完全不透明 ⇒ **绝大部分过渡时间右栏都是半透明的**
-           ⇒ 观感"乱七八糟"（内容半透明地漂着进来）。
-           ⇒ 与左栏 A-980-R34 同一个思路：**变化幅度越大，可见窗口越靠近起点**
-             （loRatio/hiRatio 收窄到 0.06/0.42：宽度到 42%×目标宽就完全显示）。
-           ⚠️ 只对"浮层态展开"这一支生效；普通展开（右栏回到 720px 档）仍用默认带，
-             否则普通展开会"刚动一下就全显示"，失去渐入感。
-           ⚠️ A-1155：判据同源改为 `isFloatExpand`（上面那处已算好，不再重复阈值判断）。 */
-        isFloatExpand
-          ? { min: 0, full: nextWidth ?? rightWidth, loRatio: 0.06, hiRatio: 0.42 }
-          : { min: 0, full: nextWidth ?? rightWidth },
+        /* ⚠️⚠️⚠️ A-1189：**渐变窗口与左栏逐字同源**（用户：「做成左侧边栏那样就行，照做」）。
+           · 展开用 `[LEFT_FADE_LO, LEFT_FADE_HI]`（0.40 / 0.95 ⇒ **淡入晚**，
+             宽度基本长到位了才完全显字）；
+           · 收起用 `[LEFT_FADE_COLLAPSE_LO, LEFT_FADE_COLLAPSE_HI]`（0 / 0.27 ⇒ **淡出早**，
+             按 A-1174 的 `ease(u)` 反算得出 —— 否则渐出会晚到"实际宽度只剩几十 px"、
+             那一段已被 `overflow: clip` 裁掉 ⇒ 肉眼只看到"快收完才闪一下"）。
+           ⚠️ 本轮**取消**了此前"窗口化那一支单独用更早的带 `[0.06, 0.42]`"的特例
+              （A-1152 定的）：那条特例正是 A-1164「整块面板由黑变亮」的成因之一
+              （收起方向 `1 - p` 在 `u = 0.06` 就归零）。用户要的是"像左栏那样的一致时机"，
+              而左栏两组窗口本身就不在中段长时间半透明 ⇒ 不必再有第三套带。
+              ⚠️ 若将来还要给窗口化单独调时机，**必须在 `LEFT_FADE_*` 之外新增常量并同步守卫**，
+                 不要就地改数值（铁律 11：同一事实一个产地）。 */
+        nextOpen
+          ? { min: 0, full: nextWidth ?? rightWidth, loRatio: LEFT_FADE_LO, hiRatio: LEFT_FADE_HI }
+          : { min: 0, full: rightWidth, loRatio: LEFT_FADE_COLLAPSE_LO, hiRatio: LEFT_FADE_COLLAPSE_HI },
       );
     } else {
       // 右栏占满时聊天悬浮窗一并退出浮层（恢复普通布局）
@@ -3078,25 +3731,32 @@ export default function App(): JSX.Element {
       rightFadeCancelRef.current = runGeometrySyncFade(
         /* A-1157：与展开支同源 —— 量真正在动的 `.right-sidebar`（wrapper 是硬跳的）。 */
         () => rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null,
-        (_p, done) => {
+        (p, done) => {
           if (done) {
             setRightWebviewPin(null);
-            // A-1153：与上面展开支对称 —— 过渡期变量成对摘除，绝不留残值
-            rightWrapperRef.current?.style.removeProperty("--right-target-w");
-            /* ⚠️ A-1155：done 时**再摘一次** `--right-body-pin`。
-               起点那次摘是为了"本轮不被上一次的残值污染"；这次摘是为了"本轮自己钉的值
-               在过渡结束后也归零"（否则本次 runGeometrySyncFade 期间若有人写它就会残留）。 */
-            rightWrapperRef.current?.style.removeProperty("--right-body-pin");
+            /* ⚠️⚠️⚠️ A-1175：与展开支同一条理由 —— 这里**不许**再同步摘那两个变量
+               （会夹一个 IACVT 帧 = 一帧 661px 抖动，完整推导见展开支 done 里的注释）。
+               ⚠️ 本支的起点（`rwEl0`）已经摘过一次（"本轮不被上一轮残值污染"）；
+                  而"本轮自己钉的值归零"由 `React.useEffect(…, [rightMin0])` 承担。
+               ⚠️ 收起支不写 `--right-body-pin`（只有展开支写），所以起点摘一次即足够。 */
           }
-          const node = rightWrapperRef.current;
+          /* ⚠️⚠️⚠️ A-1189：收起方向也要淡出 —— 与展开支同一条语言（`1 - p`、窗口
+             `[LEFT_FADE_COLLAPSE_*, …]`、`done` 钉 `"0"`），推导见展开支。
+             ⚠️ A-1164 曾在**两个方向**都删掉 opacity（理由是"平移不需要淡入淡出"）；
+             那条结论的成因是**收起支的窗口曾取 `[0.06, 0.42]`** ⇒ `1 - p` 在 `u = 0.06`
+             就归零 ⇒ 剩下 94% 的时间整块面板全透明（实拍 p95=10.0 就是这一刻）。
+             A-1174 反算出的 `[0, 0.27]` 让"淡出"在**宽度还很大时**就完成，不再有那个中段。 */
+          const node = rightWrapperRef.current?.querySelector<HTMLElement>(".right-sidebar") ?? null;
           if (!node) { return; }
-          /* ⚠️ A-1164：收起方向**同样**不淡出（与展开方向同一条理由、同一条证据：
-             实拍录像里过渡中的右栏内容区 p95=10.0，而静止态是 133.0 —— 整块面板
-             在滑动的同时由黑变亮/由亮变黑，观感就是"抽搐"。右栏有不透明背景，
-             平移本身不需要淡入淡出。） */
-          if (done) { node.style.removeProperty("opacity"); }
+          if (done) {
+            if (nextOpen) { node.style.removeProperty("opacity"); } else { node.style.opacity = "0"; }
+          } else {
+            node.style.opacity = String(nextOpen ? p : 1 - p);
+          }
         },
-        { min: 0, full: rightWidth },
+        /* ⚠️⚠️⚠️ A-1189：收起窗口与左栏**逐字同源**（`[0, 0.27]`，见 `LEFT_FADE_COLLAPSE_*`
+           的反算推导）—— 这是用户诉求「淡出早一点 / 多早一点」的唯一落点。 */
+        { min: 0, full: rightWidth, loRatio: LEFT_FADE_COLLAPSE_LO, hiRatio: LEFT_FADE_COLLAPSE_HI },
       );
     }
   }
@@ -3201,9 +3861,54 @@ export default function App(): JSX.Element {
          在帧间让出主线程 ⇒ 右栏的宽度过渡能跑完它自己的 280ms，而不是被一帧冻住。
        ⚠️ 只包这一处：它对应的正是"一次性大重建"；其余状态（`rightMin0` 等）是在**驱动**动画，
          必须同步提交，包进来反而会延迟动画起点。 */
+    /* ⚠️⚠️⚠️ A-1174：**切换呈现模式那两帧，把宿主藏起来**。
+       为什么需要：这一下 `setFloatState("float")` 会让 `hostIsFloat` 变真
+       ⇒ 宿主当帧就从 `.inline-chat-host` 切成 `.float-window`
+       ⇒ 几何从「内联盒子」一步跳到「浮窗默认框」（实测 `240+380` → `252+666`，**+286px**），
+          而同一帧 `rw` / `main` 也在跳 —— 三个都在跳、且**都可见**（`hostOp=1`）
+       ⇒ 用户原话「窗口化的那一下右侧边栏还是会抽搐闪烁」。
+       实测（`probe-a1173-float-jerk.mjs` ① 段）：
+         ` 6ms host=240+380  hostOp=1  cls="inline-chat-host"`
+         `12ms host=252+666  hostOp=1  cls="float-window"`   ← 切换帧、不透明
+       ⇒ 藏两帧（React 提交 + 浏览器应用），让那一跳**在不可见时发生**。
+
+       ⚠️⚠️ **为什么用 `visibility` 而不是 `opacity` 淡入**：
+         `.float-window` 有一条**刻意的** `opacity: 1`（A-1152/A-1160），注释写明
+         "浮窗**显式不透明** —— 将来有人给它加 opacity 过渡，右栏内容就会再次透上来叠印，
+          这正是 A-1159 的失败"。浮窗下方就是右栏 ⇒ 半透明期间两层会叠影。
+         `visibility` 没有这个副作用（不是半透明，是直接不画）。
+       ⚠️ 不写 `node.style.opacity` 的另一层原因：宿主的 `style` 由 React 按
+         `floatBoxStyle` / `inlineChatHostStyle` **整体重设** ⇒ 手写的 `transition` 会被冲掉
+         （实测：手动压 0 只维持一帧、淡入只持续 7ms）。而 `visibility` **不在那两个对象里**，
+         React 的 style diff 不会碰它 ⇒ 写法安全。
+       ⚠️ 用 `setTimeout` 而不是 rAF：窗口 hidden 时 rAF 会被停掉，宿主会永久藏住（隐形）。 */
+    const hostEnter = chatHostRef.current;
+    if (hostEnter) { hostEnter.style.visibility = "hidden"; }
+    /* ⚠️⚠️⚠️ A-1180：**`.main` 也要藏一帧**（A-1174 只藏了宿主 `host`，漏了它）。
+       ## 根因（`probe-a1180-visible-hole.mjs` 双采样实测，进入窗口化）
+         `17ms  main Δwidth=-721  rb Δwidth=+721  host Δleft=+12`
+       那一帧 `main-float` 类刚挂上、而 `.main.main-float { width: 0 !important }`
+       还没生效 ⇒ **`.main` 的 721px 宽度一帧内塌成 0、下一帧又回来**。
+       ⚠️ **它是可见的**：`.main { background: var(--bg) }`（不透明）
+       ⇒ 藏 `host` 盖不住它 ⇒ 用户看到的就是「窗口化那一瞬一帧抽搐」。
+       ⚠️ A-1152 的注释说「浮层态下 `<main>` 不渲染（渲染 null）」—— **实测它仍在 DOM 里**
+         （只是被 `width:0` 压掉）⇒ 那条注释里的前提在当前代码里**不成立**，不能据此认为它无害。
+       ⇒ 与宿主**同帧、同拍**藏/恢复（同一处`setTimeout(32ms)`）。
+       ⚠️ 用 `visibility` 而不是 `display:none`：后者会让 `.main` 子树一起消失，
+         而 `.main` 里可能有需要保留布局的节点；`visibility` 只是不画。
+       ⚠️ `.main` 的 `style` 由 React 按 `className`/`style` 下发，但 **`visibility` 不在其中**
+         （它只有 `className`）⇒ 手写内联不会被 style diff 冲掉。 */
+    const mainEnter = document.querySelector<HTMLElement>(".main");
+    if (mainEnter) { mainEnter.style.visibility = "hidden"; }
     React.startTransition(() => {
       setFloatState("float");
     });
+    window.setTimeout(() => {
+      const n = chatHostRef.current;
+      if (n && n.style.visibility === "hidden") { n.style.visibility = ""; }
+      const m = document.querySelector<HTMLElement>(".main");
+      if (m && m.style.visibility === "hidden") { m.style.visibility = ""; }
+    }, 32);
   }
 
   /**
@@ -3276,7 +3981,7 @@ export default function App(): JSX.Element {
          右栏回落到 `var(--right-sidebar-w)`（CSS 单源）并被 `.right-sidebar` 的常驻过渡接住。
        ⚠️ 摘除点在下面的几何 done（与 `setRightMin0(false)` 并排），不在这里。 */
     /* ⚠️⚠️⚠️ A-1157-R2：**先量后写、再挂 `anim`，顺序不能换**。
-       退场要��右栏一个**显式的过渡起点**（浮层满宽），下一帧再放开 ⇒ 满宽平滑收到自然宽。
+       退场要右栏一个**显式的过渡起点**（浮层满宽），下一帧再放开 ⇒ 满宽平滑收到自然宽。
        为什么必须"先量"：`setRightExitAnim(true)` 是**离散事件的同步 flush** ——
        它一执行，铺满规则就失效、右栏**当刻**掉到自然宽（实测退场第一帧就是 431px）
        ⇒ 再去量就量到错的起点。这正是第一版"延后一帧清理"仍然失败的原因：
@@ -3325,6 +4030,23 @@ export default function App(): JSX.Element {
       setFloatAnim("idle");
       // 期间被最小化/还原打断（那两条路会复位本标记）→ 这次退场作废，别把 state 落成 none
       if (!floatClosingRef.current || !genOk) { return; }
+      /* ⚠️⚠️⚠️ A-1173：**切换呈现模式之前，先把宿主 opacity 同步压到 0**。
+         为什么必须有这一句：下一行 `setFloatState("none")` 会让 `hostIsFloat` 变假
+         ⇒ 宿主当帧就从 `.float-window` 切成 `.inline-chat-host`
+         ⇒ 几何从「浮窗收拢后的 0×0」一步跳到「内联的完整尺寸」（实测 +661px），
+            而且**外壳样式也换了一套**。
+         唯一会把宿主 opacity 置 0 的地方是 `startInlineChatRevealFade`，
+         但它挂在**两帧 rAF 之后**（避开 React commit 边界）
+         ⇒ **切换那一帧宿主仍是完全不透明的** ⇒ 外壳"啪"地展开
+         = 用户报的「退出窗口化时抽搐、闪动」。
+         实测（`probe-a1173-float-jerk.mjs`，修复前）：
+           `402ms host=585+0   hostOp=1  cls="float-window"`（已收拢完）
+           `411ms host=240+661 hostOp=1  cls="inline-chat-host"`（**切换帧，不透明**）
+           `420ms hostOp=0`（一帧之后才压下去 —— 晚了）
+         ⇒ 在**这里同步压 0**（DOM 立即生效）；两帧后那次淡入会再置一次 0 并平滑淡入，
+            两者幂等，不冲突。 */
+      const hostExit = chatHostRef.current;
+      if (hostExit) { hostExit.style.opacity = "0"; }
       floatClosingRef.current = false;
       setFloatState("none");
       /* ⚠️ A-1155：done 时**再确认一次**过渡期状态已清（与上面起点那次构成"起点 + 收尾"双保险）。
@@ -3616,7 +4338,14 @@ export default function App(): JSX.Element {
           onDone?.(gen === floatFadeGenRef.current);
         }
       },
-      { min: minW, full: floatSizeRef.current.w },
+      /* ⚠️⚠️⚠️ A-1173：`duration` **必须显式传悬浮窗自己的几何过渡时长**
+         （`FLOAT_TRANSITION_MS` = 拼接进 `FLOAT_TRANSITION(_FULL)` 的那个 400）。
+         不传就落回 `GEOM_FADE_MS`（280）—— 比 CSS 的 400ms **短 120ms** ⇒
+         `floatAnim` 提前回 `idle`（= 收工），而浮窗几何**还在滑**（实测那一刻还剩 36px 宽）
+         ⇒ `hostIsFloat` 变假 ⇒ 宿主当场从"浮窗"切成"内联聊天区"
+         ⇒ 一帧内 `host 567+36` → `240+661` = 用户报的「退出窗口化时抽搐、闪动」。
+         守卫：`tests/core-ts/a1173-anim-duration-sync.spec.ts`。 */
+      { min: minW, full: floatSizeRef.current.w, duration: FLOAT_TRANSITION_MS },
     );
   }
 

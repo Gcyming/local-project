@@ -159,7 +159,13 @@ describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
     expect(d).toHaveProperty("events");
     const e2 = EmotionalState.fromDict(d);
     expect(e2.mood).toBe(e.mood);
-    expect(e2.valence).toBe(e.valence);
+    /* ⚠️ 判据只能是「3 位小数接近」，**不能**用 `toBe`：
+       `toDict()` 走 `round3`（权威 = Python 侧 `core/emotion.py::to_dict` 的 `round(v, 3)`），
+       而 `update()` 内部先调 `decay()`，半衰期按 `Date.now()` 算 ⇒ 8 次 update 之间的
+       **亚毫秒漂移**会把 `valence` 顶到 round3 的边界上（实测 `0.6399999845967296`）。
+       写 `toBe` 等于要求 round3 给出它没有的精度 ⇒ 单独跑绿、全量并发时红（**假守卫**）。
+       Python 侧同名用例只断言 `events`、从不比浮点值，正是同一个道理。 */
+    expect(e2.valence).toBeCloseTo(e.valence, 3);
     const c = e.clone();
     c.update({ success: false, failureType: "task" });
     expect(c.mood).not.toBe(e.mood); // 克隆独立

@@ -14,6 +14,12 @@
  *   · "移出监测栏"（留在监测栏里就是没做）。
  * 第 4 句（互斥）是**纯判据**，可以穷举验证 —— 放在 A 组。
  *
+ * ⚠️ A-1126（用户 2026-09-26）**更正了第 4 句的作用范围**：用户原话
+ *   「为什么点击后台任务后，**同行的子代理悬浮按钮会消失**？旧设定没删干净？」
+ *   ⇒ 互斥作用于**面板**（同一时刻只有一个 `.collapse.is-open`），
+ *     **按钮必须常显**。旧实现把 `is-faded` 挂在整格上（按钮一起淡出），已删除；
+ *     本文件新增"按钮常显 / 没有 is-faded"的那几条断言，防止旧设定复活。
+ *
  * 变异：`gui/scripts/mut-a1074-dock.mjs`
  */
 import { describe, it, expect } from "vitest";
@@ -21,7 +27,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DOCK_ORDER, toggleDock, closeDock, isDockOpen, isDockFaded, dockSlotState, dockSlotClassOf,
+  DOCK_ORDER, toggleDock, closeDock, isDockOpen, dockSlotClassOf,
   type DockState,
 } from "../../gui/src/renderer/pages/floatDock.js";
 
@@ -64,7 +70,7 @@ function between(src: string, from: string, next: string): string {
 }
 
 // ── ① 互斥判据（纯模块，可穷举）──────────────────────────────────────────────
-describe("A-1074①：「一个展开时另一个渐出」——用**单值**表达，非法状态不存在", () => {
+describe("A-1074①：「一个展开时另一个**面板**收起」——用**单值**表达，非法状态不存在", () => {
   it("toggle：点开就展开、再点收起、点另一个则切换", () => {
     expect(toggleDock(null, "procs")).toBe("procs");
     expect(toggleDock("procs", "procs")).toBeNull();
@@ -72,25 +78,21 @@ describe("A-1074①：「一个展开时另一个渐出」——用**单值**表
     expect(toggleDock("subs", "subs")).toBeNull();
   });
 
-  it("**穷举**全部 (状态 × 位置)：至多一个展开，且同一格不会既展开又渐出", () => {
+  it("**穷举**全部 (状态 × 位置)：至多一个面板展开", () => {
     const states: DockState[] = [null, "procs", "subs"];
     for (const s of states) {
       let openCount = 0;
       for (const id of DOCK_ORDER) {
-        const v = dockSlotState(s, id);
-        if (v.open) { openCount += 1; }
-        expect(v.open && v.faded, `状态 ${s} / ${id}：既展开又渐出，不可能态`).toBe(false);
-        expect(v.open, `isDockOpen 与 dockSlotState 说法不一致（${s}/${id}）`).toBe(isDockOpen(s, id));
-        expect(v.faded, `isDockFaded 与 dockSlotState 说法不一致（${s}/${id}）`).toBe(isDockFaded(s, id));
+        if (isDockOpen(s, id)) { openCount += 1; }
       }
-      expect(openCount, `状态 ${s} 下有 ${openCount} 个展开 —— 用户要的是「一个展开时另一个渐出」`).toBeLessThanOrEqual(1);
+      expect(openCount, `状态 ${s} 下有 ${openCount} 个面板展开 —— 用户要的是「一个展开时另一个让位」`).toBeLessThanOrEqual(1);
     }
   });
 
-  it("渐出恰好是「另一个在展开」：都收起时谁都不渐出", () => {
-    expect(DOCK_ORDER.map((k) => isDockFaded(null, k))).toEqual([false, false]);
-    expect(dockSlotState("procs", "procs")).toEqual({ open: true, faded: false });
-    expect(dockSlotState("procs", "subs")).toEqual({ open: false, faded: true });
+  it("展开态恰好是「当前那一个」：都收起时谁都不算展开", () => {
+    expect(DOCK_ORDER.map((k) => isDockOpen(null, k))).toEqual([false, false]);
+    expect(isDockOpen("procs", "procs")).toBe(true);
+    expect(isDockOpen("procs", "subs")).toBe(false);
   });
 
   it("closeDock **只关自己**：另一个正开着时不许被顺手关掉（无关操作互相踩）", () => {
@@ -99,11 +101,20 @@ describe("A-1074①：「一个展开时另一个渐出」——用**单值**表
     expect(closeDock(null, "procs")).toBeNull();
   });
 
-  it("类名唯一产地：`is-open` / `is-faded` 由同一对标志拼出来（两处各写一份必然漂移）", () => {
-    expect(dockSlotClassOf(true, false)).toBe("dock-slot is-open");
-    expect(dockSlotClassOf(false, true)).toBe("dock-slot is-faded");
-    expect(dockSlotClassOf(false, false)).toBe("dock-slot");
-    expect(dockSlotClassOf(true, false), "展开态必须带 is-open（CSS 靠它做强调）").toContain("is-open");
+  it("⚠️ A-1126 类名**只有** is-open 一个状态位（不再有 is-faded）", () => {
+    /* 用户 2026-09-26：「为什么点击后台任务后，同行的子代理悬浮按钮会消失？旧设定没删干净？」
+       ⇒ 渐出/互斥只作用于**面板**，按钮常显。这条守卫锁住"旧设定没有复活"：
+          ① 类名函数本身产不出 is-faded；
+          ② 模块里不再导出 isDockFaded / dockSlotState 这两个旧 API
+             （留着它们就是留着"第二个产地"，迟早有人再接回一个格子上去）。 */
+    expect(dockSlotClassOf(true), "展开态必须带 is-open（CSS 靠它做强调）").toBe("dock-slot is-open");
+    expect(dockSlotClassOf(false)).toBe("dock-slot");
+    for (const open of [true, false]) {
+      expect(dockSlotClassOf(open), "又产出了 is-faded → 另一个按钮会随面板展开而消失").not.toContain("is-faded");
+    }
+    const moduleSrc = strip(read("gui/src/renderer/pages/floatDock.ts"));
+    expect(moduleSrc, "又导出了旧的渐出判据 isDockFaded（按钮常显的旧设定会顺着它复活）").not.toContain("isDockFaded");
+    expect(moduleSrc, "又导出了旧的 dockSlotState（含 faded 的第二真相源）").not.toContain("dockSlotState");
   });
 
   it("渲染顺序的唯一出处是 DOCK_ORDER（组件里不许再写字面量数组）", () => {
@@ -178,9 +189,11 @@ describe("A-1074②：坞在输入框上方最右 / 面板向上展开 / 与产�
   it("与产物卡**同族**：面板内部直接用 `.collapse`，节拍只走共享变量（不写死时长）", () => {
     expect(DOCK, "面板没复用 .collapse 这个类 → 「与产物卡同族」只是说法").toContain("collapse${procsOpen");
     // 展开/收起相关的过渡时长一律取共享变量
-    expect(rule(".dock-slot"), "坞格的过渡没走 --collapse-dur").toContain("var(--collapse-dur)");
     expect(rule(".dock-pill"), "胶囊的过渡没走 --collapse-dur").toContain("var(--collapse-dur)");
-    for (const sel of [".float-dock", ".dock-panel", ".dock-slot", ".dock-pill"]) {
+    /* A-1126：`.dock-slot` 不再有过渡（它那条 `transition: opacity` 只服务于已被删掉的渐隐）
+       ⇒ 它**不该**出现在"必须走共享节拍"的名单里；改成断言它干脆没有过渡。 */
+    expect(rule(".dock-slot"), "坞格又长出了过渡（渐隐那套旧设定会顺着它复活）").not.toMatch(/transition/);
+    for (const sel of [".float-dock", ".dock-panel", ".dock-pill"]) {
       expect(rule(sel), `${sel} 里写死了秒数 —— 应改走 --collapse-dur/--collapse-ease`)
         .not.toMatch(/transition[^;]*\b\d+(\.\d+)?s\b/);
     }
@@ -202,8 +215,14 @@ describe("A-1074②：坞在输入框上方最右 / 面板向上展开 / 与产�
     expect(SUB_C, "子代理胶囊又出现摘要段了").not.toContain("dock-pill-summary");
     expect(CSS, "胶囊又有了变宽动画（max-width/width 过渡）").not.toMatch(/\.dock-pill[^{]*\{[^}]*max-width/);
     expect(rule(".dock-pill"), "胶囊写了 width:100%（应改为按内容定宽）").not.toMatch(/width:\s*100%/);
-    expect(CSS, "又退回 grid-template-columns 轨道方案（列轨在非定宽容器里收不拢）")
-      .not.toContain("grid-template-columns");
+    /* ⚠️ A-1130 **迁移**（不是删）：原来这里是**全表** `not.toContain("grid-template-columns")` ——
+       它靠"整个 CSS 里没人用这个属性"才成立，属于过宽的绊线。本轮 diff 色块（`.diff-rows-fit`）
+       正当使用了 `grid-template-columns`，把它撞红了。守卫的原意是"**坞**不许退回列轨方案"，
+       所以改成**逐个查坞自己的规则块** —— 意图不变，且不再对无关特性误报。 */
+    for (const sel of [".float-dock", ".dock-panel", ".dock-slot", ".dock-pill", ".dock-panel-card"]) {
+      expect(rule(sel), `${sel} 又退回 grid-template-columns 轨道方案（列轨在非定宽容器里收不拢）`)
+        .not.toContain("grid-template-columns");
+    }
   });
 
   it("A-1079：收起态箭头的方向 = **朝上**（面板从上方浮出），展开后翻成朝下", () => {
@@ -229,13 +248,26 @@ describe("A-1074②：坞在输入框上方最右 / 面板向上展开 / 与产�
     }
   });
 
-  it("「一个展开时另一个渐出」接了线：类名与面板态都由**单值**派生，且子代理不再自持 open", () => {
-    expect(DOCK, "坞格类名没从派生标志拼 → 渐出/展开会出现两套说法")
-      .toContain("dockSlotClassOf(procsSlot.open, procsSlot.faded)");
-    expect(PANEL_C, "坞的展开态不是单值 DockState → 会出现两个同时展开").toContain("useState<DockState>(null)");
+  it("A-1126「两个按钮都常显，只让**面板**互斥」接了线：类名由单值派生，子代理不自持 open", () => {
+    expect(DOCK, "坞格类名没从派生标志拼 → 展开态会出现两套说法")
+      .toContain("dockSlotClassOf(procsOpen)");
+    expect(PANEL_C, "坞的展开态不是单值 DockState → 会出现两个面板同时展开").toContain("useState<DockState>(null)");
     expect(PANEL_C, "还有独立的 procsOpen 状态 setter → 又变回两个真相源").not.toContain("setProcsOpen");
+    expect(PANEL_C, "父级又给子代理传了 faded → 另一个按钮会随面板展开而消失（用户报的正是这个）").not.toContain("faded");
     expect(SUB_C, "子组件自己持有 open → 那就是第二个真相源（互斥必然漂移）").not.toContain("const [open, setOpen]");
-    expect(SUB_C, "子代理没接收坞给的 slot 视觉态").toContain("slot: { open: boolean; faded: boolean }");
+    expect(SUB_C, "子代理没接收坞给的展开态").toContain("open: boolean");
+  });
+
+  it("⚠️ A-1126 按钮**常显**：两个按钮的渲染条件都与「另一个面板开着吗」无关", () => {
+    /* 用户报的症状是"点了后台任务，旁边那个子代理按钮就没了"。两个成因都不允许回来：
+       ① 坞格上挂渐隐类（由上面那条 CSS 断言挡住）；
+       ② 按钮的**渲染条件**里混进坞状态（如 `!subsOpen && agentProcs?.any && (`，或
+          `if (runs.length === 0 || open) return null;`）—— 那会在"另一个开着"时把按钮整个摘掉。
+       ⇒ 判据：坞里不许出现 `<坞状态> &&` 形式的门；子代理的 null 出口只看 `runs.length`。 */
+    expect(DOCK, "「后台进程」的渲染条件里混进了坞状态 → 另一个面板开着时它会消失")
+      .not.toMatch(/!?\s*(procsOpen|subsOpen)\s*&&/);
+    expect(SUB_C, "子代理按钮的 null 出口不再只看 runs.length → 加上别的条件就可能把按钮摘掉")
+      .toContain("if (runs.length === 0) { return null; }");
   });
 
   it("「子代理从右侧监测栏移出」：监测栏里不再有它，坞里有它", () => {
@@ -246,8 +278,14 @@ describe("A-1074②：坞在输入框上方最右 / 面板向上展开 / 与产�
     expect(DOCK, "子代理没进坞 → 移出后就没了入口").toContain("<SubAgentExpandButton");
   });
 
-  it("渐出必须**同时**让出点击（否则是个「看不见但挡住点击」的空洞）", () => {
-    expect(rule(".dock-slot.is-faded"), "渐出后仍接收点击 → 用户点到一片空白却没反应").toContain("pointer-events: none");
+  it("⚠️ A-1126：CSS 里**不许**再有 `.dock-slot.is-faded`（旧设定：另一个按钮整颗淡出）", () => {
+    /* 曾经那条是 `.dock-slot.is-faded { opacity: 0; pointer-events: none; }` —— 用户报的
+       「点击后台任务后，同行的子代理悬浮按钮会消失」就是它。用户裁决：「两个按钮都常显，
+       只让面板互斥」。⇒ 规则与配套的过渡一并删除；这条守卫防止它被"顺手"加回来。
+       ⚠️ 断言的是**选择器存在性**：`opacity: 0` 出现在别处（如 `:disabled`）不算违规。 */
+    expect(CSS, "`.dock-slot.is-faded` 回来了 → 另一个按钮又会随面板展开而消失").not.toContain(".dock-slot.is-faded");
+    expect(SUB_C, "子代理的胶囊又挂了 is-faded").not.toContain("is-faded");
+    expect(PANEL_C, "「后台进程」的坞格又挂了 is-faded").not.toContain("is-faded");
   });
 
   it("两条路都走同一套类名（「同款悬浮按钮」不是两套长得像的样式）", () => {

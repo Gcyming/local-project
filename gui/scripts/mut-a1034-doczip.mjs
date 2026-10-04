@@ -54,7 +54,10 @@ const MUTATIONS = [
   {
     name: "M4 pptx 不按页分节（丢掉结构）",
     file: "doc",
-    from: "parts.push(`--- 第 ${n} 页 ---\\n${lines.join(\"\\n\")}`);",
+    /* ⚠️ A-1133 同步（2026-09-28）：页标记已抽成**唯一产地** `pptPageMarker(n)`
+       （pptx 与老版 .ppt 两族共用同一形状）⇒ 这里跟着改。改动形状时必须同步本锚点，
+       否则本守卫静默失效（`check-mut-anchors` 会报"未命中"）。 */
+    from: "parts.push(`${pptPageMarker(n)}\\n${lines.join(\"\\n\")}`);",
     to: "parts.push(lines.join(\"\\n\"));",
   },
   {

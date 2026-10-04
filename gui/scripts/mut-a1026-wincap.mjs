@@ -41,11 +41,14 @@ const CAP_RETRY = CAP_RETRY_HEAD + "            windowCap: await resolveSessionW
 /* A-1084：windowCap 多了第二个载体 —— **引擎请求**（保险门 `planEngineSend` 靠它判"发不发"）。
    两条请求路径各一处：stream 用 `agent.model_choice`（本轮要用的模型），retry 查注册表拿同一个。
    缺任一处 ⇒ 那条路径的保险门永远放行（=做了等于没做）。 */
-const REQ_CAP_STREAM = "      windowCap: await resolveSessionWindowCap(agentId, loadingAgent?.model_choice ?? \"\").catch(() => undefined),\n";
+/* A-1131 重锚：形参从「Agent 的模型」换成了 `runModelChoice`
+   （= `effectiveModelChoice(会话覆盖, Agent 默认)` 算出的**本次要用的模型**）。
+   判据不变：两条请求路径都必须带上 windowCap，缺任一处 ⇒ 那条路径的保险门永远放行。 */
+const REQ_CAP_STREAM = "      windowCap: await resolveSessionWindowCap(agentId, runModelChoice).catch(() => undefined),\n";
 const REQ_CAP_RETRY =
   "      windowCap: await resolveSessionWindowCap(\n" +
   "        agentId,\n" +
-  "        (await agentRegistry!.findAgent(agentId).catch(() => null))?.model_choice ?? \"\",\n" +
+  "        effectiveModelChoice(retryMeta?.modelChoice, (await agentRegistry!.findAgent(agentId).catch(() => null))?.model_choice),\n" +
   "      ).catch(() => undefined),\n";
 const LOCAL_GUARD = "  if (isLocalEndpoint(input.baseUrl)) { return undefined; }\n";
 
@@ -142,7 +145,15 @@ const variants = [
 ];
 
 const files = [PROVIDERS, GUI_INDEX, CHAT_PANEL];
-const GUARDS = ["tests/core-ts/a1026-guards.spec.ts", "tests/core-ts/a1022-guards.spec.ts"];
+/* ⚠️ A-1131 补漏：`⑪/⑫`（引擎请求漏掉 windowCap）的守卫**不在** a1026/a1022 里，
+   而在 `tests/core-ts/context-loop.spec.ts`（"windowCap 从主进程一路透传到引擎"那条）。
+   原 GUARDS 列表漏了它 ⇒ 这两条变异在这个脚本里会**假存活**（改坏了也没人报）。
+   ⇒ 补进列表（实测：撤掉 ⑪ 后本 spec 变红 EXIT=1）。 */
+const GUARDS = [
+  "tests/core-ts/a1026-guards.spec.ts",
+  "tests/core-ts/a1022-guards.spec.ts",
+  "tests/core-ts/context-loop.spec.ts",
+];
 
 const sha = (p) => createHash("sha1").update(fs.readFileSync(p)).digest("hex");
 const before = Object.fromEntries(files.map((f) => [f, sha(f)]));

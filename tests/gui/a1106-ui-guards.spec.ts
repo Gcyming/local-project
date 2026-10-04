@@ -471,7 +471,12 @@ describe("A-1106 问题 6：产物卡展开必须有**横向**过渡", () => {
     expect(host, "找不到 .prod-host").toBeTruthy();
     expect(host!, "折叠态必须显式 width（不能靠 auto 由内容撑）").toMatch(/width:\s*fit-content/);
     expect(host!, "必须开 interpolate-size 才能插值 fit-content ↔ 100%").toMatch(/interpolate-size:\s*allow-keywords/);
-    expect(host!, "必须声明 width 过渡").toMatch(/transition:\s*width\s+var\(--collapse-dur\)/);
+    /* A-1146d 起改为**两段式**（用户口径：展开先横向再向下、折叠先向上再向左）⇒
+       横向自己有节拍 `--prod-x-dur`，并在**折叠方向**用 delay 等纵向收完。
+       ⚠️ 不能因为这里有 delay 就把这条删了 —— 删掉等于回到"没有横向过渡"，
+       而那会让 `.prod-host` 的 width 从 fit-content 瞬跳到 100%（另一头的静默失效）。 */
+    expect(host!, "必须声明 width 过渡（两段式的第一段，节拍 = --prod-x-dur）").toMatch(/transition:\s*width\s+var\(--prod-x-dur\)/);
+    expect(host!, "折叠方向：横向要等纵向收完（delay = --collapse-dur）").toMatch(/var\(--collapse-dur\)/);
     const open = ruleBody(CSS_CODE, ".prod-host.is-open");
     expect(open, "找不到 .prod-host.is-open").toBeTruthy();
     expect(open!).toMatch(/width:\s*100%/);
@@ -481,9 +486,14 @@ describe("A-1106 问题 6：产物卡展开必须有**横向**过渡", () => {
     expect(PANEL_CODE).toMatch(/className=\{`prod-host\$\{expanded === i \? " is-open" : ""\}`\}/);
   });
 
-  it("③ 高度过渡仍归 .collapse（两层各管一轴，不许各调各的时长）", () => {
+  it("③ 高度过渡仍归 .collapse；展开方向由 `.prod-host.is-open .collapse` 加 delay 串行", () => {
     const collapse = ruleBody(CSS_CODE, ".collapse");
     expect(collapse, "找不到 .collapse").toBeTruthy();
-    expect(collapse!, "高度过渡必须用房颤唯一的 --collapse-dur").toMatch(/transition:[^;]*grid-template-rows\s+var\(--collapse-dur\)/);
+    expect(collapse!, "高度过渡必须用唯一的 --collapse-dur").toMatch(/transition:[^;]*grid-template-rows\s+var\(--collapse-dur\)/);
+    /* A-1146d：展开方向要**等横向走完**才开始（两段式），折叠方向 delay=0（先收高度）。
+       两个方向顺序相反 ⇒ 只靠 `.is-open` 切换的那条规则来实现。 */
+    const scoped = ruleBody(CSS_CODE, ".prod-host.is-open .collapse");
+    expect(scoped, "缺少展开方向的纵向 delay ⇒ 两条轴又并行了（会重新掉帧）").toBeTruthy();
+    expect(scoped!).toMatch(/transition-delay:\s*var\(--prod-x-dur\)/);
   });
 });

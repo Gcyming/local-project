@@ -424,7 +424,7 @@ async def _tool_prompt_build(args: dict) -> str:
 
 async def _extract_last_frame(video_path: str, out_png: str) -> str:
     """A-063: 用 ffmpeg 抽取视频末帧（链式参考帧用）。成功返回帧路径，失败返回空串。"""
-    import subprocess
+    from core.subproc import run_text   # A-1134：外部命令唯一产地（text=False + 宽容解码）
     ffmpeg = _cfg_or("ffmpeg", "")
     if not ffmpeg or not Path(ffmpeg).is_file():
         import shutil
@@ -435,10 +435,12 @@ async def _extract_last_frame(video_path: str, out_png: str) -> str:
         out = Path(out_png)
         out.parent.mkdir(parents=True, exist_ok=True)
         # -sseof -0.1: 从文件末尾前 0.1 秒取一帧（末帧）
-        r = subprocess.run(
+        # ⚠️ A-1134：原为 `text=True` 且无 errors ⇒ ffmpeg 按控制台代码页输出中文路径时
+        #    reader 线程抛 UnicodeDecodeError 当场死（且调用方的 except 抓不到）。
+        r = run_text(
             [ffmpeg, "-y", "-sseof", "-0.1", "-i", str(video_path),
              "-frames:v", "1", str(out)],
-            capture_output=True, text=True, timeout=60,
+            timeout=60,
         )
         return str(out) if r.returncode == 0 and out.is_file() else ""
     except Exception:
@@ -697,22 +699,22 @@ async def _tool_video_concat(args: dict) -> str:
         list_file.write_text(
             "\n".join(f"file '{p.replace(chr(39), chr(39) + chr(92) + chr(39))}'" for p in paths),
             encoding="utf-8")
-        import subprocess
-        r = subprocess.run(
+        from core.subproc import run_text   # A-1134（同上）
+        r = run_text(
             [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
              "-c", "copy", str(out_path)],
-            capture_output=True, text=True, timeout=300,
+            timeout=300,
         )
         if r.returncode != 0 or not out_path.exists():
             # 方式 2：重编码拼接（不同编码/参数兜底）
             inputs = []
             for p in paths:
                 inputs += ["-i", p]
-            r2 = subprocess.run(
+            r2 = run_text(
                 [ffmpeg, "-y"] + inputs +
                 ["-filter_complex", f"concat=n={len(paths)}:v=1:a=0",
                  "-c:v", "libx264", "-preset", "fast", str(out_path)],
-                capture_output=True, text=True, timeout=600,
+                timeout=600,
             )
             if r2.returncode != 0 or not out_path.exists():
                 return f"[错误] 视频拼接失败: {(r.stderr or r2.stderr or '')[-200:]}"

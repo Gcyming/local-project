@@ -276,6 +276,36 @@ export interface ContractToolCall {
   function: { name: string; arguments: string };
 }
 
+/**
+ * A-1132：**收尾正文的唯一判据**（纯函数）—— 两条工具循环路径（`run` 非流式 / `runStream` 流式）
+ * 必须给出**同一个口径**的"这次运行到底交付了什么正文"。
+ *
+ * 语义：以**收尾阶段**的正文为准（`tailText`）；只有它为空时才回退到跨轮累积（`allText`）。
+ *
+ * 什么叫"收尾阶段"：**最后一次工具调用之后**的那些轮次（见两个循环里的 `tailText` 累加）。
+ *   · 本轮**以工具调用收尾**（`nextCalls.length > 0`）⇒ 这段正文是「说完就去做」的**过程叙述**，
+ *     整段丢弃、收尾阶段从头开始（下一轮才是"做完之后说了什么"）。
+ *   · 本轮**没有工具调用**（含被 steer / 计划核对**续轮**的情形）⇒ 并入收尾阶段。
+ *   于是「多段连续收尾」不会被误伤（用户在正文写到一半插引导 ⇒ 两段都属于最终交付），
+ *   而 25 轮的"计划叙述"不会堆进正文。
+ *
+ * 为什么不是"全过程累加"：
+ *   实测那条记录（`config/history.jsonl`）：`ai` = 4546 字 = 25 轮叙述累加（读起来是过程日志），
+ *   其中收尾那一轮只有 1471 字的正式汇报；用户原话「正文里面似乎混杂了思考历程里面的内容，
+ *   **正文非常长**」。过程叙述**本来就在时间线里**（同一条记录 `timeline` 有 25 个 `body` 步），
+ *   不会因为正文收敛而丢。
+ *
+ * 为什么回退 `allText`：它的原始注释写明了用途 ——「模型在最终轮可能只发工具调用、无任何正文」。
+ * 那种收尾下如果直接交付空串，用户会看到**空回复**（比长正文更糟）。
+ *
+ * ⚠️ 中断 / 预算熔断那两条路径**不走本函数**：那里的语义是"保留已产出的全部内容、不要丢弃"，
+ *    与"交付哪一段"是两件事（见 `runStream` 里两处 `allText` 的注释）。
+ */
+export function pickFinalBody(tailText: string | undefined, allText: string | undefined): string {
+  const r = tailText ?? "";
+  return r ? r : (allText ?? "");
+}
+
 export function toContract(calls: FlatToolCall[]): ContractToolCall[] {
   return calls.map((tc) => ({
     id: tc.id,
@@ -808,6 +838,9 @@ export class ToolLoop {
       startMs: Date.now(),
     };
     let allText = "";
+    /* A-1132：**收尾阶段**的正文（最后一次工具调用之后的所有 content）—— 交付口径，见 `pickFinalBody`。
+       ⚠️ 与 `allText`（全过程累加）刻意分开：前者回答"交付哪一段"，后者回答"保底别丢内容"。 */
+    let tailText = "";
     /** 跨轮累计上游 usage（缓存命中 token 透传） */
     let usageAcc: LoopUsage | undefined;
     /** A-974-R7：最近一轮 usage（窗口占用数据源，见 ToolLoopResult.lastUsage） */
@@ -864,6 +897,10 @@ export class ToolLoop {
       budget.tokens += tokEst(raw);
       if (raw) { allText = allText ? `${allText}\n\n${raw}` : raw; }
       const nextCalls = toFlat((msg?.tool_calls ?? []) as unknown as Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>);
+      /* A-1132：本轮**以工具调用收尾** ⇒ 这段正文是「说完就去做」的**过程叙述**，不进交付；
+         否则并入收尾阶段（含 steer / 计划核对续轮 —— 那是把一段答案切成两轮，两段都要留）。 */
+      if (nextCalls.length > 0) { tailText = ""; }
+      else if (raw) { tailText = tailText ? `${tailText}\n\n${raw}` : raw; }
       if (nextCalls.length === 0) {
         // A-1061⑥：与 runStream 同一语义 —— 本轮没要工具，但若有中途引导在等，
         // 就续一轮把它注入**同一轮运行**（不能要求"必须有工具调用"才算边界）。
@@ -881,8 +918,11 @@ export class ToolLoop {
           continue;
         }
         return {
-          text: raw,
-          raw,
+          /* A-1132：收尾正文的**唯一判据**（见 `pickFinalBody`）。
+             此前 `run()` 返回裸 `raw`（只最后一轮）、流式那条返回裸 `allText`（全过程累加）
+             ⇒ 同一件事两个产地，必然漂（用户就是在流式那条上看到"正文非常长"的）。 */
+          text: pickFinalBody(tailText, allText), // A-1132（run）
+          raw: pickFinalBody(tailText, allText),
           rounds: round,
           roundLog: roundLog.map((r) => r.details).flat(),
           reasonings,
@@ -918,8 +958,12 @@ export class ToolLoop {
     let usedTodoWrite = false;
     const roundLog: Array<{ round: number; details: ToolRoundDetail[] }> = [];
     const reasonings: string[] = [];
-    /** 跨轮累积的模型正文（每轮 roundText 只含当轮内容；最终 reply 必须包含全部轮次）。 */
+    /** 跨轮累积的模型正文（每轮 roundText 只含当轮内容）。**保底/中断**语义用它 ——
+     *  A-1132 起它不再是交付口径（交付看 `tailText` / `pickFinalBody`）。 */
     let allText = "";
+    /* A-1132：**收尾阶段**的正文（最后一次工具调用之后的所有 content）—— 交付口径，见 `pickFinalBody`。
+       ⚠️ 与 `allText`（全过程累加）刻意分开：前者回答"交付哪一段"，后者回答"保底别丢内容"。 */
+    let tailText = "";
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
     /** 接近上限时注入提醒，促使模型收束而非硬熔断 */
@@ -1048,6 +1092,10 @@ export class ToolLoop {
       const nextCalls = toolCallAcc
         .filter((a) => a.name)
         .map((a) => ({ id: a.id || `t_${a.index}`, type: "function" as const, name: a.name, arguments: a.args || "{}" }));
+      /* A-1132：本轮**以工具调用收尾** ⇒ 这段正文是「说完就去做」的**过程叙述**，不进交付；
+         否则并入收尾阶段（含 steer / 计划核对续轮 —— 那是把一段答案切成两轮，两段都要留）。 */
+      if (nextCalls.length > 0) { tailText = ""; }
+      else if (roundText) { tailText = tailText ? `${tailText}\n\n${roundText}` : roundText; }
       if (nextCalls.length === 0) {
         /* A-1061⑥：本轮模型没再要工具 —— 但**此刻有中途引导在等，就不能就这么收尾**。
          *
@@ -1079,8 +1127,20 @@ export class ToolLoop {
           continue;
         }
         return {
-          text: allText,
-          raw: allText,
+          /* ══ A-1132：收尾口径与 `run()`（非流式）**统一**：正文 = **收尾阶段**的正文 ══
+             用户实测原话：「正文里面似乎混杂了思考历程里面的内容，**正文非常长**，你看看
+             是不是之前叫你做的最后拼接思考历程中的正文到正文输出这一个功能异常」。
+             实测那条记录（`config/history.jsonl`）：`ai` = 4546 字 —— 25 轮叙述的**累加**
+             （`allText`），读起来就是过程日志；而收尾阶段只有 1471 字的正式汇报；
+             正文与 40 个 `think` 步**零交集**（逐段比对 0/46）⇒ 不是"思考被抄进正文"。
+             病根 = **两条路径两种口径**：`run()` 收尾 `text: raw`（只最后一轮），
+             这里（GUI 走的流式路径）收尾 `text: allText`（**全过程**累加）——
+             同一件事两个产地，必然漂。现在两边共用 `pickFinalBody` + `tailText`（"收尾阶段"）。
+             ⚠️ `allText` 退回它注释里写明的**保底语义** ⇒ 收尾阶段空时才用它；中断（976）与
+                预算（992）那两条路径**必须继续用 allText**（"保留已产出、不丢弃"，别一起改）。
+             ⚠️ 过程叙述**没有丢**：它们在时间线里就是 `body` 步，思考历程照旧可回看。 */
+          text: pickFinalBody(tailText, allText), // A-1132（runStream）
+          raw: pickFinalBody(tailText, allText),
           rounds: round,
           roundLog: roundLog.map((r) => r.details).flat(),
           reasonings,

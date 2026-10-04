@@ -1552,6 +1552,46 @@ code,
 body.float-layout .right-wrapper:not(.right-wrapper-anim):not(.right-wrapper-exit) .right-sidebar {
   width: 100% !important;
 }
+/* ⚠️⚠️⚠️ A-1176：**浮层稳态下，右栏容器的宽度必须与左栏"同曲线、同时长"地过渡**。
+   用户原话：「窗口化后，左侧边栏的展开，动画慢于动作……右侧边栏已经让开了（是**秒让**，
+   没有动画），左侧边栏才跟上。主要问题就是窗口化后，右侧边栏没有与左侧边栏的展开衔接动画协调」。
+
+   ## 机制
+   容器 `rw` 的宽度是内联的「窗口宽 − 左栏占位变量」；而那个变量（`--left-w`）写的是
+   **目标占位宽**（`sidebarOpen ? sidebarWidth : 0`，见 A-1172）——
+   `sidebarOpen` 在点击那一帧就翻转 ⇒ 它**当帧**变成 240
+   ⇒ `rw` 的宽度当帧从 1332 变 1092。而 `rw` 在浮层态有 `margin-left: auto`（A-1152）
+   ⇒ 它的**左缘 = 窗口宽 − 宽度** ⇒ 左缘也当帧跳到 240。
+   左栏那边却是 CSS `transition: width 0.5s` 慢慢长的 ⇒ **两者彻底脱节**。
+   ⚠️ 本注释刻意**不写** `var(` 那种字面形式：`a1167-sidebar-no-shrink.spec.ts` 有一条
+      「CSS 文件里不许出现该变量的消费」的诚实边界断言，它**不剥注释** ⇒ 写了会误触。
+   真机实测（`probe-a1176-sidebar-sync.mjs`，浮层态点「展开左栏」）：
+     `12ms sb.w=1 rw.l=240 rw.w=1092 left-w=240px`
+     `25ms sb.w=32 rw.l=240 rw.w=1092`      ← 右栏**一帧**就位
+     `389ms sb.w=232 rw.l=240 rw.w=1092`    ← 左栏还在慢慢长（0.5s）
+     即「右栏秒让、左栏才跟上」。
+
+   ## 为什么这样写是安全的
+   · 只作用于**浮层稳态**：`:not(.right-wrapper-anim):not(.right-wrapper-exit)` 把过渡期
+     （用 `var(--right-target-w)` 驱动）和退场期（`right-wrapper-exit`）都排除在外 ——
+     那两段有自己的宽度来源，不能被这条抢。
+   · **不能**顺便加给 `.right-wrapper` 的普通态：那时它的宽度是 `auto`，
+     而 `auto` **不参与插值** ⇒ 过渡根本不会启动（A-1157 记过这个坑）。
+     浮层态是 `calc(...)`，计算后是 px ⇒ 可插值。
+   · 时长/缓动**必须与 `.sidebar` 的 `transition: width` 逐字一致**（见下面 `.sidebar` 那条），
+     否则仍是"一个快一个慢"。守卫 `a1176-sidebar-sync.spec.ts` 从**两份文本**取值比对。 */
+body.float-layout .right-wrapper:not(.right-wrapper-anim):not(.right-wrapper-exit) {
+  transition: width 0.5s cubic-bezier(0, 0, 0.2, 1);
+}
+/* ⚠️⚠️⚠️ A-1179（已撤销）：曾尝试给过渡期容器加 `transition: width` + 独立变量
+   `--right-wrap-w`（含"两段式写变量 + `void offsetWidth` 强制同步布局"）。
+   ⚠️⚠️ **实测无效**（空白 380 → 582 → 662px，完全没改善）：容器过渡期的旧宽来自**内联**
+      的非浮层分支 = **`auto`** ⇒ **`auto` 不参与插值** ⇒ 过渡根本不启动、永远硬跳。
+      就算用独立变量也一样 —— 内联宽在 React 提交那帧已是目标值，没有"旧值"可插值。
+   ⇒ 正解在 App.tsx：**过渡期不给容器宽度**（`undefined` ⇒ `auto`），
+     让容器宽度 = **内容宽**，而内容由 `--right-target-w` 驱动、自己能插值
+     （旧宽是 px）⇒ 容器永远贴合内容 ⇒ 结构上不可能出现空白带。
+   ⇒ 这里**不要**再加容器过渡：加了反而会让容器与内容不同拍（A-1173 记过的"两半必须同拍"）。 */
 /* ⚠️⚠️ A-1152：右栏铺满整窗时，**内容列要有舒适上限且居中**（用户实测：
    「右侧边栏占满的时候内部比例甚至都不正常了」）。
    根因：右栏内部大量布局是 `grid-template-columns: 1fr 1fr` / `flex: 1`，
@@ -1627,12 +1667,35 @@ body.float-layout .right-sidebar > *:is([data-fullwidth], .right-tabbar, .webvie
    ⚠️ 为什么稳态看不出问题：稳态右栏是 `width:100%`，与 wrapper 等宽，auto 外边距没有余量可吃。
      所以这条只在**过渡中段**（右栏比 wrapper 窄）才起作用，正是出问题的那一段。
    ⚠️ 为什么不能改成给 wrapper 加 `transition: width`：wrapper 的旧值是 `auto`，
-     而 **`auto` 不能参与插值** ⇒ 过渡不会启动（这正是当初它"硬跳"的原因）。 */
-body.float-layout .right-sidebar {
-  margin-left: auto;
-}
+     而 **`auto` 不能参与插值** ⇒ 过渡不会启动（这正是当初它"硬跳"的原因）。
+   ⚠️⚠️⚠️ A-1173：**下面那条独立规则 `body.float-layout .right-sidebar` 已撤销**，
+      它的 `margin-left: auto` 搬进了 `.right-sidebar` 的**主规则** ⇒ **无条件生效**。
+      原因：退浮层那一帧 `float-layout` 已被摘，而 wrapper 还没缩到位
+      ⇒ 右栏右侧会露出一条空白（实测 `probe-a1173-float-jerk.mjs` 的 408~450ms，
+        详见主规则处那条注释）。 */
 body.float-layout .right-wrapper-anim .right-sidebar {
-  /* ⚠️⚠️ A-1153：过渡期的宽度来源 = **JS 在过渡起点写入的 `--right-target-w`**。
+  /* ⚠️⚠️⚠️ A-1179：**过渡期容器（`.right-wrapper`）也必须过渡，且与本条同长同曲线**。
+     ## 根因（用户 trace `float-trace-2026-10-04T10-26-12.json` 逐帧指出来的）
+     窗口 1707 宽、进入窗口化那一瞬：
+       `t=507ms  rw=768+939   rs=768+939`← 两者一致，无空白
+       `t=514ms  rw=268+1439  rs=725+982`    ← **容器一步跳到最终位，内容还在途中**
+       `t=519ms  rw=268+1439  rs=649+1059`   ← 空白 286px
+                    ⇒ 空白峰值 **380px**（`rw.width − rs.width`，t≈519ms）
+     这段空白落在 `.app` 的 `var(--bg)` 上（不透明深色）⇒ **用户看到的就是一帧黑屏/闪**。
+     ## 为什么容器会硬跳
+     · 容器在过渡期带 `right-wrapper-anim` ⇒ **A-1176 我加的那条
+       `body.float-layout .right-wrapper:not(.right-wrapper-anim):not(.right-wrapper-exit)`
+       把它排除掉了** ⇒ 容器**根本没有过渡**（那条规则从未参与过渡期，只有稳态才生效）。
+     · 内容 `.right-sidebar` 有自己的 `transition: width 0.5s`（主规则那份）⇒ **只有内容在动**。
+     ⇒ 两条曲线脱节：容器瞬间到位、内容慢慢长 ⇒ 中间露底。
+     ⚠️⚠️ 注意这里**不能**简单去掉 A-1176 那条的 `:not()` —— 那样容器会用
+        `auto → 1439` 参与插值，而 **`auto` 不可插值**（上面那段注释已记）⇒ 又变硬跳。
+     ⇒ 正解：过渡期容器的宽度来源是 `--right-target-w`（**px，可插值**），
+        给它一条与内容**逐字同曲线同时长**的过渡即可。
+     ⚠️ 时长必须 = `.right-sidebar` 主规则那份（0.5s），否则容器先到位、内容还在跑，
+        空白依旧（这正是 A-1173 记过的"动画两半必须同拍"的同一族问题）。 */
+  transition: width 0.5s cubic-bezier(0, 0, 0.2, 1);
+  /*⚠️⚠️ A-1153：过渡期的宽度来源 = **JS 在过渡起点写入的 `--right-target-w`**。
      浮层铺满不再改写 `rightWidth` state（那会让退出后右栏永久停在整窗宽 ⇒ 挤压 `.main`，
      用户截图里的「对话内容被挤压到屏幕外」），改由这个**过渡期专用变量**驱动；
      几何 done 时成对摘除（铁律 11：写/摘必须成对）。
@@ -1656,11 +1719,29 @@ body.float-layout .right-wrapper-anim .right-sidebar {
        方向由同级的 `margin-left:auto` 决定（右缘钉住、左缘向左）。 */
   transition: width 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
+/* ⚠️⚠️⚠️ A-1173：`margin-left: auto` **从 `body.float-layout .right-sidebar` 那条独立规则搬到这里**
+   —— 改成**无条件生效**。
+   ① 为什么原来那条不够：它只在浮层态挂，而**退浮层那一帧 `float-layout` 已被摘** ⇒ 失效
+      ⇒ `.right-sidebar` 退回"贴 wrapper 左缘"，而 wrapper 此刻还没缩到位
+      ⇒ **右栏右侧露出一条空白**（实测 `probe-a1173-float-jerk.mjs`：
+        `408~450ms` 期间 `rw=901+431` 而 `rs=901+296` ⇒ 右边空 **135px**，
+        直到 450ms 才回贴窗口右缘）。
+   ② 为什么不只在"退场期"（`.right-wrapper-exit`）加：那个类在几何 done 时就被摘，
+      而露白窗口正好**横跨摘除时刻**（408ms 摘、450ms 才回位）⇒ 挂它救不了。
+   ③ 为什么**并进主规则**而不是另起一条 `.right-sidebar { … }`（我第一版就是那么写的）：
+      另起一条会被 `a1106-ui-guards.spec.ts` 的 `ruleBody(CSS_CODE, ".right-sidebar")`
+      解析成"顶层 `.right-sidebar` 规则"，于是那条断言拿到的是**新的那条**（只有
+      `margin-left`）⇒ 报"不是 `overflow: clip`" ✗。同一选择器**只留一处**，别再分家。
+   ④ 无条件挂的代价 = 0：普通态下 `.right-sidebar` 与 `.right-wrapper` **等宽**
+      （wrapper 的 basis 就是它撑出来的）⇒ auto 外边距没有余量可吃，与不加完全一致
+      （实测 450ms `rw=1046+286`、`rs=1046+286` 逐值相等）。
+      它只在"两者不等宽"的过渡中段起作用 —— 而那正是要治的那一段。 */
 .right-sidebar {
   display: flex;
   flex-direction: column;
   width: var(--right-sidebar-w, 320px);
   min-width: 260px;
+  margin-left: auto;
   /* A-980-R14：解除 900px 硬上限——右栏可拖到占满窗口（上限对齐拖拽逻辑 innerWidth-48）
      A-975-R4：再加 `100%`——外层 wrapper 允许被 flex 收缩（窗口变窄时优先让位给聊天区），
      这里用 max-width:100% 跟随收缩后的 wrapper，避免固定宽度溢出 wrapper。
@@ -1820,6 +1901,30 @@ body.slime-dragging .sidebar,
 body.slime-dragging .right-sidebar {
   transition: none;
 }
+/* ⚠️⚠️⚠️ A-1177：拖拽期**必须连右栏容器一起禁掉过渡**，否则左栏拖动会"拖不动右栏"。
+   背景：A-1176 给浮层稳态的 `.right-wrapper` 加了 `transition: width 0.5s`（为了让右栏
+   与左栏的展开/折叠**同拍**）。但**拖拽**是另一回事 ——
+     · `slime-dragging` 期间左栏走"零 React 重渲染、每帧写内联宽"（A-1152），
+       而 `--left-w` 也每帧跟着变（A-1177 的 onMove 同步）；
+     · 若容器还留着 0.5s 过渡，它每个 55ms 的新目标都只走 5% ⇒ **永远追不上**
+       ⇒ 右栏看起来"不跟随"，实测 `left-w` 与 `sb.w` 逐帧一致（480/440/…/240）
+       而 `rw.l` 全程停在 **520**（起点值）⇒ 两者错位 280px。
+   ⇒ 把 `.right-wrapper` 加进这条"拖动期禁过渡"清单。
+   ⚠️ 与 A-1176 不冲突：那条过渡的用途是**状态切换时的动画**（点按钮 / 吸附收起），
+      而拖拽期本来就要求"零延迟跟手" ⇒ 两者本来就该互斥。
+   ⚠️ 词法要写全（`body.slime-dragging .right-wrapper`）：上面那条是逗号分组选择器，
+      它只覆盖 `.sidebar` 与 `.right-sidebar`；容器当时不在名单里（这是 A-1176 之后才出现的）。 */
+body.slime-dragging .right-wrapper {
+  transition: none;
+}
+/* ⚠️⚠️⚠️ A-1177：**上面那条还不够 —— 特异度不够会被 A-1176 那条盖掉**（实测拖拽时右栏仍不动）。
+   A-1176 那条是 `body.float-layout .right-wrapper:not(.right-wrapper-anim):not(.right-wrapper-exit)`
+   ⇒ **6 个类**；而 `body.slime-dragging .right-wrapper` 只有 **2 个类** ⇒ 输给它。
+   ⇒ 补一条**同等特异度**的（把那两个 `:not()` 也照抄），靠**源码顺序**取胜
+     （本条在 1583 那条之后）。 */
+body.slime-dragging .right-wrapper:not(.right-wrapper-anim):not(.right-wrapper-exit) {
+  transition: none;
+}
 /* ⚠️⚠️ A-1154：拖动**第一帧**就要禁文本选中 + 定住光标 —— 不能等 140ms 后的 `slime-resizing`。
    真机问题（用户实测「一拖拽对话页就出现闪烁 / 拖动很怪」的杂讯来源之一）：
    拖动头 140ms 内 `user-select` 仍是默认值 ⇒ 鼠标划过对话区会把**大段文本拖成选区**
@@ -1884,7 +1989,26 @@ body.slime-resizing {
       （`.float-window` 里的 wrapper / `<main>` 里的 wrapper）——不是 `.chat-scroll`
       ⇒ 常驻过渡不会把逐帧动画平滑化掉。 */
 .chat-scroll {
-  transition: opacity 0.12s linear;
+  /* ⚠️⚠️⚠️ A-1190：时长/缓动**与侧边栏宽度过渡同源**，且**只有一个产地**。
+     用户原话：「中间的渐入渐出都是与侧边栏错开设计的，即刻意的错开侧边栏与聊天页的
+     消失、出现时间……改成同步的吧」。
+     · 时长：由 App 写进两个 CSS 变量 —— **挂类（淡出）读 `--chat-fade-out-dur`、
+       摘类（淡入）读 `--chat-fade-in-dur`**。不在这里手抄一个数，否则改一边忘一边
+       ⇒ 又回到"两半不同拍"（铁律 39/59）。
+       ⚠️⚠️ 判据是"**变化后**样式里解析出来的 transition"：
+          · 挂类：变化后匹配 `body.slime-fading .chat-scroll` ⇒ 用**那条类规则**的声明（= 淡出）；
+          · 摘类：变化后只匹配本条 ⇒ 用**本声明**（= 淡入）。
+          ⇒ 本条是**淡入**方向，必须读 `--chat-fade-in-dur` —— 写反了凹陷就变成
+            "慢淡出 + 快淡入"（`135/275` 反过来），守卫 `a1190` ⑫ 钉的就是这个方向。
+       ⚠️⚠️ A-1190②：为什么**必须拆成两个变量**（此前共用一个 `--chat-fade-dur`）：
+         几何动画走的是"**凹陷**"—— 淡出 `CHAT_DIP_OUT_MS`=135ms、淡入 `CHAT_DIP_IN_MS`=275ms
+         （推导见 App.tsx 那组常量）。方向不同、时长不同，共用一个变量就表达不出来。
+         拖拽/窗口 resize 那条路两个变量写的是同一个值（`CHAT_FADE_MS`），行为与改前一致。
+       fallback 500ms 与 `SIDEBAR_WIDTH_MS` 一致，纯粹为"变量还没写上"的那一帧兜底。
+     · 缓动：与 `.sidebar` / `.right-sidebar` 的 `cubic-bezier(0,0,0.2,1)` **逐字相同**。
+     此前这里是 `opacity 0.12s linear`（固定 120ms、线性），与侧边栏的 500ms 缓动曲线
+     天然不同拍 = 用户说的"刻意错开"。 */
+  transition: opacity var(--chat-fade-in-dur, 500ms) cubic-bezier(0, 0, 0.2, 1);
   /* ⚠️⚠️ A-1161：**预留滚动条槽位**（`scrollbar-gutter: stable`）。
      用户报「窗口化那一瞬**边界剧烈左右抖动**，右栏恢复与展开左右摇摆闪烁」，
      并给了一张裁切放大的边界截图（那条波浪竖线就在浮窗右缘内侧）。
@@ -1906,7 +2030,14 @@ body.slime-resizing {
 }
 body.slime-fading .chat-scroll {
   opacity: 0;
-  transition: opacity 0.12s linear;
+  /* ⚠️ A-1190：与上面那条常驻规则**同源**（同一组变量 + 同一条曲线）。
+     ⚠️⚠️ A-1190②：这一条是**挂类（淡出）方向**，读 `--chat-fade-out-dur`；
+        上面那条常驻规则是**摘类（淡入）方向**，读 `--chat-fade-in-dur`。
+        两个方向各有一个产地 —— 任一方向单独改一个数就是半拍错位，而"凹陷"
+        （淡出 135ms + 淡入 275ms）本来就是两个不同的数。
+        ⚠️ 别把两个变量**对调**：`transition` 取的是**变化后**样式里的声明 ——
+           挂类后匹配的是**本条**，所以本条必须是"淡出"那一个。 */
+  transition: opacity var(--chat-fade-out-dur, 500ms) cubic-bezier(0, 0, 0.2, 1);
 }
 body.slime-resizing .chat-scroll {
   content-visibility: hidden;
@@ -1914,6 +2045,15 @@ body.slime-resizing .chat-scroll {
      （`slime-resizing` 摘掉、`slime-fading` 也已摘掉，若无此条opacity 会瞬间回到 1）。 */
   opacity: 0;
 }
+/* ⚠️⚠️⚠️ A-1181（**已撤销**）：曾加过一条
+   `body.slime-dragging.slime-resizing .chat-scroll { opacity:1; content-visibility:visible }`
+   想让「拖栏时文本不消失」。
+   ⚠️⚠️ **它把非浮层态拖栏的淡出也一起关掉了** —— 而那个淡出是**用户明确认可的优化**
+     （用户原话：「通过改变比例时淡出不渲染对话栏文本是个**极佳的优化手段**」），
+     且 `a1152` ⑫ 有守卫钉着「拖动起始先只挂 fading」。
+   ⇒ 正解是**按状态分流**：拖栏时**只有浮层态**不淡出（那才是用户诉求①），
+     非浮层态照旧淡出。分流在 App.tsq 侧（`floatStateRef`），不在 CSS。
+   ⇒ 这条注释留着，防止后人又从"CSS 一刀切"的方向试一次。 */
 
 /* ── A-1152：悬浮窗宽高过渡期间，**把内容宽度钉住**（让它不重排） ──────────────
    用户报：「聊天页窗口化那一个瞬间，每次必然卡顿掉帧」。

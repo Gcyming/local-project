@@ -104,10 +104,13 @@ describe("A-1152 ③ 窗口 resize 路径必须 rAF 节流（卡顿的直接来�
        现在锚的是正确时序：**先 fading（定时器里再 resizing）**，且两处都要能摘。 */
     const at = APP_CODE.indexOf("const mark =");
     expect(at, "找不到窗口缩放的 mark 处理").toBeGreaterThan(-1);
-    const seg = APP_CODE.slice(at, at + 900);
+    const seg = APP_CODE.slice(at, at + 1400);
     expect(seg).toMatch(/classList\.add\("slime-fading"\)/);
-    /* resizing 的挂载必须在 setTimeout回调里（延后一阶段）*/
-    expect(seg).toMatch(/setTimeout\([\s\S]{0,200}?classList\.add\("slime-resizing"\)/);
+    /* resizing 的挂载必须在 setTimeout 回调里（延后**一整个淡出时长**）。
+       ⚠️ A-1190：窗口 900→1400、200→600 —— `mark()` 现在多了一段"时长按路径分流 + 写
+       CSS 变量"的前置逻辑，回调里还夹着一条"本轮是否已结束"的竞争守卫
+       （`if (!contains("slime-fading")) return`），跨过它才是 `add("slime-resizing")`。 */
+    expect(seg).toMatch(/setTimeout\([\s\S]{0,600}?classList\.add\("slime-resizing"\)/);
     /* 两个类都要能被摘掉（残留 = 长期停在降级/不可见形态） */
     const at2 = APP_CODE.indexOf("function endChatFreeze");
     expect(at2).toBeGreaterThan(-1);
@@ -220,8 +223,13 @@ describe("A-1152 ⑦ 浮层态的 `<main>`必须**彻底脱离布局**（用户�
        `.main.main-float` 有 `width:0 !important`（"浮层态 `.main` 必须零宽"），
        两者对打就是 A-1152 那次「左栏收起异常 / 右栏不铺满」回归的真正原因。
        放在内层 ⇒ `<main>` 几何与改造前逐字相同（仍是 0×0 占位），右栏铺满那套一行不用动。 */
-    const hostAt = APP_CODE.indexOf('className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}');
-    expect(hostAt, "找不到唯一宿主的 className").toBeGreaterThan(-1);
+    /* ⚠️⚠️⚠️ A-1173 改判据：呈现模式用 `hostIsFloat`，**不是业务状态 `mainIsFloatLayout`**。
+       原来这里是 `mainIsFloatLayout ? … : …`，而同一元素的 `style` 用的是 `hostIsFloat`
+       ⇒ 同一个宿主的两半判据**不同源**：只要有一帧不同步，就会出现
+       "类还是浮窗、盒模已是内联"（或反之）—— 那正是 A-1171 要治的跳变。
+       ⇒ 两处必须同源（`mainIsFloatLayout || floatClosing || floatAnimOut || floatAnim === "in"`）。 */
+    const hostAt = APP_CODE.indexOf('className={hostIsFloat ? "float-window" : "inline-chat-host"}');
+    expect(hostAt, "找不到唯一宿主的 className（或它又用回了业务状态 `mainIsFloatLayout`）").toBeGreaterThan(-1);
     expect(hostAt, "宿主必须在 <main> 内部（不能把 fixed 写在 <main> 上）")
       .toBeGreaterThan(APP_CODE.indexOf("<main className="));
     expect(hostAt, "宿主必须在 </main> 之前").toBeLessThan(APP_CODE.indexOf("</main>"));
@@ -255,7 +263,9 @@ describe("A-1152 ⑨ 用户新要求：浮层态**彻底卸载中间页 + 不许
        （那是 A-1152 回退方案）。现在浮层外框就是**唯一宿主自己**——但**仍然在 `<main>` 内部**
        （理由见上一条：`.main.main-float` 的 `width:0 !important` 会和 fixed 打架）。
        `.float-window` 类名在浮层态挂上，`-webkit-app-region: no-drag` 照旧生效。 */
-    expect(APP_CODE).toMatch(/className=\{mainIsFloatLayout \? "float-window" : "inline-chat-host"\}/);
+    /* ⚠️⚠️⚠️ A-1173：判据同 ⑦ —— 呈现模式必须用 `hostIsFloat`（与同元素的 `style` 同源），
+       不再用业务状态 `mainIsFloatLayout`（那会让"类"与"盒模"各走各的）。 */
+    expect(APP_CODE).toMatch(/className=\{hostIsFloat \? "float-window" : "inline-chat-host"\}/);
     expect(APP_CODE).not.toMatch(/<main className=\{`main\$\{mainIsFloatLayout \? " main-float float-window" : ""\}\}/);
     expect(CSS_CODE).toMatch(/\.float-window\s*\{[^}]*-webkit-app-region:\s*no-drag/);
   });
@@ -361,7 +371,7 @@ describe("A-1152 ⑪ 浮层态右栏铺满：**wrapper 给宽度 + 右栏填满*
        ⚠️ A-1155 更新：浮层态**从 `"100%"` 改成 `"calc(100% - var(--left-w, 0px))"`**。
          实测：`.body` 自身宽 = 整窗，`.body` = `[左栏][main][wrapper]`
          ⇒ 裸 `100%` 让 wrapper 右缘 = 左栏宽 + 整窗宽 = **越窗 240px**。 */
-    expect(APP_CODE).toMatch(/width:\s*\(?\s*mainIsFloatLayout\s*&&\s*!rightMin0\s*\)?\s*\?\s*"calc\(100% - var\(--left-w,\s*0px\)\)"\s*:\s*\(?\s*mainIsFloatLayout\s*\?\s*"var\(--right-target-w\)"\s*:\s*"auto"/);
+    expect(APP_CODE).toMatch(/width:\s*\(?\s*mainIsFloatLayout\s*&&\s*!rightMin0\s*\)?\s*\?\s*"calc\(100% - var\(--left-w,\s*0px\)\)"\s*:\s*\(?\s*mainIsFloatLayout\s*\?\s*\(rightExitAnim\s*\?\s*"var\(--right-target-w\)"\s*:\s*undefined\)\s*:\s*"auto"/);
   });
 
   it("CSS 里右栏填满 wrapper 的规则仍在（`body.float-layout .right-sidebar`）", () => {
@@ -372,8 +382,14 @@ describe("A-1152 ⑪ 浮层态右栏铺满：**wrapper 给宽度 + 右栏填满*
     /* ⚠️ 这个组合就是本轮踩坑的形状：两条规则各自都"看起来对"，
        少一条的表现分别是"右栏消失"与"右侧留白" —— 形状断言无法区分，
        所以两条都要锚，且真正兜底的是 `assert-float-gap.cjs` 的几何（走真实 CSS 路径）。
-       ⚠️ A-1155：wrapper 那条已随实测改为 `calc(100% - var(--left-w, 0px))`，见上。 */
-    const hasWrapper = /width:\s*\(?\s*mainIsFloatLayout\s*&&\s*!rightMin0\s*\)?\s*\?\s*"calc\(100% - var\(--left-w,\s*0px\)\)"\s*:\s*\(?\s*mainIsFloatLayout\s*\?\s*"var\(--right-target-w\)"\s*:\s*"auto"/.test(APP_CODE);
+       ⚠️ A-1155：wrapper 那条已随实测改为 `calc(100% - var(--left-w, 0px))`，见上。
+       ⚠️⚠️ A-1179 更新：浮层**过渡期**（`rightMin0` 为真）的容器宽度已改成
+         `rightExitAnim ? "var(--right-target-w)" : undefined` ——
+         过渡期**不给宽度**（⇒ `auto` ⇒ 容器贴合内容，消除「容器已到位、内容还在长」
+         那一帧黑屏；实测空白 380px → 0px）；退场期仍给宽度（A-1157-R2 要求）。
+         ⇒ 本判据锚的是「**稳态**给宽度 + 非浮层回落 auto」这个**意图**，
+         过渡期的具体分流由 `a1179-float-enter-blank.spec.ts` 单独钉。 */
+    const hasWrapper = /width:\s*\(?\s*mainIsFloatLayout\s*&&\s*!rightMin0\s*\)?\s*\?\s*"calc\(100% - var\(--left-w,\s*0px\)\)"\s*:\s*\(?\s*mainIsFloatLayout\s*\?\s*\(rightExitAnim\s*\?\s*"var\(--right-target-w\)"\s*:\s*undefined\)\s*:\s*"auto"/.test(APP_CODE);
     const hasSidebar = /body\.float-layout\s+\.right-wrapper:not\(\.right-wrapper-anim\):not\(\.right-wrapper-exit\)\s+\.right-sidebar\s*\{[^}]*width:\s*100%\s*!important/.test(CSS_CODE);
     expect(hasWrapper && hasSidebar).toBe(true);
   });
@@ -406,16 +422,37 @@ describe("A-1152 ⑫ 淡出/淡入必须**分两阶段**（用户实测「渐出
     expect(sameFrame.test(APP_CODE)).toBe(false);
   });
 
-  it("拖动起始是**先只挂 fading**（resizing 延后到定时器里）", () => {
-    const at = APP_CODE.indexOf("function handleSidebarResize");
-    expect(at).toBeGreaterThan(-1);
-    const seg = APP_CODE.slice(at, at + 1600);
+  it("⚠️ A-1190：淡出**不在**拖拽起点挂（点一下分栏边缘不该淡出）", () => {
+    /* 用户原话：「现在的消失判定是一点击侧边栏的边缘，还没有拖拽就消失，这不对，
+       改成只有发生**实质性比例变化**才会消失」。
+       旧实现：两个 resizer 的 `pointerdown` **无条件**挂 `slime-fading` + 起阶段定时器。
+       现在这两样都从起点删掉，淡出**只剩一个触发源**（RO 的 `mark()`，判据 = "宽度真的变了"）。
+       ⚠️ `slime-dragging` 必须留着 —— 它管"禁宽度过渡 / 光标 / 禁选区"（A-1153/A-1154），
+          与淡出无关，且必须在拖动**第一帧**就挂上。 */
+    for (const fn of ["function handleSidebarResize", "function handleRightbarResize"]) {
+      const at = APP_CODE.indexOf(fn);
+      expect(at, `找不到 ${fn}`).toBeGreaterThan(-1);
+      const seg = APP_CODE.slice(at, at + 1600);
+      expect(
+        seg,
+        `${fn} 的起点又在无条件挂 fading ⇒ 用户"点一下边缘"（还没拖）聊天页就会消失`,
+      ).not.toMatch(/classList\.add\("slime-fading"\)/);
+      expect(
+        seg,
+        `${fn} 的起点丢了 slime-dragging ⇒ 拖动头段不跟手 / 拖出蓝色选区`,
+      ).toMatch(/classList\.add\("slime-dragging"\)/);
+    }
+  });
+
+  it("⚠️ A-1190：两阶段（fading → resizing）仍在，且**只**在 `mark()` 里", () => {
+    /* 两阶段的**内容**不变（先 fading 播过渡、后 resizing 跳过布局），
+       变的是**产地**：从"每个 resizer 各写一遍"收归到 RO 的 `mark()`（铁律 11）。 */
+    const at = APP_CODE.indexOf("const mark =");
+    expect(at, "找不到 RO 的 mark 处理").toBeGreaterThan(-1);
+    const seg = APP_CODE.slice(at, at + 1400);
     expect(seg).toMatch(/classList\.add\("slime-fading"\)/);
-    /* fading 的出现必须**早于** resizing（用 index 比较先后） */
-    const f = seg.indexOf('classList.add("slime-fading")');
-    const r = seg.indexOf('classList.add("slime-resizing")');
-    expect(f).toBeGreaterThan(-1);
-    expect(r === -1 || f < r).toBe(true);
+    /* resizing 的挂载必须在 setTimeout 回调里（延后一整个淡出时长） */
+    expect(seg).toMatch(/setTimeout\([\s\S]{0,600}?classList\.add\("slime-resizing"\)/);
   });
 
   it("存在 `endChatFreeze()` 且它**分帧**摘类（渐入，别硬跳）", () => {
@@ -621,17 +658,27 @@ describe("A-1152 ⑮ 右栏占满时**内部比例**不许失衡（用户：「�
     expect(bareBody.test(CSS_CODE)).toBe(false);
   });
 
-  it("窗口化（大幅展开）用**更早的透明度带**（否则长期半透明 = 「动画乱七八糟」）", () => {
-    /* ⚠️ 默认带是 `[0.45, 0.90] × full`，而窗口化时 `full = 整窗宽`
-       ⇒ 要涨到 90%×1388≈1250px 才完全不透明 ⇒ 绝大部分过渡时间右栏半透明。
-       ⇒ 窗口化那一支必须显式给更早的 loRatio/hiRatio（与左栏 A-980-R34 同思路）。 */
-    const at = APP_CODE.indexOf("function animateRightSidebar");
-    expect(at).toBeGreaterThan(-1);
-    const seg = APP_CODE.slice(at, at + 3500);
-    expect(seg).toMatch(/loRatio:\s*0\.\d+/);
-    expect(seg).toMatch(/hiRatio:\s*0\.\d+/);
-    /* ⚠️ 且要有"仅窗口化这一支"的条件判断，不能把普通展开也一起改（会失去渐入感）。 */
-    expect(seg).toMatch(/nextWidth\s*>\s*window\.innerWidth\s*\*\s*0\.\d+/);
+  it("右栏两条支都**显式**传可见性窗口，且与左栏**同源常量**（A-1189 取代 A-1152 的「更早的带」特例）", () => {
+    /* ⚠️ 历史（A-1152）：窗口化那一支曾单独用更早的带 `[0.06, 0.42]`，理由是
+       "窗口化时 `full = 整窗宽` ⇒ 默认带 [0.45,0.90] 要到 90% 宽才完全不透明 ⇒ 长期半透明"。
+       ⚠️⚠️ A-1189：那条特例正是 A-1164「整块面板由黑变亮」的成因 —— 收起方向 `1 - p`
+          在 `u = 0.06`（30ms）就归零 ⇒ 剩下 94% 的时间整块面板全透明（实拍 p95 = 10.0）。
+          用户明确要求「做成左侧边栏那样就行，照做」，而左栏那两组窗口本身就不在过渡中段
+          长时间半透明 ⇒ 不需要第三套带。
+       ⇒ 本条的**意图**从"必须更早"改成"**必须显式、且与左栏同一产地**"：
+          落回 `FADE_VISIBLE_LO/HI` 默认带 = 又一条没人调过的时机（用户感受不到"晚淡入/早淡出"）。 */
+    const m = /function\s+animateRightSidebar\b[\s\S]*?\n  \}/.exec(APP_CODE);
+    expect(m, "取不到 `animateRightSidebar` 函数体（守卫自己失效了）").toBeTruthy();
+    const seg = m![0];
+    expect(seg, "展开支没引用左栏的窗口常量 ⇒ 时机出现第二产地（手抄数值迟早与左栏漂开）")
+      .toMatch(/loRatio:\s*LEFT_FADE_LO,\s*hiRatio:\s*LEFT_FADE_HI/);
+    expect(seg, "收起支没换用收起专用的窗口常量 ⇒ 渐出会被推迟到实际宽度只剩几十 px ⇒ 肉眼看不见渐出")
+      .toMatch(/loRatio:\s*LEFT_FADE_COLLAPSE_LO,\s*hiRatio:\s*LEFT_FADE_COLLAPSE_HI/);
+    expect(seg, "两方向必须按 `nextOpen` 分流（不是写死一组）").toMatch(/nextOpen\s*\n?\s*\?/);
+    /* ⚠️ `isFloatExpand` 的阈值判据必须仍在：它管的是**铺满宽度 / 钉宽 / `float-layout` 类**，
+       不只是透明度带 —— 不能因为透明度带与它解耦了就把这段一起删。 */
+    expect(seg, "`isFloatExpand` 的阈值判据被删了（它管铺满/钉宽/float-layout，不只是透明度带）")
+      .toMatch(/nextWidth\s*>\s*window\.innerWidth\s*\*\s*0\.\d+/);
   });
 });
 

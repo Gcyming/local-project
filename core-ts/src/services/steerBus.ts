@@ -108,6 +108,35 @@ export function pendingSteerCount(sessionId: string | undefined): number {
   return buffers.get(sid)?.length ?? 0;
 }
 
+/**
+ * A-1151：**按 id 撤销单条**待注入项 —— 用户在待发卡片上点「✕」时调。
+ *
+ * ## 为什么必须要它（用户实测 bug）
+ * 用户原话：「这两个引导都是我点击了**取消叉**后的情况，结果**后面都传上去了**，是不是取消功能有问题？」
+ *
+ * 缺口在这里：`pushSteer` 之后，这条引导在**两个地方**各有一份 ——
+ *   ① 渲染层的待发卡片（`interruptQueueRef`，`✕` 删的是它）；
+ *   ② 本缓冲（等着被工具循环在轮次边界消费）。
+ * 而**流结束前**渲染层点 `✕` 只删 ① ⇒ ② 里的残留一直挂着 ⇒ 本轮若走到轮次边界、
+ * 或（纯文本回答走不到边界时）残留留到下一次运行 ⇒ **用户明明取消了，还是被注入**。
+ * `clearSteers` 只在**流结束**时全清，救不了"流还在跑时用户取消"这一段。
+ *
+ * ⇒ 本函数把"渲染层删掉了"这件事**同步给缓冲**。找不到该 id 时返回 `false`
+ *  （卡片可能已被工具循环消费掉——那属于"已经进上下文"，撤销无从谈起，如实回执让界面区分）。
+ */
+export function dropSteer(sessionId: string | undefined, id: string | number): boolean {
+  const sid = typeof sessionId === "string" ? sessionId.trim() : "";
+  if (!sid) { return false; }
+  const list = buffers.get(sid);
+  if (!list || list.length === 0) { return false; }
+  const key = String(id ?? "");
+  const idx = list.findIndex((it) => it.id === key);
+  if (idx < 0) { return false; }
+  list.splice(idx, 1);
+  if (list.length === 0) { buffers.delete(sid); }
+  return true;
+}
+
 /** 仅供测试：清空全部会话的缓冲（进程内单例，测试之间必须隔离）。 */
 export function resetSteerBusForTest(): void {
   buffers.clear();

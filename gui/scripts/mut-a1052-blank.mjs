@@ -98,9 +98,12 @@ const MUTATIONS = [
     /* ⚠️ 锚点必须带下一行 `      </div>`：只取表达式时，8 空格版是 12 空格版的**子串**
        （后者含前者的后 8 格）⇒ 同一句话命中 3 处（1030 / 1966 / 1976）。
        `sub` 只替换第一处，所以"看起来能用"，但那是**隐式的**：一旦行序/缩进被人调整，
-       变异就改到别处而没有任何人知道（假绿）。带上下文后唯一，**替换位置与原来完全相同**。 */
-    from: "        {collapseBlankRuns(m.content)}\n      </div>",
-    to: "        {m.content}\n      </div>",
+       变异就改到别处而没有任何人知道（假绿）。带上下文后唯一，**替换位置与原来完全相同**。
+       ⚠️ A-1133 同步：用户气泡的渲染源从 `m.content` 换成了 `att.body`
+       （先拆掉编码在文本里的附件行再渲染 —— 否则气泡里会显示绝对路径）。
+       变异语义不变：把包裹去掉 ⇒ 回到"裸文本直落 pre-wrap"= 巨型色块回归。 */
+    from: "        {collapseBlankRuns(att.body)}\n      </div>",
+    to: "        {att.body}\n      </div>",
   },
   {
     name: "C2 发言失败气泡漏净化 → 同一片空白在失败态继续撑高",
@@ -138,9 +141,11 @@ const MUTATIONS = [
     /* 锚点带 `streamReqRef.current = { agentId, ` 前缀 = **唯一**定位到 4703（记录本次请求参数、
        供重试路径复用）。⚠️ 已知边界：首次发送在 4730 的 `api.chat.stream({ … })`，两处参数片段
        逐字相同、都属"发送路径"，本变异只覆盖前者（`sub` 只改第一处）。将来若把守卫收紧到
-       只断言 4730，需要为它另立一条变异。 */
-    from: "streamReqRef.current = { agentId, message: text, sessionId: sid",
-    to: "streamReqRef.current = { agentId, message: collapseBlankRuns(text), sessionId: sid",
+       只断言 4730，需要为它另立一条变异。
+       ⚠️ A-1133 同步：发送路径的局部变量从 `text` 改名为 `outbound`
+       （= 原文 + 文档附件的路径编码块，见 `formatDocAttachments`）。 */
+    from: "streamReqRef.current = { agentId, message: outbound, sessionId: sid",
+    to: "streamReqRef.current = { agentId, message: collapseBlankRuns(outbound), sessionId: sid",
   },
   {
     name: "C7 净化模块没被 import → 「调用计数」假通过：名字还在、实现没了",

@@ -5,9 +5,15 @@
  * 横向延伸再向上展开，动画与产物卡片同族」「子代理从右侧监测栏移出，做成同款悬浮按钮」
  * 「一个展开时另一个渐出」。
  *
- * A 组：纯判据（互斥 / 渐出 / 只关自己 / 类名唯一产地）
+ * A 组：纯判据（面板互斥 / 只关自己 / 类名唯一产地 / **没有 is-faded**）
  * B 组：接线与几何（贴最右 / 向上展开 / 定位祖先 / 复用 .collapse / 同族节拍 /
- *       渐出让出点击 / 子代理在坞不在监测栏 / 单值 state / 同款类名）
+ *       按钮常显 / 子代理在坞不在监测栏 / 单值 state / 同款类名）
+ *
+ * ⚠️ A-1126（用户 2026-09-26）把「一个展开时另一个渐出」**收窄成「只让面板互斥、按钮常显」**
+ *   （用户原话：「为什么点击后台任务后，同行的子代理悬浮按钮会消失？旧设定没删干净？」
+ *   ⇒ 裁决「两个按钮都常显，只让面板互斥」）。原 A2/A3/A4/A6 与 B6/B7 的锚点已随重构漂移，
+ *   **按新形态重锚**（不是删掉）：A3 = 收起态又套 is-faded、A6 = 模块里又导出 isDockFaded、
+ *   B7 = CSS 里又加回 `.dock-slot.is-faded`、B23/B24 = 按钮的渲染条件混进坞状态。
  *
  * ⚠️ 中文句子里不许夹 ASCII 双引号（A-1056 自伤）—— 一律「」。
  * ⚠️ 四个目标文件都是 **LF**（同仓行尾是混的，判之前先跑命令）——
@@ -71,23 +77,24 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
     mutate: (t) => sub(t, "  return current === id ? null : id;", "  return id;"),
   },
   {
-    name: "A2 坞格判据不再看 id（有任何一个展开 ⇒ 两格都算展开 = 两个面板同时开）",
+    name: "A2 坞格判据不再看 id（有任何一个面板展开 ⇒ 两格都算展开 = 两个面板同时开）",
+    file: MODULE,
+    /* A-1126 重锚：原来的 `dockSlotState` 已删（它带 faded），判据收敛成 `isDockOpen`。 */
+    mutate: (t) => sub(t, "  return current === id;", "  return current !== null;"),
+  },
+  {
+    name: "A3 收起态也套 is-faded（A-1126 旧设定复活：按钮会随另一个面板展开而消失）",
     file: MODULE,
     mutate: (t) => sub(
       t,
-      "  return { open: isDockOpen(current, id), faded: isDockFaded(current, id) };",
-      "  return { open: current !== null, faded: isDockFaded(current, id) };",
+      '  return `dock-slot${open ? " is-open" : ""}`;',
+      '  return `dock-slot${open ? " is-open" : ""}${open ? "" : " is-faded"}`;',
     ),
   },
   {
-    name: "A3 渐出判据说反（该渐出的是自己而不是另一个）",
+    name: "A4 类名漏掉 is-open（展开态没有任何强调 —— 两个按钮看着都像「没开」）",
     file: MODULE,
-    mutate: (t) => sub(t, "  return current !== null && current !== id;", "  return current === id;"),
-  },
-  {
-    name: "A4 都收起时也渐出（两个按钮一上来就是隐形的 —— 用户看不到任何入口）",
-    file: MODULE,
-    mutate: (t) => sub(t, "  return current !== null && current !== id;", "  return current !== id;"),
+    mutate: (t) => sub(t, '  return `dock-slot${open ? " is-open" : ""}`;', '  return `dock-slot`;'),
   },
   {
     name: "A5 closeDock 顺手把另一个也关了（用户正看的子代理面板自己消失）",
@@ -95,9 +102,13 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
     mutate: (t) => sub(t, "  return current === id ? null : current;", "  return null;"),
   },
   {
-    name: "A6 类名漏掉 is-faded（渐出没有任何视觉效果 —— 两个按钮同时看着都像「没开」）",
+    name: "A6 模块里又导出旧的渐出判据 isDockFaded（第二个真相源复活，按钮常显迟早破功）",
     file: MODULE,
-    mutate: (t) => sub(t, '  return `dock-slot${open ? " is-open" : ""}${faded ? " is-faded" : ""}`;', '  return `dock-slot${open ? " is-open" : ""}`;'),
+    mutate: (t) => sub(
+      t,
+      "export function dockSlotClassOf(open: boolean): string {",
+      "export function isDockFaded(current: DockState, id: DockId): boolean { return current !== null && current !== id; }\nexport function dockSlotClassOf(open: boolean): string {",
+    ),
   },
 
   // ── B 接线 / 几何 ──────────────────────────────────────────────────────────
@@ -127,14 +138,24 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
     mutate: (t) => sub(t, 'className={`collapse${procsOpen ? " is-open" : ""}`}', 'className={`dock-fade${procsOpen ? " is-open" : ""}`}'),
   },
   {
-    name: "B6 坞格的过渡写死秒数（不再取共享节拍变量 ⇒ 改全局节拍时坞不动）",
+    name: "B6 胶囊的过渡写死秒数（不再取共享节拍变量 ⇒ 改全局节拍时坞不动）",
     file: CSS,
-    mutate: (t) => sub(t, "  transition: opacity var(--collapse-dur) var(--collapse-ease);", "  transition: opacity 0.3s ease;"),
+    /* A-1126 重锚：`.dock-slot` 的 `transition: opacity` 已随渐隐一起删除
+       （它原来只服务于"另一格淡出"）。"节拍只走共享变量"这条改锚到胶囊本体。 */
+    mutate: (t) => sub(
+      t,
+      "  transition: background var(--collapse-dur) var(--collapse-ease), color var(--collapse-dur) var(--collapse-ease);",
+      "  transition: background 0.3s ease, color 0.3s ease;",
+    ),
   },
   {
-    name: "B7 渐出不让出点击（一个看不见却挡住点击的空洞：点它没任何反应）",
+    name: "B7 又把 `.dock-slot.is-faded` 加回来（A-1126 旧设定复活：另一个按钮随面板展开而消失）",
     file: CSS,
-    mutate: (t) => sub(t, ".dock-slot.is-faded { opacity: 0; pointer-events: none; }", ".dock-slot.is-faded { opacity: 0; }"),
+    mutate: (t) => sub(
+      t,
+      ".dock-slot.is-open .dock-pill { background: var(--accent-soft); color: var(--text); }",
+      ".dock-slot.is-open .dock-pill { background: var(--accent-soft); color: var(--text); }\n.dock-slot.is-faded { opacity: 0; pointer-events: none; }",
+    ),
   },
   {
     name: "B8 坞里又长出摘要段（A-1079 用户已撤销「横向延伸」—— 胶囊该始终紧凑）",
@@ -175,12 +196,19 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
   {
     name: "B11 子代理没进坞（移出监测栏又没进坞 = 入口直接消失）",
     file: PANEL,
-    mutate: (t) => sub(t, '            <SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot("subs")} />', "            {/* 入口缺失 */}"),
+    /* A-1126 重锚：props 从 `slot={subsSlot}` 改为 `open={subsOpen}`（渐隐判据已删）。 */
+    mutate: (t) => sub(t, '            <SubAgentExpandButton open={subsOpen} onToggle={() => toggleDockSlot("subs")} />', "            {/* 入口缺失 */}"),
   },
   {
     name: "B12 子代理自己持有 open（第二个真相源 ⇒ 互斥必然漂移）",
     file: SUB,
-    mutate: (t) => sub(t, "  { slot, onToggle }: { slot: { open: boolean; faded: boolean }; onToggle: () => void },", "  { slot, onToggle }: { slot: { open: boolean }; onToggle: () => void },"),
+    /* A-1126 重锚：props 从 `slot: {open, faded}` 简化为 `open: boolean`。
+       改成"组件内部又自持一个 open 状态" —— 判据不变（子组件不许有第二个真相源）。 */
+    mutate: (t) => sub(
+      t,
+      "  const [runs, setRuns] = useState<SubRun[]>([]);",
+      "  const [open, setOpen] = useState(false); void setOpen;\n  const [runs, setRuns] = useState<SubRun[]>([]);",
+    ),
   },
   {
     name: "B13 子代理退回旧的 .pop 浮层（没换成同款坞面板 ⇒ 「同款」不成立）",
@@ -193,12 +221,12 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
     mutate: (t) => sub(t, 'className="dock-pill"', 'className="dock-pill-legacy"'),
   },
   {
-    name: "B15 坞的展开态退回两个独立布尔（又变回两个真相源，两个同时展开没人管）",
+    name: "B15 坞的展开态退回两个独立布尔（又变回两个真相源，两个面板同时展开没人管）",
     file: PANEL,
     mutate: (t) => sub(
       t,
-      '  const procsSlot = dockSlotState(dock, "procs");',
-      '  const setProcsOpen = (v: boolean): void => { void v; };\n  const procsSlot = dockSlotState(dock, "procs");',
+      '  const procsOpen = isDockOpen(dock, "procs");',
+      '  const setProcsOpen = (v: boolean): void => { void v; };\n  const procsOpen = isDockOpen(dock, "procs");',
     ),
   },
   {
@@ -215,9 +243,19 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
     ),
   },
   {
-    name: "B16 坞格类名不再从派生标志拼（写死 → 展开/渐出两套说法）",
+    name: "B16 坞格类名不再从派生标志拼（写死 → 展开态没有任何强调）",
     file: PANEL,
-    mutate: (t) => sub(t, "dockSlotClassOf(procsSlot.open, procsSlot.faded)", '"dock-slot"'),
+    mutate: (t) => sub(t, "dockSlotClassOf(procsOpen)", '"dock-slot"'),
+  },
+  {
+    name: "B28 「后台进程」按钮的渲染条件混进坞状态（另一个面板开着时它整个消失 —— 用户报的另一半）",
+    file: PANEL,
+    mutate: (t) => sub(t, "                {agentProcs?.any && (", "                {!subsOpen && agentProcs?.any && ("),
+  },
+  {
+    name: "B29 子代理按钮的 null 出口绑上坞状态（另一个面板开着就 return null ⇒ 按钮消失）",
+    file: SUB,
+    mutate: (t) => sub(t, "  if (runs.length === 0) { return null; }", "  if (runs.length === 0 || open) { return null; }"),
   },
   {
     name: "B21 输入框那个圆角框被挪到坞**之前**（坞被框起来 ⇒ absolute 面板被 overflow:hidden 裁掉，展开什么都看不见）",

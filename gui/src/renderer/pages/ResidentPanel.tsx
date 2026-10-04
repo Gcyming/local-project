@@ -372,10 +372,14 @@ export default function ResidentPanel(): React.JSX.Element {
             子代理
             <span style={{ color: "var(--text-muted)", fontWeight: 400, fontSize: 12, marginLeft: 8 }}>独立上下文并行执行（{maxParallel !== null ? `最多 ${maxParallel} 个并发` : "并行度见「设置 → 通用 → 请求频率」"}，受上游 RPM 限速保护）· 这里手动派发的产出落盘 data/generated/subagent-*.md；<b>对话里由 Agent 委派的，产出会作为工具结果交回主对话并由主 Agent 验收</b></span>
           </div>
-          {/* A-980-R31：运行记录现在持久化（data/subagent-runs.json），给一个显式清空入口 */}
+          {/* A-980-R31：运行记录现在持久化（data/subagent-runs.json），给一个显式清空入口。
+              ⚠️ A-1127（用户 2026-09-26）：「设置中的历史记录不受限，但是设置一个用户可主动选择
+              删除历史记录的选项按钮」⇒ 这里是**设置侧**的完整历史（上限 100 条，与本页的
+              240px 滚动区一起看），**不受**悬浮面板那条「只显示最近 5 条」的限制；
+              删除只能由用户在这里点（不可恢复，title 里写明）。 */}
           {runs.length > 0 && (
             <button style={{ ...miniBtn, flexShrink: 0, color: "var(--text-dim)" }} onClick={() => void clearRuns()}
-              title="清空子代理历史记录（落盘文件 + 已结束的内存记录；运行中/排队中的任务不受影响）">
+              title={`清空子代理历史记录（共 ${runs.length} 条：落盘 data/subagent-runs.json + 已结束的内存记录，不可恢复）；运行中/排队中的任务不受影响。悬浮面板只看最近 5 条，完整历史只在这里`}>
               清空历史
             </button>
           )}

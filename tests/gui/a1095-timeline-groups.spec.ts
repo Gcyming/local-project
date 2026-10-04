@@ -120,7 +120,13 @@ describe("A-1095 #9 groupTimeline 投影", () => {
 describe("A-1095 #9 接线守卫", () => {
   it("ThinkingPanel 与流式实时区都走 groupTimeline（不再裸 map 时间线）", () => {
     expect(PANEL).toMatch(/groupTimeline\(timeline\)/);
-    expect(PANEL).toMatch(/groupTimeline\(liveTimeline\)/);
+    /* A-1128 **迁移**（不是删）：流式实时区的入参多包了一层**显示层缓冲**
+       （`groupTimeline([...trimTailToShown(liveTimeline, tailShown)])` —— 思考逐字渐入要按
+       缓冲截断末位节点）。本条守卫的原意不变 —— "流式实时区必须过 groupTimeline" ——
+       所以断言改成**在同一行里必须同时出现 groupTimeline( 与 liveTimeline**，
+       对新旧两种形态都成立，而不是把调用形状焊死。 */
+    expect(PANEL, "流式实时区没走 groupTimeline（或 liveTimeline 没交进去）")
+      .toMatch(/groupTimeline\([^\n]*liveTimeline[^\n]*\)/);
     // 旧的裸 map 必须绝迹（否则归组形同虚设）
     expect(PANEL).not.toMatch(/timeline\.map\(\(step, i\)/);
     expect(PANEL).not.toMatch(/liveTimeline\.map\(\(step, i\)/);

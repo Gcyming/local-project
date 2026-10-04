@@ -40,8 +40,17 @@ export interface HttpServeParams {
    *     —— 它是应用自己在启动阶段建的，不是"本次 Agent 运行途中打开的服务"。
    *     用户要求面板只显示「Agent 运行途中打开的工具、脚本、端口」，所以它**不进面板**。
    *     （A-977 的持久化目的——"重启后旧链接仍可用"——不受影响：服务照常运行、照常可访问。）
+   *   · `builtin`     = **slime 自身的功能**用它来托管自己的页面（当前 = 右栏搜索页）。
+   *     它不是"Agent 起了个后台资源"，而是应用的一部分 ⇒ 同样**不进面板**，
+   *     而且**不落盘**（每次启动由 slime 自己重新交付，端口/目录由代码决定，不靠上次清单）。
+   *
+   * ⚠️ 为什么 `builtin` 必须与 `restored` 分开：两者都"不进面板"，但**重启后的行为不同** ——
+   *   `restored` 是"上次运行留下的服务，重启后照旧恢复"（用户可能已经不需要它）；
+   *   `builtin` 是"应用能力的一部分，每次启动都该有"。
+   *   若把搜索页混进 `restored` 的持久化清单，用户一旦在别处 `stopAll()` 就会把搜索页也停掉，
+   *   而"搜索页应该是常驻的"这件事就没人保证了。
    */
-  origin?: "agent" | "restored";
+  origin?: "agent" | "restored" | "builtin";
 }
 
 /** 运行中的服务信息（list 返回） */
@@ -60,8 +69,8 @@ export interface HttpServerInfo {
   startedAt: number;
   /** 累计请求数 */
   requests: number;
-  /** #230：谁起的（`agent` = 本次 Agent 运行途中起的；`restored` = 启动时按上次清单重建的） */
-  origin: "agent" | "restored";
+  /** #230：谁起的（`agent` = 本次 Agent 运行途中起的；`restored` = 启动时按上次清单重建的；`builtin` = slime 自身功能托管） */
+  origin: "agent" | "restored" | "builtin";
 }
 
 /** serve 成功返回 */
@@ -87,7 +96,7 @@ interface ServerEntry {
   /** A-977：SPA 回退开关（持久化时需一并记录） */
   spa?: boolean;
   /** #230：谁起的（见 HttpServeParams.origin） */
-  origin: "agent" | "restored";
+  origin: "agent" | "restored" | "builtin";
 }
 
 /** 常见 MIME 类型映射（扩展名小写 → Content-Type） */
@@ -232,7 +241,12 @@ class HttpStaticServerManager {
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
       try {
-        const list = [...this.entries.values()].map((e) => ({ dir: e.dir, host: e.host, port: e.port, spa: Boolean((e as { spa?: boolean }).spa) }));
+        /* ⚠️ `builtin` **不落盘**：它是 slime 自身功能（搜索页），每次启动由应用自己重新交付。
+           混进清单会有两个后果：① 用户停掉别的服务后清空清单，搜索页跟着消失；
+           ② 重启时按上次端口恢复，而内置服务该用哪个端口是**代码**决定的，不是上次的运气。 */
+        const list = [...this.entries.values()]
+          .filter((e) => e.origin !== "builtin")
+          .map((e) => ({ dir: e.dir, host: e.host, port: e.port, spa: Boolean((e as { spa?: boolean }).spa) }));
         mkdirSync(dirname(this.persistPath as string), { recursive: true });
         writeFileSync(this.persistPath as string, JSON.stringify({ version: 1, entries: list }, null, 2), "utf8");
       } catch { /* 落盘失败不影响服务运行 */ }
@@ -293,7 +307,9 @@ class HttpStaticServerManager {
       if (resolve(e.dir) === dir && e.host === host) {
         /* #230：复用发生在**本次运行**里的 Agent 调用中 → 这个服务从这一刻起就是
            "Agent 运行途中打开的服务"，把 restored 标记**升格**为 agent，
-           否则会出现"Agent 明明刚起过它、面板里却看不到"的反向错位。 */
+           否则会出现"Agent 明明刚起过它、面板里却看不到"的反向错位。
+           ⚠️ `builtin` **不升格**：它是应用自身功能托管的页面，被谁复用都还是应用的一部分
+           （升格会让搜索页重新变回"Agent 起的后台资源"—— 正是用户报的那个问题）。 */
         if (e.origin === "restored") {
           e.origin = "agent";
           e.startedAt = Date.now(); // 时长从"本次被 Agent 起用"算起，不把上次运行的时长算进去
@@ -324,8 +340,8 @@ class HttpStaticServerManager {
     const startedAt = Date.now();
     const entry: ServerEntry = {
       id, dir, host, port, server: null as unknown as Server, startedAt, requests: 0, spa,
-      // #230：缺省即"Agent 起的"（`restore()` 会显式传 restored）
-      origin: params.origin === "restored" ? "restored" : "agent",
+      // #230：缺省即"Agent 起的"（`restore()` 会显式传 restored；slime 自身功能传 builtin）
+      origin: params.origin === "restored" ? "restored" : params.origin === "builtin" ? "builtin" : "agent",
     };
 
     const handler = (req: IncomingMessage, res: ServerResponse): void => {

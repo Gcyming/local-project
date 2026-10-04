@@ -13,7 +13,7 @@
  * 不支持：加密、分卷、多磁盘 —— 遇到一律**明确抛错**，绝不静默返回错数据。
  */
 
-import { inflateRawSync } from "node:zlib";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, normalize, resolve, sep } from "node:path";
 
@@ -267,4 +267,122 @@ export async function extractZipTo(
 /** 归档内所有条目名（调试/守卫用）。 */
 export function zipEntryNames(buf: Buffer): string[] {
   return listZip(buf).map((e) => e.name);
+}
+
+/* ══ A-1133：ZIP **写入**（生成 .docx / .xlsx / .pptx 用） ══════════════════════════════
+   为什么写在本文件（而不是新开一个模块）：本文件就是「ZIP 容器格式」的**唯一产地**
+   （读的四个函数就在上面）。写到别处就成了"同一格式两套实现"——CRC 或中央目录字段
+   一处不合，产物就是「自家能读、Office 判为损坏」的**假成功**文件（比直接报错更坏）。
+   ⚠️ 日期字段写死 1980-01-01（ZIP 的最早合法 DOS 日期）：用"当前时间"会让同一份内容
+   **每次生成字节都不同** —— 测试无法逐字节比对，也让"内容没变但文件变了"的 diff 噪声永存。 */
+
+const FLAG_UTF8 = 0x0800;
+const DOS_DATE_1980 = 33;
+
+/** CRC32 查表（IEEE 802.3 多项式 0xEDB88320），首次使用时构建。 */
+let crcTable: Uint32Array | null = null;
+
+function getCrcTable(): Uint32Array {
+  if (crcTable) { return crcTable; }
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) !== 0 ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    t[i] = c >>> 0;
+  }
+  crcTable = t;
+  return t;
+}
+
+/**
+ * 计算 CRC32（ZIP 每条目必需）。
+ * 为什么自己写：解压端（含 Windows 资源管理器、Office）拿 CRC 校验完整性，缺了或写错，
+ * 文件能打开但内容被判「损坏」；而 `node:zlib` 的 `crc32` 是 Node 20+ 才有的新 API。
+ */
+export function crc32(buf: Buffer): number {
+  const t = getCrcTable();
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) {
+    c = t[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** 写入用的部件（名字 + 内容） */
+export interface ZipFile {
+  name: string;
+  data: Buffer;
+}
+
+/**
+ * 打包成 ZIP（deflate；UTF-8 文件名）。
+ *
+ * @param files 部件列表；**同名后者覆盖前者**（与 Map 语义一致，避免同部件写两份）
+ * @returns 完整 ZIP 字节（本地头 + 数据 + 中央目录 + EOCD）
+ */
+export function writeZip(files: readonly ZipFile[]): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  let count = 0;
+
+  for (const f of files) {
+    const nameBytes = Buffer.from(f.name, "utf8");
+    const crc = crc32(f.data);
+    const comp = deflateRawSync(f.data);
+
+    const local = Buffer.alloc(30 + nameBytes.length);
+    local.writeUInt32LE(SIG_LOCAL, 0);
+    local.writeUInt16LE(20, 4);              // version needed
+    local.writeUInt16LE(FLAG_UTF8, 6);       // flags
+    local.writeUInt16LE(8, 8);               // method = deflate
+    local.writeUInt16LE(0, 10);              // mod time
+    local.writeUInt16LE(DOS_DATE_1980, 12);  // mod date
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(comp.length, 18);
+    local.writeUInt32LE(f.data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28);              // extra len
+    nameBytes.copy(local, 30);
+    locals.push(local, comp);
+
+    const central = Buffer.alloc(46 + nameBytes.length);
+    central.writeUInt32LE(SIG_CENTRAL, 0);
+    central.writeUInt16LE(20, 4);            // version made by
+    central.writeUInt16LE(20, 6);            // version needed
+    central.writeUInt16LE(FLAG_UTF8, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(DOS_DATE_1980, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(comp.length, 20);
+    central.writeUInt32LE(f.data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt16LE(0, 30);            // extra len
+    central.writeUInt16LE(0, 32);            // comment len
+    central.writeUInt16LE(0, 34);            // disk start
+    central.writeUInt16LE(0, 36);            // internal attrs
+    central.writeUInt32LE(0, 38);            // external attrs
+    central.writeUInt32LE(offset, 42);       // local header offset
+    nameBytes.copy(central, 46);
+    centrals.push(central);
+
+    offset += local.length + comp.length;
+    count += 1;
+  }
+
+  const cd = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(SIG_EOCD, 0);
+  eocd.writeUInt16LE(0, 4);                  // disk num
+  eocd.writeUInt16LE(0, 6);                  // cd start disk
+  eocd.writeUInt16LE(count, 8);
+  eocd.writeUInt16LE(count, 10);
+  eocd.writeUInt32LE(cd.length, 12);
+  eocd.writeUInt32LE(offset, 16);            // cd offset
+  eocd.writeUInt16LE(0, 20);                 // comment len
+
+  return Buffer.concat([Buffer.concat(locals), cd, eocd]);
 }

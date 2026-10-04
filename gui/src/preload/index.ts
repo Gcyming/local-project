@@ -4,7 +4,7 @@
  * - contextBridge 唯一暴露窗口：window.slimeAPI（封装回调，不暴露原始 ipcRenderer）
  * - IPC 接收侧白名单验证由主进程 onMessage 处理完成；渲染层仅收可信类型
  */
-import { contextBridge, ipcRenderer, IpcRendererEvent } from "electron";
+import { contextBridge, ipcRenderer, webUtils, IpcRendererEvent } from "electron";
 import type {
   StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus,
   LlmGatewayConfigDTO, LlmGatewayStatusDTO, LlmGatewayNewTokenDTO,
@@ -16,6 +16,7 @@ import type {
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus, AdbDownloadProgressInfo,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
+  TermProfilesResult,
   AgentProcsListResult, AgentProcsStopResult,
   GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, WorkspaceReadFileResult,
   ContextMenuItem, WorkspaceContextMenuParams, WorkspaceCreateResult,
@@ -32,6 +33,7 @@ import type {
 import type { SidebarOpenRequest } from "../shared/ipc.js";
 // A-1122（③）：文件回滚的预演/还原结果（core-ts 侧定义，这里只借类型）
 import type { FileUndoPlan, FileUndoResult } from "../shared/ipc.js";
+import type { SidebarSearchView } from "../shared/searchView.js";
 
 /** 监听 ipcRenderer 事件→回掉，自动注销；渲染层拿到 cleanup() */
 function onMessage<T>(channel: string, cb: (payload: T) => void) {
@@ -67,6 +69,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
      */
     steer: (sessionId: string, id: number | string, text: string) =>
       ipcRenderer.invoke("slime:chat:steer", { sessionId, id: String(id), text }) as Promise<{ ok: boolean; pending?: number; error?: string }>,
+    /** A-1151：撤销一条已投入的引导（用户在待发卡片点「✕」时调）。
+     *  ⚠️ 必须与 `steer` 成对存在：只删渲染层那份，主进程缓冲里的残留会在下一轮被注入
+     *  —— 用户看到的现象就是"我明明取消了，它还是发出去了"。 */
+    dismissSteer: (sessionId: string, id: number | string) =>
+      ipcRenderer.invoke("slime:chat:steer:dismiss", { sessionId, id: String(id) }) as Promise<{ ok: boolean; dropped?: boolean }>,
     /** A-973：查询指定会话是否仍有进行中的流（渲染层恢复时判定"进行中/已结算"的真相源） */
     isActive: (key: string) =>
       ipcRenderer.invoke("slime:chat:isActive", { key }) as Promise<{ active: boolean }>,
@@ -132,6 +139,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /** 会话级工作目录更新（以文件夹为主：绑定/更换工作文件夹） */
     setWorkspace: (sessionId: string, workspace: string | null) =>
       ipcRenderer.invoke("slime:sessions:setWorkspace", { sessionId, workspace }) as Promise<{ ok: boolean; workspace?: string }>,
+    /** A-1131：会话级模型选择（modelChoice=null 清除覆盖，回落 Agent 默认值）。
+     *  ⚠️ 与 `agents.update({model_choice})` 是**两条不同语义**的通路：
+     *  这条只改本会话，那条改 Agent（= 新建会话的初值）。别再合并。 */
+    setModelChoice: (sessionId: string, modelChoice: string | null) =>
+      ipcRenderer.invoke("slime:sessions:setModelChoice", { sessionId, modelChoice }) as Promise<{ ok: boolean; modelChoice?: string | null }>,
     rename: (sessionId: string, title: string) =>
       ipcRenderer.invoke("slime:sessions:rename", { sessionId, title }) as Promise<{ ok: boolean }>,
     remove: (sessionId: string) =>
@@ -252,6 +264,14 @@ contextBridge.exposeInMainWorld("slimeAPI", {
   files: {
     /** 导入文件对话框：返回本地路径（聊天输入区附件） */
     pick: () => ipcRenderer.invoke("slime:files:pick") as Promise<{ ok: boolean; path?: string; error?: string }>,
+    /* ══ A-1133：拖入文件的**真实磁盘路径** ══════════════════════════════════════════════
+       ⚠️ `File.path` 在 Electron 32 起已移除（本仓 35），唯一官方途径是 `webUtils.getPathForFile`。
+       此前仓里没有这个桥 ⇒ 拖入的 word/pdf/excel 在渲染层**拿不到路径** ⇒ 无论怎么处理都读不了
+       （用户报的「完全无法拖入任何工作文档」的第二层原因：不是被拦住了，是根本没有路径可读）。
+       ⚠️ 必须在**渲染进程**里调用（要真实 File 对象），所以只能经 contextBridge 暴露函数本身。 */
+    pathForFile: (file: File): string => {
+      try { return webUtils.getPathForFile(file) ?? ""; } catch { return ""; }
+    },
   },
   /**
    * A-1122（③）：文件回滚账本 —— 回滚一条消息时把磁盘上的改动也还原。
@@ -549,14 +569,125 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     openPath: (path: string) =>
       ipcRenderer.invoke("slime:shell:openPath", { path }) as Promise<{ ok: boolean; error?: string }>,
   },
-  term: {
-    /** 右侧栏「终端」：执行命令并返回输出 */
-    exec: (cmd: string, cwd?: string) =>
-      ipcRenderer.invoke("slime:term:exec", { cmd, cwd }) as Promise<TermResult>,
+  /* ══ A-1133：拖入文件的**真实磁盘路径** ══════════════════════════════════════════════
+     ⚠️ `File.path` 在 Electron 32 起已移除（本仓是 35），唯一官方途径是 `webUtils.getPathForFile`。
+     仓里此前**没有**这个桥 ⇒ 拖入的文件在渲染层拿不到路径 ⇒ 无论 word/pdf/excel 都读不了
+     （这正是用户报的「完全无法拖入任何工作文档」的第二层原因：不是被拦住了，是根本没有路径可读）。
+     ⚠️ 必须在**渲染进程**里调用（它要真实的 File 对象），所以只能经 contextBridge 暴露函数本身。 */
+  /* ══ A-1133：工作文档通道（读取 / 生成） ═══════════════════════════════════════════
+     判据全部在主进程调的 `core-ts/src/office/*`（纯模块、可单测），这里只做搬运。 */
+  docs: {
+    read: (path: string) =>
+      ipcRenderer.invoke("slime:docs:read", { path }) as Promise<{ ok: boolean; kind?: string; text?: string; error?: string; truncated?: boolean }>,
+    create: (spec: { path: string; format: string; title?: string; body: string }) =>
+      ipcRenderer.invoke("slime:docs:create", { spec }) as Promise<{ ok: boolean; path?: string; bytes?: number; error?: string }>,
+    /** A-1133：把渲染用 HTML 落盘（内容哈希命名）→ 右栏浏览器页用应用内服务打开它 */
+    htmlPreview: (payload: { name?: string; html: string }) =>
+      ipcRenderer.invoke("slime:docs:htmlPreview", payload) as Promise<{ ok: boolean; path?: string; dir?: string; name?: string; error?: string }>,
+    /** A-1136：**保真渲染页**落盘（读原文件字节 → 真渲染库）→ 右栏浏览器页打开。
+     *  `degrade: true` = 该类型不支持保真渲染，调用方应退回 `read`+`htmlPreview` 的结构化通道。
+     *  ⚠️ 阶段 C 起：老格式（.doc/.xls/.ppt）**会走这条**（内部先转 PDF），失败时带
+     *  `needs: "libreoffice"` + `hint`（缺依赖）或 `reason: "failed"`（转换失败，别混成一句）。
+     *  成功时 `transient: true` = `dir` 指向的是**可复用**的固定目录（PDF 本身在临时区、已复制过来）。
+     *  ⚠️ **没有 `convertDir`**：临时转换目录由主进程在复制完 PDF 后**当场删掉**（用户定「不留文件」）；
+     *     曾把它返回给渲染层"让渲染层删"，而渲染层从不消费 ⇒ 每转一次漏一个临时目录（09-30 修）。
+     *  `fallback: true` = 走了**兜底路线**（如 `.xls` 用 SheetJS 直读而非 LibreOffice 转 PDF）——
+     *     页面已带可见提示条，调用方当成功处理即可（用户口径：「LibreOffice 优先 + SheetJS 兜底」）。 */
+    renderPage: (payload: { path: string; name?: string }) =>
+      ipcRenderer.invoke("slime:docs:renderPage", payload) as Promise<{
+        ok: boolean; dir?: string; name?: string; error?: string; degrade?: boolean;
+        needs?: string; hint?: string; reason?: string; transient?: boolean; fallback?: boolean;
+      }>,
+    /** 某次"本地文件被拦下/被取消下载"的通知（用户必须看到交代，不许静默） */
+    onLocalFile: (cb: (payload: { path: string; reason: string }) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, p: { path: string; reason: string }): void => cb(p);
+      ipcRenderer.on("slime:docs:local-file", h);
+      return () => { ipcRenderer.off("slime:docs:local-file", h); };
+    },
   },
-  /* A-1069（#226）：Agent 启动的后台资源（图形控制常驻宿主 / 本地服务 / 后台子代理）。
+  /* ══ 阶段 C：本机外部依赖探测 ═══════════════════════════════════════════════════════
+     ⚠️ 只暴露"问一下"，**不暴露任意进程调用**（那是另一个量级的攻击面）。
+     判据在主进程 `libreofficeConvert.ts` + `core-ts/src/office/libreoffice.ts`（唯一产地）。 */
+  office: {
+    /** 本机有没有可用的 LibreOffice（老版 .doc/.xls/.ppt 保真预览的前置条件）。
+     *  `force: true` = 用户刚装完、要立即复检（跳过进程内缓存）。 */
+    libreofficeProbe: (force?: boolean) =>
+      ipcRenderer.invoke("slime:office:libreofficeProbe", { force: Boolean(force) }) as Promise<{
+        ok: boolean; found: boolean; path: string; version: string; hint: string; error?: string;
+      }>,
+  },
+  /* A-1137：右栏**搜索页**的宿主信息 + 对话侧状态条的数据源。
+     ⚠️ 这一组是**主窗口**用的（guest 那几条在 `searchHost.cjs` 里，两者 sender 不同、判据也不同）。
+     ⚠️ 渲染层**不做判据**：页面事件 → 视图的翻译在主进程的
+     `gui/src/shared/searchView.ts::viewFromPageEvent()`（唯一产地，纯函数）。 */
+  search: {
+    /** 取「搜索页 URL + guest preload 的 file:// 路径」。**渲染层不知道产物布局**，必须问主进程。
+     *  失败时返回 `{ok:false,error}` —— 调用方要把错误如实显示（那是"搜索页打不开"的唯一线索）。 */
+    host: () =>
+      ipcRenderer.invoke("slime:search:hostInfo") as Promise<{
+        ok: boolean; url?: string; preload?: string; fingerprint?: string; error?: string;
+      }>,
+    /** 取一份"最近视图"（广播是一次性的 ⇒ 晚挂载时靠它补课）。 */
+    view: () =>
+      ipcRenderer.invoke("slime:search:viewGet") as Promise<SidebarSearchView | null>,
+    /** 订阅"右栏搜索页在做什么"的广播（对话侧状态条）。 */
+    onView: (cb: (v: SidebarSearchView) => void) =>
+      onMessage<SidebarSearchView>("slime:search:viewChanged", cb),
+
+    /* ── A-1138：自建全网索引服务（爬虫 / 索引 / 服务**都在 slime 进程内**）───────────── */
+    /** 一键启动（幂等：已在跑就返回当前端口）。失败**必须**把 `error` 显示出来
+     *  （端口被占用这类失败不显示 ⇒ 用户只会看到"少一块补充命中"，永远不知道为什么）。 */
+    indexStart: () =>
+      ipcRenderer.invoke("slime:search:indexStart") as Promise<{ ok: boolean; port?: number; error?: string }>,
+    indexStop: () => ipcRenderer.invoke("slime:search:indexStop") as Promise<{ ok: boolean }>,
+    /** 一键收录：交给主进程后台跑（立刻返回，进度看 `indexStatus().log`）。
+     *  A-1139：载荷改成 `{ seeds, opts }` —— `seeds` 可以是**多行文本**（批量收录），
+     *  参数夹取仍在主进程（渲染层不做判据）。 */
+    indexCrawl: (payload: { seeds: string | string[]; opts?: Record<string, unknown> }) =>
+      ipcRenderer.invoke("slime:search:indexCrawl", payload) as Promise<{ ok: boolean; error?: string }>,
+    indexStatus: () => ipcRenderer.invoke("slime:search:indexStatus") as Promise<{
+      running: boolean; port: number; pages: number; terms: number;
+      crawling: boolean; log: string[];
+      lastCrawl: { ok: boolean; fetched?: number; error?: string } | null;
+      sites?: { host: string; pages: number }[];
+    }>,
+    /** A-1139：索引维护三条（重建 / 清空 / 按站删除）。 */
+    indexRebuild: () =>
+      ipcRenderer.invoke("slime:search:indexRebuild") as Promise<{ ok: boolean; pages?: number; terms?: number; error?: string }>,
+    indexClear: () =>
+      ipcRenderer.invoke("slime:search:indexClear") as Promise<{ ok: boolean; removed?: number; error?: string }>,
+    indexRemoveSite: (host: string) =>
+      ipcRenderer.invoke("slime:search:indexRemoveSite", host) as Promise<{ ok: boolean; removed?: number; error?: string }>,
+    /** A-1140：读**生效中**的全局参数（分词 / 打分 / 正文）——
+     *  ⚠️ 回的是夹取后的值，不是用户填的原始值：这样"填了 999 被夹到 8"在界面上是**看得见**的。 */
+    indexParamsGet: () =>
+      ipcRenderer.invoke("slime:search:indexParamsGet") as Promise<{
+        index: { k1: number; b: number; titleBoost: number; wholeWordMaxLen: number; minTermLen: number; stopwords: string[] };
+        body: { minBodyChars: number; maxBodyChars: number };
+      } | null>,
+    /** A-1140：改全局参数。主进程会夹取 → 落盘 → **立即重建索引**；
+     *  正在收录时会被拒（`{ok:false,error}`），调用方必须把 `error` 显示出来。 */
+    indexParamsSet: (p: {
+      index?: Partial<{ k1: number; b: number; titleBoost: number; wholeWordMaxLen: number; minTermLen: number; stopwords: string[] }>;
+      body?: Partial<{ minBodyChars: number; maxBodyChars: number }>;
+    }) =>
+      ipcRenderer.invoke("slime:search:indexParamsSet", p) as Promise<{ ok: boolean; pages?: number; terms?: number; notice?: string; error?: string }>,
+  },
+  term: {
+    /** 右侧栏「终端」：执行命令并返回输出。
+     *  ⚠️ A-1139：`profileId` 是**渲染层选的 shell**（缺省 ⇒ 主进程用默认 shell）。
+     *  编码**不在这里判** —— 主进程按 `decodeBytes` 解好再回带 `encoding`/`looseEncoding`。 */
+    exec: (cmd: string, cwd?: string, profileId?: string) =>
+      ipcRenderer.invoke("slime:term:exec", { cmd, cwd, profileId }) as Promise<TermResult>,
+    /** A-1139：主机本地终端组件清单（下拉用）。探测结果主进程侧缓存（并发只探一次）。 */
+    profiles: () =>
+      ipcRenderer.invoke("slime:term:profiles") as Promise<TermProfilesResult>,
+  },
+  /* A-1069（#226）：Agent 启动的后台资源（图形控制常驻宿主 / 本地服务）。
      ⚠️ 渲染层**不做判据**：类别归属、排序、状态词、可否停止全在主进程调的纯模块里
-     （`core-ts/src/services/agentProcs.ts`）。这里只是把视图取回来、把点击转成 {kind,id}。 */
+     （`core-ts/src/services/agentProcs.ts`）。这里只是把视图取回来、把点击转成 {kind,id}。
+     ⚠️ 范围（用户 2026-09-26）：「只监视 Agent 运行的脚本、端口」⇒ **不含子代理**
+     （子代理在自己的坞里，见 SubAgentExpandButton）。 */
   agentProcs: {
     list: () =>
       ipcRenderer.invoke("slime:agentprocs:list", {}) as Promise<AgentProcsListResult>,
@@ -723,6 +854,11 @@ contextBridge.exposeInMainWorld("slimeAPI", {
    *  抄一份的下场是"主进程多发了一个字段、渲染层不知道"，而那正是 `cmd`/`root` 会被静默丢掉的形态。 */
   onSidebarOpen: (cb: (payload: SidebarOpenRequest) => void) =>
     onMessage<SidebarOpenRequest>("slime:sidebar:open", cb),
+  /** A-1144：把「右栏此刻挂载的内容」**上报**给主进程（方向与上面相反）。
+   *  主进程按 `sessionId` 存住，下一轮对话时注入系统提示（见 `core-ts/src/sidebarMount.ts`）。
+   *  ⚠️ 传 `null`（或空文本）= **清空** —— 右栏空了就必须撤下，否则模型会一直拿着一份过期的右栏。 */
+  publishSidebarMount: (payload: { sessionId: string; text: string } | null) =>
+    ipcRenderer.send("slime:sidebar:mount", payload),
 });
 
 declare global {
@@ -736,6 +872,8 @@ declare global {
         cancel: (key: string) => Promise<{ ok: boolean; error?: string; active?: number }>;
         /** A-1060：投入中途「引导」（不打断当前生成；在下一个工具调用后的轮次边界注入） */
         steer: (sessionId: string, id: number | string, text: string) => Promise<{ ok: boolean; pending?: number; error?: string }>;
+        /** A-1151：撤销一条已投入的引导（`✕` 时调，与 `steer` 配对）。 */
+        dismissSteer: (sessionId: string, id: number | string) => Promise<{ ok: boolean; dropped?: boolean }>;
         isActive: (key: string) => Promise<{ active: boolean }>;
         compress: (sessionId: string, ratio: number, used?: number, force?: boolean) => Promise<CompressResult>;
         onChunk: (cb: (chunk: StreamChunk) => void) => () => void;
@@ -775,6 +913,8 @@ declare global {
         /** A-1011：群聊成员思考推理强度（effort=null 清除覆盖，回落群聊默认 high） */
         setMemberEffort: (sessionId: string, memberId: string, effort: string | null) => Promise<{ ok: boolean; memberEfforts?: Record<string, string>; leaderEffort?: string }>;
         setWorkspace: (sessionId: string, workspace: string | null) => Promise<{ ok: boolean; workspace?: string }>;
+        /** A-1131：会话级模型选择（null = 清除覆盖、回落 Agent 默认值） */
+        setModelChoice: (sessionId: string, modelChoice: string | null) => Promise<{ ok: boolean; modelChoice?: string | null }>;
         rename: (sessionId: string, title: string) => Promise<{ ok: boolean }>;
         remove: (sessionId: string) => Promise<{ ok: boolean }>;
         clear: (sessionId: string) => Promise<{ ok: boolean }>;
@@ -963,7 +1103,9 @@ declare global {
         openPath: (path: string) => Promise<{ ok: boolean; error?: string }>;
       };
       term: {
-        exec: (cmd: string, cwd?: string) => Promise<TermResult>;
+        exec: (cmd: string, cwd?: string, profileId?: string) => Promise<TermResult>;
+        /** A-1139：主机本地终端组件清单（下拉用） */
+        profiles: () => Promise<TermProfilesResult>;
       };
       /** A-1069（#226）：Agent 启动的后台资源面板 */
       agentProcs: {
@@ -1037,6 +1179,8 @@ declare global {
       };
       /** A-918++ / A-1121：主进程通知「在右侧栏打开某项」（url / terminal / files） */
       onSidebarOpen: (cb: (payload: SidebarOpenRequest) => void) => () => void;
+      /** A-1144：把「右栏此刻挂载的内容」上报给主进程（按会话注入系统提示）；`null` = 清空 */
+      publishSidebarMount: (payload: { sessionId: string; text: string } | null) => void;
       /** 图形控制能力（screen_*）：桌面 + 安卓统一 */
       screen: {
         info: () => Promise<{

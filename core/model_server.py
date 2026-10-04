@@ -24,6 +24,8 @@ from typing import Optional
 
 import httpx
 
+from .subproc import run_text
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -43,14 +45,15 @@ class VRAMMonitor:
         if not nvidia_smi:
             return None
         try:
-            result = subprocess.run(
+            # ⚠️ A-1134：一律走 `run_text`（bytes 收 + 宽容解码）——`text=True` 会让解码发生在
+            # reader 线程里，撞上非 UTF-8 字节就崩线程（Windows 中文环境实测）。
+            result = run_text(
                 [
                     nvidia_smi,
                     "--query-gpu=memory.total,memory.used,memory.free",
                     "--format=csv,noheader,nounits",
                 ],
-                capture_output=True, text=True, timeout=5,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}),
+                timeout=5,
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return None
@@ -168,11 +171,7 @@ class ModelBackend:
             return
         try:
             if IS_WINDOWS:
-                subprocess.run(
-                    ["taskkill", "/PID", str(self._pid), "/T", "/F"],
-                    capture_output=True,
-                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}),
-                )
+                run_text(["taskkill", "/PID", str(self._pid), "/T", "/F"])
             else:
                 os.killpg(os.getpgid(self._pid), signal.SIGTERM)
             self._process.wait(timeout=5)
@@ -225,11 +224,7 @@ class ModelBackend:
             return False
         if IS_WINDOWS:
             try:
-                result = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {self._pid}"],
-                    capture_output=True, text=True,
-                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}),
-                )
+                result = run_text(["tasklist", "/FI", f"PID eq {self._pid}"])
                 if str(self._pid) not in result.stdout:
                     return False
             except Exception:
@@ -589,25 +584,29 @@ def _verify_llama_server_pid(pid: int) -> bool:
     """检查 PID 对应进程是否为 llama-server（N10-M7，防 PID 复用误杀）。
 
     Windows 优先 wmic 命令行校验（老系统）；wmic 缺失（Win11 24H2+ 已移除）
-    时回退 tasklist 镜像名校验。Unix 读 /proc/{pid}/cmdline。"""
+    时回退 tasklist 镜像名校验。Unix 读 /proc/{pid}/cmdline。
+
+    ⚠️ A-1134：这里的三条 Windows 查询**原本全用 `text=True`**（无 encoding/errors），
+       在中文 Windows 上会因 `wmic` / `tasklist` 输出 GBK 而**崩掉 reader 线程**
+       ⇒ `stdout` 拿不到 ⇒ 本函数永远返回 False ⇒ "无法确认时不杀" 退化成 "**永远不杀**"。
+       判据依赖的正是 stdout 里的 `llama-server`，所以它必须走 `run_text`。
+    """
     if not pid:
         return False
     try:
         if IS_WINDOWS:
             if shutil.which("wmic"):
-                result = subprocess.run(
+                result = run_text(
                     ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine"],
-                    capture_output=True, text=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=5,
                 )
-                return "llama-server" in (result.stdout or "")
+                return "llama-server" in result.stdout
             # wmic 缺失回退：tasklist 镜像名校验
-            result = subprocess.run(
+            result = run_text(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=5,
             )
-            return "llama-server" in (result.stdout or "")
+            return "llama-server" in result.stdout
         else:
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
             return "llama-server" in cmdline
@@ -616,25 +615,22 @@ def _verify_llama_server_pid(pid: int) -> bool:
 
 
 def _pid_for_port(port: int) -> int | None:
-    """解析监听端口的进程 PID（Windows netstat / Unix lsof）。失败返回 None。"""
+    """解析监听端口的进程 PID（Windows netstat / Unix lsof）。失败返回 None。
+
+    ⚠️ A-1134：`netstat`（中文 Windows 输出 GBK）同样走 `run_text` —— 解码失败会让 `out`
+       为空 ⇒ **端口被谁占用判断不出来** ⇒ 残留实例回收整条链路失效。
+    """
     import re as _re
     try:
         if IS_WINDOWS:
-            out = subprocess.run(
-                ["netstat", "-ano", "-p", "TCP"],
-                capture_output=True, text=True, timeout=5,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}),
-            ).stdout
+            out = run_text(["netstat", "-ano", "-p", "TCP"], timeout=5).stdout
             for line in out.splitlines():
                 if _re.search(rf":{port}\s", line) and "LISTENING" in line.upper():
                     parts = line.split()
                     if parts and parts[-1].isdigit():
                         return int(parts[-1])
         else:
-            out = subprocess.run(
-                ["lsof", "-ti", f"tcp:{port}"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout
+            out = run_text(["lsof", "-ti", f"tcp:{port}"], timeout=5).stdout
             pids = [x for x in out.strip().splitlines() if x.isdigit()]
             if pids:
                 return int(pids[0])
@@ -646,22 +642,24 @@ def _pid_for_port(port: int) -> int | None:
 def _parent_pid(pid: int) -> int | None:
     """查询父 PID。失败/非 Windows 返回 None（保守：不判定孤儿）。
 
-    Windows 优先 wmic；wmic 缺失（Win11 24H2+）回退 PowerShell Get-CimInstance。"""
+    Windows 优先 wmic；wmic 缺失（Win11 24H2+）回退 PowerShell Get-CimInstance。
+
+    ⚠️ A-1134：`wmic` / `powershell` 的中文输出都会走 `run_text`（原为 `text=True`）。
+       这里要的是**数字**，一旦读者线程崩掉就永远返回 None ⇒ 孤儿判定整体失效。
+    """
     if not IS_WINDOWS:
         return None
     try:
         if shutil.which("wmic"):
-            out = subprocess.run(
+            out = run_text(
                 ["wmic", "process", "where", f"ProcessId={pid}", "get", "ParentProcessId"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=5,
             ).stdout
         else:
-            out = subprocess.run(
+            out = run_text(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                  f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId"],
-                capture_output=True, text=True, timeout=8,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=8,
             ).stdout
         nums = [int(x) for x in out.split() if x.isdigit()]
         return nums[0] if nums else None
@@ -673,11 +671,7 @@ def _process_alive(pid: int) -> bool:
     """PID 是否存活。查询失败保守视为存活（不误判孤儿、不误杀）。"""
     if IS_WINDOWS:
         try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            ).stdout
+            out = run_text(["tasklist", "/FI", f"PID eq {pid}"], timeout=5).stdout
             return str(pid) in out
         except Exception:
             return True
@@ -704,10 +698,7 @@ def _kill_pid(pid: int) -> bool:
         return False
     try:
         if IS_WINDOWS:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            run_text(["taskkill", "/PID", str(pid), "/T", "/F"])
         else:
             os.kill(pid, 15)
         logger.info(f"[model_server] 已回收孤儿 llama-server (PID {pid})")

@@ -132,6 +132,26 @@ export default function RuntimePanel(): JSX.Element {
     }
   }
 
+  /* ── 阶段 C：老版 Office（.doc/.xls/.ppt）保真预览的前置依赖 ──────────────────────
+     为什么放「运行环境」而不是别处：它和 Node/Python/Git 一样是**机器级外部依赖**，
+     不是某个文件的属性 ⇒ 归到这一类用户才能在"文件打不开"时找到它。
+     ⚠️ 判据只有一处（主进程 `libreofficeConvert.ts`）—— 这里**不许**自己拼安装路径。 */
+  interface LoProbe { found: boolean; path: string; version: string; hint: string }
+  const [lo, setLo] = React.useState<LoProbe | null>(null);
+  const [loBusy, setLoBusy] = React.useState(false);
+
+  const loadLo = React.useCallback(async (force = false): Promise<void> => {
+    if (!api?.office?.libreofficeProbe) { return; }
+    setLoBusy(true);
+    try {
+      const r = await api.office.libreofficeProbe(force) as LoProbe;
+      setLo(r);
+    } catch { /* 未就绪时静默：这一栏是补充信息，不该把整页打成错误 */ }
+    finally { setLoBusy(false); }
+  }, [api]);
+
+  React.useEffect(() => { void loadLo(); }, [loadLo]);
+
   /* ── 图形控制能力（screen_*）：后端/目标一览 + 紧急停止 + 截图预览 ── */
   interface ScreenInfo {
     enabled: boolean;
@@ -270,6 +290,52 @@ export default function RuntimePanel(): JSX.Element {
           })}
         </div>
       )}
+
+      {/* ── 阶段 C：老版 Office 文件的保真预览（可选外部依赖） ───────────────────────
+          用户 2026-09-29 决策：「先探测本机已有的，缺了再提示下载」。这里就是那个"提示下载"的落点，
+          也是他装完之后回来**复检**的地方（「重新检测」会 force 跳过缓存）。 */}
+      <div style={{ marginTop: 18 }}>
+        <h2 style={{ fontSize: 15, margin: "0 0 4px" }}>文档预览增强</h2>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 10 }}>
+          新格式（.docx/.xlsx/.pptx）已内置渲染，无需任何安装。
+          老版格式（.doc/.xls/.ppt）的原样预览需要本机安装 <b>LibreOffice</b>（免费、约 350MB，不随包分发）。
+        </div>
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 14px" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>LibreOffice</span>
+              {lo?.version && <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "Consolas, monospace" }}>{lo.version}</span>}
+              <span style={{
+                fontSize: 11, padding: "1px 8px", borderRadius: 7, flexShrink: 0,
+                background: lo?.found ? "rgba(0,200,120,.15)" : "var(--danger-soft)",
+                color: lo?.found ? "#22c55e" : "#f87171", fontWeight: 600,
+              }}>
+                {lo === null ? "检测中…" : lo.found ? "就绪" : "未安装"}
+              </span>
+            </div>
+            {lo?.found && lo.path && (
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, fontFamily: "Consolas, monospace", wordBreak: "break-all" }}>{lo.path}</div>
+            )}
+            {lo && !lo.found && (
+              /* ⚠️ 提示必须**可操作**（给下载入口），不是"不支持"三个字。
+                 文案来自主进程的 `LO_DOWNLOAD_HINT`（唯一产地）—— 两处各写一份必然漂。 */
+              <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{lo.hint}</div>
+            )}
+          </div>
+          {lo && !lo.found && (
+            <button className="btn primary" style={{ padding: "5px 14px", fontSize: 12, flexShrink: 0, whiteSpace: "nowrap" }}
+              onClick={() => { try { window.open("https://www.libreoffice.org/download/download-libreoffice/", "_blank"); } catch { /* 忽略 */ } }}>
+              前往下载
+            </button>
+          )}
+          <button className="btn" style={{ padding: "5px 14px", fontSize: 12, flexShrink: 0, whiteSpace: "nowrap" }}
+            disabled={loBusy}
+            title="装完 LibreOffice 后点这里复检（跳过缓存）"
+            onClick={() => void loadLo(true)}>
+            {loBusy ? "检测中…" : "重新检测"}
+          </button>
+        </div>
+      </div>
 
       {/* ── 图形控制能力（桌面 + 安卓统一）：可用目标一览 / 截图预览 / 紧急停止 ── */}
       <div style={{ marginTop: 18 }}>

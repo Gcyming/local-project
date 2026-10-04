@@ -6,15 +6,29 @@
  *   「子代理从右侧监测栏移出，做成**同款**悬浮按钮」
  *   「**一个展开时另一个渐出**」
  *
- * ## 为什么把这三行判据抽成纯模块
+ * ## 为什么把这几行判据抽成纯模块
  *
- * 「同一个时刻只能展开一个」这件事，如果让两个按钮**各自**持有一个 `open` 布尔，那么
- * "两个同时展开"只是一个没人在意的非法状态 —— 界面上表现为两块面板叠在一起、或者后点开的
+ * 「同一个时刻只能展开一个面板」这件事，如果让两个按钮**各自**持有一个 `open` 布尔，那么
+ * "两个面板同时展开"只是一个没人在意的非法状态 —— 界面上表现为两块面板叠在一起、或者后点开的
  * 把先点开的盖住，而 tsc / 构建 / 全部逻辑测试都不会响。
  *
  * ⇒ 把"当前展开的是哪一个"收敛成**一个单值**（`DockState`），非法状态在类型上就不存在；
- *   "另一个要不要渐出"也不再由组件各判一次，而是从同一个单值派生（`dockSlotState`）。
+ *   "另一格现在是什么状态"也不再由组件各判一次，而是从同一个单值派生（`isDockOpen`）。
  *   这样"互斥"是可**穷举验证**的：枚举所有 `(state, id)` 组合即可（见守卫）。
+ *
+ * ## ⚠️ A-1126 范围更正：渐出的是**面板**，不是按钮（用户 2026-09-26）
+ *
+ * 用户原话：「为什么点击后台任务后，**同行的子代理悬浮按钮会消失**？旧设定没删干净？」
+ *
+ * 原实现（A-1074）把 `isDockFaded` 派生成的 `is-faded` 类挂到**整格**上
+ * （`.dock-slot.is-faded { opacity: 0; pointer-events: none; }`）——
+ * 于是展开「后台任务」时，**旁边那个子代理按钮**整颗淡成透明：用户"想点它却发现它没了"。
+ * 那是把"面板互斥"顺手做成了"入口互斥"，与"两个按钮都该常显"直接冲突。
+ *
+ * ⇒ 现在**没有 `faded` 这个概念了**：面板互斥已经由单值 `DockState` + 各自的 `.collapse`
+ *   开合态保证（同一时刻只有一个 `.collapse.is-open`）；按钮只按自己的数据决定显示与否
+ *   （后台资源为 `any`、子代理为有记录），**永不因为另一个面板开着而消失**。
+ *   唯一保留的视觉反馈是"哪个是开着的"（`is-open` 高亮，见 index.css）。
  *
  * 本模块**不得**出现 React / JSX / DOM（对齐 `insertCopy.ts` / `streamFade.ts` 的分家约定）。
  */
@@ -44,31 +58,19 @@ export function closeDock(current: DockState, id: DockId): DockState {
   return current === id ? null : current;
 }
 
-/** 该项是否展开。 */
+/** 该项的面板是否展开。 */
 export function isDockOpen(current: DockState, id: DockId): boolean {
   return current === id;
 }
 
-/** 该项是否应当**渐出**（另一个正在展开 ⇒ 本项让位）。都收起时谁都不渐出。 */
-export function isDockFaded(current: DockState, id: DockId): boolean {
-  return current !== null && current !== id;
-}
-
 /**
- * 坞内一格的视觉态。组件只消费这个结果，不再自己判 ——
- * 于是"展开/渐出"这两个类名永远同源，不会出现"一个说展开、一个说收起"的漂移。
+ * 坞内一格的类名。由**父级从单值 state 派生后**传下来（组件自己不许再持一份 `open`——
+ * 那就是第二个真相源）。
  *
- * 组件拿到的就是这两个布尔（由父级从**单值** state 派生后传下去），
- * 子组件**不许**再自己持有一份 `open` —— 那就是第二个真相源。
+ * ⚠️ 只有 `is-open` 这一个状态位：**没有 `is-faded`** ——
+ *   那是 A-1074 的旧设定（让另一格整颗淡出），已被用户否掉（见文件头 A-1126）。
+ *   别把它加回来：加上去的那一刻，"另一个按钮会不会消失"就又开始由 CSS 决定了。
  */
-export function dockSlotState(current: DockState, id: DockId): { open: boolean; faded: boolean } {
-  return { open: isDockOpen(current, id), faded: isDockFaded(current, id) };
-}
-
-/**
- * 类名由**已派生出的标志**拼（不是再从 state 判一次）。
- * 唯一产地：组件之间不会各拼一份字符串，CSS 类名不会漂移。
- */
-export function dockSlotClassOf(open: boolean, faded: boolean): string {
-  return `dock-slot${open ? " is-open" : ""}${faded ? " is-faded" : ""}`;
+export function dockSlotClassOf(open: boolean): string {
+  return `dock-slot${open ? " is-open" : ""}`;
 }

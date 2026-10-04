@@ -1009,6 +1009,11 @@ export class SlimeEngine implements ChatEngine {
     //    （提醒变成"模型自己说过的话"）。折进**最后一条 user 消息**（Claude Code 的
     //    system-reminder 形态）既保住 recency 又保持角色合法 —— 详见 userReminder.ts。
     if (reminder) { out = foldUserReminder(out, reminder); }
+    /* ⚠️ A-1129 的「出网唯一规范化」**不在这里** —— 它在 `ModelRouter.chat/chatStream`
+       （唯一分派点）。为什么不挂在这里：`engine.buildMessages` 只覆盖**本轮第一次**请求，
+       而 `tool_loop` 第 2..N 轮直接 `router.chat(opts.messages)` 重发、**不经过本函数**，
+       那里正是推 `content: null`（模型只回工具调用）的地方 —— 挂这里会让
+       "多轮工具调用"整类漏网。**别把这行加回来**（两处施用 = 拆一处就静默漏一处）。 */
     return out;
   }
 

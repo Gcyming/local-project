@@ -88,9 +88,12 @@ const MUTATIONS = [
   {
     name: "6 接线：流式实时区退回裸 map（用户澄清针对的正是这处）",
     file: F_PANEL,
+    /* A-1128 重锚：实时区的入参多包了一层**显示层缓冲**
+       （`[...trimTailToShown(liveTimeline, tailShown)]` —— 思考逐字渐入要按缓冲截断末位节点）。
+       判据不变：退回**裸 map** 就不再归组（守卫同步改成"同一行里 groupTimeline( 与 liveTimeline 都要在"）。 */
     mutate: (t) => sub(
       t,
-      "                        {groupTimeline(liveTimeline).map((g) => (\n                          <TimelineGroupBlock key={`lg\${g.from}`} group={g} liveStream />\n                        ))}",
+      "                        {groupTimeline([...trimTailToShown(liveTimeline, tailShown)]).map((g) => (\n                          <TimelineGroupBlock key={`lg\${g.from}`} group={g} liveStream />\n                        ))}",
       "                        {liveTimeline.map((step, i) => (\n                          <TimelineNode key={`l${i}`} step={step} autoExpand={i === liveTimeline.length - 1} />\n                        ))}",
     ),
   },

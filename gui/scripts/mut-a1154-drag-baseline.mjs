@@ -14,9 +14,13 @@
  * | M5 | CSS 去掉 `body.slime-dragging { cursor: col-resize }` | 拖动中光标跳变 | 同上 |
  * | M6 | `GEOM_SYNC_NEVER_MOUNT_FRAMES` 的有界判据删掉（改成永真等待） | `slime-freezing` 永久残留 | `probe-raf-hidden`（hidden 时 rAF 停摆会掩盖它） |
  * | M7 | `startFloatGeometryFade` 的 done 不摘 `--slime-freeze-w` | 聊天区被钉死在旧宽（成对写/摘破缺） | A-1152 实测 |
- * | M8 | 阶段定时器不存 `dragPhaseTimerRef`（改回裸 setTimeout） | 短促拖拽松手后才挂 `slime-resizing`（闪烁） | `probe-realinput-drag` |
+ * | M8 | `mark()` 的阶段定时器不存 `dragPhaseTimerRef`（改回裸 setTimeout） | 短促拖拽松手后才挂 `slime-resizing`（闪烁） | `probe-realinput-drag` |
  * | M9 | `endChatFreeze` 不取消阶段定时器 | 同上（残留路径） | 同上 |
- * | M10 | 阶段定时器去掉"拖动已结束则作废"校验 | renderer 卡顿时延迟回调仍污染 | 同源 |
+ * | M10 | `mark()` 的阶段定时器去掉"本轮已结束则作废"校验 | renderer 卡顿时延迟回调仍污染 | 同源 |
+ *
+ * ⚠️⚠️ A-1190：M8/M10 的**锚点**已随"起表点从两个 resizer 起点搬进 `mark()`"一起迁移
+ *    （不变量本身一字未变：句柄要存 ref、到点要校验本轮是否已结束）。
+ *    "拖动起点不许淡出"这条新不变量由 `mut-a1190-chat-fade.mjs` 单独覆盖（它需要 a1152 的守卫）。
  *
  * ⚠️ 快照/还原一律走**字节**；还原后比 sha256；带 SIGINT 保险（`_mut-eol` 提供）。
  * ⚠️ 锚点用 `sub()`（行尾无关）—— 本仓行尾是混的，裸 `\n` 多行锚点会静默失效。
@@ -108,24 +112,25 @@ const MUTATIONS = [
     ),
   },
 
-  /* ── ④ 几何 done 的"从未挂载"必须有界 ─────────────────────────── */
-  {
-    name: "7 删掉 neverMount 的有界判据（对象从未挂载 ⇒ rAF 死循环、临时类永久残留）",
-    file: F_APP,
-    mutate: (t) => sub(
-      t,
-      "      if (seen || ++neverMount >= GEOM_SYNC_NEVER_MOUNT_FRAMES) { onFrame(lastP, true); return; }",
-      "      if (seen) { onFrame(lastP, true); return; }",
-    ),
-  },
+  /* ── ④ 几何 done 的"从未挂载"必须有界：**已退休**（A-1170）─────────────
+     本条锚的是 A-1154 时期**测量驱动**引擎的 `neverMount` 判据。
+     A-1162 已把引擎整体重写成**时间驱动**（收工判据只有 `u >= 1`）——
+     "对象从未挂载"不再参与收工，rAF 也必然在 `GEOM_FADE_MS` 内停
+     ⇒ 该缺陷形态（rAF 死循环 / 临时类永久残留）不可能再发生。
+     ⚠️ 守卫侧同样已迁移：`a1154-drag-baseline.spec.ts` ④ 段那条断言
+     **已被替换成**新形态（spec 里写明"这条**替换** A-1154 ④ 的 NEVER_MOUNT 守卫"），
+     所以旧变异必须一起退场，否则只会永久报"未命中"（假警报）。 */
   {
     /* ⚠️ 必须 `subAll`（改**全部** 3 处 removeProperty）而不是 `sub`（只改第一处）：
        `startFloatGeometryFade` 的函数体里同时有"新周期起头的自己摘"（2966 行附近）
        与"几何 done 里摘"（3016 行附近）**两处** —— 只改一处时另一处仍满足守卫断言
        ⇒ 变异"存活"但其实是**变异点不完整**（铁律 9/30：改一个点没碰到被判据锚定的那个不变量）。
        替换体保持语法合法（改属性名而不是删行）。 */
-    name: "8 几何 done 不摘 --slime-freeze-w（成对写/摘破缺 ⇒ 聊天区被钉死）",
+    name: "7 几何 done 不摘 --slime-freeze-w（成对写/摘破缺 ⇒ 聊天区被钉死）",
     file: F_APP,
+    /* ⚠️ 命中多处（新周期起头的自己摘 + 几何 done 里摘）⇒ 声明 `all: true`，
+       否则 `check-mut-anchors` 每次跑都报「不唯一」。 */
+    all: true,
     mutate: (t) => subAll(
       t,
       'removeProperty("--slime-freeze-w")',
@@ -133,32 +138,36 @@ const MUTATIONS = [
     ),
   },
 
-  /* ── ⑤ 拖动阶段定时器可取消 + 到点校验 ─────────────────────────── */
+  /* ── ⑤ 淡出阶段定时器可取消 + 到点校验 ─────────────────────────────
+     ⚠️⚠️ A-1190 重锚：这组（M8/M10）原来锚在**两个 resizer 起点**那段代码上；
+     本轮把"起阶段定时器"整个搬进了 RO 的 `mark()`（淡出的唯一触发源，
+     见 `a1190-chat-fade.spec.ts` 与 App.tsx 里那段注释）⇒ 锚点随之迁移。
+     **不变量本身一字未变**：句柄要存 ref、到点要校验"本轮是否已结束"。 */
   {
-    name: "9 右栏阶段定时器不存句柄（改回裸 setTimeout ⇒ 松手后才挂类）",
+    name: "8 mark() 的阶段定时器不存句柄（改回裸 setTimeout ⇒ 松手后才挂类）",
     file: F_APP,
     mutate: (t) => sub(
       t,
-      "    window.clearTimeout(dragPhaseTimerRef.current);\n    dragPhaseTimerRef.current = window.setTimeout(() => {\n      dragPhaseTimerRef.current = 0;\n      if (!document.body.classList.contains(\"slime-dragging\")) { return; }\n      document.body.classList.remove(\"slime-fading\");\n      document.body.classList.add(\"slime-resizing\");\n    }, 140);\n    const startX = e.clientX;\n    /* ⚠️⚠️ A-1154：`startWidth` 必须取 **DOM 实测宽度**",
-      "    window.setTimeout(() => {\n      if (!document.body.classList.contains(\"slime-dragging\")) { return; }\n      document.body.classList.remove(\"slime-fading\");\n      document.body.classList.add(\"slime-resizing\");\n    }, 140);\n    const startX = e.clientX;\n    /* ⚠️⚠️ A-1154：`startWidth` 必须取 **DOM 实测宽度**",
+      "        dragPhaseTimerRef.current = window.setTimeout(() => {\n          dragPhaseTimerRef.current = 0;",
+      "        window.setTimeout(() => {\n          void dragPhaseTimerRef.current;",
     ),
   },
   {
-    name: "10 endChatFreeze 不取消阶段定时器（残留路径）",
+    name: "9 endChatFreeze 不取消阶段定时器（残留路径）",
     file: F_APP,
     mutate: (t) => sub(
       t,
-      "    window.clearTimeout(dragPhaseTimerRef.current);\n    dragPhaseTimerRef.current = 0;\n    requestAnimationFrame(() => {\n      document.body.classList.remove(\"slime-fading\");\n    });",
-      "    requestAnimationFrame(() => {\n      document.body.classList.remove(\"slime-fading\");\n    });",
+      "    window.clearTimeout(dragPhaseTimerRef.current);\n    dragPhaseTimerRef.current = 0;\n    // ⚠️ A-1190：本轮已恢复 ⇒ 取消\"宽度停住 ⇒ 恢复\"定时器（见 chatSettleTimerRef）。\n    window.clearTimeout(chatSettleTimerRef.current);\n    chatSettleTimerRef.current = 0;\n    requestAnimationFrame(() => {\n      document.body.classList.remove(\"slime-fading\");\n    });",
+      "    // ⚠️ A-1190：本轮已恢复 ⇒ 取消\"宽度停住 ⇒ 恢复\"定时器（见 chatSettleTimerRef）。\n    window.clearTimeout(chatSettleTimerRef.current);\n    chatSettleTimerRef.current = 0;\n    requestAnimationFrame(() => {\n      document.body.classList.remove(\"slime-fading\");\n    });",
     ),
   },
   {
-    name: "11 阶段定时器去掉「拖动已结束则作废」校验（延迟回调仍会污染）",
+    name: "10 mark() 的阶段定时器去掉「本轮已结束则作废」校验（延迟回调仍会污染）",
     file: F_APP,
     mutate: (t) => sub(
       t,
-      "      if (!document.body.classList.contains(\"slime-dragging\")) { return; }\n      document.body.classList.remove(\"slime-fading\");\n      document.body.classList.add(\"slime-resizing\");\n    }, 140);\n    const startX = e.clientX;\n    /* ⚠️⚠️ A-1154：与右栏同一处修复",
-      "      document.body.classList.remove(\"slime-fading\");\n      document.body.classList.add(\"slime-resizing\");\n    }, 140);\n    const startX = e.clientX;\n    /* ⚠️⚠️ A-1154：与右栏同一处修复",
+      "          if (!document.body.classList.contains(\"slime-fading\")) { return; }\n          document.body.classList.add(\"slime-resizing\");",
+      "          document.body.classList.add(\"slime-resizing\");",
     ),
   },
 ];

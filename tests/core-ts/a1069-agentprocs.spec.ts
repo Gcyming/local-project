@@ -21,9 +21,7 @@ import {
   buildAgentProcView,
   formatElapsed,
   isAgentStartedKind,
-  isSubagentLive,
   planAgentProcStop,
-  subagentStatusLabel,
   type AgentProcSources,
 } from "../../core-ts/src/services/agentProcs.js";
 
@@ -33,8 +31,29 @@ const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const strip = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
 describe("A-1069-A 范围：只有「Agent 启动的」才进面板（应用服务明确排除）", () => {
-  it("三类就是 Agent 工具能起、且停下后仍然活着的三类", () => {
-    expect([...AGENT_PROC_KINDS]).toEqual(["screen-host", "http-server", "subagent"]);
+  it("两类就是 Agent 工具能起、且停下后仍然活着的两类（**脚本宿主 + 端口**）", () => {
+    expect([...AGENT_PROC_KINDS]).toEqual(["screen-host", "http-server"]);
+  });
+
+  it("⚠️ **子代理不在这个面板里**（用户 2026-09-26：「只监视 Agent 运行的脚本、端口」）", () => {
+    /* 用户原话：「为什么这个后台任务监视的是子代理？不符合要求，只监视 Agent 运行的
+       后台脚本、端口」。
+       本条是**范围判据**的守卫：子代理曾经是这里的第三类（`"subagent"`），
+       它有自己的坞（SubAgentExpandButton + resident.state().subagents）与详情弹窗。
+       两边都列 = 同一件事两个产地，用户还会以为"后台任务"这个按钮在管人。
+       ⇒ 三重锁：类型联合里没有、KINDS 里没有、停止动作表里也没有。 */
+    const kinds = AGENT_PROC_KINDS as readonly string[];
+    expect(kinds, "子代理又回到了后台资源面板（用户明确要求移出）").not.toContain("subagent");
+    expect(Object.keys(AGENT_PROC_KIND_LABELS), "标签表里还有子代理").not.toContain("subagent");
+    expect(Object.keys(AGENT_PROC_STOP_ACTIONS), "停止动作表里还有子代理").not.toContain("subagent");
+    expect(isAgentStartedKind("subagent"), "isAgentStartedKind 仍把子代理当成后台资源").toBe(false);
+    // 真源也没了：即使有人硬塞 `subagents`，它也不该产出任何条目
+    const v = buildAgentProcView(
+      { subagents: [{ id: "a1", name: "研究员", status: "running" }] } as unknown as AgentProcSources,
+      1_000,
+    );
+    expect(v.count, "子代理被算成了后台资源条目").toBe(0);
+    expect(v.any).toBe(false);
   });
 
   it("每一类都有中文名与停止动作（新增类别漏配这两样 = 面板上出现无法停止的条目）", () => {
@@ -46,9 +65,9 @@ describe("A-1069-A 范围：只有「Agent 启动的」才进面板（应用服�
     expect(Object.keys(AGENT_PROC_STOP_ACTIONS).sort()).toEqual([...AGENT_PROC_KINDS].sort());
   });
 
-  it("isAgentStartedKind：认这三类，认不出应用服务名（它们根本不该进 sources）", () => {
+  it("isAgentStartedKind：认这两类，认不出应用服务名（它们根本不该进 sources）", () => {
     for (const k of AGENT_PROC_KINDS) { expect(isAgentStartedKind(k)).toBe(true); }
-    for (const bad of ["llama-server", "python-backend", "mcp", "silam", "electron", "", "http-server "]) {
+    for (const bad of ["llama-server", "python-backend", "mcp", "silam", "electron", "subagent", "sub-agent", "", "http-server "]) {
       expect(isAgentStartedKind(bad), `${bad || "(空串)"} 不该被认成 Agent 启动的资源`).toBe(false);
     }
   });
@@ -60,14 +79,13 @@ describe("A-1069-A 范围：只有「Agent 启动的」才进面板（应用服�
     expect(v.entries).toEqual([]);
   });
 
-  it("三类齐全时才三条 —— 且**只**来自传进来的真源（没有第四条来源）", () => {
+  it("两类齐全时才两条 —— 且**只**来自传进来的真源（没有第三条来源）", () => {
     const v = buildAgentProcView({
       screenHost: { pid: 4242, startedAt: 0 },
       httpServers: [{ id: "s1", port: 8080, dir: "D:/x", startedAt: 0 }],
-      subagents: [{ id: "a1", name: "研究员", status: "running", startedAt: 0 }],
     }, 5_000);
-    expect(v.count).toBe(3);
-    expect(v.entries.map((e) => e.kind)).toEqual(["screen-host", "http-server", "subagent"]);
+    expect(v.count).toBe(2);
+    expect(v.entries.map((e) => e.kind)).toEqual(["screen-host", "http-server"]);
   });
 });
 
@@ -140,47 +158,79 @@ describe("A-1069-C 本地 HTTP 服务（http_serve 起的监听，跨轮次存�
   });
 });
 
-describe("A-1069-D 后台子代理：只收还在跑的（终态条目会变成「点了没反应」）", () => {
-  it("running/pending 进面板，终态**不进**", () => {
-    const v = buildAgentProcView({
-      subagents: [
-        { id: "r", name: "研究员", status: "running", startedAt: 0 },
-        { id: "p", name: "排队者", status: "pending", startedAt: 0 },
-        { id: "d", name: "完成者", status: "done", startedAt: 0 },
-        { id: "f", name: "失败者", status: "fail", startedAt: 0 },
-        { id: "t", name: "超时者", status: "timeout", startedAt: 0 },
-        { id: "c", name: "取消者", status: "cancelled", startedAt: 0 },
-      ],
-    }, 1_000);
-    expect(v.entries.map((e) => e.id)).toEqual(["r", "p"]);
+describe("A-1069-C2 范围判据（`origin`）：哪些服务**不该**出现在「Agent 后台资源」面板", () => {
+  const svc = (origin?: "agent" | "restored" | "builtin") => ({
+    id: "svc-1", port: 8081, dir: "C:/Users/x/AppData/slime-gui/slime-search/page", startedAt: 0, origin,
   });
 
-  it("isSubagentLive 的判据（唯一出处，组件不许自己写 == \"running\"）", () => {
-    expect(isSubagentLive("running")).toBe(true);
-    expect(isSubagentLive("pending")).toBe(true);
-    for (const s of ["done", "fail", "timeout", "cancelled", undefined, ""]) {
-      expect(isSubagentLive(s), `${String(s)} 不该算「还在跑」`).toBe(false);
+  it("缺省 / `agent` → 进面板（本次运行途中由 Agent 起的，正是用户要看的）", () => {
+    for (const origin of [undefined, "agent" as const]) {
+      const v = buildAgentProcView({ httpServers: [svc(origin)] }, 1);
+      expect(v.count, `origin=${String(origin)} 该进来却没进来`).toBe(1);
+      expect(v.entries[0].label).toContain("8081");
     }
   });
 
-  it("状态词映射照实说（不把终态说成运行中）", () => {
-    expect(subagentStatusLabel("running")).toBe("运行中");
-    expect(subagentStatusLabel("pending")).toBe("排队中");
-    expect(subagentStatusLabel("done")).toBe("已完成");
-    expect(subagentStatusLabel("timeout")).toBe("超时");
-    expect(subagentStatusLabel(undefined)).toBe("已派出");
+  /* ⚠️ 这条是**回归守卫**：`restored` 的过滤从 A-977/#230 起就写在纯视图里，
+     但在此之前**没有任何守卫**（spec 里搜不到 `origin`/`restored`）——
+     也就是说，把 `if (s.origin === "restored") continue;` 整行删掉，
+     tsc / 单测 / 构建全绿，而用户又会在刚打开应用时看到一个自己从没起过的端口。 */
+  it("`restored` → **不进**面板（应用启动时按上次清单重建的，不是 Agent 运行途中打开的）", () => {
+    const v = buildAgentProcView({ httpServers: [svc("restored")] }, 1);
+    expect(v.count, "启动时重建的服务又出现在面板里了（用户原话：「我要的是 Agent 运行途中打开的」）").toBe(0);
   });
 
-  it("任务描述进 detail 并压平空白（换行会把一行撑成多行）", () => {
+  /* ⚠️ A-1139 回归守卫：用户实测「搜索引擎的自研插件一直被视作后台进程」——
+     搜索页由 slime 自身功能托管（`origin: "builtin"`），不是 Agent 起的后台资源。 */
+  it("`builtin` → **不进**面板（slime 自身功能托管的页面，如右栏搜索页）", () => {
+    const v = buildAgentProcView({ httpServers: [svc("builtin")] }, 1);
+    expect(v.count, "slime 自己的页面又被当成 Agent 后台资源了").toBe(0);
+  });
+
+  it("三类混在一起时只留 `agent` 那条（过滤按条生效，不是「有一条不是 agent 就整批不显示」）", () => {
     const v = buildAgentProcView({
-      subagents: [{ id: "a", name: "研究员", status: "running", task: "调研\n\n  某主题  ", startedAt: 0 }],
+      httpServers: [svc("restored"), svc("builtin"), { ...svc("agent"), id: "mine", dir: "D:/proj/dist" }],
     }, 1);
-    expect(v.entries[0].detail).toBe("调研 某主题");
+    expect(v.count).toBe(1);
+    expect(v.entries[0].id).toBe("mine");
   });
 
-  it("没有任务描述时如实说明（不留空字段让人以为是渲染坏了）", () => {
-    const v = buildAgentProcView({ subagents: [{ id: "a", name: "研究员", status: "running" }] }, 1);
-    expect(v.entries[0].detail).toBe("（无任务描述）");
+  /* ⚠️ 这条锁的是**将来**：过滤写成 `origin !== "agent"`（黑名单）也能让上面几条通过，
+     但语义是"未知类别默认**进**面板"——方向错了（新增第四类时会默认泄漏到用户眼前）。
+     ⇒ 这里要求未知取值也**不进**面板（白名单方向）。 */
+  it("未知 origin 取值 → 不进面板（范围判据是白名单：只有明确的 `agent` 才进）", () => {
+    const v = buildAgentProcView({
+      httpServers: [{ ...svc(), origin: "something-new" as unknown as "agent" }],
+    }, 1);
+    expect(v.count, "未知来源被默认放进面板了 —— 新增类别会静默泄漏到用户眼前").toBe(0);
+  });
+});
+
+describe("A-1069-D 范围收窄（用户 2026-09-26）：子代理**不再是**后台资源条目", () => {
+  /* 这里原本是「子代理只收 running/pending」那一组（含 `isSubagentLive` / `subagentStatusLabel`
+     的行为断言）。用户要求把子代理整体移出本面板后，那两个函数与那组断言一起**迁移**到了
+     子代理自己的地盘 —— 面板的可见范围由 A 段那条「子代理不在这个面板里」锁住；
+     子代理的状态词/是否还在跑由 `SubAgentExpandButton` 自己的 STATUS_META 负责
+     （它有独立的守卫，见 tests/gui/ 下的子代理相关 spec）。
+     ⚠️ 迁移不是删除：原来"终态不该显示成运行中"的那份**关心**仍在，只是换了产地。 */
+  it("无论子代理什么状态，都不产出后台资源条目（running 也不行）", () => {
+    for (const status of ["running", "pending", "done", "fail", "timeout", "cancelled"]) {
+      const v = buildAgentProcView(
+        { subagents: [{ id: "x", name: "研究员", status, startedAt: 0, task: "调研" }] } as unknown as AgentProcSources,
+        1_000,
+      );
+      expect(v.count, `子代理（${status}）又被算成后台资源了`).toBe(0);
+    }
+  });
+
+  it("子代理与真实的端口/宿主**混在一起**时也只留后两者（不会被顺手带出来）", () => {
+    const v = buildAgentProcView({
+      screenHost: { pid: 1, startedAt: 0 },
+      httpServers: [{ id: "s", port: 80, dir: "D:/s", startedAt: 0 }],
+      subagents: [{ id: "a", name: "子代理", status: "running", startedAt: 0 }],
+    } as unknown as AgentProcSources, 1_000);
+    expect(v.entries.map((e) => e.kind)).toEqual(["screen-host", "http-server"]);
+    expect(v.count).toBe(2);
   });
 });
 
@@ -206,24 +256,29 @@ describe("A-1069-E 时长与排序", () => {
 
   it("排序：先按类别顺序，同类内先起的在上面", () => {
     const v = buildAgentProcView({
-      subagents: [
-        { id: "late", name: "后起", status: "running", startedAt: 5_000 },
-        { id: "early", name: "先起", status: "running", startedAt: 1_000 },
+      httpServers: [
+        { id: "late", port: 81, dir: "D:/l", startedAt: 5_000 },
+        { id: "early", port: 80, dir: "D:/e", startedAt: 1_000 },
       ],
-      httpServers: [{ id: "h", port: 80, dir: "D:/h", startedAt: 9_999 }],
       screenHost: { startedAt: 9_999 },
     }, 10_000);
-    expect(v.entries.map((e) => e.id)).toEqual(["", "h", "early", "late"]);
+    expect(v.entries.map((e) => e.id)).toEqual(["", "early", "late"]);
   });
 });
 
 describe("A-1069-F 停止请求：合法才给动作，非法必须拒绝（不许静默什么都不做）", () => {
-  it("三类各自的动作", () => {
+  it("两类各自的动作", () => {
     expect(planAgentProcStop({ kind: "screen-host" })).toEqual({ ok: true, action: "dispose-screen-host", id: "" });
     expect(planAgentProcStop({ kind: "http-server", id: "svc-1" }))
       .toEqual({ ok: true, action: "stop-http-server", id: "svc-1" });
-    expect(planAgentProcStop({ kind: "subagent", id: "run-9" }))
-      .toEqual({ ok: true, action: "cancel-subagent", id: "run-9" });
+  });
+
+  it("⚠️ 子代理的停止请求**必须被拒绝**（它已不是本面板的资源 —— 放行就等于两处都能停）", () => {
+    /* 用户要求把子代理移出本面板。若停止判据仍认 `subagent`，主进程那条 `cancel-subagent`
+       分支就成了**第二个产地**：渲染层只要还留着旧条目（或手改 IPC 参数）就能从"后台任务"
+       这个按钮里把子代理取消掉，与坞里的操作互相踩。⇒ 未识别的类别一律拒绝。 */
+    expect(planAgentProcStop({ kind: "subagent", id: "run-9" }).ok).toBe(false);
+    expect(planAgentProcStop({ kind: "subagent" }).ok).toBe(false);
   });
 
   it("未知类别 → 拒绝（否则主进程会走到不存在的分支，而界面已乐观划掉）", () => {
@@ -241,8 +296,8 @@ describe("A-1069-F 停止请求：合法才给动作，非法必须拒绝（不�
     }
   });
 
-  it("http-server / subagent 缺 id → 拒绝（停哪个无从谈起）", () => {
-    for (const kind of ["http-server", "subagent"] as const) {
+  it("http-server 缺 id → 拒绝（停哪个无从谈起）", () => {
+    for (const kind of ["http-server"] as const) {
       expect(planAgentProcStop({ kind }).ok).toBe(false);
       expect(planAgentProcStop({ kind, id: "" }).ok).toBe(false);
       expect(planAgentProcStop({ kind, id: "   " }).ok).toBe(false);
@@ -378,15 +433,17 @@ describe("A-1069-H 接线：面板在输入栏上方 / 判据不在渲染层 / �
     // 邻位断言：校验结果必须紧跟一个"不合法就返回失败"的分支（否则校验了也不用）
     expect(stopBody, "校验了却不据此拒绝 → 等于没校验")
       .toMatch(/const plan = planAgentProcStop\([\s\S]{0,200}?if \(!plan\.ok\) \{ return \{ ok: false/);
-    // 按动作分派（不是自己 switch kind）
-    expect(stopBody, "没有按 plan.action 分派").toContain('plan.action === "dispose-screen-host"');
+    // 按动作分派（不是自己 switch kind）—— 收窄成两类后主进程改成了显式 switch
+    expect(stopBody, "没有按 plan.action 分派").toContain('case "dispose-screen-host":');
+    expect(stopBody, "http-server 那一路没有按 plan.action 分派").toContain('case "stop-http-server":');
   });
 
-  it("取数只取三类真源，且**不含应用自身服务**（关掉它们等于把应用拆了）", () => {
+  it("取数只取两类真源，且**不含应用自身服务 / 不含子代理**", () => {
     const src = between(MAIN_C, "async function collectAgentProcSources()", "function broadcastAgentProcs()");
     expect(src, "没取图形控制常驻宿主").toContain("desktopBackend.residentHost?.()");
     expect(src, "没取本地服务").toContain("httpServer.list()");
-    expect(src, "没取后台子代理").toContain("subagentsRef?.list()");
+    /* 用户 2026-09-26：「只监视 Agent 运行的脚本、端口」 —— 子代理不属于这两者。 */
+    expect(src, "取数里又出现了子代理（用户明确要求移出本面板）").not.toContain("subagents");
     for (const forbidden of ["llama", "python-backend", "mcp", "silam"]) {
       expect(src, `取数里出现了应用自身服务（${forbidden}）→ 用户会以为关掉只是停个任务`).not.toContain(forbidden);
     }

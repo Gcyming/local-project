@@ -30,6 +30,15 @@ export interface GatewayConfig {
   rateLimitPerMin?: number;
   rateLimitWindowMs?: number;
   authExempt?: string[];
+  /**
+   * 自建全网索引服务（A-1141）的地址，例如 `http://127.0.0.1:8600`。
+   *
+   * ⚠️ **未配置则不挂这组路由**（与 `llmGateway.enabled` 同一条约定）：网关是 slime 对外入口，
+   *   多一组会读用户全部收录内容的端点，必须是"显式打开"的，不能因为某处默认值凑巧非空就悄悄开。
+   * 端口由 `gui/src/main/llmGateway.ts` 从 `SEARCH_INDEX_PORT` **派生**传进来
+   * （唯一产地，避免 8600 在仓库里写两处）。
+   */
+  searchBaseUrl?: string;
   /** LLM 转发网关（OpenAI 兼容入口 + 多上游转发）；未配置则关闭该能力 */
   llmGateway?: {
     /** 是否启用 LLM 转发（默认 false，保持 v2.6 边界） */
@@ -187,6 +196,58 @@ export function buildGateway(
   }
 
   app.get("/health", async () => ({ status: "ok", service: "slime-gateway" }));
+
+  // ── 自建全网索引（A-1141）：把 slime 进程内的检索能力接到网关 ─────────────
+  //
+  // 为什么是**薄代理**而不是把实现搬进来：
+  //   · 索引服务（`gui/src/main/searchIndexService.ts`）只监听 `127.0.0.1:8600`，右栏搜索页
+  //     在 webview 里**直连**它 ⇒ 回包形状一个字都不能动（搬进来就得同时改页面）；
+  //   · 网关是 slime 对外的**唯一入口**（有全局认证 + 限流）。检索作为"slime 的一部分"，
+  //     就该在这里有端点，而不是让外部客户端去猜一个私有端口。
+  //
+  // ⚠️ 三条**不豁免**全局 Bearer：检索能读到用户收录的全部内容，绝不能裸奔。
+  // ⚠️ 薄代理的判据是「**逐字透出**」：不改字段名、不改状态码、不在这里做夹取 ——
+  //   一旦这里也做一次翻译，页面（直连 8600）与网关（19110）看到的就是两份事实，迟早漂。
+  const searchBase = (cfg.searchBaseUrl ?? "").replace(/\/+$/, "");
+  if (searchBase) {
+    /** 转发一次；上游不可达 ⇒ 502 + **出声**（降级要看得见），而不是把 404 装成正常。 */
+    const proxySearch = async (
+      path: string,
+      method: "GET" | "POST",
+      body: string | undefined,
+      reply: FastifyReply,
+    ): Promise<unknown> => {
+      try {
+        const upstream = await fetch(`${searchBase}${path}`, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        const raw = await upstream.text();
+        reply.code(upstream.status).header("Content-Type", "application/json; charset=utf-8");
+        return reply.send(raw);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return reply.code(502).send({
+          error: { message: `自建索引服务不可达（${searchBase}）：${msg}`, type: "search_unavailable" },
+        });
+      }
+    };
+
+    // GET /v1/search?q=…&page=&size= —— 检索。查询串**原样**透传（夹取仍在索引服务那一处）。
+    app.get("/v1/search", async (req: FastifyRequest, reply: FastifyReply) => {
+      const rawUrl = req.raw.url ?? "/v1/search";
+      const qi = rawUrl.indexOf("?");
+      return proxySearch(`/search${qi >= 0 ? rawUrl.slice(qi) : ""}`, "GET", undefined, reply);
+    });
+
+    // GET /v1/search/status —— 索引状态（页数 / 词条 / 是否在收录 / 当前生效参数）。
+    app.get("/v1/search/status", async (_req, reply) => proxySearch("/status", "GET", undefined, reply));
+
+    // POST /v1/search/crawl —— 触发收录（body 原样透传：seeds / delay / max_pages…）。
+    app.post("/v1/search/crawl", async (req: FastifyRequest, reply) =>
+      proxySearch("/crawl", "POST", JSON.stringify(req.body ?? {}), reply));
+  }
 
   // ── LLM 转发网关（OpenAI 兼容入口 + 多上游转发 + 4 类格式互转 + 令牌限流）──
   // 端点豁免全局 authToken（走独立认证）。认证逻辑（B 档）：

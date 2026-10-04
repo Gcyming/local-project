@@ -193,20 +193,33 @@ describe("A-1162 几何 done 必定有界（`u >= 1` 取代「等对象挂载」
   });
 });
 
-describe("A-1154 ⑤ 拖动阶段定时器必须可取消且到点校验（防「松手后才挂类」）", () => {
-  it("两个 resize 处理函数都把 140ms 阶段定时器句柄存进 `dragPhaseTimerRef`", () => {
+describe("A-1154 ⑤ 淡出阶段定时器必须可取消且到点校验（防「松手后才挂类」）", () => {
+  it("⚠️ A-1190：阶段定时器**只有一个产地**（`mark()`），两个 resizer 起点都不再起它", () => {
+    /* 用户原话：「一点击侧边栏的边缘，还没有拖拽就消失，这不对，改成只有发生实质性比例变化
+       才会消失」⇒ 起表点从两个 resizer 的起点搬到 `mark()`（"宽度真的变了"才淡出）。
+       ⚠️ 但"句柄必须存 ref"与"到点校验本轮是否已结束"这两条不变量**一字未变**，
+         只是校验的状态类从 `slime-dragging` 换成了 `slime-fading` —— 后者更通用：
+         窗口 resize 路径没有 `slime-dragging`，却同样要防"变化已结束还补挂"。 */
+    const at = APP_CODE.indexOf("const mark =");
+    expect(at, "找不到 RO 的 mark 处理").toBeGreaterThan(-1);
+    const seg = APP_CODE.slice(at, at + 2600);
+    expect(
+      /dragPhaseTimerRef\.current\s*=\s*window\.setTimeout/.test(seg),
+      "mark() 的阶段定时器没存句柄 ⇒ 松手后它才到点、把 slime-resizing 挂上且没人摘（闪烁 + 残留隐藏）",
+    ).toBe(true);
+    expect(
+      /!document\.body\.classList\.contains\("slime-fading"\)\s*\)\s*\{\s*return/.test(seg),
+      "mark() 的阶段定时器没有「本轮已结束则作废」的校验",
+    ).toBe(true);
+    /* ⚠️ 反方向也要钉：起点若又自己起了定时器 ⇒ 用户"点一下边缘"（还没拖）就又淡出了。 */
     for (const fn of ["handleSidebarResize", "handleRightbarResize"]) {
-      const body = fnBody(APP_CODE, fn);
+      const fnAt = APP_CODE.indexOf(`function ${fn}`);
+      expect(fnAt, `找不到 ${fn}`).toBeGreaterThan(-1);
+      const head = APP_CODE.slice(fnAt, fnAt + 1600);
       expect(
-        /dragPhaseTimerRef\.current\s*=\s*window\.setTimeout/.test(body),
-        `${fn} 的阶段定时器没存句柄 ⇒ 松手后它才到点、把 slime-resizing 挂上且没人摘（闪烁 + 残留隐藏）`,
-      ).toBe(true);
-      /* 到点必须校验"本轮拖动是否还在进行"——没有它，clearTimeout 一旦被绕过（renderer 卡顿）
-         延迟回调仍会污染。 */
-      expect(
-        /!document\.body\.classList\.contains\("slime-dragging"\)\s*\)\s*\{\s*return/.test(body),
-        `${fn} 的阶段定时器没有「拖动已结束则作废」的校验`,
-      ).toBe(true);
+        /dragPhaseTimerRef\.current\s*=\s*window\.setTimeout/.test(head),
+        `${fn} 的起点又自己起了阶段定时器（A-1190 已把它收敛到 mark()）`,
+      ).toBe(false);
     }
   });
 

@@ -108,16 +108,27 @@ describe("A-1153 ② 过渡期宽度走 `--right-target-w`，且**成对**写/�
     expect(body, "`var(--right-target-w)` 带了 fallback ⇒ 非浮层展开会误用兜底值").not.toMatch(/var\(--right-target-w\s*,/);
   });
 
-  it("CSS：浮层态右栏**贴住窗口右缘**（`margin-left:auto`）—— 否则过渡是「向右合」而不是「向左挤开」", () => {
+  it("CSS：右栏**贴住窗口右缘**（`margin-left:auto`）—— 否则过渡是「向右合」而不是「向左挤开」", () => {
     /* ⚠️ A-1157：`.right-sidebar` 是 `.right-wrapper`（display:flex）的 flex item。
        默认它贴的是 wrapper 的**左缘**，而 wrapper 在过渡起点就跳到目标宽 ⇒ 右栏从
        左缘开始、**向右**长 ⇒ 用户看到的正是「向右合上」。
        ⇒ auto 外边距把它顶到 wrapper 右缘 ⇒ 宽度变化时右缘钉住、左缘向左推。
        ⚠️ 稳态看不出差别（那时右栏 100% 与 wrapper 等宽，auto 没有余量可吃），
-         所以这条必须写成静态断言 —— 端到端探针在稳态量不到它。 */
-    const m = /body\.float-layout\s+\.right-sidebar\s*\{([^}]*)\}/.exec(CSS_CODE);
-    expect(m, "找不到 `body.float-layout .right-sidebar` 规则").toBeTruthy();
-    expect(m![1]).toMatch(/margin-left:\s*auto/);
+         所以这条必须写成静态断言 —— 端到端探针在稳态量不到它。
+       ⚠️⚠️⚠️ A-1173 改判据：这条 auto **不再限定 `body.float-layout`**，
+         而是搬进了 `.right-sidebar` 的**主规则**（无条件）。
+         原因：退浮层那一帧 `float-layout` 已被摘，而 wrapper 还没缩到位
+         ⇒ 右栏右侧露出 135px 空白（`probe-a1173-float-jerk.mjs` 的 408~450ms）。
+         ⇒ 判据改成「**存在某条 `.right-sidebar` 规则带 `margin-left: auto`**」——
+            不绑定具体是哪一条（`.sidebar, .right-sidebar` 那条共用 `--rz-ramp` 的
+            也会被同一个正则命中，绑"第一条"会假红）。 */
+    const bodies = [...CSS_CODE.matchAll(/\.right-sidebar\s*\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(bodies.length, "CSS 里找不到任何 `.right-sidebar { … }` 规则（守卫自己失效了）").toBeGreaterThan(0);
+    expect(
+      bodies.some((b) => /margin-left:\s*auto/.test(b)),
+      "没有一条 `.right-sidebar` 规则带 `margin-left: auto` ⇒ 过渡期右栏会贴 wrapper 左缘"
+      + "「向右合上」，且退浮层时会露出一条空白",
+    ).toBe(true);
   });
 });
 

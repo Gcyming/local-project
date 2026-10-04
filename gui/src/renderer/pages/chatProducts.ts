@@ -353,3 +353,52 @@ export function extractProducts(events: ToolEvent[]): ProductItem[] {
   }
   return out;
 }
+
+/* ══════════════ A-1146：从会话产物里找出「这个文件这次改了什么」 ══════════════ */
+
+/** 找到的会话内改动（`trimmed` = 落盘时被限流摘掉了全文，只有增删行数）。 */
+export interface SessionFileDiff {
+  old: string;
+  new: string;
+  trimmed: boolean;
+  /** 命中的是哪一条产物（用于右栏如实说明"这是哪次改动"）。 */
+  name: string;
+}
+
+const norm = (p: string): string => String(p ?? "").replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+
+/**
+ * 在**本次会话的产物**里找某个文件的最后一次改动（右栏「对比」的第二个数据源）。
+ *
+ * ## 为什么要有它（用户原话）
+ * 「右侧边栏的对比功能还是限定死了在 Git 仓库，我觉得应该可以像对话里面的一样，展现此次变动。」
+ * 现实是**大量文件根本不在 Git 仓库里**（新项目、临时脚本、agent 现生成的文件），
+ * 于是右栏只会显示一句"不在 Git 仓库内…请用聊天区工具卡查看" ⇒ 功能等于没有。
+ *
+ * ## 选取口径（两条都不能含糊）
+ *   · **按序数从新到旧**：`Record` 的键是 assistant 消息的序数（字符串）⇒ 倒序即"最新在前"；
+ *     同一个文件被写多次时，**取最新的那一次**（用户要的是"此次变动"，不是历史全量）。
+ *   · **只认带 `diffFull` 的写入**：`file_read` 之类没有变更可比。
+ *   ⚠️ `diffTrimmed`（落盘限流摘掉全文）**不返回空**，而是返回 `trimmed: true` + 空全文，
+ *     由界面**如实说"详情未随记录保存"** —— 静默返回 null 会让用户以为"这次没改过"（A-1029 的整条教训）。
+ */
+export function findSessionFileDiff(
+  byOrdinal: Record<string, ProductItem[]> | null | undefined,
+  file: string,
+): SessionFileDiff | null {
+  const want = norm(file);
+  if (!want || !byOrdinal) { return null; }
+  const keys = Object.keys(byOrdinal).sort((a, b) => Number(b) - Number(a));  // 序数倒序 = 最新在前
+  for (const k of keys) {
+    const list = Array.isArray(byOrdinal[k]) ? byOrdinal[k] : [];
+    for (let i = list.length - 1; i >= 0; i -= 1) {          // 同一序数内也取最后一条
+      const p = list[i];
+      if (!p) { continue; }
+      if (p.kind !== "write") { continue; }
+      if (norm(p.rel) !== want && norm(p.name) !== want) { continue; }
+      if (p.diffFull) { return { old: p.diffFull.old, new: p.diffFull.new, trimmed: false, name: p.name }; }
+      if (p.diffTrimmed) { return { old: "", new: "", trimmed: true, name: p.name }; }
+    }
+  }
+  return null;
+}

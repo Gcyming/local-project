@@ -1011,7 +1011,7 @@ MUTATIONS.push(
   {
     name: "112 展开态宽度写回 auto（两态同一个关键字 ⇒ 根本没得过渡）",
     file: F_CSS,
-    mutate: (t) => sub(t, ".prod-host.is-open { width: 100%; }", ".prod-host.is-open { width: auto; }"),
+    mutate: (t) => sub(t, ".prod-host.is-open {\n  width: 100%;", ".prod-host.is-open {\n  width: auto;")  /* A-1146d：展开态从单行变成多行（多了 transition-delay）⇒ 重锚 */,
   },
   {
     name: "113 产物卡类名留在卡片上（宿主 CSS 写了却没人用 = 静默失效）",

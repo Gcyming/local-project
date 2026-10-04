@@ -619,9 +619,12 @@ async def git_commit(args: dict) -> str:
 
     try:
         note_text = json.dumps(note, ensure_ascii=False, separators=(",", ":"))
-        subprocess.run(
+        # ⚠️ A-1134：原为 `subprocess.run(text=True)` 且**无 errors**（同文件 77/179/608 都有
+        #    `errors="replace"`，唯独这里漏了）⇒ 中文 Windows 上 git 输出非 UTF-8 字节即崩 reader 线程。
+        from core.subproc import run_text
+        run_text(
             ["git", "notes", "--ref=slime-intent", "add", "-f", "-m", note_text, commit_hash],
-            cwd=str(_PROJECT_ROOT), capture_output=True, text=True, timeout=30, check=False,
+            cwd=str(_PROJECT_ROOT), timeout=30,
         )
     except Exception as e:  # noqa: BLE001  note 写入失败不影响 commit 成功
         log.warning("git notes add 失败（不影响 commit）：%s", e)

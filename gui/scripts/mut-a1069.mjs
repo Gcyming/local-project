@@ -4,9 +4,9 @@
  * 覆盖 `tests/core-ts/a1069-agentprocs.spec.ts`。用户原话：「请把 Agent 停下时的后台进程
  * 做一个……在输入栏上方的按钮，而且点击后可以展开」，范围是「仅 Agent 启动的进程」。
  *
- * A 组：纯模块判据（范围 / 三类真源 / 终态过滤 / 排序 / 时长 / 状态词 / 停止请求校验）
+ * A 组：纯模块判据（范围 / 两类真源 / 子代理**不在**本面板 / 排序 / 时长 / 停止请求校验）
  * B 组：接线事实（面板在输入框上方 / 判据不在渲染层 / 订阅不轮询 /
- *       主进程现算 + 先校验 / 取数范围 / 回合结束广播 / 三处通道名一致）
+ *       主进程现算 + 先校验 / 取数范围（不含子代理）/ 回合结束广播 / 三处通道名一致）
  *
  * ⚠️ 中文句子里不许夹 ASCII 双引号（A-1056 自伤）—— 一律「」。
  * ⚠️ B 组改的是 `.tsx` / `index.ts` 的**文本**（守卫按文本读，不 import），
@@ -64,14 +64,22 @@ const MUTATIONS = [
     mutate: (t) => sub(t, "  for (const s of src.httpServers ?? []) {", "  for (const s of [] as HttpServerSource[]) {"),
   },
   {
-    name: "A4 子代理终态不过滤（点停止却什么都没发生 —— 它早就结束了）",
+    name: "A4 类别表里加回 subagent（用户 2026-09-26 明确要求移出；加回来 = 同一件事两个产地）",
     file: MODULE,
-    mutate: (t) => sub(t, "    if (!isSubagentLive(a.status)) { continue; }", "    if (false) { continue; }"),
+    mutate: (t) => sub(
+      t,
+      'export const AGENT_PROC_KINDS: readonly AgentProcKind[] = ["screen-host", "http-server"];',
+      'export const AGENT_PROC_KINDS: readonly AgentProcKind[] = ["screen-host", "http-server", "subagent"] as readonly AgentProcKind[];',
+    ),
   },
   {
-    name: "A5 isSubagentLive 恒真（终态与未知状态都算「还在跑」）",
+    name: "A5 中文名表里保留 subagent（面板上又会出现「后台子代理」这一类）",
     file: MODULE,
-    mutate: (t) => sub(t, '  return status === "running" || status === "pending";', "  return true;"),
+    mutate: (t) => sub(
+      t,
+      '  "http-server": "本地服务",\n};',
+      '  "http-server": "本地服务",\n  "subagent": "后台子代理",\n} as Record<AgentProcKind, string>;',
+    ),
   },
   {
     name: "A6 排序忽略类别（顺序随机 → 同一类的东西被拆散，用户扫不动）",
@@ -94,9 +102,22 @@ const MUTATIONS = [
     mutate: (t) => sub(t, '  if (startedAt === undefined || !Number.isFinite(startedAt) || !Number.isFinite(now)) { return ""; }', "  if (false) { return \"\"; }"),
   },
   {
-    name: "A10 状态词映射说反话（已完成的子代理被显示成「运行中」）",
+    name: "A10 停止动作表里加回 cancel-subagent（「后台任务」按钮又能取消子代理 = 第二个产地）",
     file: MODULE,
-    mutate: (t) => sub(t, '    case "done": return "已完成";', '    case "done": return "运行中";'),
+    mutate: (t) => sub(
+      t,
+      'export const AGENT_PROC_STOP_ACTIONS: Record<AgentProcKind, AgentProcStopAction> = {\n  "screen-host": "dispose-screen-host",\n  "http-server": "stop-http-server",\n};',
+      'export const AGENT_PROC_STOP_ACTIONS: Record<AgentProcKind, AgentProcStopAction> = {\n  "screen-host": "dispose-screen-host",\n  "http-server": "stop-http-server",\n  "subagent": "cancel-subagent",\n} as unknown as Record<AgentProcKind, AgentProcStopAction>;',
+    ),
+  },
+  {
+    name: "A16 isAgentStartedKind 也认 subagent（停止请求那层就会放行，判据与类别表分家）",
+    file: MODULE,
+    mutate: (t) => sub(
+      t,
+      "  return (AGENT_PROC_KINDS as readonly string[]).includes(kind);",
+      '  return (AGENT_PROC_KINDS as readonly string[]).includes(kind) || kind === "subagent";',
+    ),
   },
   {
     name: "A11 未知类别不再拒绝（手改的 IPC 参数会走到不存在的分支，而界面已乐观划掉）",
@@ -230,12 +251,13 @@ const MUTATIONS = [
   {
     name: "B17 stop 不按动作分派（自己 switch 类别 → 判据又长回主进程里）",
     file: MAIN,
-    mutate: (t) => sub(t, '      if (plan.action === "dispose-screen-host") {', '      if (plan.id === "") {'),
+    /* 收窄成两类后主进程改成了显式 switch —— 锚点同步到 `case`（原锚点是 `if (plan.action === …)`）。 */
+    mutate: (t) => sub(t, '        case "dispose-screen-host":', '        case "whatever-screen-host":'),
   },
   {
     name: "B18 取数少了一路（本地服务那一类在面板上永远为 0）",
     file: MAIN,
-    mutate: (t) => sub(t, "      httpServer.list().catch(() => []),", "      Promise.resolve([]),"),
+    mutate: (t) => sub(t, "    const servers = await httpServer.list().catch(() => []);", "    const servers: never[] = [];"),
   },
   {
     name: "B19 取数里混进了应用自身服务（用户会以为关掉它只是停个任务，实际是把应用拆了）",
@@ -251,6 +273,15 @@ const MUTATIONS = [
     name: "B21 通道名一端打错（tsc 不报、构建不报 —— 静默失效）",
     file: PRELOAD,
     mutate: (t) => sub(t, '"slime:agentprocs:changed"', '"slime:agentprocs:change"'),
+  },
+  {
+    name: "B22 取数把子代理加回来（用户明确要求移出 —— 加回来面板又开始监视子代理）",
+    file: MAIN,
+    mutate: (t) => sub(
+      t,
+      "    const servers = await httpServer.list().catch(() => []);",
+      '    const servers = await httpServer.list().catch(() => []);\n    const subagents = subagentsRef?.list() ?? []; void subagents;',
+    ),
   },
 ];
 

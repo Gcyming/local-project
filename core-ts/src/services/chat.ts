@@ -41,6 +41,8 @@ import { getSession } from "./sessions.js";
 import { DIFF_TAG_RE } from "../tool_loop.js";
 // A-1106：委派规范的**唯一出处**（与 `Engine.buildSystem` 共用同一常量，不再各写一遍）。
 import { DELEGATION_GUIDANCE } from "./subagentCatalog.js";
+/* A-1144：右栏「挂载」——把用户此刻在右栏看的东西按会话拼进系统提示（唯一产地 `sidebarMount.ts`）。 */
+import { sidebarMountSection } from "../sidebarMount.js";
 // A-1093：标记字面量的唯一出处（`diff_marker.ts`）—— 正则、占位符、构造器、统计口径同源。
 import { DIFF_TRIMMED_MARKER as DIFF_TRIMMED_TAG } from "../diff_marker.js";
 
@@ -186,6 +188,16 @@ export interface ChatRequest {
   maxTokens?: number;
   /** 会话 ID（GUI 项目内独立会话；缺省写入无 session_id 记录） */
   sessionId?: string;
+  /**
+   * A-1131：**本次请求要用的模型**（会话级选择，由主进程从会话 meta 读出后透传）。
+   *
+   * 用户原话：「同一个 Agent 似乎不能在不同会话使用不同模型……之前那个会话里面的 agent
+   * 模型直接变成 deepseek 模型了」。原因是下拉写的是 **Agent 记录** ⇒ 同 Agent 全会话共用。
+   * 现在模型选择住在**会话**上，主进程读出来后经本字段下发；引擎侧由 `runAgentFor` 收口。
+   *
+   * ⚠️ 缺省（undefined / 空串）= 跟随 `agent.model_choice`（老数据与所有内部调用零行为变化）。
+   */
+  modelChoice?: string;
   /** 联网搜索开关：false 时 web_search/web_fetch 工具被静默拒绝（GUI 侧下发） */
   networkEnabled?: boolean;
   /** 识图图片（data URL 列表，data:image/png;base64,...）。引擎层转为 OpenAI 兼容 content 数组 */
@@ -1786,6 +1798,26 @@ export class ChatService {
     }
   }
 
+  /**
+   * A-1131：**本次运行要用哪个 Agent 对象** —— 会话级模型覆盖的唯一收口点。
+   *
+   * 为什么必须收在这里（而不是各个 engine 调用点）：`chat()` / `stream()` 里共有
+   * **9 处** `this.engine.chat/stream({ agent, … })`（含委托子调用、强制工具轮、续接轮），
+   * 它们吃的都是同一个局部 `agent` ⇒ 在**解析点**覆盖一次，下游一处都不会漏；
+   * 在调用点各写一遍注定漏（本仓反复踩过"只有一条路径记得改"的坑）。
+   *
+   * ⚠️ 只覆盖 `model_choice`，其余字段（persona / 工具面 / max_context…）原样透传。
+   * ⚠️ 覆盖值为空 ⇒ 原样返回**同一个对象**（零行为变化，且避免无谓复制）。
+   * ⚠️ 不做合法性校验：取值域与 `agent.model_choice` 完全同一套，路由解析是**唯一**判据
+   *    （engine 对未知选择会给出「未知的模型选择」的明确报错，这里再判一次就是两个产地）。
+   */
+  private async runAgentFor(agentId: string, modelChoiceOverride?: string): Promise<AgentState | undefined> {
+    const agent = await this.registry.findAgent(agentId);
+    const override = typeof modelChoiceOverride === "string" ? modelChoiceOverride.trim() : "";
+    if (!agent || !override || override === agent.model_choice) { return agent; }
+    return { ...agent, model_choice: override };
+  }
+
   async analyze(agentId: string, message: string): Promise<SwarmAnalysis> {
     const agent = await this.registry.findAgent(agentId);
     if (!agent) {
@@ -1809,13 +1841,17 @@ export class ChatService {
   // ── /chat ──────────────────────────────────────────────
 
   async chat(agentId: string, req: ChatRequest): Promise<ChatResult> {
-    const agent = await this.registry.findAgent(agentId);
+    const agent = await this.runAgentFor(agentId, req.modelChoice);
     if (!agent) {
       throw new ChatServiceError(404, "Agent 不存在");
     }
     const systemPrompt = await this.systemPromptFor(agent);
     const teamCtx = await this.teamContextFor(req.sessionId);
-    const systemBegin = teamCtx ? `${systemPrompt}\n\n${teamCtx}` : systemPrompt;
+    /* A-1144：右栏挂载段（按会话）。放在团队上下文**之后** —— 它描述"此刻屏幕上的东西"，
+       越贴近用户当前那句话越有用。⚠️ 三个来源拼装口径统一用 `filter(Boolean).join`：
+       `teamCtx ? a+"\n\n"+b : a` 那种写法每加一个来源就要再写一遍分支（迟早漏一处）。 */
+    const mount = sidebarMountSection(req.sessionId);
+    const systemBegin = [systemPrompt, teamCtx, mount].filter(Boolean).join("\n\n");
     const effective = await this.effectiveMessage(agent, req.message);
     const history = [...(req.history ?? [])];
     const workspace = await this.sessionWorkspaceFor(req.sessionId);
@@ -1939,7 +1975,7 @@ export class ChatService {
    * 委托后台执行 + 15s 心跳；done 单收尾（委托整合后发出）；finally 持久化。
    */
   async *stream(agentId: string, req: ChatRequest, resumeSeq = 0, signal?: AbortSignal): AsyncGenerator<ServiceEvent<unknown>> {
-    const agent = await this.registry.findAgent(agentId);
+    const agent = await this.runAgentFor(agentId, req.modelChoice);
     if (!agent) {
       throw new ChatServiceError(404, "Agent 不存在");
     }
@@ -1958,7 +1994,9 @@ export class ChatService {
 
     const systemPrompt = await this.systemPromptFor(agent);
     const teamCtx = await this.teamContextFor(req.sessionId);
-    const systemBase = teamCtx ? `${systemPrompt}\n\n${teamCtx}` : systemPrompt;
+    /* A-1144：流式路径同样要挂载（两条路径漏一条 = "只有打字机模式才看得见右栏"这种诡异症状）。 */
+    const mount = sidebarMountSection(req.sessionId);
+    const systemBase = [systemPrompt, teamCtx, mount].filter(Boolean).join("\n\n");
     const system = req.resumeHint ? `${systemBase}\n\n[系统·中断续接] ${req.resumeHint}` : systemBase;
     const workspace = await this.sessionWorkspaceFor(req.sessionId);
     // 显式传唤预委派：入参消息若直接包含 <DELEGATE name="..">（用户按「⟳ 传唤」按钮，

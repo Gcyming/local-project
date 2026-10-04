@@ -37,16 +37,16 @@ const CODE = stripComments(SRC);
  *  「排序依据」注释一起更新 —— 那张依据表才是防"下一个维护者凭感觉再动一遍"的东西。 */
 const EXPECTED_ORDER = [
   "general", "appearance", "permissions", "providers",      // 组 ① 常用
-  "agents", "mind", "skills", "mcp", "resident",            // 组 ② Agent 与能力
-  "runtime", "usage", "status",                             // 组 ③ 运行与维护
+  "agents", "mind", "skills", "mcp", "plugins", "resident", // 组 ② Agent 与能力
+  "runtime", "searchengine", "usage", "status",             // 组 ③ 运行与维护
   "experimental",                                           // 组 ④ 高级
 ];
 
 /** 分组归属（`sectionId → groupId`） */
 const EXPECTED_GROUP: Record<string, string> = {
   general: "common", appearance: "common", permissions: "common", providers: "common",
-  agents: "agent", mind: "agent", skills: "agent", mcp: "agent", resident: "agent",
-  runtime: "ops", usage: "ops", status: "ops",
+  agents: "agent", mind: "agent", skills: "agent", mcp: "agent", plugins: "agent", resident: "agent",
+  runtime: "ops", searchengine: "ops", usage: "ops", status: "ops",
   experimental: "advanced",
 };
 
@@ -55,14 +55,14 @@ const EXPECTED_GROUP: Record<string, string> = {
  *     而"重排时少抄一个"会被这里当场抓住。 */
 const EXPECTED_KW: Record<string, number> = {
   general: 10, appearance: 12, permissions: 6, providers: 6,
-  agents: 5, mind: 8, skills: 3, mcp: 4, resident: 8,
-  runtime: 9, usage: 8, status: 4,
+  agents: 5, mind: 8, skills: 3, mcp: 4, plugins: 7, resident: 8,
+  runtime: 9, searchengine: 8, usage: 8, status: 4,
   experimental: 10,
 };
 const EXPECTED_FT: Record<string, number> = {
   general: 35, appearance: 16, permissions: 14, providers: 12,
-  agents: 14, mind: 10, skills: 10, mcp: 10, resident: 17,
-  runtime: 10, usage: 8, status: 7,
+  agents: 14, mind: 10, skills: 10, mcp: 10, plugins: 14, resident: 17,
+  runtime: 10, searchengine: 12, usage: 8, status: 7,
   experimental: 12,
 };
 
@@ -86,8 +86,8 @@ function parseSections(): Parsed[] {
 const SECTIONS = parseSections();
 
 describe("A-1125 设置左栏：分组与排序", () => {
-  it("① 13 个栏目一项不少（掉一项 = 那个板块从界面上消失）", () => {
-    expect(SECTIONS.length, `解析到 ${SECTIONS.length} 项，应为 13`).toBe(13);
+  it("① 15 个栏目一项不少（掉一项 = 那个板块从界面上消失）", () => {
+    expect(SECTIONS.length, `解析到 ${SECTIONS.length} 项，应为 15`).toBe(15);
     expect(SECTIONS.map((s) => s.id).sort()).toEqual([...EXPECTED_ORDER].sort());
   });
 

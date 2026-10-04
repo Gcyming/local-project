@@ -195,10 +195,19 @@ async function tryOpenExternal(url: string): Promise<{ ok: boolean; handler?: st
  * 系统没有注册该协议的应用就弹窗。webview 的 will-navigate **拦不住 loadURL/src 编程式导航**
  * （Electron 文档：will-navigate 仅覆盖用户点击/页面内导航），所以必须在**所有** URL 进入
  * webview 的入口（navigate/open/地址栏/openTab）做 scheme 白名单校验：非 Web 协议一律拒绝，
- * 根本不让 Chromium 把 bitbrowser:// 这类链接交给系统。 */
-const SAFE_NAV_SCHEMES = new Set(["http", "https", "about", "file", "data", "blob"]);
+ * 根本不让 Chromium 把 bitbrowser:// 这类链接交给系统。
+ *
+ * ⚠️ A-1133（2026-09-28 事故）：**`file:` 已从这里移除**。
+ * 之前白名单里带着 `file`，于是右栏浏览器可以加载本地文件 —— 而把 `.docx/.xlsx` 交给 Chromium
+ * 的结果是 `ERR_FAILED (-2)` + 重试风暴（拖放默认导航正好就落在"加载本地文件"上，
+ * 用户在控制台看到的就是不断重发的 `file:///…docx`）。
+ * 本地文件现在**一律走文档通道**（`core-ts/src/office/*`：读取 + 预览 + 生成），
+ * 连 PDF 也不走 `file://`（改由应用内静态服务出 `http://127.0.0.1:port/x.pdf`，
+ * 这样不仅能渲染，还带上了正确的 Content-Type 与同源隔离）。
+ * ⇒ 判据是**能力边界**：webview 只接"网络资源"，不接"磁盘路径"（本地文件的语义由文档通道负责）。 */
+const SAFE_NAV_SCHEMES = new Set(["http", "https", "about", "data", "blob"]);
 
-/** URL 是否能安全交给右侧栏浏览器加载：http(s)/about/blank/file/data/blob 放行；未知协议拦截。 */
+/** URL 是否能安全交给右侧栏浏览器加载：http(s)/about/blank/data/blob 放行；`file:` 与未知协议拦截。 */
 export function isWebNavUrl(raw: string | undefined): boolean {
   const url = (raw ?? "").trim();
   if (!url || url === "about:blank") { return true; }

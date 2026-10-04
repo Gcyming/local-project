@@ -462,8 +462,16 @@ describe("A-1084 engine 侧保险门：装不下的请求**不许出网**（防�
   it("接线：windowCap 从主进程一路透传到引擎（缺任何一节 = 保险门永远放行 = 等于没做）", () => {
     expect(CHAT_C, "ChatRequest 没声明 windowCap").toMatch(/windowCap\?: number;/);
     expect(CHAT_C, "ChatService 没把 windowCap 透传给 engine").toContain("windowCap: req.windowCap");
-    expect(MAIN_C, "主进程发送时没解析并透传 windowCap（必须用本次模型，不是 session.model）")
-      .toMatch(/windowCap: await resolveSessionWindowCap\(agentId, loadingAgent\?\.model_choice/);
+    /* ⚠️ A-1131 **迁移**（不是删）：原来断言的是
+       `resolveSessionWindowCap(agentId, loadingAgent?.model_choice` —— 即"用 Agent 的模型"。
+       而 A-1131 之后"本次要用的模型"是**会话覆盖优先**（`runModelChoice`），
+       所以形参从 `loadingAgent?.model_choice` 换成了同一个判据算出的 `runModelChoice`。
+       本条守卫的原意（"窗口上限必须按本次要用的模型解析后透传"）不变；
+       顺带把"那个判据必须是会话覆盖优先"也锁上 —— 否则 windowCap 会按错模型算（选小窗口模型时误放行）。 */
+    expect(MAIN_C, "主进程发送时没解析并透传 windowCap（必须用本次要用的模型）")
+      .toMatch(/windowCap: await resolveSessionWindowCap\(agentId, runModelChoice\)/);
+    expect(MAIN_C, "runModelChoice 不是「会话覆盖优先」算出来的 ⇒ 窗口上限按错模型算")
+      .toContain("const runModelChoice = effectiveModelChoice(brainMeta?.modelChoice, loadingAgent?.model_choice);");
     expect(MAIN_C, "重试路径没透传 → 重试成了绕过保险门的后门")
       .toMatch(/windowCap: await resolveSessionWindowCap\(\s*\n\s*agentId,/);
   });

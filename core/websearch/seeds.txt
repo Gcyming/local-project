@@ -1,0 +1,9 @@
+# Slime Mini Web Search — 种子地址（每行一个，# 开头为注释）
+# 用法：python3 crawler.py --db search.db --seeds-file seeds.txt --max-pages 200 --max-depth 3
+# 提示：选互通链接多、静态渲染的站点；大站请开 --same-host 并放小 max-pages 试跑。
+
+https://example.com
+https://www.iana.org/domains/example
+https://httpbin.org/html
+https://www.python.org
+https://docs.python.org/3/tutorial/

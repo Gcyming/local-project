@@ -2682,11 +2682,12 @@ def _cmd_context(agent: dict):
 
 
 def _cmd_memory(agent_id: str, agent_name: str, args: str = ""):
-    """查看/搜索/添加 Agent 成长记忆
+    """查看/搜索/添加/重建 Agent 成长记忆
     用法：
       /memory                  → 查看记忆
       /memory search <关键词>   → 向量检索相关记忆（需开启 LanceDB）
       /memory add              → 交互式添加记忆
+      /memory reindex          → 从 JSON 真相源重建语义索引（A-1139 / 缺陷 D4）
     """
     sub = args.strip().lower()
     if sub.startswith("search"):
@@ -2694,6 +2695,9 @@ def _cmd_memory(agent_id: str, agent_name: str, args: str = ""):
         return
     if sub == "add":
         _cmd_memory_add(agent_id, agent_name)
+        return
+    if sub == "reindex":
+        _cmd_memory_reindex(agent_id, agent_name)
         return
 
     console.print()
@@ -2758,7 +2762,6 @@ def _cmd_memory_search(agent_id: str, agent_name: str, query: str):
 
 
 def _cmd_memory_add(agent_id: str, agent_name: str):
-    """交互式添加成长记忆（对接 POST /agents/{id}/memory）"""
     console.print()
     console.print(f"[bold cyan]━━━ 为 {agent_name} 添加记忆 ━━━[/]")
     console.print("  1. 事实 (fact)")

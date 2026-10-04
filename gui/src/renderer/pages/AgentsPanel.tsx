@@ -41,15 +41,41 @@ interface AgentDetail {
   subagent_dispatch?: boolean;
 }
 
-/** A-980-R22：工具面白名单（与 shared/ipc ToolProfileDTO / core-ts ToolProfile 同构） */
+/** A-980-R22：工具面白名单（与 shared/ipc ToolProfileDTO / core-ts ToolProfile 同构）
+ *  A-1140：mode 增加 `creator`（创造模式）—— 能力面同标准模式，额外授权 Agent 自建技能。 */
 interface ToolProfileLocal {
-  mode: "default" | "custom";
+  mode: "default" | "creator" | "custom";
   skills: string[];
   mcp: string[];
 }
 
-/** 工具配置初始值（default=内置推荐集，由 core-ts 运行时解析；custom=用户勾选） */
+/** 工具配置初始值（default=标准模式内置推荐集，由 core-ts 运行时解析；custom=用户勾选） */
 const EMPTY_TOOL_PROFILE: ToolProfileLocal = { mode: "default", skills: [], mcp: [] };
+
+/**
+ * A-1140：三档能力模式的**唯一产地**（显示名 + 说明 + 顺序）。
+ *
+ * ⚠️ 存储值仍是 `"default" | "creator" | "custom"`：`"default"` 是历史值，
+ * 为了 UI 命名整齐去改它就得写 `config/agents.json` 迁移，不划算 —— 显示名在这里映射。
+ *
+ * 调研结论（`agent-plugin-ecosystem-research.md` Q3）：**没有任何主流产品实现
+ * 「标准 / 创造 / 自定义」三档**，最接近的是 Zed 的三个内置 profile。故这里没有
+ * 可抄的既有设计，说明文案按 slime 自己的语义写。
+ */
+const CAPABILITY_MODES: Array<{ value: ToolProfileLocal["mode"]; label: string; desc: string }> = [
+  {
+    value: "default", label: "标准模式",
+    desc: "开箱即用：内置精选技能（搜索 / 网页抓取 / 提示词优化 / 市场调研 / 设计生成），不启用第三方 MCP。覆盖通用场景，各方面均衡。",
+  },
+  {
+    value: "creator", label: "创造模式",
+    desc: "在标准模式之上，授权 Agent 在现有技能不够用时**给自己造技能**并立即使用。自建技能会声明 origin: agent，可在「插件」页查看与停用。",
+  },
+  {
+    value: "custom", label: "自定义模式",
+    desc: "纯自搭工作区：自主勾选技能与 MCP 服务器，按白名单启用。",
+  },
+];
 
 interface ExtrasCatalog {
   skills: Array<{ name: string; description: string }>;
@@ -200,21 +226,35 @@ function ToolProfilePicker(props: {
   const toggle = (list: string[], item: string): string[] =>
     list.includes(item) ? list.filter((x) => x !== item) : [...list, item];
 
+  /** 切档：切到 custom 时**保留**已勾选内容（切走再切回来不该丢），其余档位清空无意义的载荷 */
+  const pick = (mode: ToolProfileLocal["mode"]): void =>
+    onChange(mode === "custom"
+      ? { mode: "custom", skills: value.skills, mcp: value.mcp }
+      : { mode, skills: [], mcp: [] });
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12.5 }}>
-        <input type="radio" checked={value.mode === "default"}
-          onChange={() => onChange({ mode: "default", skills: [], mcp: [] })} />
-        {/* A-980-R30：标签不折行（CJK 每字都是断行点，容器窄时"默认推荐集"的"集"会被拆到下一行） */}
-        <span style={{ fontWeight: 700, whiteSpace: "nowrap" }}>默认推荐集</span>
-        <span style={{ color: "var(--text-muted)", flex: 1 }}>内置精选技能（搜索/网页抓取/提示词优化/市场调研/设计生成），不启用第三方 MCP</span>
-      </label>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12.5 }}>
-        <input type="radio" checked={value.mode === "custom"}
-          onChange={() => onChange({ mode: "custom", skills: [], mcp: [] })} />
-        <span style={{ fontWeight: 700, whiteSpace: "nowrap" }}>自定义</span>
-        <span style={{ color: "var(--text-muted)", flex: 1 }}>自主勾选技能与 MCP 服务器（白名单启用）</span>
-      </label>
+      {CAPABILITY_MODES.map((m) => {
+        const on = value.mode === m.value;
+        return (
+          <label key={m.value}
+            style={{
+              display: "flex", alignItems: "flex-start", gap: 9, cursor: "pointer",
+              fontSize: 12.5, padding: "9px 11px", borderRadius: 9,
+              border: on ? "1px solid var(--accent)" : "1px solid var(--border)",
+              background: on ? "var(--accent-soft)" : "transparent",
+            }}>
+            <input type="radio" name="capability-mode" checked={on}
+              style={{ marginTop: 2, flexShrink: 0 }}
+              onChange={() => pick(m.value)} />
+            {/* A-980-R30：标签不折行（CJK 每字都是断行点，容器窄时会被拆字） */}
+            <span style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+              <span style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{m.label}</span>
+              <span style={{ color: "var(--text-muted)" }}>{m.desc}</span>
+            </span>
+          </label>
+        );
+      })}
       {value.mode === "custom" && (
         <>
           <ToolSetBox title="技能（Skill）" items={extras.skills} selected={value.skills}

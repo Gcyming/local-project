@@ -26,6 +26,65 @@ export const IPC_CHANNELS = {
   sessions_remove_agent: "slime:sessions:removeAgent",
   sessions_remove_workspace: "slime:sessions:removeWorkspace",
   sessions_set_members: "slime:sessions:setMembers",
+  /* A-1133：工作文档通道（拖入 .docx/.xlsx/.pptx/.pdf 的读取与生成）。
+     ⚠️ 与"浏览器页"刻意分开：那些类型 Chromium 画不出来，交给它只会 ERR_FAILED（本次事故）。 */
+  docs_read: "slime:docs:read",
+  docs_create: "slime:docs:create",
+  docs_local_file: "slime:docs:local-file",
+  /* A-1133：把「文档 → HTML」渲染页落盘，供右栏浏览器页打开（路线一：转成 HTML 让浏览器画）。 */
+  docs_html_preview: "slime:docs:htmlPreview",
+  /* A-1136：**保真渲染页**落盘 —— 读原始文件字节 + 交给真渲染库（pptx-preview/docx-preview/SheetJS），
+     产出「像图片一样」的页面。与 `docs_html_preview`（抽文本再重排版）是两条不同的路线。 */
+  docs_render_page: "slime:docs:renderPage",
+  /* 阶段 C：本机有没有 LibreOffice（老版 .doc/.xls/.ppt 保真预览的前置条件）。
+     ⚠️ 单独一条：它是**机器**的属性、不是某个文件的属性 ⇒ 用户还没点文件时也要能问。 */
+  office_libreoffice_probe: "slime:office:libreofficeProbe",
+  /* A-1137：搜索页**宿主桥**（右栏搜索页 ↔ main ↔ 渲染层）。
+     ⚠️ 这一组**刻意不走 `handleTrusted`**：它的 sender 是右栏 webview 的 guest，
+     不是主窗口 ⇒ `isTrustedSender` 必然拒绝。改用 `event.senderFrame.url` 白名单，
+     产地唯一：`gui/src/main/searchBridge.ts::isTrustedSearchFrame()`。
+     为什么需要它：右栏浏览器页是 `<webview>`（独立顶层 frame）⇒ 页面里的 `window.parent === window`，
+     `postMessage` 只能听到自己发的 ⇒ **页面无法靠 postMessage 与宿主通信**（已实测证伪）。
+     唯一通路是 guest preload（`gui/src/preload/searchHost.cjs`）+ `contextBridge` + 这几条 IPC。 */
+  search_query: "slime:search:query",
+  /** guest → main：页面上报「右栏在做什么」（检索结果 / 打开某条 / 换模式 …），供对话侧实时监测。 */
+  search_event: "slime:search:event",
+  /** main → guest：把主程序主题推给搜索页（webview 里 postMessage 收不到，只能走这条）。 */
+  search_theme: "slime:search:theme",
+  search_theme_get: "slime:search:themeGet",
+  search_theme_report: "slime:search:themeReport",
+  /** 渲染层 → main：要「搜索页 URL + guest preload 的 file:// 路径」（渲染层不知道产物布局）。
+   *  ⚠️ 这条与 `search_view_get` 的 **sender 是主窗口**（不是 guest）⇒ 判据是
+   *  `searchBridge.ts::isTrustedMainSender`（复用 `main/index.ts::isTrustedSender`）。
+   *  曾错用 guest 白名单 ⇒ **dev 模式下渲染层被误拒**（其 origin 是另一个端口）。 */
+  search_host_info: "slime:search:hostInfo",
+  /** 渲染层 → main：取一份"最近视图"（广播是一次性的，晚挂载的消费面靠它补课，否则永远空白）。 */
+  search_view_get: "slime:search:viewGet",
+  /** main → 渲染层：右栏视图状态广播（`ChatPanel` 的状态条订阅它）。
+   *  ⚠️ 只有**来自 guest** 的那部分走 IPC（main 转），渲染层自身的页签变化走渲染层内部事件
+   *  （`gui/src/renderer/pages/sidebarView.ts`）—— 同一进程内不必绕主进程。 */
+  search_view_changed: "slime:search:viewChanged",
+  /* ── A-1138：自建全网索引服务（**已写进 slime**，不再 spawn Python 三件套）──────────────
+     渲染层 → main 的三条一键控制。⚠️ sender 是**主窗口**（用注入的 `isMainSender`，
+     不重抄一份判据），与 guest 那几条不是同一类来源。 */
+  search_index_start: "slime:search:indexStart",
+  search_index_stop: "slime:search:indexStop",
+  search_index_status: "slime:search:indexStatus",
+  /** 渲染层「开始收录」按钮（与 HTTP `/crawl` 共用同一套参数夹取与后台任务）。 */
+  search_index_crawl: "slime:search:indexCrawl",
+  /* ── A-1139：索引维护三条（补齐「欠账」：批量收录 / 参数可调 / 重建·清空）─────────
+     学习全网搜索引擎的做法：收录是**可配置、可重来**的 —— 站长工具里改完 crawl 参数
+     要能「重新抓取」，索引坏了要能「重建」，不要了要能「清空」。只有"开始收录"一个按钮
+     等于把用户锁死在第一次的选择上（参数错了只能删库重来，而删库本身又没入口）。 */
+  search_index_rebuild: "slime:search:indexRebuild",
+  search_index_clear: "slime:search:indexClear",
+  /** 按站点删除（`site:host`）—— 批量收录之后最有用的单条操作。 */
+  search_index_removeSite: "slime:search:indexRemoveSite",
+  /* ── A-1140：分词 / 正文参数（全局，落盘持久；改完**立即重建**索引）────────────────
+     ⚠️ 与上面「每站收录参数」不是一回事：那些是"这一次抓取"的，这两个是"这个索引"的。
+     `params_get` 回的是**夹取后**的生效值（面板回显的就是它 ⇒ 用户看得见自己被夹到哪）。 */
+  search_index_params_get: "slime:search:indexParamsGet",
+  search_index_params_set: "slime:search:indexParamsSet",
   // 加号/命令面板 + 输入联想
   extras_list: "slime:extras:list",
   chat_suggest: "slime:chat:suggest",
@@ -105,10 +164,13 @@ export const IPC_CHANNELS = {
   /** A-980-R8：用系统默认应用打开文件（word/pdf/ppt/excel 等右侧栏无力渲染的格式） */
   shell_open_path: "slime:shell:openPath",
   term_exec: "slime:term:exec",
+  /** A-1139：内置终端用哪些 shell（探测主机本地终端组件，供下拉选择）。 */
+  term_profiles: "slime:term:profiles",
   /* ── A-1069（#226）：Agent 启动的后台资源面板 ─────────────────────────────
-     范围由用户划定：**仅 Agent 启动的**（屏幕控制常驻宿主 / http_serve 的本地服务 /
-     后台子代理）。应用自身服务（Python 后端、llama-server、MCP、情感脑 sidecar）
-     一概不进这个面板 —— 关掉它等于把应用打瘸，那不是用户想在这里做的事。 */
+     范围由用户划定：**仅 Agent 启动的**（屏幕控制常驻宿主 / http_serve 的本地服务）。
+     ⚠️ 2026-09-26 收窄：用户原话「只监视 Agent 运行的**脚本、端口**」⇒ 后台子代理
+     不在这个面板里（它在子代理坞 SubAgentExpandButton 里）。应用自身服务（Python 后端、
+     llama-server、MCP、情感脑 sidecar）一概不进这个面板 —— 关掉它等于把应用打瘸。 */
   agentprocs_list: "slime:agentprocs:list",
   agentprocs_stop: "slime:agentprocs:stop",
   /** 主进程 → 渲染层：后台资源集合发生变化（起/停），让面板立刻刷新而不是靠轮询 */
@@ -265,7 +327,9 @@ export interface AgentInfo {
 
 /** A-980-R22：Agent 工具面白名单（skill/MCP 差异化配置；与 core-ts agentTools.ToolProfile 同构） */
 export interface ToolProfileDTO {
-  mode: "default" | "custom";
+  /** A-1140：三档 —— default=标准模式 / creator=创造模式 / custom=自定义模式
+   *  （显示名映射见 `AgentsPanel.tsx` 的 CAPABILITY_MODES，与 `core-ts` 的 ToolProfileMode 同构） */
+  mode: "default" | "creator" | "custom";
   /** 启用的技能名（extras.skillList 的 name） */
   skills: string[];
   /** 启用的 MCP 服务器名（extras.mcpList 的 name，运行时按 mcp_<server>_* 前缀匹配工具） */
@@ -714,6 +778,10 @@ export interface SkillInfo {
   hasSkillMd: boolean;
   /** 是否启用（禁用 = 技能目录被移至 config/skills/.disabled/ 下） */
   enabled: boolean;
+  /** A-1140：**声明的**来源（`market` / `user` / `agent` / `""`=未声明）。
+   *  ⚠️ 与主进程 `config_files.ts` 的 SkillInfo **必须同步** —— 缺字段会让插件页
+   *  的来源列恒为「未声明」且不报错（静默失效）。仅作展示，不作安全判定。 */
+  origin: string;
 }
 
 export interface McpServerInfo {
@@ -858,7 +926,14 @@ export interface WorkspaceListResult {
 }
 
 /** 文件内容 MIME 类型映射 */
-export type FileMime = "text" | "image" | "binary" | "pdf" | "office";
+/**
+ * 文件预览的**形态**（决定右侧栏用哪个分支渲染）。
+ * ⚠️ A-1133：新增 `docText` —— 工作文档（docx/xlsx/pptx）**抽出来的结构化文本**。
+ * 与 `text` 分开是必须的：`text` 是"源码视图"（等宽、不折行、按语言高亮），
+ * 文档正文要按段落折行；两者混用会让长文档变成"单行无限往右延伸"。
+ * 与 `office` 的关系：`office` = 抽不出文本时的兜底形态（图标 + 用系统应用打开）。
+ */
+export type FileMime = "text" | "docText" | "image" | "binary" | "pdf" | "office";
 
 /** 工作树文件读取结果（点击文件打开新标签页用） */
 export interface WorkspaceReadFileResult {
@@ -873,14 +948,66 @@ export interface WorkspaceReadFileResult {
   error?: string;
 }
 
-/** 终端执行结果（右侧栏「终端」标签页：命令运行器，非 PTY） */
+/** 终端执行结果（右侧栏「终端」标签页） */
 export interface TermResult {
   ok: boolean;
   stdout: string;
   stderr: string;
   code: number | null;
+  /** A-1139：这次输出是按哪个编码解出来的（`utf-8` / `gb18030` …）。 */
+  encoding?: string;
+  /**
+   * A-1139：`true` = 我们**没能确认**输出编码，退到了兜底（GB18030）。
+   * 界面必须把它显式显示出来（铁律 31：降级可以，但降级要看得见）——
+   * 否则用户看到的乱码就永远没有归因。
+   */
+  looseEncoding?: boolean;
+  /** A-1139：实际跑在哪个 shell 里（`profileId` 回显，便于界面显示与排错）。 */
+  profileId?: string;
+  /**
+   * A-1139：**非致命但必须让用户看见**的说明（超时被终止 / 输出截断 / 编码兜底）。
+   *
+   * ⚠️ 与 `error` 刻意分开（理由同 `TabInstance.fileNotice`）：
+   * `error` = 这次**没有结果**（命令没跑起来）；
+   * `notice` = 结果**在**，但它有前提。
+   * 合成一个字段会逼调用方二选一 ⇒ 必然有一类被静默 —— 而"超时看起来像正常结束"
+   * 正是旧实现（超时返回 `ok:true` + 部分输出）最坑的地方。
+   */
+  notice?: string;
+  /**
+   * A-1139：本条命令**实际使用**的工作目录（绝对路径）；`undefined` = 沿用了进程默认目录。
+   *
+   * ⚠️ 这是 cwd 延续的**事实来源**：渲染层会提议一个 cwd（从 `cd xxx` 推导），但只在
+   * 主进程校验通过后才生效 ⇒ 渲染层拿到回带值后**以它为准**（自己那份只是缓存）。
+   * 这样"推导算错"不会变成"命令静默跑在错的目录里"。
+   */
+  cwd?: string;
   error?: string;
 }
+
+/* ── A-1139：内置终端适配主机本地终端组件 ─────────────────────────────────────
+   用户实测（2026-10-01）：「我本地部分代码都无法适配……可以在使用时**自适应直接接入主机
+   本地终端的各个组件**」，对标 VS Code 的终端下拉（PowerShell 7 / Windows PowerShell /
+   命令提示符 / WSL 发行版 / Developer Command Prompt for VS / Git Bash）。
+
+   ⚠️ 形状**只借类型**（同 ChatPanel 引 `context_compress` 的手法）：
+   「哪些 shell 存在」以及「每个 shell 各自怎么调」（`shellInvocation`）的判据唯一产地是
+   `core-ts/src/terminal/profiles.ts`。在渲染层手抄一份 `TermProfile` 的下场是：主进程加一个
+   字段（例如 `setup`）而这份没跟上 ⇒ **某个 shell 静默不再可用**，tsc 也发现不了。
+   `import type` 编译后完全擦除 ⇒ 不会把主进程图谱拖进浏览器包。 */
+import type { TermProfile } from "../../../core-ts/src/terminal/profiles.js";
+export type { TermProfile, TermProfileKind } from "../../../core-ts/src/terminal/profiles.js";
+
+/**
+ * A-1139：内置终端可用的 shell 配置列表。
+ *
+ * ⚠️ 用**判别联合**表达失败，而不是「空列表 + error 字段」：空列表的含义是
+ * 「这台机器上一个 shell 都没探测到」（用户该知道这是环境问题，可能 PATH 不对），
+ * 与「查询失败」是两件事 —— 混在一起会让用户以为自己的机器没有终端。
+ */
+export type TermProfilesResult =
+  | { ok: true; profiles: TermProfile[]; defaultId: string | null }
+  | { ok: false; error: string };
 
 /* ── A-1069（#226）：Agent 启动的后台资源 ────────────────────────────────────
    ① **只借类型**（`import type`）：渲染层刻意不引入 core-ts（见 ChatPanel 的注释

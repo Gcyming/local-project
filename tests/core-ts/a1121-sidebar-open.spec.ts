@@ -240,7 +240,8 @@ describe("A-1121 接线：三步链路都必须整包透传（不许任何一步
   });
 
   it("http_create_app 的回执**按真实结果**写（未装配界面时不得声称已自动打开）", () => {
-    expect(BUILTIN).toContain("fireSidebarOpen({ kind: \"url\", url: localUrl, name: title })");
+    /* A-1142：末尾多了 `sessionId` —— 形状变了就同步锚点（铁律：改源码形状必须同步锚点）。 */
+    expect(BUILTIN).toContain("fireSidebarOpen({ kind: \"url\", url: localUrl, name: title, sessionId: sessionIdFromArgs(args) })");
     expect(BUILTIN).toContain("界面未就绪，未自动打开");
   });
 });

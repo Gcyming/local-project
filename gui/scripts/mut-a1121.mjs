@@ -59,8 +59,10 @@ const MUTATIONS = [
   {
     name: "2 对象 url 分支不判空（同上，第二个产地）",
     file: F_OPEN,
-    mutate: (t) => sub(t, '  return url ? { kind: "url", url, name: nm, from: req.from } : null;',
-      '  return { kind: "url", url, name: nm, from: req.from };'),
+    /* ⚠️ A-1142 起 url 分支多带一个 `sessionId`（会话归属）⇒ 旧锚点已不存在。
+       重锚到**现行那一行**：语义不变（"判空"这个闸门还在），只是形状多了字段。 */
+    mutate: (t) => sub(t, '  return url ? { kind: "url", url, name: nm, from: req.from, sessionId: sid } : null;',
+      '  return { kind: "url", url, name: nm, from: req.from, sessionId: sid };'),
   },
   {
     name: "3 未知 kind 静默变成 terminal（不静默变承载这条判据失效）",
@@ -71,8 +73,9 @@ const MUTATIONS = [
   {
     name: "4 terminal 类也保留 from（站点限流语义外溢）",
     file: F_OPEN,
-    mutate: (t) => sub(t, "    return { kind, cmd: trimOrUndef(req.cmd), name: nm };",
-      "    return { kind, cmd: trimOrUndef(req.cmd), name: nm, from: req.from };"),
+    /* ⚠️ 同上：A-1142 起 terminal 分支也带 `sessionId`，旧锚点已漂移。 */
+    mutate: (t) => sub(t, "    return { kind, cmd: trimOrUndef(req.cmd), name: nm, sessionId: sid };",
+      "    return { kind, cmd: trimOrUndef(req.cmd), name: nm, sessionId: sid, from: req.from };"),
   },
   {
     name: "5 name 优先级反转（调用方显式给的名字被兜底参数盖掉）",
@@ -129,8 +132,9 @@ const MUTATIONS = [
   {
     name: "14 未装配时终端工具照写「已打开」（假陈述）",
     file: F_BUILTIN,
-    mutate: (t) => sub(t, '    if (!fireSidebarOpen({ kind: "terminal", cmd: prefill, name })) {',
-      '    fireSidebarOpen({ kind: "terminal", cmd: prefill, name });\n    if (false) {'),
+    /* ⚠️ A-1142 起这处调用多了 `sessionId` ⇒ 旧锚点已漂移，重锚到现行那一行。 */
+    mutate: (t) => sub(t, '    if (!fireSidebarOpen({ kind: "terminal", cmd: prefill, name, sessionId: sessionIdFromArgs(args) })) {',
+      '    fireSidebarOpen({ kind: "terminal", cmd: prefill, name, sessionId: sessionIdFromArgs(args) });\n    if (false) {'),
   },
   {
     name: "15 文件工具不做目录存在性校验（开出一个空树让用户以为这里没文件）",

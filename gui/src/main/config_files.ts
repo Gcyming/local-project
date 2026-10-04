@@ -7,7 +7,7 @@
  * - 写入：备份 + 原子写（tmp + rename），上限 512KB
  */
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
-import { frontmatterDescription } from "../../../core-ts/src/skills.js";
+import { frontmatterDescription, frontmatterField } from "../../../core-ts/src/skills.js";
 import { encrypt, decrypt } from "../../../core-ts/src/encryption.js";
 import { expandMarketQuery } from "../../../core-ts/src/services/marketLocalize.js";
 import { existsSync, readFileSync, statSync, writeFileSync, renameSync, mkdirSync, copyFileSync, readdirSync, openSync, readSync, closeSync, rmSync } from "node:fs";
@@ -28,6 +28,11 @@ export interface SkillInfo {
   hasSkillMd: boolean;
   /** 是否启用（禁用 = 技能目录被移至 config/skills/.disabled/ 下） */
   enabled: boolean;
+  /** A-1140：**声明的**来源（SKILL.md frontmatter 的 `origin` 字段）。
+   *  `market` = 官方技能仓库 / `user` = 用户自备 / `agent` = Agent 自建 / `""` = 未声明。
+   *  ⚠️ 这是**声明值而非可信归属** —— 任何写入方都能伪造它。插件页按「声明」如实展示，
+   *  安全判定不得依赖它（权限判定走 core/permissions.py 与沙箱）。 */
+  origin: string;
 }
 
 export interface McpServerInfo {
@@ -131,18 +136,23 @@ function scanSkillRoot(base: string, enabled: boolean): SkillInfo[] {
     const hasManifest = existsSync(manifestPath);
     const hasSkillMd = existsSync(skillPath);
     let description = "";
+    let origin = "";
     if (hasManifest) {
       description = extractManifestDescription(readHeadSafe(manifestPath, 4096));
     }
-    if (!description && hasSkillMd) {
-      /* 主流 Agent 的技能只有 SKILL.md（无 manifest.yaml），描述写在 frontmatter 里。
-       * 此前这里取 `firstLineSafe()` —— 即**物理首行**，而带 frontmatter 的文件首行就是
-       * 分隔符 `---`，于是技能库里所有第三方技能都显示不出描述（用户实测「明明加了却像缺东西」）。
-       * 改为先用共享解析器读 frontmatter.description，读不到再退回首个非分隔符标题行。 */
+    if (hasSkillMd) {
       const head = readHeadSafe(skillPath, 4096);
-      description = frontmatterDescription(head) || firstLineSafe(skillPath);
+      if (!description) {
+        /* 主流 Agent 的技能只有 SKILL.md（无 manifest.yaml），描述写在 frontmatter 里。
+         * 此前这里取 `firstLineSafe()` —— 即**物理首行**，而带 frontmatter 的文件首行就是
+         * 分隔符 `---`，于是技能库里所有第三方技能都显示不出描述（用户实测「明明加了却像缺东西」）。
+         * 改为先用共享解析器读 frontmatter.description，读不到再退回首个非分隔符标题行。 */
+        description = frontmatterDescription(head) || firstLineSafe(skillPath);
+      }
+      // A-1140：来源声明（插件页用于区分 官方市场 / 用户自备 / Agent 自建）
+      origin = frontmatterField(head, "origin", 32).toLowerCase();
     }
-    out.push({ name: entry, description, hasManifest, hasSkillMd, enabled });
+    out.push({ name: entry, description, hasManifest, hasSkillMd, enabled, origin });
   }
   return out;
 }

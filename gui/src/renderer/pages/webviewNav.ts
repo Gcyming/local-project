@@ -52,3 +52,75 @@ export function safeLoadURL(wv: WebviewLike | null | undefined, url: string): vo
     });
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   A-1133：**导航失败锁存** —— 「无休止报错」的结构性闸门。
+
+   事故（用户原话：「我无休止的报错，除非我主动关闭」）：拖入 `.docx` 后控制台无限刷
+     `GUEST_VIEW_MANAGER_CALL: Error: ERR_FAILED (-2) loading 'file:///…docx'`
+   伴随界面疯狂闪烁、目标文件夹被半成品文件塞满。
+
+   为什么会"无休止"：自动重发有**两条**通路，而它们都不知道"这个地址已经被判死"——
+     · 300ms 导航安全网（本意：guest 还没 attach 时兜底）；
+     · 地址写回 + `forceNav`（本意：props.url 与 guest 当前地址不一致时对齐）。
+   一次注定失败的加载（例如把 `.docx` 交给 Chromium）会让 `getURL()` 永远不等于目标 ⇒
+   两条通路每 300ms 各重发一次 ⇒ **永远失败、永远重发**。
+
+   ⚠️ 判据要分开两件事，混在一起就是这次的错：
+     · "还没 attach" 是**时序**问题 ⇒ 只在 attach 前兜底（`trigger === "net" && attached` 即停）；
+     · "加载失败过" 是**终态**问题 ⇒ 一旦失败，自动通路一律不再重发，只留用户手动「重试」。
+   为什么 1 次就算终态：这些重发**不是用户意图**，而是内部兜底；对"类型根本不支持"的地址，
+   第 2 次到第 1 万次的结果完全一样。用户手动「重试」= 清账本 + 显式再来一次（保留逃生口）。
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/** 失败账本：目标地址 → 已失败次数。key 用**原始目标地址**（不是 guest 的 `getURL()`）。 */
+export type NavFailureBook = Map<string, number>;
+
+/** 自动重发的触发者（用于区分"时序兜底"与"用户意图"） */
+export type NavTrigger = "attach" | "url-change" | "net" | "manual";
+
+/** 真失败才算数：`-3`（被后续导航顶掉/主动 abort）是正常噪声，不该进账本。 */
+export function isTerminalNavFailure(errno: number): boolean {
+  return !isBenignAbort(errno);
+}
+
+/** 记一次失败。返回账本是否有变化（无变化 = 这条失败本身已被忽略，例如 -3）。 */
+export function noteNavFailure(book: NavFailureBook, url: string, errno: number): boolean {
+  if (!url || !isTerminalNavFailure(errno)) { return false; }
+  book.set(url, (book.get(url) ?? 0) + 1);
+  return true;
+}
+
+/** 该地址是否已被判死（自动通路一律不许再发）。 */
+export function isNavLatchBlocked(book: ReadonlyMap<string, number>, url: string): boolean {
+  return Boolean(url) && (book.get(url) ?? 0) > 0;
+}
+
+/** 用户手动「重试」时的逃生口：清掉该地址（不传 = 全清）的失败记录。 */
+export function clearNavFailure(book: NavFailureBook, url?: string): void {
+  if (url === undefined) { book.clear(); return; }
+  book.delete(url);
+}
+
+/**
+ * **自动**加载是否允许（唯一判据）。所有自动通路（attach 兜底 / 地址写回 / 300ms 安全网）
+ * 都必须先问它 —— 少问一处，那处就是下一个"无休止刷屏"。
+ *
+ * 拒绝的三种理由（都要能被单独解释，否则以后没人敢动）：
+ *   ① 没有目标地址（空/undefined）；
+ *   ② 该地址已在失败账本里 ⇒ **终态**，自动通路不再重发；
+ *   ③ 安全网（`net`）在 guest 已 attach 后仍然发 ⇒ 它已经越过了自己的职责窗口（时序兜底），
+ *      此时的重复加载只可能是"力竭式重试"。
+ */
+export function navAutoLoadAllowed(
+  book: ReadonlyMap<string, number>,
+  url: string,
+  trigger: NavTrigger,
+  attached: boolean,
+): boolean {
+  if (!url) { return false; }
+  if (trigger === "manual") { return true; }
+  if (isNavLatchBlocked(book, url)) { return false; }
+  if (trigger === "net" && attached) { return false; }
+  return true;
+}

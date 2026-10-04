@@ -15,8 +15,12 @@
 
 import { isZip, listZip, readZipText, type ZipEntry } from "./zip.js";
 import { isOle2, openCfb } from "./cfb.js";
+/* A-1133：PDF 抽取与 OOXML **不是同一族**（既不是 ZIP 也不是 OLE），按"一类格式一个解析器"
+   放在同级模块里；本文件只负责**派发**（唯一产地：`docKindFromExt` 决定走哪条）。 */
+import { extractPdfText } from "./pdf_text.js";
 
-export type DocKind = "docx" | "pptx" | "xlsx";
+/** 可读文档的种类。`pdf` 与 OOXML 的解析路径完全不同（见 `pdf_text.ts` 的上限说明）。 */
+export type DocKind = "docx" | "pptx" | "xlsx" | "pdf";
 
 /** 旧版二进制格式（OLE2 复合文档）—— 与 DocKind 区分，因为解析路径完全不同 */
 export type OleKind = "doc" | "xls" | "ppt";
@@ -25,6 +29,9 @@ const KIND_BY_EXT: Record<string, DocKind> = {
   ".docx": "docx",
   ".pptx": "pptx",
   ".xlsx": "xlsx",
+  /* A-1133：PDF 走独立解析器（`pdf_text.ts`）。放在这里是为了让**所有调用方**
+     （`file_read` 工具、主进程文档通道）自动获得 PDF 读取能力，而不必各自再判一次扩展名。 */
+  ".pdf": "pdf",
   // 宏/模板变体：容器结构相同，直接复用同一套读取
   ".docm": "docx",
   ".dotx": "docx",
@@ -34,15 +41,26 @@ const KIND_BY_EXT: Record<string, DocKind> = {
   ".xltx": "xlsx",
 };
 
-/** 旧版二进制 Office 格式（OLE2 复合文档）：读不了，必须**说清楚**而不是吐乱码。 */
+/** 旧版二进制 Office 格式（OLE2 复合文档）：容器结构相同，**同一套 OLE 解析器全都能读**。 */
 const LEGACY_BINARY: Record<string, string> = {
   ".doc": "Word 97-2003",
   ".xls": "Excel 97-2003",
   ".ppt": "PowerPoint 97-2003",
+  /* A-1133：同族的**模板 / 放映**变体。用户要求「所有 Office 办公文件全给我做一遍适配」，
+     它们与上三个是同一个 OLE2 容器、同一批流名（WordDocument / Workbook / PowerPoint Document）
+     ⇒ 复用同一解析器即可，**不需要**新代码；但**必须**在这里登记，否则会被当成未知类型拒收。 */
+  ".dot": "Word 97-2003 模板",
+  ".xlt": "Excel 97-2003 模板",
+  ".pot": "PowerPoint 97-2003 模板",
+  ".pps": "PowerPoint 97-2003 放映",
 };
 
-/** 旧版格式的扩展名 → 解析种类 */
-const OLE_KIND_BY_EXT: Record<string, OleKind> = { ".doc": "doc", ".xls": "xls", ".ppt": "ppt" };
+/** 旧版格式的扩展名 → 解析种类（同容器同流名的变体一律复用同一解析路径） */
+const OLE_KIND_BY_EXT: Record<string, OleKind> = {
+  ".doc": "doc", ".dot": "doc",
+  ".xls": "xls", ".xlt": "xls",
+  ".ppt": "ppt", ".pot": "ppt", ".pps": "ppt",
+};
 
 /** 据扩展名判定旧版格式种类（A-1036：现在**能真解析**了，不再只是报错）。 */
 export function oleKindFromExt(ext: string): OleKind | null {
@@ -167,7 +185,7 @@ function extractPptx(buf: Buffer, entries: ZipEntry[], maxChars: number): DocExt
     const lines = [...xml.matchAll(/<a:p\b[^>]*>([\s\S]*?)<\/a:p>/g)]
       .map((p) => textOfRuns(p[1], "a:t").trim())
       .filter((t) => t.length > 0);
-    parts.push(`--- 第 ${n} 页 ---\n${lines.join("\n")}`);
+    parts.push(`${pptPageMarker(n)}\n${lines.join("\n")}`);
   }
   const notes = entries.filter((e) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(e.name)).length;
   const info = [`pptx：${slides.length} 页`];
@@ -315,18 +333,76 @@ function latin1(buf: Buffer): string {
  * Word 控制字符 → 可读形态。
  * Word 用 0x07 表示单元格/行结束、0x0D 段落、0x0B 软换行、0x0C 分页，
  * 13/14/15 是域标记（域代码不该出现在正文里）。
+ *
+ * ⚠️ **导出是为了能单测**（`tests/core-ts/a1036-guards.spec.ts`）—— 这里的正则顺序**很容易写坏**
+ *    而且坏了之后**看起来完全正常**（见下），只能靠用例钉死。
+ *
+ * ## 2026-09-28 实测的 bug：换行被**自己的下一句**抹掉
+ * 旧第 4 行写的是 `[\x00-\x06\x08-\x0A\x0E-\x1F]` —— 那个 `\x08-\x0A` **含 `\x09`(Tab) 与 `\x0A`(LF)**，
+ * 而 `\t` / `\n` 正是**上一行刚刚生成**的（`\x07`→`\t`、`\x0D`→`\n`）。
+ * ⇒ 段落标记先被翻译成换行、紧接着又被当"控制字符"清掉。
+ * 症状（真实文件 `EDA第九组实验一报告.doc` 实测）：全篇 `\n = 0`、`\r = 0`，
+ * **3623 字挤成一块**，网页上是一大坨没有换行的文字（= 用户说的「连正常换行都不会」）。
+ * ⚠️ 危险之处：它**不报错、不吐乱码**（文本一个字都没少），只是结构静默消失。
+ * ⇒ 判据必须断言"**换行真的在**"，不能只断言"含某个词"。
  */
-function cleanWordText(s: string): string {
+export function cleanWordText(s: string): string {
   return s
     .replace(/[\x13-\x15]/g, "")
     .replace(/[\x07\x0C\x0B\x0D]/g, (m) => (m === "\x07" ? "\t" : "\n"))
     .replace(/\x01/g, "￼")
-    .replace(/[\x00-\x06\x08-\x0A\x0E-\x1F]/g, "")
+    /* ⚠️ 范围**必须**排除 `\x09`(Tab) 与 `\x0A`(LF)：它们是上一行的产物。
+       清掉它们 = 把刚生成的换行/制表又抹掉（上面的 bug 就是这么来的）。 */
+    .replace(/[\x00-\x06\x08\x0E-\x1F]/g, "")
     .replace(/\n{3,}/g, "\n\n");
 }
 
-/** 从 clx（piece table）还原 Word 正文 —— 这是 .doc 的**权威**文本来源 */
-function wordTextFromClx(clx: Buffer, wd: Buffer): string {
+/**
+ * 一段文本像不像**真实的中文正文**（用于识别"piece table 指向了垃圾区"）。
+ *
+ * ## 为什么这个判据成立（2026-09-29 实测得出，不是拍脑袋）
+ * 真实中文有极强的**用字集中性**：一篇几千字的文章通常只用到 300~800 个不同汉字，
+ * 且大量字符落在高频区（`的是在不了和有我…`）。而"把随机/加密字节按 UTF-16 解"得到的
+ * **伪汉字**恰好相反 —— 它均匀散落在 CJK 统一区的天文数字个码点上，几乎**每个字都不重复**。
+ * ## 阈值从哪来（2026-09-29 实测，`_diag-doc-ratio.mjs` 逐段量出，两支分离清晰）
+ * ```
+ *   正常中文段   实验一 熟悉Quartus II… : n=9023  r=0.123   ← 最长、最典型
+ *   （去重率低） EDA第九组实验一报告    : n=1024  r=0.390 / n=1004 r=0.319 / n=1758 r=0.298
+ *                专题3总结（可读段）    : n=1711  r=0.357
+ *   ───────────────────────────────── 0.40 ~ 0.65 空档 ─────────────────────────────
+ *   损坏段       专题3总结（垃圾段）    : n=1984  r=0.661   ← 伪汉字
+ * ```
+ * ⇒ **阈值取 0.55**：距正常段上界 0.390 有 0.16 余量，距损坏段下界 0.661 有 0.11 余量，
+ *   落在两支之间的空档中部。
+ * ⚠️ **首版取 0.75 是错的**（依据只有一段 120 字的样本，代表性差 ⇒ 真实损坏段 0.661 打不穿它，
+ *   守卫/探针在该报的时候**不报**）。教训：**阈值必须由"全体样本的实测分布"定，不能用单点样本**。
+ *
+ * ⚠️ 只对**足够长的**样本判定（< 80 字时统计无意义，宁可放行）：短句可以是任意组合。
+ * ⚠️ 这是**启发式**，不是规范判据 —— 所以它的用途是「标出来、别让 Agent 当真」，
+ *    **不是**丢数据（真实文本被误判也只是多一句提示，代价可控；反之代价是把垃圾喂给模型）。
+ */
+export const FAKE_TEXT_DEDUP_RATIO = 0.55;
+
+export function looksLikeRealText(s: string): boolean {
+  const chars = Array.from(s).filter((c) => {
+    const v = c.codePointAt(0) ?? 0;
+    /* 只统计"有信息量"的字符：CJK 统一区 + 常用标点/字母数字。空白与 ASCII 噪声不参与。 */
+    return (v >= 0x4e00 && v <= 0x9fff) || (v >= 0x3040 && v <= 0x30ff) || (v >= 0xac00 && v <= 0xd7af);
+  });
+  if (chars.length < 80) { return true; }        // 太短 ⇒ 不下结论（放行）
+  const unique = new Set(chars).size;
+  return unique / chars.length < FAKE_TEXT_DEDUP_RATIO;   // 去重率 ≥ 阈值 ⇒ 判定为伪文本
+}
+
+/**
+ * 从 clx（piece table）还原 Word 正文 —— 这是 .doc 的**权威**文本来源。
+ *
+ * ⚠️ 返回**逐段**结果（不是拼好的字符串）：piece table 的每一段可以各自损坏
+ * （实测 `专题3总结_*.doc`：第 0 段 1984 字全是伪汉字、第 1 段 1711 字完全正常）。
+ * 拼在一起会得到"看起来有 3695 字的正文"，其中 54% 是垃圾 —— **对 Agent 比读不到更坏**
+ * （模型会把伪汉字当真去总结）。⇒ 由调用方按段判质、丢掉垃圾段并**如实报告**。
+ */
+function wordPiecesFromClx(clx: Buffer, wd: Buffer): { text: string; bad: number } {
   let p = 0;
   let plc: Buffer | null = null;
   while (p < clx.length) {
@@ -344,27 +420,33 @@ function wordTextFromClx(clx: Buffer, wd: Buffer): string {
     }
     break;                                        // 未知标记 → 不猜
   }
-  if (!plc || plc.length < 4) { return ""; }
+  if (!plc || plc.length < 4) { return { text: "", bad: 0 }; }
   const n = Math.floor((plc.length - 4) / 12);    // 每条 PCD 8B + 一个 CP 4B
-  if (n <= 0) { return ""; }
+  if (n <= 0) { return { text: "", bad: 0 }; }
   const cps: number[] = [];
   for (let i = 0; i <= n && (i + 1) * 4 <= plc.length; i += 1) { cps.push(plc.readUInt32LE(i * 4)); }
   const pcdBase = (n + 1) * 4;
   const parts: string[] = [];
+  let bad = 0;
   for (let i = 0; i < n; i += 1) {
     const chars = cps[i + 1] - cps[i];
     if (!Number.isFinite(chars) || chars <= 0) { continue; }
     const fcRaw = plc.readUInt32LE(pcdBase + i * 8 + 2);
     const compressed = (fcRaw & 0x40000000) !== 0;
+    let seg: string;
     if (compressed) {
       const off = (fcRaw & 0x3FFFFFFF) >>> 1;
-      parts.push(latin1(wd.subarray(off, off + chars)));
+      seg = latin1(wd.subarray(off, off + chars));
     } else {
       const off = fcRaw & 0x3FFFFFFF;
-      parts.push(wd.subarray(off, off + chars * 2).toString("utf16le"));
+      seg = wd.subarray(off, off + chars * 2).toString("utf16le");
     }
+    /* ⚠️ 逐段判质：伪汉字段**丢掉**并计数（不许拼进去）。压缩段（latin1）不判 —— 那是单字节
+       西文/ANSI，用字集中性判据不适用（它的"重复率"天然低），误杀风险大于收益。 */
+    if (!compressed && !looksLikeRealText(seg)) { bad += 1; continue; }
+    parts.push(seg);
   }
-  return parts.join("");
+  return { text: parts.join(""), bad };
 }
 
 /** 兜底：piece table 不可用时，扫出成串的可打印字符（宁可给一部分，也不给零） */
@@ -383,21 +465,82 @@ function salvagePrintable(wd: Buffer): string {
   return runs.join("\n");
 }
 
+/** MS-DOC 2.5.1 `FibBase.wIdent` 的规范值 —— **唯一产地**（.doc 与 .dot 共用）。 */
+export const DOC_WIDENT = 0xa5ec;
+
+/**
+ * 校验 `WordDocument` 流的 FIB 头（**纯函数**，从 `extractWordBinary` 里提出来以便**行为级**单测）。
+ *
+ * 为什么要单独提出：这条判据原先内联在 `extractWordBinary` 里，只能靠"源码里有没有那段文本"来守 ——
+ * 而**文本断言对「改条件」是瞎的**（铁律 3）：把 `if ((flags & 0x0100) !== 0)` 改成 `if (false)`，
+ * 那行注释与常量一字未动，`toContain` 照样绿。提成函数后，守卫可以直接喂合成 FIB 进去、断言它**抛错**。
+ *
+ * @param wd `WordDocument` 流的字节
+ * @throws 结构不合法或加密时抛错（错误信息面向用户，含可操作出路）
+ */
+export function validateDocFib(wd: Buffer): void {
+  /* ⚠️⚠️ **先验 `wIdent`（2026-09-29，A-1136 阶段 C 时定位）**：
+     MS-DOC 2.5.1 规定 `FibBase.wIdent` **必须是 0xA5EC**；不是它 = 这个流根本不是 Word 的 FIB。
+     为什么这条必须挡在最前面：真实样本 `专题3总结_*.doc` 的 `wIdent=0xCFD0`、`nFib=57361`（都是
+     不可能的取值），**却恰好**在 0x01A2/0x01A6 处有"看起来合理"的 fcClx/lcbClx，于是旧代码按
+     piece table 解出了一段**编码层面完全合法、语义上纯属垃圾**的常用汉字（"任悍牙箱颖抛吓垒桩…"）。
+     这种失败**最坏**：不是报错，而是**给 Agent 一堆像模像样的假正文**（模型会当真去总结），
+     而用户看到的是一份"读出来全是乱码"的文档 —— 两边都被误导。
+     ⇒ 结构不合法就**明确报错**（下面 `salvagePrintable` 都不走），让它诚实失败。
+     ⚠️ 这也解释了为什么"兜底扫描"不能作为常规路径：它对合法结构才成立，对伪造结构只会产垃圾。
+     ⚠️ 相关位域（MS-DOC 2.5.1 `fibBase.flags`，权威来源 Microsoft Learn / PRONOM fmt/754）：
+        `fComplex`=bit2(0x04)｜`fEncrypted`=bit8(0x0100)｜`fWhichTblStm`=bit9(0x0200)｜`fObfuscated`=bit15(0x8000)。 */
+  if (wd.length < 32) { throw new Error("不是有效的 .doc：WordDocument 流过短（读不到 FIB 头）"); }
+  const wIdent = wd.readUInt16LE(0x0000);
+  if (wIdent !== DOC_WIDENT) {
+    throw new Error(
+      `不是有效的 .doc：FIB 标识 wIdent=0x${wIdent.toString(16).toUpperCase().padStart(4, "0")}`
+      + `（应为 0x${DOC_WIDENT.toString(16).toUpperCase()}）。`
+      + "这个文件的正文结构已损坏或不是 Word 文档（常见于第三方工具异常导出的 .doc）"
+      + "——请用系统程序打开确认，或另存为 .docx 后重读。",
+    );
+  }
+  const flags = wd.readUInt16LE(0x000A);
+  /* ⚠️ 加密文档：正文在磁盘上是密文，按明文解只会得到垃圾 ⇒ 如实拒绝（并给可操作出路）。
+     `fEncrypted`=bit8；`fObfuscated`=bit15 是 XOR 混淆（RC4 之外的旧式口令保护）。
+     两者都为真时必须报错 —— 这是**规范明确**的判据，不是启发式。 */
+  if ((flags & 0x0100) !== 0 || (flags & 0x8000) !== 0) {
+    throw new Error(
+      "这份 .doc 是**加密文档**（FIB 标记 fEncrypted=1），正文以密文存储，无法直接提取。"
+      + "请先用 Word/WPS 打开并输入口令，再另存为 .docx 后重读。",
+    );
+  }
+}
+
 function extractWordBinary(buf: Buffer, maxChars: number): DocExtractResult {
   const cfb = openCfb(buf);
   const wd = cfb.readStream("WordDocument");
   if (!wd) { throw new Error("不是有效的 .doc：缺少 WordDocument 流"); }
+  /* ⚠️ FIB 头的三道规范判据（wIdent / fEncrypted / fObfuscated）已提到 `validateDocFib`：
+     既保证唯一产地，又让守卫能**喂合成字节直接验行为**（而不是断言"源码里有没有这段文本"）。 */
+  validateDocFib(wd);
+  const flags = wd.readUInt16LE(0x000A);
   const info: string[] = [];
   let text = "";
+  let badPieces = 0;
   if (wd.length > 0x01AA) {
-    const flags = wd.readUInt16LE(0x000A);
     const tableName = (flags & 0x0200) !== 0 ? "1Table" : "0Table";
     const fcClx = wd.readUInt32LE(0x01A2);
     const lcbClx = wd.readUInt32LE(0x01A6);
     const table = cfb.readStream(tableName) ?? cfb.readStreamLike("Table");
     if (table && lcbClx > 0 && fcClx + lcbClx <= table.length) {
-      text = wordTextFromClx(table.subarray(fcClx, fcClx + lcbClx), wd);
+      const got = wordPiecesFromClx(table.subarray(fcClx, fcClx + lcbClx), wd);
+      text = got.text;
+      badPieces = got.bad;
       if (text.trim()) { info.push("正文来源：piece table（clx）"); }
+      /* ⚠️ 有段被判为伪文本 ⇒ **必须说出来**（这是用户与 Agent 都会看到的"信息完整性"交代）。
+         不说的话，用户会以为"这份文档本来就这么少内容"，Agent 会基于残缺内容给结论。 */
+      if (badPieces > 0) {
+        info.push(
+          `⚠️ 有 ${badPieces} 段内容无法还原（该段在文件里已损坏，读出来是无意义字符），已**跳过**`
+          + "以免把垃圾当成正文。建议用 Word/WPS 打开另存为 .docx 后重读，以取得完整内容。",
+        );
+      }
     }
   }
   if (!text.trim()) {
@@ -407,23 +550,71 @@ function extractWordBinary(buf: Buffer, maxChars: number): DocExtractResult {
   const body = cleanWordText(text);
   const words = body.split(/\s+/).filter(Boolean).length;
   info.unshift(`doc：约 ${words} 个字/词`);
-  // ⚠️ 诚实边界（A-1036）：piece table 的 CP/fc 偏移是按 MS-DOC 规范解码的，结构已对着真实
-  // 文件逐字段核对过（nFib=193 / fWhichTblStm → 1Table / CPs 与 fc 均合理）。但实测存在
-  // **非标准写入器**（WPS / 第三方转换器）产出的 .doc：其 fcMin 起的一段区域并非正文文本，
-  // 按 UTF-16 解会得到一串**常用汉字区**的无意义字（编码层面与真文本无法区分，做不了可靠的
-  // 自动检测 —— 写了也是假防线）。这里如实标注来源，不假装干净。
-  info.push("解析方式：piece table（clx）；若某些段落读起来无意义，多为非标准写入器所致，建议另存为 .docx 后重读");
+  /* ⚠️ 诚实边界（A-1036；2026-09-29 A-1136 阶段 C 修正为**有判据**）：
+     过去这里写的是"伪汉字没法自动检测，写了也是假防线"。**这个判断是错的** ——
+     真实中文有极强的用字集中性（几千字只用几百个不同汉字），把随机字节按 UTF-16 解出来的
+     伪汉字则几乎字字不同。判据 = **去重率**（`looksLikeRealText`），实测能把损坏段干净摘出来。
+     ⇒ 现在三层防线，缺一不可：
+        ① `wIdent === 0xA5EC`  —— 规范判据，挡"根本不是 Word 的流"；
+        ② `fEncrypted`         —— 规范判据，挡"正文是密文"；
+        ③ 逐段去重率           —— 启发式，挡"piece table 指向垃圾区"（把垃圾段丢掉并计数上报）。 */
+  info.push("解析方式：piece table（clx）；若仍有段落读起来无意义，建议另存为 .docx 后重读");
   return clamp(body, maxChars, info);
 }
 
-function extractPptBinary(buf: Buffer, maxChars: number): DocExtractResult {
-  const cfb = openCfb(buf);
-  const stream = cfb.readStream("PowerPoint Document") ?? cfb.readStreamLike("PowerPoint Document");
-  if (!stream) { throw new Error("不是有效的 .ppt：缺少 PowerPoint Document 流"); }
-  const texts: string[] = [];
-  // PPT 记录：recVer/recInstance(2) + recType(2) + recLen(4) + 数据，线性排布无对齐填充。
-  // 文本只有两种原子：TextCharsAtom(UTF-16LE) / TextBytesAtom(单字节)。
-  // 线性游走即可命中（容器记录只是"包住"子记录，不会跳过它们）。
+/** PPT 记录类型（MS-PPT 2.1.2）：我们只关心"哪些容器算幻灯片正文" */
+const PPT_RT_SLIDE = 0x03ee;          // Slide：真正的幻灯片页
+const PPT_RT_NOTES = 0x03f0;          // Notes：备注页（讲稿）
+const PPT_RT_TEXT_CHARS = 0x0fa0;     // TextCharsAtom（UTF-16LE）
+const PPT_RT_TEXT_BYTES = 0x0fa8;     // TextBytesAtom（单字节）
+
+/**
+ * 页标记 —— **唯一产地**。`gui/renderer/pages/docView.ts` 的 `PAGE_RE` 就是认这个形状建页卡片的，
+ * pptx（`ppt/slides/slideN.xml`，n 取文件名编号）与老版 .ppt（顺序号）**两族共用同一形状**。
+ * ⚠️ 改这里的格式必须同步 `docView.ts::PAGE_RE`（有守卫：`tests/gui/a1133-doc-view.spec.ts`）。
+ */
+export function pptPageMarker(n: number): string {
+  return `--- 第 ${n} 页 ---`;
+}
+
+export interface PptSlideScan {
+  /** 每页的文本行；下标 = 页码 - 1。**空数组 = 该页没有文字**（纯图片页），页数照记 */
+  pages: string[][];
+  /** 进了正文的文本原子数 */
+  slideAtoms: number;
+  /** 被排除的原子数（母版 / 版式 / 备注 / 其他容器） */
+  excludedAtoms: number;
+  /** 备注页容器个数 */
+  notesPages: number;
+}
+
+/**
+ * 扫一遍 `PowerPoint Document` 流，**只**收 `Slide` 容器里的文本原子，并按 Slide 顺序分页。
+ *
+ * ## ⚠️ 2026-09-28 用户截图打回（"PPT 甚至连内容都没有"）—— 两个叠加的错
+ * 旧实现**线性收集流里全部** TextCharsAtom/TextBytesAtom，**不区分容器**。用真实文件
+ * `jeny_第二章.ppt`（6.1MB）实测 837 个文本原子，按祖先链分布是：
+ *   · `Slide`  容器内 **618** 个 ← 真正的课程正文（「数字信号处理」「引言」「设 是以N为周期的…」）
+ *   · `Notes`  容器内 **167** 个 ← 样例正是「单击此处编辑母版文本样式\r第二级\r第三级…」
+ *   · `MainMaster` 容器内 **52** 个 ← 「单击此处编辑母版标题样式」
+ * ⇒ 旧实现把 **219 个母版/备注占位符原子**掺进正文，而且按**流的物理顺序**拼 ⇒ 排在正文之前，
+ *   用户看到的第一屏全是「单击此处编辑母版标题样式」——**真正的课程内容被淹没**。
+ *
+ * ## 修法（三条都是结构性的）
+ * 1. **只取 `Slide` 容器内的原子**（母版是设计模板、备注是讲稿，都不是"幻灯片上的字"）；
+ * 2. **按 Slide 出现顺序分页** ⇒ 顺带修掉"物理顺序 ≠ 页码顺序"这个真实的顺序错误；
+ * 3. **不静默丢弃**：被排除的原子数如实返回（见 `PptSlideScan`）。
+ *
+ * ⚠️ 本函数是**纯函数**（吃流字节、吐结构），所以能用**手工拼的合成流**单测 ——
+ *    不必依赖任何真实 .ppt 文件（`tests/core-ts/a1133-ppt-slides.spec.ts`）。
+ */
+export function collectPptSlides(stream: Buffer): PptSlideScan {
+  const pages: string[][] = [];
+  const stack: Array<{ type: number; end: number }> = [];
+  let slideAtoms = 0;
+  let excludedAtoms = 0;
+  let notesPages = 0;
+
   let p = 0;
   while (p + 8 <= stream.length) {
     const recVer = stream.readUInt16LE(p) & 0x000f;
@@ -431,22 +622,51 @@ function extractPptBinary(buf: Buffer, maxChars: number): DocExtractResult {
     const recLen = stream.readUInt32LE(p + 4);
     const start = p + 8;
     if (recLen > stream.length - start) { break; }   // 截断 → 停止，不猜
-    if (recType === 0x0fa0) {
-      texts.push(stream.subarray(start, start + recLen).toString("utf16le"));
-    } else if (recType === 0x0fa8) {
-      texts.push(latin1(stream.subarray(start, start + recLen)));
+    while (stack.length > 0 && p >= stack[stack.length - 1].end) { stack.pop(); }
+    if (recVer === 0x0f) {
+      /* ⚠️ 容器记录：recLen 覆盖全部子记录 ⇒ 只前进 8 字节"进入"，不能连同 payload 跳过
+         （否则第一个 `Document` 容器就把整份幻灯片的文本原子全跳掉 —— 实测 0 个文本块）。 */
+      stack.push({ type: recType, end: start + recLen });
+      if (recType === PPT_RT_SLIDE) { pages.push([]); }
+      else if (recType === PPT_RT_NOTES) { notesPages += 1; }
+    } else if (recType === PPT_RT_TEXT_CHARS || recType === PPT_RT_TEXT_BYTES) {
+      const onSlide = stack.some((s) => s.type === PPT_RT_SLIDE);
+      if (!onSlide) {
+        /* ⚠️ 一律计数（不许静默丢弃）：用户发现少了内容时，这个数字是唯一的诊断线索。 */
+        excludedAtoms += 1;
+      } else {
+        slideAtoms += 1;
+        const raw = recType === PPT_RT_TEXT_CHARS
+          ? stream.subarray(start, start + recLen).toString("utf16le")
+          : latin1(stream.subarray(start, start + recLen));
+        const t = raw.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
+        if (t) { pages[pages.length - 1].push(t); }
+      }
     }
-    // ⚠️ recVer=0xF 是**容器**记录：它的 recLen 覆盖全部子记录。
-    // 容器必须"进入"（只前进 8 字节头）而不是连同 payload 一起跳过 ——
-    // 否则第一个 Document 容器就把整份幻灯片的文本原子全跳掉了（实测 0 个文本块）。
     p = recVer === 0x0f ? start : start + recLen;
   }
-  const body = texts
-    .map((t) => t.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim())
-    .filter((t) => t.length > 0)
-    .join("\n");
-  const info = [`ppt：${texts.length} 个文本块`];
-  if (!body) { info.push("未找到文本内容（可能是纯图片幻灯片）"); }
+  return { pages, slideAtoms, excludedAtoms, notesPages };
+}
+
+/**
+ * 老版 .ppt（OLE2）文本抽取 = 打开 CFB → 扫 `PowerPoint Document` 流 → 按页拼结构。
+ * 判据全在 `collectPptSlides`（纯函数、可单测）；这里只做"取流 + 拼文本 + 报统计"。
+ *
+ * ⚠️ 边界：纯图片幻灯片（无任何文本原子）会产出一张**空页卡片** —— 这是**故意的**：
+ *    "这一页存在但没有文字"本身就是信息（对齐 pptx 分支"页数照报"的口径）。
+ */
+function extractPptBinary(buf: Buffer, maxChars: number): DocExtractResult {
+  const cfb = openCfb(buf);
+  const stream = cfb.readStream("PowerPoint Document") ?? cfb.readStreamLike("PowerPoint Document");
+  if (!stream) { throw new Error("不是有效的 .ppt：缺少 PowerPoint Document 流"); }
+  const scan = collectPptSlides(stream);
+  /* 页标记形状必须与 pptx 分支一致（`--- 第 N 页 ---`）—— 下游 `docView.buildDocView`
+     就是认这个标记建页卡片的（一处判据，两族共用）。 */
+  const body = scan.pages.map((lines, i) => `${pptPageMarker(i + 1)}\n${lines.join("\n")}`).join("\n\n");
+  const info = [`ppt：${scan.pages.length} 页`, `正文文本块 ${scan.slideAtoms} 个`];
+  if (scan.excludedAtoms > 0) { info.push(`已排除母版/备注占位符 ${scan.excludedAtoms} 个`); }
+  if (scan.notesPages > 0) { info.push(`含备注页 ${scan.notesPages} 个（未展开）`); }   // 口径对齐 extractPptx
+  if (scan.slideAtoms === 0) { info.push("未找到文本内容（可能是纯图片幻灯片）"); }
   return clamp(body, maxChars, info);
 }
 
@@ -725,6 +945,12 @@ export function extractOleText(buf: Buffer, kind: OleKind, opts: { maxChars?: nu
  * @throws 容器不是 ZIP / 缺关键部件 / 压缩方式不支持时抛错 —— 由调用方转成给模型看的说明
  */
 export function extractDocText(buf: Buffer, kind: DocKind, opts: { maxChars?: number } = {}): DocExtractResult {
+  /* ⚠️ PDF 必须在 `isZip` 检查**之前**分派：PDF 不是 ZIP 容器，走下面那条会撞
+     "文件不是有效的 Office 2007+ 文档" 的误导性报错（用户看到的是"格式不对"，
+     而真实情况是"走错了分支"）。 */
+  if (kind === "pdf") {
+    return extractPdfText(buf, opts);
+  }
   if (!isZip(buf)) {
     throw new Error(
       "文件不是有效的 Office 2007+ 文档（缺少 ZIP 容器头）。"

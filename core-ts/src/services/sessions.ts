@@ -89,6 +89,23 @@ export interface SessionMeta {
   members?: MemberEntry[];
   /** A-954 群聊组长的入群模型（会话归属 Agent=组长；缺省用其 agent.model_choice） */
   leaderModel?: string;
+  /**
+   * A-1131：**本会话的模型选择**（覆盖该 Agent 的默认 `model_choice`）。
+   *
+   * 用户原话：「同一个 Agent 似乎不能在不同会话使用不同模型，即我之前在一个会话里使用
+   * deepseek 的模型，然后再在另一个会话的相同 Agent 那里用 agnes 模型，之前那个会话里面的
+   * agent 模型直接变成 deepseek 模型了」。
+   *
+   * 病根：聊天区的模型下拉写的是 **Agent 记录**（`App.updateAgentConfig({model_choice})`
+   * → `slime:agents:update`）⇒ 同一个 Agent 的所有会话共用一个字段，改一处全变。
+   * ⇒ 模型选择本来就是**会话级**的事实，收到这里；Agent 上的 `model_choice` 退化为
+   *   「**新建会话的初值** / 最近一次选择」，已有会话各有各的覆盖、互不影响。
+   *
+   * ⚠️ 取值域与 `agent.model_choice` 同一套（`api:<key>[:<model>]` / `local:<id>` /
+   *    `silam` / `inherit`）—— 下游解析只有一处（engine 的路由解析），不要在这里另做校验。
+   * ⚠️ 缺省（undefined / 空串）= 没覆盖 ⇒ 用 Agent 的默认值（老数据零行为变化）。
+   */
+  modelChoice?: string;
   /** A-1011 群聊组长（会话归属 Agent）的推理强度覆盖（群聊专属；缺省 = 群聊默认 high） */
   leaderEffort?: string;
   /** A-943 会话模式：brainstorm = 群聊头脑风暴（发议题→全员并行发言→组长收束）；缺省 = 普通（保留 <DELEGATE> 传唤） */
@@ -219,8 +236,40 @@ export async function setSessionAgent(sessionId: string, agentId: string): Promi
   return updated;
 }
 
-/** 会话级工作目录更新（"以文件夹为主"模型：workspace 存会话 meta，不再写 Agent sandbox_override） */
-export async function setSessionWorkspace(sessionId: string, workspace: string | null): Promise<SessionMeta | null> {
+/**
+ * A-1131：**「本会话该用哪个模型」的唯一判据**（纯函数）。
+ *
+ * 覆盖优先、缺省回落到 Agent 默认值（见 `SessionMeta.modelChoice` 的注释）。
+ * ⚠️ 判据必须**只在这里**：渲染层显示的值、主进程发请求时塞给引擎的值、
+ *    以及窗口上限（`resolveSessionWindowCap`）用的模型，三处若各写一遍"取哪个"，
+ *    迟早出现"界面上写着 A、实际发的是 B、按 C 算的窗口"（本仓的静默失效家族）。
+ */
+export function effectiveModelChoice(sessionChoice: string | undefined, agentChoice: string | undefined): string {
+  const s = (sessionChoice ?? "").trim();
+  if (s) { return s; }
+  return (agentChoice ?? "").trim();
+}
+
+/**
+ * A-1131：写入**本会话**的模型选择（不改 Agent 记录 ⇒ 同 Agent 的其他会话不受影响）。
+ * 传 null / 空串 = 清除覆盖（回到跟随 Agent 默认值）。
+ */
+export async function setSessionModelChoice(sessionId: string, modelChoice: string | null): Promise<SessionMeta | null> {
+  let updated: SessionMeta | null = null;
+  await withWriteLock(async () => {
+    const all = await readAll();
+    const meta = all[sessionId];
+    if (!meta) { return; }
+    const next = (modelChoice ?? "").trim();
+    if (next) { meta.modelChoice = next; } else { delete meta.modelChoice; }
+    meta.updatedAt = new Date().toISOString();
+    await atomicWrite(all);
+    updated = meta;
+  });
+  return updated;
+}
+
+/** 会话级工作目录更新（"以文件夹为主"模型：workspace 存会话 meta，不再写 Agent sandbox_override） */export async function setSessionWorkspace(sessionId: string, workspace: string | null): Promise<SessionMeta | null> {
   let updated: SessionMeta | null = null;
   await withWriteLock(async () => {
     const all = await readAll();

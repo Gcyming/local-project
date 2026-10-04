@@ -22,7 +22,9 @@ import { execFile, exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 // A-1121（②）：右栏打开请求的契约与触发（唯一出处；`setSidebarOpener` 也在这里）
-import { fireSidebarOpen, hasSidebarOpener } from "../sidebarOpen.js";
+import { fireSidebarOpen, hasSidebarOpener, sessionIdFromArgs } from "../sidebarOpen.js";
+/* A-1144：右栏「挂载」的读取口（唯一产地 `sidebarMount.ts`；系统提示那边也用它）。 */
+import { sidebarMountSection } from "../sidebarMount.js";
 // A-1122（③）：文件改动账本 —— 「回滚（rollbackTo）时把磁盘也还原」的记账口径唯一出处。
 // 记账必须发生在**真正改动之前**（改完就再也拿不到"改前状态"）。
 import {
@@ -32,6 +34,7 @@ import {
 import { createPlan, updateStage, advanceByLabel, planProgress, planToJSON, parsePlan, type PlanStageStatus } from "../planning/plan.js";
 import { PROTECTED_DIRS_SET, SENSITIVE_FILENAMES_SET, WRITE_BLOCK_SUFFIXES_SET } from "shared/security-policy";
 import { extractDocText, docKindFromExt, legacyBinaryName, extractOleText, oleKindFromExt } from "../doc_text.js";
+import { writeDocument, type DocFormat } from "../office/docWrite.js";
 import type { MemoryStore } from "../memory/store.js";
 import type {
   ActionVerify,
@@ -50,6 +53,9 @@ import { groupSubagentCatalog, renderSubagentCatalogLines } from "../services/su
 // A-1093：改动标记的**唯一产地**（`[__slime_diff__]old|new[/__slime_diff__]`）。
 // 此前是下面 fileWrite 里一行内联模板串，与三处解析各写各的 —— 格式漂一次就全线失灵。
 import { buildDiffMarker } from "../diff_marker.js";
+// A-1137：联网检索的**唯一产地**（Bing/百度解析器 + 反爬节奏 + 验证码退避）。
+// webSearch 现在只是它的「文本形态适配器」——searchOnlineText() 逐字保持历史输出格式。
+import { searchOnlineText } from "../search/onlineSearch.js";
 
 const execFileP = promisify(execFile);
 const execP = promisify(execCb);
@@ -276,6 +282,73 @@ function finishDocResult(
       + `继续读取请传 offset=${lastLine + 1} limit=${limit}]`;
   }
   return `${head}${lines.join("\n")}`;
+}
+
+/**
+ * 扩展名 → 生成格式的**唯一产地**。判据只用**目标路径的扩展名**（要生成什么由文件名说清）。
+ */
+const DOC_CREATE_FORMATS: Record<string, DocFormat> = {
+  ".docx": "docx",
+  ".xlsx": "xlsx",
+  ".pptx": "pptx",
+  ".pdf": "pdf",
+  ".csv": "csv",
+  ".md": "md",
+  ".txt": "txt",
+};
+
+/**
+ * `docs_create` 的执行体：按扩展名生成**真正的** Office / 文档文件（不是只写文本）。
+ *
+ * ## 为什么需要它（2026-09-30 用户原话：「office 办公文件，slime 能不能读取并修改，
+ * 用户有需求时，能否自己按用户要求，从零生成、创建？」）
+ * 审计发现：`core-ts/src/office/docWrite.ts::writeDocument()` **早就实现了** docx/xlsx/pptx/pdf 的
+ * 真容器生成（OOXML 部件齐全、有完整 round-trip 测试），IPC `slime:docs:create` 也接好了 ——
+ * 但**没有任何 Agent 工具包装它**（`docs_create` 这条通道只有声明、零消费者）。
+ * ⇒ 结果是：**能读、能画，但 Agent 自己一个字都生成不了**。本工具把那条断链接上。
+ *
+ * ## ⚠️ 边界与 `fileWrite` **同一套**（新工具绝不是绕过沙箱的口子）
+ * 项目根 / 工作目录内 + 符号链接拒绝 + 敏感路径黑名单，全走同一条 `resolveInProject`。
+ *
+ * ## ⚠️ 只创建**新文件**，目标已存在就拒绝
+ * `docWrite` 的产物是**二进制**，而"改动账本"（`recordFileChange`）记的是**字符串**旧内容 ⇒
+ * 允许覆盖就会造出「能回滚、但回滚出来是个坏文件」的**假承诺**，比"不支持回滚"更坏。
+ * 文本格式（.csv/.md/.txt）要覆盖请走 `file_write`（它本来就有账本与 diff）。
+ */
+async function docsCreate(args: Record<string, unknown>): Promise<string> {
+  const path = String(args.path ?? "").trim();
+  if (!path) { return "[错误] 缺少 path 参数"; }
+  if (!("body" in args)) { return "[错误] 缺少 body 参数"; }
+  const body = String(args.body ?? "");
+  const title = typeof args.title === "string" ? args.title : undefined;
+
+  const ext = extname(path).toLowerCase();
+  const format = DOC_CREATE_FORMATS[ext];
+  if (!format) {
+    return `[错误] 不支持的目标格式「${ext || "(无扩展名)"}」。可用：${Object.keys(DOC_CREATE_FORMATS).join(" / ")}`;
+  }
+
+  const ws = String(args._workspace ?? "");
+  const sandboxAllowed = args._sandbox_allowed === true;
+  try {
+    const p = projectRootPath(path, ws);
+    const abs = await resolveInProject(p, ws, sandboxAllowed);
+    if (isBlockedWritePath(abs, ws)) {
+      return `[错误] 敏感文件/目录禁止写入: ${path}`;
+    }
+    /* ⚠️ **不许覆盖**：给一条可操作的出路，而不是只说"不行"。 */
+    try {
+      await stat(abs);
+      return `[错误] 目标已存在：${path}。本工具只**新建**文件（二进制文档不支持回滚，覆盖会造成`
+        + `「能回滚但文件已坏」的假承诺）。请换一个路径，或先删掉它。`;
+    } catch { /* 不存在 = 正是我们要的 */ }
+
+    const r = await writeDocument({ path: abs, format, title, body });
+    if (!r.ok) { return `[错误] 生成失败：${r.error}`; }
+    return `已生成 ${r.path}（${format}，${r.bytes} 字节）。`;
+  } catch (e) {
+    return `[错误] ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 async function fileRead(args: Record<string, unknown>): Promise<string> {
@@ -816,158 +889,20 @@ async function webFetch(args: Record<string, unknown>): Promise<string> {
   }
 }
 
-/** 解析 Bing 搜索结果（li.b_algo 结构） */
-function _parseBingResults(html: string, maxResults: number): string {
-  const items: string[] = [];
-  const liRe = /<li class="b_algo"[\s\S]*?<\/li>/gi;
-  let m: RegExpExecArray | null;
-  let count = 0;
-  while ((m = liRe.exec(html)) !== null && count < maxResults) {
-    const block = m[0];
-    const titleMatch = block.match(/<h2[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!titleMatch) { continue; }
-    const link = titleMatch[1];
-    const title = titleMatch[2].replace(/<[^>]+>/g, "").trim();
-    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
-    items.push(`- ${title}\n  ${link}\n  ${snippet}`);
-    count++;
-  }
-  return items.length > 0 ? items.join("\n") : "[无搜索结果]";
-}
-
-/** 解析百度搜索结果 */
-function _parseBaiduResults(html: string, maxResults: number): string {
-  const items: string[] = [];
-  const resultRe = /<h3[^>]*>[\s\S]*?<a[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m: RegExpExecArray | null;
-  let count = 0;
-  while ((m = resultRe.exec(html)) !== null && count < maxResults) {
-    const link = m[1];
-    const title = m[2].replace(/<[^>]+>/g, "").trim();
-    if (!title || !link) { continue; }
-    // 百度摘要在后续 <p> 标签中
-    const afterLink = html.slice(m.index + m[0].length);
-    const descMatch = afterLink.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const snippet = descMatch ? descMatch[1].replace(/<[^>]+>/g, "").trim().slice(0, 200) : "";
-    items.push(`- ${title}\n  ${link}\n  ${snippet}`);
-    count++;
-  }
-  return items.length > 0 ? items.join("\n") : "[无搜索结果]";
-}
-
-// ── 联网搜索反爬节奏与验证码退避（语义移植自 core/search.py SearchEngine） ──
-const BING_HOME = "https://cn.bing.com/";
-const BING_SEARCH = "https://cn.bing.com/search";
-const BAIDU_SEARCH = "https://www.baidu.com/s";
-// 中英文验证码特征（仅匹配可见文本，不匹配脚本文件名；BUG-034 对齐）
-const CAPTCHA_KEYWORDS = [
-  "安全验证", "验证码", "滑块", "人机验证",
-  "verify", "captcha", "robot", "unusual traffic", "challenge",
-];
-const DELAY_MIN = 0.5, DELAY_MAX = 1.3;
-const BACKOFF_MIN = 2.0, BACKOFF_MAX = 4.0;
-const BACKOFF_WINDOW_MS = 5 * 60 * 1000;
-// 进程内单例状态（连接复用 + 预热/退避共享）
-let _searchPrewarmed = false;
-let _searchPrewarmPromise: Promise<void> | null = null;
-let _captchaUntil = 0;
-function _searchDelay(): Promise<void> {
-  const inBackoff = Date.now() < _captchaUntil;
-  const min = inBackoff ? BACKOFF_MIN : DELAY_MIN;
-  const max = inBackoff ? BACKOFF_MAX : DELAY_MAX;
-  const ms = min + Math.random() * (max - min);
-  return new Promise((r) => setTimeout(r, ms * 1000));
-}
-async function _searchPrewarm(): Promise<void> {
-  if (_searchPrewarmed) { return; }
-  if (_searchPrewarmPromise) { return _searchPrewarmPromise; }
-  _searchPrewarmed = true; // await 前置位，防并发 tool_calls 双重预热
-  _searchPrewarmPromise = (async () => {
-    try {
-      await fetch(BING_HOME, {
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) slime-agent" },
-        signal: AbortSignal.timeout(10_000),
-      });
-    } catch { /* 预热失败不影响搜索 */ }
-  })();
-  return _searchPrewarmPromise;
-}
-/** 仅匹配可见文本（去脚本/样式后小写子串匹配） */
-function _isCaptchaHtml(html: string): boolean {
-  const text = html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .toLowerCase();
-  return CAPTCHA_KEYWORDS.some((k) => text.includes(k.toLowerCase()));
-}
-function _markCaptcha(): void {
-  _captchaUntil = Date.now() + BACKOFF_WINDOW_MS;
-}
-const CAPTCHA_MSG = "[搜索引擎要求人机验证。请稍等 1 分钟后重试，或更换网络环境后再搜索。]";
-
+/**
+ * webSearch：联网检索（给模型读的文本形态）。
+ *
+ * ⚠️ 解析器、反爬节奏、验证码退避**全部收归** `core-ts/src/search/onlineSearch.ts`
+ * （铁律 11：同一事实写在 N 个地方必然漂）。本函数现在只是"把一个 query 翻译成一次调用"，
+ * 不再持有任何 DOM 结构知识 —— 否则搜索页（要结构化 items）就得再抄一份解析器，
+ * 而"上游改了 DOM"时漏改任何一处都是**零报错的静默失效**。
+ */
 async function webSearch(args: Record<string, unknown>): Promise<string> {
   const query = String(args.query ?? "");
   if (!query) {
     return "[错误] 缺少 query 参数";
   }
-  let maxResults = 10;
-  try {
-    maxResults = Math.min(10, Math.max(1, Number(args.max_results ?? 10)));
-  } catch {
-    maxResults = 10;
-  }
-  await _searchPrewarm();
-  await _searchDelay();
-  // 优先国内 Bing（cn.bing.com），失败时降级百度
-  const bingUrl = `${BING_SEARCH}?q=${encodeURIComponent(query)}&count=${maxResults}`;
-  let html: string | null = null;
-  let bingErr: string | null = null;
-  try {
-    const resp = await fetch(bingUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) slime-agent" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (resp.ok) {
-      html = await resp.text();
-    } else {
-      bingErr = `HTTP ${resp.status}`;
-    }
-  } catch (e) {
-    bingErr = e instanceof Error ? e.message : String(e);
-  }
-  if (html !== null) {
-    const parsed = _parseBingResults(html, maxResults);
-    if (parsed !== "[无搜索结果]") { return parsed; }
-    // BUG-034 对齐：无结果时再做验证码检测（真验证码页必然无结果）
-    if (_isCaptchaHtml(html)) {
-      _markCaptcha();
-      return CAPTCHA_MSG;
-    }
-    return parsed;
-  }
-  // Bing 失败：尝试百度兜底
-  const baiduUrl = `${BAIDU_SEARCH}?wd=${encodeURIComponent(query)}&rn=${maxResults}`;
-  try {
-    const baiduResp = await fetch(baiduUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) slime-agent" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!baiduResp.ok) {
-      return `[错误] 搜索失败（Bing: ${bingErr}；百度: HTTP ${baiduResp.status}）`;
-    }
-    const baiduHtml = await baiduResp.text();
-    const parsed = _parseBaiduResults(baiduHtml, maxResults);
-    if (parsed !== "[无搜索结果]") { return parsed; }
-    if (_isCaptchaHtml(baiduHtml)) {
-      _markCaptcha();
-      return CAPTCHA_MSG;
-    }
-    return parsed;
-  } catch (e) {
-    return `[错误] 搜索失败（Bing: ${bingErr}；百度: ${e instanceof Error ? e.message : String(e)}）`;
-  }
+  return searchOnlineText(query, { maxResults: args.max_results });
 }
 
 /**
@@ -1611,6 +1546,38 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     },
     executeFn: subagentResult,
     permissions: ["read"],
+  }));
+  /* 2026-09-30：把「Agent 自己从零生成 Office 文档」这条**断链**接上 ——
+     能力（`office/docWrite.ts`）与通道（`slime:docs:create`）本来都在，
+     缺的只是**一个给 Agent 用的工具**（审计时 `docs_create` 只有声明、零消费者）。 */
+  registry.register(new Tool({
+    name: "docs_create",
+    description:
+      "按内容**从零生成一个真正的文档文件**并落盘（不是只写文本）：docx / xlsx / pptx / pdf / csv / md / txt。"
+      + "目标格式由 `path` 的**扩展名**决定。\n"
+      + "`body` 用**纯文本**表达结构，按格式解析：\n"
+      + "  · **docx**：`# 一级标题` / `## 二级标题` / `- 列表项` / 空行分段；\n"
+      + "  · **xlsx**：制表符或逗号分列、换行分行（**第一行当表头**）；\n"
+      + "  · **pptx**：**每页之间用一行 `---` 分隔**，页内第一行是标题；\n"
+      + "  · **pdf**：正文原样排版，超一页自动分页；\n"
+      + "  · **csv / md / txt**：正文原样落盘。\n"
+      + "父目录会自动创建。用户说「做个 Excel / 写个 Word / 生成一份 PPT / 导出 PDF」时用它。\n"
+      + "⚠️ 只**新建**文件；目标已存在会被拒绝（换个路径，或文本格式改用 `file_write`）。\n"
+      + "⚠️ 要**改**已有文档：先 `file_read` 读出内容，改好后用本工具写到**新路径**（本工具不做就地编辑）。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "目标路径，扩展名决定格式（如 报告.docx / 数据.xlsx / 演示.pptx / 说明.pdf）" },
+        body: { type: "string", description: "正文（结构写法见工具描述）" },
+        title: { type: "string", description: "文档标题（可选；用于文档属性/标题栏）" },
+      },
+      required: ["path", "body"],
+    },
+    executeFn: docsCreate,
+    permissions: ["write"],
+    riskKind: "write",
+    // 生成新文件属普通写入（受保护目录 / 敏感文件 / 越权路径仍由分类器拦）
+    autoApprovable: true,
   }));
   registry.register(new Tool({
     name: "file_read",
@@ -2602,7 +2569,8 @@ ${body}
       const localUrl = `http://127.0.0.1:${r.port}`;
       // A-918++ / A-1121：生成后自动在右侧栏浏览器打开。回执**按真实结果**写 ——
       // 未装配界面时不能声称"已自动打开"（那是假陈述，用户会去找一个不存在的页签）。
-      const opened = fireSidebarOpen({ kind: "url", url: localUrl, name: title });
+      // A-1142：带上发起会话 ⇒ 渲染层才知道这条请求归谁（否则会串到用户当前看的那个会话上）
+      const opened = fireSidebarOpen({ kind: "url", url: localUrl, name: title, sessionId: sessionIdFromArgs(args) });
       return [
         `[已生成网页应用] ${title}（类型=${kind}）`,
         `已写入文件：\n${filesLine}`,
@@ -2677,7 +2645,7 @@ ${body}
     // 参数名刻意用 `prefill`（不是 cmd / command）——见上面对 targetFromArgs 的说明
     const prefill = typeof args.prefill === "string" ? args.prefill.trim() : "";
     const name = typeof args.name === "string" ? args.name.trim() : "";
-    if (!fireSidebarOpen({ kind: "terminal", cmd: prefill, name })) {
+    if (!fireSidebarOpen({ kind: "terminal", cmd: prefill, name, sessionId: sessionIdFromArgs(args) })) {
       return hasSidebarOpener()
         ? "[错误] 打开终端页失败（界面拒绝了这次请求）"
         : "[错误] 右侧栏未就绪（当前运行环境未装配界面），无法打开终端页";
@@ -2703,7 +2671,7 @@ ${body}
         return `[错误] 目录不存在：${root}`;
       }
     }
-    if (!fireSidebarOpen({ kind: "files", root, rel })) {
+    if (!fireSidebarOpen({ kind: "files", root, rel, sessionId: sessionIdFromArgs(args) })) {
       return hasSidebarOpener()
         ? "[错误] 打开文件页失败（界面拒绝了这次请求）"
         : "[错误] 右侧栏未就绪（当前运行环境未装配界面），无法打开文件树";
@@ -2716,6 +2684,25 @@ ${body}
     return rel
       ? `[已打开] 右侧栏文件页：浏览根 ${root}，并定位到 ${rel}`
       : `[已打开] 右侧栏文件页：浏览根 ${root}`;
+  }
+
+  /**
+   * sidebar_mount：读**右栏此刻挂载的内容**（A-1144）。
+   *
+   * 为什么系统提示里已经有一份摘要、还要单独一个工具：
+   *   ① 摘要是"每轮自动附"的**简报**（几行）；长对话里它会被上下文压缩挤到中段甚至丢掉，
+   *      这时模型需要一个能**主动再取一次**的入口；
+   *   ② 工具调用是**显式**的 —— 模型读到这里就等于承认"我知道了右栏有什么"，
+   *      比在系统提示里塞一段更容易被它当回事（recency + 显式动作）。
+   * ⚠️ 不能编：没有挂载时如实说"没有"，绝不许凭标题猜内容（那是最坏的一种幻觉）。
+   */
+  async function sidebarMountRead(args: Record<string, unknown>): Promise<string> {
+    const text = sidebarMountSection(sessionIdFromArgs(args));
+    if (!text) {
+      return "[无挂载] 右侧边栏此刻没有可读的内容（或它属于**别的会话** —— 右栏是按会话隔离的）。"
+        + "不要凭空描述右栏里有什么；需要让用户看到某个东西时，用 sidebar_open_* 系列工具把它打开。";
+    }
+    return text;
   }
 
   registry.register(new Tool({
@@ -2758,6 +2745,23 @@ ${body}
       required: [],
     },
     executeFn: sidebarOpenFiles,
+    permissions: ["read"],
+    riskKind: "read",
+    autoApprovable: true,
+  }));
+
+  registry.register(new Tool({
+    name: "sidebar_mount",
+    description:
+      "读**右侧边栏此刻挂载的内容**（用户正在右栏看的网页 / 文件 / 终端里跑的东西）。\n"
+      + "· 系统每轮已经自动附上它的**摘要**（【右侧边栏 · 实时挂载】那一段）—— "
+      + "只有当你需要重新确认（长对话里摘要被挤掉了）、或者要向用户复述细节时才调本工具；\n"
+      + "· 用户说「这个 / 这一页 / 它 / 帮我看看」而上下文里没有别的指代对象时，**先调它**再回答，"
+      + "不要反问用户「你指的是什么」；\n"
+      + "· 要读某个页面的**正文**，用它给出的地址调 web_fetch（右栏的页面地址就是普通 http(s) 地址）。\n"
+      + "右栏没有挂载内容时会如实返回「无挂载」，不要凭标题猜内容。",
+    parameters: { type: "object", properties: {}, required: [] },
+    executeFn: sidebarMountRead,
     permissions: ["read"],
     riskKind: "read",
     autoApprovable: true,

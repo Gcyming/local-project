@@ -151,9 +151,17 @@ slime-server.ps1
 # 探针的运行产物：每次跑都整体重写，只对当次测量有意义，不入库
 /scripts/layout-probe/result.json
 /scripts/layout-probe/run.log
+# gui/scripts/probe-render-fidelity.mjs 的截图输出（每次跑重写；给人肉眼验收用的中间产物）
+/docs/a1136-probe-out/
 
 # ── 用户自己的产物项目（不是 slime 源码）──────────────────────────────
-/apps/
+# ⚠️ 用 `/apps/*`（而不是 `/apps/`）才有**逐目录放行**的能力：
+#  Git 规则「父目录被排除时，无法再排除其中的文件」⇒ 写成 `/apps/` 的话，下面那条 `!` 会被静默忽略。
+/apps/*
+# A-1137 例外：slime 的**搜索页**（用户自制的单文件搜索器）已升格为**构建输入**
+# —— `apps/local-search-engine/index.html` 被 `?raw` 内联进主进程产物（唯一产地），
+#   Agent 侧 `webSearch` 也在同一界面里被调用。构建输入必须在版本控制里，否则干净检出构建不出搜索页。
+!/apps/local-search-engine/
 
 # ── Agent Git 治理（影子仓库 / 并行 worktree）──────────────────────────
 .slime/
@@ -191,3 +199,20 @@ Thumbs.db
 !/run_tests.py
 !/pytest.ini
 !/requirements.txt
+
+# ── 编码事故恢复期的一次性产物（2026-10-05，确认无用后可删）──────────────
+# index.ts.corrupted-bak 是那次 UTF-8→GBK 往返后的乱码原样备份（留证用，含 0 可用信息）
+gui/src/main/index.ts.corrupted-bak
+# 恢复期跑 pytest 时指定的独立 basetemp（为绕开 %TEMP% 里损坏的 pytest-current junction）
+.pytest_basetemp/
+# 恢复/排查脚本的临时输出
+_s.meta
+_s.raw
+gui/output-*.txt
+gui/scripts/.probe-dbg/
+gui/scripts/.probe-shots/
+# 本地打包出来的发行压缩包（体积大且可重建）
+slime-search-*.tar.gz
+slime-search-*.zip
+# 随包 vendor 的第三方抽取物
+gui/vendor/

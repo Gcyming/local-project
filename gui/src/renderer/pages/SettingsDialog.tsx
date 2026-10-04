@@ -9,6 +9,8 @@ import StatusPanel from "./StatusPanel.js";
 import MindHubPanel from "./MindHubPanel.js";
 import SkillsPanel from "./SkillsPanel.js";
 import McpPanel from "./McpPanel.js";
+// A-1140：插件页 —— 技能 + MCP 的统一清单（跨两类能力的盘点视图 + 来源）
+import PluginsPanel from "./PluginsPanel.js";
 import PermissionsPanel from "./PermissionsPanel.js";
 import GeneralPanel from "./GeneralPanel.js";
 // A-1115：外观 / UI 设定专栏（主题已从「通用」迁入本页）
@@ -17,11 +19,13 @@ import ResidentPanel from "./ResidentPanel.js";
 import RuntimePanel from "./RuntimePanel.js";
 import UsageStatsPanel from "./UsageStatsPanel.js";
 import LlmGatewayPanel from "./LlmGatewayPanel.js";
+// A-1138：「搜索索引」专栏（自建全网索引服务的一键操作面）
+import SearchIndexPanel from "./SearchIndexPanel.js";
 import type { DownloadProgressInfo } from "../../shared/ipc.js";
 import { SearchIcon, SettingsIcon, CloseIcon } from "../components/Icon.js";
 import type { ThemeName } from "../theme.js";
 
-export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "permissions" | "general" | "appearance" | "resident" | "runtime" | "usage" | "experimental";
+export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "plugins" | "permissions" | "general" | "appearance" | "resident" | "runtime" | "usage" | "experimental" | "searchengine";
 
 /** A-980-R23：设置栏目描述——keywords 负责栏目名/主题词；features 收编「栏目内具体功能名」，
  *  搜索命中任一词（含小写归一）即定位到该栏目，实现「精准搜到具体功能」 */
@@ -32,7 +36,7 @@ type SectionGroup = "common" | "agent" | "ops" | "advanced";
  *  依据（不靠感觉，两条都是权威一手口径）：
  *   ① **Android 官方设置规范**（developer.android.com/design/patterns/settings）：
  *      「11~15 项设置 ⇒ 用 **2~4 个分组分隔符**；最重要的单独项放**顶部且不加分隔**，
- *        其余按**重要性排序**；极低频/实验性的放底部」——本页 13 项，正好落在这个区间。
+ *        其余按**重要性排序**；极低频/实验性的放底部」——本页 14 项，仍落在这个区间。
  *   ② **Nielsen Norman Group**「Alphabetical Sorting Must (Mostly) Die」：
  *      选项列表**不该**按字母或随意排，应按「**重要度或频率**」+ 逻辑结构。
  *  ⚠️ 组名只说"用户会怎么找"，不搬内部术语（NN/g Heuristic 2：用用户的语言）。 */
@@ -118,6 +122,16 @@ const SECTIONS: SectionDef[] = [
     features: ["新增服务器", "启用", "停用", "删除服务器", "OAuth", "令牌", "工具权限", "远程 MCP", "stdio", "配置示例"],
   },
   {
+    // A-1140：插件页。**与「技能库」「MCP 接入」不是重复** ——
+    //   那两页是**管理面**（各自增删改）；本页是**盘点面**（跨两类的一个视图 + 来源维度），
+    //   回答别处答不上的问题：「我手上到底有哪些扩展能力？分别从哪来？哪些是 Agent 自己造的？」
+    //   紧挨 mcp 之后：三者同族（都是"给 Agent 加能力"），连着放用户才找得到。
+    id: "plugins", label: "插件", group: "agent",
+    keywords: ["插件", "plugin", "扩展", "来源", "自建", "清单", "origin"],
+    features: ["插件清单", "统一清单", "技能列表", "MCP 列表", "声明来源", "Agent 自建", "官方市场",
+      "用户自备", "未声明", "origin 声明", "启用停用", "打开技能目录", "按来源筛选", "创造模式产物"],
+  },
+  {
     id: "resident", label: "后台任务", group: "agent",
     keywords: ["定时", "cron", "子代理", "subagent", "后台", "resident", "常驻", "schedule"],
     features: ["定时任务", "cron", "子代理", "派发", "触发", "暂停", "恢复", "删除任务", "执行记录", "预设模板", "后台常驻", "深度研究", "代码审查", "每日摘要", "数据处理", "子代理默认模型", "选拔派发"],
@@ -128,6 +142,14 @@ const SECTIONS: SectionDef[] = [
     id: "runtime", label: "运行环境", group: "ops",
     keywords: ["node", "python", "git", "运行时", "附件", "配套", "runtime", "venv", "环境"],
     features: ["Node.js", "Python", "Git", "venv", "虚拟环境", "附件目录", "ADB", "HTTP 服务", "端口配置", "二进制依赖"],
+  },
+  {
+    // A-1138：「搜索索引」= 自建全网索引服务的一键操作面（服务随主程序自动起）。
+    //   归「运行与维护」：装一次、偶尔收录一批站点、出问题才来查 —— 与「运行环境」同族（都是本机服务）。
+    id: "searchengine", label: "搜索索引", group: "ops",
+    keywords: ["搜索", "索引", "爬虫", "收录", "全网", "search", "index", "crawl"],
+    features: ["自建索引", "全网索引", "索引服务", "启动索引", "停止索引", "一键收录", "爬取站点",
+      "索引页数", "索引词条", "端口 8600", "本地搜索服务", "补充命中"],
   },
   {
     id: "usage", label: "使用统计", group: "ops",
@@ -297,6 +319,7 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
             {activeTab === "general" && <GeneralPanel />}
             {activeTab === "appearance" && <AppearancePanel theme={props.theme} onThemeChange={props.onThemeChange} />}
             {activeTab === "runtime" && <RuntimePanel />}
+            {activeTab === "searchengine" && <SearchIndexPanel />}
             {activeTab === "resident" && <ResidentPanel />}
             {activeTab === "mind" && <MindHubPanel selectedAgentId={props.selectedAgentId} dl={props.dl} />}
             {activeTab === "agents" && (
@@ -310,6 +333,7 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
             )}
             {activeTab === "skills" && <SkillsPanel />}
             {activeTab === "mcp" && <McpPanel />}
+            {activeTab === "plugins" && <PluginsPanel />}
             {activeTab === "permissions" && <PermissionsPanel />}
             {activeTab === "providers" && <ProvidersPanel />}
             {activeTab === "status" && <StatusPanel />}

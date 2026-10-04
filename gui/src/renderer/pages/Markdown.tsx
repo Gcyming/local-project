@@ -24,7 +24,15 @@ export const SIDEBAR_OPEN_EVENT = "slime:open-in-sidebar";
  */
 export type SidebarOpenPayload =
   | SidebarOpenRequest
-  | { kind: "file"; rel?: string; name?: string; from?: "site" | "user" };
+  /* A-1142：⚠️ `sessionId` 与 `from` 同宗 —— 联合类型里**任一成员缺字段**，全 union 的
+     `p.sessionId` 访问都会报错（A-1133 加 `doc` 时已经为 `from` 付过一次账）。
+     渲染层内部产生的请求（`file` / `doc`）通常不带会话号（就是当前会话自己点的）⇒ 可选。 */
+  | { kind: "file"; rel?: string; name?: string; from?: "site" | "user"; sessionId?: string }
+  /* A-1133：**文档 → HTML 网页渲染**（`.docx/.xlsx/.pptx/.pdf/旧版 OLE` 都走这条）：
+     与 `file` 的区别是"要不要转成 HTML 当网页打开" —— 后者是文件页里的结构化文本兜底。
+     ⚠️ 必须带 `from?`：联合类型里**任一成员缺字段**，全union 的 `d.from` 访问都会报错
+     （实测踩到：加了这个成员而没带 `from` ⇒ 两处既有代码 tsc 变红）。 */
+  | { kind: "doc"; rel: string; name?: string; from?: "site" | "user"; sessionId?: string };
 export function requestSidebarOpen(payload: SidebarOpenPayload): void {
   window.dispatchEvent(new CustomEvent<SidebarOpenPayload>(SIDEBAR_OPEN_EVENT, { detail: payload }));
 }

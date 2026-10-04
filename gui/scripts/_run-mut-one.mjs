@@ -145,9 +145,34 @@ const ATOM = String.raw`(?:${STR}|[A-Z_][A-Z0-9_]*)`;
 const ATOM_RE = new RegExp(ATOM, "y");
 const EXPR_RE = new RegExp(`^\\s*${ATOM}(?:\\s*\\+\\s*${ATOM})*\\s*$`);
 
+/**
+ * 剥掉**字符串字面量之外**的注释（字符串内部原样保留）。
+ *
+ * ⚠️ 不能用整串 `replace(/\/\*…\*\//g, " ")`：变异锚点常常**故意**把源码里的行内注释
+ *   一起抄进来以保证唯一性，例如
+ *     `"  justify-content: flex-end;       /* 「最右边」 *​/"`
+ *   整串 replace 会把这段注释也抹掉 ⇒ 清洗后的锚点在源码里**永远匹配不上**，
+ *   症状是"这条变异跑不了"（而锚点核验、守卫本身都还是绿的）——
+ *   mut-a1074-dock 的 B1 / B4 / B22 就这样静默失效过（实测 3 条一起"锚点未命中"）。
+ *   ⇒ 只对字符串字面量**之外**的注释做移除，锚点里的注释照原样参与匹配。
+ */
+function stripCommentsOutsideStrings(s) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === "`") { const e = skipString(s, i); out += s.slice(i, e); i = e; continue; }
+    if (c === "/" && s[i + 1] === "*") { const e = s.indexOf("*/", i + 2); out += " "; i = e < 0 ? s.length : e + 2; continue; }
+    if (c === "/" && s[i + 1] === "/") { const e = s.indexOf("\n", i); out += " "; i = e < 0 ? s.length : e; continue; }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
 /** 求值「字符串表达式」：STR / IDENT（查 consts）/ `+` 拼接（可夹注释） */
 function evalArgExpr(expr) {
-  const cleaned = expr.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+  const cleaned = stripCommentsOutsideStrings(expr);
   if (!EXPR_RE.test(cleaned)) { return null; }
   const atoms = [...cleaned.matchAll(new RegExp(ATOM, "g"))].map((m) => m[0]);
   const vals = atoms.map((a) => (/^["']/.test(a) ? unlit(a) : consts.get(a)));

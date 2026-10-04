@@ -194,6 +194,28 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
 }
 
 /**
+ * 从 SKILL.md 文本中提取 frontmatter 的**任意**字段（标量）。
+ *
+ * A-1140：`frontmatterDescription` 的泛化版本 —— 插件页要读 `origin` 来判断来源
+ * （官方市场 / 用户自备 / Agent 自建）。解析逻辑与 description 完全同源，
+ * 各写一份必然漂移，故收敛到这一个函数；`frontmatterDescription` 变成它的特例。
+ *
+ * 容错：允许 frontmatter 未闭合（GUI 只读文件头 4KB，可能正好截在字段中间）。
+ */
+export function frontmatterField(text: string, key: string, limit = 200): string {
+  const m = /^\uFEFF?---\r?\n([\s\S]*?)(?:\r?\n---|\r?\n?$)/.exec(text);
+  if (!m) { return ""; }
+  let v: unknown;
+  try {
+    v = parseMiniYaml(m[1])[key];
+  } catch {
+    return "";
+  }
+  if (typeof v !== "string") { return ""; }
+  return v.replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+/**
  * 从 SKILL.md 文本中提取 frontmatter 的 `description`。
  *
  * 为何独立导出：GUI 技能库列表（`config_files.ts`）与引擎（`loadSingleSkill`）都要这个值。
@@ -204,16 +226,7 @@ export function parseMiniYaml(text: string): Record<string, unknown> {
  * 折叠/多行描述统一压成单行空格，便于列表展示。
  */
 export function frontmatterDescription(text: string, limit = 200): string {
-  const m = /^\uFEFF?---\r?\n([\s\S]*?)(?:\r?\n---|\r?\n?$)/.exec(text);
-  if (!m) { return ""; }
-  let desc: unknown;
-  try {
-    desc = parseMiniYaml(m[1]).description;
-  } catch {
-    return "";
-  }
-  if (typeof desc !== "string") { return ""; }
-  return desc.replace(/\s+/g, " ").trim().slice(0, limit);
+  return frontmatterField(text, "description", limit);
 }
 
 // ── 模型 ─────────────────────────────────────────────────

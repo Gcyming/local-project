@@ -14,6 +14,9 @@ import { ChatClient, AnthropicClient, ResponsesClient, GoogleClient, ChatStreamR
 import { noteUpstream, formatFallbackNotice } from "./llm/upstreamNotice.js";
 // A-1071（#229）：max_tokens 与思考参数同类——必须按「本条路由实际模型」封顶（见 withModel 注释）
 import { applyMaxTokensCap } from "./llm/maxTokens.js";
+/* A-1129：出网前 messages 的唯一规范化（空 content → 角色占位）。
+   挂在 router 的两个入口上 ⇒ 覆盖四个协议客户端与全部调用方（含 tool_loop 的中途重发）。 */
+import { sanitizeWirePayload } from "./services/outgoingMessages.js";
 import { ChatRequest, ChatResponse, ChatToolCallDelta } from "shared/schemas";
 
 export type RouteKind = "local" | "cloud";
@@ -401,6 +404,18 @@ export class ModelRouter {
    * A-158：可降级失败的路由自动熔断冷却，本轮跳过、后续请求优先避开。
    */
   async chat(payload: ChatRequest): Promise<ChatResult> {
+    /* A-1129：**出网唯一规范化** —— 空 content 的消息必须在这里被修好。
+       上游（实测 AGNES / agnes-3.0-flash）对 `messages` 有硬校验：
+       `400 ... messages: Validation error: message content cannot be empty`。
+       为什么挂在 router 这一层（而不是 engine / 各协议客户端）：
+         · router 是**唯一分派点** —— 四个协议客户端（OpenAI 兼容 / Anthropic / Responses /
+           Google）都在它下游，挂这里一处覆盖全部；
+         · 更重要的是它覆盖 **tool_loop 的中途重发**：第 2..N 轮直接
+           `this.router.chat(opts.messages)`，**不经过 `engine.buildMessages`**，
+           而那里正是推 `content: null`（模型只回工具调用）的地方 ——
+           挂在 engine 上会让"多轮工具调用"这一整类漏网（见 mut 的第 13 条）。
+       判据与取舍（补占位而非丢消息）见 `outgoingMessages.ts` 文件头。 */
+    payload = sanitizeWirePayload(payload); // A-1129（chat 入口）
     const chain = this.fallbackChain("chat");
     if (chain.length === 0) {
       throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);
@@ -441,6 +456,9 @@ export class ModelRouter {
     onReasoning?: (reasoning: string) => void,
     onToolDelta?: (toolCalls: ChatToolCallDelta[]) => void,
   ): Promise<ChatStreamResultRouted> {
+    /* A-1129：同 `chat()` —— 出网唯一规范化（**唯一分派点**，覆盖四个协议 + 全部调用方，
+       含 tool_loop 的中途重发）。理由与取舍见 `chat()` 里的长注释与 outgoingMessages.ts。 */
+    payload = sanitizeWirePayload(payload); // A-1129（chatStream 入口）
     const chain = this.fallbackChain("chat");
     if (chain.length === 0) {
       throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);

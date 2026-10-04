@@ -424,6 +424,35 @@ const CLICK_FLOAT_TRACE = `(() => {
       } else {
         row.push(null, null, null, null);
       }
+      /* ⚠️⚠️ A-1163：**空洞探测**（放在**所有**既有列之后 —— 加在中间会把后面列位顶歪，
+         这个坑本文件上面已经踩过一次并写了守卫）。
+         用户实拍帧显示三件事：中间一整块**纯黑**（浮窗该在的位置）、右栏右缘没贴住
+         窗口右缘、**看不到浮窗** ⇒ 疑似「.main 已塌成 0、浮窗还没绘制」。
+         ⇒ 逐帧问「浮窗中心那个点，屏幕上顶层到底是谁」：
+            命中 .float-window 子树 = 已绘制；命中 .main / body = **空洞**。
+         ⚠️ 坐标取**浮窗自己的实测 rect**（不是算出来的目标值）：只有实测才知道它这帧在哪。
+         ⚠️⚠️⚠️ 本段注释里**绝对不许出现反引号**：整段代码是被包进页内模板字符串的，
+            反引号会提前截断它，后面 .main 就被当代码执行 ⇒ 报 ".main is not a function"。
+            （同一个坑本文件已犯过四次，每次症状都一样。注意 `node --check` **抓不到**：
+             模板字符串的内容仍是合法 JS，只有真正在浏览器里跑才炸。）*/
+      {
+        const he = M.host;
+        let tag = "HOLE:no-host";
+        if (he) {
+          const r = he.getBoundingClientRect();
+          const top = r.width > 4 && r.height > 4
+            ? document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2))
+            : null;
+          if (!top) { tag = "HOLE:zero-rect"; }
+          else if (top.closest(".float-window")) { tag = "FLOATWIN"; }
+          else {
+            const c = typeof top.className === "string" && top.className.trim()
+              ? "." + top.className.trim().split(/\s+/)[0] : "";
+            tag = "HOLE:" + top.tagName.toLowerCase() + c;
+          }
+        }
+        row.push(tag);
+      }
       tr.rows.push(row);
     }
     tr.raf = requestAnimationFrame(tick);
@@ -695,6 +724,13 @@ const READ_EXIT_TRACE = `JSON.stringify((() => {
       if (typeof r[13] !== "number" || r[13] < 0 || r[13] > 100) { bad.push("opacity@" + r[0] + "=" + r[13]); }
       if (typeof r[17] !== "string" || !/^(scroll|auto|hidden|visible)$/.test(r[17])) { bad.push("overflowY@" + r[0] + "=" + r[17]); }
     }
+    /* ⚠️ A-1163：空洞探测列（r[19]）只许取约定的几个值，否则说明列位又被顶歪了。 */
+    const holes = rows.filter((r) => typeof r[19] === "string" && (r[19] === "FLOATWIN" || r[19].startsWith("HOLE:")));
+    if (holes.length !== rows.length) { bad.push("空洞列位置异常"); }
+    say("  🕳 空洞帧：" + holes.filter((r) => r[19].startsWith("HOLE:")).length + " / " + holes.length
+      + (holes.filter((r) => r[19].startsWith("HOLE:")).length
+        ? " ⇒ 取值 " + JSON.stringify([...new Set(holes.filter((r) => r[19].startsWith("HOLE:")).map((r) => r[19]))].slice(0, 6))
+        : " ✓ 全程浮窗都在屏幕上"));
     say("  🧷 列位自检：" + (bad.length ? "❌ 列位错位 → " + bad.slice(0, 4).join(", ") : "✓ 各列读数与其语义相符"));
   }   /* ← 抖动分析块的收尾 */
   await snap("S1 点窗口化后（收敛后）");

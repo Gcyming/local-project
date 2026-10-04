@@ -6,14 +6,21 @@
  *   而是和「后台进程」并排放在输入框正上方的坞里，用**同一套**类名：
  *   `dock-slot` / `dock-pill`（胶囊按钮，展开时横向延伸）/ `dock-panel` + `.collapse`（向上展开）。
  *
- * 展开/渐出的判据**不在这里**：`open` / `faded` 由父级从 `floatDock.ts` 的**单值** state 派生后传进来 ——
- * 这样"两个同时展开"这种非法状态在结构上就不存在（见 floatDock.ts 的说明）。
+ * 展开态的判据**不在这里**：`open` 由父级从 `floatDock.ts` 的**单值** state 派生后传进来 ——
+ * 这样"两个面板同时展开"这种非法状态在结构上就不存在（见 floatDock.ts 的说明）。
+ *
+ * ⚠️ A-1126（用户 2026-09-26）：**按钮常显** —— 父级不再传 `faded`（旧设定会让另一格整颗淡出，
+ *   表现为「点击后台任务后同行的子代理悬浮按钮会消失」）。按钮显不显示只看**本组件自己的数据**。
+ *
+ * ⚠️ A-1127（用户 2026-09-26）：**面板最多显示最近 5 条**（`subAgentPanel.ts` 的纯判据），
+ *   列表高度有上限、超出即滚动；设置页那边的完整历史不受这条限制（它有自己的「清空历史」）。
  */
 import React, { type JSX, useEffect, useState } from "react";
 import SubAgentModal from "./SubAgentModal.js";
 import SubagentAvatar from "../components/SubagentAvatar.js";
 import { ChevronIcon } from "../components/Icon.js";
 import { dockSlotClassOf } from "./floatDock.js";
+import { latestSubagentRuns, subagentPanelCountLabel, SUBAGENT_PANEL_LIMIT } from "./subAgentPanel.js";
 
 interface SubRun {
   id: string;
@@ -43,9 +50,8 @@ const STATUS_META: Record<string, { txt: string; c: string }> = {
 };
 
 export default function SubAgentExpandButton(
-  { slot, onToggle }: { slot: { open: boolean; faded: boolean }; onToggle: () => void },
+  { open, onToggle }: { open: boolean; onToggle: () => void },
 ): JSX.Element | null {
-  const { open, faded } = slot;
   const [runs, setRuns] = useState<SubRun[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -65,6 +71,9 @@ export default function SubAgentExpandButton(
   }, [refresh]);
 
   const active = runs.filter((r) => r.status === "running" || r.status === "pending");
+  /* A-1127：面板只显示**最近 5 条**（纯判据在 subAgentPanel.ts）。
+     ⚠️ 这是"显示"的上限，**不是**存储的上限 —— 设置页那边仍是完整历史（100 条 + 手动清空）。 */
+  const visible = latestSubagentRuns(runs);
   /* 没有任何子代理记录 → 这一格整个不渲染（不留空壳，与「后台进程」同约定）。
      ⚠️ A-1106/5b 更正：可见性判据**就住在本组件里** —— 调用方 ChatPanel 是**无条件**挂载本组件的
      （外层只判 `!pendingAsk`），并不存在「ChatPanel 据 runs 决定要不要显示坞」那一层（旧注释那条
@@ -72,7 +81,8 @@ export default function SubAgentExpandButton(
        ① 主因是委派没发生（提示词层，见 subagentCatalog.ts 的力度预算分档）；
        ② 次因是派发/取消没**如实推送**（见 gui/src/main/index.ts 的 onSpawn 与 cancel 通道）——
           此前 pending 阶段与「取消排队中」都不广播 ⇒ 面板只能等 3 秒轮询，观感就是「不实时」。
-     放宽这里（改成恒显）只会多一个恒为 0 的空壳，不解决上面两条。 */
+     放宽这里（改成恒显）只会多一个恒为 0 的空壳，不解决上面两条。
+     ⚠️ A-1126：也**不许**因为"另一个面板开着"而在这里返回 null —— 按钮必须常显。 */
   if (runs.length === 0) { return null; }
 
   return (
@@ -87,7 +97,9 @@ export default function SubAgentExpandButton(
               fontSize: 12, fontWeight: 700, color: "var(--text)",
               display: "flex", justifyContent: "space-between", alignItems: "center",
             }}>
-              <span>子代理 ({runs.length})</span>
+              <span title={`这里只看最近 ${SUBAGENT_PANEL_LIMIT} 条（完整历史在 设置 → 子代理，可手动清空）`}>
+                {subagentPanelCountLabel(runs.length, visible.length)}
+              </span>
               <button
                 onClick={onToggle}
                 title="收起"
@@ -97,9 +109,13 @@ export default function SubAgentExpandButton(
                 }}
               >✕</button>
             </div>
-            {/* 列表可滚动（子代理可能很多） */}
-            <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4, maxHeight: 340, overflow: "auto" }}>
-              {runs.slice().reverse().map((r) => {
+            {/* 列表：**最多 5 条**（A-1127），且高度有上限、超出即滚动。
+                `maxHeight` 是兜底 —— 条目上限把常态锁在 5 行内，但长任务描述换行仍可能顶高。 */}
+            <div
+              data-subagent-panel-list
+              style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4, maxHeight: 340, overflow: "auto" }}
+            >
+              {visible.map((r) => {
                 const m = STATUS_META[r.status] ?? { txt: r.status, c: "var(--text-dim)" };
                 return (
                   <button
@@ -128,8 +144,9 @@ export default function SubAgentExpandButton(
         </div>
       </div>
 
-      {/* 悬浮按钮：与「后台进程」同款（同一套 .dock-slot / .dock-pill） */}
-      <span className={dockSlotClassOf(open, faded)}>
+      {/* 悬浮按钮：与「后台进程」同款（同一套 .dock-slot / .dock-pill）。
+          ⚠️ A-1126：只带 `open` —— 父级不再传"另一个开着就淡出"，按钮**常显**。 */}
+      <span className={dockSlotClassOf(open)}>
         <button
           className="dock-pill"
           onClick={onToggle}

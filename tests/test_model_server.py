@@ -183,13 +183,12 @@ class TestModelServerManager:
 
 
 class TestEmbedFallback:
-    """_embed 降级行为测试"""
+    """_embed 降级行为测试（A-1139：从「回退伪向量」改为「显式失败」）"""
 
-    def test_dead_port_fallback_to_hash(self):
-        """registry 端口无服务 → 哈希占位，维度 1024"""
+    def test_dead_port_returns_none(self):
+        """registry 端口无服务 → 返回 None（不再产出伪向量）"""
         from core import memory as mem
         from core.model_server import ModelServerManager
-        import json
 
         # 构造假 registry（端口指向不存在服务）
         original = ModelServerManager.read_registry
@@ -198,21 +197,30 @@ class TestEmbedFallback:
         }
         try:
             result = mem._embed("测试文本")
-            # 哈希占位应返回正确的 1024 维
-            assert isinstance(result, list)
-            assert len(result) == mem._EMBED_DIM
-            # 所有值应在 [0, 1] 范围
-            assert all(0.0 <= v <= 1.0 for v in result)
+            # A-1139：此处原先断言拿到 1024 维「哈希占位」。但那个向量是**伪嵌入**：
+            # 补位值是 ord(' ')/256 = 0.125 而非 0，短文本 99%+ 的维度是同一个常数，
+            # 实测 5 个语义无关短中文文本两两余弦 min=0.9659/max=0.9920/均值=0.9835
+            # （真实嵌入应在 0.3~0.6）。它让召回排序退化为随机却不报任何错 ——
+            # 静默的垃圾比显式失败更糟。现在必须是 None。
+            assert result is None
         finally:
             ModelServerManager.read_registry = original
 
-    def test_hash_dimension_matches_embed_dim(self):
-        """_hash_embed 维度始终等于 _EMBED_DIM"""
+    def test_hash_embed_removed(self):
+        """A-1139：_hash_embed 已删除（伪嵌入的唯一产地）"""
         from core import memory as mem
-        result = mem._hash_embed("任意文本")
-        assert len(result) == mem._EMBED_DIM
-        result2 = mem._hash_embed("")
-        assert len(result2) == mem._EMBED_DIM
+        assert not hasattr(mem, "_hash_embed")
+
+    def test_empty_registry_returns_none(self):
+        """registry 为空（无 embedding 条目）→ 同样是 None，不得造向量"""
+        from core import memory as mem
+        from core.model_server import ModelServerManager
+        original = ModelServerManager.read_registry
+        ModelServerManager.read_registry = lambda: {}
+        try:
+            assert mem._embed("任意文本") is None
+        finally:
+            ModelServerManager.read_registry = original
 
 
 # ── A-017: 崩溃残留孤儿 llama-server 检测与回收 ──────────────

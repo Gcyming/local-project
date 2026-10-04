@@ -84,6 +84,8 @@ def _is_python_process(pid: str) -> bool:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=5,
+            errors="replace",  # ⚠️ A-1134：本文件 `_kill_port`（第 47 行）本来就有这一句
+            #                    唯独这里漏了 ⇒ tasklist 的中文表头会让 reader 线程当场崩
         ).stdout
         first = out.splitlines()[0] if out.splitlines() else ""
         return "python" in first.lower()

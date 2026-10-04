@@ -31,12 +31,42 @@ def _validate_agent_id(agent_id: str):
 
 # ── 辅助函数 ────────────────────────────────────────────────
 
+# A-1139：CJK 连续段（中日韩）。中文没有空格，空白分词对中文恒为 1 个 token。
+_CJK_RUN_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]+"
+)
+
+
+def _tokens(text: str) -> set:
+    """把文本切成可比对的 token 集合（**单一产地**，相似度与排序共用）。
+
+    A-1139：此前只有 `text.split()`。中文没有空格 ⇒ 整句被切成 1 个 token ⇒
+    「用户喜欢用 Python 写脚本」vs「用户偏好使用 Python 编程」的 Jaccard 只有 0.20，
+    够不着 0.75 去重阈值、也够不着建链阈值 ⇒ 去重/建链/相关性排序三处**全部空转**。
+    实测后果：11658 条 lesson 里只有 25 条不同内容（99.8% 是重复）。
+
+    这里对 CJK 段补 **字符 unigram + 字符 bigram**：
+      · unigram 保召回（同义改写能命中共用的字）
+      · bigram 保精度（区分「处理」与「处置」这类）
+    拉丁文本仍按空白分词。实测（真实语料：15 组同模板对 / 285 组不同模板对）
+    判别间隔 0.5195 → 0.5852，同模板均值 0.62 → 0.84。
+    评测探针：temp_test_dir/probe_similarity_variants.py、probe_threshold_sweep.py
+    """
+    if not text:
+        return set()
+    low = text.lower()
+    toks = {w for w in low.split() if w}
+    for run in _CJK_RUN_RE.findall(low):
+        toks.update(run)
+        if len(run) > 1:
+            toks.update(run[i:i + 2] for i in range(len(run) - 1))
+    return toks
+
+
 def _text_similarity(a: str, b: str) -> float:
-    """简单文本相似度（Jaccard 词级）。ponytail: 够用，Add when 需要语义相似度。"""
-    if not a or not b:
-        return 0.0
-    set_a = set(a.split())
-    set_b = set(b.split())
+    """文本相似度（Jaccard；token 化见 _tokens，对中文有效）。"""
+    set_a = _tokens(a)
+    set_b = _tokens(b)
     if not set_a or not set_b:
         return 0.0
     return len(set_a & set_b) / len(set_a | set_b)
@@ -64,29 +94,36 @@ def _emotion_importance(base: int, emotion: dict | None) -> int:
 
 
 def _rank_by_relevance(items: list, context: str, content_key: str = "content") -> list:
-    """按与上下文的词级相关性排序。"""
+    """按与上下文的相关性排序（token 化复用 _tokens，中文同样有效）。"""
     if not context or not items:
         return items
-    ctx_words = set(context.lower().split())
-    if not ctx_words:
+    if not _tokens(context):
         return items
 
     def score(item):
-        text = ""
-        if isinstance(item, dict):
-            text = item.get(content_key, "")
-        else:
-            text = str(item)
-        item_words = set(text.lower().split())
-        if not item_words:
-            return 0
+        text = item.get(content_key, "") if isinstance(item, dict) else str(item)
+        if not isinstance(text, str):
+            text = str(text)
         # Jaccard + importance bonus
-        relevance = len(ctx_words & item_words) / len(ctx_words | item_words)
+        relevance = _text_similarity(context, text)
         imp = item.get("importance", 5) if isinstance(item, dict) else 5
         return relevance * 10 + imp * 0.1
 
     return sorted(items, key=score, reverse=True)
 
+
+# ── 相似度阈值（A-1139 校准）──────────────────────────────
+# 依据：真实语料 15 组「同模板应合并」对 / 285 组「不同模板不应合并」对，
+# 对 _tokens 的 V3 方案做阈值扫描（temp_test_dir/probe_threshold_sweep.py）。
+#   · 去重 0.75：召回 0.867 / 误判 9/285（F1 0.703）。**刻意保召回不保精度** ——
+#     这个问题上的代价是不对称的：漏合并 = 垃圾永久累积（实测已累积 11658 条
+#     lesson 而只有 25 条不同内容），误合并 = 少存一条。0.80 虽然 F1 更高（0.800）
+#     但召回掉到 0.800，故不采用。
+#   · 建链 0.70：原值 0.3 在中文下从未生效；换 V3 后 0.3 会误链 42%（120/285）。
+#     0.70 把误链压到 16%，同时保住同模板族的连通。注意两分布**有重叠**
+#     （不应合并 max=0.882 ≈ 同模板 max=0.889），不存在完美阈值。
+_DEDUP_THRESHOLD = 0.75
+_LINK_THRESHOLD = 0.70
 
 # ── 艾宾浩斯遗忘 ──────────────────────────────────────────
 _EBBINGHAUS_TAU = 5.0  # 遗忘半衰期（天）
@@ -151,8 +188,15 @@ def _get_embed_dim() -> int:
 _EMBED_DIM = _get_embed_dim()
 
 
-def _embed(text: str) -> list[float]:
-    """BGE-M3 向量（经 llama-server）；失败回退哈希。ponytail: 纯同步，2s 本地超时可接受。
+def _embed(text: str) -> Optional[list[float]]:
+    """BGE-M3 向量（经 llama-server）；不可用时返回 **None**（显式失败）。
+
+    A-1139：此前失败会 `return _hash_embed(text)`，而那个「降级向量」是伪嵌入 ——
+    它的补位值是 `ord(' ')/256 = 0.125` 而非 0，于是短文本 99%+ 的维度是同一个常数，
+    常数项支配了整个向量。实测：5 个语义完全无关的短中文文本两两余弦
+    min=0.9659 / max=0.9920 / 均值=0.9835（真实嵌入应在 0.3~0.6），且超过 1024 字符的
+    内容完全不可见。后果是**召回排序退化为随机，却因为「向量合法」而不报任何错** ——
+    比直接失败更糟。现在返回 None，由调用方走既有的「无向量 → 回落关键词」分支。
 
     A-003: 端口来源优先级 —— ① 本进程 ModelServerManager 内存状态（权威）
     → ② registry 文件（供外部进程/降级）。manager 启动时会清空陈旧 registry，
@@ -182,12 +226,26 @@ def _embed(text: str) -> list[float]:
                 return [float(v) for v in data["data"][0]["embedding"]]
     except Exception:
         pass
-    return _hash_embed(text)
+    # A-1139：**不再回退伪嵌入**。返回 None，让调用方显式走「无向量」分支
+    # （跳过向量写入 / recall 返回空 → 回落 JSON 关键词）。原 _hash_embed 已删除：
+    # 它产出的向量让任意两段无关文本余弦都在 0.94~0.99，等价于噪声，却伪装成成功。
+    return None
 
 
-def _hash_embed(text: str) -> list[float]:
-    """字符级哈希占位向量（embedding 不可用时的降级方案）"""
-    return [float(ord(c) % 256) / 256.0 for c in text[:_EMBED_DIM].ljust(_EMBED_DIM, " ")]
+def _memory_table_schema():
+    """记忆表 schema（**单一产地**，所有建表点共用）。
+
+    A-1139：此前建表靠 `data=[{...零向量哨兵行...}]` 让 LanceDB 反推 schema，
+    于是每张表都带一行 `vector=[0.0]*dim` 的哨兵。零向量是**退化查询的最近邻吸引子**，
+    `recall()` 只过滤空 content 却照样收它，白占 top_k 名额。改为显式 schema 建空表。
+    """
+    import pyarrow as pa
+    return pa.schema([
+        pa.field("role", pa.string()),
+        pa.field("content", pa.string()),
+        pa.field("vector", pa.list_(pa.float32(), _EMBED_DIM)),
+        pa.field("tags", pa.string()),
+    ])
 
 
 def vectorize_knowledge(agent_id: str, role: str, content: str,
@@ -202,11 +260,11 @@ def vectorize_knowledge(agent_id: str, role: str, content: str,
         try:
             table = db.open_table(table_name)
         except Exception:
-            table = db.create_table(
-                table_name,
-                data=[{"role": "", "content": "", "vector": [0.0] * _EMBED_DIM, "tags": ""}],
-            )
+            table = db.create_table(table_name, schema=_memory_table_schema())
         vec = _embed(content)
+        if vec is None:
+            # A-1139：无向量可用（BGE-M3 不可达）→ 不写，让调用方知道没成功
+            return False
         table.add([{"role": role, "content": content, "vector": vec, "tags": ""}])
         return True
     except Exception as e:
@@ -230,6 +288,12 @@ class MemoryStore:
         self._lancedb_enabled = lancedb_enabled and _LANCEDB_AVAILABLE
         self._lancedb_uri = lancedb_uri or str(_DATA_DIR / agent_id / "lancedb")  # LanceDB 保持原位
         self._lance_table = None
+        # A-1139（D4）：索引与 JSON 失配的标记。
+        # JSON 是唯一真相源，LanceDB 只是**派生索引**；但此前二者是「双写且无对账」——
+        # 索引写失败、进程被杀、或因维度/字段不匹配 drop_table 之后，索引就永久少一截，
+        # 而**没有任何信号**告诉调用方「你现在的语义召回是残缺的」。
+        # 本标记就是那个信号：置位 = 索引不完整，应调 `reindex()` 从 JSON 重灌。
+        self._index_stale = False
         import threading
         self._lock = threading.Lock()  # N9-H9: per-agent 写锁防并发覆盖
         self._load()
@@ -287,18 +351,51 @@ class MemoryStore:
     def _store_categorized(self, category: str, content: str, tags: list | None = None,
                            importance: int = 5, extra: dict | None = None,
                            emotion: dict | None = None):
-        """统一分类存储：去重 + JSON + LanceDB（含 per-agent 锁）。
+        """统一分类存储：去重 + JSON + 向量索引。
 
         emotion（可选，三位一体）：情绪调制记忆权重 + 快照落库。
         神经科学依据：情绪强烈的事件记得更牢（杏仁核→海马固化）；
         情绪快照供将来 mood-congruent 检索（Bower 1981）。None=旧行为不变。
+
+        A-1139（D3）：**JSON 与向量拆成两段，锁只护前一段**。
+        此前 `_embed`（同步 HTTP，timeout 2s）与 LanceDB 写入都在 per-agent 锁内 ——
+        嵌入服务一慢，该 Agent 的记忆写入就被整个卡住。现在锁内只做纯内存 + JSON 落盘
+        （微秒级），出锁后才做嵌入与索引；索引失败只丢索引，不影响已落盘的真相源。
         """
         with self._lock:
-            self._store_categorized_locked(
+            stored = self._store_categorized_locked(
                 category, content, tags,
                 _emotion_importance(importance, emotion),
                 {**(extra or {}),
                  **({"emotion": dict(emotion)} if emotion else {})})
+        if stored:
+            self._index_vector(category, content, tags or [])
+
+    def _index_vector(self, category: str, content: str, tags: list) -> None:
+        """把一条记忆写进 LanceDB 语义索引（**必须在锁外调用**）。
+
+        A-1139（D3）：从 `_store_categorized_locked` 里抽出来。理由是嵌入是一次同步
+        HTTP 往返，不能占着 per-agent 锁。语义同原来那段：best-effort，失败只丢索引
+        （JSON 才是真相源）。
+        """
+        if not self._lancedb_enabled:
+            return
+        try:
+            self._init_lancedb()
+            if self._lance_table is None:
+                return
+            vec = _embed(content)
+            # A-1139：无向量就只留 JSON（真相源），不往索引里塞半条
+            if vec is None:
+                return
+            self._lance_table.add([{
+                "role": category,
+                "content": content,
+                "vector": vec,
+                "tags": ",".join(tags),
+            }])
+        except Exception as e:
+            logging.warning(f"[memory] LanceDB store 失败: {e}")
 
     async def _store_categorized_async(self, category: str, content: str,
                                        tags: list | None = None, importance: int = 5,
@@ -312,16 +409,21 @@ class MemoryStore:
 
     def _store_categorized_locked(self, category: str, content: str, tags: list | None,
                                    importance: int = 5, extra: dict | None = None):
-        """锁内实际写入逻辑。BUG-003: 写入时建立双向链接（tags 重叠自动关联）。"""
+        """锁内实际写入逻辑（**只做 JSON**）。BUG-003: 写入时建立双向链接（tags 重叠自动关联）。
+
+        A-1139（D3）：**向量索引已移出本函数**（嵌入是同步 HTTP，不能占着 per-agent 锁）。
+        返回 True = 确实新增了一条（调用方应补写索引）；False = 去重命中，没有新条目。
+        ⚠️ 直接调用本函数的路径（目前只有 `add_preference`）必须自己处理返回值并补索引。
+        """
         tags = tags or []
         # 去重：检查同 category 内相似度 >75% 的事实（N11-P2-10）
         for existing in self._data.get("facts", []):
             if existing.get("category") != category:
                 continue
-            if _text_similarity(content.lower(), existing.get("content", "").lower()) > 0.75:
+            if _text_similarity(content.lower(), existing.get("content", "").lower()) > _DEDUP_THRESHOLD:
                 existing["repeated"] = existing.get("repeated", 0) + 1
                 self._save()
-                return
+                return False  # A-1139：去重命中 ⇒ 没有新条目，调用方不必写索引
 
         new_id = _mem_id(content)
         tag_set = set(tags)
@@ -336,7 +438,7 @@ class MemoryStore:
                 linked = True
             elif not tag_set and _text_similarity(
                 content.lower(), existing.get("content", "").lower()
-            ) > 0.3:
+            ) > _LINK_THRESHOLD:
                 linked = True
             if linked:
                 links.append(existing["id"])
@@ -360,19 +462,9 @@ class MemoryStore:
             **(extra or {}),
         })
         self._save()
-        if self._lancedb_enabled:
-            try:
-                self._init_lancedb()
-                if self._lance_table is not None:
-                    vec = _embed(content)
-                    self._lance_table.add([{
-                        "role": category,
-                        "content": content,
-                        "vector": vec,
-                        "tags": ",".join(tags),
-                    }])
-            except Exception as e:
-                logging.warning(f"[memory] LanceDB store 失败: {e}")
+        # A-1139（D3）：向量索引**不在这里做** —— 嵌入是同步 HTTP 往返（timeout 2s），
+        # 不能占着 per-agent 锁。由调用方 `_store_categorized` 在出锁后经 `_index_vector` 补写。
+        return True
 
     def add_fact(self, fact: str, importance: int = 5,
                  emotion: dict | None = None):
@@ -382,8 +474,9 @@ class MemoryStore:
 
     def add_preference(self, key: str, value: str):
         """添加/更新用户偏好（按 key 精确去重）"""
+        content = f"{key}: {value}"
+        tags = [key]
         with self._lock:
-            content = f"{key}: {value}"
             for f in self._data.get("facts", []):
                 if f.get("category") == "preference" and f.get("tags") and f["tags"][0] == key:
                     f["content"] = content
@@ -391,7 +484,13 @@ class MemoryStore:
                     f["timestamp"] = datetime.now(timezone.utc).isoformat()
                     self._save()
                     return
-            self._store_categorized_locked("preference", content, tags=[key], importance=6)
+            stored = self._store_categorized_locked("preference", content, tags=tags, importance=6)
+        # A-1139（D3）：索引在**锁外**补写 —— 与 `_store_categorized` 同口径。
+        # 本函数是唯一绕过 `_store_categorized` 直接调 `_store_categorized_locked` 的路径；
+        # 向量写入随 D3 拆走后若不在这里补这一步，偏好就会永久不进语义索引
+        #（静默失效：功能「在」，只是再也搜不到）。
+        if stored:
+            self._index_vector("preference", content, tags)
 
     def add_skill(self, skill_name: str):
         """记录解锁的技能"""
@@ -547,30 +646,22 @@ class MemoryStore:
                                 or getattr(vec_field.type, 'dimension', None))
                     if dim_attr and dim_attr != _EMBED_DIM:
                         logging.warning(
-                            f"[memory] 向量维度不匹配（表: {dim_attr}, 当前: {_EMBED_DIM}），"
-                            f"重建表（记忆可再生，丢失可接受）"
+                            f"[memory] 向量维度不匹配（表: {dim_attr}, 当前: {_EMBED_DIM}），重建空表。"
+                            f"索引已标记为 stale —— 调 reindex() 可从 JSON 真相源回填"
+                            f"（A-1139/D4：此前这里**没有**回填路径，注释却写「记忆可再生」，与代码不符）"
                         )
                         db.drop_table(table_name)
-                        self._lance_table = db.create_table(
-                            table_name,
-                            data=[{"role": "", "content": "", "vector": [0.0] * _EMBED_DIM, "tags": ""}],
-                        )
+                        self._lance_table = db.create_table(table_name, schema=_memory_table_schema())
+                        self._index_stale = True
                 # V1: 检查已有表是否缺 tags 字段（旧 schema 无此列）
                 field_names = {f.name for f in self._lance_table.schema}
                 if "tags" not in field_names:
-                    logging.warning(
-                        f"[memory] 旧表缺 tags 字段，重建表"
-                    )
+                    logging.warning("[memory] 旧表缺 tags 字段，重建空表（索引已标记 stale，调 reindex() 回填）")
                     db.drop_table(table_name)
-                    self._lance_table = db.create_table(
-                        table_name,
-                        data=[{"role": "", "content": "", "vector": [0.0] * _EMBED_DIM, "tags": ""}],
-                    )
+                    self._lance_table = db.create_table(table_name, schema=_memory_table_schema())
+                    self._index_stale = True
             except Exception:
-                self._lance_table = db.create_table(
-                    table_name,
-                    data=[{"role": "", "content": "", "vector": [0.0] * _EMBED_DIM, "tags": ""}],
-                )
+                self._lance_table = db.create_table(table_name, schema=_memory_table_schema())
         except Exception as e:
             logging.warning(f"[memory] LanceDB 初始化失败，降级到 JSON: {e}")
             self._lancedb_enabled = False
@@ -585,6 +676,8 @@ class MemoryStore:
             return False
         try:
             vec = _embed(content)
+            if vec is None:
+                return False  # A-1139：无向量可用，不写半条
             self._lance_table.add([{
                 "role": role, "content": content, "vector": vec, "tags": tags,
             }])
@@ -606,6 +699,11 @@ class MemoryStore:
             return []
         try:
             vec = _embed(query)
+            # A-1139：查询向量拿不到 → 返回空，让调用方回落 JSON 关键词检索
+            #（此前会拿伪嵌入去搜，返回一堆「看起来 98% 相似」的噪声且不报错）
+            if vec is None:
+                logging.info("[memory] embedding 不可用，语义召回跳过（回落关键词）")
+                return []
             q = self._lance_table.search(vec)
             if categories:
                 # 单引号转义防注入
@@ -619,6 +717,81 @@ class MemoryStore:
         except Exception as e:
             logging.warning(f"[memory] LanceDB recall 失败: {e}")
             return []
+
+    def reindex(self, batch_size: int = 64) -> dict:
+        """从 JSON（**唯一真相源**）重建 LanceDB 语义索引，并返回对账结果。
+
+        A-1139（D4）：这是「双写无对账」里**缺失的那条对账路径**。
+        此前 JSON 与索引双写且互不校验 —— 索引写失败、进程被杀、或因维度/字段不匹配
+        被 `drop_table` 之后，索引就**永久**少一截，而代码注释却写「记忆可再生，丢失可接受」，
+        实现里根本没有重建入口（注释与代码矛盾）。本方法把它补上。
+
+        安全性质（都针对「别把好索引换成坏索引」）：
+          · **先探一次嵌入**：不可用就直接返回，**原样保留旧表** —— 绝不先清空再失败；
+          · 逐条 best-effort：单条拿不到向量就跳过并计数，不中断整体；
+          · `_index_stale` 只在**确实写完**（无跳过）时才摘掉，否则保持置位。
+
+        返回 {"ok", "written", "skipped", "total", "error"?}。
+        """
+        if not self._lancedb_enabled or not _LANCEDB_AVAILABLE:
+            return {"ok": False, "written": 0, "skipped": 0, "total": 0,
+                    "error": "LanceDB 未启用或不可用"}
+
+        facts = [f for f in self._data.get("facts", [])
+                 if isinstance(f, dict) and isinstance(f.get("content"), str)
+                 and f["content"].strip()]
+
+        # ① 探针：嵌入不可用就放弃，**不动旧表**（旧索引可能仍是好的）
+        if facts and _embed("reindex-probe") is None:
+            logging.warning("[memory] reindex 中止：embedding 不可用，旧索引保持原样")
+            return {"ok": False, "written": 0, "skipped": 0, "total": len(facts),
+                    "error": "embedding 不可用（旧索引未改动）"}
+
+        try:
+            uri = self._lancedb_uri or str(_DATA_DIR / self.agent_id / "lancedb")
+            db = lancedb.connect(uri)
+            table_name = f"memory_{self.agent_id}"
+            try:
+                db.drop_table(table_name)
+            except Exception:
+                pass  # 原本就没有这张表
+            table = db.create_table(table_name, schema=_memory_table_schema())
+            self._lance_table = table
+
+            written = 0
+            skipped = 0
+            batch: list[dict] = []
+            for f in facts:
+                vec = _embed(f["content"])
+                if vec is None:
+                    skipped += 1
+                    continue
+                tags = f.get("tags")
+                batch.append({
+                    "role": f.get("category", ""),
+                    "content": f["content"],
+                    "vector": vec,
+                    "tags": ",".join(tags) if isinstance(tags, list) else (tags or ""),
+                })
+                if len(batch) >= batch_size:
+                    table.add(batch)
+                    written += len(batch)
+                    batch = []
+            if batch:
+                table.add(batch)
+                written += len(batch)
+
+            # 有跳过 ⇒ 索引仍不完整，stale 标记保持置位（不谎报「已完全对上」）
+            self._index_stale = skipped > 0
+            logging.info(
+                f"[memory] reindex 完成: 写入 {written} 条 / 跳过 {skipped} 条 / 共 {len(facts)} 条")
+            return {"ok": True, "written": written, "skipped": skipped, "total": len(facts)}
+        except Exception as e:
+            # 失败时**如实置 stale** —— 索引此刻确实不可信
+            self._index_stale = True
+            logging.warning(f"[memory] reindex 失败: {e}")
+            return {"ok": False, "written": 0, "skipped": 0, "total": len(facts),
+                    "error": str(e)}
 
 
 # ── 便捷函数 ──────────────────────────────────────────────

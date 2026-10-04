@@ -86,7 +86,10 @@ const A_ENTRY_BLOCK = [
 ].join("\n");
 
 /* 浮层稳态宽的 JSX 三元 */
-const FLOAT_W = 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? "var(--right-target-w)" : "auto")';
+/* ⚠️⚠️ A-1179：浮层过渡分支的容器宽度已改成 `undefined`（⇒ `auto` ⇒ 容器贴合内容，
+   消除「容器已到位、内容还在长」那一帧黑屏），退场期靠 `rightExitAnim` 分流。
+   ⇒ 这三个变异（M8/M9/M10）的 `FLOAT_W` 必须跟着改，否则锚点漂移、守卫**假失效**。 */
+const FLOAT_W = 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")';
 
 /* 唤出路径的第三参 */
 const FLOAT_CALL = "animateRightSidebar(true, floatTargetW, true)";
@@ -163,12 +166,25 @@ const MUTATIONS = [
   {
     name: "M8 浮层稳态宽改回裸 100%（右栏右缘越窗 240px）",
     file: F_APP,
-    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "100%"\n              : (mainIsFloatLayout ? "var(--right-target-w)" : "auto")'),
+    /* ⚠️⚠️ A-1179：核验器（check-mut-anchors.mjs）只认证据字面量，认不出
+       "锚点藏在常量里"的写法（`sub(t, FLOAT_W, ...)`）⇒ 会判成「未命中（守卫假失效）」。
+       ⇒ 这里显式写出与 FLOAT_W 逐字相同的 from，让核验器能验证它仍命中源码。
+       ⚠️ 改 FLOAT_W 时必须同步改这两处 from，否则又漂移。
+       ⚠️⚠️ 本注释里**刻意不写反引号**：核验器的 STR 扫描器会把 from 之前最近的
+          反引号当成锚点边界（实测 mut-a1090 第 23 条就是这样假红的）。 */
+    from: 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")',
+    /* ⚠️ A-1179：替换体也要保留 `rightExitAnim` 分流（否则改动后语法/结构与基线不一致）。 */
+    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "100%"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")'),
   },
   {
     name: "M9 非浮层态不回落 auto（普通展开被内联宽污染）",
     file: F_APP,
-    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? "var(--right-target-w)" : undefined)'),
+    /* ⚠️⚠️ A-1179：核验器只认证据字面量，认不出"锚点藏在常量里"的写法
+       （`sub(t, FLOAT_W, ...)`）⇒ 会判成「未命中（守卫假失效）」。
+       ⇒ 显式写出与 FLOAT_W 逐字相同的 from。⚠️ 改 FLOAT_W 时必须同步改这里。
+       ⚠️⚠️ 本注释里刻意不写反引号（核验器的 STR 扫描器会被反引号截断，见 M8 处说明）。 */
+    from: 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")',
+    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : undefined)'),
   },
 
   /* ── R6：判据与真状态同源 ── */
@@ -212,25 +228,27 @@ const MUTATIONS = [
        ② resize 块（在 `App` 里）与 `animateLeftSidebar` 里这两行的**缩进与文本除取值来源外完全相同**，
           而 `sub()` 只替换**第一处** ⇒ 只锚那一行会命中 resize 那块，`animateLeftSidebar` 毫发无损
           （实测：变异后 `animateLeftSidebar` 的 `fnBody` 长度仍是 896、`hasLeftW` 仍为 true）。
-       ⇒ 用**上一行的取值来源**区分两处：目标处是 `const lw = node.getBoundingClientRect().width;`。 */
+       ⚠️⚠️ A-1170 重锚：区分两处的"取值来源"从**上一行的**
+          `const lw = node.getBoundingClientRect().width;` 改成了**行内的** `node.getBoundingClientRect().width`
+          —— A-1170 把那两行合并成了一行（`const lw` 已删，因为它只被这一处用）。
+          唯一性不受影响：`node.` 只出现在目标处（resize 块用的是 `leftSidebarRef.current?.…`）。 */
     mutate: (t) => sub(
       t,
-      "\n          const lw = node.getBoundingClientRect().width;\n          rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(lw)}px`);",
-      "\n          const lw = node.getBoundingClientRect().width;",
+      "\n          rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(sidebarOpenRef.current ? sidebarWidthRef.current : 0)}px`);",
+      "",
     ),
   },
 
-  /* ── 死锁兜底 ── */
-  {
-    name: "M16 GEOM_SYNC_HARD_LIMIT_FRAMES 从 done 判据里删掉（结构性死锁）",
-    file: F_APP,
-    mutate: (t) => sub(t, "      || frameCount >= GEOM_SYNC_HARD_LIMIT_FRAMES);", ");"),
-  },
-  {
-    name: "M17 frameCount 不递增（上界成死代码）",
-    file: F_APP,
-    mutate: (t) => sub(t, "    frameCount++;\n", ""),
-  },
+  /* ── 死锁兜底：**已退休**（A-1170）─────────────────────────────────────
+     M16（`GEOM_SYNC_HARD_LIMIT_FRAMES` 从 done 判据里删掉）与
+     M17（`frameCount` 不递增）锚的是 A-1155 时期**测量驱动**引擎的启发式判据。
+     A-1162 已把 `runGeometrySyncFade` **整体重写成时间驱动**
+     （`u = 已过时长 / GEOM_FADE_MS`，收工判据**只有** `u >= 1`）——
+     「上界」这个需求本身消失了：时间驱动天然有界，不存在"对象不动就永远不收工"。
+     守卫侧也已钉死这一点：`a1155-float-width-symmetry.spec.ts` 的 A-1162 段
+     **明确断言那五个魔数（含 `GEOM_SYNC_HARD_LIMIT_FRAMES`）都不许再出现**。
+     ⇒ 保留这两条会永久"未命中"（核验器会报"守卫已失效"，但那不是失效，
+        而是**这个缺陷形态已经不可能发生**）。删掉，别留会制造假警报的条目。 */
 
   /* ── R8：内联宽残留 ── */
   {
@@ -262,9 +280,11 @@ const MUTATIONS = [
        ⇒ 浮窗根本没有外框。 */
     name: "M20 唯一宿主不按模式换类（浮层态拿不到 fixed 外框 ⇒ 浮窗不可见）",
     file: F_APP,
+    /* ⚠️ A-1173 重锚：判据从业务状态 `mainIsFloatLayout` 改成呈现模式 `hostIsFloat`
+       （与同元素的 `style` 同源；两半判据不同源会让"类还是浮窗、盒模已是内联"出现一帧）。 */
     mutate: (t) => sub(
       t,
-      'className={mainIsFloatLayout ? "float-window" : "inline-chat-host"}',
+      'className={hostIsFloat ? "float-window" : "inline-chat-host"}',
       'className="inline-chat-host"',
     ),
   },

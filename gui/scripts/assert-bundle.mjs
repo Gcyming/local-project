@@ -750,5 +750,16 @@ check("main", main, "LanceDB 运行时组件未就位", "组件未就位时的�
 check("renderer", renderer, "向量记忆已降级为 JSON 检索", "降级说明进了渲染产物（用户不会只看到「没结果」）");
 check("renderer", renderer, "prepare-lancedb-component.mjs", "组件生成脚本提示进了渲染产物（用户知道怎么补）");
 
+/* A-1138：自建全网索引服务「写进 slime」（爬虫 / 索引 / 服务全在 main 进程内，设置页一键操作）。
+   ⚠️ 这几条守的是**「模块有没有被打进包」**（tree-shake / 整体被删会静默让功能消失，
+   而 tsc / 单测 / 构建全绿）。它**不**覆盖「接线有没有被调用」—— `IPC_CHANNELS` 是共享常量、
+   `/crawl` 也在模块自身里，把 `main/index.ts` 的注册/启动删掉这些字符串照样在包里。
+   **接线**那一层由源码守卫覆盖：`tests/gui/a1138-search-index.spec.ts ⑥`（并有 M34/M35 变异证明它不是假守卫）。
+   ⇒ 别把这里的 OK 读成「功能一定可用」。 */
+check("main", main, "/crawl", "爬取路由进了 main 产物（模块真的被打进包，没被 tree-shake）");
+check("main", main, "SlimeMiniBot/1.0", "爬虫 User-Agent 进了产物（同上：证明这个模块在包里）");
+check("main", main, "search-index", "索引落盘目录名进了产物（同上）");
+check("renderer", renderer, "searchengine", "设置页「搜索索引」栏目进了渲染产物（被 tree-shake 就点不到）");
+
 console.log(fail === 0 ? "\nALL ASSERTIONS PASSED" : `\n${fail} ASSERTION(S) FAILED`);
 process.exit(fail === 0 ? 0 : 1);

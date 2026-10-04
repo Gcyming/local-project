@@ -99,8 +99,15 @@ describe("A-1052 A 组：collapseBlankRuns 语义", () => {
 
 describe("A-1052 B 组：ChatPanel 源码契约", () => {
   it("三处纯文本渲染点都走 collapseBlankRuns（用户气泡 + 发言失败 + 错误气泡）", () => {
-    const hits = chatSrc.match(/\{collapseBlankRuns\(m\.content\)\}/g) ?? [];
-    expect(hits.length).toBe(3);
+    /* A-1133 迁移：**用户气泡**的渲染源从 `m.content` 换成了 `att.body`
+       （先拆掉编码在文本里的附件行，再渲染正文 —— 否则气泡里会显示绝对路径，
+       而用户明确要求"不要直接显示文件地址"）。另外两处（发言失败 / 错误气泡）不受影响。
+       ⚠️ 判据必须**分开数**：只数总数会让"某一处退回裸渲染"蒙混过关（三处本来长得一样）。 */
+    const userBubble = chatSrc.match(/\{collapseBlankRuns\(att\.body\)\}/g) ?? [];
+    expect(userBubble.length, "用户气泡必须渲染**去掉附件行**的正文").toBe(1);
+    const others = chatSrc.match(/\{collapseBlankRuns\(m\.content\)\}/g) ?? [];
+    expect(others.length, "发言失败 + 错误气泡两处仍取原文").toBe(2);
+    expect(userBubble.length + others.length, "纯文本渲染点总数").toBe(3);
   });
 
   it("不得再有裸 `{m.content}` 直落在 pre-wrap 容器里", () => {
@@ -122,8 +129,12 @@ describe("A-1052 B 组：ChatPanel 源码契约", () => {
     // 全文件**调用**恰好 3 处（import 行后跟空格而非左括号，不计）；多一处即有人把它
     // 塞进了发送/落库路径 → 用户发出去、存下去的就是被改写过的文本。
     expect((chatSrc.match(/collapseBlankRuns\(/g) ?? []).length).toBe(3);
-    // 发送路径的正文仍是原始 text（`api.chat.stream({ …, message: text, sessionId: sid … })`）
-    expect(/message: text, sessionId: sid/.test(chatSrc)).toBe(true);
+    /* A-1133 迁移：发送路径的正文从局部变量 `text` 改名为 `outbound`
+       （= 原文 + 文档附件的路径编码块，见 `formatDocAttachments`）。
+       本条守卫的**意图**不变：发出去的必须是**原文**，绝不是被渲染净化改写过的文本。
+       ⚠️ 因此判据写成"这两个变量之一"而不是写死 `text` —— 写死会把"改名"误判成违规。 */
+    expect(/message: (text|outbound), sessionId: sid/.test(chatSrc), "发送路径不得用净化后的文本").toBe(true);
+    expect(/message: collapseBlankRuns/.test(chatSrc), "净化绝不许进入发送路径").toBe(false);
   });
 
   it("净化模块必须真的被 import —— 否则「调用计数」可被「名字还在、实现没了」绕过", () => {

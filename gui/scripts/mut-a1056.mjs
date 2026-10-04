@@ -115,13 +115,17 @@ const MUTATIONS = [
   {
     name: "A-1056③ 激励语被搬回底部监测栏（用户在输入区读到系统闲话）",
     file: CHAT,
-    /* A-1074 迁移：子代理坞条目从自闭合的 `<SubAgentExpandButton />` 改成带 `slot`/`onToggle`
-       的挂载点（悬浮坞重构）。旧锚点从那时起**未命中** —— 而 `sub()` 未命中是**静默返回原文**
-       （一个字没改），所以这条守卫当时已经变成"永远绿"的假守卫。
-       按铁律【重构要同步变异脚本的锚点】换成当前唯一形态（目标文件里的挂载点只有一处）。 */
+    /* A-1126 重锚（**同时修掉一个更老的假守卫**）：
+       原锚点是坞里的 `<SubAgentExpandButton … />`（A-1074 时同步过一次）。但 A-1077 把**坞移到了
+       监测栏上面** ⇒ 从那以后这个锚点虽然还能命中，注入点却落在监测栏**窗口之外**
+       （守卫取的窗口 = `{/* ─ A-1056② 实时监测栏` → `{/* A-969：上下文自动压缩过渡动画`，
+       坞在它前面）⇒ 变异改的字节与守卫看的区域**不相交**，这条守卫其实是"永远绿"的。
+       A-1126 顺手把 `slot=` 改名为 `open=` 只是把"锚点漂移"暴露成「未命中」（check-mut-anchors 报出来）。
+       ⇒ 锚点改到监测栏**窗口内**唯一的一处：模型名那一行的开头。
+       判据不变：激励语一旦被搬回监测栏，窗口里就会出现 `pickCheer`。 */
     mutate: (t) => sub(t,
-      "<SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot(\"subs\")} />",
-      "<SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot(\"subs\")} />{pickCheer(0)}"),
+      "              {streamModel && (",
+      "              {true && (<span>{pickCheer(0)}</span>)}\n              {streamModel && ("),
   },
 
   /* ── ④ 状态行必须真的接上线 ─────────────────────────────────────── */

@@ -98,10 +98,17 @@ const MUTATIONS = [
   {
     name: "5 不再写 --right-target-w（过渡期没有宽度对象 ⇒ 硬跳）",
     file: F_APP,
+    /* ⚠️ A-1179：曾把锚点改成**多行**形态（`if` 块里带注释）。
+       ⚠️⚠️ A-1190 重锚回**单行**：live 现在又写回了单行
+       （`if (el && isFloatExpand) { el.style.setProperty("--right-target-w", …); }`，
+       见 App.tsx `animateRightSidebar`）⇒ 旧的多行锚点（`…);\n      }`）**不再命中**，
+       `check-mut-anchors` 与跑批都会报「未命中（源码已漂移，该守卫已失效）」。
+       判据不变：把那次写入**停用**（保留语法合法，别删行 —— 否则跑批会把
+       "编译不过"误当成"抓住了"）。 */
     mutate: (t) => sub(
       t,
       '      if (el && isFloatExpand) { el.style.setProperty("--right-target-w", `${Math.round(nextWidth!)}px`); }',
-      "      if (el && isFloatExpand) { /* 变异：不写过渡目标宽 */ }",
+      "      if (el && isFloatExpand) { void el; void nextWidth; }",
     ),
   },
   {
@@ -111,6 +118,10 @@ const MUTATIONS = [
        batch 会判成"异常"而不是"被抓住"。 */
     name: "6 全部漏摘 --right-target-w（残值污染下一次展开）",
     file: F_APP,
+    /* ⚠️ 整组替换（3 处摘除点：展开 done / 收起 done / 取消路径）⇒ 必须声明 `all: true`，
+       否则 `check-mut-anchors` 报「不唯一（命中 N 次，无法确定改的是哪一处）」——
+       报警没人看就等于没报警。 */
+    all: true,
     mutate: (t) => subAll(
       t,
       'removeProperty("--right-target-w")',
@@ -145,9 +156,13 @@ const MUTATIONS = [
   {
     /* ⚠️ A-1157：浮层态右栏必须贴住 wrapper 右缘（`margin-left: auto`）——
        少了它过渡就从 wrapper 左缘起向右长，稳态量不出差别，只能靠静态断言守。 */
-    name: "7c 去掉浮层态右栏的 margin-left:auto（过渡变成「向右合」而非「向左挤开」）",
+    name: "7c 去掉右栏贴右缘的 margin-left:auto（过渡变成「向右合」而非「向左挤开」）",
     file: F_CSS,
-    mutate: (t) => sub(t, "  margin-left: auto;\n}\nbody.float-layout .right-wrapper-anim .right-sidebar", "}\nbody.float-layout .right-wrapper-anim .right-sidebar"),
+    /* ⚠️ A-1173 重锚：`margin-left: auto` 不再是 `body.float-layout .right-sidebar`
+       那条独立规则，而是搬进了 `.right-sidebar` 的**主规则**（无条件生效）——
+       因为退浮层那一帧 `float-layout` 已摘、而 wrapper 还没缩到位，右侧会露出 135px 空白。
+       ⇒ 锚点改成主规则里那两行（`min-width: 260px;` 紧跟 `margin-left: auto;`）。 */
+    mutate: (t) => sub(t, "  min-width: 260px;\n  margin-left: auto;", "  min-width: 260px;"),
   },
 
   /* ── ③ 抖动：第二次动画 ─────────────────────────────────────────── */
@@ -182,7 +197,12 @@ const MUTATIONS = [
   {
     name: "9 拖动第一帧不再挂 slime-dragging（拖动头 140ms 不跟手）",
     file: F_APP,
-    mutate: (t) => sub(
+    /* ⚠️ 两个 resizer 起点（左栏 / 右栏）**各有一处** `slime-dragging` 的挂载 ——
+       本变异要的是"拖动第一帧都不挂"，所以用 `subAll` 整组替换
+       （只改一处 = 另一栏仍跟手，那不是本变异想证明的缺陷）。
+       命中两处 ⇒ 必须声明 `all: true`（否则核验器报「不唯一」）。 */
+    all: true,
+    mutate: (t) => subAll(
       t,
       '    document.body.classList.add("slime-dragging");',
       "    /* 变异：不挂 slime-dragging */",
@@ -209,12 +229,29 @@ const MUTATIONS = [
 
   /* ── ⑤ 闪烁：常驻过渡 + 兜底定时器不许递归 ─────────────────────── */
   {
-    name: "12 删掉 .chat-scroll 的常驻过渡（摘类时 0→1 硬跳 = 闪烁）",
+    name: "12 删掉 .chat-scroll 的过渡（摘类时 0→1 硬跳 = 闪烁）",
     file: F_CSS,
+    /* ⚠️ A-1170 重锚：`.chat-scroll` 规则**体内多了 A-1161 的注释**
+       （`scrollbar-gutter: stable` 那一整段），原来那句
+       `}\nbody.slime-fading .chat-scroll {` 已经**不再连续** ⇒ 锚点整体失配。
+       ⇒ 只锚「那一行过渡声明」本身，不依赖规则体的形状。
+       ⚠️⚠️ A-1190 再重锚：时长改成了读 CSS 变量（与侧边栏同源），
+       而且**两条规则（常驻 + `body.slime-fading`）里各有一份同源声明**。
+       ⇒ 判据是"两处都没有过渡"，所以必须**两处一起删**：只删一处的话，
+         摘类方向仍有一条过渡在跑 —— 那就不是这个变异想证明的东西了。
+       ⚠️⚠️⚠️ A-1190② 三度重锚：一个 `--chat-fade-dur` 已**拆成两个**方向变量
+       （常驻 = `--chat-fade-in-dur`、`body.slime-fading` = `--chat-fade-out-dur`）⇒
+       单条 `subAll` 的锚点不再覆盖两处，改成**嵌套 `sub`** 各删一条。
+       ⚠️ 仍声明 `all: true`（核验器认最内层那条锚点，命中 1 次即可 —— 这里是"整组改"的语义）。 */
+    all: true,
     mutate: (t) => sub(
-      t,
-      ".chat-scroll {\n  transition: opacity 0.12s linear;\n}\nbody.slime-fading .chat-scroll {",
-      ".chat-scroll {\n}\nbody.slime-fading .chat-scroll {",
+      sub(
+        t,
+        "  transition: opacity var(--chat-fade-in-dur, 500ms) cubic-bezier(0, 0, 0.2, 1);",
+        "  /* 变异：过渡被删 */",
+      ),
+      "  transition: opacity var(--chat-fade-out-dur, 500ms) cubic-bezier(0, 0, 0.2, 1);",
+      "  /* 变异：过渡被删 */",
     ),
   },
   {

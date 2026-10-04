@@ -30,6 +30,15 @@ export default defineConfig({
       },
       preload: {
         build: {
+          // ⚠️⚠️ **别在这里加第二个 preload 入口**（A-1137 实测结论，留档防重踩）：
+          // electron-vite 的 preload 构建走 `findLibEntry(root,'preload')` —— **单入口 + 固定文件名**
+          // （`src/preload/index.{js,ts,mjs,cjs}`）；`preload.build.rollupOptions.input` 被**整体忽略**。
+          // 判别实验：把 input 键名改成 `foo` 后产物**仍是 `index.js` 且字节数一字不差（42341）**。
+          // 官方多入口开关 `build.isolatedEntries`（配 `externalizeDeps:false`）在本仓当前版本配了也不生效。
+          // ⇒ 右栏 webview 的 guest preload 改走「构建期 `?raw` 内联 + 运行期落盘」，
+          //   见 `gui/src/preload/searchHost.cjs` 顶部与 `gui/src/main/searchBridge.ts`。
+          // ⚠️ `gui/tsconfig.json` 的 `include` 只含 `src/**/*.ts` ⇒ 本文件**不受类型检查**，
+          //   这类"装饰性配置"不会被 tsc 发现。
           rollupOptions: {
             input: resolve(__dirname, "src/preload/index.ts"),
           },

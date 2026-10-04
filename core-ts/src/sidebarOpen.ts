@@ -33,6 +33,19 @@ export interface SidebarOpenRequest {
   rel?: string;
   /** 来源：`site` = 站点弹窗/新窗口（会被渲染层的弹窗风暴保护限流） */
   from?: "site" | "user";
+  /**
+   * A-1142：**发起这次请求的会话**（工具循环注入的那个 `sessionId`）。
+   *
+   * ## 为什么必须有它
+   * 右栏视图是**全局单例**（一个 `RightSidebar` 组件、一份 `tabs`），而 Agent 是**异步**的：
+   * 用户在会话 A 派了任务、切到会话 B，此刻 A 的 Agent 才跑完工具 ⇒ 打开请求在 B 的界面上落地，
+   * 用户看到的就是「上一个 Agent 的页开到了这个会话里」（实测复现）。
+   * ⇒ 请求必须**自带归属**，渲染层才能判断"这条归不归当前显示的会话"。
+   *
+   * ⚠️ 它是**可选**的：站点弹窗 / 旧调用点拿不到会话号（→ 按"无法归属"处理，行为与以前一致）。
+   * ⚠️ 判据只有 `sidebarOpenMatchesSession` 一处 —— 别在渲染层再内联一个"要不要收"的判断。
+   */
+  sessionId?: string;
 }
 
 /** 注入的打开器签名。**字符串入参仍可用**（= `{kind:"url"}`），旧调用点无需改动。 */
@@ -69,14 +82,54 @@ export function normalizeSidebarOpenRequest(
   const kind: SidebarOpenKind =
     req.kind === "terminal" || req.kind === "files" ? req.kind : "url";
   const nm = trimOrUndef(req.name) ?? trimOrUndef(name);
+  /* ⚠️ 三个分支**都必须带上** `sessionId`：漏一个 kind = 那一类请求永远无法归属
+     （表现是"只有终端页会串台"，最难查的那一种）。 */
+  const sid = trimOrUndef(req.sessionId);
   if (kind === "terminal") {
-    return { kind, cmd: trimOrUndef(req.cmd), name: nm };
+    return { kind, cmd: trimOrUndef(req.cmd), name: nm, sessionId: sid };
   }
   if (kind === "files") {
-    return { kind, root: trimOrUndef(req.root), rel: trimOrUndef(req.rel), name: nm };
+    return { kind, root: trimOrUndef(req.root), rel: trimOrUndef(req.rel), name: nm, sessionId: sid };
   }
   const url = trimOrUndef(req.url);
-  return url ? { kind: "url", url, name: nm, from: req.from } : null;
+  return url ? { kind: "url", url, name: nm, from: req.from, sessionId: sid } : null;
+}
+
+/**
+ * A-1142：从工具参数里取「发起这次请求的会话号」（**唯一产地**）。
+ *
+ * 为什么单独一个函数：四个会开右栏的工具（`sidebar_open_terminal` / `sidebar_open_files` /
+ * `http_create_app` / 未来的）都要取它，写四遍就会漏改一处 —— 而漏掉的那一个 kind
+ * 表现为"只有这一类页会串台"，是最难查的一种回归。
+ *
+ * 口径与 `todo_write` 完全一致（`String(args.sessionId ?? "").trim()`）：
+ * 会话号由工具循环注入，缺失 = 会话上下文没就绪（CLI / 测试），如实返回 `undefined`
+ * （按"无法归属"处理），绝不许编一个。
+ */
+export function sessionIdFromArgs(args: Record<string, unknown>): string | undefined {
+  const s = String(args.sessionId ?? "").trim();
+  return s.length > 0 ? s : undefined;
+}
+
+/**
+ * A-1142：这条右栏请求**属不属于当前显示的会话**（唯一判据）。
+ *
+ * ## 口径（三种情形，逐条都是刻意的）
+ *   ① 请求没带 `sessionId`（站点弹窗 / 旧调用点）⇒ `true`：无法归属，保持旧行为交给当前会话。
+ *   ② 带了、但当前没有会话号 ⇒ `false`：宁可让它不落地，也不许"无归属地串进"任何界面。
+ *   ③ 两边都有 ⇒ 严格相等。
+ *
+ * ## ⚠️ 反面写法（本仓已付过账）
+ * 「`if (reqSid && curSid && reqSid !== curSid) { return false; } return true;`」看着等价，
+ * 实则两条边界都错：请求没带 ⇒ 放行（对）；当前没会话 ⇒ 也放行（错 —— 正是串台的口子）。
+ * 收紧成"先判请求、再判当前"的两段式，才不会写出一个看起来更短、实际漏守的守卫。
+ */
+export function sidebarOpenMatchesSession(reqSid?: string, curSid?: string): boolean {
+  const r = typeof reqSid === "string" ? reqSid.trim() : "";
+  if (!r) { return true; }              // ① 无法归属
+  const c = typeof curSid === "string" ? curSid.trim() : "";
+  if (!c) { return false; }             // ② 当前无会话 ⇒ 不收带归属的请求
+  return r === c;                        // ③
 }
 
 /**

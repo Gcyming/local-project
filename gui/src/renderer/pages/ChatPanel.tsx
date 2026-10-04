@@ -21,7 +21,50 @@ import {
 /** A-1008：「联网搜索」开关的唯一读写实现（与 App.tsx 共用，禁在本文件复写 localStorage 口径） */
 import { readNetworkEnabled, writeNetworkEnabled } from "../networkToggle.js";
 import { sanitizeThinking, normalizeThinkingText, stripMarkdown, splitThinkingIntoSteps, splitToolTrace, traceEntriesToToolSteps, composeToolTrace, resolveToolEntry, toolStatusLabel, toolStatusPhase, stripToolTraceMark } from "./thinkingText.js";
+/* A-1128：流式内容的**显示层逐字缓冲**（正文那套参数 + 思考那条缓冲的唯一出处）。
+   思考之所以"一整个一整个地吐"，就是因为它一条缓冲都没有（细则见 streamTyping.ts 文件头）。 */
+import { BODY_TYPING, IDLE_TAIL_TYPING, advanceTailTyping, tailTypingTarget, tailTypingHasBacklog, trimTailToShown, type TailTypingState } from "./streamTyping.js";
 import Markdown, { requestSidebarOpen, normalizeBrokenLines, tightenCjkSpacing } from "./Markdown.js";
+/* A-1133：拖入文件的分流判据（唯一产地，纯函数可单测）。 */
+import { planFileDrop } from "./dropGuard.js";
+/* A-1133：文档附件的**编解码唯一产地**（文本里带路径、界面上显示卡片而**不显示**地址）。 */
+import { formatDocAttachments, splitDocAttachments, baseNameOf } from "./docAttachments.js";
+
+/**
+ * 在右侧栏**预览这份附件**（附件卡片被点击时用）。
+ *
+ * 2026-09-30 用户实测：「像下面这样的卡片，我希望可以点击在右边预览，现状是只能看不能点，有点鸡肋；
+ * 拖进去后右边的侧边栏页关了后就点不开了，再想开就只能再拖一遍。」
+ *
+ * ⚠️ **与"拖入"走同一条路**：拖入那边发的就是 `requestSidebarOpen({kind:"doc", rel: 绝对路径})`
+ *    ⇒ 这里一字不差地复用同一条路由（`kind:"doc"` → 右栏 `openDocPreviewPage`）——
+ *    **绝不另写一套"该建什么页"的判据**（本仓既有约定：那个判据只有一处）。
+ * ⚠️ 卡片里存的就是**绝对路径**（A-1133：路径编码进消息文本、渲染时拆成卡片）⇒ 直接可用。
+ * ⚠️ 重复点同一个文件**不会**开重复页：右栏 `openBrowserTab` 按 **URL 去重**（同 URL 只切到那页）。
+ * ⚠️ 侧边栏若被收起，`App` 收到该事件会 `setRightOpen(true)` **自动展开** ⇒ 用户不必先手动打开。
+ * ⚠️ 必须是**模块级函数**：附件卡片有**两处**（输入区待发卡、已发送气泡卡），而后者在**另一个组件**里
+ *    ⇒ 写成组件内 handler 会拿不到作用域；写两遍又会让"点击语义"有两个产地（铁律 11）。
+ */
+/**
+ * 待发**文档附件**的上限。
+ * ⚠️ 与图片**刻意不同**：文档只带一条**磁盘路径**（几十字节，进消息文本），
+ *    界面与上下文成本都极低 ⇒ 可以放得很宽（32）。
+ */
+const MAX_PENDING_DOCS = 32;
+
+/**
+ * 待发**图片**的上限。
+ * ⚠️ 比文档小得多，因为每张图是**data URL**：既常驻内存（单张上限 8MB），
+ *    又会**整张进模型上下文**（base64 还要膨胀约 1/3）。放大它会直接把上下文和内存吃掉。
+ * ⚠️ 所以"大幅上调"只对**文档**成立；图片这里只从 4 放到 8，理由见上，不是漏改。
+ */
+const MAX_PENDING_IMAGES = 8;
+
+function openDocInSidebar(path: string, name?: string): void {
+  const p = (path ?? "").trim();
+  if (!p) { return; }
+  requestSidebarOpen({ kind: "doc", rel: p, name: (name ?? "").trim() || baseNameOf(p), from: "user" });
+}
 /* A-1106：自动压缩比率的**唯一出处**是 core-ts 的 `context_compress`（主进程判据同源）。
    此前这里硬编码 `0.5 / 0.97 / 0.85` —— 与 `DEFAULT_COMPRESS_RATIO` / `RATIO_MIN` / `RATIO_MAX`
    是同一组数的第二个产地：主进程一改，界面回显与刻度线就悄悄对不上（静默失效家族）。 */
@@ -52,7 +95,7 @@ import { CHEER_ROTATE_MS, pickCheer, shouldCheer } from "./cheerPhrases.js";
 /** A-1056③：待发指令卡片的三个操作图标（用户指定目录 gui/icon/icon_fpbc119q3rk）：
  *  修改 / 直接插入 / 撤销删除 */
 import queueEditIcon from "../../../icon/icon_fpbc119q3rk/edit.svg";
-import queueInsertIcon from "../../../icon/icon_fpbc119q3rk/arrow-narrow-right.svg";
+import queueInsertIcon from "../../../icon/icon_fpbc119q3rk/guide-arrow.svg";   // A-1151：用户提供的「引导」图标（原来用的是一个细右箭头 arrow-narrow-right.svg，被评价"太简陋"）
 import queueCancelIcon from "../../../icon/icon_fpbc119q3rk/close.svg";
 // A-1052：正文渲染前净化（折叠连续空行）——「巨型气泡」是 pre-wrap 把空行各撑成整行，见该模块文件头
 import { collapseBlankRuns } from "./messageText.js";
@@ -156,6 +199,10 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   file_read: { label: "读取文件", Icon: RefFileIcon },
   file_list: { label: "列出文件", Icon: FolderIcon },
   file_write: { label: "写入文件", Icon: EditIcon },
+  /* 2026-09-30：新工具 `docs_create`（Agent 从零生成 Office 文档）。
+     ⚠️ **加任何工具都必须同时在这里登记** —— 漏了不会报错，只会静默退化成「⚡ 英文原名」；
+        既有的 `a1091-ui-guards.spec.ts` T1 正是为这条而设（本轮就是它抓住了我）。 */
+  docs_create: { label: "生成 Office 文档", Icon: NotesIcon },
   code_check: { label: "语法检查", Icon: CheckIcon },
   // A-980-R30：键名必须是**真实工具名**。此前写的是 `delegate`（并不存在这个工具），
   // 而真正的工具叫 `delegate_subagent` → 命不中映射，工具卡只能退化成裸名字显示。
@@ -229,6 +276,8 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
      否则思考历程里会退化成「⚡ sidebar_open_terminal」（A-1091 的守卫会当场报红）。 */
   sidebar_open_terminal: { label: "打开终端页", Icon: TerminalIcon },
   sidebar_open_files: { label: "打开文件页", Icon: FolderIcon },
+  /* A-1144：读右栏**挂载**内容（系统每轮已自动附摘要，这是"再确认一次"的入口）。 */
+  sidebar_mount: { label: "读右栏挂载", Icon: RefFileIcon },
 };
 
 export function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
@@ -355,7 +404,9 @@ import { createMonitor, bumpMonitor, monitorElapsed, type StreamMonitor } from "
 import { contextRatio, contextPct, ringLevel, fmtTokens } from "./contextMath.js";
 import SubAgentExpandButton from "./SubAgentExpandButton.js";
 /* A-1074（#230）：输入框上方「悬浮按钮坞」的互斥判据（纯模块，唯一出处） */
-import { type DockId, type DockState, toggleDock, closeDock, dockSlotState, dockSlotClassOf } from "./floatDock.js";
+import { type DockId, type DockState, toggleDock, closeDock, isDockOpen, dockSlotClassOf } from "./floatDock.js";
+/* A-1137：右栏状态（对话侧状态条）—— 订阅**唯一产地**的快照 store，不自己打听右栏。 */
+import { getSidebarSnapshot, subscribeSidebarSnapshot, describeSidebarSnapshot, type SidebarSnapshot } from "./sidebarSearch.js";
 import { selfHealState } from "../ErrorBoundary.js";
 
 /** A-935：上下文占用**单一事件源**——发送时估算 / done 收到真实 usage 校准都经此广播，
@@ -1073,6 +1124,10 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
     setTimeout(() => setCopied(false), 1500);
   };
   const cap = m.mode ? m.mode.charAt(0).toUpperCase() + m.mode.slice(1) : "";
+  /* A-1133：正文里编码着 `【附件】<路径>`（Agent 要有路径），但**界面不该显示地址** ——
+     这里把它拆出来渲染成「图标 + 文件名」的卡片（用户原话：「直接显示带图标的卡片」）。
+     ⚠️ 复制/回滚仍用原始 `m.content`（带路径）：用户复制时通常正需要那个路径。 */
+  const att = splitDocAttachments(m.content);
   return (
     <div className="msg-row" style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", marginBottom: 14 }}>
       <div className="msg-user-bubble" style={{
@@ -1082,6 +1137,22 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
         lineHeight: 1.6, fontSize: 15, whiteSpace: "pre-wrap", wordBreak: "break-word",
         userSelect: "text",
       }}>
+        {/* 文档附件卡片（A-1133）：白色半透明底 + 文件图标，**只显示文件名**（路径在 title 里） */}
+        {att.docs.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: att.body ? 8 : 0, justifyContent: "flex-end" }}>
+            {att.docs.map((d) => (
+              <span key={d.path}
+                role="button" tabIndex={0}
+                title={`${d.path}\n点击在右侧预览`}
+                onClick={() => openDocInSidebar(d.path, d.name)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDocInSidebar(d.path, d.name); } }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 240, padding: "3px 9px 3px 6px", borderRadius: 9, background: "rgba(255,255,255,0.18)", border: "1px solid rgba(255,255,255,0.28)", cursor: "pointer" }}>
+                <FileTypeIcon filename={d.name} size={13} />
+                <span style={{ fontSize: 12, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+              </span>
+            ))}
+          </div>
+        )}
         {/* 随消息回显的图片缩略图（data URL；点击可新窗口查看大图） */}
         {m.images != null && m.images.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: m.content ? 8 : 0, justifyContent: "flex-end" }}>
@@ -1104,8 +1175,9 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
         )}
         {/* A-1052：渲染前折叠连续空行。pre-wrap 下每个空行占一整行（≈21.7px），
             正文里一段连续空行会把气泡撑成"巨型色块"（实测 646px 里 630px 是空白）。
-            ⚠️ 只改渲染：复制/回滚仍用原始 `m.content`。 */}
-        {collapseBlankRuns(m.content)}
+            ⚠️ 只改渲染：复制/回滚仍用原始 `m.content`。
+            A-1133：渲染的是**去掉附件行**的正文（`att.body`）—— 附件已在上方渲染成卡片。 */}
+        {collapseBlankRuns(att.body)}
       </div>
       {/* 悬停元信息行：模式 · 模型 · 时间 + 回滚/复制（hover 时出现） */}
       <div className="msg-hover" style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, color: "var(--text-dim)", marginTop: 3 }}>
@@ -1211,7 +1283,9 @@ const DiffBlock = React.memo(function DiffBlock({ oldText, newText }: { oldText:
         <span style={{ color: "var(--danger)", marginLeft: 6 }}>-{dels}</span>
         <span style={{ marginLeft: "auto", color: "var(--text-dim)" }}>vs 原内容</span>
       </div>
-      <div className="think-diff-body">
+      {/* A-1130：`diff-rows-fit` 让**所有行同宽**（= 最宽行）⇒ 红/绿底色从最左一路铺到最右，
+          而不是只铺到这一行自己的字末。判据与取舍见 index.css 里 `.diff-rows-fit` 的注释。 */}
+      <div className="think-diff-body diff-rows-fit">
         {lines.map((l, i) => (
           <div key={i} className={`think-diff-row diff-${l.op === "=" ? "eq" : l.op === "+" ? "add" : "del"}`}>
             <span className="think-diff-mark">{l.op === "=" ? " " : l.op === "+" ? "+" : "-"}</span>
@@ -2043,7 +2117,7 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
         {p.diffFull && (
           <div className={`collapse${expanded === i ? " is-open" : ""}`}>
             <div>
-              <div className="prod-diff" style={{ marginTop: 6, borderRadius: 8, overflow: "hidden", maxHeight: 340, overflowY: "auto", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.65 }}>
+              <div className="prod-diff" style={{ marginTop: 6, borderRadius: 8, overflow: "hidden", maxHeight: 340, overflowY: "auto", scrollbarGutter: "stable", fontFamily: "Consolas, 'Courier New', monospace", fontSize: 11.5, lineHeight: 1.65 }}>
                 <ProductDiffLines oldText={p.diffFull.old} newText={p.diffFull.new} />
               </div>
             </div>
@@ -2074,17 +2148,18 @@ const ProductPanel = React.memo(function ProductPanel({ products }: { products: 
           </button>
         )}
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, marginTop: 8 }}>
         {ranked.slice(0, PRODUCT_CORE_LIMIT).map(({ p }) => renderCard(p))}
       </div>
       {/* A-1015：「其余产物」整块做高度插值（收起后不留空洞、不占竖向空间）。
-          为什么不给每张卡各配一个折叠容器：卡片网格是 flex-wrap，每张卡外再套折叠容器时
-          **宽度仍然占位**（收起只是高度 0），会在网格里留下一个个空洞；整块收才收得干净。
+          为什么不给每张卡各配一个折叠容器：卡片是**竖排一列**（A-1147，用户要求「统一竖着一列排，
+          别横着排」），每张卡外再套一层折叠容器时**行仍在流里**（收起只是高度 0），
+          会在列里留下一个个空洞；整块收才收得干净。
           注：本容器是根 div 的块级子元素（不在上面那个 flex 容器内），所以原先写的
           `flexBasis:"100%"` 并不生效 —— A-1015 复查时删掉，避免无效样式误导后来人。 */}
       <div className={`collapse${open ? " is-open" : ""}`}>
         <div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, marginTop: 8 }}>
             {rest.map(({ p }) => renderCard(p))}
           </div>
         </div>
@@ -2366,6 +2441,13 @@ export default function ChatPanel({
   }, [onHistoryLoaded]);
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [input, setInput] = React.useState("");
+  /* A-1137：右栏状态（用户要求「左侧浏览器搜索后，对应的对话栏可以实时监测到右侧边栏打开的内容
+     并时刻准备接受用户需求」）。
+     ⚠️ 数据源**只有一处**：`sidebarSearch.ts` 的快照 store —— 这里只**订阅**，
+        绝不去自己打听右栏（也不直接听 `slime:search:viewChanged`：那会让"右栏状态"有两个产地）。
+     ⚠️ 初始值用 `getSidebarSnapshot()`：晚挂载时要能立刻看到已有状态，不能等下一次变化。 */
+  const [sideSnap, setSideSnap] = React.useState<SidebarSnapshot>(() => getSidebarSnapshot());
+  React.useEffect(() => subscribeSidebarSnapshot(setSideSnap), []);
   /** A-971：input 值实时镜像——卸载清理（unmount flush）需读到「切走那一刻」的最新草稿，
    *  卸载闭包里只能靠 ref 拿最新值（state 会被 eslint-disable 的旧 deps 卡住） */
   const inputValueRef = React.useRef("");
@@ -2390,6 +2472,18 @@ export default function ChatPanel({
   // 正文"逐字渐入"（ChatGPT/Claude 式），不再"整个块蹦出"；onDone/reset 时清空
   const displayPartialRef = React.useRef("");
   const lastTypingAtRef = React.useRef(0);
+  /* A-1128：**思考内容的显示层逐字缓冲**（与 `displayPartialRef` 同族，但**独立推进**）。
+   *
+   * 用户原话：「思考历程里面的吐字也是一整个一整个的吐……明明之前有一段时间是符合我要求的」。
+   * 根因与修法见 `streamTyping.ts` 的文件头：思考没有缓冲，SSE 的 reasoning chunk 直接进
+   * 时间线 ⇒ 尾巴一次多出几十上百字 ⇒ 渐入（只覆盖 ≤48 字）根本来不及"逐字"。
+   *
+   * ⚠️ 为什么**不复用** `displayPartialRef`：那个会被正文后置闸门（`bodyGateRef`）冻结
+   *   —— 冻结是对的（正文要收尾统一输出，用户裁决保留），但思考必须**边想边看**。
+   *   两者的冻结语义不同 ⇒ 各自一条缓冲，谁也不许去改对方的判据。
+   * ⚠️ 只缓冲**显示层**：`timelineStepsRef` 一个字都不动（持久化/恢复/快照都读它）。 */
+  const tailTypingRef = React.useRef<TailTypingState>(IDLE_TAIL_TYPING);
+  const [tailShown, setTailShown] = React.useState("");
   /** A-1091：最近一次**显示层真的吐出了字符**的时刻（ms）。吐字光标的唯一证据。
    *  刻意与 `lastTypingAtRef`（打字机节流门限）分开：那个是"下次可推进的时间门限"，
    *  这个是"上一次真推进的墙钟"，语义不同，合并会一改就牵连两处行为。 */
@@ -2421,7 +2515,10 @@ export default function ChatPanel({
   /** A-980-R24：打字机限速的「追平阈值」（字符）。
    *  显示落后超过这个量就切换到按比例追赶——否则高速率模型下 buffer 会无限堆积，
    *  而每帧都要对全文重跑 Markdown 解析 → 渲染进程 OOM（详见 schedulePartialRender 注释）。 */
-  const TYPING_CATCHUP_CHARS = 240;  const schedulePartialRender = React.useCallback(() => {
+  /** A-980-R24：打字机限速的「追平阈值」（字符）—— 值住在 `streamTyping.BODY_TYPING`
+   *  （与思考那条缓冲共用一套参数口径；正文这处只读它，不再自写字面量）。 */
+  const TYPING_CATCHUP_CHARS = BODY_TYPING.catchupChars;
+  const schedulePartialRender = React.useCallback(() => {
     if (partialRafRef.current !== null) { return; }
     partialRafRef.current = window.requestAnimationFrame(() => {
       partialRafRef.current = null;
@@ -2444,10 +2541,10 @@ export default function ChatPanel({
         const now = Date.now();
         if (backlog > TYPING_CATCHUP_CHARS) {
           // 追平模式：每次推进积压的 ~1/12，且不受 28ms 门限限制（每帧都能推进）
-          const step = Math.max(4, Math.ceil(backlog / 12));
+          const step = Math.max(4, Math.ceil(backlog / BODY_TYPING.divisor));
           displayPartialRef.current = full.slice(0, shown.length + step);
           lastTypingAtRef.current = now;
-        } else if (now - lastTypingAtRef.current >= 28) {
+        } else if (now - lastTypingAtRef.current >= BODY_TYPING.stepMs) {
           displayPartialRef.current = full.slice(0, shown.length + 1);
           lastTypingAtRef.current = now;
         }
@@ -2503,6 +2600,14 @@ export default function ChatPanel({
       }
       // 推理过程同样走 rAF（A-129：去掉 reasoning 分支每 chunk 一次 setReasoningTmp）
       setReasoningTmp(reasoningTmpRef.current);
+      /* A-1128：思考内容同样逐字推进（**不受正文闸门影响** —— 思考要边想边看）。
+         ⚠️ 目标取自 `timelineStepsRef`（真源），截断只发生在渲染时（`trimTailToShown`）。 */
+      tailTypingRef.current = advanceTailTyping(
+        tailTypingRef.current,
+        tailTypingTarget(timelineStepsRef.current),
+        Date.now(),
+      );
+      setTailShown(tailTypingRef.current.shown);
       // A-xxx：交错时间线快照同步（增量 steps 数组——引用不可变，必须快照新数组触发渲染）
       setLiveTimeline(timelineStepsRef.current);
       // A-968：切回恢复的占位气泡随 partial 实时续长——冻结的"（恢复中…）"会造成
@@ -2534,6 +2639,12 @@ export default function ChatPanel({
         partialRafRef.current = null;
         schedulePartialRender();
       }
+      /* A-1128：思考那条缓冲的**自续**（与上面那条分开：它不带 `!gated` —— 思考要边想边看）。
+         不写这条，症状见 `streamTyping.tailTypingHasBacklog` 的注释（尾巴停在一半）。 */
+      if (tailTypingHasBacklog(tailTypingRef.current, timelineStepsRef.current)) {
+        partialRafRef.current = null;
+        schedulePartialRender();
+      }
     });
   }, []);
   const resetPartial = React.useCallback(() => {
@@ -2546,6 +2657,9 @@ export default function ChatPanel({
     lastTypingAtRef.current = 0;
     lastEmitAtRef.current = 0; // A-1091：复位"最近吐字"——否则新一轮开头会残留上一轮的时间戳
     setPartial("");
+    /* A-1128：思考那条缓冲一并清干净（引用同一个 IDLE 对象 ⇒ 后续按引用相等即可认作"没变化"） */
+    tailTypingRef.current = IDLE_TAIL_TYPING;
+    setTailShown("");
   }, []);
 
   /** A-1106（问题 5a）：**开闸点火**。
@@ -2637,7 +2751,8 @@ export default function ChatPanel({
   /* ── A-1069（#226）：Agent 启动的后台资源面板（输入栏上方的按钮 + 可展开列表）──
    *
    * 用户原话：「请把 Agent 停下时的后台进程做一个……在输入栏上方的按钮，点击后可以展开」，
-   * 范围是「仅 Agent 启动的进程」。
+   * 范围是「仅 Agent 启动的进程」；2026-09-26 收窄为用户原话「**只监视 Agent 运行的
+   * 后台脚本、端口**」⇒ 面板里只有脚本宿主与端口两类，**子代理在自己那格坞里**（不在这里）。
    *
    * ⚠️ 渲染层**一个判据都不写**：类别归属、排序、状态词、能否停止、时长格式——全部由主进程
    *   调 `core-ts/src/services/agentProcs.ts` 的纯函数算好，这里只画。于是
@@ -2646,12 +2761,13 @@ export default function ChatPanel({
    *   叠常驻说明（见 textarea 上方那条注释），这里是**有条件的状态+控件**，不是说明文字。 */
   const [agentProcs, setAgentProcs] = React.useState<AgentProcView | null>(null);
   /* A-1074（#230）：坞的展开态是**单值**（"后台进程" / "子代理" / 都收起）——
-     两个按钮各自持一个布尔时，"两个同时展开"只是没人管的非法状态（界面上两块面板互盖），
-     而 tsc / 构建 / 全部逻辑测试都不会响。单值 → 非法状态在类型上不存在（见 floatDock.ts）。 */
+     两个按钮各自持一个布尔时，"两个面板同时展开"只是没人管的非法状态（界面上两块面板互盖），
+     而 tsc / 构建 / 全部逻辑测试都不会响。单值 → 非法状态在类型上不存在（见 floatDock.ts）。
+     ⚠️ A-1126（用户 2026-09-26）：互斥只作用于**面板** —— 两个**按钮**任何时候都常显，
+     不因另一个面板开着而淡出（用户原话：「点击后台任务后，同行的子代理悬浮按钮会消失」）。 */
   const [dock, setDock] = React.useState<DockState>(null);
-  const procsSlot = dockSlotState(dock, "procs");
-  const subsSlot = dockSlotState(dock, "subs");
-  const procsOpen = procsSlot.open;
+  const procsOpen = isDockOpen(dock, "procs");
+  const subsOpen = isDockOpen(dock, "subs");
   const toggleDockSlot = React.useCallback((id: DockId): void => { setDock((v) => toggleDock(v, id)); }, []);
   const [procsBusy, setProcsBusy] = React.useState<string | null>(null);
   const [procsError, setProcsError] = React.useState<string | null>(null);
@@ -3029,6 +3145,14 @@ export default function ChatPanel({
 
   /* ── 识图：待发送图片（预览行显示，可删除；仅随当前轮消息发送一次）── */
   const [pendingImages, setPendingImages] = React.useState<Array<{ id: string; name: string; dataUrl: string }>>([]);
+  /* A-1133：待发**文档附件**（拖入的 docx/xlsx/pptx/pdf）。
+     ⚠️ 与图片分开：图片走 dataUrl 送给视觉模型，文档走**磁盘路径**（由 `file_read` 按需分页读）——
+     混在一个数组里会让「发送时该带什么」变成一堆 if。 */
+  /* ⚠️⚠️ 附件数量上限（**唯一产地** —— 以前是散在 4 处的字面量 `slice(-4)`，
+     改一处忘一处就"有的入口还是 4"。2026-09-30 用户实测：「为什么现在最多只能载入 4 个文件啊？
+     能不能大幅上调一下这个数字」。 */
+  const [pendingDocs, setPendingDocs] = React.useState<Array<{ id: string; name: string; path: string }>>([]);
+  const docsSeqRef = React.useRef(0);
   const imagesSeqRef = React.useRef(0);
 
   /** ── 输入框内嵌权限请求（替代系统弹窗）：请求到达时输入框切换为选择题 UI ── */
@@ -5184,7 +5308,7 @@ export default function ChatPanel({
   /** A-162/A-164：真正执行发送（含输入框清空/历史追加/流式初始化/入参记录）。send() 与插入指令续发共用。
    *  注意：本函数总是清空输入框（调用方只管把内容传进来）——此前重构遗漏 setInput("")，
    *  导致「消息发出后文本仍留在输入框」的用户实测回归（A-164）。 */
-  async function doSend(text: string, targetSessionId?: string, opts?: { images?: string[]; forceNewTurn?: boolean }): Promise<void> {
+  async function doSend(text: string, targetSessionId?: string, opts?: { images?: string[]; docs?: string[]; forceNewTurn?: boolean }): Promise<void> {
     // A-982：**空串必须当"没传"处理**。`targetSessionId ?? sessionId` 只在 null/undefined 时回落，
     // 而空串是"有值"——调用方（如中断续发队列）传 "" 时会得到 `sid = ""`，于是
     // ① streamSessionRef 变成空串 → 右栏 sessionId 守卫把所有实时事件丢掉（这就是"右栏不实时"
@@ -5255,6 +5379,12 @@ export default function ChatPanel({
     // 允许「只发图片、不带文字」
     if (!api || (!text && imagesToSend.length === 0)) { return; }
     const sid = targetSid ?? sessionId;
+    /* A-1133：**文档附件编码进消息文本**（界面上显示卡片、Agent 拿到磁盘路径）。
+       为什么必须进文本而不是只挂 UI state：历史落库在主进程（`history.jsonl` 存消息文本），
+       只挂 state 的话切会话/重启后附件就丢了，而 Agent 那条路**始终需要路径**。
+       渲染层再用 `splitDocAttachments` 把它拆成卡片 —— 于是"地址不进界面、路径仍可达"两件事同时成立。 */
+    const docsToSend = opts?.docs ?? pendingDocs.map((d) => d.path);
+    const outbound = text + formatDocAttachments(docsToSend);
     // A-980-R30：**移除"发送前无脑自动派发子代理"启发式**（A-975 曾在此按正则猜测意图，把用户原话
     // 前 200 字直接丢给子代理）。理由有三，任何一条都足以撤掉：
     // ① 它抢在模型前面派发，等于**替模型做了委派决策**，与模型自己的规划冲突，最坏情况是同一个子任务
@@ -5267,7 +5397,7 @@ export default function ChatPanel({
     setInput(""); // 受控清空输入框（textarea value={input}）；不直写 DOM，避免与 React 渲染竞态
     setAtOpen(false); // A-951：发送后收起 @ 选择器
     const modelLabel = !modelChoice || modelChoice === "inherit" ? "inherit" : (modelChoice.split(":").pop() || modelChoice);
-    setMessages((prev) => [...prev, makeMessage("user", text, {
+    setMessages((prev) => [...prev, makeMessage("user", outbound, {
       model: modelLabel, mode,
       images: imagesToSend.length > 0 ? imagesToSend : undefined,
     })]);
@@ -5277,7 +5407,7 @@ export default function ChatPanel({
       snap.hasActive = true;
       // A-974-R9：初始化监测起点（发送即计时）——否则"发完立刻切走"时，切回后耗时会从切回那刻重算
       snap.monitor = createMonitor(Date.now());
-      snap.messages = [...(snap.messages ?? []), makeMessage("user", text, {
+      snap.messages = [...(snap.messages ?? []), makeMessage("user", outbound, {
         model: modelLabel, mode,
         images: imagesToSend.length > 0 ? imagesToSend : undefined,
       })];
@@ -5286,6 +5416,8 @@ export default function ChatPanel({
     // 发送后清空待发区（图片只对当前轮生效，不写入会话记忆供后续轮次自动携带）
     // ⚠️ 仅当**取过** pendingImages 时才清（队列续发走 opts.images，用户此刻选的新图不属于它）
     if (!opts?.images) { setPendingImages([]); }
+    /* A-1133：附件已随本条发出，清空待发区（与图片同规；队列续发走 `opts.docs`，不吃此刻新选的）。 */
+    if (!opts?.docs) { setPendingDocs([]); }
     resetPartial();
     // A-975：新一轮开始 → 清上一轮的压缩报告行（若有）
     compressNoteRef.current = null;
@@ -5342,7 +5474,9 @@ export default function ChatPanel({
     // 活动时间戳还是上一次运行的旧值，可能被判成"流没在动"而放行第二条流。
     streamActivityAtRef.current = Date.now();
     streamSessionRef.current = sid; // 本流归属当前会话（chunk/done/error 过滤依据）
-    streamReqRef.current = { agentId, message: text, sessionId: sid, networkEnabled, maxTokens, images: imagesToSend.length > 0 ? imagesToSend : undefined };
+    /* ⚠️ A-1133：这里存的是**重试/重连时会原样重发**的请求快照 ⇒ 必须用 `outbound`
+       （带附件编码的那份）。用 `text` 的话，断线重试会把附件悄悄丢掉。 */
+    streamReqRef.current = { agentId, message: outbound, sessionId: sid, networkEnabled, maxTokens, images: imagesToSend.length > 0 ? imagesToSend : undefined };
     retryCountRef.current = 0;
     ctxOverflowRetriedRef.current = false;
     stoppingRef.current = false;
@@ -5372,7 +5506,7 @@ export default function ChatPanel({
     }
     // A-974：发流即启心跳（实测占用的 1s 强制派发；done/error/reset 时清理）
     ensureCtxPulse();
-    void api.chat.stream({ agentId, message: text, sessionId: sid, networkEnabled, maxTokens, images: imagesToSend.length > 0 ? imagesToSend : undefined });
+    void api.chat.stream({ agentId, message: outbound, sessionId: sid, networkEnabled, maxTokens, images: imagesToSend.length > 0 ? imagesToSend : undefined });
   }
 
   /** 主动中断当前 Agent 输出（底层 abort + 保留已生成部分） */
@@ -5476,10 +5610,10 @@ export default function ChatPanel({
     if (imgs.length === 0) { return; }
     setPendingImages((prev) => {
       const merged = [...prev, ...imgs];
-      const kept = merged.slice(-4); // 只保留最近 4 张
+      const kept = merged.slice(-MAX_PENDING_IMAGES); // 只保留最近 N 张（见 MAX_PENDING_IMAGES）
       const dropped = merged.length - kept.length;
       if (dropped > 0) {
-        window.setTimeout(() => void alertAsync(`图片超限，仅保留最近 4 张（已丢弃 ${dropped} 张）`), 0);
+        window.setTimeout(() => void alertAsync(`图片超限，仅保留最近 ${MAX_PENDING_IMAGES} 张（已丢弃 ${dropped} 张）`), 0);
       }
       return kept;
     });
@@ -5507,12 +5641,12 @@ export default function ChatPanel({
     setPendingImages((prev) => {
       const imgs = res.images!.map((im: { name: string; mime: string; dataUrl: string }) => ({ id: `img-${++imagesSeqRef.current}`, name: im.name, dataUrl: im.dataUrl }));
       const merged = [...prev, ...imgs];
-      const kept = merged.slice(-4);
+      const kept = merged.slice(-MAX_PENDING_IMAGES);
       dropped = merged.length - kept.length;
       return kept;
     });
     if (dropped > 0) {
-      window.setTimeout(() => void alertAsync(`图片超限，仅保留最近 4 张（已丢弃 ${dropped} 张）`), 0);
+      window.setTimeout(() => void alertAsync(`图片超限，仅保留最近 ${MAX_PENDING_IMAGES} 张（已丢弃 ${dropped} 张）`), 0);
     }
     setPlusOpen(false);
     setSuggestions([]);
@@ -5535,12 +5669,66 @@ export default function ChatPanel({
   }, [appendImageFiles]);
 
   /** input 容器拖拽：图片文件直接转为附件 */
-  const handleDropImages = React.useCallback((e: React.DragEvent): void => {
+  /* ⚠️ A-1133：旧的 `handleDropImages`（只认图片）已**删除**，由 `handleDropFiles` 统一接管。
+     保留两份就会出现"同一入口两套判据"：只认图片的那份会让 .docx 掉进 Chromium 的默认导航
+     （`file://` 加载 ⇒ ERR_FAILED 死循环，就是用户报的那次事故）。 */
+
+  /**
+   * A-1133：**拖入工作文档**（用户原话：「完全无法拖入任何 word、PDF、excel 等工作文档」）。
+   *
+   * 三条缺陷叠在一起，缺一条都拖不进来：
+   *   ① 旧 `handleDropImages` 只对**图片**做处理 ⇒ `.docx` 落到 Chromium 的默认行为
+   *      （导航到该文件的 `file://` URL）⇒ `ERR_FAILED` + 重试风暴（入口处已装拖放闸门兜住）；
+   *   ② **拿不到磁盘路径**：`File.path` 在 Electron 32 起已移除（本仓 35），
+   *      而仓里没有 `webUtils.getPathForFile` 桥 ⇒ 就算想读也无从读起（已在 preload 补上）；
+   *   ③ 文档与图片的**分流**没有任何判据（类型判断散在组件里）。
+   *
+   * 现在：路径交给 `files.pathForFile`，分流交给 `planFileDrop`（唯一判据），
+   * 文档以路径形式**写进输入框**（用户可编辑、可删）—— Agent 随即能用 `file_read` 读它
+   * （`file_read` 早已支持 docx/xlsx/pptx 抽文本，老版 .doc/.xls/.ppt 走 OLE 解析）。
+   * ⚠️ 这里**只把路径交给用户/Agent**，不把文档正文塞进输入框：正文可能几十万字，
+   *    塞进去等于把上下文一次性烧光（模型的读取应当由 `file_read` 按需分页）。
+   */
+  const handleDropFiles = React.useCallback((e: React.DragEvent): void => {
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) { return; }
-    if (Array.from(files).some((f) => f.type.startsWith("image/"))) {
-      e.preventDefault();
-      void appendImageFiles(files);
+    const list = Array.from(files);
+    const plan = planFileDrop(list.map((f) => ({ name: f.name, type: f.type })));
+    if (plan.images.length > 0) { void appendImageFiles(list); }
+    const api = (window as unknown as { slimeAPI?: { files?: { pathForFile?: (f: File) => string } } }).slimeAPI;
+    const paths: string[] = [];
+    for (const d of plan.documents) {
+      const f = list[d.index];
+      const p = api?.files?.pathForFile?.(f) ?? "";
+      if (p) { paths.push(p); }
+    }
+    if (paths.length > 0) {
+      /* 附件以**卡片**形式挂在输入区（用户原话：「我不想要这种直接显示文件地址的方式……
+         我要的是直接显示带图标的卡片」）⇒ 不再往输入框里塞 `【文件】路径`。
+         路径在**发送时**才编码进消息文本（见 `formatDocAttachments`），界面上永不出现地址。 */
+      setPendingDocs((prev) => {
+        const merged = [...prev];
+        for (const p of paths) {
+          if (!merged.some((d) => d.path === p)) {
+            merged.push({ id: `doc-${++docsSeqRef.current}`, name: baseNameOf(p), path: p });
+          }
+        }
+        const kept = merged.slice(-MAX_PENDING_DOCS);   // 上限见 MAX_PENDING_DOCS（文档只带路径，可以很宽）
+        const dropped = merged.length - kept.length;
+        if (dropped > 0) { window.setTimeout(() => void alertAsync(`文档附件超限，仅保留最近 ${MAX_PENDING_DOCS} 个（已丢弃 ${dropped} 个）`), 0); }
+        return kept;
+      });
+      /* 顺手在右栏**打开 HTML 网页渲染**（用户要的"变换成 HTML"）——
+         拖入是明确的"我要看这份文档"意图，所以直接给渲染结果，而不是让用户再点一次。
+         `kind:"doc"` 由右栏负责：抽文本 → 转自包含 HTML → 落盘 → 应用内服务 → 浏览器页。 */
+      const first = paths[0];
+      requestSidebarOpen({ kind: "doc", rel: first, name: baseNameOf(first) });
+    }
+    if (plan.rejected.length > 0) {
+      /* 拒绝要**出声**（静默忽略的表现就是用户最初报的「拖进来没反应」），
+         但也不该把提示文字塞进输入框 —— 用与"图片超限"同一套提示通道。 */
+      const first = plan.rejected[0];
+      window.setTimeout(() => void alertAsync(`暂不支持：${list[first.index].name}\n${first.reason}`), 0);
     }
   }, [appendImageFiles]);
 
@@ -5822,13 +6010,38 @@ export default function ChatPanel({
     steerAckAtRef.current = Date.now();
   }
 
-  /** 「撤销删除」：移出队列（指令直接丢弃 —— 只由用户显式点击触发，绝不自动丢） */
+  /** 「撤销删除」：移出队列（指令直接丢弃 —— 只由用户显式点击触发，绝不自动丢）
+   *  ⚠️ A-1151：**同时要通知主进程把 steer 缓冲里那条删掉**。只删渲染层这份是不够的：
+   *  用户点过「引导」箭头（或回车）后，这条已经被 `pushSteer` 推进主进程缓冲，
+   *  残留会在本轮的轮次边界、或下一次运行时被注入 —— 用户实测就是
+   *  「点了取消叉，结果后面还是都传上去了」。
+   *  `dropSteer` 找不到该 id 时返回 false（从未投递 / 已被消费），两种都无需报错。 */
   function removeQueueItem(id: number): void {
     syncQueue(removeAt(interruptQueueRef.current, id));
+    // 脚本作用域里没有 `api` 常量（它是在各 effect 内就地取的），这里同样就地取一次。
+    const api = (window as unknown as { slimeAPI?: { chat?: { dismissSteer?: (s: string, i: number | string) => Promise<unknown> } } }).slimeAPI;
+    void api?.chat?.dismissSteer?.(sessionId ?? "", id);
   }
 
   /** 本会话此刻还有几条待发（面板只在有货时出现） */
   const queueOfMine = queueView.filter((q) => q.sessionId === sessionId);
+
+  /* A-1137：对话侧状态条的文案（纯函数，唯一产地）。`null` = 右栏没有可挂载的内容 ⇒ 整条不渲染。 */
+  const sideStatus = describeSidebarSnapshot(sideSnap);
+
+  /* A-1144：**挂载**（取代原来的「交给 slime」按钮）。
+     右栏摘要每轮自动进系统提示：这里上报 → 主进程按 sessionId 存住 → `ChatService` 注入。
+     依据 MCP Apps 的两条硬原则：界面上给用户看的东西必须同时对模型可见；用户操作要回送模型上下文。
+     ⚠️ 上报的是**这个会话**的（`props.sessionId`），主进程按会话匹配 ⇒ 别的会话读不到（隔离）。
+     ⚠️ 没有可挂载的内容时必须上报 `null`（清空）—— 否则模型会一直拿着一份过期的右栏。
+     ⚠️ 依赖数组用 `sideStatus?.inject`（字符串）而不是对象：后者每次渲染都是新身份，会无限上报。 */
+  React.useEffect(() => {
+    const api = (window as unknown as {
+      slimeAPI?: { publishSidebarMount?: (p: { sessionId: string; text: string } | null) => void };
+    }).slimeAPI;
+    const sid = sessionId ?? "";
+    api?.publishSidebarMount?.(sideStatus && sid ? { sessionId: sid, text: sideStatus.inject } : null);
+  }, [sideStatus?.inject, sessionId]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, position: "relative", overflow: "hidden" }}>
@@ -5985,7 +6198,20 @@ export default function ChatPanel({
             `index.css` 里 `.topic-rail-hit` 的 `left`（判定区左侧那 10px 就吃在这段留白里）。 */}
         <TopicRail mode="wave" scroller={railScroller} collect={collectRailEntries} params={railParams} />
         <div ref={scrollRef} onScroll={handleScroll} onWheel={handleWheel} className="chat-scroll rail-host"
-          style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "14px 44px 0 16px", overflowAnchor: "none" }}>
+          /* ⚠️ A-1152：`minWidth: 0` —— 用户实测「窗口从常规大小变成最大化后，对话页被强行拉开、
+             浮窗窗口内出现空白」，并猜测「界面缩放时各页面不会等比自适应，而是固定尺寸，
+             两侧边栏回缩、中间被强行拉出」。
+             ⚠️ 结论：**他的猜测成立**，机制是三层叠加的硬下限（都不是"等比"，是"绝对值"）：
+               ① `.main { min-width: 380px }`（A-975-R4 加的聊天区保底，只在 `.main-float` 时刻解除）；
+               ② 本容器 `padding: 14px 44px 0 16px` —— **左右合计 60px 是绝对值**，窗口越宽占比越小、
+                 窗口越窄它越占比例；
+               ③ 内部若干 `minWidth: 62 / 80 / 34` 的产物卡标签（绝对像素，不可压缩）。
+             三者叠加 ⇒ 窗口变化时聊天区的**最小可用宽度是固定的**，而两侧栏是 flex-shrink:0
+             不肯让位 ⇒ 中间被强行拉开/留白。
+             这里补 `minWidth: 0` 让本容器**允许被压到比内容更窄**（配合 `overflowY:auto`
+             让内容改为滚动而不是把容器撑开）⇒ 这是"强行拉开"的直接解药。 */
+          style={{ position: "absolute", inset: 0, overflowY: "auto", minWidth: 0,
+            padding: "14px 44px 0 16px", overflowAnchor: "none" }}>
           {olderInfo && (
             <div style={{ display: "flex", justifyContent: "center", margin: "2px 0 12px" }}>
               <button className="load-earlier-pill" onClick={() => void loadOlder()} disabled={loadingOlder}>
@@ -6081,7 +6307,9 @@ export default function ChatPanel({
                   <div className={`collapse${reasoningOpen ? " is-open" : ""}`}>
                     <div>
                       <div className="think-timeline is-live" style={{ marginTop: 4 }}>
-                        {groupTimeline(liveTimeline).map((g) => (
+                        {/* A-1128：按**显示缓冲**截断末位文本节点（唯一接口 `trimTailToShown`）。
+                            `groupTimeline` 收可变数组 ⇒ 这里展开一份（判据本身的返回值是只读的）。 */}
+                        {groupTimeline([...trimTailToShown(liveTimeline, tailShown)]).map((g) => (
                           <TimelineGroupBlock key={`lg${g.from}`} group={g} liveStream />
                         ))}
                         {liveTimeline.length === 0 && !reasoningTmp && toolEvents.length === 0 && (
@@ -6547,14 +6775,34 @@ export default function ChatPanel({
                        `justify-content: flex-end` 贴**最右边**；
                     ② 向上展开 = 面板 `position:absolute; bottom:100%` —— 高度涨、底边钉住 ⇒ 向上长，
                        输入框**零位移**（A-1069 那版在文档流里往下撑，会把输入框整个顶下去）；
-                    ③ 互斥 = 展开态是**单值** `dock`（见 floatDock.ts）。「两个同时展开」没有对应状态，
-                       「另一个渐出」也从同一个单值派生 ⇒ 两处不可能说法不一致。
+                    ③ 互斥 = 展开态是**单值** `dock`（见 floatDock.ts）。「两个面板同时展开」没有对应
+                       状态 ⇒ 不可能说法不一致。⚠️ A-1126：互斥只作用于**面板**；两个**按钮**常显
+                       （旧设定让另一格整颗淡出 → 用户报「点后台任务后子代理按钮会消失」）。
                   「与产物卡同族」是**结构保证**的：面板内部**直接用** `.collapse` 这个类（不是仿一个，
                   也不是另写一套时长），于是节拍永远同源（--collapse-dur / --collapse-ease）。
                   「横向延伸」= 胶囊里的摘要 `max-width: 0 → 420px`（+ opacity）：收起时那一段宽度为 0，
                   所以胶囊是紧凑的（⚠️ 试过 `grid-template-columns: 0fr` —— 列轨在**非定宽**容器里
                   按内容算，收起态根本收不拢，胶囊会被摘要撑成通栏）；展开时才吃出宽度。 */}
               <div className="float-dock">
+                {/* ══ A-1137：对话侧「右栏状态条」 ═════════════════════════════════════════
+                    用户原话：「左侧浏览器搜索后，对应的对话栏可以实时监测到右侧边栏打开的内容
+                    并时刻准备接受用户需求」。
+                    · 位置：坞这一行的**左端**（`marginRight:auto` 把它顶到最左，坞按钮仍靠最右）
+                      —— 复用已有的一行，**不新增垂直空间**（新增一行会把坞整体下推，那是没人要的位移）。
+                    · 文案全部来自 `describeSidebarSnapshot()`（纯函数，唯一产地）；这里不做判据。
+                    · A-1144：**不再有「交给 slime」按钮** —— 右栏内容已经**自动挂载**（每轮进系统提示），
+                      用户不必手动注入；按钮的存在反而暗示"不点它就不知道"，而那正是要消灭的体验。
+                      ⚠️ 只对「内容类」页签显示（浏览器 / 文件 / 终端）；任务、Git 是**内部面板**，
+                         不是用户在看的东西（上一版对它们也播报，用户实测吐槽过）。
+                    ⚠️ 不是 `.dock-pill`：胶囊的语义是"点开一个面板"，而这里是一个**被动读出的状态**。
+                       混用会让"哪个能点开"变得不可预测。 */}
+                {sideStatus && (
+                  <div className="side-status"
+                    title={`${sideStatus.inject}\n\n（右栏内容已经自动挂载给 Agent，不需要手动注入）`}>
+                    <span className="side-status-dot" aria-hidden />
+                    <span className="side-status-text">{sideStatus.label}</span>
+                  </div>
+                )}
                 {agentProcs?.any && (
                   <>
                     <div className="dock-panel">
@@ -6606,7 +6854,7 @@ export default function ChatPanel({
                       </div>
                     </div>
                   </div>
-                  <span className={dockSlotClassOf(procsSlot.open, procsSlot.faded)}>
+                  <span className={dockSlotClassOf(procsOpen)}>
                     <button
                       className="dock-pill"
                       onClick={() => toggleDockSlot("procs")}
@@ -6628,8 +6876,9 @@ export default function ChatPanel({
                   </span>
                 </>
               )}
-              {/* 子代理：同一个坞、同一套类名（A-1074 —— 已从底部监测栏移出） */}
-              <SubAgentExpandButton slot={subsSlot} onToggle={() => toggleDockSlot("subs")} />
+              {/* 子代理：同一个坞、同一套类名（A-1074 —— 已从底部监测栏移出）。
+                  ⚠️ A-1126：传的是**自己的**展开态，不含"另一个开着就淡出"那回事 —— 按钮常显。 */}
+              <SubAgentExpandButton open={subsOpen} onToggle={() => toggleDockSlot("subs")} />
             </div>
           </>
         )}
@@ -6638,7 +6887,7 @@ export default function ChatPanel({
           background: "var(--bg-input)", overflow: "hidden",
         }}
         onDragOver={(e) => { if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) { e.preventDefault(); } }}
-        onDrop={handleDropImages}>
+        onDrop={handleDropFiles}>
           {pendingAsk ? (
             /* ── ask_user 提问：方向分歧 / 关键决策 → 输入框位置选择题（含「其他」自填）── */
             <div style={{ padding: "14px 16px 12px" }}>
@@ -7026,6 +7275,28 @@ export default function ChatPanel({
                 </div>
               ))}
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{pendingImages.length}/4 张 · 模型将识别图中内容</span>
+            </div>
+          )}
+          {/* A-1133：文档附件卡片（图标取自 `FileTypeIcon` —— 与工具卡/右栏同一套文件图标，
+              不另造一套；用户原话：「直接显示带图标的卡片」）。
+              ⚠️ 卡片上**只有文件名**，路径放在 `title`（悬停可见）—— 界面不该被绝对路径占满。 */}
+          {pendingDocs.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: "10px 12px 0" }}>
+              {pendingDocs.map((d) => (
+                <div key={d.id}
+                  role="button" tabIndex={0}
+                  title={`${d.path}\n点击在右侧预览`}
+                  onClick={() => openDocInSidebar(d.path, d.name)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDocInSidebar(d.path, d.name); } }}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6, maxWidth: 260, padding: "4px 8px 4px 6px", borderRadius: 8, border: "1px solid var(--border-hover)", background: "var(--bg-hover)", cursor: "pointer" }}>
+                  <FileTypeIcon filename={d.name} size={14} />
+                  <span style={{ fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                  {/* ⚠️ `×` 必须 `stopPropagation` —— 否则点"移除"会**顺带把预览也打开**（卡身和它在同一个 onClick 里）。 */}
+                  <button onClick={(e) => { e.stopPropagation(); setPendingDocs((prev) => prev.filter((x) => x.id !== d.id)); }} title="移除附件"
+                    style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--text-dim)", fontSize: 13, lineHeight: 1, padding: "0 2px" }}>×</button>
+                </div>
+              ))}
+              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{pendingDocs.length}/{MAX_PENDING_DOCS} 个 · Agent 会读取其内容</span>
             </div>
           )}
           {/* A-1062 的 ◉引导 / ○排队 方向行 + 后果行已**整体撤销**（用户原话：「这个选项也没必要，

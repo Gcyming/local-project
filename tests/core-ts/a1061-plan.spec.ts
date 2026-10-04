@@ -85,10 +85,20 @@ describe("A-1061①-B 接线：每轮开头注入，且放在**最后**", () => 
     // 位置靠 recency：折进**最后一条 user** 而不是新增一条 system
     // （非首位 system 会让 OpenAI 兼容上游 400 / Anthropic 静默改写 —— 见 userReminder.ts）
     const atFold = src.indexOf("out = foldUserReminder(out, reminder)", atOut);
-    const atReturn = src.indexOf("return out;", atFold);
+    /* A-1129 **迁移**（不是删）：折入之后仍然是**立刻返回**。
+       ⚠️ 形式改了两次，这条断言跟着改成**形态无关**的判据 ——
+       只看"折入之后第一个 return 是不是直接返回 out"，不把返回值的写法焊死
+       （A-1129 一度让它是 `return sanitizeOutgoingMessages(out)`，随后规范化的落点
+        又搬到了 `ModelRouter`（唯一分派点，覆盖 tool_loop 的中途重发）⇒ 又变回 `return out;`）。
+       守卫要守的是**位置与收尾性**，不是某一次的返回值拼写。 */
+    const afterFold = src.slice(atFold + "out = foldUserReminder(out, reminder);".length);
+    const firstReturnAt = afterFold.indexOf("return ");
     expect(atOut, "找不到消息数组构造").toBeGreaterThan(-1);
     expect(atFold, "复述没有折进末尾（应调用 foldUserReminder）").toBeGreaterThan(atOut);
-    expect(atReturn, "折入之后没有 return out").toBeGreaterThan(atFold);
+    expect(firstReturnAt, "折入之后没有立刻返回").toBeGreaterThan(-1);
+    expect(afterFold.slice(firstReturnAt).startsWith("return out;"),
+      `折入之后的第一件事必须是 \`return out;\`（不许再插内容改动）—— 实际是 ${JSON.stringify(afterFold.slice(firstReturnAt, firstReturnAt + 60))}`
+    ).toBe(true);
   });
 
   it("🐛 复述不许造成**非首位 system**（旧写法 push({role:system}) 已废弃）", () => {

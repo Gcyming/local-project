@@ -17,6 +17,7 @@ import { decryptRaw } from "../../../core-ts/src/encryption.js";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { getSharedLiveProbe } from "../../../core-ts/src/probe-live.js";
 import { hydrateLiveProbeCache, persistLiveProbeCache } from "../../../core-ts/src/probe-persist.js";
+import { SEARCH_INDEX_PORT } from "./searchIndexService.js";
 
 /** LLM 网关配置（持久化到 config/llm_gateway.json） */
 export interface LlmGatewayConfig {
@@ -206,6 +207,11 @@ export class LlmGatewayManager {
         port: cfg.port,
         authToken,
         sidecarBaseUrl,
+        /* A-1141：把 slime **自建的检索引擎**接到网关上（薄代理到进程内的索引服务）。
+           ⚠️ 端口**从 `SEARCH_INDEX_PORT` 派生**，不在这里再写一遍 8600 ——
+              两处写同一个数字，改一处漏一处时网关会指向一个没人监听的端口，
+              表现为 `/v1/search` 永远 502 而**没有任何构建期报错**。 */
+        searchBaseUrl: `http://127.0.0.1:${SEARCH_INDEX_PORT}`,
         llmGateway: {
           enabled: true,
           projectRoot: PROJECT_ROOT,
