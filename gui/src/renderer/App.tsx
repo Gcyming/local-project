@@ -34,6 +34,7 @@ import { readNetworkEnabled } from "./networkToggle.js";
 // A-980-R26：自定义通知提示音播放端（主进程没有音频能力，只发"该响了"的信号）
 import { subscribeNotifySound } from "./notifySound.js";
 import { trackResizerGlint, clearResizerGlint } from "./resizerGlint.js";
+import { installFloatTrace } from "./float-trace.js";
 
 interface AgentBrief {
   id: string;
@@ -620,6 +621,13 @@ function runGeometrySyncFade(
 }
 
 export default function App(): JSX.Element {
+  /* ⚠️ A-1165：装上窗口化过渡的**页内自检录制器**（`Ctrl+Shift+D` 开关）。
+     为什么在 App 里常驻：这条抖动我在隔离 root + 空会话 + 1332px 里**复现了五轮都没测到**
+     （A-1159/1160/1161/1162/1164 全被用户推翻），而用户那边是真实长会话 + 最大化窗口 ——
+     空会话挂载是瞬时的、长会话要好几帧，**测量环境本身就是错的**。
+     ⇒ 把尺子搬到用户机器上：真实数据、真实窗口、真实 60fps 逐帧记录。
+     ⚠️ 空闲时只有一个 keydown 监听器，**零运行时开销**；录制期才有逐帧采样。 */
+  React.useEffect(() => installFloatTrace(), []);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<SettingsTab>("general");
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
