@@ -867,7 +867,27 @@ export default function App(): JSX.Element {
     if (!el || typeof ResizeObserver === "undefined") { return; }
     const sync = (): void => {
       if (floatStateRef.current === "none") { return; }
-      rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(el.getBoundingClientRect().width)}px`);
+      /* ⚠️⚠️⚠️ A-1166：写**目标宽度**，**不写实测宽度** —— 这一行是六轮抖动的总闸门。
+         用户自检数据（`Ctrl+Shift+D`，真实长会话 + 最大化 1707px）逐帧实测：
+             sb.width   303 → **257** → 295 → 302 → 303      ← 源头：左栏在弹
+             rw.width   1404 → **1450** → 1412 → 1405 → 1404  ← = 1707 − 左栏宽
+             rs.left    257 → 508 → 578 → 610 → 638 → 666
+             host.left  315 → 396 → 420 → 432 → 442 → 452    ← 浮窗位置跟着走
+             host.width 666 → 504 → 455 → 433 → 412 → 392    ← 被推着挤缩
+         `.right-wrapper` 在浮层态的宽度是 `calc(100% - var(--left-w))`（App.tsx:817-819），
+         而 `rs.left` / 浮窗默认 x（`floatBoxDefaultPos.x = (sidebarOpen ? sidebarWidth : 0) + 12`）
+         也都由左栏宽决定 ⇒ **左栏一弹，整条链一起弹**。
+         1404→1450→1412 的"冲过头再回落"（1450 = 1707−257，1412 = 1707−295）说明
+         `--left-w` **逐帧跟着实测值走** —— 正是本函数原先那行 `el.getBoundingClientRect()`。
+         ⚠️ 闭环：`.sidebar` 常驻 `transition: 0.5s` ⇒ 它**每一帧宽度都在变** ⇒
+            ResizeObserver 每帧触发 ⇒ 每帧把**动画中的中间值**写回 `--left-w`
+            ⇒ 布局再被这个中间值影响 ⇒ 再观测。**观测→写回→再观测。**
+         ⇒ 保留 ResizeObserver 作为**触发器**（窗口 resize 时 CSS 侧的 `--sidebar-w`
+            会变，仍需要有人去刷新），但写入的必须是**目标值** `sidebarWidthRef.current`，
+            **不是**那一帧量到的中间值。
+         ⚠️ 为什么不干脆删掉 ResizeObserver：窗口 resize 时左栏宽是 `vw×17.5%`（index.css 的
+            `--sidebar-w`），那条路**不经过** React state，删了就再也同步不上。 */
+      rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(sidebarWidthRef.current)}px`);
     };
     const ro = new ResizeObserver(sync);
     ro.observe(el);
@@ -2705,8 +2725,13 @@ export default function App(): JSX.Element {
               `--left-w` 只喂宽度计算、不触发额外合成（wrapper 自己的 width 过渡负责平滑）。
            ⚠️ `node.style.opacity` 的 done 复位仍走原路，这里只多写一个变量。 */
         if (floatStateRef.current !== "none") {
-          const lw = node.getBoundingClientRect().width;
-          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(lw)}px`);
+          /* ⚠️⚠️⚠️ A-1166：同样**不写实测宽度**。这是**第二条**逐帧闭环 ——
+             本回调就是 `animateLeftSidebar` 的 rAF onFrame，每一帧都在跑；
+             而 `.sidebar` 常驻 `transition: 0.5s`，它自己每一帧宽度都在变
+             ⇒ 把动画中间值写回 `--left-w` ⇒ 喂 `calc(100% - var(--left-w))`
+             ⇒ 右栏宽度跟着逐帧变 ⇒ 右栏左缘与浮窗默认 x 又跟着变。
+             ⇒ 一律写目标值 `sidebarWidthRef.current`。 */
+          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(sidebarWidthRef.current)}px`);
         }
       },
       // A-980-R34：左栏用专属提前窗 [0.40,0.95]——渐出从 95% 宽就开始、渐入从 40% 宽就启动，
