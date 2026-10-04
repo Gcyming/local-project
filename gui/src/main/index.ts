@@ -1825,7 +1825,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
           // SubAgentManager.cancel() 里直接改状�?��??*不触发任何钩�?*（onError �??�?
           // 已进�?execute 的任务）—�??�?以取消入口自己补�?次广�?��见下�?cancel 通道�?
           onStart: (run) => {
-            console.log(`[subagent] �?�?${run.name} (${run.id})`);
+            console.log(`[subagent] 开始 ${run.name} (${run.id})`);
             syncSubagentRuns(subagents.list());
             // A-918+：派发即推�?�，让右侧栏「子代理」区立即看到（不�?4s �??�?
             mainWindow?.webContents.send("slime:resident:update", null);
@@ -2654,7 +2654,7 @@ async function suggestWiderChatModel(requiredTokens: number, currentCap: number)
     return picked;
   } catch (e) {
     // A-1090：解析失�?�?**没查�?*（返�?undefined），不�?说成「查过没有�?��?��?��??
-    console.warn("[gui:main] �?��模型解析失败 —�??按�?�没查成」�?实告知（不�?成�?�查过没有�?�）:", e);
+    console.warn("[gui:main] 可救模型解析失败 —— 按「没查成」如实告知（不说成「查过没有」）:", e);
     return undefined;
   }
 }
@@ -3995,7 +3995,7 @@ function registerIpcHandlers(): void {
     });
     const names = new Map(agentRegistry!.loadedAgents.map((a) => [a.id, a.name]));
     const memberIds = memberIdsOf(meta.members);
-    console.info(`[gui:main] 新建会话: agent=${aid} session=${meta.id} workspace=${meta.workspace ?? "(�?���?"} members=${memberIds.length}${meta.type === "brainstorm" ? "（头脑�?暴）" : ""}`);
+    console.info(`[gui:main] 新建会话: agent=${aid} session=${meta.id} workspace=${meta.workspace ?? "(未绑定)"} members=${memberIds.length}${meta.type === "brainstorm" ? "（头脑风暴）" : ""}`);
     return {
       ok: true,
       session: {
@@ -4047,7 +4047,7 @@ function registerIpcHandlers(): void {
       if (rest.length === 0) {
         const purged = await clearLegacySessionHistory(meta.agentId);
         if (purged > 0) {
-          console.info(`[gui:main] 会话删除时清理遗留历史（�?session_id�? agent=${meta.agentId} 条数=${purged}`);
+          console.info(`[gui:main] 会话删除时清理遗留历史（无 session_id）: agent=${meta.agentId} 条数=${purged}`);
         }
       }
     }
@@ -4308,7 +4308,7 @@ function registerIpcHandlers(): void {
       if (!activeChats.has(sid)) {
         const n = demoteStaleInProgress(sid);
         if (n > 0) {
-          console.warn(`[gui:main] 待办收敛：会�?${sid} �?${n} 项停�?进�?�?但没有活跃流，已降级为待办（A-985）`);
+          console.warn(`[gui:main] 待办收敛：会话 ${sid} 有 ${n} 项停在"进行中"但没有活跃流，已降级为待办（A-985）`);
         }
       }
     }
@@ -4398,7 +4398,7 @@ function registerIpcHandlers(): void {
     await removeSessionsForAgent(agentId);
     await removeAgentHistory(agentId);
     for (const sid of doomed) { purgeSessionPlanning(sid); }
-    console.info(`[gui:main] 项目已删除（会话+历史+待办清理�? agent=${agentId} sessions=${doomed.length}`);
+    console.info(`[gui:main] 项目已删除（会话+历史+待办清理）: agent=${agentId} sessions=${doomed.length}`);
     return { ok: true };
   });
 
@@ -4442,7 +4442,7 @@ function registerIpcHandlers(): void {
         });
       }
     } catch (e) {
-      console.warn("[gui:main] �?能列表加载失�?", e);
+      console.warn("[gui:main] 技能列表加载失败:", e);
     }
     const mcpTools: Array<{ name: string; description: string }> = [];
     try {
@@ -7405,7 +7405,7 @@ function main(): void {
     } else if (devtoolsDecision.reason === "ephemeral") {
       console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 及其后 ${DEVTOOLS_PORT_SCAN} 个端口均被占用 → 交系统分配临时端口（真实端口见 DevToolsActivePort）`);
     } else if (devtoolsDecision.explicit) {
-      console.log(`[gui:devtools] CDP �?�� ${devtoolsDecision.port}（来�?${DEVTOOLS_PORT_ENV}）`);
+      console.log(`[gui:devtools] CDP 端口 ${devtoolsDecision.port}（来自 ${DEVTOOLS_PORT_ENV}）`);
     }
   }
 
@@ -7457,7 +7457,7 @@ function main(): void {
       {
         const sweep = sweepAfterCrash();
         if (sweep.abnormalExit) {
-          console.warn(`[gui:main] �?测到上�?异常�?出（清障：临时文�?${sweep.removedTmp} �?��；�?�?data/crash-report.log`);
+          console.warn(`[gui:main] 检测到上次异常退出（清障：临时文件 ${sweep.removedTmp} 个）；详见 data/crash-report.log`);
         }
         markRunning(app.getVersion());
       }
