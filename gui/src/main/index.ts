@@ -5177,7 +5177,7 @@ function registerIpcHandlers(): void {
        再广�?��次给其它窗口�?*/
     const view = buildAgentProcView(await collectAgentProcSources(), Date.now()).entries;
     broadcastAgentProcs();
-    return { ok: true, detail: `已停�?���?${view.length} 项）` };
+    return { ok: true, detail: `已停止（余 ${view.length} 项）` };
   });
 
   /* ══════════════�?图形控制能力（screen_*）：GUI 面板与紧急停�?══════════════�?*/
@@ -5233,7 +5233,7 @@ function registerIpcHandlers(): void {
       if (r.ok) { return { ok: true }; }
       // A-980-R4：浏览器唤起类协�?�?明确告知已拦�?��不�?求�?客户�?��
       if (r.reason === "browser-scheme") {
-        return { ok: false, error: `已拦�?��览器唤起链接 ${(url.split(":")[0] || "").toLowerCase()}:// —�?�不唤醒外部浏�?器` };
+        return { ok: false, error: `已拦截浏览器唤起链接 ${(url.split(":")[0] || "").toLowerCase()}:// ——不唤醒外部浏览器` };
       }
       return { ok: false, error: `链接 ${(url.split(":")[0] || "").toLowerCase()}:// �?要安装�?应�?户�?才能打开（系统未注册该协�?��` };
     } catch (e) {
@@ -5602,7 +5602,7 @@ function registerIpcHandlers(): void {
   handleTrusted<{ name: string; content: string }>("slime:mind:bookToSkill", async (_event, payload) => {
     const name = (payload.name ?? "").trim().replace(/[^\w\u4e00-\u9fa5-]/g, "").slice(0, 60);
     if (!name) {
-      return { ok: false, error: "�?能名称无效（仅支持中�?字母/数字/�?��线）" };
+      return { ok: false, error: "技能名称无效（仅支持中文/字母/数字/短横线）" };
     }
     const content = (payload.content ?? "").trim();
     if (!content) {
@@ -5900,7 +5900,7 @@ function registerIpcHandlers(): void {
     const res = await refreshProviderModels(p.key);
     if (res.ok) {
       engine?.refreshProviders();
-      console.info(`[gui:main] Provider 模型列表已刷�? ${p.key}（�?�共 ${res.total ?? 0}，新�?${res.added ?? 0}，移�?${res.removed ?? 0}）`);
+      console.info(`[gui:main] Provider 模型列表已刷新: ${p.key}（总共 ${res.total ?? 0}，新增 ${res.added ?? 0}，移除 ${res.removed ?? 0}）`);
     }
     return res;
   });
@@ -6292,7 +6292,7 @@ function registerIpcHandlers(): void {
       writeFileSync(written.path, html, "utf8");
       return { ok: true, path: written.path, dir, name: written.name };
     } catch (e) {
-      return { ok: false, error: `写入预�?页失败：${String((e as Error)?.message ?? e)}` };
+      return { ok: false, error: `写入预览页失败：${String((e as Error)?.message ?? e)}` };
     }
   });
 
@@ -6344,7 +6344,7 @@ function registerIpcHandlers(): void {
       return { ok: true, dir: dirname(abs), name: basename(abs) };
     }
     if (!plan.faithful) {
-      return { ok: false, error: `该类型不�?��保真渲染�?${abs.split(".").pop() ?? "?"}）`, degrade: true };
+      return { ok: false, error: `该类型不支持保真渲染（.${abs.split(".").pop() ?? "?"}）`, degrade: true };
     }
     /* �?�? 老格式分�?��必须经过 LibreOffice �?��（阶�?C�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�?�? */
     if (plan.needs === "libreoffice") {
@@ -6805,7 +6805,7 @@ function registerIpcHandlers(): void {
       const s = app.getLoginItemSettings({ path: process.execPath });
       return { ok: true, enabled: s.openAtLogin };
     } catch (e) {
-      console.warn("[gui:main] 读取�?机自�?���?", e);
+      console.warn("[gui:main] 读取开机自启失败:", e);
       return { ok: false, enabled: false };
     }
   });
@@ -6818,7 +6818,7 @@ function registerIpcHandlers(): void {
       return { ok: true, enabled: s.openAtLogin };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("[gui:main] 设置�?机自�?���?", e);
+      console.error("[gui:main] 设置开机自启失败:", e);
       return { ok: false, enabled: Boolean(p.enabled), error: msg };
     }
   });
@@ -7016,7 +7016,7 @@ function registerIpcHandlers(): void {
       const cfgDir = resolve(PROJECT_ROOT, "config");
       const root = resolve(PROJECT_ROOT);
       if (!root || root === resolve(sep) || root === process.env.USERPROFILE || root === process.env.HOME) {
-        return { ok: false, error: `数据根异常（${root}），已中止重�?��保护文件` };
+        return { ok: false, error: `数据根异常（${root}），已中止重置以保护文件` };
       }
       // �?发仓库保护：PROJECT_ROOT 若为源码仓库（含 .git �?package.json+src/），
       // 说明运�?的是�?发版而非安�?版，重置会�?删开发机真实配置 �?直接拒绝
@@ -7371,7 +7371,7 @@ function main(): void {
   // 而不显示窗口，表现为"安�?后打不开"。拿到锁失败即�??出，交由已有实例接�?�?
   const gotSingleInstanceLock = app.requestSingleInstanceLock();
   if (!gotSingleInstanceLock) {
-    console.warn("[gui:main] 已存�?Slime 实例，�??出本进程（聚焦已有窗口）");
+    console.warn("[gui:main] 已存在 Slime 实例，退出本进程（聚焦已有窗口）");
     app.quit();
     return;
   }
@@ -7401,9 +7401,9 @@ function main(): void {
     app.commandLine.appendSwitch("remote-debugging-port", String(devtoolsDecision.port));
     // 出声：�?口会�?�?默�?值不再可信，变了必须能�?看�?（�?�文�?老习�?��的都�?9222�?
     if (devtoolsDecision.reason === "shifted") {
-      console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 已�?占用 �?CDP �?��顺延�?${devtoolsDecision.port}`);
+      console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 已被占用 → CDP 端口顺延为 ${devtoolsDecision.port}`);
     } else if (devtoolsDecision.reason === "ephemeral") {
-      console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 及其�?${DEVTOOLS_PORT_SCAN} �??口均�?���?�?交系统分配临时�?口（真实�?���?DevToolsActivePort）`);
+      console.warn(`[gui:devtools] ${devtoolsDecision.preferred} 及其后 ${DEVTOOLS_PORT_SCAN} 个端口均被占用 → 交系统分配临时端口（真实端口见 DevToolsActivePort）`);
     } else if (devtoolsDecision.explicit) {
       console.log(`[gui:devtools] CDP �?�� ${devtoolsDecision.port}（来�?${DEVTOOLS_PORT_ENV}）`);
     }
