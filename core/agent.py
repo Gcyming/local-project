@@ -9,6 +9,7 @@ import sys
 import json
 import uuid
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -35,6 +36,123 @@ def _project_root() -> Path:
     """返回项目根目录（slime/），锚定到本文件所在位置"""
     return Path(__file__).resolve().parent.parent
 
+
+_SILAM_WEIGHT_LOCK = threading.RLock()
+_SILAM_WEIGHT_CACHE: dict[str, dict] = {}
+
+
+def backbone_npz_candidates() -> list[Path]:
+    """蒸馏权重 npz 的候选路径（按优先级取首个存在的）。"""
+    root = _project_root()
+    return [
+        root / "models" / "情感脑-silam-sigma-80m" / "backbone_80m.npz",
+        root / "_model_stage" / "data" / "backbone_80m.npz",
+    ]
+
+
+def _silam_backbone_path(candidates: list[Path]) -> Path | None:
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
+def _silam_weight_arrays(npz_path: str) -> dict:
+    """进程级缓存：304MB / 81,305,600 元素的 npz 只解压一次，之后复用内存数组。
+
+    返回的数组是只读母本，调用方构造引擎时各自 .copy()，母本永不被写。
+    """
+    with _SILAM_WEIGHT_LOCK:
+        arrays = _SILAM_WEIGHT_CACHE.get(npz_path)
+        if arrays is None:
+            import numpy as np
+            with np.load(npz_path) as data:
+                arrays = {key: np.ascontiguousarray(data[key], dtype=np.float32)
+                          for key in data.files}
+            _SILAM_WEIGHT_CACHE[npz_path] = arrays
+            logging.getLogger("slime.agent").info(
+                f"[silam] 蒸馏权重已解码并缓存 {npz_path}"
+                f"（{sum(v.size for v in arrays.values())} 元素）")
+        return arrays
+
+
+def _silam_seeded_xavier(prefix: str, weights: dict, fallback):
+    """把模块级 _xavier 换成"直接从缓存权重取"的版本：跳过注定被覆盖的随机初始化。
+
+    Backbone/Encoder 的构造按 w1..wN 顺序调用 _xavier，故用调用序号定位 npz 键；
+    缺键或形状不匹配时退回原 _xavier（随机初始化），逐键容错语义与
+    load_pretrained 保持一致，同时保住"无 npz 时随机初始化"这条路径。
+    """
+    state = {"index": 0}
+    report: list[tuple[str, str, tuple]] = []
+
+    def _xavier(rng, fan_in: int, fan_out: int):
+        state["index"] += 1
+        key = f"{prefix}_w{state['index']}"
+        want = (fan_in, fan_out)
+        arr = weights.get(key)
+        if arr is None:
+            report.append((key, "缺失", (want, None)))
+        elif tuple(arr.shape) != want:
+            report.append((key, "形状不匹配", (want, tuple(arr.shape))))
+        else:
+            report.append((key, "已装载", want))
+            return arr.copy()
+        return fallback(rng, fan_in, fan_out)
+
+    return _xavier, report
+
+
+def build_silam_engine(candidates: list[Path] | None = None):
+    """构造一个调用方独占的 SILAM 引擎。
+
+    缓存粒度 = 冻结权重数组（进程内 npz 只解压一次）。引擎本体每次新建：
+    Encoder.w3 的在线适应、树突生长、情绪/疼痛/记忆文本环等可变状态逐一独立，
+    两个 Agent 拿到的是不同对象与不同数组，绝不会互相污染。
+    构造期 _xavier 的临时替换在进程级锁内完成（仓库是异步+多线程混用）。
+    返回 (engine, cfg, backbone_path, report)；report 与 load_pretrained 同构。
+    """
+    import sys
+    silk_root = _project_root() / "_model_stage"
+    if str(silk_root) not in sys.path:
+        sys.path.insert(0, str(silk_root))
+
+    import silam_core.backbone as _backbone_mod
+    import silam_core.engine as _engine_mod
+    from silam_core.config import SilamConfig
+
+    backbone_path = _silam_backbone_path(
+        candidates if candidates is not None else backbone_npz_candidates())
+    weights = (_silam_weight_arrays(str(backbone_path))
+               if backbone_path is not None else None)
+
+    cfg = SilamConfig()
+    if weights is None:
+        return _engine_mod.SILAMEngine(cfg), cfg, None, {
+            "loaded": [], "skipped": [], "total": 0}
+
+    import silam_core.encoder as _encoder_mod
+    with _SILAM_WEIGHT_LOCK:
+        orig_bb_xavier = _backbone_mod._xavier
+        orig_enc_xavier = _encoder_mod._xavier
+        _backbone_mod._xavier, bb_report = _silam_seeded_xavier(
+            "bb", weights, orig_bb_xavier)
+        _encoder_mod._xavier, enc_report = _silam_seeded_xavier(
+            "enc", weights, orig_enc_xavier)
+        try:
+            engine = _engine_mod.SILAMEngine(cfg)
+        finally:
+            _backbone_mod._xavier = orig_bb_xavier
+            _encoder_mod._xavier = orig_enc_xavier
+
+    entries = enc_report + bb_report
+    report = {
+        "loaded": [k for k, status, _ in entries if status == "已装载"],
+        "skipped": [(k, status, shape) for k, status, shape in entries
+                    if status != "已装载"],
+        "total": len(entries),
+    }
+    return engine, cfg, backbone_path, report
 
 
 
@@ -100,28 +218,9 @@ class Agent:
         self.silam_engine = None
         self.silam_cfg = None
         try:
-            import sys
-            from pathlib import Path
-            
-            _project_root = Path(__file__).resolve().parent.parent
-            _silam_root = _project_root / "_model_stage"
-            if str(_silam_root) not in sys.path:
-                sys.path.insert(0, str(_silam_root))
-
-            from silam_core.engine import SILAMEngine
-            from silam_core.config import SilamConfig
-            from silam_core.pretrained import load_pretrained
-
-            self.silam_cfg = SilamConfig()
-            self.silam_engine = SILAMEngine(self.silam_cfg)
-
-            
-            _backbone_path = (_project_root / "models" / "情感脑-silam-sigma-80m"
-                              / "backbone_80m.npz")
-            if _backbone_path.exists():
-                load_pretrained(self.silam_engine, str(_backbone_path))
+            self.silam_engine, self.silam_cfg, _npz, _report = (
+                build_silam_engine())
         except Exception as e:
-            
             pass
 
         
@@ -276,25 +375,36 @@ class Agent:
             "fork 时 subtasks 最多 2 个。chat 时 subtasks 为空数组。"
         )
 
-    def get_system_prompt(self) -> str:
-        """组合身份铁律 + 反幻觉协议 + 平台能力 + 生命周期 + 自定义提示 + 人格特征"""
-        parts = [IDENTITY_CONSTRAINT.replace("{name}", self.name).replace("{role}", self.role),
-                 ANTI_HALLUCINATION_PROTOCOL]
+    def _system_prompt_parts(self) -> list[tuple[bool, str]]:
+        """组合身份铁律 + 反幻觉协议 + 平台能力 + 生命周期 + 自定义提示 + 人格特征。
+
+        返回 [(是否易变, 段文本), ...]，顺序即最终拼接顺序。
+        易变段（行为模式 / 情绪状态 / 可用技能清单）随每次交互与技能目录增删而变，
+        拆出后由末段 user 消息承载：system 是第 0 条消息，这几段一变就会作废整段
+        前缀缓存（设计 §1.3：静态前缀必须字节稳定，易变内容放末尾）。"""
+        parts: list[tuple[bool, str]] = []
+
+        def add(text: str, volatile: bool = False):
+            if text:
+                parts.append((volatile, text))
+
+        add(IDENTITY_CONSTRAINT.replace("{name}", self.name).replace("{role}", self.role))
+        add(ANTI_HALLUCINATION_PROTOCOL)
 
         
         try:
             from .evolve import EvolutionEngine
             lifecycle_prompt = EvolutionEngine.build_lifecycle_prompt(self.lifecycle)
             if lifecycle_prompt:
-                parts.append(lifecycle_prompt)
+                add(lifecycle_prompt)
         except Exception:
             pass
 
         
-        parts.append(self._build_capabilities_prompt())
+        add(self._build_capabilities_prompt())
 
         if self.identity_prompt:
-            parts.append(f"\n## 角色设定\n{self.identity_prompt}")
+            add(f"\n## 角色设定\n{self.identity_prompt}")
 
         if self.persona.traits:
             
@@ -316,59 +426,74 @@ class Agent:
                         trait_lines.append(f"- {name}（弱）")
                 else:
                     trait_lines.append(f"- {t}")
-            parts.append(f"\n## 人格特征\n" + "\n".join(trait_lines))
+            add(f"\n## 人格特征\n" + "\n".join(trait_lines))
 
         if self.persona.preferences:
             prefs_text = "\n".join(f"- {p}" for p in self.persona.preferences)
-            parts.append(f"\n## 偏好\n{prefs_text}")
+            add(f"\n## 偏好\n{prefs_text}")
 
         if self.persona.skill_ownership:
             skills_text = "\n".join(f"- {s}" for s in self.persona.skill_ownership)
-            parts.append(f"\n## 技能\n{skills_text}")
+            add(f"\n## 技能\n{skills_text}")
 
         
         behavior_prompt = self.behavior.to_prompt()
         if behavior_prompt:
-            parts.append(behavior_prompt)
+            add(behavior_prompt, volatile=True)
 
         
         
         
-        parts.append(f"\n## 当前状态\n{self.emotion.to_identity_prompt()}\n\n{self.emotion.to_prompt()}")
+        add(f"\n## 当前状态\n{self.emotion.to_identity_prompt()}\n\n{self.emotion.to_prompt()}",
+            volatile=True)
 
-        
-        try:
-            from core.skill_engine import get_registry as get_skill_registry
-            skill_reg = get_skill_registry()
-            
-            if not skill_reg.is_loaded:
-                skill_reg.load_skills()
-            skill_descs = skill_reg.list_skill_descriptions()
-            if skill_descs:
-                
-                
-                
-                shown = [d[:120] for d in skill_descs[:_MAX_INJECTED_SKILLS]]
-                parts.append("\n## 可用技能\n" + "\n".join(f"- {d}" for d in shown))
-                if len(skill_descs) > _MAX_INJECTED_SKILLS:
-                    parts[-1] += (
-                        f"\n（另有 {len(skill_descs) - _MAX_INJECTED_SKILLS} 个技能未列出，"
-                        f"均可通过 skill_search 工具检索、skill_lookup 工具读取完整指导）")
-                
-                
-                parts[-1] += ("\n⚠ 技能可用性以 skill_search 工具实时查询结果为准；"
-                              "对话历史或记忆中出现的技能列表可能过期（平台技能会新增），"
-                              "不得凭历史列表断言某技能不存在——不确定时调用 skill_search 核实。")
-        except Exception:
-            pass
+        add(self._skills_inventory_prompt(), volatile=True)
 
-        
-        parts.append(
+        add(
             "（提醒：务必遵守《诚实与验证铁律》——未真实执行不得声称完成；"
             "失败如实报告；引用文件前必须核实其真实存在。）"
         )
 
-        return "\n\n".join(parts)
+        return parts
+
+    def _skills_inventory_prompt(self) -> str:
+        """可用技能清单（技能目录内容的投影，目录增删即变化 → 属易变段）。"""
+        try:
+            from core.skill_engine import get_registry as get_skill_registry
+            skill_reg = get_skill_registry()
+
+            if not skill_reg.is_loaded:
+                skill_reg.load_skills()
+            skill_descs = skill_reg.list_skill_descriptions()
+            if not skill_descs:
+                return ""
+            shown = [d[:120] for d in skill_descs[:_MAX_INJECTED_SKILLS]]
+            text = "\n## 可用技能\n" + "\n".join(f"- {d}" for d in shown)
+            if len(skill_descs) > _MAX_INJECTED_SKILLS:
+                text += (
+                    f"\n（另有 {len(skill_descs) - _MAX_INJECTED_SKILLS} 个技能未列出，"
+                    f"均可通过 skill_search 工具检索、skill_lookup 工具读取完整指导）")
+            text += ("\n⚠ 技能可用性以 skill_search 工具实时查询结果为准；"
+                     "对话历史或记忆中出现的技能列表可能过期（平台技能会新增），"
+                     "不得凭历史列表断言某技能不存在——不确定时调用 skill_search 核实。")
+            return text
+        except Exception:
+            return ""
+
+    def get_system_prompt(self) -> str:
+        """组合身份铁律 + 反幻觉协议 + 平台能力 + 生命周期 + 自定义提示 + 人格特征"""
+        return "\n\n".join(text for _, text in self._system_prompt_parts())
+
+    def get_system_prompt_segments(self) -> tuple[str, str]:
+        """两段式系统提示：(稳定前缀, 易变状态段)。
+
+        稳定前缀字节稳定、可命中前缀缓存；易变状态段改由末段 user 消息承载。
+        注入内容一条不减，只是搬离 system（第 0 条消息）的稳定前缀。"""
+        stable: list[str] = []
+        volatile: list[str] = []
+        for is_volatile, text in self._system_prompt_parts():
+            (volatile if is_volatile else stable).append(text)
+        return "\n\n".join(stable), "\n\n".join(volatile)
 
     
 
