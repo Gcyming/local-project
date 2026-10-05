@@ -15,7 +15,7 @@ import type {
   SuggestionItem, ExtrasList, MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot,
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus, AdbDownloadProgressInfo,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
-  PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, WorkspaceListResult, TermResult,
+  PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, AskUserCancelNotice, WorkspaceListResult, TermResult,
   TermProfilesResult,
   AgentProcsListResult, AgentProcsStopResult,
   GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, WorkspaceReadFileResult,
@@ -312,6 +312,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     
     onTimeout: (cb: (req: { requestId: string }) => void) =>
       onMessage<{ requestId: string }>("slime:ask:timeout", cb),
+    
+    onCancel: (cb: (req: AskUserCancelNotice) => void) =>
+      onMessage<AskUserCancelNotice>("slime:ask:cancel", cb),
     
     resolve: (decision: AskUserDecision) =>
       ipcRenderer.invoke("slime:ask:resolve", decision) as Promise<{ ok: boolean }>,
@@ -978,6 +981,7 @@ declare global {
       askUser: {
         onRequest: (cb: (req: AskUserRequestUI) => void) => () => void;
         onTimeout: (cb: (req: { requestId: string }) => void) => () => void;
+        onCancel: (cb: (req: AskUserCancelNotice) => void) => () => void;
         resolve: (decision: AskUserDecision) => Promise<{ ok: boolean }>;
       };
       suggest: (text: string) => Promise<SuggestionItem[]>;

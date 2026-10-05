@@ -10,7 +10,7 @@
 import React, { type CSSProperties, type JSX } from "react";
 import { createPortal } from "react-dom";
 import type { StreamChunk, ConversationMessage, SessionConfig, ApprovalMode, SuggestionItem, ExtrasList, AgentDetail, PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, CtxBuckets, AgentProcView, AgentProcsListResult, AgentProcsStopResult, CompressResult } from "../../shared/ipc.js";
-import { buildAskDecision, canSubmitAsk, initialAskSelection } from "./askState.js";
+import { ASK_CANCEL_MARKER, ASK_CUSTOM_CHOICE, buildAskDecision, canSubmitAsk, dequeueAsk, enqueueAsk, headAsk, initialAskSelection } from "./askState.js";
 import {
   REQUEST_DROP_MARKER,
   buildAskDismissDecision,
@@ -268,6 +268,8 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   memory_insert: { label: "记住", Icon: NotesIcon },
   memory_search: { label: "回忆", Icon: HistoryIcon },
   memory_forget: { label: "忘记", Icon: CloseIcon },
+  memory_recall: { label: "检索记忆", Icon: HistoryIcon },
+  memory_write: { label: "写入记忆", Icon: NotesIcon },
   plan_create: { label: "制定计划", Icon: TodoListIcon },
   plan_update: { label: "更新计划", Icon: StageListIcon },
   browser_drag: { label: "拖拽网页元素", Icon: ManualIcon },
@@ -438,7 +440,7 @@ export interface CtxUpdatePayload {
 const perSessionStreamCache: { current: Record<string, {
   partial: string; reasoning: string; toolEvents: ToolEvent[]; timeline: TimelineStep[]; hasActive: boolean;
   tailError?: { content: string; reason: string }; messages?: Message[];
-  input?: string; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null;
+  input?: string; askQueue?: AskUserRequestUI[]; pendingPerm?: PermissionRequestUI | null;
   /** A-918++：最近一次流式入参（恢复时还原 streamReqRef → 抖动可自动重连，修复"恢复中进度不动/中断"） */
   req?: ChatStreamReq | null;
   /**
@@ -3168,15 +3170,26 @@ export default function ChatPanel({
   const [permSubmitting, setPermSubmitting] = React.useState(false);
 
   /** ── 输入框内嵌 ask_user 提问（方向分歧 / 关键决策；与权限请求同形态）── */
-  const [pendingAsk, setPendingAsk] = React.useState<AskUserRequestUI | null>(null);
-  const pendingAskRef = React.useRef<AskUserRequestUI | null>(null);
-  React.useEffect(() => { pendingAskRef.current = pendingAsk; }, [pendingAsk]);
+  const [askQueue, setAskQueue] = React.useState<AskUserRequestUI[]>([]);
+  const askQueueRef = React.useRef<AskUserRequestUI[]>([]);
+  React.useEffect(() => { askQueueRef.current = askQueue; }, [askQueue]);
+  const pendingAsk = headAsk(askQueue);
+  const headAskIdRef = React.useRef<string | null>(null);
   /** 用户选中的选项文本（"__custom" 时显示自填输入框） */
-  const [askOption, setAskOption] = React.useState<string>("__custom");
+  const [askOption, setAskOption] = React.useState<string>(ASK_CUSTOM_CHOICE);
   /** 自填内容 */
   const [askCustom, setAskCustom] = React.useState("");
   /** 回答提交中（防重复点击） */
   const [askSubmitting, setAskSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!pendingAsk) { return; }
+    if (headAskIdRef.current === pendingAsk.requestId) { return; }
+    headAskIdRef.current = pendingAsk.requestId;
+    setAskOption(initialAskSelection(pendingAsk.options));
+    setAskCustom("");
+    setAskSubmitting(false);
+  }, [pendingAsk]);
 
   /** 订阅主进程权限请求：输入框位置弹出选择题，请求结束自动恢复输入框 */
   React.useEffect(() => {
@@ -3265,33 +3278,31 @@ export default function ChatPanel({
           .catch(() => { /* 请求可能已超时/不存在 → 忽略，动作本身不受影响 */ });
         return;
       }
-      setPendingAsk(req);
-      setAskOption(initialAskSelection(req.options));
-      setAskCustom("");
-      setAskSubmitting(false);
+      setAskQueue((q) => enqueueAsk(q, req));
     });
     // 主进程超时兜底（未收到回答已按「跳过」处理）→ 收起提问 UI
     const offTimeout = api.askUser.onTimeout?.((req: { requestId: string }) => {
-      if (pendingAskRef.current && pendingAskRef.current.requestId === req.requestId) {
-        setPendingAsk(null);
-        setAskSubmitting(false);
-        window.setTimeout(() => inputRef.current?.focus(), 0);
-      }
+      setAskQueue((q) => dequeueAsk(q, req.requestId));
     });
-    return () => { off(); offTimeout?.(); };
+    const offCancel = api.askUser.onCancel?.((req: { requestId: string; reason?: string }) => {
+      if (req.reason) { console.warn(`${ASK_CANCEL_MARKER} 提问 ${req.requestId} 作废：${req.reason}`); }
+      setAskQueue((q) => dequeueAsk(q, req.requestId));
+    });
+    return () => { off(); offTimeout?.(); offCancel?.(); };
   }, []);
 
   /** 提交用户对 ask_user 的回答（选项/自填 → AskUserDecision） */
   async function resolveAsk(choice: string, custom?: string): Promise<void> {
     if (!pendingAsk || askSubmitting) { return; }
+    const target = pendingAsk;
     setAskSubmitting(true);
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    const decision: AskUserDecision = buildAskDecision(pendingAsk.requestId, choice, custom);
+    const decision: AskUserDecision = buildAskDecision(target.requestId, choice, custom);
     try {
       // 同上：try/finally 无 catch，第一层必须 `?.`
       await api?.askUser?.resolve?.(decision);
     } finally {
-      setPendingAsk(null);
+      setAskQueue((q) => dequeueAsk(q, target.requestId));
       setAskSubmitting(false);
       // 提问结束，焦点还给输入框
       window.setTimeout(() => inputRef.current?.focus(), 0);
@@ -3410,7 +3421,7 @@ export default function ChatPanel({
       const draftSnapshot = {
         ...(perSessionStreamCache.current[prevKey] ?? {}),
         input,
-        pendingAsk,
+        askQueue,
         pendingPerm,
       };
       perSessionStreamCache.current[prevKey] = draftSnapshot;
@@ -3419,7 +3430,7 @@ export default function ChatPanel({
       try {
         localStorage.setItem(`slime_session_draft_${prevKey}`, JSON.stringify({
           input,
-          pendingAsk: pendingAsk ?? null,
+          askQueue,
           pendingPerm: pendingPerm ?? null,
           savedAt: Date.now(),
         }));
@@ -3438,7 +3449,7 @@ export default function ChatPanel({
     setStreamElapsed(0);
     // 收起旧会话残留的内嵌权限/提问选择题（main 有 300s 超时兜底：未回答按拒绝/跳过放行，不会挂死工具调用）
     setPendingPerm(null);
-    setPendingAsk(null);
+    setAskQueue([]);
     setPermSubmitting(false);
     setAskSubmitting(false);
     // 作废旧流绑定：旧会话残留流事件（main 已按流打 sessionId 标签）一律被过滤；
@@ -3459,28 +3470,30 @@ export default function ChatPanel({
     // 全新空会话无 cache 无 localStorage → 恢复出空串，无害。
     if (isSessionChange || isFreshMount) {
       let restoreInput = "";
-      let restoreAsk: AskUserRequestUI | null = null;
+      let restoreAskQueue: AskUserRequestUI[] = [];
       let restorePerm: PermissionRequestUI | null = null;
       if (cached) {
         restoreInput = cached.input ?? "";
-        restoreAsk = cached.pendingAsk ?? null;
+        restoreAskQueue = cached.askQueue ?? [];
         restorePerm = cached.pendingPerm ?? null;
       } else {
         try {
           const raw = localStorage.getItem(`slime_session_draft_${sessionId}`);
           if (raw) {
-            const parsed = JSON.parse(raw) as { input?: string; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null; savedAt?: number };
+            const parsed = JSON.parse(raw) as { input?: string; askQueue?: AskUserRequestUI[]; pendingAsk?: AskUserRequestUI | null; pendingPerm?: PermissionRequestUI | null; savedAt?: number };
             // 仅 24h 内的草稿有效（避免加载陈旧历史会话的残留）
             if (parsed.savedAt && Date.now() - parsed.savedAt < 24 * 3600 * 1000) {
               restoreInput = parsed.input ?? "";
-              restoreAsk = parsed.pendingAsk ?? null;
+              restoreAskQueue = Array.isArray(parsed.askQueue)
+                ? parsed.askQueue
+                : parsed.pendingAsk ? [parsed.pendingAsk] : [];
               restorePerm = parsed.pendingPerm ?? null;
             }
           }
         } catch { /* 解析失败忽略 */ }
       }
       setInput(restoreInput);
-      setPendingAsk(restoreAsk);
+      setAskQueue(restoreAskQueue);
       setPendingPerm(restorePerm);
     }
     pendingTailErrorRef.current = null;
@@ -3770,9 +3783,9 @@ export default function ChatPanel({
       if (!sid) { return; }
       const hasStream = streamActiveRef.current || !!partialRef.current || !!reasoningTmpRef.current || toolEventsRef.current.length > 0;
       const draft = inputValueRef.current;
-      const ask = pendingAskRef.current;
+      const ask = askQueueRef.current;
       const perm = pendingPermRef.current;
-      if (!hasStream && !draft && !ask && !perm) { return; } // 无东西可存 → 不留空槽
+      if (!hasStream && !draft && ask.length === 0 && !perm) { return; } // 无东西可存 → 不留空槽
       const existing = perSessionStreamCache.current[sid] ?? {};
       perSessionStreamCache.current[sid] = {
         ...existing, // 保留既有 messages（doSend 乐观用户消息）等未列出的字段
@@ -3785,7 +3798,7 @@ export default function ChatPanel({
         tailError: pendingTailErrorRef.current ?? existing.tailError,
         req: existing.req ?? streamReqRef.current ?? null,
         input: draft,
-        pendingAsk: ask ?? null,
+        askQueue: ask,
         pendingPerm: perm ?? null,
         // A-974-R9：监测栏计数器随流现场一起落槽（有流才覆盖，避免无流时把既有值清空）
         ...(hasStream ? { monitor: snapshotMonitor() } : {}),
@@ -3793,7 +3806,7 @@ export default function ChatPanel({
       // localStorage 草稿备份（与 restore 的 24h 回退读取同键；进程重启后 cache 槽丢失时可用）
       try {
         localStorage.setItem(`slime_session_draft_${sid}`, JSON.stringify({
-          input: draft, pendingAsk: ask ?? null, pendingPerm: perm ?? null, savedAt: Date.now(),
+          input: draft, askQueue: ask, pendingPerm: perm ?? null, savedAt: Date.now(),
         }));
       } catch { /* localStorage 不可用时静默忽略 */ }
     };
@@ -6897,6 +6910,9 @@ export default function ChatPanel({
                 <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
                   需要你做出抉择{pendingAsk.header ? ` · ${pendingAsk.header}` : ""}
                 </span>
+                {askQueue.length > 1 ? (
+                  <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>· 还有 {askQueue.length - 1} 个待答</span>
+                ) : null}
                 <div style={{ flex: 1 }} />
                 <button
                   onClick={() => void resolveAsk("", "（跳过）")}

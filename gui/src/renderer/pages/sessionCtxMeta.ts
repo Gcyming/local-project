@@ -37,12 +37,12 @@ export interface TimelineStepLite {
 
 
 
-
-
-
-
-
-
+  /**
+   * ⚠️ A-1068 更正：这里原先写着「持久化时它必然已是 false/缺省」—— **那是错的**。
+   *   本字段确实会被落盘，而落盘发生在流式过程中，所以进程在工具执行途中消失时会
+   *   留下 `running: true`。回看历史（`attachTimelineToHistory`）必须过一遍
+   *   `settleRunning` 把它清掉，否则那张卡会永久显示「执行中」。
+   */
   running?: boolean;
 }
 

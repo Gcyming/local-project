@@ -448,6 +448,16 @@ export interface AskUserDecision {
   answer: string;
   
   skipped: boolean;
+  
+  choice?: string;
+  
+  cancelled?: boolean;
+}
+
+export interface AskUserCancelNotice {
+  requestId: string;
+  
+  reason: string;
 }
 
 

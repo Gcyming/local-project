@@ -339,6 +339,7 @@ export interface AskUserResponse {
   choice?: string;
   answer: string;
   skipped?: boolean;
+  cancelled?: boolean;
 }
 export type AskUserHook = (req: AskUserRequest) => Promise<AskUserResponse>;
 
@@ -685,7 +686,8 @@ export class ToolLoop {
 
     
     
-    if (tc.name === "memory_insert" || tc.name === "memory_search" || tc.name === "memory_forget") {
+    if (tc.name === "memory_insert" || tc.name === "memory_search" || tc.name === "memory_forget"
+      || tc.name === "memory_recall" || tc.name === "memory_write") {
       delete args._agent_id;
       args._agent_id = agentId;
     }
@@ -756,7 +758,10 @@ export class ToolLoop {
           ...(recommendation !== undefined ? { recommendation } : {}),
           ...(sessionId ? { sessionId } : {}),
         });
-        if (!answer || answer.skipped) {
+        if (!answer || answer.cancelled) {
+          return "[已取消] 用户中止了本次生成，本提问作废（不是你的回答，也不要据此推断用户偏好）";
+        }
+        if (answer.skipped) {
           return "[提示] 用户未作答（跳过），请根据上下文自行判断后续方向，不要编造用户的选择";
         }
         return answer.choice

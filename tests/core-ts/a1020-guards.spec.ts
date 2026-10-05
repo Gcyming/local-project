@@ -150,10 +150,21 @@ describe("A-1020 ① IPC channel 不许重复注册", () => {
     const clean = blankComments(src);
     expect(clean.split("\n").length).toBe(src.split("\n").length); 
     
-    const rawHits = (src.match(/slime:theme:set/g) ?? []).length;
-    const cleanHits = (clean.match(/slime:theme:set/g) ?? []).length;
+    const probe = [
+      "// slime:theme:set 注释里提到这个 channel 名",
+      "handleTrusted(\"slime:theme:set\", () => {});",
+      "/* slime:theme:set 块注释里也来一处 */",
+      "const after = 1;",
+    ].join("\n");
+    const probeClean = blankComments(probe);
+    const rawHits = (probe.match(/slime:theme:set/g) ?? []).length;
+    const cleanHits = (probeClean.match(/slime:theme:set/g) ?? []).length;
+    expect(probeClean.split("\n").length, "剥离器改了行数 ⇒ 行号会漂").toBe(probe.split("\n").length);
+    expect(cleanHits, "剥离器没抹掉注释里的 channel 名（会把注释掉的注册当成真注册）").toBe(1);
     expect(rawHits).toBeGreaterThan(cleanHits);
-    expect(cleanHits).toBeGreaterThanOrEqual(1);
+
+    expect((clean.match(/slime:theme:set/g) ?? []).length, "main/index.ts 里连真注册都没了")
+      .toBeGreaterThanOrEqual(1);
   });
 
   it("注册总数守恒（防止守卫被绕过/正则失效）", () => {

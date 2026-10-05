@@ -416,6 +416,7 @@ import { AgentRegistry, type AgentState } from "../../../core-ts/src/services/ag
 import { createEngine, buildSilamTraitSignals } from "../../../core-ts/src/services/engine.js";
 import { createRouteClient, type RouteEntry } from "../../../core-ts/src/router.js";
 import { chromiumFetch } from "./providers.js";
+import { AskCoordinator, DEFAULT_ASK_TIMEOUT_MS, releaseAsksOnAbort } from "./askCoordinator.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
 import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult, ResidentState, AgentProcsListResult, AgentProcsStopRequest, AgentProcsStopResult, TermProfilesResult } from "../shared/ipc.js";
 import { isBrowserSchemeUrl } from "../shared/ipc.js";
@@ -1061,7 +1062,7 @@ import {
 } from "../../../core-ts/src/services/sessions.js";
 import { loadHistoryForSession, loadHistoryForSessionBefore, clearSessionHistory, clearLegacySessionHistory } from "../../../core-ts/src/services/history.js";
 import { formatSpeakerBlob, isSpeechFailure, expandHistoryRecord, type ExpandedMessage } from "../../../core-ts/src/services/grouptalkTranscript.js";
-import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO, SUMMARIZE_INPUT_CAP, HISTORY_LOAD_LIMIT, buildCompactedHistory, truncateTurnAligned } from "../../../core-ts/src/services/context_compress.js";
+import { needsCompress, estimateHistoryTokens, DEFAULT_TAIL_KEEP, DEFAULT_COMPRESS_RATIO, SUMMARIZE_INPUT_CAP, HISTORY_LOAD_LIMIT, buildCompactedHistory, truncateTurnAligned, gateCompaction, commitCompactionIfShrunk } from "../../../core-ts/src/services/context_compress.js";
 import { acceptSummary, countTurns, formatCannotFit, formatRescueHint, pickRescueModel, INITIAL_BREAKER, isRealShrink, nextBreakerState, planSend, validateHistory, type BreakerState, type CapCandidate, type LoopMessage, type RescuableModel } from "../../../core-ts/src/services/context_loop.js";
 import { SandboxManager, defaultSandboxConfig, type SandboxConfig } from "../../../core-ts/src/sandbox.js";
 
@@ -1102,9 +1103,11 @@ const pendingPerms = new Map<string, (decision: PermissionDecision) => void>();
 
 const PERM_TIMEOUT_MS = 300_000;
 
-const pendingAsks = new Map<string, (decision: AskUserDecision) => void>();
+const ASK_TIMEOUT_MS = DEFAULT_ASK_TIMEOUT_MS;
 
-const ASK_TIMEOUT_MS = 300_000;
+const ASK_RELEASE_MARKER = "[slime:ask-release]";
+
+const askCoordinator = new AskCoordinator({ timeoutMs: ASK_TIMEOUT_MS });
 let statsPoll: NodeJS.Timeout | null = null;
 
 let selectedAgentId: string | null = null;
@@ -1556,8 +1559,8 @@ const ensureServicesOnce = singleFlight<void>(async () => {
   
   
   applyGlobalSandboxDefaults();
-  
-  
+  // A-121: SILAM 绝对大脑兑底——slime.toml [silam] enabled + as_brain 开启时
+  // 拉起 python sidecar；起不来（缺 python/脚本/依赖）静默降级，不阻塞 GUI 主流程。
   try {
     const silamCfg = readSilamConfig();
     if (silamCfg.enabled && silamCfg.asBrain) {
@@ -1584,7 +1587,8 @@ const ensureServicesOnce = singleFlight<void>(async () => {
     
     clientFactory: (route: RouteEntry) => createRouteClient(route, chromiumFetch as typeof fetch),
     hooks: {
-      fixedSegments: (agent) => {
+      fixedSegments: () => [],
+      volatileSegments: (agent) => {
         const segs: string[] = [];
         try {
           const a = agentRegistry!.loadedAgents.find((x) => x.name === agent.name);
@@ -1592,7 +1596,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
           const behavior = BehaviorStore.fromDict(a?.behavior ?? {});
           segs.push(...buildMindSegments(emotion, behavior));
         } catch (e) {
-          console.warn(`[gui:mind] 心智固定段注入失败: ${e}`);
+          console.warn(`[gui:mind] 心智易变段注入失败: ${e}`);
         }
         
         try {
@@ -1646,13 +1650,17 @@ const ensureServicesOnce = singleFlight<void>(async () => {
           recommendation: req.recommendation,
           sessionId: req.sessionId ?? agentStreamSessionMap.get(req.agentId), 
         };
-        const timer = setTimeout(() => {
-          if (pendingAsks.delete(ui.requestId)) {
-            win.webContents.send("slime:ask:timeout", { requestId: ui.requestId });
-            resolve({ answer: "", skipped: true });
-          }
-        }, ASK_TIMEOUT_MS);
-        pendingAsks.set(ui.requestId, resolve);
+        const send = (channel: string, payload: unknown): void => {
+          try { win.webContents.send(channel, payload); } catch { }
+        };
+        askCoordinator.open({
+          requestId: ui.requestId,
+          ownerKey: typeof askSid === "string" ? askSid : req.agentId,
+          agentId: req.agentId,
+          settle: resolve,
+          onTimeout: () => send("slime:ask:timeout", { requestId: ui.requestId }),
+          onCancel: (reason) => send("slime:ask:cancel", { requestId: ui.requestId, reason }),
+        });
         
         
         notifyUser({
@@ -1663,9 +1671,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         try {
           win.webContents.send("slime:ask:request", ui);
         } catch {
-          clearTimeout(timer);
-          pendingAsks.delete(ui.requestId);
-          resolve({ answer: "", skipped: true });
+          askCoordinator.resolve(ui.requestId, { requestId: ui.requestId, answer: "", skipped: true });
         }
       });
     },
@@ -3201,6 +3207,9 @@ function registerIpcHandlers(): void {
     const cancelKey = input.sessionId ?? agentId;
     const controller = new AbortController();
     activeChats.set(cancelKey, controller);
+    releaseAsksOnAbort(controller.signal, cancelKey, askCoordinator, (released) => {
+      console.warn(`${ASK_RELEASE_MARKER} ${cancelKey} 的 ${released.length} 条挂起提问已在取消时释放: ${released.join(",")}`);
+    });
     agentStreamSessionMap.set(input.agentId, cancelKey); 
     lastChatCancelKey = cancelKey;
     let history = input.history ? (input.history as any) : [];
@@ -3538,8 +3547,9 @@ function registerIpcHandlers(): void {
 
 
   handleTrusted<{ sessionId?: string; ratio?: number; used?: number; force?: boolean }>("slime:chat:compress", async (_event, p): Promise<CompressResult> => {
+    let sessionId = "";
     try {
-      const sessionId = (p?.sessionId ?? "").trim();
+      sessionId = (p?.sessionId ?? "").trim();
       if (!sessionId) { return { ok: false, error: "缺少会话 ID" }; }
       const meta = await getSession(sessionId);
       if (!meta) { return { ok: false, error: "会话不存在" }; }
@@ -3620,11 +3630,11 @@ function registerIpcHandlers(): void {
       }
       
       const key = historyFingerprint(historyAll);
-      if (compressBreaker.open && compressBreaker.lastKey === key) {
+      if (compressBreaker.open && compressBreaker.lastKey === sessionId) {
         return {
           ok: true, skipped: true, used, cap, breakerOpen: true,
           ...(force ? { stillOverflow: true } : {}),
-          reason: `压缩已熔断（同一段历史连续 ${compressBreaker.failures} 次压缩失败）：本段历史无法靠压缩救回，请换窗口更大的模型，或开一个新会话`,
+          reason: `压缩已熔断（同一会话连续 ${compressBreaker.failures} 次压缩失败）：本段历史无法靠压缩救回，请换窗口更大的模型，或开一个新会话`,
         };
       }
       const startGen = meta.summaryGeneration ?? 0;
@@ -3664,7 +3674,17 @@ function registerIpcHandlers(): void {
       if (fresh && !acceptSummary(startGen, fresh.summaryGeneration ?? 0)) {
         return { ok: true, skipped: true, used, cap, stale: true, reason: "本次压缩结果已过期（期间已有更新的压缩落地），已丢弃以避免覆盖" };
       }
-      await setSessionSummary(sessionId, summaryText, keep, { comprehend });
+      let rejectReason = "";
+      if (summaryText !== null) {
+        const gate = gateCompaction({ before: historyView, raw: historyAll, summary: summaryText, comprehend, keep });
+        const committed = await commitCompactionIfShrunk(gate, () => setSessionSummary(sessionId, summaryText, keep, { comprehend }));
+        if (!committed) {
+          rejectReason = gate.reason;
+          console.error(`[gui:main] 压缩产物未通过「必须真的变短」校验 ⇒ 拒绝落库：${rejectReason}`);
+        }
+      } else {
+        await setSessionSummary(sessionId, summaryText, keep, { comprehend });
+      }
       
       
       
@@ -3688,6 +3708,7 @@ function registerIpcHandlers(): void {
       compressBreaker = nextBreakerState(compressBreaker, {
         ok: summaryText !== null && validation.ok && realShrink,
         historyKey: key,
+        stableKey: sessionId,
       });
       const stillOverflow = cap > 0 && tokensAfter >= cap;
       
@@ -3698,10 +3719,17 @@ function registerIpcHandlers(): void {
       const dropped = Math.max(0, historyAll.length - after.length);
       return {
         ok: true,
-        summary: summaryText ?? undefined,
-        truncated: summaryText === null,
-        comprehend: comprehend ?? undefined,
-        dropped,
+        ...(rejectReason
+          ? {
+            skipped: true,
+            reason: `未落库：${rejectReason}。已丢弃本次摘要，历史保持原样；连续发生会触发熔断，请换窗口更大的模型或开一个新会话。`,
+          }
+          : {
+            summary: summaryText ?? undefined,
+            truncated: summaryText === null,
+            comprehend: comprehend ?? undefined,
+            dropped,
+          }),
         used,
         cap,
         tokensAfter,
@@ -3715,7 +3743,7 @@ function registerIpcHandlers(): void {
       };
     } catch (e) {
       console.error("[gui:main] chat:compress crashed:", e);
-      compressBreaker = nextBreakerState(compressBreaker, { ok: false });
+      compressBreaker = nextBreakerState(compressBreaker, { ok: false, stableKey: sessionId });
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
@@ -4499,12 +4527,9 @@ function registerIpcHandlers(): void {
 
   
   handleTrusted<AskUserDecision>("slime:ask:resolve", async (_event, decision: AskUserDecision) => {
-    const resolver = pendingAsks.get(decision.requestId);
-    if (!resolver) {
+    if (!askCoordinator.resolve(decision.requestId, decision)) {
       return { ok: false, error: "请求不存在或已超时" };
     }
-    pendingAsks.delete(decision.requestId);
-    resolver(decision);
     return { ok: true };
   });
 
