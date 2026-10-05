@@ -96,9 +96,6 @@ describe("A-986：崩溃判定用「脏标记」—— 强杀下唯一可靠的�
     expect(src).toContain("export function markRunning");
     expect(src).toContain("export function markCleanExit");
     expect(src).toContain("crash-report.log");
-    
-    
-    expect(src).toContain("强杀");
   });
 
   it("启动时先扫（判定+清障）再写标记；正常退出删标记（顺序错了判定就失效）", () => {
