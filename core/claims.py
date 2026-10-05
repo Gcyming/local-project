@@ -29,6 +29,7 @@ slime 幻觉护栏核心（A-047 抽取 / A-987 重构）
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -49,6 +50,54 @@ _EVIDENCE_PHRASES = ("文件大小", "完整路径", "时长")
 
 _EVIDENCE_HINTS = ("字节", "kb", "mb", "文件大小", "完整路径", "时长")
 
+
+
+
+_TEST_SUBJECT_RE = re.compile(
+    r"测试|用例|单测|回归|门禁|验收|"
+    r"\b(?:tests?|pytest|vitest|jest|run_tests|compileall|tsc|typecheck)\b",
+    re.IGNORECASE,
+)
+
+
+_TEST_PASS_RE = re.compile(
+    r"(?<![未没不勿])通过|全绿|零失败|无失败|"
+    r"\b(?:passed|passes|green|success)\b",
+    re.IGNORECASE,
+)
+
+
+_CLAIM_COUNT_RE = re.compile(
+    r"(\d[\d,]*)\s*(?:项|个|条)?\s*(passed|failed|errors?|通过|失败|错误)",
+    re.IGNORECASE,
+)
+
+
+_EVIDENCE_SUFFIXES = (".log", ".txt", ".json", ".jsonl")
+
+
+_EVIDENCE_NAME_RE = re.compile(
+    r"(qa|pytest|vitest|jest|test|report|result|log|summary|output)",
+    re.IGNORECASE,
+)
+
+
+_SUMMARY_TOKEN_RE = re.compile(
+    r"(\d+)\s+(passed|failed|errors?|skipped|xfailed|通过|失败|错误)",
+    re.IGNORECASE,
+)
+
+
+_PHASE_TOKENS = ("run_tests", "pytest", "compileall", "vitest")
+
+
+_CMD_RE = re.compile(r"cmd=(.+)$")
+
+
+_STAMP_RE = re.compile(r"\[开始\s+([^\]]+)\]")
+
+
+_MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
 
 
 
@@ -100,15 +149,27 @@ _KNOWN_EXT = (
 
 
 
+_PATH_TERMINATOR = (
+    r'(?=$|[\s"\'`<>|，。、；：！？（）()\[\]【】“”‘’「」『』…]|\.(?![\w]))'
+)
+
+
 _PATH_RE = re.compile(
     r'(?<=[\s"\'`：：（(])'
     r'('
-    r'[A-Za-z]:[\\/][^\n"\'`<>|]*?\.(?:' + _KNOWN_EXT + r')'
-    r'|[A-Za-z]:[\\/][^\s"\'`<>\uFF08\uFF09)\u3002，；、|]+'
-    r'|[\w\u4e00-\u9fff][\w\u4e00-\u9fff .\\/\-]*?\.(?:' + _KNOWN_EXT + r')'
+    r'[A-Za-z]:[\\/][^\n"\'`<>|]*?\.(?:' + _KNOWN_EXT + r')' + _PATH_TERMINATOR +
+    r'|[A-Za-z]:[\\/][^\s"\'`<>\uFF08\uFF09)\u3002，；、|]+' + _PATH_TERMINATOR +
+    r'|[\w\u4e00-\u9fff.][\w\u4e00-\u9fff .\\/\-]*?\.(?:' + _KNOWN_EXT + r')' + _PATH_TERMINATOR +
     r')',
     re.IGNORECASE,
 )
+
+
+_EXT_ONLY_RE = re.compile(r'^\.(?:' + _KNOWN_EXT + r')$', re.IGNORECASE)
+
+
+
+
 
 
 
@@ -174,6 +235,8 @@ def audit_claims(reply: str) -> ClaimAudit:
     audit = ClaimAudit()
     if not reply:
         return audit
+
+    audit.issues.extend(audit_test_claims(reply).issues)
 
     text = reply
     if _IGNORE_FENCED_BLOCKS:
@@ -266,6 +329,68 @@ def find_unverified_claims(reply: str) -> list[str]:
     return [i.detail for i in audit_claims(reply).issues if i.severity == "high"]
 
 
+def audit_test_claims(reply: str) -> ClaimAudit:
+    """②「测试通过」类声称的**证据核验**（§6.1 三类硬校验之二）。
+
+    本环境拿不到"刚才那次运行"的可靠真值（护栏进程与测试进程无共享状态），
+    因此核验对象只能是**声称者自己引用的那份落盘输出**：引用了哪份证据，那份证据
+    就必须支持这个声称。证据支持 → 静默通过；证据与声称矛盾 / 引用的证据根本不存在
+    → high 硬指控；没有可核验的证据 → low，并**显式标注本环境无法自动判定**，绝不指控。
+
+    绝不执行回复里出现的任何命令（提示注入面 + 副作用面）。
+    """
+    audit = ClaimAudit()
+    if not reply:
+        return audit
+
+    body = _PATH_RE.sub(" ", reply)
+    claim_line = _test_claim_line(body)
+    if claim_line is None:
+        return audit
+
+    claim = _parse_claim_outcome(body)
+    snippet = _clip(claim_line, 120)
+    candidates = _evidence_paths(reply)
+
+    any_outcome = False
+    for cand in candidates:
+        resolved = _resolve_evidence(cand)
+        if resolved is None:
+            continue
+        found = _resolve_existing(resolved)
+        if found is None:
+            audit.issues.append(ClaimIssue(
+                path=cand,
+                kind="test_claim_evidence_missing",
+                severity="high",
+                detail=f"「{snippet}」声称测试通过，但引用的证据文件不存在：{cand}",
+            ))
+            continue
+        outcome = _outcome_for_evidence(found, reply)
+        if outcome is None:
+            continue
+        if _attribution_conflict(claim["subjects"], outcome.get("phase", "")):
+            continue
+        any_outcome = True
+        issue = _contradiction_issue(claim, outcome, cand, snippet)
+        if issue is not None:
+            audit.issues.append(issue)
+
+    if not any_outcome and not audit.issues:
+        note = _latest_gate_note()
+        audit.issues.append(ClaimIssue(
+            path=candidates[0] if candidates else "",
+            kind="test_claim_unverifiable",
+            severity="low",
+            detail=(
+                f"「{snippet}」声称测试通过，但未附可核验的落盘证据"
+                f"（data/qa_*.log / data/qa_report.json）；"
+                f"本环境无法自动判定测试是否真的通过，只能要求提供证据{note}"
+            ),
+        ))
+    return audit
+
+
 def _resolve_existing(p: Path) -> Path | None:
     """存在性核验（**大小写不敏感兜底**），命中时返回盘上真实拼写的路径。
 
@@ -303,7 +428,16 @@ def _looks_like_truncated_fragment(raw: Path) -> bool:
     实例：`D:\\pilot` 不存在，但 `D:\\` 下存在 `pilot project` → `"pilot"` 是它的前缀 → 放行。
     代价：一个**恰好**是真实条目前缀的伪造路径会被放过（漏报）。这是刻意的取舍 ——
     对照 Anthropic 的结论（FPR 86% 的护栏会被用户直接无视），
-    **对真实文件喊狼来了的代价远大于漏掉一条**。"""
+    **对真实文件喊狼来了的代价远大于漏掉一条**。
+
+    ⚠️ A-988（用户实测漏报，本兜底曾被反向利用）：`_PATH_RE` 的惰性量词一旦停在**目录名
+    里的点号**上（`.pytest_basetemp` → `.py`），碎片恰好是一个**裸扩展名**，于是
+    `e.startswith(".py")` 在仓库根只有 3 个字符就能命中 `.pytest_basetemp` / `.pytest_cache`
+    —— 碎片校验几乎无条件放行，护栏返回 []，**编造路径被静默吞掉**。
+    收紧两条：① 碎片必须是**路径段边界**上的真实名字，不能本身就是裸扩展名
+    （`_EXT_ONLY_RE`，如 `.py` / `.png`）；② 长度不足 2 的碎片不构成证据（既有）。
+    配合 `_PATH_RE` 的终止符约束（扩展名后必须紧跟终止符），两侧一起收紧才有意义：
+    只改这里会把"误报真实文件"换成"漏报编造路径"。"""
     frag = ""
     cur = raw
     for _ in range(16):  
@@ -311,10 +445,10 @@ def _looks_like_truncated_fragment(raw: Path) -> bool:
         if parent == cur:
             return False
         frag = cur.name
+        if len(frag) < 2 or _EXT_ONLY_RE.match(frag):
+            return False
         try:
             if parent.is_dir():
-                if len(frag) < 2:
-                    return False
                 entries = os.listdir(parent)
                 return any(e != frag and e.startswith(frag) for e in entries)
         except OSError:
@@ -377,3 +511,230 @@ def _exists_in_generated(name: str) -> bool:
     except OSError:
         pass
     return False
+
+
+def _clip(text: str, n: int) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _test_claim_line(reply: str) -> str | None:
+    """第一条同时含"测试对象"与"通过"断言的行（没有就是没有这类声称）。
+
+    调用方传入的正文已剔除路径 —— 否则 `…\\tests\\test_x.py` 这种**路径**会
+    冒充"测试对象"，把一句普通的话升级成一条测试通过声称。"""
+    for raw in reply.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _TEST_SUBJECT_RE.search(line) and _TEST_PASS_RE.search(line):
+            return line
+    return None
+
+
+def _parse_claim_outcome(reply: str) -> dict:
+    """从**声称文本**里抽出它自己报的数字：passed / failed + 是否断言"通过" + 谈的是哪套门禁。"""
+    low = reply.lower()
+    out = {
+        "passed": None,
+        "failed": None,
+        "asserts_pass": bool(_TEST_PASS_RE.search(reply)),
+        "subjects": {t for t in _PHASE_TOKENS if t in low},
+    }
+    for m in _CLAIM_COUNT_RE.finditer(reply):
+        try:
+            n = int(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        kind = m.group(2).lower()
+        if kind.startswith("pass") or kind == "通过":
+            out["passed"] = n
+        else:
+            out["failed"] = n
+    return out
+
+
+def _evidence_paths(reply: str) -> list[str]:
+    """回复里被当作"测试证据"引用的文件（限日志/报告类后缀 + 文件名像门禁产物）。
+
+    为什么要限后缀与文件名：`config/auth_token.json` 这类敏感文件绝不能因为
+    "模型提到了它"就被读进来解析 —— 护栏的误伤成本（喊狼来了）高于漏报成本。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _PATH_RE.finditer(reply):
+        p = m.group(1).strip(_TRAILING_JUNK)
+        if not p or not p.lower().endswith(_EVIDENCE_SUFFIXES):
+            continue
+        if not _EVIDENCE_NAME_RE.search(p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]):
+            continue
+        key = p.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _resolve_evidence(p: str) -> Path | None:
+    raw = Path(p)
+    if not raw.is_absolute():
+        raw = _PROJECT_ROOT / raw
+    try:
+        return raw.resolve()
+    except OSError:
+        return None
+
+
+def _read_capped(path: Path) -> str | None:
+    try:
+        if path.stat().st_size > _MAX_EVIDENCE_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _outcome_from_text(text: str) -> dict | None:
+    """取**最后一行**可解析的测试结果摘要（进度行/心跳行在前，摘要行在末尾），
+    并顺手取出门禁自己写的 `cmd=` 与开始时间 —— 判断"这份证据是哪套门禁的"。"""
+    line = None
+    for raw in text.splitlines():
+        if _SUMMARY_TOKEN_RE.search(raw):
+            line = raw.strip()
+    if line is None:
+        return None
+    passed: int | None = None
+    failed = 0
+    for m in _SUMMARY_TOKEN_RE.finditer(line):
+        n = int(m.group(1))
+        kind = m.group(2).lower()
+        if kind in ("passed", "通过"):
+            passed = n
+        elif kind in ("failed", "error", "errors", "失败", "错误"):
+            failed = n
+    cmd = ""
+    stamp = ""
+    for raw in text.splitlines():
+        if not cmd:
+            m = _CMD_RE.search(raw)
+            if m:
+                cmd = m.group(1).strip()
+        if not stamp:
+            m = _STAMP_RE.search(raw)
+            if m:
+                stamp = m.group(1).strip()
+        if cmd and stamp:
+            break
+    cmd_low = cmd.lower()
+    return {
+        "line": line,
+        "passed": passed,
+        "failed": failed,
+        "phase": next((t for t in _PHASE_TOKENS if t in cmd_low), ""),
+        "stamp": stamp,
+    }
+
+
+def _outcome_for_evidence(path: Path, reply: str) -> dict | None:
+    """证据文件 → 最后一次运行的结果摘要（qa_report.json 按阶段取值）。"""
+    text = _read_capped(path)
+    if text is None:
+        return None
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("phases"), list):
+            return _outcome_from_report(data, reply)
+    return _outcome_from_text(text)
+
+
+def _outcome_from_report(data: dict, reply: str) -> dict | None:
+    phases = [p for p in data.get("phases") or [] if isinstance(p, dict)]
+    low = reply.lower()
+    chosen = None
+    for ph in phases:
+        name = str(ph.get("name") or "").lower()
+        if name and name in low:
+            chosen = ph
+            break
+    if chosen is None:
+        for want in ("pytest", "run_tests"):
+            chosen = next((p for p in phases if str(p.get("name")) == want), None)
+            if chosen is not None:
+                break
+    if chosen is None:
+        return None
+    outcome = _outcome_from_text(str(chosen.get("tail") or ""))
+    if outcome is not None:
+        outcome["phase"] = str(chosen.get("name") or "")
+        outcome["stamp"] = str(data.get("generated_at") or "")
+    return outcome
+
+
+def _attribution_conflict(claim_subjects: set, evidence_phase: str) -> bool:
+    """数字能不能归到这份证据上？归不上就不下指控（宁可漏报不可误伤）。
+
+    典型：`run_tests 1 failed（既有缺陷）… pytest 1034 passed 全绿` —— 一条回复里
+    混了两个门禁的数字，拿其中一个去比另一个就是误伤。"""
+    if not claim_subjects or not evidence_phase:
+        return False
+    return len(claim_subjects) > 1 or evidence_phase not in claim_subjects
+
+
+def _contradiction_issue(
+    claim: dict, outcome: dict, cand: str, snippet: str
+) -> ClaimIssue | None:
+    """引用证据与声称是否矛盾。只有"证据本身否定了声称"才升级为硬指控。"""
+    shown = _clip(outcome["line"], 160)
+    when = outcome.get("stamp") or ""
+    tail = f"「{snippet}」引用 {cand}"
+    if when:
+        tail += f"（该证据记录时间 {when}）"
+    tail += f"，但它最后一次记录是「{shown}」"
+    failed = outcome["failed"]
+    if failed > 0 and claim["asserts_pass"]:
+        return ClaimIssue(
+            path=cand, kind="test_claim_contradicted", severity="high",
+            detail=f"{tail}：与「测试通过」矛盾（证据记录了 {failed} 个失败）",
+        )
+    if claim["failed"] is not None and claim["failed"] != failed:
+        return ClaimIssue(
+            path=cand, kind="test_claim_contradicted", severity="high",
+            detail=f"{tail}：失败数与声称不符（声称 {claim['failed']} failed）",
+        )
+    if claim["passed"] is not None and outcome["passed"] is not None \
+            and claim["passed"] != outcome["passed"]:
+        return ClaimIssue(
+            path=cand, kind="test_claim_contradicted", severity="high",
+            detail=f"{tail}：通过数与声称不符（声称 {claim['passed']} passed）",
+        )
+    return None
+
+
+def _latest_gate_note() -> str:
+    """最近一次落盘门禁的实测结果（给"无法核验"的声称附上可对照的真值）。"""
+    text = _read_capped(_PROJECT_ROOT / "data" / "qa_report.json")
+    if text is None:
+        return ""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    parts: list[str] = []
+    for ph in data.get("phases") or []:
+        if not isinstance(ph, dict):
+            continue
+        outcome = _outcome_from_text(str(ph.get("tail") or ""))
+        if outcome is None:
+            continue
+        parts.append(
+            f"{ph.get('name')} {outcome['passed']} passed / {outcome['failed']} failed"
+            f"（status={ph.get('status')}）"
+        )
+    if not parts:
+        return ""
+    return f"；最近一次落盘门禁（{data.get('generated_at')}）：" + "，".join(parts)

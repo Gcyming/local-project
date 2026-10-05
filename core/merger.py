@@ -68,6 +68,7 @@ class Merger:
         self.result = MergeResult(task_id=task_id, original_task=original_task)
         
         self._validator_fn: Optional[Callable] = None
+        self._unverified_test_claims: list[str] = []
 
     def set_validator(self, fn: Callable) -> None:
         """设置验证函数（可选，用于注入 LLM 验证）"""
@@ -417,6 +418,7 @@ class Merger:
         
         self._append_claim_errors(summary, subtasks)
         self.assess_risks(subtasks)
+        self._append_unverifiable_claim_risk()
 
         
         trial_result = self._run_trial_sync(summary, subtasks, llm_fn)
@@ -448,22 +450,50 @@ class Merger:
         trial_run 基础检查失败 → 不虚报"任务成功"。
 
         仅当出现完成态声称动词时才触发路径核验（无声称不误伤）。"""
+        self._unverified_test_claims = []
         try:
-            from core.claims import find_unverified_claims
-            
-            
-            
+            from core.claims import audit_claims
+
             texts = [summary or ""]
             for st in subtasks:
                 texts.append(st.result or "")
-            
-            unverified = list(dict.fromkeys(find_unverified_claims("\n".join(texts))))
-            if unverified:
-                for p in unverified[:5]:
-                    self.result.errors.append(f"幻觉护栏：声称已生成/已保存但文件不存在: {p}")
-            return unverified
+
+            audit = audit_claims("\n".join(texts))
+            hard: list[tuple[str, str]] = []
+            for issue in audit.issues:
+                if issue.severity != "high":
+                    if issue.kind == "test_claim_unverifiable":
+                        self._unverified_test_claims.append(issue.detail)
+                    continue
+                if any(issue.detail == d for d, _ in hard):
+                    continue
+                hard.append((issue.detail, issue.kind))
+
+            for detail, kind in hard[:5]:
+                if kind.startswith("test_claim"):
+                    self.result.errors.append(f"幻觉护栏[{kind}]：{detail}")
+                else:
+                    self.result.errors.append(
+                        f"幻觉护栏：声称已生成/已保存但文件不存在: {detail}"
+                    )
+            return [d for d, _ in hard]
         except Exception:
-            return []  
+            return []
+
+    def _append_unverifiable_claim_risk(self) -> None:
+        """无法自动核验的「测试通过」声称 → 风险项（不升级为错误）。
+
+        护栏拿不到"刚才那次运行"的真值，核验不了就不能指控（护栏的头号死因是
+        假阳性）；但也不能当没发生 —— 记成风险，结论里带出去让人判断。"""
+        if not getattr(self, "_unverified_test_claims", None):
+            return
+        self.result.risks.append({
+            "level": RiskLevel.MEDIUM.value,
+            "description": (
+                f"{len(self._unverified_test_claims)} 条「测试通过」声称无法自动核验"
+                f"（未附可核验的落盘证据），需人工确认"
+            ),
+        })
 
     def _build_verdict(self, summary: str, subtasks: list,
                        llm_fn: Optional[Callable] = None) -> str:
