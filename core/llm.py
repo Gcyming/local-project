@@ -403,12 +403,15 @@ def _sanitize_image_data_url(raw) -> list[str]:
 def _build_user_content(agent, user_message: str,
                         images: list[str] | None = None,
                         history: list[dict] | None = None,
-                        memory_agent_id: str | None = None):
+                        memory_agent_id: str | None = None,
+                        state_segment: str = ""):
     """构造最终 user content（OpenAI 兼容）：
     - 无图 → 原字符串（保持全部旧路径行为不变，零回归）
     - 有图 → content-blocks 数组 [{type:text},{type:image_url,...}]，心性上下文注入文本块。
-    图片以 data URL 内联（适配所有 OpenAI 兼容多模态接口，无需服务端临时文件）。"""
+    图片以 data URL 内联（适配所有 OpenAI 兼容多模态接口，无需服务端临时文件）。
+    state_segment：易变状态段并入本条消息（承载它，而不是污染第 0 条 system）。"""
     text = _inject_psyche(agent, user_message, history, memory_agent_id=memory_agent_id)
+    text = _inject_state_segment(text, state_segment)
     images = _sanitize_image_data_url(images)
     if not images:
         return text
@@ -416,6 +419,16 @@ def _build_user_content(agent, user_message: str,
     for url in images:
         blocks.append({"type": "image_url", "image_url": {"url": url}})
     return blocks
+
+
+def _inject_state_segment(text: str, state_segment: str) -> str:
+    """易变状态段并入末段 user 消息（放在心性上下文之后、用户原文之前）。
+
+    设计 §1.3：静态前缀必须字节稳定，易变内容放末尾。状态段留在 system（第 0 条消息）
+    里时，每次情绪/技能目录一变就作废整段历史的前缀缓存。"""
+    if not state_segment:
+        return text
+    return f"{state_segment}\n\n---\n\n{text}"
 
 
 def _extract_nonstream_message(raw: str) -> dict:
@@ -464,29 +477,48 @@ def _extract_reasoning(delta: dict, chunk: dict | None = None) -> str:
     return ""
 
 
-def _compose_system_prompt(agent, base: str | None = None, user_message: str = "",
-                           history: list[dict] | None = None) -> str:
-    """L1 身份铁律 + L2 行为模式（固定、不膨胀）。
+def _compose_prompt_segments(agent, base: str | None = None) -> tuple[str, str]:
+    """系统提示拆成 (稳定前缀, 易变状态段)。
+
+    稳定前缀字节稳定 → 可命中前缀缓存；易变状态段（行为模式 / 情绪状态 / 可用技能清单 /
+    审慎承诺）改由末段 user 消息承载。system 是第 0 条消息，它一变整段历史缓存即作废。
     Intelligence.md: 动态记忆走 message 层（_retrieve_psyche_context），不进 system prompt。
-    Soul-Plan 第 4 步：caution_level≥1 时结构化注入审慎承诺（不碰权限，仅行为承诺）。"""
-    sp = base or agent.get_system_prompt()
+    Soul-Plan 第 4 步：caution_level≥1 时结构化注入审慎承诺（不碰权限，仅行为承诺）。
+    base 非空 = 调用方自带完整 system prompt（Swarm Worker 路径），保持原样不拆。"""
+    if base:
+        return base, ""
+    stable, volatile = agent.get_system_prompt_segments()
     try:
         hint = agent.emotion.current_behavior_hint
         if hint.get("caution_level", 0) >= 1:
-            sp += ("\n\n## 行为承诺（情绪状态导致）\n"
-                   "当前处于审慎状态：写/终端/网络类工具调用必须先向用户确认再执行。")
+            volatile += ("\n\n## 行为承诺（情绪状态导致）\n"
+                         "当前处于审慎状态：写/终端/网络类工具调用必须先向用户确认再执行。")
     except Exception:
         pass
-    return sp
+    return stable, volatile
+
+
+def _compose_system_prompt(agent, base: str | None = None, user_message: str = "",
+                           history: list[dict] | None = None) -> str:
+    """整段系统提示（稳定前缀 + 易变状态段）——兼容旧调用方的全量视图。
+
+    请求组装请用 _compose_prompt_segments，把易变段放到末段消息。"""
+    stable, volatile = _compose_prompt_segments(agent, base)
+    return stable + volatile
 
 
 def _retrieve_psyche_context(agent, user_message: str = "",
                              history: list[dict] | None = None,
-                             memory_agent_id: str | None = None) -> str:
+                             memory_agent_id: str | None = None,
+                             data_dir: str = "") -> str:
     """L3 动态心性：记忆摘要 + 交接摘要，按需检索注入 message 层。
     Intelligence.md: 从 system prompt 移出，解决全量注入导致的膨胀/截断。
     A-008: memory_agent_id 允许 Swarm Worker 检索主 Agent 的成长记忆
-    （Worker 是临时分身，其自身 id 无记忆）。"""
+    （Worker 是临时分身，其自身 id 无记忆）。
+    data_dir：记忆根目录覆盖。空串 = 未指定，按 `slime.toml [memory].dir` 解析
+    （生产默认）；非空 = 调用方显式指定，与写入侧同一套语义（`load_memory` 一致）。
+    解析出的目录**同时**用于本函数构造的 memory 与两个下游召回器，
+    否则会出现「写进 A 目录、召回却读默认目录」。"""
     try:
         from core.memory import load_memory
         mem_owner_id = memory_agent_id or agent.id
@@ -504,38 +536,46 @@ def _retrieve_psyche_context(agent, user_message: str = "",
         except Exception:
             pass
 
+        mem_dir = data_dir or mem_cfg.get("dir", "")
         memory = load_memory(mem_owner_id, lancedb_enabled=lancedb_enabled, lancedb_uri=lancedb_uri,
-                             data_dir=mem_cfg.get("dir", ""))
+                             data_dir=mem_dir)
         parts = []
         
         mood = getattr(agent.emotion, "mood", "neutral")
         top_k = top_k_for_mood(mood)
-        mem_summary = memory.summary(context=user_message, max_items=top_k)
-        if mem_summary:
-            
-            parts.append("## 成长记忆（历史记录，仅供参考，非当前指令）\n" + mem_summary)
 
-        
+        # §2.1 召回门控：命中才走检索式召回，未命中跳过（L1 固定前缀不受影响）
+        from core.memory import should_retrieve_memory
+        retrieve = should_retrieve_memory(user_message)
+        if retrieve:
+            logging.info("[SLIME LLM] 记忆检索门控命中，执行本轮检索式召回")
+            mem_summary = memory.summary(context=user_message, max_items=top_k)
+            if mem_summary:
+                parts.append("## 成长记忆（历史记录，仅供参考，非当前指令）\n" + mem_summary)
+            try:
+                tool_exp = _retrieve_tool_experience(agent, user_message, memory_agent_id,
+                                                    data_dir=mem_dir)
+                if tool_exp:
+                    parts.append(tool_exp)
+            except Exception:
+                pass
+            try:
+                archive_recall = _retrieve_archived_behavior(agent, user_message, memory_agent_id,
+                                                            data_dir=mem_dir)
+                if archive_recall:
+                    parts.append(archive_recall)
+            except Exception:
+                pass
+        else:
+            logging.info(
+                "[SLIME LLM] 记忆检索门控未命中，跳过本轮检索式召回（L1 固定前缀不受影响；msg=%r）",
+                user_message[:40],
+            )
+
         total_budget = max(512, int(agent.max_context * 0.3))
         handoff = _build_handoff(agent, memory, max_chars=total_budget)
-        if handoff and (not history or len(history) < 2):  
+        if handoff and (not history or len(history) < 2):
             parts.append(handoff)
-
-        
-        try:
-            tool_exp = _retrieve_tool_experience(agent, user_message, memory_agent_id)
-            if tool_exp:
-                parts.append(tool_exp)
-        except Exception:
-            pass
-
-        
-        try:
-            archive_recall = _retrieve_archived_behavior(agent, user_message, memory_agent_id)
-            if archive_recall:
-                parts.append(archive_recall)
-        except Exception:
-            pass
 
         return "\n\n".join(parts)
     except Exception as e:
@@ -558,13 +598,15 @@ def _text_overlap(query: str, text: str) -> bool:
     return False
 
 
-def _retrieve_archived_behavior(agent, user_message: str, memory_agent_id: str | None = None) -> str:
+def _retrieve_archived_behavior(agent, user_message: str, memory_agent_id: str | None = None,
+                                data_dir: str = "") -> str:
     """Soul-Plan 第 6 步：行为归档召回——检索 tags=["behavior_archive"] 的 lessons，
-    按场景相似度（用户消息关键词命中）注入"你曾经用过这种方式"回忆（触摸 last_accessed 刷新）。"""
+    按场景相似度（用户消息关键词命中）注入"你曾经用过这种方式"回忆（触摸 last_accessed 刷新）。
+    data_dir 必须由调用方透传写入侧用的那个目录；空串 = 未指定 = 默认记忆目录（旧行为）。"""
     try:
         from core.memory import load_memory
         mem_owner_id = memory_agent_id or agent.id
-        mem = load_memory(mem_owner_id)
+        mem = load_memory(mem_owner_id, data_dir=data_dir)
         facts = mem.get_facts() or []
         hits = []
         for f in facts:
@@ -609,13 +651,15 @@ def _retrieve_archived_behavior(agent, user_message: str, memory_agent_id: str |
         return ""
 
 
-def _retrieve_tool_experience(agent, user_message: str, memory_agent_id: str | None = None) -> str:
+def _retrieve_tool_experience(agent, user_message: str, memory_agent_id: str | None = None,
+                              data_dir: str = "") -> str:
     """Soul-Plan 环 3：按场景命中检索"工具经验"（memory lessons 中 tool. 类 + 用户消息关键词），
-    命中才注入、最多 3 条，标注"历史记录仅供参考"（沿用 N11-P1-4 防提示注入标注）。"""
+    命中才注入、最多 3 条，标注"历史记录仅供参考"（沿用 N11-P1-4 防提示注入标注）。
+    data_dir 必须由调用方透传写入侧用的那个目录；空串 = 未指定 = 默认记忆目录（旧行为）。"""
     try:
         from core.memory import load_memory
         mem_owner_id = memory_agent_id or agent.id
-        mem = load_memory(mem_owner_id)
+        mem = load_memory(mem_owner_id, data_dir=data_dir)
         lessons = mem.get_lessons(limit=100) or []
         hits = []
         for lv in lessons:
@@ -846,7 +890,8 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
                             system_prompt: str | None = None,
                             memory_agent_id: str | None = None,
                             return_raw: bool = False,
-                            images: list[str] | None = None) -> str:
+                            images: list[str] | None = None,
+                            usage_sink: dict | None = None) -> str:
     
     
     """
@@ -859,6 +904,8 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
     - system_prompt: 自定义 system prompt（覆盖 agent 的默认 prompt）
     - memory_agent_id: 心性记忆归属 Agent id（A-008：Swarm Worker 用主 Agent 记忆）
     - images: 识图图片（data URL 列表），None/空则纯文本
+    - usage_sink: 可选 dict；上游回传 usage 时回填 prompt_tokens / completion_tokens
+      （只覆盖无工具调用的单次请求；工具轮的多子请求用量上游不给合计，由调用方估算）
     """
     api_base = (cfg.get("api_base") or "").rstrip("/")
     if api_base.endswith("/v1"):
@@ -874,13 +921,15 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
     }
 
     
-    sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
+    sys_prompt, state_segment = _compose_prompt_segments(agent, system_prompt)
 
     messages = [{"role": "system", "content": sys_prompt}]
     if history:
         
         from core.context import ContextCompressor
-        compressor = ContextCompressor(agent.context_config)
+        compressor = ContextCompressor(agent.context_config,
+                                       token_budget=agent.max_context,
+                                       owner_id=agent.id)
 
         async def _summary_fn(prompt: str) -> str:
             """用当前 Provider 生成上下文摘要"""
@@ -907,7 +956,8 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
             total_chars += msg_chars
         messages.extend(truncated)
     messages.append({"role": "user", "content": _build_user_content(
-        agent, user_message, images, history, memory_agent_id=memory_agent_id)})
+        agent, user_message, images, history, memory_agent_id=memory_agent_id,
+        state_segment=state_segment)})
 
     payload = {"messages": messages, "stream": False}
     if model:
@@ -954,6 +1004,13 @@ async def call_api_provider(cfg: dict, agent: Agent, user_message: str,
 
         _raw_content = message.get("content") or ""
         _filtered = _apply_filter(_raw_content, agent)
+        
+        if usage_sink is not None:
+            _u = data.get("usage") or {}
+            for _k in ("prompt_tokens", "completion_tokens"):
+                _v = _u.get(_k)
+                if isinstance(_v, int) and not isinstance(_v, bool):
+                    usage_sink[_k] = _v
         return (_filtered, _raw_content) if return_raw else _filtered
     except httpx.HTTPError as e:
         return f"[API 调用失败: {_sanitize_api_error(e)}]"
@@ -1010,6 +1067,20 @@ async def _execute_pending_tools(agent: Agent, messages: list, tool_calls: list)
 
             
             tool = registry.get(tool_name)
+            
+            from core.agent_context import swarm_readonly_mode
+            if swarm_readonly_mode.get():
+                from core.swarm import swarm_write_denial
+                _swarm_denial = swarm_write_denial(tool)
+                if _swarm_denial:
+                    manager.record_violation(agent.id)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": _swarm_denial,
+                    })
+                    details.append((tool_name, args_str, _swarm_denial))
+                    continue
             
             
             
@@ -1441,12 +1512,14 @@ async def call_api_provider_with_meta(cfg: dict, agent: Agent, user_message: str
     }
 
     
-    sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
+    sys_prompt, state_segment = _compose_prompt_segments(agent, system_prompt)
 
     messages = [{"role": "system", "content": sys_prompt}]
     if history:
         from core.context import ContextCompressor
-        compressor = ContextCompressor(agent.context_config)
+        compressor = ContextCompressor(agent.context_config,
+                                       token_budget=agent.max_context,
+                                       owner_id=agent.id)
 
         async def _summary_fn(prompt: str) -> str:
             """用当前 Provider 生成上下文摘要"""
@@ -1471,7 +1544,8 @@ async def call_api_provider_with_meta(cfg: dict, agent: Agent, user_message: str
             truncated.insert(0, msg)
             total_chars += msg_chars
         messages.extend(truncated)
-    messages.append({"role": "user", "content": _build_user_content(agent, user_message, images, history)})
+    messages.append({"role": "user", "content": _build_user_content(
+        agent, user_message, images, history, state_segment=state_segment)})
 
     payload = {"messages": messages, "stream": False}
     if model:
@@ -1592,7 +1666,7 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
                 agent, user_message, history, system_prompt, reason="本地模型未就绪")
 
         
-        sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
+        sys_prompt, state_segment = _compose_prompt_segments(agent, system_prompt)
         messages = [{"role": "system", "content": sys_prompt}]
         if history:
             sys_tokens = _estimate_tokens(sys_prompt)
@@ -1606,7 +1680,8 @@ async def _local_model_reply(agent: Agent, user_message: str = "",
                     break
                 truncated.insert(0, msg)
             messages.extend(truncated)
-        messages.append({"role": "user", "content": _inject_psyche(agent, user_message, history)})
+        messages.append({"role": "user", "content": _inject_state_segment(
+            _inject_psyche(agent, user_message, history), state_segment)})
 
         payload = {"messages": messages, "stream": False}
         
@@ -1672,12 +1747,14 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
     }
 
     
-    sys_prompt = _compose_system_prompt(agent, system_prompt, user_message, history)
+    sys_prompt, state_segment = _compose_prompt_segments(agent, system_prompt)
 
     messages = [{"role": "system", "content": sys_prompt}]
     if history:
         from core.context import ContextCompressor
-        compressor = ContextCompressor(agent.context_config)
+        compressor = ContextCompressor(agent.context_config,
+                                       token_budget=agent.max_context,
+                                       owner_id=agent.id)
 
         async def _summary_fn(prompt: str) -> str:
             try:
@@ -1701,7 +1778,8 @@ async def call_api_provider_stream(cfg: dict, agent: Agent, user_message: str,
             truncated.insert(0, msg)
             total_chars += msg_chars
         messages.extend(truncated)
-    messages.append({"role": "user", "content": _build_user_content(agent, user_message, images, history)})
+    messages.append({"role": "user", "content": _build_user_content(
+        agent, user_message, images, history, state_segment=state_segment)})
 
     payload = {"messages": messages, "stream": True}
     if model:
@@ -1952,6 +2030,7 @@ async def call_llm_stream(agent: Agent, user_message: str, history: list[dict] |
 
 _silam_engine = None
 _silam_initialized = False
+_silam_engine_lock = threading.Lock()
 
 
 def _observe_silam_interaction(agent, user_message: str, reply: str) -> None:
@@ -2192,50 +2271,34 @@ async def _silam_tool_bridge(engine, user_message: str, report) -> dict:
 
 
 def _init_silam_engine():
-    """延迟初始化 SILAM 引擎（首次调用时加载权重）。"""
+    """延迟初始化 SILAM 引擎（首次调用时加载权重）。
+
+    双检锁：并发线程不会再看到"标志已置位但引擎仍是 None"的中间态。
+    冻结权重走 core.agent 的进程级缓存，构造不再重复解压 npz。
+    """
     global _silam_engine, _silam_initialized
     if _silam_initialized:
         return _silam_engine
-    _silam_initialized = True
+    with _silam_engine_lock:
+        if _silam_initialized:
+            return _silam_engine
+        try:
+            from .agent import build_silam_engine
+            engine, _cfg, backbone_path, st = build_silam_engine()
+            _silam_engine = engine
+            _silam_initialized = True
+            if backbone_path is not None:
+                detail = ", ".join(st["loaded"]) if st["loaded"] else ""
+                skip = "; ".join(f"{k}:{reason}" for k, reason, _ in st["skipped"])
+                logging.info(f"[silam] 已装载蒸馏权重 {backbone_path} "
+                             f"(loaded=[{detail}] skipped=[{skip}])")
+            else:
+                logging.info("[silam] 未发现蒸馏权重，使用随机初始化 80M 宽体主干")
+            return _silam_engine
+        except Exception as e:
+            logging.error(f"[silam] 初始化失败: {e}")
+            return None
 
-    try:
-        import sys
-        from pathlib import Path
-        
-        
-        silam_root = Path(__file__).parent.parent / "_model_stage"
-        if str(silam_root) not in sys.path:
-            sys.path.insert(0, str(silam_root))
-
-        from silam_core.engine import SILAMEngine
-        from silam_core.config import SilamConfig
-        from silam_core.pretrained import load_pretrained
-
-        cfg = SilamConfig()
-        _silam_engine = SILAMEngine(cfg=cfg)
-
-        
-        backbone_path = None
-        repo_root = Path(__file__).parent.parent
-        for _cand in (repo_root / "models" / "情感脑-silam-sigma-80m" / "backbone_80m.npz",
-                      silam_root / "data" / "backbone_80m.npz"):
-            if _cand.exists():
-                backbone_path = _cand
-                break
-        if backbone_path:
-            st = load_pretrained(_silam_engine, str(backbone_path))
-            detail = ", ".join(st["loaded"]) if st["loaded"] else ""
-            skip = "; ".join(f"{k}:{reason}" for k, reason, _ in st["skipped"])
-            logging.info(f"[silam] 已装载蒸馏权重 {backbone_path} "
-                         f"(loaded=[{detail}] skipped=[{skip}])")
-        else:
-            logging.info("[silam] 未发现蒸馏权重，使用随机初始化 80M 宽体主干")
-
-        return _silam_engine
-    except Exception as e:
-        logging.error(f"[silam] 初始化失败: {e}")
-        _silam_initialized = False
-        return None
 
 
 _lang_core_box_cache = {"v": None, "tried": False}

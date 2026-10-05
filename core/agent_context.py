@@ -3,6 +3,8 @@
 - 工具执行期间（core/llm.py 的 _execute_pending_tools）设置当前 Agent 的 model_choice，
   工具模块（tools/agnes_media.py）据此解析该 Agent 自己配置的 provider 密钥。
 - 使用 contextvars：异步工具调用在 await 边界自动传递，无全局状态污染。
+- swarm_readonly_mode：该 Worker 被调度器判定为纯只读并与他人并行时为 True，
+  core/llm.py 的 _execute_pending_tools 据此拦截写工具（见 core/swarm.py 的判定表）。
 """
 
 from contextvars import ContextVar
@@ -36,6 +38,9 @@ dedup_tools_log: ContextVar = ContextVar("slime_dedup_tools_log", default=None)
 
 
 current_ref_frame: ContextVar[str] = ContextVar("slime_current_ref_frame", default="")
+
+
+swarm_readonly_mode: ContextVar[bool] = ContextVar("slime_swarm_readonly_mode", default=False)
 
 
 
