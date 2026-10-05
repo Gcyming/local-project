@@ -63,13 +63,19 @@ class TestToolEmotion:
         triggers = [ev["trigger"] for ev in agent.emotion.events]
         assert "tool" not in triggers, "一成一败不触发（连续失败被成功打断）"
 
-    def test_ring3_deposit_and_inject(self):
+    def test_ring3_deposit_and_inject(self, tmp_path):
         """环 3：工具经验沉淀入库 + 按场景命中注入（标注历史记录非指令）"""
+        import core.memory as mem_mod
         agent = self._agent()
         from core.memory import load_memory
-        mem = load_memory(agent.id)
-        mem.add_lesson("用 web_search 处理 查询类请求成功", True, importance=4)
-        exp = _retrieve_tool_experience(agent, "帮我查询天气")
+        original_knowledge_dir = mem_mod._KNOWLEDGE_MEMORY_DIR
+        mem_mod._KNOWLEDGE_MEMORY_DIR = tmp_path
+        try:
+            mem = load_memory(agent.id, data_dir=str(tmp_path))
+            mem.add_lesson("用 web_search 处理 查询类请求成功", True, importance=4)
+            exp = _retrieve_tool_experience(agent, "帮我查询天气")
+        finally:
+            mem_mod._KNOWLEDGE_MEMORY_DIR = original_knowledge_dir
         assert "工具经验" in (exp or "")
         assert "历史记录，仅供参考" in (exp or "")
 

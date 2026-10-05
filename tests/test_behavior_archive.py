@@ -31,27 +31,41 @@ class TestBehaviorArchive:
         rp2 = bs.reconsolidate("场景B", ["s2"], archived_confidence=0.2)
         assert rp2.confidence == 0.3  
 
-    def test_archive_recall_with_overlap(self):
+    def test_archive_recall_with_overlap(self, tmp_path):
+        import core.memory as mem_mod
         agent = Agent(name="T", role="t")
         from core.memory import load_memory
-        mem = load_memory(agent.id)
-        mem._store_categorized(
-            "lesson",
-            "行为归档：场景「处理批量文件」的步骤 file_read file_write（现已不是习惯）",
-            tags=["behavior_archive"], importance=6, extra={"success": True},
-        )
-        r = _retrieve_archived_behavior(agent, "帮我处理批量文件")
+        original_knowledge_dir = mem_mod._KNOWLEDGE_MEMORY_DIR
+        mem_mod._KNOWLEDGE_MEMORY_DIR = tmp_path
+        try:
+            mem = load_memory(agent.id, data_dir=str(tmp_path))
+            mem._store_categorized(
+                "lesson",
+                "行为归档：场景「处理批量文件」的步骤 file_read file_write（现已不是习惯）",
+                tags=["behavior_archive"], importance=6, extra={"success": True},
+            )
+            r = _retrieve_archived_behavior(agent, "帮我处理批量文件")
+        finally:
+            mem_mod._KNOWLEDGE_MEMORY_DIR = original_knowledge_dir
         assert "曾经的行为模式" in (r or "")
         assert "历史记录，仅供参考" in (r or "")
 
-    def test_archive_recall_no_false_hit(self):
+    def test_archive_recall_no_false_hit(self, tmp_path):
+        import core.memory as mem_mod
         agent = Agent(name="T2", role="t")
         from core.memory import load_memory
-        mem = load_memory(agent.id)
-        mem._store_categorized(
-            "lesson",
-            "行为归档：场景「做饭」的步骤（现已不是习惯）",
-            tags=["behavior_archive"], importance=6, extra={"success": True},
-        )
-        r = _retrieve_archived_behavior(agent, "帮我写代码")
+        original_knowledge_dir = mem_mod._KNOWLEDGE_MEMORY_DIR
+        mem_mod._KNOWLEDGE_MEMORY_DIR = tmp_path
+        try:
+            mem = load_memory(agent.id, data_dir=str(tmp_path))
+            mem._store_categorized(
+                "lesson",
+                "行为归档：场景「做饭」的步骤（现已不是习惯）",
+                tags=["behavior_archive"], importance=6, extra={"success": True},
+            )
+            r = _retrieve_archived_behavior(agent, "帮我写代码")
+            stored = [f.get("content") for f in load_memory(agent.id, data_dir=str(tmp_path)).get_facts()]
+        finally:
+            mem_mod._KNOWLEDGE_MEMORY_DIR = original_knowledge_dir
+        assert "行为归档：场景「做饭」的步骤（现已不是习惯）" in stored, "归档条目必须真的落库，否则本用例是空转"
         assert r is None or r == ""
