@@ -193,9 +193,10 @@ describe("⑥ 跳过 / 熔断 / 压完仍超限都必须**如实告知**（不�
     expect(retryAt, "重试排在早退之前 ⇒ 早退形同虚设").toBeGreaterThan(guardAt);
   });
 
-  it("熔断必须真的接进压缩编排（同一段历史连续失败 ≥3 停）", () => {
+  it("熔断必须真的接进压缩编排（同一会话连续失败 ≥3 停）", () => {
     has(MAIN, "nextBreakerState(compressBreaker,", "熔断状态没有推进");
-    has(MAIN, "if (compressBreaker.open && compressBreaker.lastKey === key)", "熔断状态没有在编排里被查询 ⇒ 死代码");
+    has(MAIN, "if (compressBreaker.open && compressBreaker.lastKey === sessionId)", "熔断状态没有在编排里被查询 ⇒ 死代码");
+    has(MAIN, "stableKey: sessionId,", "熔断推进没有按会话维度记账 ⇒ 查询键与记账键不同源");
   });
 
   it("skip-stale 必须接进编排（异步压缩不许覆盖更新的摘要）", () => {

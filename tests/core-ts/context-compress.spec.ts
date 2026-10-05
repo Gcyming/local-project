@@ -211,7 +211,7 @@ describe("buildCompactedHistory · 摘要头 + 垫脚 + 最近 K 整轮", () => 
     expect(out.length).toBe(18); 
     expect(out[0].role).toBe("user");
     expect(out[0].content).toContain("摘要：完成 X；下一步 Y");
-    expect(out[0].content).toContain("24"); 
+    expect(out[0].content).toContain("早期消息已压缩为要点"); 
     expect(out[1].role).toBe("assistant"); 
     for (let i = 1; i < out.length; i++) {
       expect(out[i].role).not.toBe(out[i - 1].role);

@@ -253,6 +253,96 @@ export function planCompactedCut(messages: LoopMessage[], keep = DEFAULT_TAIL_KE
   return planCut(messages, keep);
 }
 
+export const MIN_CONVERSATION_BUDGET = 256;
+
+export const PRIOR_BUDGET_SHARE = 0.6;
+
+const SUMMARY_JOIN_SLACK = 8;
+
+const CLIP_ELISION_MARKER = "（…摘要轮预算所限，中间已省略…）";
+
+function takeHeadByTokens(text: string, maxTokens: number): string {
+  const limit = Math.max(0, Math.floor(Number.isFinite(maxTokens) ? maxTokens : 0));
+  if (limit <= 0) { return ""; }
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (estimateTokensLocal(text.slice(0, mid)) <= limit) { lo = mid; } else { hi = mid - 1; }
+  }
+  return text.slice(0, lo);
+}
+
+function takeTailByTokens(text: string, maxTokens: number): string {
+  const limit = Math.max(0, Math.floor(Number.isFinite(maxTokens) ? maxTokens : 0));
+  if (limit <= 0) { return ""; }
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (estimateTokensLocal(text.slice(text.length - mid)) <= limit) { lo = mid; } else { hi = mid - 1; }
+  }
+  return text.slice(text.length - lo);
+}
+
+export function clipToTokenBudget(text: string, maxTokens: number): string {
+  const src = String(text ?? "");
+  const limit = Math.floor(Number.isFinite(maxTokens) ? maxTokens : 0);
+  if (limit <= 0) { return ""; }
+  if (estimateTokensLocal(src) <= limit) { return src; }
+  const room = limit - estimateTokensLocal(CLIP_ELISION_MARKER) - 1;
+  if (room <= 0) { return takeHeadByTokens(src, limit); }
+  const head = takeHeadByTokens(src, Math.floor(room * 0.4));
+  const tail = takeTailByTokens(src, room - estimateTokensLocal(head));
+  if (head.length + tail.length >= src.length) { return takeHeadByTokens(src, limit); }
+  return `${head}${CLIP_ELISION_MARKER}${tail}`;
+}
+
+export function summaryPromptScaffoldTokens(): number {
+  return estimateTokensLocal(buildCompressSummaryPrompt("", "x"));
+}
+
+export interface PriorSummaryFit {
+  prior: string;
+
+  truncated: boolean;
+
+  priorTokens: number;
+
+  conversationBudget: number;
+
+  overBudget: boolean;
+}
+
+export function fitSummaryPrior(
+  priorSummary: string | undefined,
+  budgetTokens: number,
+  fixedTokens = 0,
+): PriorSummaryFit {
+  const requested = Math.floor(
+    Number.isFinite(budgetTokens) && budgetTokens > 0 ? budgetTokens : SUMMARIZE_INPUT_CAP,
+  );
+  const fixed = Math.max(0, Math.floor(Number.isFinite(fixedTokens) ? fixedTokens : 0));
+  const room = Math.max(0, requested - fixed - SUMMARY_JOIN_SLACK);
+  const raw = String(priorSummary ?? "").trim();
+  const affordable = room - MIN_CONVERSATION_BUDGET;
+  let prior = raw;
+  if (raw && estimateTokensLocal(raw) > affordable) {
+    const share = Math.floor(Math.max(0, affordable) * PRIOR_BUDGET_SHARE);
+    const clipped = clipToTokenBudget(raw, share);
+    if (estimateTokensLocal(clipped) < estimateTokensLocal(raw)) { prior = clipped; }
+  }
+  const priorTokens = estimateTokensLocal(prior);
+  const conversationBudget = Math.max(MIN_CONVERSATION_BUDGET, room - priorTokens);
+  return {
+    prior,
+    truncated: prior !== raw,
+    priorTokens,
+    conversationBudget,
+    overBudget: fixed + priorTokens + conversationBudget > requested,
+  };
+}
+
 
 
 
@@ -275,10 +365,9 @@ export function buildCompactedHistory(
   
   
   while (tail.length > 0 && tail[0].role !== "user") { tail.shift(); }
-  const dropped = Math.max(0, messages.length - tail.length);
 
   const header =
-    `【会话上下文压缩摘要】（早期 ${dropped} 条消息已压缩为要点，仅作延续上下文，不是待执行的新任务）\n${String(summary ?? "").trim()}`;
+    `【会话上下文压缩摘要】（早期消息已压缩为要点，仅作延续上下文，不是待执行的新任务）\n${String(summary ?? "").trim()}`;
   const comprehend = String(opts?.comprehend ?? "").trim();
   const content = comprehend ? `${header}\n\n【续接认知（回读摘要后自述的当前状态）】\n${comprehend}` : header;
 
@@ -298,4 +387,71 @@ export function buildCompactedHistory(
 
 export function truncateTurnAligned<T extends LoopMessage>(messages: T[], keep = DEFAULT_TAIL_KEEP): T[] {
   return trimTurnAligned(messages, keep);
+}
+
+export type CompactionGateCode = "shrunk" | "no-shrink" | "grew";
+
+export interface CompactionGateInput {
+  before: Array<{ role: string; content: unknown }>;
+
+  raw: LoopMessage[];
+
+  summary: string;
+
+  comprehend?: string | null;
+
+  keep?: number;
+}
+
+export interface CompactionGateResult {
+  persist: boolean;
+
+  code: CompactionGateCode;
+
+  tokensBefore: number;
+
+  tokensAfter: number;
+
+  candidate: LoopMessage[];
+
+  reason: string;
+}
+
+export function gateCompaction(input: CompactionGateInput): CompactionGateResult {
+  const keep = Math.max(
+    1,
+    Math.floor(Number.isFinite(input?.keep) ? (input.keep as number) : DEFAULT_TAIL_KEEP),
+  );
+  const raw = Array.isArray(input?.raw) ? input.raw : [];
+  const candidate: LoopMessage[] = raw.length > keep * 2
+    ? buildCompactedHistory(
+      String(input?.summary ?? ""),
+      raw,
+      keep,
+      { comprehend: String(input?.comprehend ?? "") },
+    )
+    : raw.slice();
+  const tokensBefore = estimateHistoryTokens(Array.isArray(input?.before) ? input.before : []);
+  const tokensAfter = estimateHistoryTokens(candidate);
+  const delta = tokensAfter - tokensBefore;
+  const code: CompactionGateCode = delta < 0 ? "shrunk" : delta === 0 ? "no-shrink" : "grew";
+  const reason = code === "shrunk"
+    ? `压缩产物确实变短（${tokensBefore} → ${tokensAfter} tokens，-${Math.abs(delta)}）`
+    : code === "no-shrink"
+      ? `压缩产物与压缩前等长（${tokensBefore} → ${tokensAfter} tokens）`
+      : `压缩产物反而更长（${tokensBefore} → ${tokensAfter} tokens，+${delta}）`;
+  return { persist: code === "shrunk", code, tokensBefore, tokensAfter, candidate, reason };
+}
+
+export async function commitCompactionIfShrunk(
+  gate: CompactionGateResult,
+  commit: () => Promise<unknown>,
+  onReject?: (reason: string) => void,
+): Promise<boolean> {
+  if (!gate || gate.persist !== true) {
+    onReject?.(String(gate?.reason ?? "压缩产物未通过「必须真的变短」校验"));
+    return false;
+  }
+  await commit();
+  return true;
 }

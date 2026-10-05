@@ -300,16 +300,16 @@ export const INITIAL_BREAKER: BreakerState = { failures: 0, open: false };
 
 export function nextBreakerState(
   prev: BreakerState,
-  outcome: { ok: boolean; historyKey?: string },
+  outcome: { ok: boolean; historyKey?: string; stableKey?: string },
 ): BreakerState {
-  const key = outcome.historyKey;
+  const stableKey = outcome.stableKey ?? outcome.historyKey;
   if (outcome.ok) {
-    return { failures: 0, open: false, lastKey: key };
+    return { failures: 0, open: false, lastKey: stableKey };
   }
-  const sameHistory = key !== undefined && key === prev.lastKey;
+  const sameHistory = stableKey !== undefined && stableKey === prev.lastKey;
   
-  const failures = (key === undefined || sameHistory ? prev.failures : 0) + 1;
-  return { failures, open: failures >= BREAKER_THRESHOLD, lastKey: key };
+  const failures = (stableKey === undefined || sameHistory ? prev.failures : 0) + 1;
+  return { failures, open: failures >= BREAKER_THRESHOLD, lastKey: stableKey };
 }
 
 

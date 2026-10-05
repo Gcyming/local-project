@@ -367,8 +367,7 @@ export async function setSessionSummary(
     if (!meta) { return; }
     if (summary && summary.trim()) {
       meta.contextSummary = summary.trim();
-    } else {
-      
+    } else if (!meta.contextSummary) {
       delete meta.contextSummary;
     }
     meta.summaryCount = Math.max(1, Math.floor(keep));
