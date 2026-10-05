@@ -35,7 +35,7 @@ import { createPlan, updateStage, advanceByLabel, planProgress, planToJSON, pars
 import { PROTECTED_DIRS_SET, SENSITIVE_FILENAMES_SET, WRITE_BLOCK_SUFFIXES_SET } from "shared/security-policy";
 import { extractDocText, docKindFromExt, legacyBinaryName, extractOleText, oleKindFromExt } from "../doc_text.js";
 import { writeDocument, type DocFormat } from "../office/docWrite.js";
-import type { MemoryStore } from "../memory/store.js";
+import { effectiveWeight, type MemoryFact, type MemoryStore } from "../memory/store.js";
 import type {
   ActionVerify,
   DisplayInfo,
@@ -1460,6 +1460,70 @@ async function memoryForget(args: Record<string, unknown>): Promise<string> {
   return removed > 0 ? `[已遗忘] 删除 ${removed} 条记忆` : "[提示] 无匹配的记忆可遗忘";
 }
 
+const MEMORY_RECALL_K_DEFAULT = 5;
+const MEMORY_RECALL_K_MAX = 20;
+
+async function memoryRecall(args: Record<string, unknown>): Promise<string> {
+  const agentId = toolAgentId(args);
+  if (!agentId) { return "[错误] 未取得当前 Agent 标识"; }
+  const store = activeMemoryStore(agentId);
+  if (!store) { return "[错误] 记忆存储未就绪（当前运行环境未装配 MemoryStore）"; }
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const k = clampInt(args.k, MEMORY_RECALL_K_DEFAULT, 1, MEMORY_RECALL_K_MAX);
+  const category = typeof args.category === "string" && args.category.trim() ? args.category.trim() : undefined;
+
+  let ranked: MemoryFact[];
+  const vectorHits = await store.recall(query, k, category ? [category] : undefined);
+  if (vectorHits.length) {
+    const byContent = new Map(
+      store.getFacts().filter((f) => typeof f.content === "string").map((f) => [f.content, f]),
+    );
+    ranked = vectorHits.map((hit) => byContent.get(hit.content) ?? hit);
+  } else {
+    let facts = store.getFacts().filter((f) => typeof f.content === "string");
+    if (category) { facts = facts.filter((f) => f.category === category); }
+    ranked = [...facts].sort((a, b) => effectiveWeight(b, query) - effectiveWeight(a, query)).slice(0, k);
+  }
+  const items = ranked.slice(0, k).map((f) => ({
+    id: f.id ?? "",
+    content: typeof f.content === "string" ? f.content : "",
+    category: typeof f.category === "string" && f.category ? f.category : "fact",
+    importance: typeof f.importance === "number" ? f.importance : 5,
+    timestamp: f.timestamp || f.created_at || "",
+    source: f.source ?? "unknown",
+  }));
+
+  // 跨 agent 共享指针（维护者裁决：**允许可见，但必须标注来源**）。
+  // A 已经知道的事实如果 B 永远查不到，等于把知识删了（设计 §5.2 精神）——
+  // 所以这些条目要出现，但只能用 `source = "shared:<agent_id>"` 出现，
+  // 让模型一眼分清「这不是我自己的记忆」。
+  // 预算：本 agent 条目最多 k 条，共享指针**最多再补 k 条**（不在 k 里抢位，
+  // 否则本 agent 召回一满，别人的知识就又看不见了）；已在本地条目里的内容不重复给。
+  const localContents = new Set(items.map((it) => it.content));
+  const shared = store.sharedPointerItems(query, k)
+    .filter((s) => !localContents.has(s.content))
+    .filter((s) => (category ? s.category === category : true));
+  return JSON.stringify([...items, ...shared]);
+}
+
+async function memoryWrite(args: Record<string, unknown>): Promise<string> {
+  const agentId = toolAgentId(args);
+  if (!agentId) { return "[错误] 未取得当前 Agent 标识"; }
+  const store = activeMemoryStore(agentId);
+  if (!store) { return "[错误] 记忆存储未就绪（当前运行环境未装配 MemoryStore）"; }
+  const content = typeof args.content === "string" ? args.content.trim() : "";
+  if (!content) { return "[错误] content 不能为空"; }
+  const category = typeof args.category === "string" && args.category.trim() ? args.category.trim() : "fact";
+  const importance = clampInt(args.importance, 5, 1, 10);
+  const before = store.getFacts().length;
+  store.storeCategorized(category, content, [], importance);
+  const deduped = store.getFacts().length === before;
+  if (deduped) {
+    return `[已记忆·去重] 检测到相似记忆，已标记重复而非新增（category=${category} importance=${importance}）：${content.slice(0, 200)}`;
+  }
+  return `[已记忆] category=${category} importance=${importance}：${content.slice(0, 200)}`;
+}
+
 
 
 
@@ -1906,6 +1970,46 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       required: [],
     },
     executeFn: memoryForget,
+    permissions: ["write"],
+    riskKind: "write",
+    
+    autoApprovable: true,
+  }));
+  registry.register(new Tool({
+    name: "memory_recall",
+    description: "主动检索你自己的长期记忆，返回**结构化分条结果**（JSON 数组，每条含 id / content / category / importance / timestamp / source 来源标记）。"
+      + "回答用户问题前用它召回用户偏好、项目约定、历史经验——不要凭印象猜用户要什么。"
+      + "query 留空则返回最近最常用的记忆；k 控制返回条数（默认 5，上限 20，超出不返回）；category 可选，按类别过滤（fact / preference / lesson / event）。"
+      + "⚠️ 结果里 `source` 形如 `shared:<agent_id>` 的条目是**别的 agent 的共享指针**（这条知识你本来没有、写入时因对方已有同内容而只留了指针），"
+      + "不是本 agent 的记忆：引用时必须注明来源 agent，其 id 为空、不可用于删除；本 agent 条目最多 k 条，共享指针最多再补 k 条。",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "检索关键词/主题（必填；传空字符串 = 取最近常用的记忆）" },
+        k: { type: "integer", description: "最多返回条数（默认 5，上限 20）" },
+        category: { type: "string", description: "可选：按记忆类别过滤（fact / preference / lesson / event）" },
+      },
+      required: ["query"],
+    },
+    executeFn: memoryRecall,
+    permissions: ["read"],
+  }));
+  registry.register(new Tool({
+    name: "memory_write",
+    description: "把一条值得长期记住的内容写入你自己的成长记忆（跨会话保留）。"
+      + "用于主动沉淀用户偏好、项目约定、重要教训，或你刚做出的、之后需要再次检索到的决策。"
+      + "写入自动去重：内容已有相似记忆时不会新增条目，回执会标明「已记忆·去重」。"
+      + "importance 1-10 表示重要度（默认 5，越重要给越高）。",
+    parameters: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "要记住的内容（一句话，简洁明确；必填）" },
+        category: { type: "string", description: "记忆类别（fact / preference / lesson / event；默认 fact）" },
+        importance: { type: "integer", description: "重要度 1-10（默认 5，超出范围会被夹到边界）" },
+      },
+      required: ["content"],
+    },
+    executeFn: memoryWrite,
     permissions: ["write"],
     riskKind: "write",
     
