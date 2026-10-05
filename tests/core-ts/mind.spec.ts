@@ -2,10 +2,19 @@
 
 
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { EmotionalState, topKForMood } from "../../core-ts/src/mind/emotion.js";
 import { BehaviorStore, BehaviorPattern, ConsolidationEngine } from "../../core-ts/src/mind/behavior.js";
 import { buildMindSegments, mindHooks } from "../../core-ts/src/mind/hooks.js";
+import { SlimeEngine } from "../../core-ts/src/services/engine.js";
+import { AgentRegistry, emptyPersona, type AgentState } from "../../core-ts/src/services/agents.js";
+import { ToolRegistry } from "../../core-ts/src/tools/registry.js";
+import { ChatClient } from "../../core-ts/src/llm/client.js";
+import { Session } from "../../core-ts/src/session.js";
+import { ModelRouter } from "../../core-ts/src/router.js";
 
 describe("EmotionalState（PAD + 8 mood + 半衰期）", () => {
   it("初始状态：neutral + PAD 基线", () => {
@@ -268,11 +277,12 @@ describe("MindHooks（L2 心智注入固定段）", () => {
     expect(segs.some((s) => s.includes("当前情绪：快乐"))).toBe(true);
   });
 
-  it("mindHooks：fixedSegments 接入，retrieveSegments 阶段 4.2 前为空", async () => {
+  it("mindHooks：情绪/行为段挂 volatileSegments 而非 fixedSegments（易变段不进稳定前缀），retrieveSegments 阶段 4.2 前为空", async () => {
     const e = new EmotionalState();
     const b = new BehaviorStore();
     const hooks = mindHooks(e, b);
-    const segs = hooks.fixedSegments({ name: "小灵", role: "助手" });
+    expect(hooks.fixedSegments({ name: "小灵", role: "助手" })).toEqual([]);
+    const segs = hooks.volatileSegments?.({ name: "小灵", role: "助手" }) ?? [];
     expect(segs.join("\n")).toContain("当前情绪：平静");
     expect(await hooks.retrieveSegments("a1", "q")).toEqual([]);
   });
@@ -322,5 +332,185 @@ describe("ConsolidationEngine（沉淀引擎）", () => {
     });
     expect(archived).toEqual(["旧"]);
     expect(s.patterns.some((p) => p.scenario === "旧")).toBe(false);
+  });
+});
+
+const MIND_AGENT: AgentState = {
+  id: "agent_mind",
+  name: "小灵",
+  role: "资深助手",
+  identity_prompt: "你是{name}，{role}。",
+  model_choice: "api:test-key",
+  parent_id: null,
+  persona: emptyPersona(),
+  emotion: {},
+  behavior: { patterns: [] },
+  children: [],
+  created_at: "2026-08-01T00:00:00.000Z",
+};
+
+function mindReply(): Response {
+  return new Response(
+    JSON.stringify({
+      id: "x",
+      object: "chat.completion",
+      created: 1,
+      model: "m1",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+function lastMessages(sent: string[]): Array<{ role: string; content: unknown }> {
+  const bodies = sent
+    .map((b) => {
+      try {
+        return JSON.parse(b) as { messages?: Array<{ role: string; content: unknown }> };
+      } catch {
+        return null;
+      }
+    })
+    .filter((b): b is { messages: Array<{ role: string; content: unknown }> } => !!b?.messages);
+  const last = bodies[bodies.length - 1];
+  if (!last) { throw new Error("没有捕获到请求体"); }
+  return last.messages;
+}
+
+function mindFixture(): { emotion: EmotionalState; behavior: BehaviorStore } {
+  const emotion = new EmotionalState();
+  for (let i = 0; i < 8; i += 1) { emotion.update({ success: true }); }
+  const behavior = new BehaviorStore();
+  for (let i = 0; i < 6; i += 1) {
+    behavior.reinforce({ scenario: "先测试再交付", steps: ["写测试", "跑测试", "交付"] });
+  }
+  return { emotion, behavior };
+}
+
+describe("MindHooks · L2 心智易变段已移出 system 稳定前缀（D10 同族）", () => {
+  const dirs: string[] = [];
+
+  afterEach(async () => {
+    while (dirs.length > 0) {
+      await rm(dirs.pop() as string, { recursive: true, force: true });
+    }
+  });
+
+  async function newRegistry(): Promise<AgentRegistry> {
+    const dir = await mkdtemp(join(tmpdir(), "slime-mind-volatile-"));
+    dirs.push(dir);
+    await writeFile(join(dir, "agents.json"), JSON.stringify([MIND_AGENT]), "utf8");
+    const reg = new AgentRegistry(join(dir, "agents.json"));
+    await reg.load();
+    return reg;
+  }
+
+  function makeEngine(
+    reg: AgentRegistry,
+    sent: string[],
+    emotion: EmotionalState,
+    behavior: BehaviorStore,
+  ): SlimeEngine {
+    return new SlimeEngine({
+      registry: reg,
+      providers: { "test-key": { api_base: "http://mock.local/v1", api_key: "k", model: "m1" } },
+      logger: { warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
+      tools: new ToolRegistry(),
+      hooks: mindHooks(emotion, behavior),
+      clientFactory: () => new ChatClient({
+        baseUrl: "http://mock/v1",
+        apiKey: "k",
+        fetchImpl: (async (_url: string, init?: RequestInit) => {
+          sent.push(String(init?.body ?? ""));
+          return mindReply();
+        }) as unknown as typeof fetch,
+      }),
+    });
+  }
+
+  it("buildSystemSegments：情绪/行为段只进 volatile，stable 前缀不含易变状态（门控未命中也不丢）", async () => {
+    const reg = await newRegistry();
+    const { emotion, behavior } = mindFixture();
+    const eng = makeEngine(reg, [], emotion, behavior);
+
+    const seg = await eng.buildSystemSegments(MIND_AGENT, undefined, undefined, "好的");
+
+    expect(seg.stable).toContain("你是 小灵");
+    expect(seg.stable).not.toContain("valence=");
+    expect(seg.stable).not.toContain("## 行为模式");
+    expect(seg.volatile).toContain("当前情绪：快乐");
+    expect(seg.volatile).toContain("## 行为模式");
+    expect(seg.volatile).toContain("先测试再交付");
+  });
+
+  it("端到端两轮：情绪与行为模式变化时 system 逐字节不变，变化只落在末段 user 消息", async () => {
+    const reg = await newRegistry();
+    const emotion = new EmotionalState();
+    const behavior = new BehaviorStore();
+    const sent: string[] = [];
+    const eng = makeEngine(reg, sent, emotion, behavior);
+
+    await eng.chat({ agent: MIND_AGENT, message: "帮我看看 store.ts", history: [], systemPrompt: "", toolsOnly: [] });
+    const first = lastMessages(sent);
+    const sys1 = String(first[0]?.content ?? "");
+    const tail1 = String(first[first.length - 1]?.content ?? "");
+    expect(first[0]?.role).toBe("system");
+    expect(tail1).toContain("当前情绪：平静");
+    expect(sys1).not.toContain("valence=");
+
+    for (let i = 0; i < 8; i += 1) { emotion.update({ success: true }); }
+    for (let i = 0; i < 6; i += 1) {
+      behavior.reinforce({ scenario: "先测试再交付", steps: ["写测试", "跑测试", "交付"] });
+    }
+
+    await eng.chat({ agent: MIND_AGENT, message: "帮我看看 store.ts", history: [], systemPrompt: "", toolsOnly: [] });
+    const second = lastMessages(sent);
+    const sys2 = String(second[0]?.content ?? "");
+    const tail2 = String(second[second.length - 1]?.content ?? "");
+
+    expect(sys2).toBe(sys1);
+    expect(tail2).not.toBe(tail1);
+    expect(tail2).toContain("当前情绪：快乐");
+    expect(tail2).toContain("## 行为模式");
+    expect(tail2).toContain("帮我看看 store.ts");
+    expect(tail2.indexOf("当前情绪：快乐")).toBeLessThan(tail2.indexOf("帮我看看 store.ts"));
+  });
+
+  it("buildSystem 兼容视图：情绪/行为段一条不减（老调用方仍拿全量）", async () => {
+    const reg = await newRegistry();
+    const { emotion, behavior } = mindFixture();
+    const eng = makeEngine(reg, [], emotion, behavior);
+
+    const full = await eng.buildSystem(MIND_AGENT, undefined, undefined, "好的");
+
+    expect(full).toContain("你是 小灵");
+    expect(full).toContain("当前情绪：快乐");
+    expect(full).toContain("## 行为模式");
+    expect(full).toContain("先测试再交付");
+  });
+
+  it("Session 同族：L2 心智易变段挂末段 user 消息，stable 前缀不含它且不受召回门控影响", async () => {
+    const { emotion, behavior } = mindFixture();
+    const client = new ChatClient({
+      baseUrl: "http://127.0.0.1:19100",
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+    });
+    const router = new ModelRouter(
+      [{ name: "sidecar", baseUrl: "http://127.0.0.1:19100", kind: "local", priority: 100, roles: ["chat"] }],
+      () => client,
+    );
+    const session = new Session({ router, hooks: mindHooks(emotion, behavior) });
+
+    const hit = await session.buildSystemPromptSegments({ name: "小灵", role: "资深助手" }, "agent_x", "帮我看看 store.ts");
+    const miss = await session.buildSystemPromptSegments({ name: "小灵", role: "资深助手" }, "agent_x", "好的");
+
+    expect(miss.stable).toBe(hit.stable);
+    expect(miss.volatile).toBe(hit.volatile);
+    expect(hit.volatile).toContain("当前情绪：快乐");
+    expect(hit.volatile).toContain("## 行为模式");
+    expect(hit.stable).toContain("你是 小灵");
+    expect(hit.stable).not.toContain("valence=");
+    expect(hit.stable).not.toContain("## 行为模式");
   });
 });

@@ -50,7 +50,7 @@ linux/      Linux 兼容子项目脚本
 | --- | --- |
 | 情绪状态（动态层）：每轮对话后按 成功/情绪/新颖度/称赞 全信号更新并落盘 | `core-ts/src/mind/emotion.ts`，写入点 `core-ts/src/services/chat.ts` |
 | 行为模式沉淀 + 艾宾浩斯衰减 + 归档（L3→L2） | `core-ts/src/mind/behavior.ts`（`ConsolidationEngine`） |
-| 分层提示注入：行为模式 + 情绪状态 + 自我叙事 | `core-ts/src/mind/hooks.ts` 的 `buildMindSegments`，接线于 `gui/src/main/index.ts` 的 `hooks.fixedSegments` |
+| 分层提示注入：行为模式 + 情绪状态 + 自我叙事（易变段，挂末段 user 消息，不进 system 稳定前缀） | `core-ts/src/mind/hooks.ts` 的 `buildMindSegments`，接线于 `gui/src/main/index.ts` 的 `hooks.volatileSegments` |
 | 向量记忆（LanceDB）+ 实体图双向链接 + 四阶段检索 | `core-ts/src/memory/`（`store.ts` 用 `three_layer`/`graph`/`embed_cache`；`retrieve.ts` 四阶段） |
 | 记忆分层巩固：working → episodic → semantic，与行为巩固同频触发 | `core-ts/src/memory/store.ts` 的 `consolidateMemoryNow` |
 | 知识沉淀：Pattern 记录 → 优先级升级 → 生成 Rule → 生成技能 → 写入人格特征 | `core-ts/src/memory/knowledge.ts` |

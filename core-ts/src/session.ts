@@ -8,6 +8,7 @@
 
 
 import { ModelRouter } from "./router.js";
+import { recallGateDecision } from "./memory/recall_gate.js";
 import { ChatMessage } from "shared/schemas";
 import { OutputFilter, StreamFilter } from "./filter.js";
 
@@ -20,6 +21,8 @@ export interface AgentBrief {
 export interface InjectionHooks {
   
   fixedSegments(agent: AgentBrief): string[];
+  
+  volatileSegments?(agent: AgentBrief): string[];
   
   retrieveSegments(agentId: string, query: string): Promise<string[]>;
 }
@@ -55,6 +58,45 @@ export interface SessionChatResult {
   routeName: string;
 }
 
+export interface SystemSegments {
+  
+  stable: string;
+  volatile: string;
+  memory: string;
+  workspace: string;
+}
+
+export function joinSystemSegments(seg: SystemSegments): string {
+  return seg.volatile ? `${seg.stable}\n\n${seg.volatile}` : seg.stable;
+}
+
+export function foldStateSegment<T extends { role?: string; content?: unknown }>(
+  messages: readonly T[],
+  segment: string,
+): T[] {
+  const out = messages.slice();
+  const seg = typeof segment === "string" ? segment.trim() : "";
+  if (!seg) { return out; }
+  let idx = -1;
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i]?.role === "user") { idx = i; break; }
+  }
+  if (idx < 0) {
+    out.push({ role: "user", content: seg } as T);
+    return out;
+  }
+  const msg = out[idx]!;
+  const cur = msg.content;
+  if (typeof cur === "string") {
+    out[idx] = { ...msg, content: cur.trim() ? `${seg}\n\n---\n\n${cur}` : seg };
+  } else if (Array.isArray(cur)) {
+    out[idx] = { ...msg, content: [{ type: "text", text: seg }, ...(cur as unknown[])] };
+  } else {
+    out.push({ role: "user", content: seg } as T);
+  }
+  return out;
+}
+
 export const IDENTITY_CONSTRAINT = (
   name: string,
   role: string,
@@ -83,12 +125,38 @@ export class Session {
   }
 
   
-  async buildSystemPrompt(agent: AgentBrief, agentId: string): Promise<string> {
+  async buildSystemPromptSegments(agent: AgentBrief, agentId: string, userMessage?: string): Promise<SystemSegments> {
     const parts: string[] = [IDENTITY_CONSTRAINT(agent.name, agent.role), HONESTY_PROTOCOL];
     parts.push(...this.hooks.fixedSegments(agent));
-    const query = "用户最近的需求"; 
-    parts.push(...(await this.hooks.retrieveSegments(agentId, query)));
-    return parts.join("\n\n");
+    const mind = (this.hooks.volatileSegments?.(agent) ?? [])
+      .filter((s) => s.trim().length > 0)
+      .join("\n\n");
+    const stable = parts.join("\n\n");
+    const query = "用户最近的需求";
+    if (typeof userMessage === "string") {
+      const decision = recallGateDecision(userMessage);
+      if (!decision.retrieve) {
+        console.info(
+          `[session] 记忆检索门控未命中(${decision.signal})，跳过本轮检索式召回` +
+          `（L1 固定前缀不受影响；msg=${JSON.stringify(userMessage.slice(0, 40))}）`,
+        );
+        return { stable, volatile: mind, memory: "", workspace: "" };
+      }
+      console.info(`[session] 记忆检索门控命中(${decision.signal})，执行本轮检索式召回`);
+    } else {
+      console.info("[session] 本轮无用户消息可判（后台/子代理路径），召回门控回落无条件召");
+    }
+    const memory = (await this.hooks.retrieveSegments(agentId, query)).join("\n\n");
+    return {
+      stable,
+      volatile: [mind, memory].filter((s) => s.trim().length > 0).join("\n\n"),
+      memory,
+      workspace: "",
+    };
+  }
+
+  async buildSystemPrompt(agent: AgentBrief, agentId: string, userMessage?: string): Promise<string> {
+    return joinSystemSegments(await this.buildSystemPromptSegments(agent, agentId, userMessage));
   }
 
   
@@ -96,11 +164,11 @@ export class Session {
 
 
   async chat(opts: SessionChatOptions): Promise<SessionChatResult> {
-    const system = await this.buildSystemPrompt(opts.agent, opts.agentId);
-    const messages: ChatMessage[] = [
-      { role: "system", content: system },
-      ...opts.history,
-    ];
+    const segments = await this.buildSystemPromptSegments(opts.agent, opts.agentId);
+    const messages: ChatMessage[] = foldStateSegment(
+      [{ role: "system", content: segments.stable }, ...opts.history],
+      segments.volatile,
+    );
     const payload = { messages, max_tokens: opts.maxTokens, model: opts.model };
 
     if (opts.stream === false) {

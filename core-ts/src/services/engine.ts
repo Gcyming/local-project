@@ -36,7 +36,8 @@ import {
   EngineChunk,
   ContextBuckets,
 } from "./chat.js";
-import { IDENTITY_CONSTRAINT, HONESTY_PROTOCOL, InjectionHooks, NOOP_HOOKS } from "../session.js";
+import { IDENTITY_CONSTRAINT, HONESTY_PROTOCOL, InjectionHooks, NOOP_HOOKS, foldStateSegment, joinSystemSegments, type SystemSegments } from "../session.js";
+import { recallGateDecision } from "../memory/recall_gate.js";
 import { decrypt } from "../encryption.js";
 import { getModelServer } from "../model_server.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -53,7 +54,7 @@ import { findLocalModelSpec, type LocalModelSpec } from "../local_models.js";
 
 import { readFallbackPool, resolveFallbackTargets, type FallbackPoolConfig } from "./fallbackPool.js";
 import { appendUsage, computeRecordCost, defaultCacheReadInPrompt } from "./usage.js";
-import { buildCompressSummaryPrompt, buildSummaryInput, estimateHistoryTokens, estimateTokensLocal, SUMMARIZE_INPUT_CAP, SUMMARIZE_OUTPUT_CAP, summarizeOutputCap } from "./context_compress.js";
+import { buildCompressSummaryPrompt, buildSummaryInput, clipToTokenBudget, estimateHistoryTokens, estimateTokensLocal, fitSummaryPrior, summaryPromptScaffoldTokens, SUMMARIZE_INPUT_CAP, SUMMARIZE_OUTPUT_CAP, summarizeOutputCap } from "./context_compress.js";
 
 
 import { buildResumeBlock, parseComprehend, planEngineSend, LOCAL_PREFLIGHT_MARKER, type EngineSendGuard } from "./context_loop.js";
@@ -887,7 +888,51 @@ export class SlimeEngine implements ChatEngine {
   }
 
   
-  async buildSystem(agent: AgentState, customSystemPrompt?: string, workspaceOverride?: string): Promise<string> {
+  private async gatedRetrieveSegments(agentId: string, userMessage?: string): Promise<string[]> {
+    if (typeof userMessage === "string") {
+      const decision = recallGateDecision(userMessage);
+      if (!decision.retrieve) {
+        this.logger.info(
+          `[engine] 记忆检索门控未命中(${decision.signal})，跳过本轮检索式召回` +
+          `（L1 固定前缀不受影响；msg=${JSON.stringify(userMessage.slice(0, 40))}）`,
+        );
+        return [];
+      }
+      this.logger.info(`[engine] 记忆检索门控命中(${decision.signal})，执行本轮检索式召回`);
+    } else {
+      this.logger.info("[engine] 本轮无用户消息可判（后台/子代理路径），召回门控回落无条件召");
+    }
+    return this.hooks.retrieveSegments(agentId, "用户最近的需求");
+  }
+
+  
+  private async workspaceInventorySegment(ws: string): Promise<string> {
+    let inventory = "";
+    try {
+      const listing = await this.tools.callTool("file_list", { path: ".", _workspace: ws });
+      if (listing && !listing.startsWith("[错误]") && listing !== "[空目录]") {
+        const lines = listing.split("\n");
+        inventory = lines.length > 80 ? `${lines.slice(0, 80).join("\n")}\n…（共 ${lines.length} 项）` : listing;
+      } else if (listing !== "[空目录]") {
+        inventory = `（目录清单获取失败：${listing}）`;
+      }
+    } catch {
+      inventory = "（目录清单获取失败）";
+    }
+    return (
+      `📦 你的工作目录（workspace）已设置为：\`${ws}\`\n` +
+        `以下是该目录当前的内容清单（预加载，无需再调用 file_list 即可了解概貌）：\n${inventory || "（空目录）"}\n` +
+        `所有文件操作（file_list/file_read/file_write/code_check）默认以该目录为工作区，文件路径可使用该目录内的相对路径或绝对路径。\n` +
+        `如需深入查看子目录/文件内容，请调用 file_list/file_read 继续探查。`
+    );
+  }
+
+  async buildSystemSegments(
+    agent: AgentState,
+    customSystemPrompt?: string,
+    workspaceOverride?: string,
+    userMessage?: string,
+  ): Promise<SystemSegments> {
     const parts: string[] = [
       IDENTITY_CONSTRAINT(agent.name, agent.role),
       HONESTY_PROTOCOL,
@@ -907,7 +952,6 @@ export class SlimeEngine implements ChatEngine {
       );
     }
     parts.push(...this.hooks.fixedSegments(agent));
-    parts.push(...(await this.hooks.retrieveSegments(agent.id, "用户最近的需求")));
     
     
     
@@ -932,28 +976,25 @@ export class SlimeEngine implements ChatEngine {
     
     parts.push(DELEGATION_GUIDANCE);
     
+    const mind = (this.hooks.volatileSegments?.(agent) ?? [])
+      .filter((s) => s.trim().length > 0)
+      .join("\n\n");
+    const memory = (await this.gatedRetrieveSegments(agent.id, userMessage)).join("\n\n");
     const ws = workspaceOverride ?? (agent.sandbox_override && typeof agent.sandbox_override === "object" ? String(agent.sandbox_override.workspace ?? "") : "");
-    if (ws) {
-      let inventory = "";
-      try {
-        const listing = await this.tools.callTool("file_list", { path: ".", _workspace: ws });
-        if (listing && !listing.startsWith("[错误]") && listing !== "[空目录]") {
-          const lines = listing.split("\n");
-          inventory = lines.length > 80 ? `${lines.slice(0, 80).join("\n")}\n…（共 ${lines.length} 项）` : listing;
-        } else if (listing !== "[空目录]") {
-          inventory = `（目录清单获取失败：${listing}）`;
-        }
-      } catch {
-        inventory = "（目录清单获取失败）";
-      }
-      parts.push(
-        `📦 你的工作目录（workspace）已设置为：\`${ws}\`\n` +
-          `以下是该目录当前的内容清单（预加载，无需再调用 file_list 即可了解概貌）：\n${inventory || "（空目录）"}\n` +
-          `所有文件操作（file_list/file_read/file_write/code_check）默认以该目录为工作区，文件路径可使用该目录内的相对路径或绝对路径。\n` +
-          `如需深入查看子目录/文件内容，请调用 file_list/file_read 继续探查。`,
+    const workspace = ws ? await this.workspaceInventorySegment(ws) : "";
+    const volatile = [mind, memory, workspace].filter((s) => s.trim().length > 0).join("\n\n");
+    if (volatile) {
+      this.logger.info(
+        `[engine] 易变段已移出 system（第 0 条消息）改挂末段 user 消息：` +
+          `L2 心智段 ${mind.trim() ? "有" : "无"} / L3 记忆 ${memory.trim() ? "有" : "无"} / 工作目录清单 ${workspace ? "有" : "无"}，` +
+          `稳定前缀字节不变（设计 §1.3 前缀缓存）`,
       );
     }
-    return parts.join("\n\n");
+    return { stable: parts.join("\n\n"), volatile, memory, workspace };
+  }
+
+  async buildSystem(agent: AgentState, customSystemPrompt?: string, workspaceOverride?: string, userMessage?: string): Promise<string> {
+    return joinSystemSegments(await this.buildSystemSegments(agent, customSystemPrompt, workspaceOverride, userMessage));
   }
 
   
@@ -976,7 +1017,7 @@ export class SlimeEngine implements ChatEngine {
     ) as ChatRequest["tools"];
   }
 
-  private buildMessages(call: ChatEngineCall, system: string): ChatMessage[] {
+  private buildMessages(call: ChatEngineCall, system: string, volatileSegment = ""): ChatMessage[] {
     const images = sanitizeImages(call.images);
     
 
@@ -1009,6 +1050,7 @@ export class SlimeEngine implements ChatEngine {
     
     
     if (reminder) { out = foldUserReminder(out, reminder); }
+    if (volatileSegment) { out = foldStateSegment(out, volatileSegment); }
     
 
 
@@ -1156,8 +1198,8 @@ export class SlimeEngine implements ChatEngine {
         elapsedMs: Date.now() - started,
       };
     }
-    const system = await this.buildSystem(opts.agent, opts.systemPrompt, opts.workspace);
-    const messages = this.buildMessages(opts, system);
+    const segments = await this.buildSystemSegments(opts.agent, opts.systemPrompt, opts.workspace, opts.message);
+    const messages = this.buildMessages(opts, segments.stable, segments.volatile);
     const tools = this.toolSchemas(opts.toolsOnly);
 
     
@@ -1274,19 +1316,37 @@ export class SlimeEngine implements ChatEngine {
         this.logger.warn(`[engine] 摘要轮无可路由模型（${agent.model_choice}）：${error ?? "无可用路由"}`);
         return null;
       }
-      const budget = opts?.maxInputTokens ?? SUMMARIZE_INPUT_CAP;
-      const { text, elided } = buildSummaryInput(messages, budget);
-      const inputTokens = estimateTokensLocal(text);
+      const requestedBudget = Number.isFinite(opts?.maxInputTokens) && (opts?.maxInputTokens ?? 0) > 0
+        ? Math.floor(opts?.maxInputTokens as number)
+        : SUMMARIZE_INPUT_CAP;
       const sys = (
         "你是一个专业的会话上下文压缩器。只做一件事：把用户提供的对话历史压缩成结构化中文摘要，保留接续任务所需的关键信息。" +
         "不要回答摘要之外的内容、不要自我介绍。"
       );
+      const fixedTokens = estimateTokensLocal(sys) + summaryPromptScaffoldTokens();
+      const fit = fitSummaryPrior(opts?.priorSummary, requestedBudget, fixedTokens);
+      if (fit.truncated) {
+        this.logger.warn(
+          `[engine] 既有摘要（priorSummary）本身超出摘要轮预算 ${requestedBudget} ⇒ 已头尾截断到 ${fit.priorTokens} tokens，` +
+          `对话摘录让出预算后为 ${fit.conversationBudget}（递进链优先保住 prior，不静默超窗）`,
+        );
+      }
+      if (fit.overBudget) {
+        this.logger.warn(
+          `[engine] 摘要轮预算 ${requestedBudget} tokens 装不下「系统提示+模板+既有摘要+最小对话摘录」` +
+          `⇒ 实际请求会超预算，请换窗口更大的模型`,
+        );
+      }
+      const budget = fit.conversationBudget;
+      const { text: excerpt, elided } = buildSummaryInput(messages, budget);
+      const text = clipToTokenBudget(excerpt, budget);
+      const inputTokens = fixedTokens + fit.priorTokens + estimateTokensLocal(text);
       const route = router.select("chat");
       const ask = (maxOut: number): ChatRequest => {
         const p: ChatRequest = {
           messages: [
             { role: "system", content: sys },
-            { role: "user", content: buildCompressSummaryPrompt(text, opts?.priorSummary) },
+            { role: "user", content: buildCompressSummaryPrompt(text, fit.prior) },
           ],
           max_tokens: maxOut,
         };
@@ -1432,12 +1492,14 @@ export class SlimeEngine implements ChatEngine {
       yield { type: "done", reply, reply_raw: reply, model: "none", prompt_tokens: 0, completion_tokens: 0, elapsed_ms: Date.now() - started };
       return;
     }
-    const system = await this.buildSystem(opts.agent, opts.systemPrompt, opts.workspace);
-    const messages = this.buildMessages(opts, system);
+    const segments = await this.buildSystemSegments(opts.agent, opts.systemPrompt, opts.workspace, opts.message);
+    const messages = this.buildMessages(opts, segments.stable, segments.volatile);
     const tools = this.toolSchemas(opts.toolsOnly);
     
     const buckets = computeContextBuckets({
-      system,
+      system: segments.stable,
+      memory: segments.memory,
+      workspace: segments.workspace,
       tools: tools ? JSON.stringify(tools) : "",
       history: JSON.stringify(opts.history),
       message: opts.message,

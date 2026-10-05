@@ -21,7 +21,8 @@ export function buildMindSegments(emotion: EmotionalState, behavior: BehaviorSto
 
 export function mindHooks(emotion: EmotionalState, behavior: BehaviorStore): InjectionHooks {
   return {
-    fixedSegments: () => buildMindSegments(emotion, behavior),
+    fixedSegments: () => [],
+    volatileSegments: () => buildMindSegments(emotion, behavior),
     retrieveSegments: async () => [],
   };
 }
