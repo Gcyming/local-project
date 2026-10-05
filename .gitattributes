@@ -1,0 +1,33 @@
+# 仓库文本统一按 LF 入库与检出。
+#
+# 背景：本仓库此前既无 .gitattributes，又依赖 core.autocrlf=true，
+# 于是 git 对全部源码发出 "LF will be replaced by CRLF" 警告——
+# 任何人下一次 checkout 都会把整个代码树改写成 CRLF。
+# 本项目全部代码均为 bare LF、无 BOM、UTF-8，行尾被改写即等同编码损坏，
+# 故在此显式锁死，消除该风险。
+* text=auto eol=lf
+
+# 二进制资源：禁止行尾转换与文本 diff
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.bin   binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.dylib binary
+*.node  binary
+*.wasm  binary
+*.mp3   binary
+*.mp4   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary

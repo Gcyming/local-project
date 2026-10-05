@@ -219,3 +219,20 @@ gui/vendor/
 # A-1142：strip_comments.py 产出的「去注释候选」文件（供比对后再落地，不入库）
 *.stripped
 *.bak-comments
+
+# ── 多 Agent 并行调试残留（2026-10 agent-loop 进化会话）──────────
+# 子 Agent 的探针/变异/取证脚本与产物、vitest 原始报告、验证用 bat。
+# 全部是一次性调试残留，不属于项目代码。
+temp_test_dir/
+.ref/
+.freebuff/
+.vitest-report.json
+.vitest-after.json
+vitest_before.txt
+vitest_after.txt
+_verify_inside.bat
+_verify_outside.bat
+_verify_result_inside.txt
+_verify_result_outside.txt
+# 一次命令转义失误产生的空文件，名字就叫 "-q"
+/-q
