@@ -1612,7 +1612,13 @@ def update_agent_memory(agent_id: str, req: dict):
 
 @app.post("/agents/{agent_id}/memory/recall")
 def recall_agent_memory(agent_id: str, req: dict):
-    """LanceDB 向量检索相关记忆"""
+    """LanceDB 向量检索相关记忆 + **跨 agent 共享指针**（标注来源，语义对齐 memory_recall 工具）。
+
+    维护者裁决：「允许可见，但标注来源」—— A 已知的事实如果 B 永远查不到，等于把知识删了
+    （设计 §5.2 精神）。所以除了本 agent 的语义命中（`results`，形状不变、向后兼容），
+    额外返回 `shared`：每条只含 content / category / importance / timestamp / source，
+    `source = "shared:<agent_id>"` 标明来源，不含别的 agent 的 links/backlinks/tags/system。
+    """
     agent = find_agent(agents, agent_id)
     if not agent:
         raise HTTPException(404, "Agent 不存在")
@@ -1629,7 +1635,13 @@ def recall_agent_memory(agent_id: str, req: dict):
     lancedb_cfg = memory_cfg.get("lancedb", {}) if isinstance(memory_cfg.get("lancedb"), dict) else {}
     memory = load_memory(agent_id, lancedb_enabled=lancedb_cfg.get("enabled", False), lancedb_uri=lancedb_cfg.get("uri", ""), data_dir=memory_cfg.get("dir", ""))
     results = memory.recall(query, top_k=top_k)
-    return {"query": query, "top_k": top_k, "results": results}
+    try:
+        shared = memory.shared_pointer_items(query, top_k=top_k)
+    except Exception as e:
+        # 共享指针是**附加**信息：取不到不能连累本 agent 的语义召回（如实降级为空列表）。
+        logging.warning(f"[memory] 共享指针召回失败（本次只返回本 agent 命中）: {e}")
+        shared = []
+    return {"query": query, "top_k": top_k, "results": results, "shared": shared}
 
 
 @app.post("/agents/{agent_id}/memory/reindex")

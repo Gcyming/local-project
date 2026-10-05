@@ -532,6 +532,70 @@ class TestMemory:
             mem_mod._DATA_DIR = original_data_dir
             mem_mod._KNOWLEDGE_MEMORY_DIR = original_knowledge_dir
 
+    def test_memory_summary_structured_lines(self, tmp_path):
+        """设计 §4.2：summary() 每条带 category / 时间 / 来源标记（不是散文），缺省来源给明确占位"""
+        import re
+        from core.memory import MemoryStore
+        import core.memory as mem_mod
+        original_data_dir = mem_mod._DATA_DIR
+        original_knowledge_dir = mem_mod._KNOWLEDGE_MEMORY_DIR
+        mem_mod._DATA_DIR = tmp_path
+        mem_mod._KNOWLEDGE_MEMORY_DIR = tmp_path
+        try:
+            m = MemoryStore("test_sum_struct_agent")
+            m.add_fact("用户喜欢 Python")
+            m.add_preference("theme", "dark")
+            m.add_skill("code_review")
+            m.add_lesson("要使用 async", True)
+
+            summary = m.summary()
+            assert "Python" in summary
+            assert "dark" in summary
+            assert "code_review" in summary
+            assert re.search(r"- \[fact\] 时间: \S+ · 来源: \S+ · 用户喜欢 Python", summary)
+            assert re.search(r"- \[preference\] 时间: \S+ · 来源: \S+ · theme: dark", summary)
+            assert "来源: 未标注" in summary
+            assert re.search(r"- \[lesson\] 时间: \S+ · 来源: \S+ · 结果: 成功 · 要使用 async", summary)
+            assert "- [skill] code_review" in summary
+        finally:
+            mem_mod._DATA_DIR = original_data_dir
+            mem_mod._KNOWLEDGE_MEMORY_DIR = original_knowledge_dir
+
+    def test_memory_summary_does_not_touch_last_accessed(self, tmp_path):
+        """设计 §5.1：summary() 被调用 ≠ 访问（不刷 last_accessed）；只有真正的检索命中（touch）才算"""
+        from datetime import datetime, timedelta, timezone
+        from core.memory import MemoryStore
+        import core.memory as mem_mod
+        original_data_dir = mem_mod._DATA_DIR
+        original_knowledge_dir = mem_mod._KNOWLEDGE_MEMORY_DIR
+        mem_mod._DATA_DIR = tmp_path
+        mem_mod._KNOWLEDGE_MEMORY_DIR = tmp_path
+        try:
+            m = MemoryStore("test_sum_touch_agent")
+            m.add_fact("用户喜欢 Python")
+            m._store_categorized("fact", "归档行为: 批量重命名", tags=["behavior_archive"])
+
+            old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+            for f in m.get_facts():
+                f["last_accessed"] = old
+
+            summary = m.summary(context="Python")
+            assert "Python" in summary
+            
+            assert [f["last_accessed"] for f in m.get_facts()] == [old, old]
+
+            
+            assert m.touch("归档行为") == 1
+            touched = [f for f in m.get_facts() if f["last_accessed"] != old]
+            assert len(touched) == 1
+            assert "批量重命名" in touched[0]["content"]
+            assert datetime.fromisoformat(touched[0]["last_accessed"]) > datetime.fromisoformat(old)
+            
+            assert [f["last_accessed"] for f in m.get_facts() if f["content"] == "用户喜欢 Python"] == [old]
+        finally:
+            mem_mod._DATA_DIR = original_data_dir
+            mem_mod._KNOWLEDGE_MEMORY_DIR = original_knowledge_dir
+
 
 class TestEvolve:
     """演化引擎测试"""

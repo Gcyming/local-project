@@ -72,6 +72,134 @@ def _text_similarity(a: str, b: str) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
+from core.websearch.indexer import (
+    BM25_B as _FTS_B,
+    BM25_K1 as _FTS_K1,
+    query_terms as _FTS_QUERY_TERMS,
+    tokenize as _FTS_TOKENIZE,
+)
+
+_RRF_K = 60
+
+_LINK_TRAVERSAL_RULES = (
+    (
+        "relation_exhaustive",
+        re.compile(
+            r"(?:\u6240\u6709|\u5168\u90e8|\u4e00\u5207|\u6bcf\u4e00\u4e2a|\u6bcf\u4e2a|\u6bcf\u6761|\u6709\u54ea\u4e9b|\u6709\u54ea\u51e0|\u90fd\u6709\u54ea\u4e9b"
+            r"|\u5217\u4e3e|\u5217\u51fa|\u7f57\u5217|\u679a\u4e3e|\u6c47\u603b|\u68b3\u7406)"
+            r".{0,24}(?:\u76f8\u5173|\u6709\u5173|\u5173\u8054|\u76f8\u8fde|\u6d89\u53ca|\u6709\u5173\u7cfb|\u5173\u7cfb)"
+            r"|(?:\u76f8\u5173|\u6709\u5173|\u5173\u8054|\u76f8\u8fde|\u6d89\u53ca|\u6709\u5173\u7cfb|\u5173\u7cfb)"
+            r".{0,24}(?:\u6240\u6709|\u5168\u90e8|\u4e00\u5207|\u6bcf\u4e00\u4e2a|\u6bcf\u4e2a|\u6bcf\u6761|\u6709\u54ea\u4e9b|\u6709\u54ea\u51e0|\u90fd\u6709\u54ea\u4e9b"
+            r"|\u5217\u4e3e|\u5217\u51fa|\u7f57\u5217|\u679a\u4e3e|\u6c47\u603b|\u68b3\u7406)"
+        ),
+    ),
+    (
+        "explicit_multihop",
+        re.compile(
+            r"(?:\u591a\u8df3|\u8de8\u8df3|\u591a\u5c42\u7ea7|\u5173\u8054\u94fe\u8def|\u5173\u8054\u94fe|\u5173\u7cfb\u94fe"
+            r"|\u5173\u7cfb\u56fe|\u56fe\u8c31|\u4e0a\u4e0b\u6e38|\u4f20\u9012\u4f9d\u8d56|\u95f4\u63a5\u5f71\u54cd"
+            r"|\u95f4\u63a5\u4f9d\u8d56|\u5b8c\u6574\u8109\u7eb2|\u5168\u8c8c|\u94fe\u8def)"
+            r"|(?:multi[- ]?hop|transitive)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "exhaustive_related_en",
+        re.compile(
+            r"\b(?:all|every|everything|related|associated|connected)\b.{0,40}"
+            r"\b(?:related|associated|connected|link|links)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+
+def link_traversal_requested(query: str) -> Optional[str]:
+    if not isinstance(query, str):
+        return None
+    q = query.strip()
+    if not q:
+        return None
+    for name, pattern in _LINK_TRAVERSAL_RULES:
+        if pattern.search(q):
+            return name
+    return None
+
+
+def fulltext_search(query: str, docs: list, top_k: int = 5) -> list:
+    if not query or not query.strip() or top_k <= 0 or not docs:
+        return []
+    terms = _FTS_QUERY_TERMS(query)
+    if not terms:
+        return []
+    counts = []
+    lengths = []
+    for doc in docs:
+        tf: dict = {}
+        for t in _FTS_TOKENIZE(doc or ""):
+            tf[t] = tf.get(t, 0) + 1
+        counts.append(tf)
+        lengths.append(sum(tf.values()))
+    n_docs = len(docs)
+    avg_len = (sum(lengths) / n_docs) or 1.0
+    df: dict = {}
+    for tf in counts:
+        for t in terms:
+            if t in tf:
+                df[t] = df.get(t, 0) + 1
+    scored = []
+    for i, tf in enumerate(counts):
+        score = 0.0
+        for t in terms:
+            f = tf.get(t, 0)
+            if not f:
+                continue
+            d = df.get(t, 0)
+            idf = math.log(1.0 + (n_docs - d + 0.5) / (d + 0.5))
+            denom = f + _FTS_K1 * (1.0 - _FTS_B + _FTS_B * (lengths[i] or 1) / avg_len)
+            score += idf * (f * (_FTS_K1 + 1.0)) / denom
+        if score > 0.0:
+            scored.append((i, score))
+    scored.sort(key=lambda kv: (-kv[1], kv[0]))
+    return scored[:max(0, top_k)]
+
+
+def _rrf_fuse(channels: list, k: int = _RRF_K) -> list:
+    acc: dict = {}
+    for channel in channels:
+        for rank, key in enumerate(channel):
+            if not key:
+                continue
+            acc[key] = acc.get(key, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(acc.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def link_walk(facts: list, seeds: list, max_hops: int) -> list:
+    id_to_fact = {f.get("id"): f for f in facts if isinstance(f, dict) and f.get("id")}
+    visited: set = set()
+    frontier: list = []
+    for seed in seeds:
+        sid = seed.get("id") if isinstance(seed, dict) else None
+        if sid and sid not in visited:
+            visited.add(sid)
+            frontier.append((sid, 0))
+    while frontier:
+        sid, depth = frontier.pop(0)
+        if depth >= max_hops:
+            continue
+        fact = id_to_fact.get(sid)
+        if fact is None:
+            continue
+        for link_id in list(fact.get("links") or []) + list(fact.get("backlinks") or []):
+            if link_id in visited:
+                continue
+            linked = id_to_fact.get(link_id)
+            if linked and (linked.get("content") or "").strip():
+                visited.add(link_id)
+                frontier.append((link_id, depth + 1))
+    return [id_to_fact[sid] for sid in visited if sid in id_to_fact]
+
+
 def _mem_id(content: str) -> str:
     """记忆稳定 ID（content 哈希，幂等，用于双向链接）。"""
     return "mem_" + hashlib.md5(content.encode("utf-8")).hexdigest()[:8]
@@ -126,6 +254,259 @@ _DEDUP_THRESHOLD = 0.75
 _LINK_THRESHOLD = 0.70
 
 
+_MERGE_THRESHOLD = 0.68
+_MAX_ENTRIES = 2000
+_ARCHIVE_LIMIT = 0
+_CROSS_AGENT_DEDUP = True
+_GLOBAL_INDEX_TTL_S = 30.0
+
+
+_MEMORY_SETTING_KEYS = (
+    "cross_agent_dedup", "global_index_ttl_s", "dedup_threshold", "link_threshold",
+    "merge_threshold", "max_entries", "archive_limit", "recall_gate_enabled",
+)
+_memory_config_cache: dict = {}
+
+
+def _memory_config() -> dict:
+    """`slime.toml [memory]` 的写入治理参数（**可配置入口**，不写死魔法数字）。
+
+    A-1139（§3.2 配套第 2 条）：单 agent 写入上限 / 跨 agent 去重 / 合并线全部从这里读，
+    读取失败一律回落到模块默认值 —— 配置坏了不能让记忆写入停摆。
+    ⚠️ `dedup_threshold` 默认 0.75 是校准过的，**不要往下调**（不同工具模板条目约 0.74）。
+
+    查找顺序：记忆根目录（`[memory].dir` 指向它）→ 项目根（兼容旧布局 / 隔离运行）。
+    """
+    toml_path = None
+    for base in (_KNOWLEDGE_MEMORY_DIR, _PROJECT_ROOT):
+        candidate = Path(base) / "slime.toml"
+        if candidate.exists():
+            toml_path = candidate
+            break
+    if toml_path is None:
+        return {}
+    try:
+        stat = toml_path.stat()
+    except OSError:
+        return {}
+    cached = _memory_config_cache.get((str(toml_path), stat.st_mtime))
+    if cached is not None:
+        return cached
+    cfg: dict = {}
+    try:
+        import tomllib
+        raw = tomllib.loads(toml_path.read_text(encoding="utf-8")).get("memory", {})
+        if isinstance(raw, dict):
+            cfg = {k: raw[k] for k in _MEMORY_SETTING_KEYS if k in raw}
+    except Exception as e:
+        logging.warning(f"[memory] 读取 [memory] 配置失败，使用默认值: {e}")
+        cfg = {}
+    if len(_memory_config_cache) > 8:
+        _memory_config_cache.clear()
+    _memory_config_cache[(str(toml_path), stat.st_mtime)] = cfg
+    return cfg
+
+
+def _cfg_float(name: str, default: float) -> float:
+    v = _memory_config().get(name, default)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if f > 0 else default
+
+
+def _cfg_int(name: str, default: int) -> int:
+    v = _memory_config().get(name, default)
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return n if n > 0 else default
+
+
+def _cfg_bool(name: str, default: bool) -> bool:
+    v = _memory_config().get(name, default)
+    return v if isinstance(v, bool) else default
+
+
+def _dedup_threshold() -> float:
+    return _cfg_float("dedup_threshold", _DEDUP_THRESHOLD)
+
+
+def _link_threshold() -> float:
+    return _cfg_float("link_threshold", _LINK_THRESHOLD)
+
+
+def _merge_threshold() -> float:
+    """合并线：落在 [去重线, 去重线-0.10] 区间内，避免把「不同工具」的模板条目（实测约 0.74）误并。"""
+    merge = _cfg_float("merge_threshold", _MERGE_THRESHOLD)
+    dedup = _dedup_threshold()
+    return min(merge, max(0.0, dedup - 0.01))
+
+
+def _max_entries() -> int:
+    return _cfg_int("max_entries", _MAX_ENTRIES)
+
+
+def _archive_limit() -> int:
+    """软归档区容量。**`0` = 永不回收**（维护者裁决 / 设计 §5.2）。
+
+    §5.2 原文：「不要把遗忘做成到期物理删除 —— 无任何实证来源支持遗忘带来增益；
+    而物理删除不可逆，误删代价高于留存成本」。归档区超额回收是全链路唯一的物理删除，
+    所以默认关掉：`archived` 只增不减，被挤掉的条目永远可查回。
+
+    ⚠️ 语义钉死（两侧一致，见 core-ts/src/memory/store.ts::MemoryConfig.archiveLimit）：
+      · `0` = **不设上限 / 永不回收**，**不是**「立即删光」；
+      · `> 0` = 归档区容量上限，超出才回收最旧的（此时容量不得小于 `max_entries`）；
+      · 非法值（非数字 / 负数）一律回落到默认值 —— 默认值是 0，即**往「不删」的方向**兜底：
+        配置写坏绝不会导致任何一条记忆被物理删除。
+    """
+    raw = _memory_config().get("archive_limit", _ARCHIVE_LIMIT)
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return _ARCHIVE_LIMIT
+    if limit <= 0:
+        return 0
+    return max(limit, _max_entries())
+
+
+def _cross_agent_dedup_enabled() -> bool:
+    return _cfg_bool("cross_agent_dedup", _CROSS_AGENT_DEDUP)
+
+
+def _recall_gate_enabled() -> bool:
+    """§2.1 召回廉价判据开关（纯字符串/正则级，不扫全量记忆；关闭则召回门控失效、旧行为无条件召）。"""
+    return _cfg_bool("recall_gate_enabled", True)
+
+
+_CONTEXT_ROT_SIGNALS = (
+    ("past_tense", re.compile(r"(?i)(上次|上回|之前|刚才|刚|刚刚|当时|回头|那时|那时候|上周|上个月|last time|previously|earlier|that time|last week|last month)")),
+    ("reference", re.compile(r"(那个|那篇|那段|这款|它们|\bthem\b|\bit\b|this one|that one|that thing|earlier|above)")),
+    ("new_entity", re.compile(r"(?:[A-Za-z][\w.+\-]{2,40}|[A-Z_][\w_]{3,40})")),
+    ("task_type", re.compile(r"(?i)(任务|作业|问题|故障|缺陷|bug|issue|task|job|problem|fix|debug|修复|报错|异常)")),
+)
+
+
+def should_retrieve_memory(message: str, session_state: dict | None = None) -> bool:
+    """§2.1 召回廉价判据：本轮是否需要检索式召回。
+
+    三类信号（任一命中即 True）：
+      ① 过去时 / 指代 —— 「上次」「之前」「那个」「刚才」等；
+      ② 新实体 —— 专有名词 / 路径 / 人名（ASCII 标识符 ≥3 字符）；
+      ③ 任务类型切换 —— 会话状态里 prev_task_type ≠ cur_task_type。
+    纯字符串 / 正则级，不引入模型调用、不扫全量记忆。
+    空消息无信号可判，返回 False（调用方据此跳过本轮检索式召回，L1 固定前缀不受影响）。
+    开关 `[memory].recall_gate_enabled` 缺省 True；关闭时恒 True（恢复无条件召）。
+    """
+    if not _recall_gate_enabled():
+        return True
+
+    if not isinstance(message, str):
+        message = ""
+    msg = message.strip()
+    if not msg:
+        return False
+
+    state = session_state or {}
+    prev_task = str(state.get("prev_task_type") or "").strip().lower()
+    cur_task = str(state.get("cur_task_type") or "").strip().lower()
+    if prev_task and cur_task and prev_task != cur_task:
+        return True
+
+    for _name, pattern in _CONTEXT_ROT_SIGNALS:
+        if pattern.search(msg):
+            return True
+
+    return False
+
+
+def _global_index_ttl_s() -> float:
+    return _cfg_float("global_index_ttl_s", _GLOBAL_INDEX_TTL_S)
+
+
+def _dedup_hit(items: list, content: str, category: str, threshold: float):
+    """per-agent 去重判据（**单一产地**）：返回 (命中的条目, 相似度) 或 (None, 最高相似度)。
+
+    同类别内比较；先用 token 集合的包含数做**充分剪枝**（Jaccard ≥ t ⇒ |A∩B| ≥ t·|A|），
+    剪枝掉的对不会是真命中 —— 这是上限生效后仍能扛住条目增长的关键。
+    """
+    cand = _tokens(content.lower())
+    if not cand:
+        return None, 0.0
+    need = int(len(cand) * threshold)
+    best = 0.0
+    for item in items:
+        if item.get("category") != category:
+            continue
+        existing = item.get("content", "")
+        other = _tokens(existing.lower()) if isinstance(existing, str) else set()
+        if not other:
+            continue
+        inter = len(cand & other)
+        if inter < need:
+            continue
+        score = inter / len(cand | other)
+        if score > best:
+            best = score
+        if score > threshold:
+            return item, score
+    return None, best
+
+
+def _merged_content(base: str, candidate: str) -> str:
+    """合并后的正文 = 基准内容 + 「补充」行。
+
+    合并是**有损的**（只保留一份正文），所以补充行的**原文必须留痕** ——
+    调用方把 candidate 原文写进 `merge_trail`，正文本身只做追加，绝不重写既有事实。
+    同义改写（candidate 的 token 已被 base 覆盖）不追加，避免正文被无意义撑大。
+    """
+    cand_tokens = _tokens(candidate.lower())
+    base_tokens = _tokens(base.lower())
+    if cand_tokens and cand_tokens <= base_tokens:
+        return base
+    if candidate.strip() in base:
+        return base
+    return f"{base}\n补充: {candidate.strip()}"
+
+
+def _effective_value(item: dict, context: str = "") -> float:
+    """条目价值 = 权重 × 置信度 ×（1+重复命中次数）。用于上限下的**被挤掉**排序。
+
+    权重沿用 `_effective_weight`（遗忘因子 × 重要性）—— 复用同一个排序信号，
+    不再另造一个「价值」公式，避免两套打分互相打架。
+    """
+    base = _effective_weight(item, context)
+    conf = item.get("confidence")
+    if isinstance(conf, (int, float)) and math.isfinite(conf):
+        base *= max(0.0, min(1.0, float(conf)))
+    return base * (1.0 + max(0, int(item.get("repeated", 0) or 0)))
+
+
+def _list_agent_dirs(base) -> list:
+    """列出记忆根目录下的 agent 目录（跳过 .global 这类隐藏目录）。
+
+    只有**测试**会用 `data_dir` 指到一个临时目录，且那里通常只有一个 agent；
+    生产环境（9799 个目录）由 `GlobalMemoryIndex` 自己按 TTL 缓存扫描，不走这里。
+    """
+    import os
+    try:
+        return [e.name for e in os.scandir(base)
+                if e.is_dir() and not e.name.startswith(".")]
+    except OSError:
+        return []
+
+
+def _read_agent_facts(base, agent_id: str) -> list:
+    """读另一个 agent 的 facts（全局索引不可用时的精确回退路径）。"""
+    from core.safe_io import read_json_safe
+    data = read_json_safe(Path(base) / agent_id / "memory.json", default=None)
+    if not isinstance(data, dict):
+        return []
+    return data.get("facts", []) or []
+
+
 _EBBINGHAUS_TAU = 5.0  
 
 def forgetting_factor(days_since_access: float, importance: int) -> float:
@@ -148,6 +529,25 @@ def _effective_weight(item: dict, context: str = "") -> float:
     if context:
         return ff * (1.0 + _text_similarity(context, item.get("content", "")))
     return ff
+
+
+_SUMMARY_TIME_UNKNOWN = "未知"
+_SUMMARY_SOURCE_UNKNOWN = "未标注"
+
+
+def _summary_item_line(item: dict | None, content: str, category: str = "",
+                       channel: str = "", note: str = "") -> str:
+    """summary() 的结构化条目行：category + 时间 + 来源（设计 §4.2 读取侧是一等公民）。
+    与 TS 侧 core-ts/src/memory/store.ts 的 summaryItemLine 逐字段对齐。"""
+    item = item or {}
+    cat = category or item.get("category") or "fact"
+    tag = f"[{cat}@{channel}]" if channel else f"[{cat}]"
+    ts = item.get("timestamp") or item.get("last_accessed") or _SUMMARY_TIME_UNKNOWN
+    src = item.get("source") or _SUMMARY_SOURCE_UNKNOWN
+    if not note and isinstance(item.get("success"), bool):
+        note = f"结果: {'成功' if item['success'] else '失败'}"
+    extra = f" · {note}" if note else ""
+    return f"- {tag} 时间: {ts} · 来源: {src}{extra} · {content}"
 
 
 
@@ -276,13 +676,15 @@ class MemoryStore:
     """Agent 成长型记忆存储"""
 
     def __init__(self, agent_id: str, lancedb_enabled: bool = False, lancedb_uri: str = "",
-                 data_dir: str = ""):
+                 data_dir: str = "", global_index: str = "auto"):
         _validate_agent_id(agent_id)
         self.agent_id = agent_id
         
         base = Path(data_dir) if data_dir else _KNOWLEDGE_MEMORY_DIR
         if not base.is_absolute():
             base = _PROJECT_ROOT / base
+        self._base_dir = base
+        self._explicit_data_dir = bool(data_dir)
         self._json_path = base / agent_id / "memory.json"
         self._data: dict = {}
         self._lancedb_enabled = lancedb_enabled and _LANCEDB_AVAILABLE
@@ -296,7 +698,307 @@ class MemoryStore:
         self._index_stale = False
         import threading
         self._lock = threading.Lock()  
+        # A-1139（§3.2 配套第 1 条）：跨 agent 全局去重索引。
+        # "auto" = 跟随 [memory].cross_agent_dedup；"off" = 完全退回 per-agent 行为。
+        self._global_mode = global_index
+        self._global = None
         self._load()
+
+    def _global_index(self):
+        """惰性取跨 agent 全局索引；任何异常都降级为 None（**不阻断写入**）。
+
+        索引是派生件：拿不到它只会让重复多写几条，绝不能让记忆写入失败。
+        """
+        if self._global is not None:
+            return self._global
+        if self._global_mode == "off" or not _cross_agent_dedup_enabled():
+            return None
+        try:
+            from core.memory_global import get_global_index
+            self._global = get_global_index(self._base_dir, ttl_s=_global_index_ttl_s())
+        except Exception as e:
+            logging.warning(f"[memory] 全局去重索引不可用（退回 per-agent 去重）: {e}")
+            self._global = None
+        return self._global
+
+    def _cross_agent_scan(self, content: str, threshold: float):
+        """跨 agent 查重：先查派生索引，索引不可用时退回「逐目录精确读另一个 agent 的 facts」。
+
+        回退路径只在「调用方显式给了 `data_dir`」时启用（测试 / 隔离运行）——
+        生产是 9799 个 agent 目录，每次写入都全量扫盘正是全局索引要消灭的东西。
+        ⚠️ `_explicit_data_dir` 是**性能**守卫，不是隔离守卫：隔离由
+        `memory_global` 单点判定（`get_global_index` 在隔离态交不出索引对象），
+        本函数据此**不再**顺着往下走回退路径 —— 「索引拿不到」在隔离态是判定结果，
+        不是「索引坏了，换条路继续去重」。与 TS 侧 `crossAgentScan` 的
+        `if (idx.isolated) return null` 同一道门。
+        """
+        idx = self._global_index()
+        if idx is not None:
+            try:
+                return idx.check(content, exclude_agent=self.agent_id, threshold=threshold)
+            except Exception as e:
+                logging.warning(f"[memory] 全局去重查询失败（本轮退回 per-agent）: {e}")
+                return None
+        try:
+            from core.memory_global import is_isolated
+            if is_isolated(self._base_dir):
+                return None
+        except Exception as e:
+            logging.warning(f"[memory] 隔离判定失败（按非隔离继续）: {e}")
+        if not self._explicit_data_dir:
+            return None
+        for other in _list_agent_dirs(self._base_dir):
+            if other == self.agent_id:
+                continue
+            hit, score = _dedup_hit(_read_agent_facts(self._base_dir, other),
+                                    content, "", threshold)
+            if hit is not None:
+                return {"agent": other, "mem_id": hit.get("id", ""),
+                        "content": hit.get("content", ""),
+                        "category": hit.get("category") or "fact",
+                        "score": score, "key": ""}
+        return None
+
+    def _spill_to_archive(self, category: str, exclude_id: str = ""):
+        """写入上限：把**价值最低**的条目软归档（替换），返回被挤掉的条目 dict。
+
+        设计 §5.2：「不要把遗忘做成到期物理删除」—— 所以这里是**移动**不是删除：
+        条目进 `archived`，保留 content / 原始时间 / 归档原因，`get_archived()` 可查回。
+        活跃集腾出位置给新条目，条目总数不再无限增长。
+        归档区本身默认 `archive_limit = 0` = **永不回收**（语义见 `_archive_limit()`）。
+        """
+        facts = self._data.get("facts", [])
+        if not facts:
+            return None
+        victim = None
+        victim_value = None
+        for item in facts:
+            if item.get("id") == exclude_id:
+                continue
+            value = _effective_value(item)
+            if victim is None or value < victim_value:
+                victim, victim_value = item, value
+        if victim is None:
+            return None
+        facts.remove(victim)
+        victim["status"] = f"archived:{category}"
+        victim["archived_at"] = datetime.now(timezone.utc).isoformat()
+        victim["archived_reason"] = f"超出单 agent 上限 {_max_entries()} 条，按最低有效价值替换"
+        archived = self._data.setdefault("archived", [])
+        archived.append(victim)
+        limit = _archive_limit()
+        if limit > 0 and len(archived) > limit:
+            freed = len(archived) - limit
+            # 全链路唯一一处真删：**归档区**的超额部分（活跃区永不物理删除）。
+            # ⚠️ limit == 0（默认）= **永不回收**，本分支不进入：归档区只增不减。
+            del archived[:freed]
+            logging.info(f"[memory] 归档区超出 {limit} 条，回收最旧的 {freed} 条")
+        try:
+            idx = self._global_index()
+            if idx is not None:
+                idx.note_retired(victim.get("content", ""), self.agent_id)
+        except Exception:
+            pass
+        return victim
+
+    def _register_global(self, item: dict) -> None:
+        """本地新条目登记进全局索引，让**同进程的下一次写入**立刻看得见它。"""
+        idx = self._global_index()
+        if idx is None:
+            return
+        try:
+            idx.upsert(item.get("content", ""), self.agent_id, mem_id=item.get("id", ""),
+                       category=item.get("category", ""), importance=item.get("importance", 5),
+                       timestamp=item.get("timestamp", ""))
+        except Exception as e:
+            logging.warning(f"[memory] 全局索引登记失败: {e}")
+
+    def _after_store(self, item: dict) -> None:
+        """条目已落盘后的收尾，**必须在 per-agent 锁之外调用**。
+
+        两件事：① 把新条目登记进全局索引；② 全局索引登记会顺带落盘，
+        所以这里也是「谁先拿锁」的唯一顺序点 —— per-agent 锁先、全局索引锁后。
+        """
+        self._register_global(item)
+
+    def _add_shared_ref(self, agent_id: str, mem_id: str, content: str, score: float,
+                        category: str = "fact") -> bool:
+        """跨 agent 去重命中 → 本地不新增内容，只留一条**指针**（去重不等于丢知识）。
+
+        为什么不做成「直接 return，什么都不留」：那样 A 已经知道的事实，B 永远查不到，
+        等于把知识**删除**了。指针不参与 JSON 真相源的内容语义（不在 facts 里、
+        不进 summary、不建链），只让 `get_shared_refs()` / `global_recall()` 能把它找回来。
+        `category` 跟着指针走：索引不在场时对外投影仍能如实标出「这是别人的哪类记忆」。
+        """
+        refs = self._data.setdefault("shared_refs", [])
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get("mem_id") == mem_id and ref.get("from_agent") == agent_id:
+                ref["hit_count"] = int(ref.get("hit_count", 0) or 0) + 1
+                ref["last_hit_at"] = datetime.now(timezone.utc).isoformat()
+                self._save()
+                return True
+        refs.append({
+            "from_agent": agent_id,
+            "mem_id": mem_id,
+            "score": round(float(score), 4),
+            "preview": content[:120],
+            "category": category or "fact",
+            "hit_count": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": f"shared:{agent_id}:{mem_id}",
+        })
+        self._save()
+        return True
+
+    def get_shared_refs(self) -> list:
+        """跨 agent 去重被我方「让位」的条目指针（可查回，不静默丢失）。"""
+        return [r for r in self._data.get("shared_refs", []) if isinstance(r, dict)]
+
+    def get_archived(self) -> list:
+        """被写入上限挤出的条目（**软归档，非删除**）。可按 status/content 查回。"""
+        return [a for a in self._data.get("archived", []) if isinstance(a, dict)]
+
+    def _shared_refs_ranked(self, query: str, top_k: int) -> list:
+        """本地 `shared_refs` 指针按 query 相关性排序（**不发散**：score ≤ 0 的丢掉）。
+
+        `content` 用指针里的 preview（写入时截断 120 字）—— 派生索引能在场就由索引补全文。
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        ranked = []
+        for ref in self.get_shared_refs():
+            agent = ref.get("from_agent") or ""
+            content = ref.get("preview")
+            if not agent or not isinstance(content, str) or not content:
+                continue
+            score = _text_similarity(q, content)
+            if score <= 0:
+                continue
+            ranked.append({
+                "agent": agent,
+                "mem_id": ref.get("mem_id", ""),
+                "content": content,
+                "category": ref.get("category") or "fact",
+                "importance": 5,
+                "timestamp": ref.get("timestamp", ""),
+                "score": score,
+                "source": f"shared:{agent}",
+            })
+        ranked.sort(key=lambda r: r["score"], reverse=True)
+        return ranked[:max(0, top_k)]
+
+    def global_recall(self, query: str, top_k: int = 5) -> list:
+        """跨 agent 召回：把「因为别处已有而没写进本 agent」的内容找回来（去重 ≠ 删除）。
+
+        两条来源合并，按 (agent, mem_id/content) 去重（索引命中优先 —— 它是**全文**，
+        本地指针只有 120 字 preview）：
+          ① 派生索引里别的 agent 的条目（原有语义）；
+          ② 本地 `shared_refs` 指针 —— 索引关掉/坏掉/对方条目已被软归档时，指针仍然
+             记得「这条内容曾经在谁那里」，是索引之外的兜底来源。
+
+        每条都带 `source = "shared:<agent_id>"`：这是**别人的**记忆，不是本 agent 的。
+        空 query → 返回空（与索引召回一致）：别人条目的 last_accessed / 热度是本 agent
+        读不到的内部字段，无法给出与本地条目可比的「最近最常用」排序。
+        """
+        if not query or not query.strip() or top_k <= 0:
+            return []
+        merged: dict = {}
+        idx = self._global_index()
+        if idx is not None:
+            try:
+                for r in idx.recall(query, top_k=top_k, exclude_agent=self.agent_id):
+                    agent = r.get("agent", "")
+                    merged[(agent, r.get("mem_id") or r.get("content", ""))] = {
+                        "agent": agent,
+                        "mem_id": r.get("mem_id", ""),
+                        "content": r.get("content", ""),
+                        "category": r.get("category") or "fact",
+                        "importance": r.get("importance", 5),
+                        "timestamp": r.get("timestamp", ""),
+                        "score": r.get("score", 0.0),
+                        "source": f"shared:{agent}",
+                    }
+            except Exception as e:
+                logging.warning(f"[memory] 跨 agent 召回失败: {e}")
+        for ref in self._shared_refs_ranked(query, top_k):
+            key = (ref["agent"], ref["mem_id"] or ref["content"])
+            if key in merged:
+                continue
+            merged[key] = ref
+        return sorted(merged.values(), key=lambda r: r.get("score", 0.0), reverse=True)[:top_k]
+
+    def shared_pointer_items(self, query: str, top_k: int = 5) -> list:
+        """共享指针的**对外投影**（模型看到的形状 / 记忆端点返回给调用方的形状）。
+
+        隐私边界（维护者裁决：「允许可见，但标注来源」）：只给**内容 + 来源标识** ——
+        别人的 links / backlinks / tags / system 等内部字段一律不出现。据此：
+          · `source` = `shared:<agent_id>`，唯一且明确区分的来源标注；
+          · `id` 恒为空串：本 agent 的 id 空间里没有这条，给上别人的 mem_id 反而会诱导
+            memory_forget 去删**别人的**真相源（越权幻想）；
+          · category / importance / timestamp 取自派生索引摘要（索引本来只有摘要字段）。
+        """
+        return [{
+            "id": "",
+            "content": r.get("content", ""),
+            "category": r.get("category") or "fact",
+            "importance": r.get("importance", 5),
+            "timestamp": r.get("timestamp", ""),
+            "source": r.get("source") or f"shared:{r.get('agent', '')}",
+        } for r in self.global_recall(query, top_k=top_k)]
+
+    def _indexed_facts(self) -> list:
+        return [f for f in self._data.get("facts", [])
+                if isinstance(f, dict) and isinstance(f.get("content"), str)
+                and f["content"].strip()]
+
+    def fulltext_recall(self, query: str, top_k: int = 5) -> list[dict]:
+        if not query or not query.strip() or top_k <= 0:
+            return []
+        facts = self._indexed_facts()
+        if not facts:
+            return []
+        return [dict(facts[i], channel="全文")
+                for i, _score in fulltext_search(query, [f["content"] for f in facts], top_k)]
+
+    def hybrid_recall(self, query: str, top_k: int = 5, graph: bool | None = None,
+                      max_hops: int = 2) -> list[dict]:
+        if not query or not query.strip() or top_k <= 0:
+            return []
+        vector: list[dict] = []
+        if self._lancedb_enabled:
+            try:
+                vector = [dict(r, channel="向量") for r in self.recall(query, top_k=top_k)]
+            except Exception:
+                vector = []
+        fulltext = self.fulltext_recall(query, top_k=top_k)
+        by_content: dict = {}
+        for r in vector + fulltext:
+            by_content.setdefault(r.get("content", ""), r)
+        fused = _rrf_fuse([
+            [r.get("content", "") for r in vector],
+            [r.get("content", "") for r in fulltext],
+        ])
+        out: list[dict] = []
+        seen: set = set()
+        for content, _score in fused:
+            if not content or content in seen:
+                continue
+            seen.add(content)
+            out.append(dict(by_content.get(content, {"content": content})))
+        head = out[:top_k]
+        want_graph = link_traversal_requested(query) is not None if graph is None else bool(graph)
+        if want_graph:
+            facts = self._indexed_facts()
+            content_to_fact = {f["content"]: f for f in facts}
+            seeds = [content_to_fact[c] for c in seen if c in content_to_fact]
+            for f in link_walk(facts, seeds, max_hops)[:top_k]:
+                content = f["content"]
+                if content in seen:
+                    continue
+                seen.add(content)
+                head.append(dict(f, channel="关联"))
+        return head
 
     
 
@@ -414,22 +1116,61 @@ class MemoryStore:
         A-1139（D3）：**向量索引已移出本函数**（嵌入是同步 HTTP，不能占着 per-agent 锁）。
         返回 True = 确实新增了一条（调用方应补写索引）；False = 去重命中，没有新条目。
         ⚠️ 直接调用本函数的路径（目前只有 `add_preference`）必须自己处理返回值并补索引。
+
+        A-1139（设计 §3.2 配套两条）在此处落实：
+          1. 写入前额外查一次**跨 agent 全局去重** —— 命中则本地不新增内容，只留指针
+             （`shared_refs`），并把命中记进派生索引的 hits；
+          2. **单 agent 写入上限** —— 条目达到 `[memory].max_entries` 后，新条目只能
+             ① 与高相似旧条目**合并**，或 ② 把**价值最低**的旧条目**软归档**腾位置；
+             活跃集永不物理删除，被挤掉的进 `archived` 可查回。
         """
         tags = tags or []
-        
-        for existing in self._data.get("facts", []):
-            if existing.get("category") != category:
-                continue
-            if _text_similarity(content.lower(), existing.get("content", "").lower()) > _DEDUP_THRESHOLD:
-                existing["repeated"] = existing.get("repeated", 0) + 1
-                self._save()
-                return False  
+        dedup = _dedup_threshold()
+        facts = self._data.setdefault("facts", [])
+        new_extra = dict(extra or {})
+
+        # ---- ① per-agent 去重（原有语义，判据抽到 _dedup_hit 以复用剪枝） ----
+        hit, _score = _dedup_hit(facts, content, category, dedup)
+        if hit is not None:
+            hit["repeated"] = int(hit.get("repeated", 0) or 0) + 1
+            self._save()
+            return False
+
+        # ---- ② 跨 agent 全局去重（本次新增；命中则本地只留指针，不新增内容） ----
+        shared = self._cross_agent_scan(content, dedup)
+        if shared is not None:
+            self._add_shared_ref(shared.get("agent", ""), shared.get("mem_id", ""),
+                                 shared.get("content", "") or content,
+                                 float(shared.get("score", 0.0)),
+                                 shared.get("category", "") or category)
+            logging.info(
+                f"[memory] 跨 agent 去重命中（agent={self.agent_id} ← {shared.get('agent')}"
+                f" score={float(shared.get('score', 0.0)):.3f}），本地不新增：{content[:60]}")
+            return False
 
         new_id = _mem_id(content)
         tag_set = set(tags)
         links = []
-        
-        for existing in self._data.get("facts", []):
+
+        # ---- ③ 上限之下的「合并」档：高相似但不达去重线 → 并进旧条目，不新增 ----
+        # ⚠️ 带 tags 的条目**不参与合并**：tags 是调用方显式的「同族」信号，同族但内容不同
+        # 的条目应当各自留着并靠 links 关联，合并会把不同事实揉成一条（信息损失 ≠ 去重）。
+        merge_hit, merge_score = (None, 0.0) if tag_set else \
+            _dedup_hit(facts, content, category, _merge_threshold())
+        if merge_hit is not None:
+            trail = merge_hit.setdefault("merge_trail", [])
+            trail.append({"content": content, "score": round(merge_score, 4),
+                          "at": datetime.now(timezone.utc).isoformat()})
+            merge_hit["content"] = _merged_content(merge_hit.get("content", ""), content)
+            merge_hit["importance"] = max(int(merge_hit.get("importance", 5)),
+                                          max(1, min(10, importance)))
+            merge_hit["timestamp"] = datetime.now(timezone.utc).isoformat()
+            merge_hit["repeated"] = int(merge_hit.get("repeated", 0) or 0) + 1
+            merge_hit["merged_from"] = int(merge_hit.get("merged_from", 0) or 0) + 1
+            self._save()
+            return False
+
+        for existing in facts:
             if existing.get("id") == new_id:
                 continue
             existing_tags = set(existing.get("tags", []))
@@ -438,7 +1179,7 @@ class MemoryStore:
                 linked = True
             elif not tag_set and _text_similarity(
                 content.lower(), existing.get("content", "").lower()
-            ) > _LINK_THRESHOLD:
+            ) > _link_threshold():
                 linked = True
             if linked:
                 links.append(existing["id"])
@@ -448,7 +1189,20 @@ class MemoryStore:
                 
                 existing["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
-        self._data.setdefault("facts", []).append({
+        # ---- ④ 上限：满了先「替换」腾位置，新条目才进得来 ----
+        # 全局索引登记 / 跨 agent 指针 / 归档返回都给**调用方**在锁外做 ——
+        # 锁内顺序恒为「先 per-agent 锁、后全局索引锁」，绝不在持有 per-agent 锁时
+        # 去取全局索引锁（那会与另一条反向路径构成死锁）。
+        extras: dict = {}
+        limit = _max_entries()
+        if len(facts) >= limit:
+            freed = self._spill_to_archive(category)
+            if freed is None:
+                logging.warning(f"[memory] {self.agent_id} 已达上限 {limit} 条且无可替换条目，本次写入丢弃")
+                return False
+            extras["replaced"] = freed.get("id", "")
+
+        item = {
             "id": new_id,
             "content": content,
             "category": category,
@@ -459,11 +1213,12 @@ class MemoryStore:
             "links": links,        
             "backlinks": [],       
             "repeated": 0,
-            **(extra or {}),
-        })
+            **new_extra,
+            **extras,
+        }
+        facts.append(item)
         self._save()
-        
-        
+        self._after_store(item)
         return True
 
     def add_fact(self, fact: str, importance: int = 5,
@@ -484,13 +1239,7 @@ class MemoryStore:
                     f["timestamp"] = datetime.now(timezone.utc).isoformat()
                     self._save()
                     return
-            stored = self._store_categorized_locked("preference", content, tags=tags, importance=6)
-        
-        
-        
-        
-        if stored:
-            self._index_vector("preference", content, tags)
+        self._store_categorized("preference", content, tags=tags, importance=6)
 
     def add_skill(self, skill_name: str):
         """记录解锁的技能"""
@@ -552,71 +1301,69 @@ class MemoryStore:
         
         ranked = sorted(facts, key=lambda f: _effective_weight(f, context), reverse=True)
         selected = ranked[:max_items]
-        
-        for f in selected:
-            f["last_accessed"] = datetime.now(timezone.utc).isoformat()
+        # 设计 §5.1（富者愈富 bug）：summary() 被调用 ≠ 记忆被访问。这里**不再**刷新
+        # last_accessed —— 否则每轮对话都把当前 top-N 继续抬到榜首，排名外的沉睡记忆
+        # 永远追不上，「沉睡但可唤醒」在实现上不成立。
+        # 衰减（_effective_weight）保留为排序信号；只有真正的检索命中（touch()）才算访问。
 
-        
         content_to_fact = {f["content"]: f for f in facts}
-        id_to_fact = {f.get("id"): f for f in facts if f.get("id")}
         known = {f["content"] for f in facts}
 
-        
         semantic_items = []
-        seeds = []
-        if context and self._lancedb_enabled:
-            try:
-                recalled = self.recall(context, top_k=max_items)
-                semantic_items = [r for r in recalled if r.get("content", "") not in known]
-                seeds = recalled
-            except Exception:
-                pass  
-
-        
         graph_items = []
         if context:
-            
-            unique_seeds = []
-            seen_seed_contents = set()
-            for s in seeds:
-                c = s.get("content", "")
-                if c and c not in seen_seed_contents:
-                    seen_seed_contents.add(c)
-                    unique_seeds.append(s)
-            seed_facts = [content_to_fact.get(s.get("content", "")) for s in unique_seeds]
-            seed_facts = [f for f in seed_facts if f]
-            if not seed_facts:
-                seed_facts = selected[:3]
-            seen = set()
-            for seed_fact in seed_facts:
-                for link_id in seed_fact.get("links", []) + seed_fact.get("backlinks", []):
-                    linked = id_to_fact.get(link_id)
-                    
-                    if (linked and linked.get("id") not in seen
-                            and linked.get("content", "") not in known):
-                        seen.add(linked["id"])
-                        graph_items.append(linked)
+            recalled = []
+            try:
+                recalled = self.hybrid_recall(context, top_k=max_items)
+            except Exception:
+                recalled = []
+            hit_contents = []
+            seen_hits = set()
+            for r in recalled:
+                c = r.get("content", "")
+                if c and r.get("channel") != "关联" and c not in seen_hits:
+                    seen_hits.add(c)
+                    hit_contents.append(c)
+            if hit_contents:
+                rest = [f for f in ranked if f["content"] not in seen_hits]
+                selected = ([content_to_fact[c] for c in hit_contents if c in content_to_fact]
+                            + rest)[:max_items]
+            semantic_items = [r for r in recalled if r.get("content", "") not in known]
+            shown = {f["content"] for f in selected}
+            graph_items = [r for r in recalled
+                           if r.get("channel") == "关联"
+                           and r.get("content", "") not in shown]
 
         if selected or semantic_items or graph_items:
-            lines = [f"- [{f.get('category', 'fact')}] {f['content']}" for f in selected]
-            
+            # 设计 §4.2：读取侧是一等公民 —— 每条都必须带 category / 时间 / 来源，不是一段散文。
+            lines = [_summary_item_line(f, f["content"]) for f in selected]
+
             for gf in graph_items[:3]:
-                lines.append(f"- [关联] {gf['content']}")
-            
+                lines.append(_summary_item_line(gf, gf["content"], channel="关联"))
+
             for item in semantic_items[:3]:
-                lines.append(f"- {item['content']}")
+                lines.append(_summary_item_line(item, item.get("content", ""),
+                                                category=item.get("role", ""), channel="语义"))
             parts.append("## 已知事实\n" + "\n".join(lines))
         prefs = self.get_preferences()
-        if prefs:
-            parts.append("## 用户偏好\n" + "\n".join(f"- {k}: {v}" for k, v in list(prefs.items())[:max_items]))
+        pref_fact_by_key = {}
+        for f in facts:
+            if f.get("category") == "preference" and f.get("tags"):
+                pref_fact_by_key[f["tags"][0]] = f
+        pref_entries = list(prefs.items())[:max_items]
+        if pref_entries:
+            parts.append("## 用户偏好\n" + "\n".join(
+                _summary_item_line(pref_fact_by_key.get(k), f"{k}: {v}", category="preference")
+                for k, v in pref_entries))
         skills = self.get_skills()
         if skills:
-            parts.append("## 已解锁技能\n" + "\n".join(f"- {s}" for s in skills[:max_items]))
+            # skills_unlocked 是纯字符串数组，数据模型里没有时间/来源字段（两侧一致）。
+            parts.append("## 已解锁技能\n" + "\n".join(f"- [skill] {s}" for s in skills[:max_items]))
         lessons = self.get_lessons(limit=max_items * 2)
         if lessons:
             ranked_lessons = sorted(lessons, key=lambda l: _effective_weight(l, context), reverse=True)
             parts.append("## 经验教训\n" + "\n".join(
-                f"- [{'成功' if l['success'] else '失败'}] {l['content']}"
+                _summary_item_line(l, l.get("content", ""))
                 for l in ranked_lessons[:max_items]
             ))
         return "\n\n".join(parts)
