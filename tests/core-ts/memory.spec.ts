@@ -4,11 +4,11 @@
 
 
 import { describe, expect, it, afterAll } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  MemoryStore, textSimilarity, memId, forgettingFactor,
+  MemoryStore, resolveMemoryPaths, textSimilarity, memId, forgettingFactor,
   effectiveWeight, hashEmbed, type MemoryFact,
 } from "../../core-ts/src/memory/store.js";
 import { retrieveFromStore, stage2LinkWalk } from "../../core-ts/src/memory/retrieve.js";
@@ -79,16 +79,26 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
     expect(m.getLessons(true).length).toBe(1);
   });
 
-  it("summary 包含事实/偏好/技能/教训段", async () => {
+  it("summary 包含事实/偏好/技能/教训段，且每条带 category/时间/来源（设计 §4.2）", async () => {
     const dir = makeTmp();
     const m = new MemoryStore("test_sum_agent", { dataDir: dir });
     m.addFact("用户喜欢 Python");
     m.addPreference("theme", "dark");
     m.addSkill("code_review");
+    m.addLesson("要使用 async", true);
     const summary = await m.summary();
     expect(summary).toContain("Python");
     expect(summary).toContain("dark");
     expect(summary).toContain("code_review");
+    // 检索结果是结构化条目：category + 时间 + 来源三标记齐全，不是一段散文
+    expect(summary).toMatch(/- \[fact\] 时间: \S+ · 来源: \S+ · 用户喜欢 Python/);
+    expect(summary).toMatch(/- \[preference\] 时间: \S+ · 来源: \S+ · theme: dark/);
+    // 没有 source 字段的条目给明确占位（不留空）
+    expect(summary).toContain("来源: 未标注");
+    // 教训段同样结构化，并保留 success 语义
+    expect(summary).toMatch(/- \[lesson\] 时间: \S+ · 来源: \S+ · 结果: 成功 · 要使用 async/);
+    // skills_unlocked 是纯字符串数组，数据模型无时间/来源字段
+    expect(summary).toContain("- [skill] code_review");
   });
 
   it("add_preference 按 key 精确更新（对照 test_memory_preference_update）", () => {
@@ -110,7 +120,7 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
     expect(m.getFacts()[0].repeated).toBe(2);
   });
 
-  it("双向链接：tags 重叠自动关联 + backlinks 维护 + last_accessed 刷新（BUG-003/014）", () => {
+  it("双向链接：tags 重叠自动关联 + backlinks 维护 + summary() 不刷新 last_accessed（BUG-003/014、设计 §5.1）", async () => {
     const dir = makeTmp();
     const m = new MemoryStore("test_link_agent", { dataDir: dir });
     m.storeCategorized("fact", "学习 Python 语法", ["编程"]);
@@ -120,18 +130,68 @@ describe("MemoryStore CRUD（对照 test_memory_store_crud）", () => {
     const second = facts[1];
     expect(second.links).toContain(first.id);
     expect(facts[0].backlinks).toContain(second.id);
+    // 写入路径（建条目 / 建链）仍然落 last_accessed
     expect(facts[0].last_accessed).toBeTruthy();
+    // 但 summary() 只是读取：不许把选中的 top-N 刷成「刚刚访问过」（富者愈富 bug）
+    const accessBefore = m.getFacts().map((f) => f.last_accessed);
+    const countBefore = m.getFacts().map((f) => f.access_count);
+    await m.summary("Python");
+    expect(m.getFacts().map((f) => f.last_accessed)).toEqual(accessBefore);
+    expect(m.getFacts().map((f) => f.access_count)).toEqual(countBefore);
   });
 
-  it("touch：behavior_archive 标签按前缀刷新 last_accessed", () => {
+  it("设计 §5.1：summary() 调用不算访问，真正的检索命中（search）才刷新 last_accessed/access_count", async () => {
+    const dir = makeTmp();
+    const m1 = new MemoryStore("test_access_semantics", { dataDir: dir });
+    m1.addFact("沉睡记忆: 批量重命名 batch 脚本");
+    m1.addFact("活跃记忆: Python 项目经验");
+
+    // 真实落盘 → 回拨两条的 last_accessed → 重新加载（走 load() 真实路径，而非内存里做手脚）
+    const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const jsonPath = resolveMemoryPaths("test_access_semantics", { dataDir: dir }).memoryJson;
+    const raw = JSON.parse(readFileSync(jsonPath, "utf8")) as { facts: MemoryFact[] };
+    for (const f of raw.facts) {
+      f.last_accessed = old;
+      f.access_count = 0;
+    }
+    writeFileSync(jsonPath, JSON.stringify(raw, null, 2), "utf8");
+
+    const m = new MemoryStore("test_access_semantics", { dataDir: dir });
+    expect(m.getFacts().map((f) => f.last_accessed)).toEqual([old, old]);
+
+    // 1) summary() 是「读」：命中与否都不改变访问状态
+    const text = await m.summary("batch", 5);
+    expect(text).toContain("批量重命名 batch 脚本");
+    expect(m.getFacts().map((f) => f.last_accessed)).toEqual([old, old]);
+    expect(m.getFacts().map((f) => f.access_count)).toEqual([0, 0]);
+
+    // 2) search() 是「真正的检索命中」：只有命中的那条被 touch，另一条保持沉睡
+    const hit = m.search("Python", { limit: 1 });
+    expect(hit).toContain("Python 项目经验");
+    const refreshed = m.getFacts().filter((f) => f.last_accessed !== old);
+    expect(refreshed.length).toBe(1);
+    expect(refreshed[0].content).toContain("Python");
+    expect(refreshed[0].access_count).toBe(1);
+    expect(m.getFacts().filter((f) => f.access_count === 0).length).toBe(1);
+    expect(m.getFacts().filter((f) => f.access_count === 0)[0].content).toContain("批量重命名");
+  });
+
+  it("touch：真正的检索命中（behavior_archive）才刷新 last_accessed，未命中的保持不动", () => {
     const dir = makeTmp();
     const m = new MemoryStore("test_touch_agent", { dataDir: dir });
     m.storeCategorized("fact", "归档行为: 批量重命名", ["behavior_archive"]);
     m.addFact("普通记忆");
-    const before = m.getFacts()[0].last_accessed;
+    const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    m.getFacts()[0].last_accessed = old;
+    const untouchedBefore = m.getFacts()[1].last_accessed;
     const n = m.touch("归档行为");
     expect(n).toBe(1);
-    expect(m.getFacts()[0].last_accessed >= before).toBe(true);
+    // 命中的条目被真正 touch（不是 >= 这种恒真断言）
+    const after = m.getFacts()[0].last_accessed;
+    expect(after).not.toBe(old);
+    expect(Date.parse(after)).toBeGreaterThan(Date.parse(old));
+    // 未命中的条目不许被顺带刷新
+    expect(m.getFacts()[1].last_accessed).toBe(untouchedBefore);
     expect(m.touch("不存在的")).toBe(0);
   });
 
