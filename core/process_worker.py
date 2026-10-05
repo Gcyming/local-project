@@ -3,6 +3,8 @@ slime 多进程 Worker
 - 每个子 Agent 在独立 Python 进程中执行
 - 通过 IPC A2A 总线与其他进程通信
 - 支持超时控制、轮次限制、结果回传
+- agent_config["readonly"] 为真时，本 Worker 被判定为纯只读，与其他 Worker 并行执行，
+  core/llm.py 的 _execute_pending_tools 会据此拦截写工具（与 core/executor.py 同一条闸）。
 """
 
 from __future__ import annotations
@@ -179,6 +181,7 @@ def _worker_main(
     - receive_queue: IPC A2A 接收队列（可选）
     - peer_queues: IPC A2A 发送队列 {agent_name: Queue}（可选）
     """
+    ro_token = None
     try:
         inp = WorkerInput.from_dict(worker_input)
         peer_queues = peer_queues or {}
@@ -198,7 +201,26 @@ def _worker_main(
             })
 
         
+        from core.budget import SubtaskBudget
+        budget = SubtaskBudget(
+            model=str((inp.provider_config or {}).get("model") or ""),
+            provider_cfg=inp.provider_config,
+            provider_key=inp.provider_key,
+            name=inp.subtask_name,
+        )
+        budget.start()
+        if budget.cost_disabled_reason:
+            logging.warning(f"[process_worker] {inp.subtask_name}: {budget.cost_disabled_reason}")
+            if progress_queue:
+                progress_queue.put({
+                    "subtask_id": inp.subtask_id,
+                    "status": "running",
+                    "progress": budget.cost_disabled_reason[:200],
+                })
+
+        
         from core.agent import Agent
+        from core.agent_context import swarm_readonly_mode
         agent = Agent(
             name=inp.subtask_name,
             
@@ -215,17 +237,27 @@ def _worker_main(
         
         _restore_psyche_snapshot(agent, inp.agent_config)
 
+        if inp.agent_config.get("readonly"):
+            ro_token = swarm_readonly_mode.set(True)
+
         cfg = inp.provider_config
         result = ""
         error = ""
         rounds = 0
         confirmed = False  
 
-        
+        sys_prompt = agent.get_system_prompt()
+
         for round_num in range(1, MAX_ROUNDS + 1):
             
             if stop_event and stop_event.is_set():
                 error = "收到停止信号"
+                break
+
+            
+            _trip = budget.check()
+            if _trip is not None:
+                error = _trip.reason
                 break
 
             rounds = round_num
@@ -275,19 +307,31 @@ def _worker_main(
 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                _usage: dict = {}
+                _round_to = WORKER_ROUND_TIMEOUT
+                _remaining = budget.remaining_seconds()
+                if _remaining is not None:
+                    
+                    _round_to = min(_round_to, max(0.001, _remaining))
                 try:
                     reply = loop.run_until_complete(
                         asyncio.wait_for(
                             call_api_provider(
                                 cfg, agent, message, [],
-                                system_prompt=agent.get_system_prompt(),
+                                system_prompt=sys_prompt,
                                 memory_agent_id=inp.agent_config.get("memory_agent_id"),
+                                usage_sink=_usage,
                             ),
-                            timeout=WORKER_ROUND_TIMEOUT,
+                            timeout=_round_to,
                         )
                     )
                 except asyncio.TimeoutError:
-                    error = f"[Worker 超时] 单轮交互周期超过 {WORKER_ROUND_TIMEOUT}s"
+                    
+                    _trip = budget.wall_trip(
+                        force=_remaining is not None and _remaining <= WORKER_ROUND_TIMEOUT
+                    )
+                    error = (_trip.reason if _trip is not None
+                             else f"[Worker 超时] 单轮交互周期超过 {WORKER_ROUND_TIMEOUT}s")
                     break
                 finally:
                     loop.close()
@@ -303,6 +347,13 @@ def _worker_main(
                 break
 
             result = reply
+
+            budget.record_round(
+                prompt_tokens=_usage.get("prompt_tokens"),
+                completion_tokens=_usage.get("completion_tokens"),
+                prompt_text=sys_prompt + "\n" + message,
+                reply_text=reply if isinstance(reply, str) else "",
+            )
 
             
             if peer_queues:
@@ -332,6 +383,12 @@ def _worker_main(
             if "<DONE>" in reply:
                 result = reply.replace("<DONE>", "").strip()
                 confirmed = True
+                break
+
+            
+            _trip = budget.check()
+            if _trip is not None:
+                error = _trip.reason
                 break
 
         
@@ -392,6 +449,9 @@ def _worker_main(
             })
         except Exception:
             pass  
+    finally:
+        if ro_token is not None:
+            swarm_readonly_mode.reset(ro_token)
 
 
 

@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Callable
 
 from .agent import Agent
+from .agent_context import swarm_readonly_mode
 from .swarm import SwarmOrchestrator, SubTask, TaskState, SwarmPlan
 from .a2a import A2ABus
 from .merger import Merger, MergeResult
 from .multiplexer import Multiplexer
 from .llm import call_llm, call_api_provider
+from .budget import SubtaskBudget
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -222,6 +224,7 @@ class SwarmExecutor:
                         "behavior": self.main_agent.behavior.to_dict(),
                         "lifecycle": self.main_agent.lifecycle.value,
                         "context_config": dict(self.main_agent.context_config),
+                        "readonly": st.read_only,
                     },
                 )
                 pw = ProcessWorker(worker_input, receive_queue=receive_q, peer_queues=peer_qs)
@@ -237,79 +240,95 @@ class SwarmExecutor:
                 batch = rounds_mp[round_no]
                 if total_rounds_mp > 1 and on_progress:
                     on_progress("round", f"第 {round_no}/{total_rounds_mp} 轮开始（{len(batch)} 个子任务）")
-                pending = list(batch)
-                active: list[tuple[SubTask, ProcessWorker]] = []
-                start_time = time.time()
-                
-                
+
+
                 video_subs = [st for st in plan.subtasks if _is_video_generation_task(st)]
-                
+
                 _mp_to = _resolve_task_timeout(plan, bool(video_subs))
+                start_time = time.time()
 
-                while pending or active:
-                    
-                    if time.time() - start_time > _mp_to:
-                        if on_progress:
-                            on_progress("timeout", f"第 {round_no} 轮超时 ({_mp_to}s)，终止剩余 Worker")
+                readonly_batch = [pair for pair in batch if pair[0].read_only]
+                write_batch = [pair for pair in batch if not pair[0].read_only]
+                if readonly_batch and on_progress:
+                    on_progress("readonly",
+                                f"只读子任务并行执行（{len(readonly_batch)} 个，无写操作）")
+                if write_batch and on_progress:
+                    on_progress("serialize",
+                                f"写操作串行化执行（{len(write_batch)} 个，排队不并发）")
+
+                def _pump(pairs, cap):
+                    pending = list(pairs)
+                    active: list[tuple[SubTask, ProcessWorker]] = []
+                    while pending or active:
+
+                        if time.time() - start_time > _mp_to:
+                            if on_progress:
+                                on_progress("timeout", f"第 {round_no} 轮超时 ({_mp_to}s)，终止剩余 Worker")
+                            for st, pw in active:
+                                pw.stop()
+                                self.orchestrator.mark_failed(task_id, st.id, "任务超时")
+                                mux.update_pane(st.name, status="failed", progress="任务超时")
+                            for st, pw in pending:
+                                self.orchestrator.mark_failed(task_id, st.id, "任务超时（未启动）")
+                                mux.update_pane(st.name, status="failed", progress="任务超时（未启动）")
+                            return
+
+
+                        while len(active) < cap and pending:
+                            st, pw = pending.pop(0)
+                            self.orchestrator.mark_running(task_id, st.id)
+                            mux.update_pane(st.name, status="running")
+                            pw.start()
+                            active.append((st, pw))
+                            started_workers.append((st, pw))
+
+
+                        still_active = []
                         for st, pw in active:
-                            pw.stop()
-                            self.orchestrator.mark_failed(task_id, st.id, "任务超时")
-                            mux.update_pane(st.name, status="failed", progress="任务超时")
-                        for st, pw in pending:
-                            self.orchestrator.mark_failed(task_id, st.id, "任务超时（未启动）")
-                            mux.update_pane(st.name, status="failed", progress="任务超时（未启动）")
-                        break
 
-                    
-                    while len(active) < plan.max_workers and pending:
-                        st, pw = pending.pop(0)
-                        self.orchestrator.mark_running(task_id, st.id)
-                        mux.update_pane(st.name, status="running")
-                        pw.start()
-                        active.append((st, pw))
-                        started_workers.append((st, pw))
+                            for progress in pw.drain_progress():
+                                status = progress.get("status", "running")
+                                progress_text = progress.get("progress", "")
+                                if status == "failed":
+                                    mux.update_pane(st.name, status="failed", progress=progress_text)
+                                elif status == "done":
+                                    mux.update_pane(st.name, status="done", progress=progress_text)
+                                else:
+                                    mux.update_pane(st.name, progress=progress_text)
 
-                    
-                    still_active = []
-                    for st, pw in active:
-                        
-                        for progress in pw.drain_progress():
-                            status = progress.get("status", "running")
-                            progress_text = progress.get("progress", "")
-                            if status == "failed":
-                                mux.update_pane(st.name, status="failed", progress=progress_text)
-                            elif status == "done":
-                                mux.update_pane(st.name, status="done", progress=progress_text)
+                                if "reply_preview" in progress:
+                                    mux.update_pane(st.name, append_line=progress["reply_preview"])
+
+
+                            result = pw.get_result(timeout=0.5, kill_on_timeout=False)
+                            if result is not None:
+                                if result.state == "done":
+                                    self.orchestrator.mark_done(task_id, st.id, result.result)
+                                    self.orchestrator.increment_rounds(task_id, st.id)
+                                    mux.update_pane(st.name, status="done", progress="完成")
+                                else:
+                                    self.orchestrator.mark_failed(task_id, st.id, result.error)
+
+
+                                    st.result = result.result
+                                    if result.rounds:
+                                        st.rounds = result.rounds
+                                    mux.update_pane(st.name, status="failed", progress=result.error[:100])
+                                pw.cleanup()
                             else:
-                                mux.update_pane(st.name, progress=progress_text)
-                            
-                            if "reply_preview" in progress:
-                                mux.update_pane(st.name, append_line=progress["reply_preview"])
+                                still_active.append((st, pw))
 
-                        
-                        result = pw.get_result(timeout=0.5, kill_on_timeout=False)
-                        if result is not None:
-                            if result.state == "done":
-                                self.orchestrator.mark_done(task_id, st.id, result.result)
-                                self.orchestrator.increment_rounds(task_id, st.id)  
-                                mux.update_pane(st.name, status="done", progress="完成")
-                            else:
-                                self.orchestrator.mark_failed(task_id, st.id, result.error)
-                                
-                                
-                                st.result = result.result
-                                if result.rounds:
-                                    st.rounds = result.rounds
-                                mux.update_pane(st.name, status="failed", progress=result.error[:100])
-                            pw.cleanup()
-                        else:
-                            still_active.append((st, pw))
+                        active = still_active
 
-                    active = still_active
 
-                    
-                    if active or pending:
-                        time.sleep(0.2)
+                        if active or pending:
+                            time.sleep(0.2)
+
+                if readonly_batch:
+                    _pump(readonly_batch, plan.max_workers)
+                if write_batch:
+                    _pump(write_batch, 1)
+
                 if total_rounds_mp > 1 and on_progress:
                     on_progress("round", f"第 {round_no}/{total_rounds_mp} 轮完成")
 
@@ -492,31 +511,57 @@ class SwarmExecutor:
         total_rounds = len(rounds)
 
         try:
-            async def _queue_worker(task_queue: asyncio.Queue):
+            write_gate = asyncio.Lock()
+
+            async def _queue_worker(task_queue: asyncio.Queue, readonly: bool = False):
                 while True:
                     try:
                         st = task_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         return
-                    
-                    
+
                     import random as _random
                     await asyncio.sleep(_random.uniform(0, 0.4))
+                    ro_token = swarm_readonly_mode.set(readonly) if readonly else None
                     self.orchestrator.mark_running(task_id, st.id)
                     try:
                         mux.update_pane(st.name, status="running")
                         await self._worker_loop(task_id, st, mux, on_round_exhausted)
                     except Exception as e:
-                        
-                        
+
                         self.orchestrator.mark_failed(task_id, st.id, f"调度异常: {e}")
                         try:
                             mux.update_pane(st.name, status="failed", progress=str(e)[:100])
                         except Exception:
                             pass
+                    finally:
+                        if ro_token is not None:
+                            swarm_readonly_mode.reset(ro_token)
 
-            
-            
+            async def _dispatch_subs(readonly_subs: list, write_subs: list):
+                """只读子任务并行跑；会写子任务排队串行跑（写操作必须单线程）。"""
+                if readonly_subs:
+                    ro_queue: asyncio.Queue = asyncio.Queue()
+                    for st in readonly_subs:
+                        await ro_queue.put(st)
+                    ro_slots = min(plan.max_workers, len(readonly_subs))
+                    await asyncio.gather(
+                        *[_queue_worker(ro_queue, readonly=True) for _ in range(ro_slots)],
+                        return_exceptions=True,
+                    )
+                for st in write_subs:
+                    async with write_gate:
+                        self.orchestrator.mark_running(task_id, st.id)
+                        try:
+                            mux.update_pane(st.name, status="running")
+                            await self._worker_loop(task_id, st, mux, on_round_exhausted)
+                        except Exception as e:
+                            self.orchestrator.mark_failed(task_id, st.id, f"调度异常: {e}")
+                            try:
+                                mux.update_pane(st.name, status="failed", progress=str(e)[:100])
+                            except Exception:
+                                pass
+
             async def _video_chain(video_subs: list):
                 prev_frame = ""
                 
@@ -535,13 +580,13 @@ class SwarmExecutor:
                     if prev_frame:
                         vst.ref_frame = prev_frame  
                     try:
-                        
-                        _to = _resolve_task_timeout(self.orchestrator.get_plan(task_id),
-                                                    _is_video_generation_task(vst))
-                        await asyncio.wait_for(
-                            self._worker_loop(task_id, vst, mux, on_round_exhausted),
-                            timeout=_to,
-                        )
+                        async with write_gate:
+                            _to = _resolve_task_timeout(self.orchestrator.get_plan(task_id),
+                                                        _is_video_generation_task(vst))
+                            await asyncio.wait_for(
+                                self._worker_loop(task_id, vst, mux, on_round_exhausted),
+                                timeout=_to,
+                            )
                     except asyncio.TimeoutError:
                         self.orchestrator.mark_failed(task_id, vst.id, "任务超时")
                         mux.update_pane(vst.name, status="failed", progress="任务超时")
@@ -576,17 +621,18 @@ class SwarmExecutor:
                         mux.update_pane(st.name, status="queued", task=st.description)
                     if total_rounds > 1 and on_progress:
                         on_progress("round", f"第 {round_no}/{total_rounds} 轮开始（{len(parallel_subs)} 个子任务）")
+                    readonly_subs = [st for st in parallel_subs if st.read_only]
+                    write_subs = [st for st in parallel_subs if not st.read_only]
+                    if readonly_subs and on_progress:
+                        on_progress("readonly",
+                                    f"只读子任务并行执行（{len(readonly_subs)} 个，无写操作）")
+                    if write_subs and on_progress:
+                        on_progress("serialize",
+                                    f"写操作串行化执行（{len(write_subs)} 个，排队不并发）")
 
-                    task_queue: asyncio.Queue = asyncio.Queue()
-                    for st in parallel_subs:
-                        await task_queue.put(st)
-
-                    slots = min(plan.max_workers, len(parallel_subs))
-                    
                     _round_to = _resolve_task_timeout(plan, bool(video_subs))
                     await asyncio.wait_for(
-                        asyncio.gather(*[_queue_worker(task_queue) for _ in range(slots)],
-                                       return_exceptions=True),
+                        _dispatch_subs(readonly_subs, write_subs),
                         timeout=_round_to,
                     )
                     if total_rounds > 1 and on_progress:
@@ -792,6 +838,17 @@ class SwarmExecutor:
                 await self.bus.send(st.name, "broadcast", f"Provider 未配置，任务失败", "alert")
                 return
 
+            budget = SubtaskBudget(
+                model=str(cfg.get("model") or ""),
+                provider_cfg=cfg,
+                provider_key=provider_key,
+                name=worker_name,
+            )
+            budget.start()
+            if budget.cost_disabled_reason:
+                logging.warning(f"[executor] {worker_name}: {budget.cost_disabled_reason}")
+                await self.bus.send(st.name, "broadcast", budget.cost_disabled_reason, "alert")
+
             from .global_config import get_defaults
             defaults = get_defaults()
             worker_agent = Agent(
@@ -818,10 +875,19 @@ class SwarmExecutor:
 
             reply = ""  
             
+            sys_prompt = worker_agent.get_system_prompt()
+
             round_num = 1
             effective_max = MAX_ROUNDS
             reset_count = 0
             while round_num <= effective_max:
+                
+                _trip = budget.check()
+                if _trip is not None:
+                    self.orchestrator.mark_failed(task_id, st.id, _trip.reason)
+                    mux.update_pane(st.name, status="failed", progress=_trip.reason[:120])
+                    await self.bus.send(st.name, "broadcast", _trip.reason, "alert")
+                    return
                 self.orchestrator.increment_rounds(task_id, st.id)
                 mux.update_pane(st.name, progress=f"第 {round_num}/{effective_max} 轮")
 
@@ -861,11 +927,29 @@ class SwarmExecutor:
                     
                     mux.update_pane(st.name, progress=f"第 {round_num}/{effective_max} 轮 · 正在调用模型…")
                     try:
-                        reply = await call_api_provider(
+                        _usage = {}
+                        _call = call_api_provider(
                             cfg, worker_agent, message, [],
-                            system_prompt=worker_agent.get_system_prompt(),
+                            system_prompt=sys_prompt,
                             memory_agent_id=self.main_agent.id,  
+                            usage_sink=_usage,
                         )
+                        _remaining = budget.remaining_seconds()
+                        if _remaining is None:
+                            reply = await _call
+                        else:
+                            
+                            
+                            reply = await asyncio.wait_for(_call, timeout=_remaining)
+                    except asyncio.TimeoutError:
+                        
+                        _trip = budget.wall_trip(force=True)
+                        if _trip is None:
+                            raise
+                        self.orchestrator.mark_failed(task_id, st.id, _trip.reason)
+                        mux.update_pane(st.name, status="failed", progress=_trip.reason[:120])
+                        await self.bus.send(st.name, "broadcast", _trip.reason, "alert")
+                        return
                     finally:
                         
                         if _rf_token is not None:
@@ -883,6 +967,13 @@ class SwarmExecutor:
                     await self.bus.send(st.name, "broadcast", reply, "alert")
                     return
 
+                budget.record_round(
+                    prompt_tokens=_usage.get("prompt_tokens"),
+                    completion_tokens=_usage.get("completion_tokens"),
+                    prompt_text=sys_prompt + "\n" + message,
+                    reply_text=reply if isinstance(reply, str) else "",
+                )
+
                 mux.update_pane(st.name, append_line=reply[:200])
 
                 await self.bus.send(st.name, "broadcast",
@@ -893,6 +984,14 @@ class SwarmExecutor:
                     self.orchestrator.mark_done(task_id, st.id, clean)
                     mux.update_pane(st.name, status="done", progress="完成")
                     await self.bus.send(st.name, "broadcast", f"任务完成", "done")
+                    return
+
+                _trip = budget.check()
+                if _trip is not None:
+                    
+                    self.orchestrator.mark_failed(task_id, st.id, _trip.reason)
+                    mux.update_pane(st.name, status="failed", progress=_trip.reason[:120])
+                    await self.bus.send(st.name, "broadcast", _trip.reason, "alert")
                     return
 
                 round_num += 1

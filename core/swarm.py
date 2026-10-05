@@ -2,7 +2,7 @@
 slime Swarm 编排器
 - 自动按任务拆解分裂子 Agent
 - Provider 数量决定并发上限，队列排队分批执行
-- 并行执行子任务
+- 只读子任务并行，会写子任务串行（设计文档 §6.1「写操作必须单线程」）
 """
 
 import asyncio
@@ -13,6 +13,77 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
+
+
+_WRITE_MARKERS: tuple[str, ...] = (
+    "file_write", "file_delete", "git_stage", "git_commit", "git_branch",
+    "git_restore", "git_revert", "git_worktree", "git_checkpoint_save",
+    "git_checkpoint_restore", "agnes_generate_image", "agnes_generate_video",
+    "video_concat",
+    "写入", "写进", "保存", "存到", "新建", "创建", "编写", "写出", "生成文件",
+    "输出文件", "落盘", "提交", "commit", "修改", "改动", "编辑", "改写",
+    "重写", "重构", "修复", "实现", "开发", "补充", "删除", "移除", "覆盖",
+    "更新", "替换", "重命名", "安装", "部署", "打包", "构建", "编译",
+    "迁移", "格式化", "补丁", "patch", "运行脚本", "执行命令", "执行脚本",
+    "跑测试", "执行测试",
+)
+
+_READ_MARKERS: tuple[str, ...] = (
+    "读取", "阅读", "查阅", "分析", "调研", "研究", "总结", "梳理", "盘点",
+    "搜索", "查找", "检索", "查询", "对比", "比较", "审查", "评审", "评估",
+    "解释", "说明", "列出", "罗列", "翻译", "统计", "排查", "检查", "复盘",
+    "汇报", "介绍", "讲解", "有哪些", "是否",
+    "file_read", "file_list", "git_status", "git_diff", "git_log",
+)
+
+WRITE_DENY_PREFIX = "[Swarm 串行闸]"
+
+_WRITE_PERMISSIONS = frozenset({"write", "terminal"})
+
+_WRITE_SIDE_EFFECT_TOOLS = frozenset({
+    "agnes_generate_image", "agnes_generate_video", "video_concat",
+    "file_write", "file_delete",
+})
+
+
+def classify_subtask_readonly(description: str) -> bool:
+    """判定子任务是否纯只读（fail-closed：认不出来一律当写）。
+
+    只读 = 描述里出现只读意图且**没有**任何写意图。写意图优先，
+    所以「分析并修复」这类混合子任务必然落到写侧被串行化。
+    """
+    text = (description or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _WRITE_MARKERS):
+        return False
+    return any(marker in text for marker in _READ_MARKERS)
+
+
+def swarm_write_denial(tool) -> str:
+    """只读子任务里，判定某个工具是否必须被拒绝执行。返回拒绝理由（允许则空串）。
+
+    拒绝三类：显式写/终端权限、已知有落盘副作用的工具、MCP 桥接工具
+    （外部 server 副作用未知，默认 network 权限，证明不了只读）。
+    """
+    if tool is None:
+        return ""
+    name = str(getattr(tool, "name", "") or "")
+    perms = set(getattr(tool, "permissions", None) or [])
+    hit = (
+        name in _WRITE_SIDE_EFFECT_TOOLS
+        or bool(perms & _WRITE_PERMISSIONS)
+        or name.startswith("mcp_")
+    )
+    if not hit:
+        return ""
+    perm_text = ",".join(sorted(perms)) if perms else "unknown"
+    return (
+        f"{WRITE_DENY_PREFIX} 只读子任务禁止调用会写的工具 '{name}'"
+        f"（权限：{perm_text}）。本子任务已被判定为只读并与其他 Worker 并行执行，"
+        f"调用写工具会与其他 Worker 抢占同一工作目录。请改为只读分析，"
+        f"把结论写在回复里；确需落盘请交回主 Agent 串行执行。"
+    )
 
 
 class TaskState(Enum):
@@ -41,6 +112,7 @@ class SubTask:
     agent_name: str = ""  
     round: int = 1        
     ref_frame: str = ""  
+    read_only: bool = False 
 
 
 @dataclass
@@ -106,6 +178,7 @@ class SwarmOrchestrator:
         subtask_names: 用户为每个子 Agent 起的名字（可选）
         subtask_agents: A-053 角色路由——每个子任务命中的持久子 Agent 名（可选，空=临时 Worker）
         max_workers: 最大并发数（排队分批，不截断任务）
+        子任务的 read_only 在此按描述判定（fail-closed），供执行器决定并行/串行。
         """
         if not subtask_descriptions:
             raise ValueError("子任务列表不能为空")
@@ -138,6 +211,7 @@ class SwarmOrchestrator:
                 provider_key=provider_key,
                 agent_name=agent_name,
                 round=round_no,
+                read_only=classify_subtask_readonly(desc),
             )
             plan.subtasks.append(subtask)
 
