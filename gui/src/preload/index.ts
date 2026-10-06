@@ -14,7 +14,7 @@ import type {
   SessionItem, ConversationMessage, SessionConfig, ApprovalMode,
   SuggestionItem, ExtrasList, MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot,
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus, AdbDownloadProgressInfo,
-  GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus,
+  GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus, PluginSnapshotDTO,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, AskUserCancelNotice, WorkspaceListResult, TermResult,
   TermProfilesResult,
   AgentProcsListResult, AgentProcsStopResult,
@@ -245,6 +245,14 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     
     mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) =>
       ipcRenderer.invoke("slime:mcpRegistryInstall", { card }) as Promise<{ ok: boolean; error?: string }>,
+
+    pluginsList: () => ipcRenderer.invoke("slime:plugins:list") as Promise<PluginSnapshotDTO>,
+    pluginsReload: () => ipcRenderer.invoke("slime:plugins:reload") as Promise<PluginSnapshotDTO>,
+    pluginsUnload: (name: string) =>
+      ipcRenderer.invoke("slime:plugins:unload", { name }) as Promise<{ ok: boolean; error?: string }>,
+    /* A-1196：拨片开关「开」——从禁用名单移除并重新装载（返回最新快照，省一次往返）。 */
+    pluginsEnable: (name: string) =>
+      ipcRenderer.invoke("slime:plugins:enable", { name }) as Promise<{ ok: boolean; error?: string; snapshot?: PluginSnapshotDTO }>,
   },
   runtime: {
     
@@ -948,6 +956,9 @@ declare global {
         mcpAdd: (input: { name: string; kind: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string>; force?: boolean }) => Promise<{ ok: boolean; error?: string }>;
         mcpRegistrySearch: (query?: string) => Promise<{ ok: boolean; servers?: Array<{ name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }>; appliedQuery?: string; unrecognized?: boolean; error?: string }>;
         mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) => Promise<{ ok: boolean; error?: string }>;
+        pluginsList: () => Promise<PluginSnapshotDTO>;
+        pluginsReload: () => Promise<PluginSnapshotDTO>;
+        pluginsUnload: (name: string) => Promise<{ ok: boolean; error?: string }>;
       };
       runtime: {
         list: () => Promise<{

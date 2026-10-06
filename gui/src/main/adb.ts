@@ -14,6 +14,7 @@ import { mkdir, rm, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { extractZipTo } from "../../../core-ts/src/zip.js";
+import { applicationUserAgent as productUserAgent } from "../../../core-ts/src/http-identity.js";
 import { extractPercent, extractDetail } from "../shared/downloadPhase.js";
 import type { AdbDownloadProgressInfo } from "../shared/ipc.js";
 import { app } from "electron";
@@ -162,7 +163,7 @@ export class AdbService {
           resolveResult({ state: "error", percent: 0, receivedMB: 0, totalMB: 0, error: errMsg });
           return;
         }
-        const req = httpsRequest(u, { headers: { "User-Agent": "slime-gui/adb" } }, (res: IncomingMessage) => {
+        const req = httpsRequest(u, { headers: { "User-Agent": productUserAgent() } }, (res: IncomingMessage) => {
           const status = res.statusCode ?? 0;
           const location = res.headers.location;
           if ((status === 301 || status === 302 || status === 303) && location) {

@@ -87,6 +87,10 @@ export const IPC_CHANNELS = {
   search_index_params_set: "slime:search:indexParamsSet",
   
   extras_list: "slime:extras:list",
+  plugins_list: "slime:plugins:list",
+  plugins_reload: "slime:plugins:reload",
+  plugins_unload: "slime:plugins:unload",
+  plugins_enable: "slime:plugins:enable",
   chat_suggest: "slime:chat:suggest",
   
   stats_snapshot: "slime:stats:snapshot",
@@ -492,6 +496,33 @@ export interface SuggestionItem {
 export interface ExtrasList {
   skills: Array<{ name: string; description: string }>;
   mcpTools: Array<{ name: string; description: string }>;
+}
+
+
+
+export interface PluginRejectedDTO {
+  dir: string;
+  errors: string[];
+}
+
+export interface PluginSnapshotDTO {
+  plugins: PluginSummaryDTO[];
+  rejected: PluginRejectedDTO[];
+}
+
+export interface PluginSummaryDTO {
+
+  name: string;
+  description: string;
+  version: string;
+  origin: string;
+  contributions: string[];
+  tools: string[];
+  modules: string[];
+  unloadable: boolean;
+  status: string;
+  error?: string;
+  dir: string;
 }
 
 

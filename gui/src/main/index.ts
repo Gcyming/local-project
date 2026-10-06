@@ -326,6 +326,7 @@ import { readFile } from "node:fs/promises";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
+import { productUserAgent } from "../../../core-ts/src/product.js";
 
 import { classifyFile, isNavigableLocalFile, nonNavigableReason } from "../../../core-ts/src/office/fileKinds.js";
 
@@ -352,6 +353,7 @@ import { resolveWindowCap } from "../../../core-ts/src/model_introspect.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, DEFAULT_EXEC_BUDGET_MS, normalizeModelPool, sanitizeSubagentRunName } from "../../../core-ts/src/services/subagent.js";
+import { buildSharedSpecBlock } from "../../../core-ts/src/services/subagent_batch.js";
 import {
   dispatchableAgentIds,
   dispatchableSubagentDefinitions,
@@ -360,7 +362,7 @@ import {
   renderSubagentCatalogLines,
   renderSubagentModelSegments,
 } from "../../../core-ts/src/services/subagentCatalog.js";
-import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setScreenController, setTrashService } from "../../../core-ts/src/tools/builtin.js";
+import { setSubagentManager, setMemoryStoreProvider, setAdbService, setHttpServer, setScreenController, setTrashService, setPluginCatalog } from "../../../core-ts/src/tools/builtin.js";
 
 import { setSidebarOpener, normalizeSidebarOpenRequest } from "../../../core-ts/src/sidebarOpen.js";
 
@@ -419,7 +421,7 @@ import { chromiumFetch } from "./providers.js";
 import { AskCoordinator, DEFAULT_ASK_TIMEOUT_MS, releaseAsksOnAbort } from "./askCoordinator.js";
 import type { ChatRequest } from "../../../core-ts/src/services/chat.js";
 import type { StreamChunk, ChatInput, AgentInfo, StatsSnapshot, UsageSnapshot, UsageRecomputeResult, SidecarStatus, PermissionDecision, PermissionRequestUI, PermissionOption, AskUserRequestUI, AskUserDecision, WorkspaceEntry, WorkspaceListResult, WorkspaceReadFileResult, TermResult, GitDetect, GitInfo, GitAction, GitCloneResult, GitDiffResult, CompressResult, ResidentState, AgentProcsListResult, AgentProcsStopRequest, AgentProcsStopResult, TermProfilesResult } from "../shared/ipc.js";
-import { isBrowserSchemeUrl } from "../shared/ipc.js";
+import { isBrowserSchemeUrl, IPC_CHANNELS } from "../shared/ipc.js";
 import { parseUnifiedDiff } from "./git_diff.js";
 import { initUpdater, registerUpdaterHandlers, setStatusSink } from "./updater.js";
 import {
@@ -443,7 +445,14 @@ import { SlimeEngine } from "../../../core-ts/src/services/engine.js";
 import { SilamBrainClient, readSilamConfig, type SilamBrain, type SilamAffectState } from "../../../core-ts/src/services/silam_brain.js";
 import { decryptRaw } from "../../../core-ts/src/encryption.js";
 import { removeAgentHistory, loadHistory, appendHistory, attachTimelineToRecord, type HistoryRecord } from "../../../core-ts/src/services/history.js";
-import { SkillRegistry, loadAllSkills } from "../../../core-ts/src/skills.js";
+import { SkillRegistry, loadAllSkills, getSkillRegistry } from "../../../core-ts/src/skills.js";
+import { PluginHost } from "../../../core-ts/src/plugin/host.js";
+import { BUILTIN_PLUGIN_GROUPS, builtinPluginManifests } from "../../../core-ts/src/plugin/builtin-plugins.js";
+import { loadPluginsFromDisk, pluginSkillsRoot } from "../../../core-ts/src/plugin/loader.js";
+import type { RejectedPluginDir } from "../../../core-ts/src/plugin/loader.js";
+import { markPluginDisabled, readDisabledPlugins, unmarkPluginDisabled } from "../../../core-ts/src/plugin/disabled-store.js";
+import { SKILL_ENTRY_TOOL_NAMES } from "../../../core-ts/src/services/agentTools.js";
+import type { PluginRejectedDTO, PluginSnapshotDTO, PluginSummaryDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
@@ -1419,6 +1428,180 @@ async function refreshAgentSkills(): Promise<void> {
 
 
 
+// P3：插件宿主。三类来源：系统默认（代码内置）、Agent 自建、外部载入（磁盘扫描 config/plugins）。
+// builtin 由 host 内建语义保证不可卸载；磁盘清单里的 origin=builtin 由 loader 直接拒绝。
+// skills 的实际装配仍走上面的 refreshAgentSkills —— 这里只登记清单与贡献，不重复装配。
+// 登记什么、怎么撤销，全部由下面注入的钩子决定：host 本身不知道任何具体工具名。
+const PLUGINS_ROOT = join(PROJECT_ROOT, "config", "plugins");
+/* A-1196：插件禁用名单（持久化）—— 扩展页拨片开关「关」的记录。
+   重扫/重启后按名单把对应插件装载后立即卸载（记录在、贡献撤），开关保持「关」。 */
+const PLUGINS_DISABLED_FILE = join(PROJECT_ROOT, "config", "plugins-disabled.json");
+
+interface PluginHostState {
+  host: PluginHost;
+  /** 插件名 → 来源目录绝对路径（builtin 为空串，它不在磁盘上） */
+  dirs: Map<string, string>;
+  /** fail-closed 拒绝的目录清单：随每次 list/reload 一并回传，不静默吞掉 */
+  rejected: RejectedPluginDir[];
+  warnings: string[];
+}
+
+/**
+ * 插件名 → 该插件当前生效的技能来源句柄（loadFromSource 的返回物）的在途 Promise。
+ *
+ * A-1195 起 host.load 会在重建前先 await 撤销上一轮全部 scope（核心层兜底，不再依赖本层），
+ * 本 Map 收窄为「句柄登记簿」：dispose 闭包借它找到当前句柄并按来源精确撤销。previous 的
+ * stale 兜底仍然保留 —— 幂等，且覆盖「旧 scope 撤销失败后的残余」。
+ */
+const pluginSkillSourceHandles = new Map<string, Promise<{ name: string; dispose: () => void }>>();
+
+function createPluginHost(dirs: Map<string, string>): PluginHost {
+  const toolReg = getRegistry();
+  return new PluginHost({
+    // 工具贡献：本宿主不由 host 代为登记任何内置工具，故无句柄可给（如实留空）。
+    registerTools: () => [],
+    // 指令贡献：磁盘来源的插件按「插件自己的 skills 根」装配，撤销句柄就是
+    // loadFromSource 的按名精确撤销（宿主撤它 ⇒ 只摘该插件本次真正新增的技能名）。
+    registerInstructions: (manifest) => {
+      const skillReg = getSkillRegistry();
+      // builtin 没有磁盘来源目录：它的技能装配在系统来源根（skillDir / Agent 额外目录）上，
+      // 而系统来源根对按来源卸载一律 fail-closed（SkillRegistry.unloadBySource 的 isSystemRoot）。
+      // 所以 builtin 走与旧接线同一条路：只登记技能入口工具名，绝不参与技能撤销。
+      if (manifest.origin === "builtin") {
+        return [
+          {
+            label: `${SKILL_ENTRY_TOOL_NAMES.join("/")}（builtin：技能经由 SkillRegistry 登记，不参与按来源撤销）`,
+            dispose: () => {
+              for (const n of SKILL_ENTRY_TOOL_NAMES) {
+                toolReg.unregister(n);
+              }
+            },
+          },
+        ];
+      }
+      const dir = dirs.get(manifest.name);
+      if (!dir) {
+        // 磁盘扫描没给出目录 ⇒ 如实不登记（host 会记「尚未接线」），不猜来源。
+        return [];
+      }
+      const sourceRoot = pluginSkillsRoot(dir);
+      const previous = pluginSkillSourceHandles.get(manifest.name);
+      const pending = (previous ? previous.catch(() => null) : Promise.resolve(null)).then((stale) => {
+        stale?.dispose();
+        return skillReg.loadFromSource(sourceRoot, manifest.name);
+      });
+      pluginSkillSourceHandles.set(manifest.name, pending);
+      // 装配失败留到撤销时再上报，避免在无人撤销时变成未处理的 rejection。
+      pending.catch(() => {});
+      return [
+        {
+          label: `${manifest.name} 的技能（按来源装配与撤销：${sourceRoot}）`,
+          dispose: async () => {
+            const handle = await pending;
+            handle.dispose();
+            if (pluginSkillSourceHandles.get(manifest.name) === pending) {
+              pluginSkillSourceHandles.delete(manifest.name);
+            }
+          },
+        },
+      ];
+    },
+  });
+}
+
+async function scanAndLoadInto(host: PluginHost, dirs: Map<string, string>): Promise<Pick<PluginHostState, "rejected" | "warnings">> {
+  const disk = await loadPluginsFromDisk(PLUGINS_ROOT);
+  dirs.clear();
+  for (const loaded of disk.manifests) {
+    dirs.set(loaded.manifest.name, loaded.dir);
+  }
+  // builtin 排在最前：它是地基，后装插件的 requires 才有解析对象。
+  const manifests = [...builtinPluginManifests(), ...disk.manifests.map((m) => m.manifest)];
+  const records = await host.load(manifests);
+  // A-1196：按持久化禁用名单关闭（装载→立即卸载：记录保留供扩展页展示开关、贡献全部撤销）。
+  let disabledByStore = 0;
+  for (const name of readDisabledPlugins(PLUGINS_DISABLED_FILE)) {
+    const rec = host.get(name);
+    if (rec?.unloadable && rec.status === "loaded") {
+      await host.unload(name);
+      disabledByStore += 1;
+    }
+  }
+  const failed = records.filter((r) => r.status === "failed").length;
+  const unloadable = records.filter((r) => r.unloadable).length;
+  const fromDisk = records.filter((r) => r.manifest.origin !== "builtin").length;
+  console.info(
+    `[gui:plugins] 插件已装载 ${records.length} 个（内置 ${records.length - fromDisk} · 磁盘 ${fromDisk}，清单失败 ${failed}，可卸载 ${unloadable}${disabledByStore > 0 ? `，按禁用名单关闭 ${disabledByStore}` : ""}）`,
+  );
+  for (const r of disk.rejected) {
+    console.warn(`[gui:plugins] 目录未通过校验未装载 ${r.dir}：${r.errors.join("；")}`);
+  }
+  return { rejected: disk.rejected, warnings: disk.warnings };
+}
+
+const ensurePluginHostOnce = singleFlight<PluginHostState>(async () => {
+  const dirs = new Map<string, string>();
+  const host = createPluginHost(dirs);
+  // A-1195：plugin_status（creator 专用只读工具）的数据源 —— 闭包实时读 host.list()，
+  // 重载后自动反映，无需重新注入。
+  setPluginCatalog(() => host.list().map((r) => ({
+    name: r.manifest.name,
+    version: r.manifest.version,
+    origin: r.manifest.origin,
+    status: r.status,
+    contributions: r.contributions,
+    unloadable: r.unloadable,
+  })));
+  const scanned = await scanAndLoadInto(host, dirs);
+  return { host, dirs, ...scanned };
+});
+
+async function ensurePluginHost(): Promise<PluginHostState> {
+  return ensurePluginHostOnce();
+}
+
+async function reloadPlugins(): Promise<PluginHostState> {
+  const state = await ensurePluginHost();
+  const scanned = await scanAndLoadInto(state.host, state.dirs);
+  state.rejected = scanned.rejected;
+  state.warnings = scanned.warnings;
+  return state;
+}
+
+
+
+
+
+// 族级信息（tools / modules）只在 BUILTIN_PLUGIN_GROUPS 里，PluginRecord 不带，
+// 所以两边合并后才可序列化发给渲染层。host 的 load() 覆盖全部来源，故以 host 顺序为准。
+function summarizePlugins(state: PluginHostState): PluginSummaryDTO[] {
+  return state.host.list().map((record) => {
+    const group = BUILTIN_PLUGIN_GROUPS.find((g) => g.name === record.manifest.name);
+    return {
+      name: record.manifest.name,
+      description: record.manifest.description,
+      version: record.manifest.version,
+      origin: record.manifest.origin,
+      contributions: [...record.manifest.provides],
+      tools: group?.tools ? [...group.tools] : [],
+      modules: group?.modules ? [...group.modules] : [],
+      unloadable: record.unloadable,
+      status: record.status,
+      error: record.error,
+      dir: state.dirs.get(record.manifest.name) ?? "",
+    };
+  });
+}
+
+function snapshotPlugins(state: PluginHostState): PluginSnapshotDTO {
+  const rejected: PluginRejectedDTO[] = state.rejected.map((r) => ({ dir: r.dir, errors: [...r.errors] }));
+  return { plugins: summarizePlugins(state), rejected };
+}
+
+
+
+
+
 
 
 
@@ -1745,7 +1928,9 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         }
         if (!target) { throw new Error(`子代理「${def.name}」找不到可执行 Agent`); }
         if (!engine) { throw new Error("引擎未就绪"); }
-        const system = def.systemPrompt ?? (await engine.buildSystem(target, undefined, undefined));
+        const baseSystem = def.systemPrompt ?? (await engine.buildSystem(target, undefined, undefined));
+        const sharedSpecBlock = buildSharedSpecBlock(def.sharedSpec ?? "");
+        const system = sharedSpecBlock ? `${baseSystem}\n\n${sharedSpecBlock}` : baseSystem;
         
         
         
@@ -2161,7 +2346,8 @@ function bgeEmbed(): { embed: (text: string) => Promise<number[]> } {
       try {
         const resp = await fetch(`${embeddingBaseUrl()}/v1/embeddings`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          // 申请类（模型 API）：诚实标产品身份，与 core-ts/src/llm/client.ts 同一套策略。
+          headers: { "Content-Type": "application/json", "User-Agent": productUserAgent() },
           body: JSON.stringify({ model: "bge-m3", input: text }),
           signal: ctrl.signal,
         });
@@ -4551,6 +4737,59 @@ function registerIpcHandlers(): void {
     await ensureServices();
     const { listSkills } = await import("./config_files.js");
     return listSkills();
+  });
+
+
+  handleTrusted<void>(IPC_CHANNELS.plugins_list, async (): Promise<PluginSnapshotDTO> => {
+    const state = await ensurePluginHost();
+    return snapshotPlugins(state);
+  });
+
+  handleTrusted<void>(IPC_CHANNELS.plugins_reload, async (): Promise<PluginSnapshotDTO> => {
+    const state = await reloadPlugins();
+    return snapshotPlugins(state);
+  });
+
+  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_unload, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) {
+      return { ok: false, error: "缺少插件名" };
+    }
+    const state = await ensurePluginHost();
+    const record = state.host.get(name);
+    if (!record) {
+      return { ok: false, error: `插件未装载：${name}` };
+    }
+    if (!record.unloadable) {
+      return { ok: false, error: `插件 '${name}' 是系统默认插件，不可卸载` };
+    }
+    const report = await state.host.unload(name);
+    if (report.failed.length > 0) {
+      const first = report.failed[0].error;
+      return { ok: false, error: `卸载 ${name} 时撤销失败：${first instanceof Error ? first.message : String(first)}` };
+    }
+    // A-1196：卸载即"关闭开关"—— 写进持久化禁用名单（否则下次重扫/重启会把它装回来）。
+    try {
+      markPluginDisabled(PLUGINS_DISABLED_FILE, name);
+    } catch (e) {
+      console.error(`[gui:plugins] 禁用名单写入失败（插件已卸载，但重启后可能恢复）：${e instanceof Error ? e.message : String(e)}`);
+    }
+    return { ok: true };
+  });
+
+  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_enable, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) {
+      return { ok: false, error: "缺少插件名" };
+    }
+    // A-1196：开关「开」—— 从禁用名单移除并重扫装载（重扫自带「先撤销再重建」，见 host.load）。
+    try {
+      unmarkPluginDisabled(PLUGINS_DISABLED_FILE, name);
+    } catch (e) {
+      console.error(`[gui:plugins] 禁用名单写入失败（继续尝试装载）：${e instanceof Error ? e.message : String(e)}`);
+    }
+    const enabledState = await reloadPlugins();
+    return { ok: true, snapshot: snapshotPlugins(enabledState) };
   });
 
   

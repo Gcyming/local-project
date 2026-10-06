@@ -280,6 +280,8 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   sidebar_open_files: { label: "打开文件页", Icon: FolderIcon },
   /* A-1144：读右栏**挂载**内容（系统每轮已自动附摘要，这是"再确认一次"的入口）。 */
   sidebar_mount: { label: "读右栏挂载", Icon: RefFileIcon },
+  /* A-1195：创造模式自验工具（只读；仅 creator 工具面可见，见 agentTools.CREATOR_ONLY_TOOL_NAMES）。 */
+  plugin_status: { label: "查看插件状态", Icon: SitemapIcon },
 };
 
 export function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
@@ -483,6 +485,11 @@ const STREAM_CACHE_MAX_SLOTS = 12;
  *  ⚠️ 以后只改 `STOP_BTN_SIZE`，图标尺寸由 `STOP_ICON_SIZE` 派生，勿再手填数字。 */
 const STOP_BTN_SIZE = 36;
 const STOP_ICON_SIZE = Math.round((STOP_BTN_SIZE * 0.40) / 0.512);
+
+/** A-1194：停止看门狗的时长。点「停止」后若流在此时长内仍未走到终态（stopping 未复位），
+ *  判定底层某环节卡死，强制复位 UI（见 stopWatchdog effect）。
+ *  正常路径由流终态事件（done/error）立即复位 stopping，本定时器随 effect cleanup 清掉。 */
+const STOP_WATCHDOG_MS = 15000;
 
 export function pruneStreamCache(keep?: string): void {
   const store = perSessionStreamCache.current;
@@ -2958,6 +2965,19 @@ export default function ChatPanel({
     ctxOverflowRetriedRef.current = false;
     stoppingRef.current = false;
   }, [resetPartial]);
+  /** A-1194：停止看门狗——点「停止」后若 stopping 在 15s 内没有回到 false（流未走到终态事件），
+   *  判定底层卡死（重试退避/工具/上游假死等），强制复位 UI，避免终止按钮永远转圈「没反应」。
+   *  正常路径：流终态（done/error）→ setStopping(false) → effect cleanup 清掉定时器。 */
+  React.useEffect(() => {
+    if (!stopping) { return; }
+    const timer = window.setTimeout(() => {
+      if (!stoppingRef.current) { return; }
+      console.warn("[chat] A-1194 停止看门狗：15s 内流未终态，强制复位 UI");
+      resetStreamUI();
+      setStreamErrorBanner("停止等待超时：已强制复位界面，后台收尾可能仍在进行");
+    }, STOP_WATCHDOG_MS);
+    return () => window.clearTimeout(timer);
+  }, [stopping, resetStreamUI]);
   /** 上下文消耗圆环：已用（done 的 promptTokens）/ 上限（Agent max_context） */
   const [ctxUsed, setCtxUsed] = React.useState(0);
   const [ctxCap, setCtxCap] = React.useState(0);

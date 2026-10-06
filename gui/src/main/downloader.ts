@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { readDepStatus, updateTomlKey } from "./mind_config.js";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 import { extractZipTo } from "../../../core-ts/src/zip.js";
+import { applicationUserAgent as productUserAgent } from "../../../core-ts/src/http-identity.js";
 import { clampPercent, extractDetail, extractPercent, type DownloadPhase } from "../shared/downloadPhase.js";
 
 export type DownloadTarget = "llama" | "bge";
@@ -163,7 +164,7 @@ function destDirFor(target: DownloadTarget): string {
 
 async function resolveLlamaAsset(): Promise<{ name: string; url: string; runtime?: { name: string; url: string } | null }> {
   const resp = await fetch("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "slime-gui" },
+    headers: { Accept: "application/vnd.github+json", "User-Agent": productUserAgent() },
     signal: AbortSignal.timeout(15000),
   });
   if (!resp.ok) {

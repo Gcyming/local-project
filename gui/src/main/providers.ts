@@ -5,6 +5,9 @@
 
 
 import { decrypt, encrypt, PROJECT_ROOT } from "../../../core-ts/src/encryption.js";
+/* A-1195（交接欠账 B6）：供应商探测请求也要报同一身份 —— 与模型请求指纹一致，
+ * 避免「模型侧叫 slime、探测侧匿名」的自相矛盾（风控视角的身份存疑信号）。 */
+import { identityHeaders } from "../../../core-ts/src/http-identity.js";
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Agent as HttpKeepAliveAgent } from "node:http";
@@ -414,8 +417,13 @@ function httpRequestViaProxy(
       const targetHost = parsed.hostname;
       const targetPort = parsed.port || (isHttps ? 443 : 80);
       const fail = (e: unknown) => { if (signal?.aborted) { reject(new Error("aborted")); } else { reject(e instanceof Error ? e : new Error(String(e))); } };
+      
+      let connectReqRef: { destroy: (e: Error) => void } | null = null;
+      const onAbort = (): void => {
+        
+        try { connectReqRef?.destroy(new Error("aborted")); } catch {}
+      };
       const cleanupSig = () => { if (signal) { try { signal.removeEventListener("abort", onAbort); } catch {} } };
-      const onAbort = () => { cleanupSig(); };
       const doHttp = () => {
         
         const req = httpMod.request({
@@ -475,6 +483,12 @@ function httpRequestViaProxy(
         });
         connectReq.on("error", fail);
         connectReq.on("timeout", () => connectReq.destroy(new Error("代理 CONNECT 超时")));
+        
+        connectReqRef = connectReq;
+        if (signal) {
+          if (signal.aborted) { connectReq.destroy(new Error("aborted")); }
+          else { signal.addEventListener("abort", onAbort, { once: true }); }
+        }
         connectReq.end();
       };
       if (isHttps) { doHttps(); } else { doHttp(); }
@@ -607,11 +621,54 @@ function httpRequest(
 
 
 
+/** A-1195（交接欠账 B7）叠加分析——内层重试 × 外层 429 表**不是简单相乘**：
+ *   · HTTP 状态类错误（429/5xx）由外层（llm/client.ts 的退避表）处理，内层只是 resolve 返回，不重试；
+ *   · 连接/网络层错误由内层兜底（250/600/1200ms 短退避）；
+ *   · 仅当「网络层持续失败」时两者才叠乘（最坏 12 次连接尝试）——但内层每次尝试与外层共享
+ *     同一个超时窗口（combineAbortSignal 的 signal 一路传进 httpRequest），
+ *     总时长有界于外层 timeoutMs，不因次数叠乘而放大；
+ *   · 连接失败时服务器不可见（无风控暴露面）。
+ *  结论：保留内层 3 次（对网络抖动的容错）；有界性由 a1195-chromiumfetch-bounds 守卫钉住。 */
 const FETCH_RETRY_ATTEMPTS = 3;
 const FETCH_RETRY_DELAY_MS = [250, 600, 1200];
 
+/** A-1194：abort 时统一抛 AbortError（与 DOM/undici 命名一致）。
+ *  上层 llm/client.ts 按 name === "AbortError" 识别为「已取消」而非网络故障，
+ *  绝不能被本文件的降级链当作「普通失败」继续重试/改走代理/重发。 */
+function abortError(): Error {
+  const e = new Error("The operation was aborted");
+  e.name = "AbortError";
+  return e;
+}
+
+/** A-1194：可被 AbortSignal 打断的退避睡眠（本文件局部实现，不跨包引 core-ts）。 */
+function abortableFetchSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) { return new Promise((r) => setTimeout(r, ms)); }
+  if (signal.aborted) { return Promise.reject(abortError()); }
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, ms);
+    const onAbort = (): void => { cleanup(); reject(abortError()); };
+    const cleanup = (): void => { clearTimeout(timer); signal.removeEventListener("abort", onAbort); };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** A-1194：把 net.fetch 与 abort 信号赛跑——即使某版本 Electron 的 net.fetch
+ *  不理会 init.signal（历史 bug），用户点「停止」也必须能立刻脱身（底层请求自行收尾）。 */
+function raceWithAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) { return p; }
+  if (signal.aborted) { return Promise.reject(abortError()); }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => { cleanup(); reject(abortError()); };
+    const cleanup = (): void => { signal.removeEventListener("abort", onAbort); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then((v) => { cleanup(); resolve(v); }, (e) => { cleanup(); reject(e); });
+  });
+}
+
 export async function chromiumFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
   const urlString = String(url);
+  const signal = (init as { signal?: AbortSignal }).signal;
   if (urlString.startsWith("http://") || urlString.startsWith("https://")) {
     
     
@@ -620,41 +677,49 @@ export async function chromiumFetch(url: string | URL, init: RequestInit = {}): 
       const net = electronNet();
       if (net) {
         try {
-          return await net.fetch(urlString, init);
+          return await raceWithAbort(net.fetch(urlString, init), signal);
         } catch (e) {
           
           
           if (e instanceof Error && e.name === "AbortError") { throw e; }
+          if (signal?.aborted) { throw abortError(); }
           console.warn(`[chromiumFetch] net.fetch 失败（降级 https.request）：${String(e instanceof Error ? e.message : e).slice(0, 120)}`);
         }
       }
     }
     let lastErr: unknown = null;
     for (let attempt = 0; attempt < FETCH_RETRY_ATTEMPTS; attempt++) {
+      if (signal?.aborted) { throw abortError(); }
       try {
         return await httpRequest(urlString, init, FETCH_TIMEOUT_MS);
       } catch (e) {
+        
+        if (signal?.aborted) { throw abortError(); }
         lastErr = e;
         if (attempt < FETCH_RETRY_ATTEMPTS - 1) {
           
           const delay = FETCH_RETRY_DELAY_MS[attempt] ?? 800;
-          await new Promise((r) => setTimeout(r, delay));
+          await abortableFetchSleep(delay, signal);
         }
       }
     }
     
     
     
+    if (signal?.aborted) { throw abortError(); }
     const proxy = resolveSystemProxy(urlString);
     if (proxy) {
       try {
         console.info(`[chromiumFetch] 直连失败，尝试经系统代理 ${proxy} 访问 ${urlString.slice(0, 60)}`);
         return await httpRequestViaProxy(urlString, proxy, init, Math.max(FETCH_TIMEOUT_MS, 20000));
       } catch (e) {
+        
+        if (signal?.aborted) { throw abortError(); }
         lastErr = e;
         console.warn(`[chromiumFetch] 代理路径失败：${String(e instanceof Error ? e.message : e).slice(0, 120)}`);
       }
     }
+    if (signal?.aborted) { throw abortError(); }
     console.warn(`[chromiumFetch] https.request failed after ${FETCH_RETRY_ATTEMPTS} attempts for ${urlString.slice(0, 60)}: ${String(lastErr)} — falling back to global fetch`);
   }
   return fetch(url, init);
@@ -706,7 +771,7 @@ async function tryFetchModels(url: string, apiKey: string, format: ApiFormat): P
   for (const headers of headerSets) {
     try {
       const res = await chromiumFetch(url, {
-        headers,
+        headers: identityHeaders(headers),
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
       if (!res.ok) {
@@ -1402,7 +1467,7 @@ async function fetchUpstreamDetails(baseUrl: string, apiKey: string, format: Api
 
   const getJson: UpstreamJsonFetcher = async (url) => {
     try {
-      const res = await chromiumFetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      const res = await chromiumFetch(url, { headers: identityHeaders(headers), signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) { return null; }
       return await res.json() as { data?: unknown };
     } catch {
@@ -1962,7 +2027,7 @@ export async function detectApiFormat(baseUrl: string, apiKey: string): Promise<
   for (const { openai, headers } of headerSets) {
     for (const url of urls) {
       try {
-        const res = await chromiumFetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+        const res = await chromiumFetch(url, { headers: identityHeaders(headers), signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
         if (res.ok) { return openai ? "openai" : "anthropic"; }
       } catch {  }
     }
@@ -2008,7 +2073,7 @@ export async function probeProvider(baseUrl: string, apiKey: string): Promise<{
     for (const url of endpoints) {
       const t0 = Date.now();
       try {
-        const res = await chromiumFetch(url, { headers: hs.headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+        const res = await chromiumFetch(url, { headers: identityHeaders(hs.headers), signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
         if (!res.ok) { continue; }
         const body = (await res.json()) as Record<string, unknown>;
         const items = (Array.isArray(body.data) ? body.data
@@ -2034,7 +2099,7 @@ export async function probeProvider(baseUrl: string, apiKey: string): Promise<{
   
   try {
     const pres = await chromiumFetch(`${base}/api/pricing`, {
-      headers: headerSets[0].headers,
+      headers: identityHeaders(headerSets[0].headers),
       signal: AbortSignal.timeout(5000),
     });
     pricingSeen = pres.ok;

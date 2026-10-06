@@ -126,10 +126,10 @@ const SECTIONS: SectionDef[] = [
     
     
     
-    id: "plugins", label: "插件", group: "agent",
+    id: "plugins", label: "扩展", group: "agent",
     keywords: ["插件", "plugin", "扩展", "来源", "自建", "清单", "origin"],
-    features: ["插件清单", "统一清单", "技能列表", "MCP 列表", "声明来源", "Agent 自建", "官方市场",
-      "用户自备", "未声明", "origin 声明", "启用停用", "打开技能目录", "按来源筛选", "创造模式产物"],
+    features: ["扩展总览", "指令层", "能力层", "技能指导", "MCP 工具来源", "来源构成",
+      "Agent 自建", "官方市场", "用户自备", "未声明", "origin 声明", "stdio", "http", "去技能库管理"],
   },
   {
     id: "resident", label: "后台任务", group: "agent",
@@ -333,7 +333,7 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
             )}
             {activeTab === "skills" && <SkillsPanel />}
             {activeTab === "mcp" && <McpPanel />}
-            {activeTab === "plugins" && <PluginsPanel />}
+            {activeTab === "plugins" && <PluginsPanel onNavigate={(t) => { setTab(t); setQuery(""); }} />}
             {activeTab === "permissions" && <PermissionsPanel />}
             {activeTab === "providers" && <ProvidersPanel />}
             {activeTab === "status" && <StatusPanel />}

@@ -7,6 +7,7 @@
 
 
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
+import { githubHeaders, identityHeaders } from "../../../core-ts/src/http-identity.js";
 import { frontmatterDescription, frontmatterField } from "../../../core-ts/src/skills.js";
 import { encrypt, decrypt } from "../../../core-ts/src/encryption.js";
 import { expandMarketQuery } from "../../../core-ts/src/services/marketLocalize.js";
@@ -591,11 +592,16 @@ export function setRegistryAuth(auth: { githubToken?: string }): { ok: boolean; 
 }
 
 
-function githubHeaders(): Record<string, string> {
-  const h: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "slime-agent" };
+/**
+ * 技能市场调GitHub API 的请求头。
+ *
+ * `Accept` 与 `User-Agent` 由 `http-identity` 单一产地供给（GitHub 缺 UA 会直接 403），
+ * 这里只补本文件独有的那一件事：**带上用户自己的 registry token**。
+ * 刻意不自己再拼一遍 Accept/UA —— 同一事实写两处必然漂移。
+ */
+function registryAuthHeaders(): Record<string, string> {
   const token = getRegistryAuth().githubToken;
-  if (token) { h.Authorization = `Bearer ${token}`; }
-  return h;
+  return githubHeaders(token ? { Authorization: `Bearer ${token}` } : undefined);
 }
 
 
@@ -615,7 +621,7 @@ export async function searchSkillMarket(query: string): Promise<{ ok: boolean; s
   try {
     if (!skillMarketCache) {
       const listRes = await fetch(`https://api.github.com/repos/${SKILL_MARKET_REPO}/contents/skills`, {
-        headers: githubHeaders(),
+        headers: registryAuthHeaders(),
       });
       if (!listRes.ok) { return { ok: false, error: `拉取技能列表失败（HTTP ${listRes.status}）` }; }
       const list = (await listRes.json()) as Array<{ name: string; type: string }>;
@@ -627,7 +633,7 @@ export async function searchSkillMarket(query: string): Promise<{ ok: boolean; s
         while (pool.length > 0) {
           const n = pool.shift()!;
           try {
-            const rawRes = await fetch(`https://raw.githubusercontent.com/${SKILL_MARKET_REPO}/main/skills/${n}/SKILL.md`, { headers: githubHeaders() });
+            const rawRes = await fetch(`https://raw.githubusercontent.com/${SKILL_MARKET_REPO}/main/skills/${n}/SKILL.md`, { headers: registryAuthHeaders() });
             if (rawRes.ok) {
               entries.push({ name: n, description: extractFrontmatterDescription(await rawRes.text()) });
             } else {
@@ -660,7 +666,7 @@ export async function installSkillFromMarket(name: string): Promise<{ ok: boolea
   const dir = join(base, safeName);
   if (existsSync(dir)) { return { ok: false, error: `已存在同名技能「${safeName}」` }; }
   try {
-    const rawRes = await fetch(`https://raw.githubusercontent.com/${SKILL_MARKET_REPO}/main/skills/${safeName}/SKILL.md`, { headers: githubHeaders() });
+    const rawRes = await fetch(`https://raw.githubusercontent.com/${SKILL_MARKET_REPO}/main/skills/${safeName}/SKILL.md`, { headers: registryAuthHeaders() });
     if (!rawRes.ok) { return { ok: false, error: `下载 SKILL.md 失败（HTTP ${rawRes.status}）` }; }
     const text = await rawRes.text();
     mkdirSync(dir, { recursive: true });
@@ -765,7 +771,7 @@ export async function searchMcpRegistry(query: string): Promise<{
     const expanded = expandMarketQuery(query ?? "");
     const q = expanded.query;
     const url = `https://registry.modelcontextprotocol.io/v0.1/servers?limit=60${q ? `&search=${encodeURIComponent(q)}` : ""}`;
-    const res = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "slime-agent" } });
+    const res = await fetch(url, { headers: identityHeaders({ Accept: "application/json" }) });
     if (!res.ok) { return { ok: false, error: `registry 请求失败（HTTP ${res.status}）` }; }
     const data = (await res.json()) as { servers?: Array<{ server?: { name?: string; description?: string; packages?: unknown[]; remotes?: unknown[] } }> };
     const raw = data.servers ?? [];
