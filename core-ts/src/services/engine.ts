@@ -9,7 +9,7 @@
 
 
 
-import { ModelRouter, RouteEntry, type ClientFactory, type ApiFormat } from "../router.js";
+import { ModelRouter, RouteEntry, providerKeyOfRoute, type ClientFactory, type ApiFormat } from "../router.js";
 import { ChatClient } from "../llm/client.js";
 import { getSharedRpmLimiter } from "../llm/rpmLimiter.js";
 import { ChatMessage, ChatRequest } from "shared/schemas";
@@ -431,8 +431,17 @@ export class SlimeEngine implements ChatEngine {
     this.hooks = opts.hooks ?? NOOP_HOOKS;
     this.tools = opts.tools ?? getRegistry();
     this.sandbox = opts.sandbox ?? null;
+    // 默认工厂必须带上 rateLimit：不带就等于**默认路径完全绕过 RPM 限流器**
+    // （fetchWithRetry 里`if (rateLimit)` 才acquire），并发一上来就是硬打上游，
+    // 很容易撞限流甚至被风控判定为滥用。key与 createRouteClient 保持同一口径。
     this.clientFactory =
-      opts.clientFactory ?? ((route) => new ChatClient({ baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs }));    this.defaultReply = opts.defaultReply ?? defaultReplyText;
+      opts.clientFactory ?? ((route) => new ChatClient({
+        baseUrl: route.baseUrl,
+        apiKey: route.apiKey,
+        timeoutMs: route.timeoutMs,
+        rateLimit: { key: providerKeyOfRoute(route), model: route.model },
+      }));
+    this.defaultReply = opts.defaultReply ?? defaultReplyText;
     this.logger = opts.logger ?? console;
     this.onAskUser = opts.onAskUser;
     this.silamBrain = opts.silamBrain ?? null;
@@ -1172,7 +1181,7 @@ export class SlimeEngine implements ChatEngine {
       const reply = this.silamUnavailableText(opts.agent);
       return { reply, replyRaw: reply, model: "none", promptTokens: 0, completionTokens: 0, elapsedMs: Date.now() - started };
     }
-    const { router, error } = await this.resolveRouteInternal(opts.agent);
+    const { router, error } = await this.resolveRouteInternal(opts.agent, opts.signal);
     if (!router) {
       this.logger.warn(`[engine] 无可路由模型（${opts.agent.model_choice}）：${error ?? "无可用路由"}`);
       
@@ -1230,7 +1239,7 @@ export class SlimeEngine implements ChatEngine {
         onAskUser: this.onAskUser,
         networkEnabled: opts.networkEnabled,
       });
-      const result = await loop.run({ agentId: opts.agent.id, agentName: opts.agent.name, messages, initialToolCalls: [], tools, maxTokens: effectiveMaxTokens(opts.agent, opts.maxTokens), sessionId: opts.sessionId, maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs });
+      const result = await loop.run({ agentId: opts.agent.id, agentName: opts.agent.name, messages, initialToolCalls: [], tools, maxTokens: effectiveMaxTokens(opts.agent, opts.maxTokens), sessionId: opts.sessionId, signal: opts.signal, maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs, maxRounds: opts.maxRounds });
       const filtered = new OutputFilter().filter(result.raw, opts.agent.name);
       
       this.observeTutorDemo(opts, result.raw);
@@ -1260,7 +1269,7 @@ export class SlimeEngine implements ChatEngine {
     const payload: ChatRequest = { messages, max_tokens: effectiveMaxTokens(opts.agent, opts.maxTokens) };
     const route = router.select("chat");
     Object.assign(payload, this.reasoningParams(opts.agent, route));
-    const { response, routeName } = await router.chat(withModel(payload, route!));
+    const { response, routeName } = await router.chat(withModel(payload, route!), opts.signal);
     const raw = response.choices[0]?.message?.content ?? "";
     const filtered = new OutputFilter().filter(raw, opts.agent.name);
     const usage = response.usage as { prompt_tokens?: number; completion_tokens?: number; cache_read_tokens?: number; cache_creation_tokens?: number; reasoning_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number }; cache_read_in_prompt?: boolean } | undefined;
@@ -1541,6 +1550,7 @@ export class SlimeEngine implements ChatEngine {
           maxToolCalls: opts.maxToolCalls,
           maxTotalTokens: opts.maxTotalTokens,
           maxWallClockMs: opts.maxWallClockMs,
+          maxRounds: opts.maxRounds,
           onEvent: (ev) => {
             if (ev.type === "reasoning") {
               liveQueue.push({ type: "reasoning", content: ev.content });

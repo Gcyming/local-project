@@ -89,6 +89,10 @@ export interface SubAgentDef {
 
 
 
+  sharedSpec?: string;
+
+  batchId?: string;
+
   adhoc?: boolean;
 }
 
@@ -160,6 +164,8 @@ export interface SubAgentRun {
   
   definitionName?: string;
   
+  batchId?: string;
+
   model?: string;
 }
 
@@ -352,6 +358,8 @@ export class SubAgentManager {
   private runs = new Map<string, SubAgentRun>();
   private controllers = new Map<string, AbortController>();
   private defs = new Map<string, SubagentDefinition>();
+
+  private batches = new Map<string, string[]>();
   
   private cancelRequested = new Set<string>();
   
@@ -626,12 +634,51 @@ export class SubAgentManager {
       run.definitionName = def.name;
     }
     this.runs.set(run.id, run);
+    if (def.batchId) {
+      run.batchId = def.batchId;
+      const list = this.batches.get(def.batchId) ?? [];
+      list.push(run.id);
+      this.batches.set(def.batchId, list);
+    }
     
     
     
     void this.fireHook(this.hooks.onSpawn, run, def);
     void this.execute(run, effectiveModel ? { ...def, model: effectiveModel } : def);
     return run;
+  }
+
+  spawnBatch(
+    defs: Array<Omit<SubAgentDef, "batchId">>,
+    opts: { batchId?: string; sharedSpec?: string } = {},
+  ): { batchId: string; runs: SubAgentRun[] } {
+    const batchId = opts.batchId ?? randomUUID();
+    const sharedSpec = String(opts.sharedSpec ?? "").trim() || undefined;
+    if (!this.batches.has(batchId)) { this.batches.set(batchId, []); }
+    const runs: SubAgentRun[] = [];
+    for (const d of defs) {
+      const spec = d.sharedSpec ?? sharedSpec;
+      runs.push(this.spawn(spec ? { ...d, batchId, sharedSpec: spec } : { ...d, batchId }));
+    }
+    return { batchId, runs };
+  }
+
+  listBatch(batchId: string): SubAgentRun[] {
+    const ids = this.batches.get(batchId) ?? [];
+    const out: SubAgentRun[] = [];
+    for (const id of ids) {
+      const r = this.status(id);
+      if (r) { out.push(r); }
+    }
+    return out;
+  }
+
+  async awaitBatch(batchId: string, timeoutMs = 300_000, signal?: AbortSignal): Promise<SubAgentRun[]> {
+    const ids = this.batches.get(batchId) ?? [];
+    if (ids.length === 0) { return []; }
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    await Promise.all(ids.map((id) => this.wait(id, Math.max(1, deadline - Date.now()), signal)));
+    return this.listBatch(batchId);
   }
 
   status(id: string): SubAgentRun | undefined {
@@ -663,6 +710,11 @@ export class SubAgentManager {
         this.runs.delete(id);
         n++;
       }
+    }
+    for (const [bid, ids] of this.batches) {
+      const kept = ids.filter((id) => this.runs.has(id));
+      if (kept.length === 0) { this.batches.delete(bid); }
+      else { this.batches.set(bid, kept); }
     }
     return n;
   }

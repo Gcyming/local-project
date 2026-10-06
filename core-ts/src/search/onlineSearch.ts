@@ -57,7 +57,18 @@ export const BAIDU_SEARCH = "https://www.baidu.com/s";
 export const MAX_RESULTS = 10;
 export const DEFAULT_RESULTS = 10;
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) slime-agent";
+/**
+ * 抓取类流量的身份：**完整、合法的浏览器 UA**。
+ *
+ * ⚠️ 为什么不挂 `slime-agent` 尾巴—— 以前这里是
+ * `Mozilla/5.0 (Windows NT 10.0; Win64; x64) slime-agent`，两头不讨好：
+ * 凭 UA 白名单的反爬一眼看出这不是真浏览器（尾巴本身是自曝），
+ * 而对不想暴露的抓取流量来说，暴露了又换不来任何好处。
+ *
+ *⚠️ 身份策略分两类，别混：**申请类**（模型/更新/市场）诚实标`slime/<version>`，
+ * 见 `core-ts/src/product.ts`；**抓取类**（这里）模拟浏览器，因为抓取的常规做法就是如此。
+ */
+export const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 export const ENGINE_NAMES: Record<EngineId, string> = {
   bing: "必应（国内）",

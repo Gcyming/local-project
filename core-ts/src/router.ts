@@ -403,7 +403,7 @@ export class ModelRouter {
 
 
 
-  async chat(payload: ChatRequest): Promise<ChatResult> {
+  async chat(payload: ChatRequest, signal?: AbortSignal): Promise<ChatResult> {
     
 
 
@@ -424,10 +424,12 @@ export class ModelRouter {
     for (let i = 0; i < chain.length; i++) {
       const route = chain[i];
       try {
-        const response = await this.createClient(route).chat(this.withModel(payload, route));
+        const response = await this.createClient(route).chat(this.withModel(payload, route), signal);
         this.resetProviderCircuit(ModelRouter.providerKeyOf(route)); 
         return { response, routeName: route.name };
       } catch (e) {
+        
+        if (signal?.aborted) { throw e; }
         const reason = routeErrorLine(route, e);
         errors.push(reason);
         if (i < chain.length - 1) {

@@ -12,6 +12,7 @@ import { modelScopeFromUpstreamText } from "../upstreamErrorScope.js";
 import { noteUpstream, formatRetryNotice, formatPrefillNotice } from "./upstreamNotice.js";
 
 import { getSharedRpmLimiter, parseRateLimitHeaders } from "./rpmLimiter.js";
+import { productUserAgent } from "../product.js";
 
 
 
@@ -209,6 +210,46 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** A-1194：可被 AbortSignal 打断的等待——修「终止按钮点了半天没反应」。
+ *  429 重试退避最长 60s（Retry-After），原先 sleep 不可打断：
+ *  abort 后仍要等满退避、下一轮循环才检查，用户看到的就是「停不下来」。
+ *  abort 时立即以「请求已取消」（protocol）拒绝，与 fetchWithRetry 既有取消语义一致。 */
+export function abortableWait<T>(wait: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) { return wait; }
+  if (signal.aborted) { return Promise.reject(new UpstreamError("请求已取消", 0, "protocol")); }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup();
+      reject(new UpstreamError("请求已取消", 0, "protocol"));
+    };
+    const cleanup = (): void => {
+      signal.removeEventListener("abort", onAbort);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    wait.then(
+      (v) => { cleanup(); resolve(v); },
+      (e) => { cleanup(); reject(e); },
+    );
+  });
+}
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) { return sleep(ms); }
+  if (signal.aborted) { return Promise.reject(new UpstreamError("请求已取消", 0, "protocol")); }
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, ms);
+    const onAbort = (): void => {
+      cleanup();
+      reject(new UpstreamError("请求已取消", 0, "protocol"));
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function isTransientStatus(status: number): boolean {
   return TRANSIENT_STATUS_CODES.has(status);
 }
@@ -281,6 +322,19 @@ export interface RateLimitIdentity {
   model?: string;
 }
 
+/**
+ * 闸门来源的前两态。**第三态（无闸门）刻意不落在这里**，见 `rateLimitGateOpen`。
+ *
+ *   · `explicit`  —— 调用方显式传了 `rateLimit`，该拦的必须仍然拦（GUI 主链路）。
+ *   · `provider`  —— 调用方没传，但**仍按 baseUrl 有闸门**（A-1107 P0：漏传不许裸奔）。
+ */
+export type RateLimitGate = "explicit" | "provider";
+
+export interface RateLimitPlan {
+  identity: RateLimitIdentity;
+  gate: RateLimitGate;
+}
+
 
 
 
@@ -306,8 +360,18 @@ async function fetchWithRetry(opts: {
   externalSignal?: AbortSignal;
   
   rateLimit?: RateLimitIdentity;
+  rateLimitGate?: RateLimitGate;
 }): Promise<Response> {
   const { fetchImpl, url, init, maxAttempts, timeoutMs, externalSignal, rateLimit } = opts;
+  /**
+   * 「这个 provider 有没有闸门」——三态判定，只在这里算一次：
+   *   · 显式传了 ⇒ 有闸门（GUI 主链路，行为不许变）。
+   *   · 没传但查得到RPM（人工配置 / 声明表 / 已实测）⇒ 有闸门（A-1107 P0 的本意）。
+   *   · 没传且**查不到任何 RPM** ⇒ 无闸门：既不acquire 也不 observe，
+   *     既不阻塞也不伪造 RPM。查不到配置就是没有闸门——这是正确的 fail-open 方向，
+   *     凭空按 baseUrl 塞个默认 RPM 反而可能把用户请求卡死。
+   */
+  const gateOpen = rateLimit ? rateLimitGateOpen(opts.rateLimitGate, rateLimit) : false;
   let lastResp: Response | null = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (externalSignal?.aborted) {
@@ -315,20 +379,20 @@ async function fetchWithRetry(opts: {
     }
     
     
-    if (rateLimit) {
-      
-      
-      
-      await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {
-        
-        
-        if (ms >= 1000) {
-          noteUpstream(
-            "retry",
-            `上游每分钟请求额度已用满，需要等 ${Math.round(ms / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,
-          );
-        }
-      });
+    if (rateLimit && gateOpen) {
+      await abortableWait(
+        getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {
+          
+          
+          if (ms >= 1000) {
+            noteUpstream(
+              "retry",
+              `上游每分钟请求额度已用满，需要等 ${Math.round(ms / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,
+            );
+          }
+        }),
+        externalSignal,
+      );
       if (externalSignal?.aborted) {
         throw new UpstreamError("请求已取消", 0, "protocol");
       }
@@ -338,7 +402,7 @@ async function fetchWithRetry(opts: {
       const resp = await fetchImpl(url, { ...init, signal: controller.signal });
       
       
-      if (rateLimit) {
+      if (rateLimit && gateOpen) {
         try {
           getSharedRpmLimiter().observe(
             rateLimit.key,
@@ -355,12 +419,13 @@ async function fetchWithRetry(opts: {
       
       const waitMs = retryDelayMs(resp, attempt);
       noteUpstream("retry", formatRetryNotice({ attempt, maxAttempts, waitMs, status: resp.status }));
-      await sleep(waitMs);
+      await sleepAbortable(waitMs, externalSignal);
     } catch (e) {
+      
+      if (externalSignal?.aborted) {
+        throw new UpstreamError("请求已取消", 0, "protocol");
+      }
       if (e instanceof Error && e.name === "AbortError") {
-        if (externalSignal?.aborted) {
-          throw new UpstreamError("请求已取消", 0, "protocol");
-        }
         if (timeoutMs === undefined) {
           throw e;
         }
@@ -375,7 +440,7 @@ async function fetchWithRetry(opts: {
       const netWaitMs = jitteredDelay((RETRY_TRANSIENT_BACKOFF[attempt] ?? 7) * 1000);
       
       noteUpstream("retry", formatRetryNotice({ attempt, maxAttempts, waitMs: netWaitMs }));
-      await sleep(netWaitMs);
+      await sleepAbortable(netWaitMs, externalSignal);
     } finally {
       cleanup();
     }
@@ -696,6 +761,71 @@ export interface ChatClientOptions {
   fetchImpl?: typeof fetch;
   
   rateLimit?: RateLimitIdentity;
+  /**
+   * 闸门来源。省略时按 `rateLimit` 有无自动落定：传了 ⇒ `explicit`，
+   * 没传 ⇒ `provider`（仍由 `rateLimitGateOpen` 查 RPM 决定到底放不放行）。
+   */
+  rateLimitGate?: RateLimitGate;
+}
+
+/**
+ * 这个 provider **有没有闸门**（三态里真正被问的那一问）。
+ *
+ * ⚠️ 判据是「**限流器查得到 RPM 吗**」，不是「调用方传了 rateLimit 吗」。
+ * 恒真的 `if (rateLimit)` 会让**没有任何人工 RPM 配置**的请求也去排队，
+ * 症状只表现为「测试莫名超时 5 秒」，很难联想到限流器。
+ *
+ * `gate === "explicit"`（调用方显式传了）⇒ 恒为 true：
+ * GUI 主链路（router.ts 的 `createRouteClient`）该拦的必须仍然拦，这条不许动。
+ * `gate === "provider"`（A-1107 P0 的兜底路径）⇒ **按配置定**：
+ * 人工配置（engine.ts 的 `setManualRpmOf`）/ 声明表 / 已实测到额度⇒ 有闸门；
+ * 一条都查不到 ⇒ 明确「无闸门」，**fail-open放行**。
+ *
+ * ⚠️ A-1195：本函数在**每次** fetchWithRetry 调用时执行（resolve 实时查询当前配置），
+ * **不是**构造时快照 —— 交接文档「provider 态快照」的说法经实测不成立（a1195-gate-live 守卫钉住）。
+ */
+export function rateLimitGateOpen(gate: RateLimitGate | undefined, identity: RateLimitIdentity): boolean {
+  if (gate === "explicit") { return true; }
+  try {
+    return getSharedRpmLimiter().resolve(identity.key, identity.model).rpm !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 决定这个 client 的限流身份。
+ *
+ * ⚠️ **为什么不给`rateLimit` 兜底等于没有限流**（A-1107 风控审计结论）：
+ * `rateLimit` 原本是纯可选字段，漏传时`fetchWithRetry` 会**整段跳过**限流器——
+ * 于是「记得传」的调用点被限流、「忘了传」的调用点畅通无阻，限流成了看运气的。
+ * 实测两个生产构造点就漏了：core-ts/src/services/engine.ts 的默认 clientFactory、
+ * gateway-ts/src/llmGateway.ts 的 defaultClientFactory，都没传 rateLimit。
+ * 漏传的那条恰好是 GUI 主链路（经 chromiumFetch 打真供应商），等于主链路完全裸奔。
+ *
+ * 所以这里**按 baseUrl 兜底**：调用方不必记得传，限流就不会被绕过。
+ * key 用 baseUrl 而非模型名，与两处既有配置同源：
+ *   · engine.ts 的`setManualRpmOf` 按规范化 baseUrl 查人工配置
+ *   · router.ts 的 `providerKeyOfRoute` 同样是 baseUrl || name
+ * ⇒ 三处 key 同一形态，人工配置的 RPM 才对得上，否则配了也不生效。
+ *
+ * `model` 只在调用方显式给了才沿用：它会触发「声明 RPM」节流（按模型查表），
+ * 不该由一个兜底默认值擅自引入。兜底只保证**按供应商维度有闸门**。
+ *
+ * ⚠️ **「有没有闸门」不再由 key 的兜底决定**（三态）：
+ * 兜底 key 只是**身份**，它让「查得到配置」这件事成为可能；
+ * 闸门开不开由 `rateLimitGateOpen` 按限流器**实际查得到 RPM** 来判。
+ * 于是「未配置且查不到 ⇒ 无闸门」成了显式第三态，而不是被 key 兜底吃掉。
+ */
+function resolveRateLimitIdentity(
+  opts: { baseUrl: string; rateLimit?: RateLimitIdentity },
+): RateLimitPlan {
+  const base = (opts.baseUrl ?? "").trim();
+  const key = opts.rateLimit?.key?.trim() || base || "unknown-provider";
+  return {
+    identity: { key, model: opts.rateLimit?.model },
+    gate: opts.rateLimit ? "explicit" : "provider",
+  };
 }
 
 export class ChatClient {
@@ -704,19 +834,26 @@ export class ChatClient {
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
   
-  private rateLimit?: RateLimitIdentity;
+  private rateLimit: RateLimitIdentity;
+  
+  private rateLimitGate: RateLimitGate;
 
   constructor(opts: ChatClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.rateLimit = opts.rateLimit;
+    const plan = resolveRateLimitIdentity(opts);
+    this.rateLimit = plan.identity;
+    this.rateLimitGate = opts.rateLimitGate ?? plan.gate;
   }
 
   private headers(): Record<string, string> {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
+      // 申请类流量的诚实身份：模型请求原来完全不标识自己（只有鉴权头），
+      // 补上产品标识便于上游定位/限流。值来自单一产地 core-ts/src/product.ts。
+      "User-Agent": productUserAgent(),
     };
     if (this.apiKey) {
       h.Authorization = `Bearer ${this.apiKey}`;
@@ -755,6 +892,7 @@ export class ChatClient {
         : this.timeoutMs,
       externalSignal,
       rateLimit: this.rateLimit,
+      rateLimitGate: this.rateLimitGate,
     });
   }
 
@@ -794,8 +932,8 @@ export class ChatClient {
   }
 
   
-  async chat(payload: ChatRequest): Promise<ChatResponse> {
-    const resp = await this.post(this.endpoint("chat"), payload, RETRY_429_BACKOFF.length);
+  async chat(payload: ChatRequest, externalSignal?: AbortSignal): Promise<ChatResponse> {
+    const resp = await this.post(this.endpoint("chat"), payload, RETRY_429_BACKOFF.length, externalSignal);
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
       throw new UpstreamError(
@@ -1134,14 +1272,18 @@ export class AnthropicClient {
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
   
-  private rateLimit?: RateLimitIdentity;
+  private rateLimit: RateLimitIdentity;
+  
+  private rateLimitGate: RateLimitGate;
 
-  constructor(opts: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch; rateLimit?: RateLimitIdentity }) {
+  constructor(opts: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch; rateLimit?: RateLimitIdentity; rateLimitGate?: RateLimitGate }) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey ?? "";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.rateLimit = opts.rateLimit;
+    const plan = resolveRateLimitIdentity(opts);
+    this.rateLimit = plan.identity;
+    this.rateLimitGate = opts.rateLimitGate ?? plan.gate;
   }
 
   private endpoint(): string {
@@ -1152,6 +1294,7 @@ export class AnthropicClient {
   private headers(): Record<string, string> {
     return {
       "Content-Type": "application/json",
+      "User-Agent": productUserAgent(),
       "x-api-key": this.apiKey,
       "anthropic-version": "2023-06-01",
     };
@@ -1169,6 +1312,7 @@ export class AnthropicClient {
       timeoutMs: this.timeoutMs,
       externalSignal: signal,
       rateLimit: this.rateLimit,
+      rateLimitGate: this.rateLimitGate,
     });
     const resp = await send(payload);
     
@@ -1190,8 +1334,8 @@ export class AnthropicClient {
   }
 
   
-  async chat(payload: ChatRequest): Promise<ChatResponse> {
-    const resp = await this.post(this.endpoint(), this.toAnthropicPayload(payload));
+  async chat(payload: ChatRequest, externalSignal?: AbortSignal): Promise<ChatResponse> {
+    const resp = await this.post(this.endpoint(), this.toAnthropicPayload(payload), externalSignal);
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
       throw new UpstreamError(
@@ -1547,18 +1691,25 @@ export class ResponsesClient {
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
   
-  private rateLimit?: RateLimitIdentity;
+  private rateLimit: RateLimitIdentity;
+  
+  private rateLimitGate: RateLimitGate;
 
   constructor(opts: ChatClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.rateLimit = opts.rateLimit;
+    const plan = resolveRateLimitIdentity(opts);
+    this.rateLimit = plan.identity;
+    this.rateLimitGate = opts.rateLimitGate ?? plan.gate;
   }
 
   private headers(): Record<string, string> {
-    const h: Record<string, string> = { "Content-Type": "application/json" };
+    const h: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": productUserAgent(),
+    };
     if (this.apiKey) { h.Authorization = `Bearer ${this.apiKey}`; }
     return h;
   }
@@ -1663,14 +1814,16 @@ export class ResponsesClient {
     };
   }
 
-  async chat(payload: ChatRequest): Promise<ChatResponse> {
+  async chat(payload: ChatRequest, externalSignal?: AbortSignal): Promise<ChatResponse> {
     const resp = await fetchWithRetry({
       fetchImpl: this.fetchImpl,
       url: this.endpoint(),
       init: { method: "POST", headers: this.headers(), body: JSON.stringify(this.toResponsesPayload(payload)) },
       maxAttempts: RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
+      externalSignal,
       rateLimit: this.rateLimit,
+      rateLimitGate: this.rateLimitGate,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1695,6 +1848,7 @@ export class ResponsesClient {
       timeoutMs: this.timeoutMs,
       externalSignal,
       rateLimit: this.rateLimit,
+      rateLimitGate: this.rateLimitGate,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1770,18 +1924,26 @@ export class GoogleClient {
   private timeoutMs: number;
   private fetchImpl: typeof fetch;
   
-  private rateLimit?: RateLimitIdentity;
+  private rateLimit: RateLimitIdentity;
+  
+  private rateLimitGate: RateLimitGate;
 
   constructor(opts: ChatClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.apiKey = opts.apiKey ?? "";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.rateLimit = opts.rateLimit;
+    const plan = resolveRateLimitIdentity(opts);
+    this.rateLimit = plan.identity;
+    this.rateLimitGate = opts.rateLimitGate ?? plan.gate;
   }
 
   private headers(): Record<string, string> {
-    return { "Content-Type": "application/json", "x-goog-api-key": this.apiKey };
+    return {
+      "Content-Type": "application/json",
+      "User-Agent": productUserAgent(),
+      "x-goog-api-key": this.apiKey,
+    };
   }
 
   private endpoint(model: string): string {
@@ -1891,7 +2053,7 @@ export class GoogleClient {
     };
   }
 
-  async chat(payload: ChatRequest): Promise<ChatResponse> {
+  async chat(payload: ChatRequest, externalSignal?: AbortSignal): Promise<ChatResponse> {
     const model = payload.model ?? "";
     const resp = await fetchWithRetry({
       fetchImpl: this.fetchImpl,
@@ -1899,7 +2061,9 @@ export class GoogleClient {
       init: { method: "POST", headers: this.headers(), body: JSON.stringify(this.toGooglePayload(payload)) },
       maxAttempts: RETRY_429_BACKOFF.length,
       timeoutMs: this.timeoutMs,
+      externalSignal,
       rateLimit: this.rateLimit,
+      rateLimitGate: this.rateLimitGate,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);
@@ -1935,6 +2099,7 @@ export class GoogleClient {
       timeoutMs: this.timeoutMs,
       externalSignal,
       rateLimit: this.rateLimit,
+      rateLimitGate: this.rateLimitGate,
     });
     if (resp.status >= 400) {
       const bodyText = (await resp.text()).slice(0, 200);

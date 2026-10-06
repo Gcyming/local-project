@@ -3266,6 +3266,10 @@ def swarm(task, max_workers, agent):
     用法: slime_cli.py swarm "你的任务" [--max-workers M]
 
     如果不提供 task 参数，进入交互模式。
+
+    ⚠️ 待统一（2026-10-06）：本命令走 Python 侧 core/executor.py，是 CLI 自有实现。
+    GUI 与 TS 侧已改用「子代理 + 编排」（delegate_subagent 的 subtasks 参数，判断权在主 Agent），
+    两条实现尚未合并。详见 docs/README.md 的「待统一项」。
     """
     from core.encryption import decrypt
     from core.agent import load_agents

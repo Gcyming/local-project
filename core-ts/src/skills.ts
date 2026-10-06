@@ -7,9 +7,14 @@
 
 
 import { readdir, readFile, lstat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { Tool, ToolRegistry, getRegistry } from "./tools/registry.js";
 import { PROJECT_ROOT } from "./paths.js";
+import {
+  isSkillNameVisible,
+  UNRESTRICTED_SKILL_VISIBILITY,
+  type SkillVisibilityScope,
+} from "./services/agentTools.js";
 
 const SKILL_BODY_LIMIT = 12000;
 const MAX_SKILL_DESCRIPTION_LENGTH = 500;
@@ -27,6 +32,39 @@ const SANDBOX_DENY = new Set([5]);
 
 
 const MISSING_SKILL_DIR_REPORTED = new Set<string>();
+
+export const SKILL_VISIBILITY_DENIED_PREFIX = "[技能白名单拒绝]";
+
+export const SKILL_SOURCE_PROTECTED_PREFIX = "[技能来源受保护]";
+
+export const SKILL_SOURCE_SUBDIR = "skills";
+
+function normalizePathKey(p: string): string {
+  const abs = resolve(String(p ?? ""));
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
+}
+
+export function skillBelongsToSource(skillPath: string, sourceRoot: string): boolean {
+  const root = normalizePathKey(sourceRoot);
+  if (root === "") {
+    return false;
+  }
+  const dir = normalizePathKey(dirname(String(skillPath ?? "")));
+  return dir === root || dir.startsWith(root + sep);
+}
+
+export function skillSourceRoot(skill: Skill): string {
+  const parent = dirname(skill.path);
+  return dirname(parent).split(sep).pop() === SKILL_SOURCE_SUBDIR ? dirname(parent) : parent;
+}
+
+export function skillVisibilityDenial(name: string, scope: SkillVisibilityScope): string {
+  const who = String(name ?? "").trim() || "(空名)";
+  if (scope.allowed.length === 0) {
+    return `${SKILL_VISIBILITY_DENIED_PREFIX} 技能「${who}」不在你当前的白名单内，且当前白名单为空 —— 本 Agent 未启用任何技能，skill_search 也不会返回任何技能。请改用内置核心工具完成任务；确需该技能，请让用户在「Agent 管理 → 工具能力」中为该 Agent 勾选后再重试。`;
+  }
+  return `${SKILL_VISIBILITY_DENIED_PREFIX} 技能「${who}」不在你当前的白名单内，无法加载其正文。你当前可用的技能仅限：${scope.allowed.join("、")}。请改用上述白名单内的技能；确需「${who}」，请让用户在「Agent 管理 → 工具能力」中为该 Agent 勾选后再重试。`;
+}
 
 
 
@@ -236,6 +274,7 @@ export interface SkillManifestData {
   version?: string;
   description?: string;
   author?: string;
+  origin?: string;
   tags?: string[];
   permissions?: Record<string, boolean>;
   args_schema?: Record<string, unknown>;
@@ -247,6 +286,7 @@ export class SkillManifest {
   version: string;
   description: string;
   author: string;
+  origin: string;
   tags: string[];
   permissions: Record<string, boolean>;
   argsSchema: Record<string, unknown>;
@@ -257,6 +297,7 @@ export class SkillManifest {
     this.version = data.version ?? "1.0";
     this.description = data.description ?? "";
     this.author = data.author ?? "";
+    this.origin = data.origin ?? "";
     this.tags = Array.isArray(data.tags) ? data.tags.map(String) : [];
     this.permissions = (data.permissions as Record<string, boolean>) ?? { read: true };
     this.argsSchema = (data.args_schema as Record<string, unknown>) ?? {};
@@ -269,6 +310,7 @@ export class SkillManifest {
       version: data.version !== undefined ? String(data.version) : undefined,
       description: data.description !== undefined ? String(data.description) : undefined,
       author: data.author !== undefined ? String(data.author) : undefined,
+      origin: data.origin !== undefined ? String(data.origin) : undefined,
       tags: Array.isArray(data.tags) ? data.tags.map(String) : undefined,
       permissions: (data.permissions as Record<string, boolean>) ?? undefined,
       args_schema: data.args_schema as Record<string, unknown> | undefined,
@@ -301,6 +343,10 @@ export class Skill {
     this.body = opts.body ?? "";
     this.path = opts.path ?? "";
     this.executeFn = opts.executeFn;
+  }
+
+  isAgentAuthored(): boolean {
+    return String(this.manifest.origin ?? "").trim().toLowerCase() === "agent";
   }
 
   toLLMSchema(): Record<string, unknown> {
@@ -347,6 +393,7 @@ export class SkillRegistry {
   approvalCallback?: (permission: string, level: number) => boolean;
   private skills = new Map<string, Skill>();
   private loaded = false;
+  private unloadedSources = new Set<string>();
 
   constructor(opts: SkillRegistryOptions = {}) {
     this.skillDir = opts.skillDir ?? DEFAULT_SKILL_DIR;
@@ -361,10 +408,25 @@ export class SkillRegistry {
   
   async loadSkills(): Promise<string[]> {
     this.skills.clear();
+    return this.loadSkillsFromDirs(this.scanRoots());
+  }
+
+  private scanRoots(): string[] {
+    return [this.skillDir, ...this.extraDirs].filter(
+      (root) => root && !this.unloadedSources.has(normalizePathKey(root)),
+    );
+  }
+
+  listUnloadedSources(): string[] {
+    return [...this.unloadedSources];
+  }
+
+  async loadSkillsFromDirs(roots: string[]): Promise<string[]> {
     const loaded: string[] = [];
-    
-    
-    for (const root of [this.skillDir, ...this.extraDirs]) {
+    for (const root of roots) {
+      if (!root) {
+        continue;
+      }
       let entries: string[];
       try {
         entries = await readdir(root);
@@ -506,10 +568,16 @@ export class SkillRegistry {
   }
 
   
-  async callSkill(name: string, _args: Record<string, unknown>): Promise<string> {
+  async callSkill(name: string, _args: Record<string, unknown>, scope?: SkillVisibilityScope): Promise<string> {
     const skill = this.skills.get(name);
     if (!skill) {
+      if (scope && scope.constrained) {
+        return skillVisibilityDenial(name, scope);
+      }
       return `[错误] 技能 '${name}' 未找到`;
+    }
+    if (scope && !isSkillNameVisible(skill.name, scope, skill.isAgentAuthored())) {
+      return skillVisibilityDenial(skill.name, scope);
     }
     if (skill.executeFn && !this.checkPermissions(skill.manifest.permissions)) {
       return `[错误] 技能 '${name}' 权限不足（需要写/终端/网络权限）`;
@@ -550,11 +618,18 @@ export class SkillRegistry {
   }
 
   
-  search(query: string, limit = 10): Array<{ name: string; description: string }> {
+  search(
+    query: string,
+    limit = 10,
+    scope?: SkillVisibilityScope,
+  ): Array<{ name: string; description: string }> {
     const q = (query ?? "").trim().toLowerCase();
     const n = Math.max(1, Math.min(limit ? parseInt(String(limit), 10) : 10, 50));
     const scored: Array<[number, string, Skill]> = [];
     for (const s of this.skills.values()) {
+      if (scope && !isSkillNameVisible(s.name, scope, s.isAgentAuthored())) {
+        continue;
+      }
       if (!q) {
         scored.push([0, s.name, s]);
         continue;
@@ -581,11 +656,122 @@ export class SkillRegistry {
     this.skills.clear();
     this.loaded = false;
   }
+
+  /**
+   * 系统来源根（skillDir + extraDirs）：这些是应用自身装配的技能，
+   * 不属于任何插件，因此不提供按来源卸载能力。
+   */
+  private isSystemRoot(sourceRoot: string): boolean {
+    const root = normalizePathKey(sourceRoot);
+    if (root === "") {
+      return true;
+    }
+    return [this.skillDir, ...this.extraDirs].some((r) => r && normalizePathKey(r) === root);
+  }
+
+  /**
+   * 按来源目录卸载技能：只移除归属命中的那些，其余原样留下，不做全量重载。
+   * 归属判定走 Skill.path 与来源根的前缀关系（见 skillBelongsToSource）——
+   * 调用方不需要（也不允许）把插件名写进技能里，映射关系由路径结构本身承担。
+   * 幂等：同一来源重复卸载第二次返回空数组。
+   * fail-closed：传入系统来源根（应用自身装配的技能）一律拒绝并抛错。
+   */
+  async unloadBySource(sourceRoot: string): Promise<string[]> {
+    const root = String(sourceRoot ?? "").trim();
+    if (root === "") {
+      return [];
+    }
+    if (this.isSystemRoot(root)) {
+      throw new Error(`${SKILL_SOURCE_PROTECTED_PREFIX} 系统来源的技能不可按来源卸载：${root}`);
+    }
+    const key = normalizePathKey(root);
+    const removed: string[] = [];
+    for (const [name, skill] of [...this.skills]) {
+      if (!skillBelongsToSource(skill.path, root)) {
+        continue;
+      }
+      this.skills.delete(name);
+      removed.push(name);
+    }
+    this.unloadedSources.add(key);
+    this.loaded = true;
+    if (removed.length > 0) {
+      console.info(`[skills] 按来源卸载技能 ${removed.length} 个（${root}）`);
+    }
+    return removed;
+  }
+
+  /**
+   * 载入单个来源目录下的技能并返回该来源的撤销句柄。
+   * 撤销只摘掉「本次真正新增」的技能名（按名精确撤销），因此：
+   * 同批次里被其它来源占用的同名技能不会被误摘，重复撤销安全。
+   */
+  async loadFromSource(sourceRoot: string, pluginName: string): Promise<{ name: string; dispose: () => void }> {
+    const root = String(sourceRoot ?? "").trim();
+    const key = normalizePathKey(root);
+    this.unloadedSources.delete(key);
+    const before = new Set(this.skills.keys());
+    await this.loadSkillsFromDirs([root]);
+    const added: string[] = [];
+    for (const [name, skill] of this.skills) {
+      if (!before.has(name) && skillBelongsToSource(skill.path, root)) {
+        added.push(name);
+      }
+    }
+    let disposeRan = false;
+    return {
+      name: pluginName,
+      dispose: () => {
+        if (disposeRan) {
+          return;
+        }
+        disposeRan = true;
+        for (const n of added) {
+          this.skills.delete(n);
+        }
+        this.unloadedSources.add(key);
+        if (added.length > 0) {
+          this.loaded = true;
+          console.info(`[skills] 撤销来源 ${pluginName} 的技能 ${added.length} 个（${root}）`);
+        }
+      },
+    };
+  }
 }
 
 
 
 let skillRegistry: SkillRegistry | null = null;
+
+const SKILL_SCOPE_ENVELOPE = "_skill_scope";
+
+export function skillScopeFromArgs(args: Record<string, unknown> | undefined): SkillVisibilityScope | undefined {
+  if (!args || typeof args !== "object") { return undefined; }
+  const raw = args[SKILL_SCOPE_ENVELOPE];
+  if (raw === undefined || raw === null) { return undefined; }
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) { return undefined; }
+    try {
+      const parsed = JSON.parse(s) as Record<string, unknown>;
+      return normalizeSkillScopeEnvelope(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return normalizeSkillScopeEnvelope(raw as Record<string, unknown>);
+  }
+  return undefined;
+}
+
+function normalizeSkillScopeEnvelope(raw: Record<string, unknown>): SkillVisibilityScope | undefined {
+  if (raw.constrained !== true) {
+    return raw.constrained === false ? { ...UNRESTRICTED_SKILL_VISIBILITY } : undefined;
+  }
+  const allowed = Array.isArray(raw.allowed) ? raw.allowed.map((s) => String(s ?? "").trim()).filter((s) => s.length > 0) : [];
+  return { constrained: true, allowed, allowAgentAuthored: raw.allowAgentAuthored === true };
+}
 
 export function getSkillRegistry(): SkillRegistry {
   if (skillRegistry === null) {
@@ -641,8 +827,12 @@ export async function loadAllSkills(opts: {
       } catch {
         n = 10;
       }
-      const items = skillReg.search(q, n);
+      const scope = skillScopeFromArgs(args);
+      const items = skillReg.search(q, n, scope);
       if (items.length === 0) {
+        if (scope && scope.constrained) {
+          return skillVisibilityDenial(q || "(全部)", scope);
+        }
         return "未找到匹配的技能。可不带关键词调用 skill_search 查看全部可用技能。";
       }
       const lines = items.map((it) => `- ${it.name}: ${it.description}`);
@@ -666,7 +856,7 @@ export async function loadAllSkills(opts: {
       if (!name) {
         return "[错误] 缺少 name 参数（先用 skill_search 查询技能名）";
       }
-      return skillReg.callSkill(name, {});
+      return skillReg.callSkill(name, {}, skillScopeFromArgs(args));
     },
     permissions: ["read"],
   }));

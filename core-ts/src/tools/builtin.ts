@@ -25,6 +25,17 @@ import { Tool, ToolRegistry, getRegistry } from "./registry.js";
 import { fireSidebarOpen, hasSidebarOpener, sessionIdFromArgs } from "../sidebarOpen.js";
 
 import { sidebarMountSection } from "../sidebarMount.js";
+import {
+  assessBatchRisks,
+  buildBatchVerdict,
+  buildMergePrompt,
+  collectBatchClaimErrors,
+  resolveBatchConflict,
+  extractTotalDuration,
+  validateVideoSegments,
+  BATCH_MAX_SUBTASKS,
+  type BatchResultEntry,
+} from "../services/subagent_batch.js";
 
 
 import {
@@ -1045,10 +1056,36 @@ interface SubAgentManagerLike {
   
   
   catalog?: () => Array<{ name: string; description: string; source: "user" | "builtin" }>;
+
+  spawnBatch?: (
+    defs: Array<{
+      name: string;
+      task: string;
+      model?: string;
+      systemPrompt?: string;
+      toolsOnly?: string[];
+      sharedSpec?: string;
+    }>,
+    opts?: { sharedSpec?: string },
+  ) => { batchId: string; runs: SubAgentRunLike[] };
+  awaitBatch?: (batchId: string, timeoutMs?: number, signal?: AbortSignal) => Promise<SubAgentRunLike[]>;
 }
 
 let subagentManagerRef: SubAgentManagerLike | null = null;
 export function setSubagentManager(m: SubAgentManagerLike | null): void { subagentManagerRef = m; }
+
+/** A-1195（交接欠账 A2）：插件清单的只读数据源。
+ *  创造模式下模型写完插件文件后，用 plugin_status 确认「真的被装载」（文件存在 ≠ 装载成功）。 */
+export interface PluginCatalogEntry {
+  name: string;
+  version: string;
+  origin: string;
+  status: string;
+  contributions: string[];
+  unloadable: boolean;
+}
+let pluginCatalogRef: (() => PluginCatalogEntry[]) | null = null;
+export function setPluginCatalog(fn: (() => PluginCatalogEntry[]) | null): void { pluginCatalogRef = fn; }
 
 
 
@@ -1160,6 +1197,83 @@ function renderSubAgentOutcome(run: SubAgentRunLike): string {
   ].join("\n");
 }
 
+async function delegateBatch(input: {
+  task: string;
+  subtasks: string[];
+  sharedSpec: string;
+  model: string;
+  adhocName: string;
+  adhocSystem: string;
+  adhocTools: string[];
+  waitMs: number;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const mgr = subagentManagerRef;
+  if (!mgr) { return "[错误] 子代理管理器未就绪（当前运行环境未装配 SubAgentManager）"; }
+  if (typeof mgr.spawnBatch !== "function" || typeof mgr.awaitBatch !== "function") {
+    return "[提示] 当前装配不支持批量派发（spawnBatch/awaitBatch 缺失）——本次未派发。请改用不带 subtasks 的单发调用。";
+  }
+
+  const adhoc = Boolean(input.adhocSystem) || input.adhocTools.length > 0;
+  const baseName = input.task.replace(/\s+/g, " ").trim().slice(0, 12) || "批量";
+  const defs = input.subtasks.map((desc, i) => ({
+    name: `${baseName}-${i + 1}`,
+    task: desc,
+    ...(input.model ? { model: input.model } : {}),
+    ...(adhoc ? { adhoc: true } : {}),
+    ...(adhoc && input.adhocSystem ? { systemPrompt: input.adhocSystem } : {}),
+    ...(adhoc && input.adhocTools.length > 0 ? { toolsOnly: input.adhocTools } : {}),
+  }));
+
+  const batch = mgr.spawnBatch(defs, input.sharedSpec ? { sharedSpec: input.sharedSpec } : {});
+  const finals = await mgr.awaitBatch(batch.batchId, input.waitMs, input.signal);
+
+  const entries: BatchResultEntry[] = finals.map((r) => ({
+    name: r.name,
+    state: r.status === "done" ? "done" : r.status,
+    result: r.result ?? "",
+    error: r.error ?? "",
+  }));
+
+  const risks = assessBatchRisks(entries);
+  const conflict = await resolveBatchConflict(undefined, entries);
+  const claimErrors = await collectBatchClaimErrors("", entries);
+  const collected = entries.map((e) => e.result).filter((t) => t.trim().length > 0).join("\n\n");
+  const verdict = buildBatchVerdict(collected, entries, risks);
+
+  const parts: string[] = [
+    `[已并行派发 ${defs.length} 个子代理 · 批次 ${batch.batchId}]`,
+    verdict,
+    "",
+    "—— 风险分级 ——",
+    ...risks.map((r) => `[${r.level}] ${r.description}`),
+  ];
+
+  if (!conflict.check.consistent && conflict.check.issue) {
+    parts.push(
+      "",
+      "—— 疑似矛盾（关键词启发式，**请你自己核对是否真矛盾**）——",
+      conflict.check.issue,
+    );
+  }
+  if (claimErrors.length > 0) {
+    parts.push("", "—— 幻觉护栏（声称已生成/已保存但文件不存在）——", ...claimErrors);
+  }
+  if (input.signal?.aborted) {
+    parts.push(
+      "",
+      "[已停止等待] 用户停止了本次生成；各子代理**仍在后台继续执行**，稍后可用 subagent_result 取回。",
+    );
+  }
+
+  parts.push("", buildMergePrompt({
+    task: input.task,
+    entries,
+    ...(input.sharedSpec ? { globalSpec: input.sharedSpec } : {}),
+  }));
+  return parts.join("\n");
+}
+
 async function delegateSubagent(args: Record<string, unknown>): Promise<string> {
   const task = typeof args.task === "string" ? args.task.trim() : "";
   if (!task) { return "[错误] task 不能为空（请写清目标 + 期望输出格式 + 边界）"; }
@@ -1181,6 +1295,40 @@ async function delegateSubagent(args: Record<string, unknown>): Promise<string> 
   
   
   const signal = injectedSignal(args);
+
+  const subtasks = Array.isArray(args.subtasks)
+    ? args.subtasks
+        .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+        .map((x) => x.trim())
+    : [];
+  const sharedSpec = typeof args.sharedSpec === "string" ? args.sharedSpec.trim() : "";
+
+  if (subtasks.length > 0) {
+    if (wantAgent) {
+      return "[提示] subtasks（批量派发）与 agent（点名单个子代理）不能同时使用：要点名某个子代理请单发（不填 subtasks），要批量请把 agent 留空。";
+    }
+    if (subtasks.length > BATCH_MAX_SUBTASKS) {
+      return `[提示] subtasks 一次最多 ${BATCH_MAX_SUBTASKS} 项（你给了 ${subtasks.length}）——请合并相近项，或分多次调用。`;
+    }
+    const segmentIssue = validateVideoSegments(subtasks.map((d) => ({ desc: d })), extractTotalDuration(task));
+    if (segmentIssue) {
+      return [
+        `[提示] 你给的 subtasks 未通过拆解校验：${segmentIssue}`,
+        "请修正后重新调用（如把超长段重切、补全缺失的时间段）。",
+      ].join("\n");
+    }
+    return delegateBatch({
+      task,
+      subtasks,
+      sharedSpec,
+      model,
+      adhocName,
+      adhocSystem,
+      adhocTools,
+      waitMs,
+      ...(signal ? { signal } : {}),
+    });
+  }
 
   const overrides: {
     model?: string;
@@ -1574,7 +1722,9 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
       "并行：多个互不依赖的子任务，**在同一轮里一次性全部派出**——同一轮的工具调用本来就并发执行，不必串着来（每个调用各自阻塞等自己的结果）。只有当你需要\"派出去后自己接着做别的、稍后再收\"时才用 background=true，之后用 subagent_result 收口。\n" +
       "点名：想指定某个子代理就在 agent 里写它的名字（见系统提示里的「可用子代理」清单）；不确定就留空，会按任务语义自动选。\n" +
       "临时子代理：清单里没有合适的人时**现场定义一个**——填 systemPrompt（角色 + 约束），并按需填 tools（工具白名单）/ name（展示名）/ model（档位）；系统会据此造一个只跑这一次的执行者（**不写盘、不进清单、跑完即弃**）。此时不要再填 agent。\n" +
-      "模型：见系统提示「子代理执行模型」段列出的档位——**可按子任务难度为不同子代理点名不同 model**（机械/批量活给便宜档、需要推理的给强档），用户明确要求用某模型时也填这里。不填 = 用默认执行档；想跟随主对话模型就填 inherit。",
+      "模型：见系统提示「子代理执行模型」段列出的档位——**可按子任务难度为不同子代理点名不同 model**（机械/批量活给便宜档、需要推理的给强档），用户明确要求用某模型时也填这里。不填 = 用默认执行档；想跟随主对话模型就填 inherit。\n" +
+      "批量：当任务能拆成**多个互不依赖的部分**（长视频分段、长文分章、多文件批处理、多模块代码）时，**由你自己拆好**填进 subtasks（每项写清该段的独立目标与边界），系统会**并行**派发、全部完成后把各段结果连同你给的 sharedSpec 一起交回给你整合。**不要**为了拆解再派一个'总协调'子代理——拆解判断是你（主 Agent）的活。⚠️ 填了 subtasks 就不要再填 agent。\n" +
+      "共享基线：分段任务若需跨段一致的约定（视频的 style/lighting/characters/continuity、代码的 tech_stack/接口签名/命名约定），写进 sharedSpec——它会注入**每一个**子代理，保证各段产出可拼接。不填则各子任务互不知晓，产出可能对不上。",
     parameters: {
       type: "object",
       properties: {
@@ -1584,6 +1734,8 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
         name: { type: "string", description: "临时子代理的展示名（可选）：**仅在你现场定义**（给了 systemPrompt 或 tools）时生效，用于界面展示与产物文件名。不填则自动按任务取一个名字" },
         systemPrompt: { type: "string", description: "**现场定义一个临时子代理**（可选）：它的角色设定与约束（工作流 / 输出要求 / 边界）。给了它（或 tools）就等于现场造一个**只在本任务里存在**的执行者——不写盘、不进「可用子代理」清单、跑完即弃。清单里没有合适的人时用它，别退回自己全做。⚠️ 此时**不要再填 agent**（以现场定义为准）" },
         tools: { type: "array", items: { type: "string" }, description: "临时子代理的工具白名单（可选，工具名列表）：限定它只能用这些工具（例 [\"file_read\",\"file_list\"]）。派发/收取类工具会被系统强制剔除（子代理不允许再派子代理）" },
+        subtasks: { type: "array", items: { type: "string" }, description: "**批量派发**（可选）：你自己把任务拆成的多个独立子任务，每项一段、写清该段的目标与边界。填了它会**并行**派发、全部完成后把各段结果 + 共享基线交回给你整合。⚠️ 填了它**不要**再填 agent。不填 = 单发一个子代理（原有行为）" },
+        sharedSpec: { type: "string", description: "**跨段共享基线**（可选，配合 subtasks）：要求所有子任务保持一致的约定（视频风格/人物/光线、代码技术栈/接口签名/命名）。会注入每个子代理的系统提示。不填则各子任务互不知晓，各自产出可能拼不起来" },
         background: { type: "boolean", description: "true=只派发、不阻塞（之后用 subagent_result 取结果）；默认 false=等它跑完并把产出交回给你验收（等待期间用户点「停止生成」可中断等待，中断**不会**取消子代理）" },
         timeoutMs: { type: "number", description: "等待上限（毫秒）。默认 960000（= 子代理默认执行预算 900000 + 60s 收尾余量）；上限 1260000。注意这是**等待**上限，不是子代理的执行预算（预算到点由子代理自身 abort，等待到点只是主 Agent 先撤）。**等待必须 ≥ 预算**；用户「停止生成」会让等待提前结束（子代理不受影响）" },
       },
@@ -3364,5 +3516,41 @@ ${body}
   }));
 
   
+  async function pluginStatus(): Promise<string> {
+    if (!pluginCatalogRef) {
+      return "[提示] 插件宿主尚未接线：当前环境无法列出插件（在 GUI 内运行时此工具才有数据）。";
+    }
+    let list: PluginCatalogEntry[] = [];
+    try {
+      list = pluginCatalogRef();
+    } catch (e) {
+      return `[错误] 读取插件清单失败：${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (list.length === 0) {
+      return "（当前没有任何已装载的插件——包括系统默认插件都不在，说明宿主未完成装配。）";
+    }
+    const lines = list.map((p) => {
+      const contrib = p.contributions.length > 0 ? p.contributions.join("、") : "（无贡献）";
+      return `- [${p.status}] ${p.name}@${p.version}（origin=${p.origin}｜${contrib}${p.unloadable ? "" : "｜系统插件"}）`;
+    });
+    return [
+      `当前共 ${list.length} 个插件（系统默认 + 用户 + Agent 自建）：`,
+      ...lines,
+      "",
+      "创造模式自验：自己刚写的插件应出现在这里且 status=loaded；没出现或 failed ⇒ 检查插件目录与 plugin.json（名字须与目录同名、origin=agent），然后请宿主触发一次插件重载后再看。",
+    ].join("\n");
+  }
+
+  registry.register(new Tool({
+    name: "plugin_status",
+    description:
+      "列出当前已装载的插件（名字/版本/来源/状态/贡献）。用于创造模式**自验**：写完插件文件后用本工具确认它真的被装载（status=loaded）——文件存在不等于装载成功（清单缺失、名字与目录不一致、依赖缺都会失败）。",
+    parameters: { type: "object", properties: {}, required: [] },
+    executeFn: pluginStatus,
+    permissions: ["read"],
+    riskKind: "read",
+    autoApprovable: true,
+  }));
+
   registerBrowserTools(registry);
 }

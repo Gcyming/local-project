@@ -3,6 +3,15 @@ slime Swarm Executor - 主流程控制器
 - 拆解 → 命名 → 排队调度 → worker 循环 → 合并 → 提升钩子
 - CLI 本地执行，不依赖 server
 - 支持两种模式：asyncio 协程（默认）和 多进程（use_multiprocess=True）
+
+⚠️ 待统一（2026-10-06）。TS 侧已退役同名 SwarmExecutor：
+  core-ts/src/{executor,swarm}.ts 与 core-ts/src/services/swarm.ts 已删除，
+  其「拆解 / 共享规格 / 产物合并」能力迁入 core-ts/src/services/subagent_batch.ts，
+  并已接入 delegate_subagent 的 subtasks 参数（判断权在主 Agent，非系统自动拆解）。
+本文件是 slime_cli.py 仍在使用的 Python 实现，**保留不动**（CLI 该功能完好、测试充分）。
+将来把 CLI 统一到优化后的子代理能力时，本文件连同 core/swarm.py、core/process_worker.py
+及 slime_cli.py 的两处调用点（swarm 命令 + /auto 自动检测）应一并评估退役。
+参见 docs/README.md 的「待统一项」。
 """
 
 import asyncio

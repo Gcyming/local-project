@@ -17,6 +17,7 @@ import { SandboxManager } from "./sandbox.js";
 import { OutputFilter, StreamFilter } from "./filter.js";
 
 import { drainSteers } from "./services/steerBus.js";
+import { agentSkillVisibilityFor, isSkillEntryToolName } from "./services/agentTools.js";
 
 import { planReconcileText } from "./services/todoStore.js";
 import { isAbsolute, join } from "node:path";
@@ -52,6 +53,20 @@ function truncateWithDiffTag(raw: string, limit: number): string {
   if (!m) { return raw.slice(0, limit); }
   const without = raw.replace(m[0], "").trim();
   return `${without.slice(0, limit)}\n${m[0]}`;
+}
+
+/** A-1194：工具执行与 abort 赛跑——用户点「停止」后以占位结果立即返回，
+ *  不再让整轮 Promise.all 干等飞行中的工具（无信号支持的长工具会后台自然结束）。
+ *  中断后调用方会检查 signal.aborted 提前收束，占位文本不会进入最终回复。 */
+function abortableToValue<T>(p: Promise<T>, signal: AbortSignal | undefined, fallback: T): Promise<T> {
+  if (!signal) { return p; }
+  if (signal.aborted) { return Promise.resolve(fallback); }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => { cleanup(); resolve(fallback); };
+    const cleanup = (): void => { signal.removeEventListener("abort", onAbort); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then((v) => { cleanup(); resolve(v); }, (e) => { cleanup(); reject(e); });
+  });
 }
 
 
@@ -126,6 +141,13 @@ export const TOOL_MAX_ROUNDS = (() => {
   if (Number.isFinite(n) && n > 0) { return n; }
   return 500;
 })();
+
+/** A-1196（需求：高自由度创造模式 L3）：轮上限收敛（Agent 级 maxRounds 覆盖模块默认）。
+ *  非法值一律回退默认 —— 不静默把轮数放大。 */
+function resolveMaxRounds(v: number | undefined): number {
+  if (v !== undefined && Number.isFinite(v) && v > 0) { return Math.floor(v); }
+  return TOOL_MAX_ROUNDS;
+}
 
 export interface SandboxDecision {
   allowed: boolean;
@@ -414,6 +436,8 @@ export interface ToolLoopStreamOptions {
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
+  /** A-1196：本请求的工具轮上限（Agent 级 loop_config 可覆盖模块默认 TOOL_MAX_ROUNDS）。 */
+  maxRounds?: number;
 }
 
 export interface ToolLoopOptions {
@@ -426,12 +450,14 @@ export interface ToolLoopOptions {
   tools?: ChatRequest["tools"];
   sessionId?: string;
   
+  signal?: AbortSignal;
+  
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
+  /** A-1196：本请求的工具轮上限（Agent 级 loop_config 可覆盖模块默认 TOOL_ROUNDS）。 */
+  maxRounds?: number;
 }
-
-
 
 export interface ToolLoopInput {
   router: ModelRouter;
@@ -524,7 +550,14 @@ export class ToolLoop {
         if (signal?.aborted) {
           return { tc, msg: "[已中断] 用户停止生成，剩余工具未执行" as string };
         }
-        return { tc, msg: await this.runOneTool(tc, agentId, dedup, agentName, sessionId, signal) };
+        return {
+          tc,
+          msg: await abortableToValue(
+            this.runOneTool(tc, agentId, dedup, agentName, sessionId, signal),
+            signal,
+            "[已中断] 用户停止生成，工具执行被跳过",
+          ),
+        };
       }),
     );
     
@@ -715,6 +748,18 @@ export class ToolLoop {
       args.sessionId = sessionId;
     }
 
+    if (isSkillEntryToolName(tc.name)) {
+      delete args._skill_scope;
+      const scope = agentSkillVisibilityFor(agentId);
+      if (scope) {
+        args._skill_scope = {
+          constrained: scope.constrained,
+          allowed: [...scope.allowed],
+          allowAgentAuthored: scope.allowAgentAuthored,
+        };
+      }
+    }
+
     
     
     
@@ -834,7 +879,8 @@ export class ToolLoop {
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
     
-    const warnAt = Math.max(1, TOOL_MAX_ROUNDS - 3);
+    const maxRounds = resolveMaxRounds(opts.maxRounds);
+    const warnAt = Math.max(1, maxRounds - 3);
     
     const limits: BudgetLimits = { maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs };
     const budget: BudgetState = {
@@ -851,12 +897,26 @@ export class ToolLoop {
     
     let lastUsage: LoopUsage | undefined;
 
-    for (let round = 1; round <= TOOL_MAX_ROUNDS; round++) {
+    for (let round = 1; round <= maxRounds; round++) {
       if (pending.some((tc) => tc.name === "todo_write")) { usedTodoWrite = true; }
-      const details = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId);
+      const details = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId, opts.signal);
       roundLog.push({ round, details });
       budget.toolCalls += details.length;
       budget.tokens += details.reduce((s, d) => s + tokEst(d.result), 0);
+
+      
+      if (opts.signal?.aborted) {
+        return {
+          text: allText,
+          raw: allText,
+          rounds: round,
+          roundLog: roundLog.map((r) => r.details).flat(),
+          reasonings,
+          interrupted: true,
+          lastUsage,
+          usage: usageAcc,
+        };
+      }
 
       
       if (round > 1) {
@@ -869,10 +929,10 @@ export class ToolLoop {
       }
 
       
-      if (round >= warnAt && round < TOOL_MAX_ROUNDS) {
+      if (round >= warnAt && round < maxRounds) {
         opts.messages.push({
           role: "system" as const,
-          content: `[系统提示] 本请求工具调用轮次即将耗尽（当前第 ${round} 轮，上限 ${TOOL_MAX_ROUNDS} 轮）。请根据已收集的信息给出最终结论或下一步建议；无需再发起新的工具调用。`,
+          content: `[系统提示] 本请求工具调用轮次即将耗尽（当前第 ${round} 轮，上限 ${maxRounds} 轮）。请根据已收集的信息给出最终结论或下一步建议；无需再发起新的工具调用。`,
         });
       }
 
@@ -887,7 +947,7 @@ export class ToolLoop {
         tools: opts.tools,
       };
       Object.assign(payload, reasoningParams);
-      const resp = await this.router.chat(payload);
+      const resp = await this.router.chat(payload, opts.signal);
       usageAcc = mergeLoopUsage(usageAcc, resp.response.usage as LoopUsage | undefined);
       
       if (resp.response.usage) { lastUsage = resp.response.usage as LoopUsage; }
@@ -945,8 +1005,8 @@ export class ToolLoop {
       pending = nextCalls;
     }
 
-    const text = this.formatRoundLimit(roundLog);
-    return { text, raw: text, rounds: TOOL_MAX_ROUNDS, roundLog: roundLog.map((r) => r.details).flat(), reasonings, lastUsage, usage: usageAcc };
+    const text = this.formatRoundLimit(roundLog, maxRounds);
+    return { text, raw: text, rounds: maxRounds, roundLog: roundLog.map((r) => r.details).flat(), reasonings, lastUsage, usage: usageAcc };
   }
 
   
@@ -972,7 +1032,8 @@ export class ToolLoop {
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
     
-    const warnAt = Math.max(1, TOOL_MAX_ROUNDS - 3);
+    const maxRounds = resolveMaxRounds(opts.maxRounds);
+    const warnAt = Math.max(1, maxRounds - 3);
     
     const limits: BudgetLimits = { maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs };
     const budget: BudgetState = {
@@ -985,7 +1046,7 @@ export class ToolLoop {
     
     let lastUsage: LoopUsage | undefined;
 
-    for (let round = 1; round <= TOOL_MAX_ROUNDS; round++) {
+    for (let round = 1; round <= maxRounds; round++) {
       if (pending.some((tc) => tc.name === "todo_write")) { usedTodoWrite = true; }
       const roundDetails = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId, opts.signal, opts.onEvent);
       roundLog.push({ round, details: roundDetails });
@@ -1028,10 +1089,10 @@ export class ToolLoop {
       }
 
       
-      if (round >= warnAt && round < TOOL_MAX_ROUNDS) {
+      if (round >= warnAt && round < maxRounds) {
         opts.messages.push({
           role: "system" as const,
-          content: `[系统提示] 本请求工具调用轮次即将耗尽（当前第 ${round} 轮，上限 ${TOOL_MAX_ROUNDS} 轮）。请根据已收集的信息给出最终结论或下一步建议；无需再发起新的工具调用。`,
+          content: `[系统提示] 本请求工具调用轮次即将耗尽（当前第 ${round} 轮，上限 ${maxRounds} 轮）。请根据已收集的信息给出最终结论或下一步建议；无需再发起新的工具调用。`,
         });
       }
 
@@ -1161,17 +1222,17 @@ export class ToolLoop {
       pending = nextCalls;
     }
 
-    const text = this.formatRoundLimit(roundLog);
-    return { text, raw: text, rounds: TOOL_MAX_ROUNDS, roundLog: roundLog.map((r) => r.details).flat(), reasonings, lastUsage, usage: usageAcc };
+    const text = this.formatRoundLimit(roundLog, maxRounds);
+    return { text, raw: text, rounds: maxRounds, roundLog: roundLog.map((r) => r.details).flat(), reasonings, lastUsage, usage: usageAcc };
   }
 
   
-  private formatRoundLimit(log: Array<{ round: number; details: ToolRoundDetail[] }>): string {
+  private formatRoundLimit(log: Array<{ round: number; details: ToolRoundDetail[] }>, maxRounds: number): string {
     const last = log[log.length - 1];
     if (!last) { return "[警告] 工具调用达到上限，无法继续"; }
     const items = last.details
       .map((d) => `- ${d.name}(${d.args.slice(0, 60)}) → ${d.result.slice(0, 80)}`)
       .join("\n");
-    return `[工具调用达到上限（${TOOL_MAX_ROUNDS} 轮）。已执行 ${log.reduce((s, r) => s + r.details.length, 0)} 个工具调用。请基于已有信息给出结论：\n${items}\n……`
+    return `[工具调用达到上限（${maxRounds} 轮）。已执行 ${log.reduce((s, r) => s + r.details.length, 0)} 个工具调用。请基于已有信息给出结论：\n${items}\n……`
   }
 }

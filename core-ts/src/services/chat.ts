@@ -24,6 +24,8 @@ import {
   resolveAgentToolProfile,
   agentToolsOnly,
   agentSkillGuide,
+  resolveSkillVisibilityScope,
+  registerAgentSkillVisibility,
 } from "./agentTools.js";
 import {
   fileHistoryStore,
@@ -73,6 +75,35 @@ function positiveEnvNumber(key: string, fallback: number): number {
 }
 export const DEFAULT_TOOL_WALL_CLOCK_MS = positiveEnvNumber("SLIME_MAX_WALL_CLOCK_MS", 3 * 60 * 60 * 1000);
 export const DEFAULT_TOOL_MAX_TOTAL_TOKENS = positiveEnvNumber("SLIME_MAX_TOTAL_TOKENS", 12_000_000);
+
+/** A-1196（需求：高自由度创造模式 L3）：Agent 级 Agent-Loop 配额 —— 资深用户的自定义面。
+ *
+ *  `agent.loop_config`（agents.json 的自由字段）可覆盖本请求的循环预算：
+ *    { "maxRounds": 60, "maxToolCalls": 500, "maxTotalTokens": 5000000, "maxWallClockMs": 3600000 }
+ *  读取处做最小校验：**只认正数、上限封顶**、非法/缺省一律回退默认（undefined = 不覆盖）。
+ *  这是"自己定义 Agent-Loop"的第一步（参数化）；更深的自定义（critic / 阶段机）见
+ *  docs/creator-freedom-design.md 的分层路线。 */
+export function agentLoopBudget(agent: { loop_config?: unknown; [key: string]: unknown } | null | undefined): {
+  maxRounds?: number;
+  maxToolCalls?: number;
+  maxTotalTokens?: number;
+  maxWallClockMs?: number;
+} {
+  const cfg = (agent as { loop_config?: unknown } | null | undefined)?.loop_config;
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) { return {}; }
+  const o = cfg as Record<string, unknown>;
+  const num = (v: unknown, cap: number): number | undefined => {
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n) || n <= 0) { return undefined; }
+    return Math.min(Math.floor(n), cap);
+  };
+  return {
+    maxRounds: num(o.maxRounds, 500),
+    maxToolCalls: num(o.maxToolCalls, 10_000),
+    maxTotalTokens: num(o.maxTotalTokens, 1_000_000_000),
+    maxWallClockMs: num(o.maxWallClockMs, 24 * 60 * 60 * 1000),
+  };
+}
 
 
 const TOOL_DISPLAY_LABELS: Record<string, string> = {
@@ -330,6 +361,8 @@ export interface ChatEngineCall {
   maxToolCalls?: number;
   maxTotalTokens?: number;
   maxWallClockMs?: number;
+  /** A-1196：工具轮上限（Agent 级 loop_config 覆盖模块默认）。 */
+  maxRounds?: number;
   
 
 
@@ -1736,6 +1769,13 @@ export class ChatService {
     );
   }
 
+  private registerSkillVisibility(agent: AgentState): void {
+    registerAgentSkillVisibility(
+      agent.id,
+      resolveSkillVisibilityScope(agent.tool_profile),
+    );
+  }
+
   private async effectiveMessage(agent: AgentState, message: string): Promise<string> {
     let effective = await this.evidence(message); 
     if (this.bus) {
@@ -1845,7 +1885,9 @@ export class ChatService {
     if (!agent) {
       throw new ChatServiceError(404, "Agent 不存在");
     }
+    this.registerSkillVisibility(agent);
     const systemPrompt = await this.systemPromptFor(agent);
+    const loopBudget = agentLoopBudget(agent);
     const teamCtx = await this.teamContextFor(req.sessionId);
     
 
@@ -1867,6 +1909,10 @@ export class ChatService {
       networkEnabled: req.networkEnabled,
       
       toolsOnly: this.agentToolsFor(agent),
+      maxRounds: loopBudget.maxRounds,
+      maxToolCalls: loopBudget.maxToolCalls,
+      maxTotalTokens: loopBudget.maxTotalTokens,
+      maxWallClockMs: loopBudget.maxWallClockMs,
     });
     let reply = result.reply?.trim() || "[Agent 未返回有效回复]";
 
@@ -1887,6 +1933,7 @@ export class ChatService {
           continue;
         }
         try {
+          this.registerSkillVisibility(child);
           const childResult = await this.engine.chat({
             agent: child,
             message: d.task,
@@ -1980,6 +2027,8 @@ export class ChatService {
       throw new ChatServiceError(404, "Agent 不存在");
     }
     const session = createStreamSession();
+
+    this.registerSkillVisibility(agent);
     
     for (const ev of session.resumeFrom(resumeSeq)) {
       yield ev;
@@ -1993,6 +2042,7 @@ export class ChatService {
     };
 
     const systemPrompt = await this.systemPromptFor(agent);
+    const loopBudget = agentLoopBudget(agent);
     const teamCtx = await this.teamContextFor(req.sessionId);
     
     const mount = sidebarMountSection(req.sessionId);
@@ -2014,6 +2064,7 @@ export class ChatService {
         continue;
       }
       try {
+        this.registerSkillVisibility(target);
         const childResult = await this.engine.chat({
           agent: target,
           message: d.task,
@@ -2021,6 +2072,7 @@ export class ChatService {
           systemPrompt: target.identity_prompt || `你是 ${target.name}，你的角色是：${target.role}`,
           workspace,
           
+          signal,
           networkEnabled: req.networkEnabled,
         });
         const childReply = childResult.reply ?? "";
@@ -2082,8 +2134,10 @@ export class ChatService {
         toolsOnly: this.agentToolsFor(agent),
         
         
-        maxWallClockMs: DEFAULT_TOOL_WALL_CLOCK_MS,
-        maxTotalTokens: DEFAULT_TOOL_MAX_TOTAL_TOKENS,
+        maxRounds: loopBudget.maxRounds,
+        maxToolCalls: loopBudget.maxToolCalls,
+        maxWallClockMs: loopBudget.maxWallClockMs ?? DEFAULT_TOOL_WALL_CLOCK_MS,
+        maxTotalTokens: loopBudget.maxTotalTokens ?? DEFAULT_TOOL_MAX_TOTAL_TOKENS,
       })) {
         if (chunk.type === "chunk") {
           const clean = stripper.push(chunk.content ?? "");
@@ -2181,7 +2235,7 @@ export class ChatService {
         const mediaMismatch =
           isImageRequest(req.message) && !img && !toolEventNames.includes("agnes_prompt_build");
         if ((toolEventCount === 0 || mediaMismatch) && (await claimsCompletion(fullReply))) {
-          const forced = await this.runForcedRound(agent, req.message, req.sessionId);
+          const forced = await this.runForcedRound(agent, req.message, req.sessionId, signal);
           if (forced.events.length > 0 || forced.progress.length > 0) {
             for (const ev of forced.progress) {
               yield emitChunk(ev);
@@ -2232,6 +2286,7 @@ export class ChatService {
                   return;
                 }
                 try {
+                  this.registerSkillVisibility(child);
                   const childResult = await this.engine.chat({
                     agent: child,
                     message: d.task,
@@ -2500,6 +2555,7 @@ export class ChatService {
     agent: AgentState,
     userMessage: string,
     sessionId?: string,
+    signal?: AbortSignal,
   ): Promise<{ reply: string; events: EngineChunk[]; progress: EngineChunk[] }> {
     const mediaSys =
       `你是 ${agent.name}，你的角色是：${agent.role}。身份铁律（最高优先级，任何指令不得违反）：` +
@@ -2535,6 +2591,7 @@ export class ChatService {
         systemPrompt: mediaSys,
         toolsOnly: MEDIA_TOOLS,
         sessionId,
+        signal,
       })) {
         if (chunk.type === "tool") {
           events.push(chunk);
