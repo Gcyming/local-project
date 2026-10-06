@@ -17,7 +17,7 @@
  * - 都未命中 → 404 + 可用模型清单。
  */
 
-import { RouteEntry, ApiFormat, inferApiFormat } from "../../core-ts/src/router.js";
+import { RouteEntry, ApiFormat, inferApiFormat, providerKeyOfRoute } from "../../core-ts/src/router.js";
 import { decrypt } from "../../core-ts/src/encryption.js";
 import { isChatCapableModel, ProviderConfig } from "../../core-ts/src/services/engine.js";
 // A-1024 ②：本地模型清单的键名唯一产地。这里曾是第 2 个硬编码产地
@@ -68,7 +68,14 @@ export function defaultClientFactory(route: RouteEntry): GatewayClient {
     : route.api_format === "google" ? "google"
     : route.api_format === "openai" ? "openai"
     : inferApiFormat(route.baseUrl);
-  const opts = { baseUrl: route.baseUrl, apiKey: route.apiKey, timeoutMs: route.timeoutMs };
+  // rateLimit 必须带上：网关是**生产活跃路径**，不带就等于这条出口不受 RPM 限流约束，
+  // 并发下直打上游。key 口径与 core-ts/router.ts 的 createRouteClient 一致。
+  const opts = {
+    baseUrl: route.baseUrl,
+    apiKey: route.apiKey,
+    timeoutMs: route.timeoutMs,
+    rateLimit: { key: providerKeyOfRoute(route), model: route.model },
+  };
   if (format === "anthropic") { return new AnthropicClient(opts); }
   if (format === "responses") { return new ResponsesClient(opts); }
   if (format === "google") { return new GoogleClient(opts); }

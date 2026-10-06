@@ -4,15 +4,13 @@
  * - 限流：IP 滑动窗口 120/min
  * - CORS 收窄（origin: false）
  * - 端点集（5A.4）：/agents/:id/chat（非流式）、/agents/:id/chat/analyze、/agents/:id/chat/stream
- *   （SSE {seq,type,data} + x-slime-stream-id + x-slime-resume 断线补漏）、/agents/:id/swarm、
- *   /agents/:id/swarm/report、/agents、/stats（面板数据）
- * - 业务逻辑全部在 core-ts Service API（ChatService/SwarmService/StatsService）——函数调用，非 HTTP 回环
+ *   （SSE {seq,type,data} + x-slime-stream-id + x-slime-resume 断线补漏）、/agents、/stats（面板数据）
+ * - 业务逻辑全部在 core-ts Service API（ChatService/StatsService）——函数调用，非 HTTP 回环
  */
 
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import cors from "@fastify/cors";
 import { ChatService, ChatServiceError, ChatRequest } from "../../core-ts/src/services/chat.js";
-import { SwarmService, SwarmReportRequest } from "../../core-ts/src/services/swarm.js";
 import { StatsService } from "../../core-ts/src/services/stats.js";
 import { AgentRegistry } from "../../core-ts/src/services/agents.js";
 import { SocialService, SocialConfig, SocialAgentRef, SocialChatFn } from "../../core-ts/src/services/social.js";
@@ -21,6 +19,7 @@ import { LlmGateway, LlmGatewayError } from "./llmGateway.js";
 import { TokenStore, TokenDef } from "./tokenStore.js";
 import { getSharedLiveProbe } from "../../core-ts/src/probe-live.js";
 import { getSharedCapabilityGraph } from "../../core-ts/src/probe-graph.js";
+import { PRODUCT_NAME, PRODUCT_VERSION } from "../../core-ts/src/product.js";
 import type { ChatRequest as LlmChatRequest } from "shared/schemas";
 
 export interface GatewayConfig {
@@ -61,7 +60,6 @@ export interface GatewayConfig {
 
 export interface GatewayServices {
   chat: ChatService;
-  swarm: SwarmService;
   stats: StatsService;
   agents: AgentRegistry;
   social?: SocialService;
@@ -153,6 +151,9 @@ export function buildGateway(
   });
 
   app.addHook("onRequest", async (req, reply) => {
+    // 轻量响应标识：让客户端一眼看出这是 slime 网关、哪个版本。
+    // 只加一个头，不碰任何既有行为（不改状态码、不改body、不改鉴权）。
+    reply.header("x-slime-gateway", `${PRODUCT_NAME}-${PRODUCT_VERSION}`);
     const ip = req.ip ?? "unknown";
     if (!limiter.check(`ip:${ip}`)) {
       return reply.code(429).send({ error: { message: "请求过于频繁", type: "rate_limited" } });
@@ -428,6 +429,9 @@ export function buildGateway(
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
             "X-Accel-Buffering": "no",
+            // 裸 writeHead 绕过了 Fastify 的 header 管线，onRequest 里设的头不会生效，
+            // 所以 SSE 这两条流式路径必须自己带上（否则流式请求唯独没有标识头）。
+            "x-slime-gateway": `${PRODUCT_NAME}-${PRODUCT_VERSION}`,
           });
           const encoder = new TextEncoder();
           const write = (obj: unknown): void => {
@@ -481,7 +485,7 @@ export function buildGateway(
 
   // ── core-ts 服务端点（5A.4；services 未注入时返回 501）──────
   if (services) {
-    const { chat, swarm, stats, agents } = services;
+    const { chat, stats, agents } = services;
 
     app.get("/agents", async (_req, reply) => {
       try {
@@ -552,47 +556,14 @@ export function buildGateway(
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
           "x-slime-stream-id": streamId,
+          // 同上：裸 writeHead 绕过 Fastify 管线，流式路径自己带标识头。
+          "x-slime-gateway": `${PRODUCT_NAME}-${PRODUCT_VERSION}`,
         });
         for await (const ev of chat.stream(req.params.agentId, request, resumeSeq)) {
           reply.raw.write(sseEncode(ev));
         }
         reply.raw.end();
         return reply.raw;
-      } catch (e) {
-        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
-      }
-    });
-
-    app.post<{ Params: { agentId: string } }>("/agents/:agentId/swarm", async (req, reply) => {
-      try {
-        const body = req.body as { task?: unknown; max_workers?: unknown };
-        const task = String(body.task ?? "").trim();
-        if (!task) {
-          return reply.code(400).send({ error: { message: "task 不能为空", type: "bad_request" } });
-        }
-        const result = await swarm.dispatch(req.params.agentId, task, {
-          maxWorkers: typeof body.max_workers === "number" ? body.max_workers : undefined,
-        });
-        return {
-          ok: true,
-          task_id: result.task_id,
-          warnings: result.warnings,
-          agent_snapshots: result.agent_snapshots,
-          merge_result: result.merge_result,
-        };
-      } catch (e) {
-        return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
-      }
-    });
-
-    app.post<{ Params: { agentId: string } }>("/agents/:agentId/swarm/report", async (req, reply) => {
-      try {
-        const body = req.body as Partial<SwarmReportRequest>;
-        return await swarm.report(req.params.agentId, {
-          task: String(body.task ?? ""),
-          summary: String(body.summary ?? ""),
-          results: Array.isArray(body.results) ? body.results : [],
-        });
       } catch (e) {
         return replyError(reply, e, e instanceof ChatServiceError ? e.status : 500);
       }
