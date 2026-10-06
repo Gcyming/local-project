@@ -1,8 +1,8 @@
 # slime Agent-Loop 设计
 
-> 依据：三份调研报告 —— [agent-loop-research-report.md](agent-loop-research-report.md)（33 来源 / 9 共识 / 5 分歧 / 17 反模式）、
-> [llm-agent-memory-research.md](llm-agent-memory-research.md)（39 来源，37 条抓取核验 / 15 失败模式）、
-> [agent-plugin-ecosystem-research.md](agent-plugin-ecosystem-research.md)（40 来源 / 8 个真实事故）。
+> 依据：三份调研报告 —— [agent-loop-research-report.md](../agent-loop-research-report.md)（33 来源 / 9 共识 / 5 分歧 / 17 反模式）、
+> [llm-agent-memory-research.md](../llm-agent-memory-research.md)（39 来源，37 条抓取核验 / 15 失败模式）、
+> [agent-plugin-ecosystem-research.md](../agent-plugin-ecosystem-research.md)（40 来源 / 8 个真实事故）。
 >
 > 本文只写**裁决与规格**，不写实现。每条裁决都标注依据来源编号或「工程推断」。
 > 凡与 slime 现状冲突的，附现状证据（文件:行）。
@@ -429,7 +429,7 @@ export interface ToolProfile {
 
 ## 8. 第二轮补缺口调研的增量
 
-来源：[agent-loop-research-supplement.md](agent-loop-research-supplement.md)（三类缺口：Google 消费级 agent / OpenAI reasoning / Anthropic Managed Agents 与 context management）。
+来源：[agent-loop-research-supplement.md](../agent-loop-research-supplement.md)（三类缺口：Google 消费级 agent / OpenAI reasoning / Anthropic Managed Agents 与 context management）。
 以下四条**修正或补强**前文，其中 §8.1 是本次最有价值的架构增量。
 
 ### 8.1 【新增能力】事前 critic + veto（slime 当前完全缺失）

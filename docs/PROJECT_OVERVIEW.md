@@ -1,7 +1,12 @@
 # slime 项目总览 — 改动日志 · 功能构造 · 设计理念
 
-> 生成时间：2026-09-08 ｜ 性质：项目收尾阶段的统一概览（时间线 + 功能/代码对照 + 设计理念三合一）
-> 数据来源：git 实录 + `REVIEW_AGENT.md` 修复日志 + `阶段日志.md` 阶段档案 + `ARCH-REVIEW` / `AUDIT` 审计
+> 生成时间：2026-09-08 ｜ 最近修订：2026-10-06（文档整理：清理失效引用 + 标注归档件）
+> 性质：项目收尾阶段的统一概览（时间线 + 功能/代码对照 + 设计理念三合一）
+> 数据来源：git 实录 + `REVIEW_AGENT.md` 修复日志 + `阶段日志.md` 阶段档案 + `ARCH-REVIEW` / `AUDIT` 审计（后两者已归档）
+
+> ⚠️ **时点说明**：本文主体是 **2026-09-08 的快照**，此后项目演进较大（上下文压缩 D1–D10、记忆混合检索、
+> 子代理批量编排、SwarmExecutor 退役等）。**「功能/代码对照」表已于 2026-10-06 校正**，但「改动日志」的时间线
+> 停留在 09-08。最新架构现状见 [slime-agent-loop-design.md](slime-agent-loop-design.md) 与仓库 `README.md`。
 
 ---
 
@@ -46,10 +51,10 @@
 | 对话引擎（流式/非流式 + 工具轮编排）| `ChatEngine` / `ToolLoop` / `LoopUsage` | `services/engine.ts`、`tool_loop.ts` |
 | 模型路由与降级链 | `ModelRouter` / `buildModelPoolRouter` | `router.ts` |
 | LLM 客户端（OpenAI 兼容 + Anthropic + 缓存 token 采集）| `ChatClient` / `AnthropicClient` / `normalizeUsage` | `llm/client.ts` |
-| 多智能体 Swarm（orchestrator-worker）| `SwarmEngine` / `swarm_service` | `swarm.ts`、`services/swarm.ts` |
-| 子 Agent 委派（权限收窄继承）| `SubagentManager` / `delegate_subagent` | `services/subagent.ts`、`executor.ts` |
+| 子 Agent 委派（独立上下文 + 预算闸）| `SubAgentManager` / `delegate_subagent` | `services/subagent.ts` |
+| 子代理批量编排（拆解 / 共享规格 / 产物合并）| `decomposeTask` / `spawnBatch` / `buildMergePrompt` | `services/subagent_batch.ts` |
 | 群聊编排（brainstorm / 群组）| `streamGroupTalkFlow` / `grouptalk` | `services/grouptalk.ts`、`services/brainstorm.ts` |
-| 结果归并 + 幻觉护栏 | `merger`（LLM 矛盾裁定）/ `claims` 核验 | `merger.ts`、`claims.ts` |
+| 结果归并 + 幻觉护栏 | `assessBatchRisks` / `resolveBatchConflict`（LLM 矛盾裁定）/ `claims` 核验 | `services/subagent_batch.ts`、`claims.ts` |
 
 ### 心智与记忆
 

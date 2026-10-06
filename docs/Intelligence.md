@@ -1,5 +1,11 @@
 # Slime 智能体架构演进：从截断问题到人脑式心智框架
 
+> ⚠️ **时点说明（2026-10-06 标注）**：本文主体为 **2026-08-17 的架构白皮书**，描述的是 Python 单栈时期（`d:/tool/slime`）的设计。
+> 08-17 起项目迁移到本仓库（`D:/pilot project`）并转为 TS 双栈，**文中大量 `core/*.py` 路径引用已不适用**。
+> 保留原因：L1/L2/L3 心智分层与四维人格的设计思想仍是 `core-ts/src/mind/` 的依据。
+> 阅读时请以代码为准；相关文件已在下方各节标注归档路径。
+> Phase 3 一节依赖已归档的 `_archive/soul-plan.md`。
+
 > **文档性质**：架构设计白皮书
 > **起始命题**：N11-P2-17（system prompt 过长导致的截断问题）
 > **最终成果**：L1/L2/L3 三层心智架构 + 夺舍机制 + 四维人格模型
@@ -32,7 +38,7 @@
 
 ### 1.1 问题描述
 
-在 Slime 项目的第十一轮全面审查中，发现了一个被定为 P3 级别的问题——[core/llm.py:112-118](file:///d:/tool/slime/core/llm.py#L112-L118) 的 system prompt 截断逻辑：
+在 Slime 项目的第十一轮全面审查中，发现了一个被定为 P3 级别的问题——`core/llm.py:112-118`（历史 Python 单栈路径 `d:/tool/slime/core/llm.py#L112-L118`，本仓库已无此文件） 的 system prompt 截断逻辑：
 
 ```python
 total_budget = max(512, int(agent.max_context * 0.3))
@@ -271,7 +277,7 @@ LLM 的 attention 是 O(n²) 的（n = token 数）。每次多一条记忆，�
 
 ### 6.1 当前状态
 
-Slime 的 [evolve.py](file:///d:/tool/slime/core/evolve.py) 已经实现了 persona traits 的遗忘（权重低于阈值后删除），但 [memory.py](file:///d:/tool/slime/core/memory.py) 的 facts/preferences/lessons **永远不变，永久保留**——和真实人脑相反。
+Slime 的 `evolve.py`（历史 Python 单栈路径 `d:/tool/slime/core/evolve.py`，本仓库已无此文件） 已经实现了 persona traits 的遗忘（权重低于阈值后删除），但 `memory.py`（历史 Python 单栈路径 `d:/tool/slime/core/memory.py`，本仓库已无此文件） 的 facts/preferences/lessons **永远不变，永久保留**——和真实人脑相反。
 
 ### 6.2 艾宾浩斯曲线原理
 
@@ -373,7 +379,7 @@ ranked = sorted(facts, key=lambda f: forgetting_factor(
 
 #### Hebbian Learning
 
-"一起激发的神经元连在一起"——这是反向传播的生物学原型。Slime 的 [evolve.py](file:///d:/tool/slime/core/evolve.py) `strength_trait` / `weaken_trait` 就是简化版：
+"一起激发的神经元连在一起"——这是反向传播的生物学原型。Slime 的 `evolve.py`（历史 Python 单栈路径 `d:/tool/slime/core/evolve.py`，本仓库已无此文件） `strength_trait` / `weaken_trait` 就是简化版：
 
 ```python
 # 成功的交互 → 强化相关 trait
@@ -1455,7 +1461,7 @@ Slime 的"反向夺舍"：
 1. 创建 `core/psyche/` 目录结构
 2. 迁移 `core/memory.py` → `core/psyche/memory.py`
 3. 迁移 `core/persona.py` → `core/psyche/persona.py`
-4. 修改 [llm.py:83-118](file:///d:/tool/slime/core/llm.py#L83-L118) `_compose_system_prompt`：
+4. 修改 `llm.py:83-118`（历史 Python 单栈路径 `d:/tool/slime/core/llm.py#L83-L118`，本仓库已无此文件） `_compose_system_prompt`：
    - system prompt 只保留 L1 + L2
    - L3 内容走 message 层
 5. 实现 `core/psyche/retrieval.py` 按需检索
@@ -1558,7 +1564,7 @@ N11-P2-17 起初只是一个 P3 级别的截断问题，但通过深入讨论，
 
 ---
 
-# Phase 3 待验证（Soul-Plan docs/soul-plan.md —— 未与现行已验证口径混排）
+# Phase 3 待验证（Soul-Plan _archive/soul-plan.md —— 未与现行已验证口径混排）
 
 以下实现为 Phase 3 增强，**尚未经长周期实测验证**，独立成节：
 

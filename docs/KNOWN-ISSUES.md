@@ -251,22 +251,20 @@ git log --oneline -2
 
 ---
 
-## ISSUE-002：WorkBuddy Bash 工具环境损坏（PATH 缺失，coreutils 全 `command not found`）
+## ISSUE-002：~~WorkBuddy Bash 工具环境损坏~~ → 已移出（跨项目，非 slime 问题）
 
 | 字段 | 值 |
 |------|------|
 | **发现日期** | 2026-09-13 |
-| **严重度** | 中（不阻塞交付，**阻塞 shell 脚本 / 管道 / coreutils**）|
-| **状态** | 未修复（用户确认后续单独排期）|
-| **影响范围** | WorkBuddy 桌面端「Bash 工具」（Windows）；**不影响 slime 自身运行** |
-| **详版文档** | [`docs/ISSUE-002-bash-tool-env-broken.md`](./ISSUE-002-bash-tool-env-broken.md)（现象 / 证据 / 根因假设 / 绕行 / 修复步骤 / 验证清单）|
+| **原严重度** | 中 |
+| **原状态** | 未修复（用户确认后续单独排期）|
+| **影响范围** | ⚠️ 原判定为「WorkBuddy 桌面端 Bash 工具（Windows）；**不影响 slime 自身运行**」 |
+| **当前处置** | **2026-10-06 移出本文件** —— 该问题属 WorkBuddy 宿主环境，**不是 slime 的缺陷**；<br>若仍需跟踪，见 [_archive/ISSUE-002-bash-tool-env-broken.md](_archive/ISSUE-002-bash-tool-env-broken.md)。 |
 
-**一句话**：bash 会话的 PATH 未包含 PortableGit 的 coreutils 目录，且 shim **第 3 行**就用 `dirname` 解析自身路径
-（鸡生蛋）→ `ls / grep / tail / cp / dirname` 全部 `command not found`，退出码 127。
-绝对路径调用可执行文件、shell 内建、重定向**均正常**。
+**移出理由**：本文件是 slime 的已知问题登记处。收录一个「明确不影响 slime」的问题会稀释真实风险，
+让人误以为 slime 有 Bash 环境缺陷。**「不影响本项目」的问题不进本文件。**
 
-**绕行**（已验证可完成交付）：文件操作 → PowerShell 工具；检索/读写 → Read/Write/Edit/Glob/Grep 专用工具；
-跑命令 → 绝对路径 + 输出重定向到文件再读。
+（ slime 自身若出现终端工具问题，请另开条目并明确标注 `terminal_run` / `shellInvocation` 的实际表现。）
 
 ---
 
