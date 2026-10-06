@@ -258,3 +258,212 @@ describe("A-980-R30 — 子代理结果回收与验收闭环", () => {
     expect(seen).toEqual({ agent: "代码审查员", model: "api:cheap:light" });
   });
 });
+
+describe("delegate_subagent 批量派发（编排能力合并进子代理，判断权在主 Agent）", () => {
+  beforeEach(() => {
+    resetRegistry();
+    setSubagentManager(null);
+    registerBuiltinTools();
+  });
+
+  type SpawnedDef = { name: string; task: string; sharedSpec?: string };
+  type Captured = { defs: SpawnedDef[]; opts?: { sharedSpec?: string } };
+
+  function installBatchManager(
+    results: Array<{ name: string; status: string; result?: string; error?: string }>,
+    captured?: Captured,
+  ): void {
+    setSubagentManager({
+      delegate: (): FakeRun | null => ({ id: "single-1", name: "单发", status: "pending" }),
+      wait: async (id: string): Promise<FakeRun | undefined> => ({
+        id, name: "单发", status: "done", result: "单发产出",
+      }),
+      spawnBatch: (defs: SpawnedDef[], opts?: { sharedSpec?: string }) => {
+        if (captured) {
+          captured.defs = defs;
+          if (opts) { captured.opts = opts; }
+        }
+        return {
+          batchId: "b-1",
+          runs: defs.map((d, i) => ({ id: `r-${i}`, name: d.name, status: "pending" })),
+        };
+      },
+      awaitBatch: async (): Promise<FakeRun[]> =>
+        results.map((r, i) => ({ id: `r-${i}`, name: r.name, status: r.status, result: r.result ?? "", error: r.error ?? "" })),
+    });
+  }
+
+  it("不填 subtasks → 仍走原有单发路径（回归保护）", async () => {
+    installBatchManager([]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "审查这段代码" });
+    expect(out).not.toContain("已并行派发");
+    expect(out).toContain("单发产出");
+  });
+
+  it("不填 subtasks → 绝不触碰 spawnBatch（不误触发批量）", async () => {
+    let spawned = 0;
+    setSubagentManager({
+      delegate: (): FakeRun | null => ({ id: "single-1", name: "单发", status: "pending" }),
+      wait: async (id: string): Promise<FakeRun | undefined> => ({ id, name: "单发", status: "done", result: "ok" }),
+      spawnBatch: () => { spawned++; return { batchId: "b", runs: [] }; },
+      awaitBatch: async (): Promise<FakeRun[]> => [],
+    });
+    await getRegistry().get("delegate_subagent")!.executeFn({ task: "写一段文字" });
+    expect(spawned).toBe(0);
+  });
+
+  it("✅ 填 subtasks → 并行派发 N 个子代理，返回含批次与整合指引", async () => {
+    const cap: Captured = { defs: [] };
+    installBatchManager(
+      [{ name: "甲-1", status: "done", result: "第一段完成" }, { name: "甲-2", status: "done", result: "第二段完成" }],
+      cap,
+    );
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "写一个长篇报告",
+      subtasks: ["第一部分：背景", "第二部分：结论"],
+    });
+    expect(cap.defs.length).toBe(2);
+    expect(cap.defs[0].task).toBe("第一部分：背景");
+    expect(cap.defs[1].task).toBe("第二部分：结论");
+    expect(out).toContain("已并行派发 2 个子代理");
+    expect(out).toContain("b-1");
+    expect(out).toContain("第一段完成");
+    expect(out).toContain("整合要求");
+  });
+
+  it("✅ sharedSpec 透传到批次 opts 且出现在返回的整合指引里", async () => {
+    const cap: Captured = { defs: [] };
+    installBatchManager([{ name: "甲-1", status: "done", result: "产物" }], cap);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "多模块代码",
+      subtasks: ["模块 A"],
+      sharedSpec: '{"tech_stack":"TypeScript"}',
+    });
+    expect(cap.opts?.sharedSpec).toBe('{"tech_stack":"TypeScript"}');
+    expect(out).toContain("【全局规格");
+    expect(out).toContain("tech_stack");
+  });
+
+  it("⚠️ subtasks 与 agent 同时给 → 明确拒绝，不静默忽略", async () => {
+    installBatchManager([]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "任务",
+      subtasks: ["甲", "乙"],
+      agent: "调研员",
+    });
+    expect(out).toContain("不能同时使用");
+    expect(out).not.toContain("已并行派发");
+  });
+
+  it("装配不支持 spawnBatch → 如实说不支持，不静默降级成单发", async () => {
+    setSubagentManager({
+      delegate: (): FakeRun | null => ({ id: "s", name: "单发", status: "pending" }),
+    });
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "任务",
+      subtasks: ["甲", "乙"],
+    });
+    expect(out).toContain("不支持批量派发");
+    expect(out).toContain("未派发");
+  });
+
+  it("批量全成功 → 结论为 ✓ 且风险为 low", async () => {
+    installBatchManager([
+      { name: "甲-1", status: "done", result: "成功完成" },
+      { name: "甲-2", status: "done", result: "成功完成" },
+    ]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "任务", subtasks: ["甲", "乙"] });
+    expect(out).toContain("✓");
+    expect(out).toContain("[low]");
+  });
+
+  it("批量有失败 → 结论为 ⚠ 且如实标注失败比例", async () => {
+    installBatchManager([
+      { name: "甲-1", status: "done", result: "成功完成" },
+      { name: "甲-2", status: "failed", result: "", error: "执行超时" },
+    ]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "任务", subtasks: ["甲", "乙"] });
+    expect(out).toContain("⚠");
+    expect(out).toContain("1/2 个子任务失败");
+    expect(out).toContain("执行超时");
+  });
+
+  it("批量结果疑似矛盾 → 报给主 Agent 并注明由它裁定", async () => {
+    installBatchManager([
+      { name: "甲-1", status: "done", result: "构建成功" },
+      { name: "甲-2", status: "done", result: "测试失败" },
+      { name: "甲-3", status: "done", result: "部署错误" },
+    ]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "任务", subtasks: ["甲", "乙", "丙"] });
+    expect(out).toContain("疑似矛盾");
+    expect(out).toContain("请你自己核对");
+  });
+
+  it("批量无矛盾 → 不出现疑似矛盾段（不制造噪音）", async () => {
+    installBatchManager([
+      { name: "甲-1", status: "done", result: "成功完成" },
+      { name: "甲-2", status: "done", result: "已完成并通过" },
+    ]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "任务", subtasks: ["甲", "乙"] });
+    expect(out).not.toContain("疑似矛盾");
+  });
+
+  it("🛡 拆解护栏：超 5 秒的视频段被拦下并给出修正指引", async () => {
+    installBatchManager([]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "做一个视频",
+      subtasks: ["第 1 段 0-12 秒：打斗"],
+    });
+    expect(out).toContain("未通过拆解校验");
+    expect(out).toContain("超过 5 秒上限");
+  });
+
+  it("🛡 拆解护栏：时长覆盖不足被拦下", async () => {
+    installBatchManager([]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "做一个 20 秒视频",
+      subtasks: ["第 1 段 0-5 秒：开场"],
+    });
+    expect(out).toContain("未通过拆解校验");
+    expect(out).toContain("仅覆盖");
+  });
+
+  it("🛡 拆解护栏：合法的 5 秒分段放行（护栏不误伤）", async () => {
+    installBatchManager([{ name: "甲-1", status: "done", result: "段1完成" }]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "做一个 10 秒视频",
+      subtasks: ["第 1 段 0-5 秒：开场", "第 2 段 5-10 秒：收尾"],
+    });
+    expect(out).not.toContain("未通过拆解校验");
+    expect(out).toContain("已并行派发 2 个子代理");
+  });
+
+  it("🛡 非视频任务的普通拆解不受护栏影响（无时间区间即跳过）", async () => {
+    installBatchManager([{ name: "甲-1", status: "done", result: "ok" }]);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "写一份报告",
+      subtasks: ["第一部分：背景调研", "第二部分：数据分析"],
+    });
+    expect(out).not.toContain("未通过拆解校验");
+    expect(out).toContain("已并行派发 2 个子代理");
+  });
+
+  it("🛡 数量护栏：超过上限时明确拒绝并给出出路", async () => {
+    installBatchManager([]);
+    const many = Array.from({ length: 25 }, (_, i) => `子任务${i + 1}`);
+    const out = await getRegistry().get("delegate_subagent")!.executeFn({ task: "大任务", subtasks: many });
+    expect(out).toContain("一次最多");
+    expect(out).toContain("分多次调用");
+  });
+
+  it("空字符串项被过滤（不产生空子任务）", async () => {
+    const cap: Captured = { defs: [] };
+    installBatchManager([{ name: "甲-1", status: "done", result: "ok" }], cap);
+    await getRegistry().get("delegate_subagent")!.executeFn({
+      task: "任务",
+      subtasks: ["有效任务", "   ", ""],
+    });
+    expect(cap.defs.length).toBe(1);
+    expect(cap.defs[0].task).toBe("有效任务");
+  });
+});

@@ -278,7 +278,7 @@ describe("A-1092 J 组 — RPM 限流器已经是 Agent-Loop 的必经之路（�
     
     
     
-    expect(src).toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {");
+    expect(src).toContain("getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {");
     expect(src).toContain("getSharedRpmLimiter().observe(");
     
     expect(src, "等待期界面会重新变成一整段空白").not.toContain("await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);");

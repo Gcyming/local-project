@@ -7,7 +7,6 @@ import { createServer, Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { buildGateway, SlidingWindowRateLimiter } from "../../gateway-ts/src/index.js";
 import { ChatService } from "../../core-ts/src/services/chat.js";
-import { SwarmService } from "../../core-ts/src/services/swarm.js";
 import { StatsService, AlarmBus } from "../../core-ts/src/services/stats.js";
 import { AgentRegistry } from "../../core-ts/src/services/agents.js";
 import { getSharedLiveProbe, setSharedLiveProbe, LiveProbeCache } from "../../core-ts/src/probe-live.js";
@@ -198,10 +197,6 @@ describe("buildGateway 服务端点（注入 Fake services）", () => {
     chat: chatMock,
     stream: streamMock,
   } as unknown as ChatService;
-  const swarm = {
-    dispatch: vi.fn(async () => ({ task_id: "t1", agent_snapshots: [], warnings: [] })),
-    report: vi.fn(async () => ({ ok: true, success: true })),
-  } as unknown as SwarmService;
   const agents = {
     loadedAgents: Promise.resolve([{ id: "a1", name: "A1", role: "r" }]),
     list: vi.fn(async () => [{ id: "a1", name: "A1" }]),
@@ -217,7 +212,7 @@ describe("buildGateway 服务端点（注入 Fake services）", () => {
   beforeAll(async () => {
     app = buildGateway(
       { port: 0, authToken: TOKEN, sidecarBaseUrl: "http://127.0.0.1:1", rateLimitPerMin: 1000 },
-      { chat, swarm, stats, agents },
+      { chat, stats, agents },
     );
     await app.ready();
   });
@@ -273,28 +268,6 @@ describe("buildGateway 服务端点（注入 Fake services）", () => {
     expect(frames[2].type).toBe("done");
   });
 
-  it("POST /agents/:id/swarm → dispatch", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/agents/a1/swarm",
-      headers: { authorization: `Bearer ${TOKEN}` },
-      payload: { task: "任务" },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().task_id).toBe("t1");
-  });
-
-  it("POST /agents/:id/swarm/report → report", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/agents/a1/swarm/report",
-      headers: { authorization: `Bearer ${TOKEN}` },
-      payload: { agent_id: "a1", task: "t", summary: "s", results: [] },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, success: true });
-  });
-
   it("GET /stats → snapshot", async () => {
     const res = await app.inject({ method: "GET", url: "/stats", headers: { authorization: `Bearer ${TOKEN}` } });
     expect(res.statusCode).toBe(200);
@@ -315,10 +288,6 @@ describe("buildGateway 服务端点错误路径", () => {
     chat: vi.fn(async () => { throw new Error("boom"); }),
     stream: vi.fn(async function* () { throw new Error("stream boom"); }),
   } as unknown as ChatService;
-  const swarm = {
-    dispatch: vi.fn(async () => { throw new Error("任务失败"); }),
-    report: vi.fn(async () => { throw new Error("校验失败"); }),
-  } as unknown as SwarmService;
   const agents = { loadedAgents: Promise.resolve([]), list: vi.fn(async () => []) } as unknown as AgentRegistry;
   const stats = new StatsService({ loadedAgents: [] } as unknown as AgentRegistry, new AlarmBus());
   vi.spyOn(stats, "servers").mockResolvedValue([]);
@@ -327,7 +296,7 @@ describe("buildGateway 服务端点错误路径", () => {
   beforeAll(async () => {
     app = buildGateway(
       { port: 0, authToken: TOKEN, sidecarBaseUrl: "http://127.0.0.1:1", rateLimitPerMin: 1000 },
-      { chat, swarm, stats, agents },
+      { chat, stats, agents },
     );
     await app.ready();
   });
@@ -357,15 +326,6 @@ describe("buildGateway 服务端点错误路径", () => {
     expect(res.statusCode).toBe(500);
   });
 
-  it("swarm/report 抛错 → 500", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/agents/a1/swarm/report",
-      headers: { authorization: `Bearer ${TOKEN}` },
-      payload: { agent_id: "a1", task: "t", summary: "s", results: [] },
-    });
-    expect(res.statusCode).toBe(500);
-  });
 });
 
 describe("buildGateway LLM 转发网关 /v1/capabilities（第 3 层能力知识图谱诊断端点）", () => {

@@ -137,8 +137,14 @@ describe("A-1113 滚动条：悬浮细胶囊（用户答复「按悬浮细胶囊
     
     const m = /^\.chat-scroll\s*\{([^}]*)\}/m.exec(CSS_CODE);
     if (m) {
-      expect(/scrollbar/i.test(m[1]),
-        `\`.chat-scroll { … }\` 里又有滚动条声明了：${m[1].trim().slice(0, 80)}`).toBe(false);
+      /* ⚠️ A-1197：判据只认「滚动条**外观**」声明（CSS_CODE 已剥注释；stripComments 幂等防御）：
+         · 命中 = `::-webkit-scrollbar*` 伪元素 / `scrollbar-width:` / `scrollbar-color:`；
+         · 放行 = `scrollbar-gutter:`（A-1161 的**布局**属性——预留槽位防窗口化抖动；误删会让边界抖）。
+         历史假红：A-1161 加入 `scrollbar-gutter: stable` 后，老判据 `/scrollbar/i` 整块命中
+         这条**正当布局声明** ⇒ 自 09-30 起守卫一直红（实测归因：不是注释，是声明本身）。 */
+      const body = stripComments(m[1]);
+      const bad = /::\s*-webkit-scrollbar|scrollbar-(width|color)\s*:/i.exec(body);
+      expect(bad, `\`.chat-scroll { … }\` 里又有滚动条外观声明了：${bad?.[0] ?? ""}`).toBeNull();
     }
     
 

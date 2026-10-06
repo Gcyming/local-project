@@ -79,8 +79,8 @@ describe("A-1061④-B 接线：谁在什么时候上报 / 透传 / 收掉", () =
     expect(at429, "429 重试没有上报").toBeGreaterThan(-1);
     expect(atNet, "网络级重试没有上报").toBeGreaterThan(-1);
     
-    expect(src.indexOf("await sleep(waitMs);")).toBeGreaterThan(at429);
-    expect(src.indexOf("await sleep(netWaitMs);")).toBeGreaterThan(atNet);
+    expect(src.indexOf("await sleepAbortable(waitMs, externalSignal);")).toBeGreaterThan(at429);
+    expect(src.indexOf("await sleepAbortable(netWaitMs, externalSignal);")).toBeGreaterThan(atNet);
   });
 
   it("切换备用模型也上报（此前是静默的）", () => {

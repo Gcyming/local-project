@@ -184,12 +184,6 @@ describe("A-1035 ④ 接线守卫（函数写对了但没人调用 = 白写）",
     expect(readText("core-ts/src/services/chat.ts")).toMatch(/ke\.review\(agent\.persona/);
   });
 
-  it("Swarm 路径同样接线（不能只修 chat 一份）", () => {
-    const src = readText("core-ts/src/services/swarm.ts");
-    expect(src).toMatch(/knowledgeTraits:\s*ke\s*\?\s*ke\.getPromotableTraits\(\)/);
-    expect(src).toMatch(/ke\.review\(agent\.persona/);
-  });
-
   it("工具使用必须回写成知识（能力→知识那一跳）", () => {
     const src = readText("core-ts/src/services/chat.ts");
     expect(src).toMatch(/tool\.\$\{t\}\.\$\{success \? "success" : "fail"\}/);

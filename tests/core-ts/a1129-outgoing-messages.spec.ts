@@ -190,7 +190,7 @@ describe("A-1129-C 接线：唯一分派点（覆盖四个协议 + tool_loop 的
     
 
 
-    const chatAt = ROUTER_C.indexOf("async chat(payload: ChatRequest)");
+    const chatAt = ROUTER_C.indexOf("async chat(payload: ChatRequest");
     expect(chatAt, "找不到 chat() 入口").toBeGreaterThan(-1);
     const chatPrelude = ROUTER_C.slice(chatAt, ROUTER_C.indexOf("const chain = this.fallbackChain", chatAt));
     expect(chatPrelude, "chat() 没过门 —— 非流式路径照旧 400").toContain("sanitizeWirePayload(payload)");

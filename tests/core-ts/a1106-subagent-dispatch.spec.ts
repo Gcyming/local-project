@@ -151,8 +151,8 @@ describe("A-1106 Q 组 — 子代理前台等待必须可中断（「停止按�
 
   it("Q8 ⚠️ 中断后必须**如实归因**，并说清子代理仍在跑（否则主 Agent 会去重派一个用户已不想等的任务）", () => {
     expect(countOf(BUILTIN, "if (signal?.aborted) {"), "两个子代理工具都要有中断优先归因").toBe(2);
-    expect(countOf(BUILTIN, "[已停止等待]"), "两处归因文案").toBe(2);
-    expect(countOf(BUILTIN, "仍在后台继续执行"), "必须告知子代理没有被取消").toBe(2);
+    expect(countOf(BUILTIN, "[已停止等待]"), "三处归因文案（单发派发 / 批量派发 / 结果收取）").toBe(3);
+    expect(countOf(BUILTIN, "仍在后台继续执行"), "必须告知子代理没有被取消").toBe(3);
   });
 
   

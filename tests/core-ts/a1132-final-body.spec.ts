@@ -98,8 +98,9 @@ describe("A-1132-B 接线：两条工具循环路径**共用**同一判据", () 
 
   it("⚠️ **中断 / 预算**两条路径仍用 `allText`（保留已产出、不丢弃 —— 与「交付哪一段」是两件事）", () => {
     const interrupt = LOOP_C.split("text: allText,").length - 1;
-    expect(interrupt, `中断路径的 \`text: allText\` 有 ${interrupt} 处，应为 1 —— 被顺手改成 pickFinalBody 的话，` +
-      "用户一按停止，已产出的正文就被截成「收尾那一轮」（可能只有半句）").toBe(1);
+    expect(interrupt, `中断路径的 \`text: allText\` 有 ${interrupt} 处，应为 2（run 与 runStream 各一处；` +
+      "A-1194 给非流式 run 补了中断返回，同样必须保留已产出）—— 被顺手改成 pickFinalBody 的话，" +
+      "用户一按停止，已产出的正文就被截成「收尾那一轮」（可能只有半句）").toBe(2);
     const budget = LOOP_C.split("const text = allText ? allText + note").length - 1;
     expect(budget, `预算熔断路径有 ${budget} 处，应为 2（run 与 runStream 各一）—— 它们同样必须保留已产出`).toBe(2);
   });
