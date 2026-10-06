@@ -2,7 +2,7 @@
 
 本地优先的 AI Agent 平台：Electron 桌面客户端 + TypeScript 调度核心 + Python 后端，内置 llama.cpp 本地推理。
 
-- 当前版本：**v0.0.2** —— [Releases](https://github.com/Gcyming/local-project/releases/tag/v0.0.2)
+- 当前版本：**v0.0.9**（`package.json`）—— [Releases](https://github.com/Gcyming/local-project/releases)
 - 平台：Windows x64（安装包 / 便携版）。Linux 仅有子项目脚本，未发布二进制。
 
 ## 它解决什么
@@ -14,10 +14,11 @@ Slime 把「Agent」当成持久对象管理：身份、记忆、人格参数、
 ## 仓库结构
 
 ```
-core-ts/    TypeScript 调度核心：会话 / 工具轮 / 沙箱 / 记忆 / 心智 / 模型服务 / MCP / Swarm / 技能
+core-ts/    TypeScript 调度核心：会话 / 工具轮 / 沙箱 / 记忆 / 心智 / 模型服务 / MCP / 子代理 / 技能
 gui/        Electron 客户端（主进程内嵌 core-ts；渲染层 React 19 + TypeScript）
-core/       Python 业务核心：LLM 客户端、Agent、执行器
-sidecar/    Python 推理侧车（llama-server / BGE-M3 嵌入）
+gateway-ts/ OpenAI 兼容 HTTP 网关（Fastify 薄壳，业务调 core-ts；默认 19110）
+core/       Python 业务核心：LLM 客户端、Agent、执行器（CLI 用）
+sidecar/    Python 推理侧车（silam 情感脑 stdio；llama-server 由 core-ts 的 model_server 拉起）
 tools/      Python 工具实现（含 agnes 媒体生成）
 shared/     契约层：openapi.yaml + zod / pydantic
 tests/      pytest（Python）+ vitest（TypeScript 守卫）
@@ -143,16 +144,19 @@ npm run dist:win:publish      # 同上，并发布到 GitHub Release
 
 ## 文档
 
+**完整文档索引见 [docs/README.md](docs/README.md)**（含状态标注：哪些是现状、哪些已归档）。
+
 | 文档 | 作用 |
 | --- | --- |
+| [docs/README.md](docs/README.md) | **文档总索引** —— 按用途分区 + 状态标注，找文档从这里进 |
 | [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) | 项目总览：改动时间线 + 功能/代码对照 |
 | [docs/长存架构规划.md](docs/长存架构规划.md) | 架构总纲：双栈架构、数据契约、身份移民协议 |
-| [docs/阶段日志.md](docs/阶段日志.md) | 阶段级里程碑与验收记录 |
+| [docs/slime-agent-loop-design.md](docs/slime-agent-loop-design.md) | Agent-Loop 设计定稿（三闸 / 上下文压缩 / 记忆写入裁决） |
+| [docs/阶段日志.md](docs/阶段日志.md) | 阶段级里程碑与验收记录（历史档案，不改写） |
 | [docs/Intelligence.md](docs/Intelligence.md) | 心智分层设计 |
-| [docs/sandbox_design.md](docs/sandbox_design.md) | 沙箱 L0–L5 设计 |
 | [docs/身份移民协议规格.md](docs/身份移民协议规格.md) | `.slimeagent` 包格式 v1.2 |
 | [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) | 已知问题登记 |
-| [docs/REVIEW_AGENT.md](docs/REVIEW_AGENT.md) | 问题登记表与修复日志 |
+| [docs/REVIEW_AGENT.md](docs/REVIEW_AGENT.md) | 审查框架 + 问题登记表（逐条修复流水已移入 `docs/_archive/`） |
 | [linux/README.md](linux/README.md) | Linux 子项目 |
 | [AGENTS.md](AGENTS.md) | Agent 的 Git 行为契约（提交粒度 / 分支 / 回滚） |
 
@@ -162,4 +166,4 @@ npm run dist:win:publish      # 同上，并发布到 GitHub Release
 - 便携版每次启动都会把内容解压到临时目录（electron-builder portable target 的固有行为），首次启动偏慢。
 - 安装包不含大模型 GGUF 权重，本地对话模型需自备或使用内置下载器。
 - Python 与 TypeScript 双栈并存：GUI 主链路走 core-ts，Python 侧仍保留 `slime_server.py` / `slime_cli.py` 与部分工具实现。
-- 仓库当前**没有 LICENSE 文件**，尚未声明开源许可；对外以开源方式发布前需先补上。
+- 仓库以 **Apache-2.0** 开源，全文见根目录 `LICENSE`；随包分发的第三方组件许可见根目录 `THIRD-PARTY-NOTICES.md`。
