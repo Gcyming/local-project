@@ -1,8 +1,9 @@
 {
   "name": "slime-gui",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "slime Electron GUI MVP (Phase 5)",
   "author": "slime",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Gcyming/local-project.git"

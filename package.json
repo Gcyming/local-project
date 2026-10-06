@@ -1,7 +1,8 @@
 {
   "name": "slime",
   "private": true,
-  "version": "0.0.8",
+  "license": "Apache-2.0",
+  "version": "0.0.9",
   "type": "module",
   "scripts": {
     "gen:contracts": "py scripts/gen_contracts.py",
