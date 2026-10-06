@@ -107,6 +107,7 @@ tools/ffmpeg/
 
 # ── 本地数据暂存 / 冒烟 / 一次性调试（易泄露内部结构，不入库）────────────
 _model_stage/
+_tmp-py-licenses/
 _smoke_cloud/
 _nf.txt
 _fix_*.py

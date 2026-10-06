@@ -38,8 +38,10 @@ const RAW_MUTATIONS = [
   {
     name: "3 睡完再上报（等于这段等待期仍然是静默的）",
     file: CLIENT,
-    from: "      noteUpstream(\"retry\", formatRetryNotice({ attempt, maxAttempts, waitMs, status: resp.status }));\n      await sleep(waitMs);",
-    to: "      await sleep(waitMs);\n      noteUpstream(\"retry\", formatRetryNotice({ attempt, maxAttempts, waitMs, status: resp.status }));",
+    /* A-1194：退避从 sleep 改为可中断的 sleepAbortable（终止按钮响应性）——锚同步更新。
+       变异语义不变：「先睡后报」= 等待期静默；abort 打断睡眠时该轮不上报。 */
+    from: "      noteUpstream(\"retry\", formatRetryNotice({ attempt, maxAttempts, waitMs, status: resp.status }));\n      await sleepAbortable(waitMs, externalSignal);",
+    to: "      await sleepAbortable(waitMs, externalSignal);\n      noteUpstream(\"retry\", formatRetryNotice({ attempt, maxAttempts, waitMs, status: resp.status }));",
   },
   {
     name: "4 切换备用模型不再上报（静默换模型）",

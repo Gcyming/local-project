@@ -180,20 +180,25 @@ export function eolProblems(mutations, root, readUtf8 = (p) => readFileSync(p, "
  */
 export function selfTestEolDetector(root, readUtf8 = (p) => readFileSync(p, "utf8")) {
   const bad = [];
+  /* A/B/D 走**虚拟样本**（注入 readUtf8），不再依赖仓库里恰好存在 CRLF 文件。
+     ⚠️ 2026-10-06 实测：`updater.ts` 已从 CRLF 变为 LF（旧夹具假定它恒为 CRLF）⇒
+     自检恒报失败、**全仓 mut 脚本都跑不了批**。虚拟样本让探针与仓库行尾现状解耦：
+     探针要测的是「检测能力」，不是「某个真实文件当前的字节」。 */
+  const virtualCrlfRead = () => "a;\r\nautoUpdater.autoDownload = false;\r\nlet currentStatus = 1;\r\n";
   // A. 行尾敏感：只在 CRLF 下命中
   const a = eolProblems([{
     name: "__selftest_eol_sensitive__",
-    file: "gui/src/main/updater.ts",
+    file: "virtual-selftest.ts",
     mutate: (t) => t.includes("autoUpdater.autoDownload = false;\r\n")
       ? t.replace("autoUpdater.autoDownload = false;\r\n", "") : t,
-  }], root, readUtf8);
+  }], root, virtualCrlfRead);
   if (a.length === 0) { bad.push("喂了『只在 CRLF 下命中』的锚点，却没有被检出 → 行尾敏感判据失效"); }
-  // B. 行尾污染：往 CRLF 文件里插 LF
+  // B. 行尾污染：往 CRLF 样本里插 LF
   const b = eolProblems([{
     name: "__selftest_eol_pollute__",
-    file: "gui/src/main/updater.ts",
+    file: "virtual-selftest.ts",
     mutate: (t) => t.replace("let currentStatus", "// x\nlet currentStatus"),
-  }], root, readUtf8);
+  }], root, virtualCrlfRead);
   if (b.length === 0) { bad.push("喂了『把 LF 插进 CRLF 文件』的锚点，却没有被检出 → 污染判据失效"); }
   // C. 读不到文件必须报错（而不是静默跳过）
   const c = eolProblems([{
@@ -205,9 +210,9 @@ export function selfTestEolDetector(root, readUtf8 = (p) => readFileSync(p, "utf
   // D. 干净的等价重写：不该误报
   const d = eolProblems([{
     name: "__selftest_clean__",
-    file: "gui/src/main/updater.ts",
+    file: "virtual-selftest.ts",
     mutate: (t) => t.replace("autoUpdater.autoDownload = false;", "autoUpdater.autoDownload = false;"),
-  }], root, readUtf8);
+  }], root, virtualCrlfRead);
   if (d.length !== 0) { bad.push("对『没有实际改动』的变异误报了"); }
   return bad;
 }
