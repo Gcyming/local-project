@@ -268,12 +268,10 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /* A-1198：安装官方示例扩展（活教材）—— 已存在则不覆盖。 */
     pluginsInstallExample: () =>
       ipcRenderer.invoke("slime:plugins:installExample") as Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
-    /* A-1198：扩展页「保存」—— 拨片/信任改动一次写盘（不热重载；随后 appRelaunch 统一生效）。 */
+    /* A-1198：扩展页「保存并生效」—— 拨片/信任改动一次写盘，主进程随后**重扫 + 广播**
+       使其生效并回带新快照（**不退出进程**，窗口不中断）。 */
     pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) =>
-      ipcRenderer.invoke("slime:plugins:applyChanges", payload) as Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; error?: string }>,
-    /* A-1198：重启整个 slime（保存扩展改动后统一加载）。 */
-    appRelaunch: () =>
-      ipcRenderer.invoke("slime:app:relaunch") as Promise<{ ok: boolean }>,
+      ipcRenderer.invoke("slime:plugins:applyChanges", payload) as Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; snapshot?: PluginSnapshotDTO; error?: string }>,
   },
   runtime: {
     
@@ -1002,10 +1000,8 @@ declare global {
         pluginsPageOpen: (name: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
         /* A-1198：安装官方示例扩展。 */
         pluginsInstallExample: () => Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
-        /* A-1198：扩展页保存（拨片/信任改动写盘）。 */
-        pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) => Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; error?: string }>;
-        /* A-1198：重启整个 slime。 */
-        appRelaunch: () => Promise<{ ok: boolean }>;
+        /* A-1198：扩展页保存并生效（写盘 + 重扫 + 广播，**不退出进程**；回带新快照）。 */
+        pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) => Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; snapshot?: PluginSnapshotDTO; error?: string }>;
       };
       runtime: {
         list: () => Promise<{

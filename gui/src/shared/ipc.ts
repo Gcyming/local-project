@@ -113,10 +113,8 @@ export const IPC_CHANNELS = {
   plugins_page_open: "slime:plugins:pageOpen",
   /** A-1198：安装官方示例扩展（从随包 template/plugins 复制到 config/plugins；已存在则拒绝覆盖）。 */
   plugins_install_example: "slime:plugins:installExample",
-  /** A-1198：统一保存扩展页的拨片 / 信任改动（一次写盘：停用名单 + trust.json；不热重载）。 */
+  /** A-1198：统一保存扩展页的拨片 / 信任改动（一次写盘 停用名单 + trust.json，随后重扫+广播使其生效；**不退出进程**）。 */
   plugins_apply_changes: "slime:plugins:applyChanges",
-  /** A-1198：重启整个 slime（app.relaunch）—— 「保存后统一生效」的落点。 */
-  app_relaunch: "slime:app:relaunch",
   
   plugins_changed: "slime:plugins:changed",
   chat_suggest: "slime:chat:suggest",

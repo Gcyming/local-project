@@ -79,30 +79,63 @@ describe("A-1196 ② 接线形状（防回退为假开关 / 防回退为逐个�
     expect(seg![0]).toMatch(/(?<![A-Za-z])unmarkPluginDisabled\(PLUGINS_DISABLED_FILE, name\)/);
   });
 
-  it("⚠️ 保存即统一生效点：apply_changes 段内**不许**热重载（A-1198 的核心口径）", () => {
+  it("⚠️ 保存即统一生效点：写盘后**必须重扫 + 广播**，且**绝不退出进程**（A-1198 核心口径）", () => {
     const src = read("gui/src/main/index.ts");
     const seg = /plugins_apply_changes[\s\S]*?\n  \}\);/.exec(src);
     expect(seg).not.toBeNull();
-    /* 生效点只有一个：写盘 + app.relaunch。若这里出现 reloadPlugins()，
-       就会退回「保存前就部分生效」——正是用户抱怨的慢 + 要刷页面。 */
-    expect(seg![0]).not.toMatch(/reloadPlugins\(\)/);
-    expect(seg![0]).not.toMatch(/state\.host\.unload\(/);
-    /* 重启通道真实存在（app.relaunch + app.exit，不是只写不重启）。 */
-    expect(src).toMatch(/IPC_CHANNELS\.app_relaunch[\s\S]*?app\.relaunch\(\)[\s\S]*?app\.exit\(0\)/);
+    /* 生效点 = 写盘 + 重扫装载+ 重装技能 + 广播。缺了广播 ⇒ 渲染层显示旧状态，
+       用户看到的还是「要刷页面才生效」（这正是当初的根因）。 */
+    expect(seg![0]).toMatch(/await runContribRescan\("applyChanges"\)/);
+    /* ⚠️ 顺序：重扫必须在「写盘全成功」之后 —— 提前跑 = 用旧盘状态扫一遍，等于没生效。
+       ⚠️ 用**计数 + 位置**双断言而不是「errors…return…runContribRescan」一条正则：
+       那样只要段内出现两次 runContribRescan（一次提前、一次照旧），正则照样命中（变异实测存活）。
+       这里要求：全段**恰好一次**调用，且它在 errors 早退之后。 */
+    const rescanCalls = seg![0].match(/runContribRescan\(/g) ?? [];
+    expect(rescanCalls).toHaveLength(1);
+    const iErr = seg![0].indexOf("if (errors.length > 0) {");
+    const iRescan = seg![0].indexOf("runContribRescan(");
+    expect(iErr).toBeGreaterThan(-1);
+    expect(iRescan).toBeGreaterThan(iErr);
+    /* 回带新快照（省一次往返，且立刻显示生效后的真实状态）。 */
+    expect(seg![0]).toMatch(/snapshot: snapshotPlugins\(next\)/);
   });
 
-  it("⚠️ 保存动作三段齐全：写盘 → 提示 → 真的重启（M8 的守卫；漏了「写盘但不重启」）", () => {
+  it("⚠️ 不许退出进程：app.relaunch/app.exit 已退场（用户口径「重启不退出」）", () => {
+    const src = read("gui/src/main/index.ts");
+    /* 用户明确否决了「保存后重启 slime」—— 退出程序不是"刷新状态"。
+       这里锁死：apply_changes 生效点不许出现任何退出调用。 */
+    const seg = /plugins_apply_changes[\s\S]*?\n  \}\);/.exec(src);
+    expect(seg![0]).not.toMatch(/app\.relaunch|app\.exit|process\.exit/);
+    /* 重启通道本身也要退场（留着就是假出口 + 守卫自相矛盾）。 */
+    expect(read("gui/src/shared/ipc.ts")).not.toMatch(/app_relaunch:/);
+    expect(read("gui/src/preload/index.ts")).not.toMatch(/appRelaunch:/);
+    expect(read("gui/src/renderer/pages/PluginsPanel.tsx")).not.toMatch(/appRelaunch/);
+    /* 全局也不该再有「重启 slime 承载生效」的通道。 */
+    expect(src).not.toMatch(/IPC_CHANNELS\.app_relaunch/);
+  });
+
+  it("⚠️ 保存动作齐全：写盘 → 用回带快照 → 清草稿 → 如实报错保留草稿", () => {
     const panel = read("gui/src/renderer/pages/PluginsPanel.tsx");
-    /* 只写盘不重启 = 用户还得手动重启（回到「要刷新页面才生效」的原问题）。 */
-    expect(panel).toMatch(/await a\.extras\.appRelaunch\(\)/);
-    /* 顺序：先 applyChanges 成功、再重启 —— 失败时必须留在草稿里不重启。 */
-    const idxApply = panel.indexOf("await a.extras.pluginsApplyChanges(");
-    const idxRelaunch = panel.indexOf("await a.extras.appRelaunch();");
-    expect(idxApply).toBeGreaterThan(-1);
-    expect(idxRelaunch).toBeGreaterThan(idxApply);
-    /* 写盘失败 ⇒ 如实报错且**不**继续重启（草稿保留、可重试）。 */
+    expect(panel).toMatch(/await a\.extras\.pluginsApplyChanges\(/);
+    /* 写盘失败 ⇒ 如实报错、**保留草稿**（可重试），不清空。 */
     expect(panel).toMatch(/if \(!res\?\.ok\) \{[\s\S]{0,220}?return;/);
     expect(panel).toMatch(/保存失败（改动仍在草稿里）/);
+    /* 成功 ⇒ 清草稿（否则下次进来还是"待生效"的假脏标记）。 */
+    expect(panel).toMatch(/setDraft\(emptyPluginDraft\(\)\);\s*\n\s*showNotice\(true,/);
+    /* 提示文案不许再宣称"重启"。 */
+    expect(panel).not.toMatch(/正在重启 slime|重启后统一生效|窗口会关闭/);
+  });
+
+  it("⚠️ 保存栏固定在右下角悬浮（用户口径：不在页面最上面）", () => {
+    const panel = read("gui/src/renderer/pages/PluginsPanel.tsx");
+    /* 必须 fixed + right + bottom 三件套；放在列表末尾（无 position）等于没有 ——
+       插件列表很长，用户改完拨片要滚回顶才找得到保存按钮。 */
+    expect(panel).toMatch(/position: "fixed", right: 20, bottom: 20/);
+    /* 高于设置页浮层（否则被对话框盖住）。 */
+    expect(panel).toMatch(/zIndex: 1200/);
+    /* 文案不许指引到"右上"。 */
+    expect(panel).not.toMatch(/点右上「保存/);
+    expect(panel).toMatch(/右下角/);
   });
 
   it("⚠️ 系统默认插件不可停用：保存段里的 unloadable 守卫在（M10 的守卫）", () => {
@@ -124,11 +157,11 @@ describe("A-1196 ② 接线形状（防回退为假开关 / 防回退为逐个�
     expect(read("gui/src/renderer/pages/PluginsPanel.tsx")).not.toMatch(/pluginsEnable|pluginsUnload/);
   });
 
-  it("契约与桥：统一保存 + 重启通道都在", () => {
+  it("契约与桥：统一保存通道在（重启通道已退场）", () => {
     expect(read("gui/src/shared/ipc.ts")).toMatch(/plugins_apply_changes: "slime:plugins:applyChanges"/);
-    expect(read("gui/src/shared/ipc.ts")).toMatch(/app_relaunch: "slime:app:relaunch"/);
     expect(read("gui/src/preload/index.ts")).toMatch(/pluginsApplyChanges:/);
-    expect(read("gui/src/preload/index.ts")).toMatch(/appRelaunch:/);
+    /* 回带快照类型必须声明（否则面板拿不到 res.snapshot）。 */
+    expect(read("gui/src/preload/index.ts")).toMatch(/pluginsApplyChanges:[\s\S]{0,400}?snapshot\?: PluginSnapshotDTO/);
   });
 
   it("UI：拨片只入草稿 + 保存按钮存在（不是即时应用）", () => {
@@ -139,9 +172,9 @@ describe("A-1196 ② 接线形状（防回退为假开关 / 防回退为逐个�
     /* 拨片回调只改草稿：onToggle 收整行 + 当前显示值（要 serverOn 才能判断"点回原值"）。 */
     expect(src).toMatch(/onToggle: \(row: PluginRow, shownOn: boolean\) => void/);
     expect(src).toMatch(/setToggleDraft\(d, row\.name, !shownOn, serverOn\)/);
-    /* 保存条：无草稿时不渲染，有草稿时才出现「保存并重启生效」。 */
+    /* 悬浮保存栏：无草稿时不渲染，有草稿时才出现「保存并生效」。 */
     expect(src).toMatch(/\{draftCount > 0 && \(/);
-    expect(src).toMatch(/保存并重启生效/);
-    expect(src).not.toMatch(/卸载中…/);
+    expect(src).toMatch(/保存并生效/);
+    expect(src).not.toMatch(/保存并重启生效|卸载中…/);
   });
 });

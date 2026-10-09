@@ -10,21 +10,33 @@
  * 即：启停/信任**不再逐个即时应用**（那是「慢 + 要刷页面」的根源），
  * 统一收敛到「记草稿 → 一次写盘 → app.relaunch 重启加载」这一个确定性生效点。
  *
+ * ## 2026-10-09 语义修订（用户对上一轮的两处否决）
+ *   1. **不退出进程**：上一轮做的是 app.relaunch + app.exit —— 用户明确否决
+ *      （「我要的是重启不退出，要的是刷新 slime 的状态」）。退出程序不是刷新状态。
+ *      现在的生效点 = 写盘 + runContribRescan（重扫 + 技能重装 + **广播**），
+ *      窗口全程不中断。广播是必需的一环：重扫只换主进程状态，渲染层不订阅就永远显示旧的。
+ *   2. **保存栏在右下角悬浮**：上一轮放在页面顶部 —— 用户否决
+ *      （「生效位置有问题，为什么是在页面最上面？…设置右下角的一个悬浮栏」）。
+ *      插件列表很长，放顶部等于要滚回去才找得到。必须是 position fixed + 高 zIndex。
+ *
  * ## 每条变异 / 它描述的缺陷 / 被哪条守卫抓住
  * | # | 变异点 | 缺陷（若回归） | 抓住它的守卫 |
  * |---|---|---|---|
  * | 1 | 点回原值不消草稿 | 假脏标记：明明与服务器一致还提示「待生效」 | trust ③草稿逻辑 |
- * | 2 | 草稿无脑记（不与服务器比） | 每点一下都脏，且永远消不掉 | trust ③草稿逻辑 |
+ * | 2 | 信任草稿写进 toggles | 保存时会被当成「停用该插件」写进禁用名单 | trust ③草稿逻辑 |
  * | 3 | 剪枝不剪「已与服务器一致」 | 外部变化后草稿变僵尸（保存时反复写同值） | trust ③草稿逻辑 |
  * | 4 | 剪枝不剪「插件已消失」 | 卸载后草稿仍留着（保存时刷不存在插件的错） | trust ③草稿逻辑 |
  * | 5 | 载荷不排序 | 同一草稿两次保存写出不同顺序的文件 | trust ③草稿逻辑 |
  * | 6 | 拨片直接改服务器状态（不入草稿） | 回退为逐个即时应用（慢+半生效） | toggle ②UI |
- * | 7 | 保存条恒显示（不看草稿数） | 无事也摆个「保存并重启」死按钮 | toggle ②UI |
- * | 8 | 保存后不重启 | 写盘了但能力不加载（用户还得手动重启） | toggle ②生效点 |
- * | 9 | 保存段内加回 reloadPlugins | 退回「保存前就部分生效」（半生效） | toggle ②生效点 |
+ * | 7 | 保存条恒显示（不看草稿数） | 无事也摆个「保存并生效」死按钮 | toggle ②UI |
+ * | 8 | 保存段删掉重扫+广播 | 写盘了但界面与能力都不变（保存了没反应） | toggle ②生效点 |
+ * | 9 | 重扫提到写盘之前 | 半套状态（用旧盘状态扫一遍=没生效） | toggle ②生效点 |
  * | 10 | 系统默认插件守卫删 | 能把 builtin 插件停用（越过不可卸载红线） | toggle ②接线 |
  * | 11 | trust 写盘换成读（不落盘） | 信任重启后丢失（开关是假的） | trust ③接线 |
  * | 12 | 旧逐个通道复活（enable） | 又有了「点了就即时应用」的假出口 | toggle ②旧通道退场 |
+ * | 13 | 悬浮栏改成非 fixed | 钉不住视口 ⇒ 长列表下要滚回顶才找得到（回归用户否决项） | toggle ②右下角悬浮 |
+ * | 14 | 悬浮栏 zIndex 压到浮层下 | 被设置对话框盖住（按钮点不到） | toggle ②右下角悬浮 |
+ * | 15 | 保存成功不清草稿 | 下次进来仍是「待生效」的假脏标记 | toggle ②保存动作齐全 |
  *
  * ⚠️ name 序号 == 数组位置（check-mut-anchors 逐条核对）；锚必须唯一；变异体保持语法合法。
  * ⚠️ 跑批：bash gui/scripts/_run-mut-batch.sh gui/scripts/mut-a1198-plugin-apply.mjs
@@ -126,21 +138,25 @@ const MUTATIONS = [
     ),
   },
   {
-    name: "8 保存后不重启（写盘但不加载）",
-    file: F_PANEL,
+    name: "8 保存段删掉重扫+广播（写盘但不生效）",
+    file: F_MAIN,
+    /* ⚠️ 2026-10-09 语义反转重打：用户否决「保存后重启 slime」（退出程序≠刷新状态），
+       生效点改为 runContribRescan（重扫+技能重装+广播）。删掉它 ⇒ 写盘了但界面/能力都不变，
+       用户看到的就是"保存了但没反应"。 */
     mutate: (t) => sub(
       t,
-      "      await a.extras.appRelaunch();",
-      "      /* mutated: 不重启 */",
+      "    await runContribRescan(\"applyChanges\");",
+      "    /* mutated: 不重扫不广播 */",
     ),
   },
   {
-    name: "9 保存段内加回 reloadPlugins（半生效）",
+    name: "9 重扫提到写盘之前（半套状态）",
     file: F_MAIN,
+    /* 重扫必须**晚于**全部写盘成功：提前跑 = 用旧状态扫一遍，等于没生效。 */
     mutate: (t) => sub(
       t,
-      "    const state = await ensurePluginHost();\n    const applied = { toggles: 0, trust: 0 };",
-      "    const state = await ensurePluginHost();\n    await reloadPlugins();\n    const applied = { toggles: 0, trust: 0 };",
+      "    const applied = { toggles: 0, trust: 0 };",
+      "    await runContribRescan(\"applyChanges-early\");\n    const applied = { toggles: 0, trust: 0 };",
     ),
   },
   {
@@ -168,6 +184,35 @@ const MUTATIONS = [
       t,
       "  plugins_reload: \"slime:plugins:reload\",",
       "  plugins_reload: \"slime:plugins:reload\",\n  plugins_enable: \"slime:plugins:enable\",",
+    ),
+  },
+  {
+    name: "13 保存栏改成非fixed（回到页面顶部/末尾）",
+    file: F_PANEL,
+    /* 用户口径：「生效位置有问题，为什么是在页面最上面？…设置右下角的一个悬浮栏」。
+       去掉 fixed ⇒ 悬浮栏钉不住视口，插件列表一长就找不到保存按钮（回归=滚回顶）。 */
+    mutate: (t) => sub(
+      t,
+      "          position: \"fixed\", right: 20, bottom: 20, zIndex: 1200,",
+      "          position: \"static\", marginBottom: 12, zIndex: 1200,",
+    ),
+  },
+  {
+    name: "14 悬浮栏 zIndex 压到浮层之下（被对话框盖住）",
+    file: F_PANEL,
+    mutate: (t) => sub(
+      t,
+      "          position: \"fixed\", right: 20, bottom: 20, zIndex: 1200,",
+      "          position: \"fixed\", right: 20, bottom: 20, zIndex: 5,",
+    ),
+  },
+  {
+    name: "15 保存成功后不清草稿（下次进来还是假待生效）",
+    file: F_PANEL,
+    mutate: (t) => sub(
+      t,
+      "      setDraft(emptyPluginDraft());\n      showNotice(true,",
+      "      showNotice(true,",
     ),
   },
 ];

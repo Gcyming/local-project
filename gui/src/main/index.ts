@@ -5597,9 +5597,17 @@ function registerIpcHandlers(): void {
     return { ok: true, snapshot: snapshotPlugins(state) };
   });
 
-  /* A-1198：扩展页「保存」—— 把草稿里的拨片 / 信任改动**一次写盘**（停用名单 + trust.json）。
-     ⚠️ 这里刻意**不做热重载**：写盘 + 随后的 `app_relaunch` 才是统一生效点
-     （用户口径：「拨片打开的扩展要保存后才统一生效；保存后刷新整个 slime 程序」）。
+  /* A-1198：扩展页「保存并生效」—— 把草稿里的拨片 / 信任改动**一次写盘**（停用名单 + trust.json），
+     然后**重扫装载 + 重装技能 + 广播**，让已打开的界面自己刷新。
+     ⚠️ **刻意不退出进程**（用户口径：「我要的是重启不退出，要的是刷新 slime 的状态」）：
+     早先这里做的是 `app.relaunch + app.exit`，用户明确否决——退出程序不是"刷新状态"。
+     现在的生效点 = **一次写盘 + 一次重扫 + 一次广播**，进程与窗口全程不中断：
+       · `reloadPlugins()` 自带「先撤销再重建」（host.load 会unload 旧贡献），
+         所以停用的插件工具/技能/槽位/皮肤/脚本**真的被撤下**，不需要重启来兜；
+       · `refreshAgentSkills()` 让技能贡献进Agent 上下文；
+       · `broadcastContribRescan()` 让 UiSlotHost / SettingsDialog / PluginThemeHost /
+         扩展页自身全量重算 —— 这正是原先"要刷页面"的根因（重扫只换主进程状态，
+         渲染层不订阅广播就永远显示旧的）。
      任一条写失败 ⇒ ok:false 并带回原因（界面保留草稿，可重试；写盘都是幂等的）。 */
   handleTrusted<{ toggles?: unknown; trust?: unknown }>(IPC_CHANNELS.plugins_apply_changes, async (_event, p) => {
     const state = await ensurePluginHost();
@@ -5638,21 +5646,12 @@ function registerIpcHandlers(): void {
     if (errors.length > 0) {
       return { ok: false as const, applied, error: errors.join("；") };
     }
-    return { ok: true as const, applied };
-  });
-
-  /* A-1198：重启整个 slime（用户口径：「保存后刷新整个 slime 程序以刷新 slime 状态加载扩展能力」）。
-     延迟 250ms —— 让本次 IPC 响应先回到渲染层（界面来得及显示「正在重启…」），再退出进程。 */
-  handleTrusted<void>(IPC_CHANNELS.app_relaunch, async () => {
-    setTimeout(() => {
-      try {
-        app.relaunch();
-        app.exit(0);
-      } catch (e) {
-        console.error(`[gui:app] 重启失败（请手动重启 slime）：${e instanceof Error ? e.message : String(e)}`);
-      }
-    }, 250);
-    return { ok: true as const };
+    /* ── 写盘全成功 ⇒ 立刻生效（不退出进程）──────────────────────────────
+       顺序有意为之：先全部写盘（失败可如实回报、界面保留草稿），再统一重扫。
+       任一写失败就**不重扫** —— 半套状态比"什么都没变"更难解释。 */
+    await runContribRescan("applyChanges");
+    const next = await ensurePluginHost();
+    return { ok: true as const, applied, snapshot: snapshotPlugins(next) };
   });
 
   /* A-1197 · B5（L4a page）：打开扩展自有页面 —— 按需起 `127.0.0.1` 静态服务

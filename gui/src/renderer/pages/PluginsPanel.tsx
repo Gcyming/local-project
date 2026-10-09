@@ -293,7 +293,7 @@ function SourcedPluginCard(props: {
   const serverOn = !disabled && !failed;
   const on = props.draftOn ?? serverOn;
   const shownTrusted = props.draftTrust ?? props.trusted === true;
-  /* 「待生效」标识：任一草稿值存在即算（保存并重启后才统一加载）。 */
+  /* 「待生效」标识：任一草稿值存在即算（保存后才统一加载）。 */
   const staged = props.draftOn !== undefined || props.draftTrust !== undefined;
   /* A-1197 · B1：设置区按需展开。设置项是持久数据，禁用插件后**保留**（关插件不该丢配置），
      但插件未装载时主进程拒读写⇒ 设置区会显示「不可用」而不是假装还能改。 */
@@ -316,7 +316,7 @@ function SourcedPluginCard(props: {
         />
         {staged && (
           <Badge text="待生效" tone="accent"
-            title="有未保存的改动 —— 点右上「保存并重启生效」后统一加载" />
+            title="有未保存的改动 —— 点右下角悬浮栏「保存并生效」后统一加载" />
         )}
         {hasSettings && (
           <Badge text={`设置 ${row.settingsCount} 项`} tone="dim"
@@ -340,8 +340,8 @@ function SourcedPluginCard(props: {
               on={shownTrusted}
               title={
                 shownTrusted
-                  ? "已信任：本插件声明的脚本会被装配为工具（子进程执行）。关闭 = 记入草稿，保存并重启后撤装。"
-                  : `本插件声明了 ${row.scriptCount} 个可执行脚本。打开开关表示你信任它并允许在本机以一次性子进程执行（cwd 限定在插件目录、30s 超时）；改动先入草稿，保存并重启后生效。`
+                  ? "已信任：本插件声明的脚本会被装配为工具（子进程执行）。关闭 = 记入草稿，保存后撤装。"
+                  : `本插件声明了 ${row.scriptCount} 个可执行脚本。打开开关表示你信任它并允许在本机以一次性子进程执行（cwd 限定在插件目录、30s 超时）；改动先入草稿，点右下角悬浮栏「保存并生效」后生效（不重启 slime）。`
               }
               onToggle={() => { props.onTrustToggle?.(row, shownTrusted); }}
             />
@@ -352,10 +352,10 @@ function SourcedPluginCard(props: {
             on={on}
             title={
               failed
-                ? "加载失败：修复插件目录内容后，打开开关并保存重启可重试装载"
+                ? "加载失败：修复插件目录内容后，打开开关并保存可重试装载"
                 : on
-                  ? "关闭 = 记入草稿；保存并重启后统一生效（该扩展的贡献全部撤下）"
-                  : "启用 = 记入草稿；保存并重启后统一生效"
+                  ? "关闭 = 记入草稿；保存后统一生效（该扩展的贡献全部撤下，界面自动刷新）"
+                  : "启用 = 记入草稿；保存后统一生效（不重启 slime）"
             }
             onToggle={() => { onToggle(row, on); }}
           />
@@ -622,9 +622,9 @@ export default function PluginsPanel(props: Props): JSX.Element {
   const [plugins, setPlugins] = React.useState<PluginRow[]>([]);
   const [rejected, setRejected] = React.useState<PluginRejectedRow[]>([]);
   const [pluginsFailed, setPluginsFailed] = React.useState(false);
-  /* A-1198：扩展页改为「草稿 → 保存 → 重启统一生效」（用户口径）。
+  /* A-1198：扩展页改为「草稿 → 保存 → 统一生效」（用户口径）。
      拨片与信任开关**不再即时写盘/热重载** —— 改动先进草稿（待生效标记 + 右上保存条），
-     点「保存并重启生效」才一次写盘并 app.relaunch。 */
+     点右下角悬浮栏「保存并生效」才一次写盘 + 主进程重扫 + 广播（**不退出进程**）。 */
   const [draft, setDraft] = React.useState<PluginDraftState>(emptyPluginDraft);
   const [saving, setSaving] = React.useState(false);
   const draftCount = pluginDraftCount(draft);
@@ -672,11 +672,14 @@ export default function PluginsPanel(props: Props): JSX.Element {
     }
   }, []);
 
-  /* ── A-1198：草稿 → 保存 → 重启统一生效（用户口径）───────────────────────────
-     拨片与信任开关都只改**草稿**（本地状态）；点「保存并重启生效」才一次写盘 + 重启。
+  /* ── A-1198：草稿 → 保存 → 统一生效（用户口径）─────────────────────────────
+     拨片与信任开关都只改**草稿**（本地状态）；点悬浮栏「保存并生效」才一次写盘 + 重扫 + 广播。
      为什么不再逐个即时应用：启停/信任都影响主进程装载状态（工具/技能/UI 槽位/皮肤/脚本装配），
      逐个应用又慢又会出现「一半生效、一半没生效，还要去刷页面」；
-     攒到一次保存 + 一次重启 = 确定性统一生效点（保存前怎么点都不动系统状态）。 */
+     攒到一次保存 = **一个**确定性生效点（保存前怎么点都不动系统状态）。
+     ⚠️ 生效**不退出进程**（用户口径：「我要的是重启不退出，要的是刷新 slime 的状态」）：
+     主进程写盘后走 reloadPlugins + refreshAgentSkills + 广播，窗口全程不中断。
+     ⚠️ 保存栏固定在**右下角**（用户口径：「为什么是在页面最上面？…设置右下角的一个悬浮栏」）。 */
 
   /** 拨片点击：desired = 点击后的期望值；serverOn = 服务端口径（禁用/加载失败 = 关）。 */
   const stageToggle = React.useCallback((row: PluginRow, shownOn: boolean): void => {
@@ -684,22 +687,22 @@ export default function PluginsPanel(props: Props): JSX.Element {
     setDraft((d) => setToggleDraft(d, row.name, !shownOn, serverOn));
   }, []);
 
-  /** 信任开关点击：同样只入草稿（保存重启后统一装配 / 撤装脚本工具）。 */
+  /** 信任开关点击：同样只入草稿（保存后统一装配 / 撤装脚本工具）。 */
   const stageTrust = React.useCallback((row: PluginRow, shownTrusted: boolean): void => {
     setDraft((d) => setTrustDraft(d, row.name, !shownTrusted, row.trusted === true));
   }, []);
 
-  /** 保存：一次写盘（停用名单 + trust.json）→ 重启整个 slime 统一加载扩展能力。 */
-  const doSaveAndRestart = React.useCallback(async (): Promise<void> => {
+  /** 保存：一次写盘（停用名单 + trust.json）→ 主进程重扫 + 广播 → 界面就地刷新（不退出）。 */
+  const doSaveAndApply = React.useCallback(async (): Promise<void> => {
     const a = api.current;
-    if (!a?.extras?.pluginsApplyChanges || !a.extras.appRelaunch) {
+    if (!a?.extras?.pluginsApplyChanges) {
       showNotice(false, "当前环境不支持保存扩展改动");
       return;
     }
     const n = pluginDraftCount(draft);
     const ok = await confirmAsync(
-      `保存 ${n} 项扩展改动并重启 slime？`,
-      "启停与信任改动会一起写盘；slime 会自动重启，重启后统一生效（窗口会关闭并自动重新打开）。",
+      `保存 ${n} 项扩展改动并立即生效？`,
+      "启停与信任改动会一起写盘，随后主进程重扫装载并刷新界面（**不会退出或重启 slime**，窗口全程不中断）。",
     );
     if (!ok) { return; }
     setSaving(true);
@@ -709,8 +712,15 @@ export default function PluginsPanel(props: Props): JSX.Element {
         showNotice(false, res?.error ? `保存失败（改动仍在草稿里）：${String(res.error)}` : "保存失败（改动仍在草稿里）");
         return;
       }
-      showNotice(true, "已保存，正在重启 slime 以加载扩展能力…");
-      await a.extras.appRelaunch();
+      /* 快照直接带回：省一次往返，且立刻显示生效后的真实状态（不再等广播）。 */
+      const snap = res.snapshot ? normalizeSnapshot(res.snapshot) : null;
+      if (snap) {
+        setPlugins(snap.plugins);
+        setRejected(snap.rejected);
+        setPluginsFailed(false);
+      }
+      setDraft(emptyPluginDraft());
+      showNotice(true, `已保存并生效（${res.applied?.toggles ?? 0} 项启停 · ${res.applied?.trust ?? 0} 项信任）`);
     } catch (e) {
       showNotice(false, `保存失败（改动仍在草稿里）：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -865,35 +875,10 @@ export default function PluginsPanel(props: Props): JSX.Element {
           onClick={() => { void doReload(); }}>重新装载</button>
       </div>
 
-      {/* A-1198：草稿保存条 —— 拨片/信任的改动先攒在这里，点保存才一次写盘 + 重启 slime。
-          没有草稿时不渲染（不给「无事可做」的死按钮占位）。 */}
-      {draftCount > 0 && (
-        <div style={{
-          marginBottom: 12, padding: "10px 14px", borderRadius: 10,
-          border: "1px solid var(--warning)", background: "var(--surface-2)",
-          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        }}>
-          <Badge text="待生效" tone="accent" title="以下改动还没写盘 —— 保存并重启 slime 后统一生效" />
-          <span style={{ fontSize: 12.5, color: "var(--text-muted)", flex: 1, lineHeight: 1.6 }}>
-            共 {draftCount} 项改动（启停 {Object.keys(draft.toggles).length} · 信任 {Object.keys(draft.trust).length}）。
-            保存后 slime 会重启一次，重新加载全部扩展能力（技能 / 工具 / 界面槽位 / 皮肤 / 脚本）。
-          </span>
-          <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
-            onClick={() => { setDraft(emptyPluginDraft()); }}
-            title="丢弃全部未保存的改动，拨片回到服务器当前状态">放弃改动</button>
-          <button className="btn" style={{ fontSize: 11.5, padding: "4px 12px", fontWeight: 700 }}
-            disabled={saving}
-            onClick={() => { void doSaveAndRestart(); }}
-            title="一次写盘（停用名单 + 脚本信任）并重启 slime，重启后所有扩展改动统一生效">
-            {saving ? "保存中…" : "保存并重启生效"}
-          </button>
-        </div>
-      )}
-
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
         本页是三类插件来源的总览 —— 系统默认随应用提供不可卸载，Agent 自建与外部载入可用右侧拨片开关启停；
-        拨片与信任开关<b>不会立即生效</b>：改动先记入草稿，点右上「保存并重启生效」才统一加载。
-        技能与 MCP 两类机制仍各自独立管理，不受插件容器管辖。
+        拨片与信任开关<b>不会立即生效</b>：改动先记入草稿，点右下角悬浮栏的「保存并生效」统一加载
+        （<b>不会退出或重启 slime</b>）。技能与 MCP 两类机制仍各自独立管理，不受插件容器管辖。
         扩展一律是<b>外部</b>能力（可开可关、卸下即恢复原样）——<b>不改动应用本身</b>。
       </div>
 
@@ -1094,6 +1079,43 @@ export default function PluginsPanel(props: Props): JSX.Element {
 
       {loading && (
         <div style={{ fontSize: 12.5, color: "var(--text-dim)", paddingTop: 2 }}>读取中…</div>
+      )}
+
+      {/* A-1198：草稿保存栏 —— **固定在右下角的悬浮栏**（用户口径：「生效位置有问题，
+          为什么是在页面最上面？这样用户不方便啊，你设置右下角的一个悬浮栏吧」）。
+          为什么必须 fixed 而不是塞在列表末尾：插件列表很长（内置 31 组 + 磁盘若干），
+          改完拨片在顶部时用户要滚回顶才能找到保存按钮 —— 悬浮栏在任何滚动位置都在视线内。
+          没有草稿时不渲染（不给「无事可做」的死按钮占位）。 */}
+      {draftCount > 0 && (
+        <div style={{
+          position: "fixed", right: 20, bottom: 20, zIndex: 1200,
+          maxWidth: 460, padding: "12px 14px", borderRadius: 12,
+          border: "1px solid var(--warning)",
+          background: "var(--surface-2)", boxShadow: "0 8px 28px rgba(0,0,0,0.32)",
+          display: "flex", flexDirection: "column", gap: 8,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Badge text="待生效" tone="accent" title="这些改动还没写盘 —— 保存后统一加载" />
+            <span style={{ fontSize: 12.5, color: "var(--text-muted)", flex: 1, lineHeight: 1.6 }}>
+              共 {draftCount} 项改动（启停 {Object.keys(draft.toggles).length} · 信任 {Object.keys(draft.trust).length}）
+            </span>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6 }}>
+            保存后主进程重扫装载并刷新界面（技能 / 工具 / 界面槽位 / 皮肤 / 脚本）——<b>不重启 slime</b>。
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ flex: 1 }} />
+            <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
+              onClick={() => { setDraft(emptyPluginDraft()); }}
+              title="丢弃全部未保存的改动，拨片回到服务器当前状态">放弃改动</button>
+            <button className="btn primary" style={{ fontSize: 11.5, padding: "5px 14px", fontWeight: 700 }}
+              disabled={saving}
+              onClick={() => { void doSaveAndApply(); }}
+              title="一次写盘（停用名单 + 脚本信任）后重扫装载并刷新界面；slime 全程不退出">
+              {saving ? "保存中…" : "保存并生效"}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

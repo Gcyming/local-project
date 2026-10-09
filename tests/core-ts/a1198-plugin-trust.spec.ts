@@ -109,14 +109,24 @@ describe("A-1198-T ③ 主进程接线形状：未信任 ⇒ 不装配 / 执行�
     expect(main).toMatch(/mounted\.push\(toolName\)/);
   });
 
-  it("⚠️ 信任写盘收敛到统一保存段、且段内不热重载（A-1198 生效口径）", () => {
-    /* 旧的 plugins_trust_set（写完立刻 reloadPlugins）已删 —— 即时生效正是用户抱怨的
-       「生效慢 + 要刷页面」。现在信任只经plugins_apply_changes 写盘，由 app.relaunch 统一生效。 */
+  it("⚠️ 信任写盘收敛到统一保存段、随重扫生效且**不退出进程**（A-1198 口径）", () => {
+    /* 旧的 plugins_trust_set（写完立刻 reloadPlugins）已删 —— 逐个即时应用正是用户抱怨的
+       「生效慢 + 要刷页面」。现在信任只经 plugins_apply_changes 写盘，
+       随后 runContribRescan（重扫 + 重装技能 + 广播）生效，**slime 全程不退出**。 */
     const seg = /plugins_apply_changes[\s\S]*?\n  \}\);/.exec(main);
     expect(seg).not.toBeNull();
     expect(seg![0]).toMatch(/writePluginTrust\(dir, t\?\.trusted === true\)/);
-    expect(seg![0]).not.toMatch(/reloadPlugins\(\)/);
+    /* 生效点：重扫 + 广播（缺广播 ⇒ 界面不刷新 = 老问题）。 */
+    expect(seg![0]).toMatch(/await runContribRescan\("applyChanges"\)/);
+    /* 不许退出进程。 */
+    expect(seg![0]).not.toMatch(/app\.relaunch|app\.exit/);
     expect(main).not.toMatch(/IPC_CHANNELS\.plugins_trust_set/);
+    /* runContribRescan 自身也必须真的广播（否则"生效"只停在主进程）。 */
+    const rescan = /function runContribRescan[\s\S]*?\n\}/.exec(main);
+    expect(rescan).not.toBeNull();
+    expect(rescan![0]).toMatch(/await reloadPlugins\(\)/);
+    expect(rescan![0]).toMatch(/await refreshAgentSkills\(\)/);
+    expect(rescan![0]).toMatch(/broadcastContribRescan\(reason\)/);
   });
 
   it("扩展页有信任开关（仅 scriptCount>0 时显示）+ 点击只入草稿、统一保存", () => {
