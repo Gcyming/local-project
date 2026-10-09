@@ -13,6 +13,7 @@ import { PROJECT_ROOT } from "../../core-ts/src/paths.js";
 import { readPluginTrust, writePluginTrust, PLUGIN_TRUST_FILE } from "../../core-ts/src/plugin/trust.js";
 import { parsePluginScripts } from "../../core-ts/src/plugin/contributes.js";
 import { parsePluginManifest } from "../../core-ts/src/plugin/manifest.js";
+import * as draft from "../../gui/src/renderer/pages/pluginsDraft.js";
 
 const read = (rel: string): string => readFileSync(join(PROJECT_ROOT, rel), "utf8");
 
@@ -108,17 +109,50 @@ describe("A-1198-T ③ 主进程接线形状：未信任 ⇒ 不装配 / 执行�
     expect(main).toMatch(/mounted\.push\(toolName\)/);
   });
 
-  it("信任 set 后触发重装（否则开关是假的）", () => {
-    const seg = /plugins_trust_set[\s\S]*?\n  \}\);/.exec(main);
+  it("⚠️ 信任写盘收敛到统一保存段、且段内不热重载（A-1198 生效口径）", () => {
+    /* 旧的 plugins_trust_set（写完立刻 reloadPlugins）已删 —— 即时生效正是用户抱怨的
+       「生效慢 + 要刷页面」。现在信任只经plugins_apply_changes 写盘，由 app.relaunch 统一生效。 */
+    const seg = /plugins_apply_changes[\s\S]*?\n  \}\);/.exec(main);
     expect(seg).not.toBeNull();
-    expect(seg![0]).toMatch(/writePluginTrust\(dir, trusted\)/);
-    expect(seg![0]).toMatch(/await reloadPlugins\(\)/);
+    expect(seg![0]).toMatch(/writePluginTrust\(dir, t\?\.trusted === true\)/);
+    expect(seg![0]).not.toMatch(/reloadPlugins\(\)/);
+    expect(main).not.toMatch(/IPC_CHANNELS\.plugins_trust_set/);
   });
 
-  it("扩展页有信任开关（仅 scriptCount>0 时显示）+ doTrust 调 pluginsTrustSet", () => {
+  it("扩展页有信任开关（仅 scriptCount>0 时显示）+ 点击只入草稿、统一保存", () => {
     const panel = read("gui/src/renderer/pages/PluginsPanel.tsx");
     expect(panel).toMatch(/\(row\.scriptCount \?\? 0\) > 0 &&/);
-    expect(panel).toMatch(/pluginsTrustSet\(name, trusted\)/);
     expect(panel).toContain("信任脚本");
+    /* 拨片与信任都只改草稿 —— 不再有即时应用的调用点。 */
+    expect(panel).toMatch(/setTrustDraft\(d, row\.name, !shownTrusted, row\.trusted === true\)/);
+    expect(panel).toMatch(/pluginsApplyChanges\(pluginDraftPayload\(draft\)\)/);
+    expect(panel).not.toMatch(/pluginsTrustSet|pluginsTrustGet/);
+  });
+
+  it("草稿纯逻辑：只记与服务器不同的项 / 点回原值即消草 / 剪枝不产僵尸（A-1198）", () => {
+    const d = draft;
+    /* 点一下：与服务器不同 ⇒ 有一条草稿。 */
+    const d1 = d.setToggleDraft(d.emptyPluginDraft(), "a", false, true);
+    expect(d.pluginDraftCount(d1)).toBe(1);
+    expect(d.isRowStaged(d1, "a")).toBe(true);
+    /* 点回原值 ⇒ 草稿自动消失（不给假脏标记）。 */
+    expect(d.pluginDraftCount(d.setToggleDraft(d1, "a", true, true))).toBe(0);
+    /* 信任草稿不许写进 toggles（否则保存时会被当成「停用该插件」写进禁用名单）。 */
+    const dTrust = d.setTrustDraft(d.emptyPluginDraft(), "t", true, false);
+    expect(Object.keys(dTrust.trust)).toEqual(["t"]);
+    expect(Object.keys(dTrust.toggles)).toEqual([]);
+    /* 载荷按名字排序（写盘稳定）：两个名字插反顺序插入，载荷仍须升序。 */
+    const d3 = d.setToggleDraft(d.setToggleDraft(d.emptyPluginDraft(), "zz", false, true), "aa", false, true);
+    expect(d.pluginDraftPayload(d3).toggles.map((x) => x.name)).toEqual(["aa", "zz"]);
+    const d2 = d.setTrustDraft(d.setToggleDraft(d.emptyPluginDraft(), "z", false, true), "b", true, false);
+    expect(d.pluginDraftPayload(d2)).toEqual({
+      toggles: [{ name: "z", enabled: false }],
+      trust: [{ name: "b", trusted: true }],
+    });
+    /* 剪枝：插件已消失 ⇒ 丢弃；已与服务器一致 ⇒ 丢弃。 */
+    const server = new Map([["a", { on: true, trusted: false }]]);
+    expect(d.pluginDraftCount(d.prunePluginDraft(d1, server))).toBe(1);
+    expect(d.pluginDraftCount(d.prunePluginDraft(d1, new Map([["a", { on: false, trusted: false }]])))).toBe(0);
+    expect(d.pluginDraftCount(d.prunePluginDraft(d1, new Map()))).toBe(0);
   });
 });

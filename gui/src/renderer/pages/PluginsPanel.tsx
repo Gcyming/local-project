@@ -1,4 +1,15 @@
 import React, { type JSX } from "react";
+import { confirmAsync } from "../dialog.js";
+import {
+  emptyPluginDraft,
+  pluginDraftCount,
+  pluginDraftPayload,
+  prunePluginDraft,
+  setToggleDraft,
+  setTrustDraft,
+  type PluginDraftState,
+  type PluginServerState,
+} from "./pluginsDraft.js";
 
 interface SkillRow {
   name: string;
@@ -263,20 +274,27 @@ function normalizeSnapshot(raw: unknown): PluginSnapshot | null {
 
 function SourcedPluginCard(props: {
   row: PluginRow;
-  onToggle: (name: string, currentlyOn: boolean) => void;
-  busy: boolean;
+  /* A-1198：拨片/信任只改草稿 —— 报告「行 + 当前显示值」，由面板折算 desired 并入草稿。 */
+  onToggle: (row: PluginRow, shownOn: boolean) => void;
   onSettingSubmit: (plugin: string, key: string, value: unknown) => void;
   busySettingKey: string | null;
   settingsToken: number;
+  /* A-1198：草稿值（undefined = 无草稿，显示服务器状态）。 */
+  draftOn?: boolean;
   /* A-1197 · B4（T1 脚本信任）：仅当 row.scriptCount > 0 时显示开关。 */
   trusted?: boolean;
-  busyTrust?: boolean;
-  onTrustToggle?: (name: string, trusted: boolean) => void;
+  draftTrust?: boolean;
+  onTrustToggle?: (row: PluginRow, shownTrusted: boolean) => void;
 }): JSX.Element {
-  const { row, onToggle, busy } = props;
+  const { row, onToggle } = props;
   const failed = row.status === "failed";
   const disabled = row.status === "disabled";
-  const on = !disabled && !failed;
+  /* 服务器状态（禁用/加载失败 = 关）；显示值草稿优先。 */
+  const serverOn = !disabled && !failed;
+  const on = props.draftOn ?? serverOn;
+  const shownTrusted = props.draftTrust ?? props.trusted === true;
+  /* 「待生效」标识：任一草稿值存在即算（保存并重启后才统一加载）。 */
+  const staged = props.draftOn !== undefined || props.draftTrust !== undefined;
   /* A-1197 · B1：设置区按需展开。设置项是持久数据，禁用插件后**保留**（关插件不该丢配置），
      但插件未装载时主进程拒读写⇒ 设置区会显示「不可用」而不是假装还能改。 */
   const hasSettings = (row.settingsCount ?? 0) > 0;
@@ -296,6 +314,10 @@ function SourcedPluginCard(props: {
           tone="dim"
           title={row.status}
         />
+        {staged && (
+          <Badge text="待生效" tone="accent"
+            title="有未保存的改动 —— 点右上「保存并重启生效」后统一加载" />
+        )}
         {hasSettings && (
           <Badge text={`设置 ${row.settingsCount} 项`} tone="dim"
             title="插件声明的设置项（落在插件自己的目录，不影响主配置）" />
@@ -311,33 +333,31 @@ function SourcedPluginCard(props: {
           /* A-1197 · B4（T1）：脚本信任开关 —— 开 = 允许本插件的脚本被装配为可执行工具
              （一次性子进程、cwd 限定在插件目录、30s 超时）；关 = 立即撤装。 */
           <>
-            <span style={{ fontSize: 11, color: props.trusted ? "var(--warning)" : "var(--text-dim)", flexShrink: 0 }}>
+            <span style={{ fontSize: 11, color: shownTrusted ? "var(--warning)" : "var(--text-dim)", flexShrink: 0 }}>
               信任脚本（{row.scriptCount}）
             </span>
             <ToggleSwitch
-              on={props.trusted === true}
-              busy={props.busyTrust}
+              on={shownTrusted}
               title={
-                props.trusted
-                  ? "已信任：本插件声明的脚本会被装配为工具（子进程执行）。关闭 = 立即撤装、工具注销。"
-                  : `本插件声明了 ${row.scriptCount} 个可执行脚本。打开开关表示你信任它并允许在本机以一次性子进程执行（cwd 限定在插件目录、30s 超时）。`
+                shownTrusted
+                  ? "已信任：本插件声明的脚本会被装配为工具（子进程执行）。关闭 = 记入草稿，保存并重启后撤装。"
+                  : `本插件声明了 ${row.scriptCount} 个可执行脚本。打开开关表示你信任它并允许在本机以一次性子进程执行（cwd 限定在插件目录、30s 超时）；改动先入草稿，保存并重启后生效。`
               }
-              onToggle={() => { props.onTrustToggle?.(row.name, props.trusted !== true); }}
+              onToggle={() => { props.onTrustToggle?.(row, shownTrusted); }}
             />
           </>
         )}
         {row.unloadable && (
           <ToggleSwitch
             on={on}
-            busy={busy}
             title={
               failed
-                ? "加载失败：修复插件目录内容后，打开开关重试装载"
+                ? "加载失败：修复插件目录内容后，打开开关并保存重启可重试装载"
                 : on
-                  ? "关闭 = 卸载该插件（记录进禁用名单，重启后保持关闭）"
-                  : "打开 = 重新装载该插件"
+                  ? "关闭 = 记入草稿；保存并重启后统一生效（该扩展的贡献全部撤下）"
+                  : "启用 = 记入草稿；保存并重启后统一生效"
             }
-            onToggle={() => { onToggle(row.name, on && !failed); }}
+            onToggle={() => { onToggle(row, on); }}
           />
         )}
       </div>
@@ -602,9 +622,12 @@ export default function PluginsPanel(props: Props): JSX.Element {
   const [plugins, setPlugins] = React.useState<PluginRow[]>([]);
   const [rejected, setRejected] = React.useState<PluginRejectedRow[]>([]);
   const [pluginsFailed, setPluginsFailed] = React.useState(false);
-  const [busyName, setBusyName] = React.useState<string | null>(null);
-  /* A-1197 · B4：信任开关的忙碌态（独立于拨片的 busyName —— 两个开关可各自转）。 */
-  const [busyTrustName, setBusyTrustName] = React.useState<string | null>(null);
+  /* A-1198：扩展页改为「草稿 → 保存 → 重启统一生效」（用户口径）。
+     拨片与信任开关**不再即时写盘/热重载** —— 改动先进草稿（待生效标记 + 右上保存条），
+     点「保存并重启生效」才一次写盘并 app.relaunch。 */
+  const [draft, setDraft] = React.useState<PluginDraftState>(emptyPluginDraft);
+  const [saving, setSaving] = React.useState(false);
+  const draftCount = pluginDraftCount(draft);
   /** A-1197 · B1：正在写的设置项 `plugin:key`；写完递增 token 让设置区重拉。 */
   const [busySettingKey, setBusySettingKey] = React.useState<string | null>(null);
   const [settingsToken, setSettingsToken] = React.useState(0);
@@ -649,92 +672,60 @@ export default function PluginsPanel(props: Props): JSX.Element {
     }
   }, []);
 
-  const doUnload = React.useCallback(async (name: string): Promise<void> => {
+  /* ── A-1198：草稿 → 保存 → 重启统一生效（用户口径）───────────────────────────
+     拨片与信任开关都只改**草稿**（本地状态）；点「保存并重启生效」才一次写盘 + 重启。
+     为什么不再逐个即时应用：启停/信任都影响主进程装载状态（工具/技能/UI 槽位/皮肤/脚本装配），
+     逐个应用又慢又会出现「一半生效、一半没生效，还要去刷页面」；
+     攒到一次保存 + 一次重启 = 确定性统一生效点（保存前怎么点都不动系统状态）。 */
+
+  /** 拨片点击：desired = 点击后的期望值；serverOn = 服务端口径（禁用/加载失败 = 关）。 */
+  const stageToggle = React.useCallback((row: PluginRow, shownOn: boolean): void => {
+    const serverOn = row.status !== "disabled" && row.status !== "failed";
+    setDraft((d) => setToggleDraft(d, row.name, !shownOn, serverOn));
+  }, []);
+
+  /** 信任开关点击：同样只入草稿（保存重启后统一装配 / 撤装脚本工具）。 */
+  const stageTrust = React.useCallback((row: PluginRow, shownTrusted: boolean): void => {
+    setDraft((d) => setTrustDraft(d, row.name, !shownTrusted, row.trusted === true));
+  }, []);
+
+  /** 保存：一次写盘（停用名单 + trust.json）→ 重启整个 slime 统一加载扩展能力。 */
+  const doSaveAndRestart = React.useCallback(async (): Promise<void> => {
     const a = api.current;
-    if (!a?.extras?.pluginsUnload) {
-      showNotice(false, "当前环境不支持卸载插件");
+    if (!a?.extras?.pluginsApplyChanges || !a.extras.appRelaunch) {
+      showNotice(false, "当前环境不支持保存扩展改动");
       return;
     }
-    setBusyName(name);
+    const n = pluginDraftCount(draft);
+    const ok = await confirmAsync(
+      `保存 ${n} 项扩展改动并重启 slime？`,
+      "启停与信任改动会一起写盘；slime 会自动重启，重启后统一生效（窗口会关闭并自动重新打开）。",
+    );
+    if (!ok) { return; }
+    setSaving(true);
     try {
-      const res = await a.extras.pluginsUnload(name);
-      if (res?.ok) {
-        showNotice(true, `已关闭 ${name}（重启后保持关闭）`);
-      } else {
-        showNotice(false, res?.error ? `关闭 ${name} 失败：${res.error}` : `关闭 ${name} 失败`);
+      const res = await a.extras.pluginsApplyChanges(pluginDraftPayload(draft));
+      if (!res?.ok) {
+        showNotice(false, res?.error ? `保存失败（改动仍在草稿里）：${String(res.error)}` : "保存失败（改动仍在草稿里）");
+        return;
       }
+      showNotice(true, "已保存，正在重启 slime 以加载扩展能力…");
+      await a.extras.appRelaunch();
     } catch (e) {
-      showNotice(false, `关闭 ${name} 失败：${e instanceof Error ? e.message : String(e)}`);
+      showNotice(false, `保存失败（改动仍在草稿里）：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setBusyName(null);
-      await refresh();
+      setSaving(false);
     }
-  }, [refresh]);
+  }, [draft]);
 
-  /** A-1196：拨片开关「开」——从禁用名单移除并重扫装载；快照直接带回，免一次往返。 */
-  const doEnable = React.useCallback(async (name: string): Promise<void> => {
-    const a = api.current;
-    if (!a?.extras?.pluginsEnable) {
-      showNotice(false, "当前环境不支持启用插件");
-      return;
+  /** 列表刷新后的草稿剪枝：丢「已消失的插件」与「已与服务器一致」的条目（脏标记必须诚实）。 */
+  React.useEffect(() => {
+    const server = new Map<string, PluginServerState>();
+    for (const p of plugins) {
+      server.set(p.name, { on: p.status !== "disabled" && p.status !== "failed", trusted: p.trusted === true });
     }
-    setBusyName(name);
-    try {
-      const res = await a.extras.pluginsEnable(name);
-      const snap = res?.snapshot ? normalizeSnapshot(res.snapshot) : null;
-      if (snap) {
-        setPlugins(snap.plugins);
-        setRejected(snap.rejected);
-        setPluginsFailed(false);
-      }
-      if (res?.ok) {
-        showNotice(true, `已启用 ${name}`);
-      } else {
-        showNotice(false, res?.error ? `启用 ${name} 失败：${res.error}` : `启用 ${name} 失败`);
-      }
-      if (!snap) { await refresh(); }
-    } catch (e) {
-      showNotice(false, `启用 ${name} 失败：${e instanceof Error ? e.message : String(e)}`);
-      await refresh();
-    } finally {
-      setBusyName(null);
-    }
-  }, [refresh]);
-
-  const doToggle = React.useCallback((name: string, currentlyOn: boolean): void => {
-    if (currentlyOn) { void doUnload(name); } else { void doEnable(name); }
-  }, [doUnload, doEnable]);
-
-  /* A-1197 · B4（T1 脚本信任）：切换信任开关 —— 主进程写 trust.json 后自动重装，
-     快照直接带回（免一次往返）；失败如实提示（写盘失败/目录缺失都原样上抛）。 */
-  const doTrust = React.useCallback(async (name: string, trusted: boolean): Promise<void> => {
-    const a = api.current;
-    if (!a?.extras?.pluginsTrustSet) {
-      showNotice(false, "当前环境不支持脚本信任开关");
-      return;
-    }
-    setBusyTrustName(name);
-    try {
-      const res = await a.extras.pluginsTrustSet(name, trusted);
-      const snap = res?.snapshot ? normalizeSnapshot(res.snapshot) : null;
-      if (snap) {
-        setPlugins(snap.plugins);
-        setRejected(snap.rejected);
-        setPluginsFailed(false);
-      }
-      if (res?.ok) {
-        showNotice(true, trusted ? `已信任 ${name} 的脚本（脚本工具已装配）` : `已撤销 ${name} 的脚本信任（工具立即注销）`);
-      } else {
-        showNotice(false, res?.error ? `信任开关操作失败：${res.error}` : "信任开关操作失败");
-      }
-      if (!snap) { await refresh(); }
-    } catch (e) {
-      showNotice(false, `信任开关操作失败：${e instanceof Error ? e.message : String(e)}`);
-      await refresh();
-    } finally {
-      setBusyTrustName(null);
-    }
-  }, [refresh]);
+    setDraft((d) => prunePluginDraft(d, server));
+  }, [plugins]);
 
   /* A-1197 · B1：写设置项。**渲染层不做持久化判断**（那是主进程的事），
      这里只负责调通道 + 把结果如实显示（含主进程回传的 warnings）。 */
@@ -874,8 +865,34 @@ export default function PluginsPanel(props: Props): JSX.Element {
           onClick={() => { void doReload(); }}>重新装载</button>
       </div>
 
+      {/* A-1198：草稿保存条 —— 拨片/信任的改动先攒在这里，点保存才一次写盘 + 重启 slime。
+          没有草稿时不渲染（不给「无事可做」的死按钮占位）。 */}
+      {draftCount > 0 && (
+        <div style={{
+          marginBottom: 12, padding: "10px 14px", borderRadius: 10,
+          border: "1px solid var(--warning)", background: "var(--surface-2)",
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        }}>
+          <Badge text="待生效" tone="accent" title="以下改动还没写盘 —— 保存并重启 slime 后统一生效" />
+          <span style={{ fontSize: 12.5, color: "var(--text-muted)", flex: 1, lineHeight: 1.6 }}>
+            共 {draftCount} 项改动（启停 {Object.keys(draft.toggles).length} · 信任 {Object.keys(draft.trust).length}）。
+            保存后 slime 会重启一次，重新加载全部扩展能力（技能 / 工具 / 界面槽位 / 皮肤 / 脚本）。
+          </span>
+          <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
+            onClick={() => { setDraft(emptyPluginDraft()); }}
+            title="丢弃全部未保存的改动，拨片回到服务器当前状态">放弃改动</button>
+          <button className="btn" style={{ fontSize: 11.5, padding: "4px 12px", fontWeight: 700 }}
+            disabled={saving}
+            onClick={() => { void doSaveAndRestart(); }}
+            title="一次写盘（停用名单 + 脚本信任）并重启 slime，重启后所有扩展改动统一生效">
+            {saving ? "保存中…" : "保存并重启生效"}
+          </button>
+        </div>
+      )}
+
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
         本页是三类插件来源的总览 —— 系统默认随应用提供不可卸载，Agent 自建与外部载入可用右侧拨片开关启停；
+        拨片与信任开关<b>不会立即生效</b>：改动先记入草稿，点右上「保存并重启生效」才统一加载。
         技能与 MCP 两类机制仍各自独立管理，不受插件容器管辖。
         扩展一律是<b>外部</b>能力（可开可关、卸下即恢复原样）——<b>不改动应用本身</b>。
       </div>
@@ -966,10 +983,12 @@ export default function PluginsPanel(props: Props): JSX.Element {
         {stats.agentMade.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {stats.agentMade.map((p) => (
-              <SourcedPluginCard key={p.name} row={p} busy={busyName === p.name}
-                onToggle={doToggle} onSettingSubmit={doSettingSubmit}
+              <SourcedPluginCard key={p.name} row={p}
+                onToggle={stageToggle} onSettingSubmit={doSettingSubmit}
                 busySettingKey={busySettingKey} settingsToken={settingsToken}
-                trusted={p.trusted} busyTrust={busyTrustName === p.name} onTrustToggle={doTrust} />
+                trusted={p.trusted}
+                draftOn={draft.toggles[p.name]} draftTrust={draft.trust[p.name]}
+                onTrustToggle={stageTrust} />
             ))}
           </div>
         )}
@@ -998,10 +1017,12 @@ export default function PluginsPanel(props: Props): JSX.Element {
         {stats.external.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {stats.external.map((p) => (
-              <SourcedPluginCard key={p.name} row={p} busy={busyName === p.name}
-                onToggle={doToggle} onSettingSubmit={doSettingSubmit}
+              <SourcedPluginCard key={p.name} row={p}
+                onToggle={stageToggle} onSettingSubmit={doSettingSubmit}
                 busySettingKey={busySettingKey} settingsToken={settingsToken}
-                trusted={p.trusted} busyTrust={busyTrustName === p.name} onTrustToggle={doTrust} />
+                trusted={p.trusted}
+                draftOn={draft.toggles[p.name]} draftTrust={draft.trust[p.name]}
+                onTrustToggle={stageTrust} />
             ))}
           </div>
         )}

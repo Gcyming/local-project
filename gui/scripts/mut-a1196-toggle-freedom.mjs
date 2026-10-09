@@ -71,12 +71,14 @@ const MUTATIONS = [
     ),
   },
   {
-    name: "3 unload 不写禁用名单（关的动作不持久）",
+    name: "3 统一保存不写禁用名单（关的动作不持久）",
     file: F_MAIN,
+    /* ⚠️ 2026-10-09 锚点重打（新语义）：A-1198 把「卸载即写名单」搬进 plugins_apply_changes
+       —— 旧 plugins_unload 通道已删，这条变异随之改打新的统一保存路径（缺陷描述不变）。 */
     mutate: (t) => sub(
       t,
-      "    // A-1196：卸载即\"关闭开关\"—— 写进持久化禁用名单（否则下次重扫/重启会把它装回来）。\n    try {\n      markPluginDisabled(PLUGINS_DISABLED_FILE, name);\n    } catch (e) {\n      console.error(`[gui:plugins] 禁用名单写入失败（插件已卸载，但重启后可能恢复）：${e instanceof Error ? e.message : String(e)}`);\n    }\n",
-      "",
+      "        if (t?.enabled === true) { unmarkPluginDisabled(PLUGINS_DISABLED_FILE, name); }\n        else { markPluginDisabled(PLUGINS_DISABLED_FILE, name); }",
+      "        if (t?.enabled === true) { unmarkPluginDisabled(PLUGINS_DISABLED_FILE, name); }",
     ),
   },
   /* ── ③ 拨片开关动画 ───────────────────────────────────────────── */

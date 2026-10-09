@@ -253,11 +253,6 @@ contextBridge.exposeInMainWorld("slimeAPI", {
 
     pluginsList: () => ipcRenderer.invoke("slime:plugins:list") as Promise<PluginSnapshotDTO>,
     pluginsReload: () => ipcRenderer.invoke("slime:plugins:reload") as Promise<PluginSnapshotDTO>,
-    pluginsUnload: (name: string) =>
-      ipcRenderer.invoke("slime:plugins:unload", { name }) as Promise<{ ok: boolean; error?: string }>,
-    /* A-1196：拨片开关「开」——从禁用名单移除并重新装载（返回最新快照，省一次往返）。 */
-    pluginsEnable: (name: string) =>
-      ipcRenderer.invoke("slime:plugins:enable", { name }) as Promise<{ ok: boolean; error?: string; snapshot?: PluginSnapshotDTO }>,
     /* A-1197：磁盘上新增/改了插件或技能后由主进程广播（自动重扫完成），页面据此自刷新。 */
     pluginsOnChanged: (cb: (e: { reason: string; at: number }) => void) => onMessage<{ reason: string; at: number }>("slime:plugins:changed", cb),
     /* A-1197 · B1：设置项读/写。**参数里没有 path** —— 落盘位置由主进程按插件名推导。 */
@@ -267,17 +262,18 @@ contextBridge.exposeInMainWorld("slimeAPI", {
       ipcRenderer.invoke("slime:plugins:settingsSet", { plugin, key, value }) as Promise<PluginSettingsWriteDTO>,
     /* A-1197 · B2（L4a）：UI 槽位声明（按需拉；列表接口只给 uiCount）。 */
     pluginsUi: () => ipcRenderer.invoke("slime:plugins:ui") as Promise<PluginUiSnapshotDTO>,
-    /* A-1197 · B4（T1）：信任开关读/写（写后主进程会自动重装使脚本工具生效/撤装）。 */
-    pluginsTrustGet: (name: string) =>
-      ipcRenderer.invoke("slime:plugins:trustGet", { name }) as Promise<{ ok: boolean; trusted?: boolean; error?: string }>,
-    pluginsTrustSet: (name: string, trusted: boolean) =>
-      ipcRenderer.invoke("slime:plugins:trustSet", { name, trusted }) as Promise<{ ok: boolean; trusted?: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
     /* A-1197 · B5（L4a page）：打开扩展自有页面（返回要加载的 127.0.0.1 url）。 */
     pluginsPageOpen: (name: string) =>
       ipcRenderer.invoke("slime:plugins:pageOpen", { name }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
     /* A-1198：安装官方示例扩展（活教材）—— 已存在则不覆盖。 */
     pluginsInstallExample: () =>
       ipcRenderer.invoke("slime:plugins:installExample") as Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
+    /* A-1198：扩展页「保存」—— 拨片/信任改动一次写盘（不热重载；随后 appRelaunch 统一生效）。 */
+    pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) =>
+      ipcRenderer.invoke("slime:plugins:applyChanges", payload) as Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; error?: string }>,
+    /* A-1198：重启整个 slime（保存扩展改动后统一加载）。 */
+    appRelaunch: () =>
+      ipcRenderer.invoke("slime:app:relaunch") as Promise<{ ok: boolean }>,
   },
   runtime: {
     
@@ -995,9 +991,6 @@ declare global {
         mcpRegistryInstall: (card: { name: string; displayName: string; description: string; source: string; install?: { kind: "stdio"; command: string; args: string[]; envHints: string[] } | { kind: "http"; url: string } }) => Promise<{ ok: boolean; error?: string }>;
         pluginsList: () => Promise<PluginSnapshotDTO>;
         pluginsReload: () => Promise<PluginSnapshotDTO>;
-        pluginsUnload: (name: string) => Promise<{ ok: boolean; error?: string }>;
-        /* A-1196：拨片开关「开」。 */
-        pluginsEnable: (name: string) => Promise<{ ok: boolean; error?: string; snapshot?: PluginSnapshotDTO }>;
         /* A-1197：贡献目录自动重扫完成（返回订阅的取消函数）。 */
         pluginsOnChanged: (cb: (e: { reason: string; at: number }) => void) => () => void;
         /* A-1197 · B1：设置项读/写（无 path 参数 —— 落盘位置由主进程按插件名推导）。 */
@@ -1005,13 +998,14 @@ declare global {
         pluginsSettingsSet: (plugin: string, key: string, value: unknown) => Promise<PluginSettingsWriteDTO>;
         /* A-1197 · B2（L4a）：UI 槽位声明（按需拉）。 */
         pluginsUi: () => Promise<PluginUiSnapshotDTO>;
-        /* A-1197 · B4（T1）：信任开关读/写。 */
-        pluginsTrustGet: (name: string) => Promise<{ ok: boolean; trusted?: boolean; error?: string }>;
-        pluginsTrustSet: (name: string, trusted: boolean) => Promise<{ ok: boolean; trusted?: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
         /* A-1197 · B5（L4a page）：打开扩展自有页面。 */
         pluginsPageOpen: (name: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
         /* A-1198：安装官方示例扩展。 */
         pluginsInstallExample: () => Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
+        /* A-1198：扩展页保存（拨片/信任改动写盘）。 */
+        pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) => Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; error?: string }>;
+        /* A-1198：重启整个 slime。 */
+        appRelaunch: () => Promise<{ ok: boolean }>;
       };
       runtime: {
         list: () => Promise<{

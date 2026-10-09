@@ -5518,48 +5518,6 @@ function registerIpcHandlers(): void {
     return snapshotPlugins(state);
   });
 
-  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_unload, async (_event, p) => {
-    const name = String(p?.name ?? "").trim();
-    if (!name) {
-      return { ok: false, error: "缺少插件名" };
-    }
-    const state = await ensurePluginHost();
-    const record = state.host.get(name);
-    if (!record) {
-      return { ok: false, error: `插件未装载：${name}` };
-    }
-    if (!record.unloadable) {
-      return { ok: false, error: `插件 '${name}' 是系统默认插件，不可卸载` };
-    }
-    const report = await state.host.unload(name);
-    if (report.failed.length > 0) {
-      const first = report.failed[0].error;
-      return { ok: false, error: `卸载 ${name} 时撤销失败：${first instanceof Error ? first.message : String(first)}` };
-    }
-    // A-1196：卸载即"关闭开关"—— 写进持久化禁用名单（否则下次重扫/重启会把它装回来）。
-    try {
-      markPluginDisabled(PLUGINS_DISABLED_FILE, name);
-    } catch (e) {
-      console.error(`[gui:plugins] 禁用名单写入失败（插件已卸载，但重启后可能恢复）：${e instanceof Error ? e.message : String(e)}`);
-    }
-    return { ok: true };
-  });
-
-  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_enable, async (_event, p) => {
-    const name = String(p?.name ?? "").trim();
-    if (!name) {
-      return { ok: false, error: "缺少插件名" };
-    }
-    // A-1196：开关「开」—— 从禁用名单移除并重扫装载（重扫自带「先撤销再重建」，见 host.load）。
-    try {
-      unmarkPluginDisabled(PLUGINS_DISABLED_FILE, name);
-    } catch (e) {
-      console.error(`[gui:plugins] 禁用名单写入失败（继续尝试装载）：${e instanceof Error ? e.message : String(e)}`);
-    }
-    const enabledState = await reloadPlugins();
-    return { ok: true, snapshot: snapshotPlugins(enabledState) };
-  });
-
   /* ── A-1197 · B1（L4b 设置贡献点）─────────────────────────────────────────────
      设置项的读/ 写。两条硬边界写在代码里而不是文档里：
        ① **入参只有 plugin / key / value** —— 没有 path。落盘位置由 `plugin.name`
@@ -5639,32 +5597,62 @@ function registerIpcHandlers(): void {
     return { ok: true, snapshot: snapshotPlugins(state) };
   });
 
-  /* A-1197 · B4（T1 脚本信任）：读信任状态（按需拉；默认拒绝）。 */
-  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_trust_get, async (_event, p) => {
-    const name = String(p?.name ?? "").trim();
-    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
+  /* A-1198：扩展页「保存」—— 把草稿里的拨片 / 信任改动**一次写盘**（停用名单 + trust.json）。
+     ⚠️ 这里刻意**不做热重载**：写盘 + 随后的 `app_relaunch` 才是统一生效点
+     （用户口径：「拨片打开的扩展要保存后才统一生效；保存后刷新整个 slime 程序」）。
+     任一条写失败 ⇒ ok:false 并带回原因（界面保留草稿，可重试；写盘都是幂等的）。 */
+  handleTrusted<{ toggles?: unknown; trust?: unknown }>(IPC_CHANNELS.plugins_apply_changes, async (_event, p) => {
     const state = await ensurePluginHost();
-    const dir = state.dirs.get(name);
-    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录（builtin 或未装载）：${name}` }; }
-    return { ok: true as const, trusted: readPluginTrust(dir) };
+    const applied = { toggles: 0, trust: 0 };
+    const errors: string[] = [];
+    const toggles = Array.isArray(p?.toggles) ? (p.toggles as unknown[]) : [];
+    for (const raw of toggles) {
+      const t = raw as { name?: unknown; enabled?: unknown };
+      const name = String(t?.name ?? "").trim();
+      if (!name) { errors.push("拨片改动缺 name"); continue; }
+      const rec = state.host.get(name);
+      if (!rec) { errors.push(`插件不在清单里，跳过：${name}`); continue; }
+      if (!rec.unloadable) { errors.push(`系统默认插件不可停用：${name}`); continue; }
+      try {
+        if (t?.enabled === true) { unmarkPluginDisabled(PLUGINS_DISABLED_FILE, name); }
+        else { markPluginDisabled(PLUGINS_DISABLED_FILE, name); }
+        applied.toggles += 1;
+      } catch (e) {
+        errors.push(`停用名单写入失败（${name}）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    const trusts = Array.isArray(p?.trust) ? (p.trust as unknown[]) : [];
+    for (const raw of trusts) {
+      const t = raw as { name?: unknown; trusted?: unknown };
+      const name = String(t?.name ?? "").trim();
+      if (!name) { errors.push("信任改动缺 name"); continue; }
+      const dir = state.dirs.get(name);
+      if (!dir) { errors.push(`插件没有磁盘目录（builtin 或未装载），跳过信任写入：${name}`); continue; }
+      try {
+        writePluginTrust(dir, t?.trusted === true);
+        applied.trust += 1;
+      } catch (e) {
+        errors.push(`信任写入失败（${name}）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (errors.length > 0) {
+      return { ok: false as const, applied, error: errors.join("；") };
+    }
+    return { ok: true as const, applied };
   });
 
-  /* A-1197 · B4（T1）：设置信任开关 —— 写 `trust.json` 后**重装**：
-     开 ⇒ registerScripts 装配脚本工具；关 ⇒ 旧 handle 撤销、工具立即注销（不残留）。 */
-  handleTrusted<{ name: string; trusted: boolean }>(IPC_CHANNELS.plugins_trust_set, async (_event, p) => {
-    const name = String(p?.name ?? "").trim();
-    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
-    const state = await ensurePluginHost();
-    const dir = state.dirs.get(name);
-    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录（builtin 或未装载）：${name}` }; }
-    const trusted = p?.trusted === true;
-    try {
-      writePluginTrust(dir, trusted);
-    } catch (e) {
-      return { ok: false as const, error: `信任状态写入失败：${e instanceof Error ? e.message : String(e)}` };
-    }
-    const next = await reloadPlugins();
-    return { ok: true as const, trusted, snapshot: snapshotPlugins(next) };
+  /* A-1198：重启整个 slime（用户口径：「保存后刷新整个 slime 程序以刷新 slime 状态加载扩展能力」）。
+     延迟 250ms —— 让本次 IPC 响应先回到渲染层（界面来得及显示「正在重启…」），再退出进程。 */
+  handleTrusted<void>(IPC_CHANNELS.app_relaunch, async () => {
+    setTimeout(() => {
+      try {
+        app.relaunch();
+        app.exit(0);
+      } catch (e) {
+        console.error(`[gui:app] 重启失败（请手动重启 slime）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }, 250);
+    return { ok: true as const };
   });
 
   /* A-1197 · B5（L4a page）：打开扩展自有页面 —— 按需起 `127.0.0.1` 静态服务

@@ -70,12 +70,15 @@ const MUTATIONS = [
     ),
   },
   {
-    name: "M5 信任开关写盘后不重装（假开关：打开不装配、关闭不撤装）",
+    name: "M5 统一保存不写 trust.json（假开关：重启后信任丢失）",
     file: F_MAIN,
+    /* ⚠️ 2026-10-09 锚点重打（新语义）：A-1198 起信任写盘收敛到 plugins_apply_changes
+       （旧 plugins_trust_set 通道已删）。这条变异改打新路径 —— 删掉 writePluginTrust，
+       「写盘后生效」的语义变成假的（重启后信任全丢、脚本工具不装配）。 */
     mutate: (t) => sub(
       t,
-      "    const next = await reloadPlugins();\n    return { ok: true as const, trusted, snapshot: snapshotPlugins(next) };",
-      "    const next = state;\n    return { ok: true as const, trusted, snapshot: snapshotPlugins(next) };",
+      "        writePluginTrust(dir, t?.trusted === true);\n        applied.trust += 1;",
+      "        applied.trust += 1;",
     ),
   },
 ];

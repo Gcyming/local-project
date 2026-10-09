@@ -103,22 +103,20 @@ export const IPC_CHANNELS = {
   extras_list: "slime:extras:list",
   plugins_list: "slime:plugins:list",
   plugins_reload: "slime:plugins:reload",
-  plugins_unload: "slime:plugins:unload",
-  plugins_enable: "slime:plugins:enable",
   /* A-1197 · B1（L4b 设置贡献点）：参数只有 plugin/key/value，**刻意没有 path**
      —— 落盘路径只由 plugin.name 在主进程推导（见 core-ts/src/plugin/settings-store.ts）。 */
   plugins_settings_get: "slime:plugins:settingsGet",
   plugins_settings_set: "slime:plugins:settingsSet",
   /** A-1197 · B2（L4a）：UI 槽位声明（按需拉取；列表接口只给 uiCount）。 */
   plugins_ui: "slime:plugins:ui",
-  /** A-1197 · B4（T1）：信任开关状态读（按需拉）。 */
-  plugins_trust_get: "slime:plugins:trustGet",
-  /** A-1197 · B4（T1）：设置信任开关（写 trust.json，随后重装使脚本工具立即生效/撤装）。 */
-  plugins_trust_set: "slime:plugins:trustSet",
   /** A-1197 · B5（L4a page）：打开扩展自有页面（按需起 127.0.0.1 静态服务，返回 url）。 */
   plugins_page_open: "slime:plugins:pageOpen",
   /** A-1198：安装官方示例扩展（从随包 template/plugins 复制到 config/plugins；已存在则拒绝覆盖）。 */
   plugins_install_example: "slime:plugins:installExample",
+  /** A-1198：统一保存扩展页的拨片 / 信任改动（一次写盘：停用名单 + trust.json；不热重载）。 */
+  plugins_apply_changes: "slime:plugins:applyChanges",
+  /** A-1198：重启整个 slime（app.relaunch）—— 「保存后统一生效」的落点。 */
+  app_relaunch: "slime:app:relaunch",
   
   plugins_changed: "slime:plugins:changed",
   chat_suggest: "slime:chat:suggest",
