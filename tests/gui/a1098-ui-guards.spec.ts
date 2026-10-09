@@ -194,7 +194,10 @@ describe("A-1098 ② — 浮层实底：`--modal-surface`/`--float-surface` 不�
 
   const MODAL_SITES = [
     { file: "../../gui/src/renderer/pages/SettingsDialog.tsx", n: 1, why: "设置主弹窗（各设置页都在里面）" },
-    { file: "../../gui/src/renderer/pages/AgentsPanel.tsx", n: 2, why: "创建 Agent / 删除 Agent" },
+    // 2026-10-07 A-1197：因「未保存改动离开确认弹窗」新增，AgentsPanel 的浮层数由 2 更新为 3。
+    // 三个浮层分别是：① 创建 Agent（width 520，带工具能力选择）② 未保存改动离开确认（width 440）
+    // ③ 删除 Agent（width 400）。三个都是有意保留的全屏浮层，不许挪走。
+    { file: "../../gui/src/renderer/pages/AgentsPanel.tsx", n: 3, why: "创建 Agent / 未保存改动离开确认 / 删除 Agent" },
     { file: "../../gui/src/renderer/pages/ProvidersPanel.tsx", n: 1, why: "添加 / 编辑供应商（1000px 大弹窗）" },
     { file: "../../gui/src/renderer/pages/NewProjectDialog.tsx", n: 1, why: "新建会话" },
     { file: "../../gui/src/renderer/pages/ResidentPanel.tsx", n: 1, why: "【用户本次反馈】子代理执行模型多选弹层" },
@@ -236,6 +239,10 @@ describe("A-1098 ② — 浮层实底：`--modal-surface`/`--float-surface` 不�
   });
 
   it("T19 浮层面板**自己**不许再声明 background（实底只能来自 `.modal-card` —— 防第二个真相源）", () => {
+    // 2026-10-07 A-1197：AgentsPanel 的期望值随T17 同步由 2 更新为 3（多了「未保存改动离开确认」浮层）。
+    // ⚠️ 本守卫的**本意不变**：浮层面板一律不许自己声明 background —— 断言仍逐个面板在跑，
+    // 只是被检查的面板从 2 个变成 3 个（第三个 = AgentsPanel.tsx 里width 440 的离开确认卡，
+    // 它同样只能靠 .modal-card 拿实底）。计数是精确相等，不是 >=。
     
 
 

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { PROJECT_ROOT } from "../../core-ts/src/paths.js";
 
 const APP_CODE = readFileSync(join(PROJECT_ROOT, "gui/src/renderer/App.tsx"), "utf8");
-const CSS_CODE = readFileSync(join(PROJECT_ROOT, "gui/src/renderer/index.css"), "utf8");
 
 
 

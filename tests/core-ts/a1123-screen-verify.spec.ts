@@ -97,8 +97,9 @@ class FakeBackend implements ScreenBackend {
 
 
 class NoDumpBackend extends FakeBackend {
-  
-  uiDump = undefined;
+  /* 模拟「宿主没有 uiDump」的后端：实例属性**遮蔽**原型方法（运行时即 undefined）。
+     基类把它声明为方法 ⇒ 这里的 undefined 需要显式断言盖过类型（测试替身，语义是「属性不存在」）。 */
+  uiDump = undefined as unknown as () => Promise<UiElement[]>;
 }
 
 

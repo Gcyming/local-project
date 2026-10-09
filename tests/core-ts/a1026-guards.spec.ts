@@ -229,8 +229,8 @@ describe("③ 跨进程契约：done 载荷的 windowCap（注释不会变红，
     const reqs = [...MAIN.matchAll(/:\s*ChatRequest\s*=\s*\{/g)];
     expect(
       reqs.length,
-      `引擎请求应当恰好 2 条（stream / retry），实测 ${reqs.length} 条 —— 新增发送路径请同步本守卫`,
-    ).toBe(2);
+      `引擎请求应当恰好 3 条（stream / retry / stageRunner 阶段请求），实测 ${reqs.length} 条 —— 新增发送路径请同步本守卫`,
+    ).toBe(3);
     for (const [i, m] of reqs.entries()) {
       const from = m.index ?? 0;
       expect(
@@ -243,8 +243,8 @@ describe("③ 跨进程契约：done 载荷的 windowCap（注释不会变红，
     const withCap = [...MAIN.matchAll(/windowCap:\s*([^\n]+)/g)].map((m) => m[1].trim());
     expect(
       withCap.length,
-      `windowCap 产地数应为 4（2 引擎请求 + 2 done 载荷），实测 ${withCap.length} —— 增删任一载体都要回到本行同步`,
-    ).toBe(4);
+      `windowCap 产地数应为 5（3 引擎请求 + 2 done 载荷），实测 ${withCap.length} —— 增删任一载体都要回到本行同步`,
+    ).toBe(5);
     for (const expr of withCap) {
       expect(expr, `windowCap 的来源不是唯一决策函数：${expr}`).toContain("resolveSessionWindowCap(");
     }

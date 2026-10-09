@@ -796,7 +796,7 @@ describe("SlimeEngine SILAM 兑底 reasoning 透传（A-124 正文/思考分离�
     expect(brain.reply).toHaveBeenCalledTimes(1);
   });
 
-  it("chat 无路由兜底兑底：model=silam-brain 且带 reasoning", async () => {
+  it("chat 无路由兜底：model 如实为 none，且文案报因（不再由 SILAM 大脑接管应答）", async () => {
     await writeFile(
       join(dir, "agents.json"),
       JSON.stringify([makeAgent({ model_choice: "api:missing-key" })]),
@@ -810,15 +810,21 @@ describe("SlimeEngine SILAM 兑底 reasoning 透传（A-124 正文/思考分离�
       history: [],
       systemPrompt: "",
     });
-    expect(result.model).toBe("silam-brain");
-    expect(result.reply).toBe(BRAIN_REPLY);
-    
-
-
-    expect(result.reasoning).toContain("api:missing-key");
-    expect(result.reasoning).toContain("SILAM 离线大脑兜底");
-    expect(result.reasoning).toContain(BRAIN_REASONING);
-    expect(result.reasoning?.startsWith("⚠️")).toBe(true);
+    // 2026-10-07 A-1197：silam 自研模型实测输出乱码 + 固定长度硬截断，已下线留占位。
+    // ⇒ 无路由时不再让 SILAM 离线大脑接管应答，期望值由 model="silam-brain" 更新为 "none"。
+    expect(result.model).toBe("none");
+    expect(result.reply).not.toBe(BRAIN_REPLY);
+    // 关键：兜底必须**报因** —— 把上游查到的真实原因透给用户，而不是静默兜底
+    expect(result.reply).toContain("api:missing-key");
+    expect(result.reply).toMatch(/没有可用模型/);
+    // 如实声明「这句话不是模型回答」+ 给出去哪里配的下一步
+    expect(result.reply).toContain("不是模型回答");
+    expect(result.reply).toMatch(/供应商[\s\S]*本地模型/);
+    // 下线的正是「拿 SILAM 当兜底」这条路：brain 一律不许被调用
+    expect(brain.reply, "无路由时不得再让 SILAM 离线大脑接管应答（这条已被用户拍板下线）")
+      .not.toHaveBeenCalled();
+    // 不许再凭空造一段 reasoning 去转述「由 SILAM 兜底」
+    expect(result.reasoning ?? "").toBe("");
   });
 
   it("stream 显式 silam：先 reasoning 事件，done 携带 reply + reasoning", async () => {

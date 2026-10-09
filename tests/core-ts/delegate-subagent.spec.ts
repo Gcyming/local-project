@@ -8,6 +8,9 @@
 
 
 import { describe, it, expect, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PROJECT_ROOT } from "../../core-ts/src/paths.js";
 import { getRegistry, resetRegistry } from "../../core-ts/src/tools/registry.js";
 import { registerBuiltinTools, setSubagentManager } from "../../core-ts/src/tools/builtin.js";
 
@@ -43,6 +46,31 @@ describe("delegate_subagent（自动委派工具链路）", () => {
     expect(params?.properties?.task).toBeDefined();
     expect(params?.properties?.model).toBeDefined(); 
     expect(params?.required ?? []).toContain("task");
+  });
+
+  it("派发指引覆盖「四件事 + 成本意识 + 冲突边界」（2026-10-08 多 Agent 协作设计对齐）", () => {
+    const tool = getRegistry().get("delegate_subagent");
+    const schema = tool!.toLLMSchema() as { function: { description: string } };
+    const d = schema.function.description;
+    // 派发前写清四件事：目标 / 输入 / 交付 / 验收（输入 = 相关文件与现状——子代理看不到主对话）
+    expect(d).toContain("①目标");
+    expect(d).toContain("②输入");
+    expect(d).toContain("③交付");
+    expect(d).toContain("④验收");
+    // 分工收益必须覆盖协作成本（小任务/强依赖链/同模块优先自己做）
+    expect(d).toContain("收益盖过成本才拆");
+    // 共享文件的单一修改负责人（同时写 = 冲突返工）
+    expect(d).toContain("指定唯一修改者");
+  });
+
+  it("子代理汇报契约引导「交接单四段」（做了什么/依据/验证/遗留）", () => {
+    const src = readFileSync(join(PROJECT_ROOT, "core-ts/src/services/subagent.ts"), "utf8");
+    expect(src).toContain("做了什么");
+    expect(src).toContain("依据");
+    expect(src).toContain("验证");
+    expect(src).toContain("遗留");
+    // 只写「完成了」= 图 2 的反例：主 Agent 无法核验
+    expect(src).toContain("只写「完成了」");
   });
 
   it("管理器未注入 → 如实报错（提示当前环境未装配）", async () => {
@@ -169,6 +197,8 @@ describe("A-980-R30 — 子代理结果回收与验收闭环", () => {
     
     expect(out).toContain("验收要求");
     expect(out).toContain("不要直接当事实转述");
+    // 2026-10-08：多子代理「汇合」——各自完成 ≠ 整体通过（须整合 + 端到端验证后才算完成）
+    expect(out).toContain("各自通过 ≠ 整体通过");
   });
 
   it("失败态 → 如实报失败 + 可操作建议，绝不假装成功", async () => {

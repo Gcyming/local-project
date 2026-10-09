@@ -22,8 +22,8 @@ function turns(rounds: number): Array<{ role: string; content: string }> {
   return out;
 }
 
-function sameBytes(a: string, b: string): boolean {
-  return Buffer.from(a, "utf8").equals(Buffer.from(b, "utf8"));
+function sameBytes(a: unknown, b: unknown): boolean {
+  return Buffer.from(String(a ?? ""), "utf8").equals(Buffer.from(String(b ?? ""), "utf8"));
 }
 
 describe("D1 · 压缩摘要头前缀稳定性", () => {
@@ -43,7 +43,7 @@ describe("D1 · 压缩摘要头前缀稳定性", () => {
 
   it("D1 · 摘要头是静态模板、不含任何丢弃计数", () => {
     const summary = "摘要：完成 X；下一步 Y";
-    const headOf = (rounds: number): string => buildCompactedHistory(summary, turns(rounds), 8)[0].content;
+    const headOf = (rounds: number): string => String(buildCompactedHistory(summary, turns(rounds), 8)[0].content);
 
     expect(headOf(10)).toBe(HEADER_TEMPLATE + summary);
     expect(headOf(30)).toBe(HEADER_TEMPLATE + summary);

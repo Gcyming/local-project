@@ -142,7 +142,7 @@ describe("ask_user 取消（D6：停止必须释放挂起的提问）", () => {
     expect(clock.pendingCount(), "取消必须清掉超时定时器（否则定时器泄漏到 300s）").toBe(0);
 
     clock.fireAll();
-    expect(settled.answer).toBe("");
+    expect(settled?.answer).toBe("");
   });
 
   it("模型看到的取消形状：作废，不是『用户未作答』", async () => {

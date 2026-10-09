@@ -419,3 +419,46 @@ describe("A-1195：覆盖式重装先撤销上一轮贡献（不泄漏句柄）"
     }
   });
 });
+
+describe("A-1197 · B2：UI 槽位贡献（registerUi 钩子）", () => {
+  const uiDecl = { slot: "status_item" as const, id: "count", label: "计数", refresh: "manual" as const };
+
+  it("registerUi 钩子缺席 ⇒ 如实记「尚未接线」（不假装已生效）", async () => {
+    const h = new PluginHost({});
+    const records = await h.load([m({ name: "u1", provides: ["instructions"], contributes: { ui: [uiDecl] } })]);
+    expect(records[0].status).toBe("loaded");
+    expect(records[0].contributions.join()).toContain("ui:尚未接线");
+  });
+
+  it("钩子返回空数组 ⇒ 同样记「尚未接线」", async () => {
+    const h = new PluginHost({ registerUi: () => [] });
+    const records = await h.load([m({ name: "u2", provides: ["instructions"], contributes: { ui: [uiDecl] } })]);
+    expect(records[0].contributions.join()).toContain("ui:尚未接线");
+  });
+
+  it("有声明 + 有钩子 ⇒ 登记（contributions 含槽位摘要），卸载时 dispose 被逆序调用且不残留", async () => {
+    const disposed: string[] = [];
+    const h = new PluginHost({
+      registerUi: (manifest) => [
+        { label: `${manifest.name}-ui-A`, dispose: () => { disposed.push("A"); } },
+        { label: `${manifest.name}-ui-B`, dispose: () => { disposed.push("B"); } },
+      ],
+    });
+    const records = await h.load([m({ name: "u3", provides: ["instructions"], contributes: { ui: [uiDecl] } })]);
+    expect(records[0].contributions.join()).toContain("status_item×1");
+
+    const report = await h.unload("u3");
+    expect(report.ok).toBe(2);
+    /* 逆序撤销：后登记的先去。 */
+    expect(disposed).toEqual(["B", "A"]);
+    expect(h.get("u3")!.contributions).toEqual([]);
+  });
+
+  it("没声明 ui 的插件不碰 registerUi（不凭空造槽位）", async () => {
+    let called = 0;
+    const h = new PluginHost({ registerUi: () => { called += 1; return []; } });
+    const records = await h.load([m({ name: "u4", provides: ["instructions"] })]);
+    expect(records[0].status).toBe("loaded");
+    expect(called).toBe(0);
+  });
+});

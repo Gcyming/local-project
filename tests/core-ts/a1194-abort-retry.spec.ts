@@ -153,7 +153,10 @@ describe("A-1194 P4：signal 穿透内部调用（接线形状）", () => {
 
   it("tool_loop.ts：非流式 run 也收 signal（Options / 工具执行 / 模型轮）", () => {
     const src = readText("core-ts/src/tool_loop.ts");
-    expect(src).toMatch(/executePendingTools\(opts\.messages, pending, opts\.agentId, dedup, agentName, opts\.sessionId, opts\.signal\)/);
+    /* ⚠️ 守卫对账（A-1198）：executePendingTools 的调用串里加了 agentRole/agentModel 两个
+       身份注入参数（git 工具用），signal 的位置随之后移 —— 判据按新调用形状同步（意图不变：
+       signal 必须以实参传进 executePendingTools，而不是省掉）。 */
+    expect(src).toMatch(/executePendingTools\(opts\.messages, pending, opts\.agentId, dedup, denials, agentName, agentRole, agentModel, opts\.sessionId, opts\.signal\)/);
     expect(src).toMatch(/this\.router\.chat\(payload, opts\.signal\)/);
   });
 

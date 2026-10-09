@@ -104,10 +104,65 @@ describe("A-1018 ③④：本地模型启动参数与子进程输出", () => {
 
 describe("A-1018 ⑤：兜底必须报因（数量守恒）", () => {
   const src = read(ENGINE);
-  it("fallbackNotice 有定义，且在 chat / stream 两条兜底路径都被调用", () => {
-    expect(src).toContain("private fallbackNotice(agent: AgentState, error: string | null): string");
-    const calls = src.split("this.fallbackNotice(opts.agent, error)").length - 1;
-    expect(calls, "兜底报因必须在 chat() 与 stream() 都接上（漏一处就有一个入口静默兜底）").toBeGreaterThanOrEqual(2);
+  /* 2026-10-07 A-1197：silam 自研模型质量未达标（乱码 + 硬截断）已下线留占位，
+   * 于是「无模型路由时的兜底」由 fallbackNotice(假借 SILAM 大脑应答) 换成 noModelRouteText(如实提示)。
+   * ⇒ 守卫的**本意一字未改**：无路由时给出的文案必须说清原因、如实标明这不是模型回答，
+   * 且 chat / stream 两条入口都必须接上（原守卫用 >=2 兜底，本轮收紧成**精确 2**，不许漏也不许多）。
+   * 检查对象随之由 fallbackNotice 更新为 noModelRouteText；旧函数已整段删除，
+   * 下面额外钉死它不得复活（有定义就等于「还能兜底」的错觉，且它本身是死代码）。 */
+  it("noModelRouteText 有定义，且定义处恰好 1 处", () => {
+    expect(src, "无路由兜底报因的方法必须存在（它就是「兜底必须报因」的载体）")
+      .toContain("private noModelRouteText(agent: AgentState, error: string | null): string {");
+    expect(
+      src.split("private noModelRouteText(").length - 1,
+      "noModelRouteText 的定义必须恰好 1 处（复制两份文案 = 两个真相源，改一处就漏一处）",
+    ).toBe(1);
+  });
+
+  it("chat / stream 两条兜底路径各自恰好调用一次（精确 2，漏一处就有一个入口静默兜底）", () => {
+    const calls = src.split("this.noModelRouteText(opts.agent, error)").length - 1;
+    expect(calls, "兜底报因必须在 chat() 与 stream() 都接上（漏一处就有一个入口静默兜底）").toBe(2);
+
+    // 两条路径必须**分别**被锚到自己的返回形状上：只数出现次数的话，
+    // 同一个函数被同一个分支调两次也能凑够 2 —— 那等于 stream 入口仍然静默。
+    const chatBlock = src.match(
+      /const reply = this\.noModelRouteText\(opts\.agent, error\);\n      return \{[\s\S]*?\n      \};/,
+    );
+    expect(chatBlock, "chat() 的 !router 分支没有接上 noModelRouteText（或返回形状变了，锚点失效）").not.toBeNull();
+    expect(chatBlock![0], "chat() 兜底必须如实标 model=\"none\"，不许再冒充 silam-brain").toMatch(
+      /(?<![A-Za-z0-9_-])model\s*:\s*"none"/,
+    );
+
+    const streamBlock = src.match(
+      /const reply = this\.noModelRouteText\(opts\.agent, error\);\n      yield \{ type: "done"[\s\S]*?return;/,
+    );
+    expect(streamBlock, "stream() 的 !router 分支没有接上 noModelRouteText（或 done 形状变了，锚点失效）").not.toBeNull();
+    expect(streamBlock![0], "stream() 兜底必须如实标 model=\"none\"，不许再冒充 silam-brain").toMatch(
+      /(?<![A-Za-z0-9_-])model\s*:\s*"none"/,
+    );
+    // stream 侧不得再凭空造一个 reasoning 帧去转述「由 SILAM 兜底」
+    expect(streamBlock![0], "stream 兜底不许再凭空造 reasoning 帧（旧实现靠它转述 SILAM 兜底）")
+      .not.toContain('type: "reasoning"');
+  });
+
+  it("兜底文案必须报因：说清「没有可用模型」+ 如实声明不是模型回答 + 指出去哪里配", () => {
+    const m = src.match(/private noModelRouteText\([\s\S]*?\n  \}/);
+    expect(m, "取不到 noModelRouteText 的方法体（锚点失效）").not.toBeNull();
+    const text = m![0];
+    expect(text, "兜底文案必须如实声明「这句话不是模型回答」").toContain("不是模型回答");
+    expect(text, "兜底文案必须说清原因是「没有可用模型」").toMatch(/没有可用模型/);
+    // 「报因」的关键：必须把上游查到的 error 真的插进文案，而不是丢掉
+    expect(text, "兜底文案必须把 resolveRouteInternal 给出的 error 插进去（丢掉就等于没报因）")
+      .toContain("${error");
+    expect(text, "兜底文案必须给出去哪里配的下一步（否则用户只知道自己坏了，不知道怎么修）")
+      .toMatch(/供应商[\s\S]*本地模型/);
+  });
+
+  it("旧兜底 fallbackNotice 不得复活（它假借 SILAM 大脑应答，正是本轮下线的那条路）", () => {
+    expect(src, "fallbackNotice 已被整段删除；留着它等于留着一个没人调的私有方法 + 「还能兜底」的错觉")
+      .not.toContain("fallbackNotice");
+    expect(src, "无路由兜底不得再冒出兜底应答/保底应答这类宣称（实测是乱码，用户已拍板下线）")
+      .not.toMatch(/兜底应答|保底应答/);
   });
 });
 

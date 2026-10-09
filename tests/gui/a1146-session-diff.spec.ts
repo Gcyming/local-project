@@ -53,6 +53,33 @@ describe("A-1146 ① `findSessionFileDiff`：取的是「此次变动」", () =>
     expect(findSessionFileDiff(byOrd, "dir\\a.py")).not.toBeNull();
   });
 
+  /* ⚠️ 2026-10-08（用户实测：右栏对「本次会话明明改过」的文件报「不在 git 仓内」）：
+     右栏预览给的是**绝对路径**（tab.fileAbs），而产物记录的 rel 是**工具 detail 原样**
+     （常见为工作区相对）——所以要按 workspace 做「绝对 ↔ 相对」等价匹配。 */
+  it("⚠️ 绝对 ↔ 工作区相对：右栏给绝对、产物存相对 —— 必须仍能对上", () => {
+    const byOrd = { "1": [write("opencode-zen/gemmy.proj", "gemmy.proj")] };
+    const ws = "D:/pilot project";
+    expect(findSessionFileDiff(byOrd, "D:/pilot project/opencode-zen/gemmy.proj", ws)).not.toBeNull();
+  });
+
+  it("⚠️ 反方向同样成立：want 是相对**子路径**、产物存绝对（name 兜不住时才见真章）", () => {
+    /* ⚠️ 刻意用**子路径**（sub/a.py）而不是顶层文件：顶层时产物的 `name` 恰好等于 want，
+       会把「相对 → 绝对」别名分支失效的变异**假绿**掉（实测踩过）。 */
+    const byOrd = { "1": [write("D:/pilot project/sub/a.py", "a.py")] };
+    expect(findSessionFileDiff(byOrd, "sub/a.py", "D:/pilot project")).not.toBeNull();
+  });
+
+  it("⚠️ 等价匹配只做**前缀级**推算，不做 basename 兜底（同名不同目录不许张冠李戴）", () => {
+    const byOrd = { "1": [write("other/sub/a.py", "a.py")] };
+    expect(findSessionFileDiff(byOrd, "D:/pilot project/tools/a.py", "D:/pilot project")).toBeNull();
+  });
+
+  it("不传 workspace（旧调用方）⇒ 行为与原来一致：只做字面（归一后）比较", () => {
+    const byOrd = { "1": [write("a.py")] };
+    expect(findSessionFileDiff(byOrd, "a.py")).not.toBeNull();
+    expect(findSessionFileDiff(byOrd, "D:/pilot project/a.py")).toBeNull();
+  });
+
   it("只认**写入**（file_read 没有「变更」可比）", () => {
     const byOrd = { "1": [{ ...write("a.py"), kind: "read" as const }] };
     expect(findSessionFileDiff(byOrd, "a.py")).toBeNull();

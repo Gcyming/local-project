@@ -47,15 +47,16 @@ describe("内置工具清点：以真实运行期注册表为准", () => {
     names = await realRegisteredToolNames();
   });
 
-  it("真实注册表恰好是 59 个内置工具", () => {
-    expect(names.length).toBe(59);
+  it("真实注册表恰好是 64 个内置工具（A-1198：+5 个 git_* 工具）", () => {
+    expect(names.length).toBe(64);
     expect(names.filter((n) => n.startsWith("skill_")).sort()).toEqual(["skill_lookup", "skill_search"]);
   });
 
-  it("源码实测与运行期注册表一致（builtin 44 + browser 13 + skills 2）", () => {
+  it("源码实测与运行期注册表一致（builtin 44 + git 5 + browser 13 + skills 2）", () => {
     expect(toolNamesInSource("core-ts/src/tools/builtin.ts").length).toBe(44);
+    expect(toolNamesInSource("core-ts/src/tools/git.ts").length).toBe(5);
     expect(toolNamesInSource("core-ts/src/tools/browser.ts").length).toBe(13);
-    const fromSource = [...toolNamesInSource("core-ts/src/tools/builtin.ts"), ...toolNamesInSource("core-ts/src/tools/browser.ts"), "skill_search", "skill_lookup"];
+    const fromSource = [...toolNamesInSource("core-ts/src/tools/builtin.ts"), ...toolNamesInSource("core-ts/src/tools/git.ts"), ...toolNamesInSource("core-ts/src/tools/browser.ts"), "skill_search", "skill_lookup"];
     expect([...fromSource].sort()).toEqual([...names].sort());
   });
 });
@@ -72,10 +73,10 @@ describe("auditBuiltinCoverage：穷尽性自检", () => {
 
     expect(report.missing, `未被登记的内置工具：${report.missing.join(", ")}`).toEqual([]);
     expect(report.extra, `登记了但注册表里没有的工具：${report.extra.join(", ")}`).toEqual([]);
-    expect(report.covered.length).toBe(59);
+    expect(report.covered.length).toBe(64);
   });
 
-  it("登记的 59 个工具名与真实注册表完全相同", () => {
+  it("登记的 64 个工具名与真实注册表完全相同", () => {
     expect([...BUILTIN_TOOL_NAMES].sort()).toEqual([...names].sort());
   });
 
@@ -84,7 +85,7 @@ describe("auditBuiltinCoverage：穷尽性自检", () => {
     const report = auditBuiltinCoverage(mutated);
 
     expect(report.missing).toContain("memory_recall");
-    expect(report.covered.length).toBe(58);
+    expect(report.covered.length).toBe(63);
   });
 
   it("多登一个注册表里没有的工具会被检出为 extra", () => {
