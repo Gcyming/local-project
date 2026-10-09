@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import { execFile, exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import { Tool, ToolRegistry, getRegistry } from "./registry.js";
+import { isProtectedSourcePath } from "./classifier.js";
 
 import { fireSidebarOpen, hasSidebarOpener, sessionIdFromArgs } from "../sidebarOpen.js";
 
@@ -58,6 +59,7 @@ import type {
 } from "../screen/types.js";
 import { toOptimizedDataUrl } from "../screen/optimize.js";
 import { registerBrowserTools } from "./browser.js";
+import { registerGitTools } from "./git.js";
 
 import { DEFAULT_EXEC_BUDGET_MS } from "../services/subagent.js";
 import { groupSubagentCatalog, renderSubagentCatalogLines } from "../services/subagentCatalog.js";
@@ -148,16 +150,52 @@ async function resolveInProject(p: string, ws = "", sandboxAllowed = false): Pro
   }
 }
 
-function isBlockedWritePath(p: string, ws = ""): boolean {
+/** A-1197：受保护**一级目录**的判定。
+ *
+ *  单一真相源 = `classifier.isProtectedSourcePath`（它内部读 shared/security-policy.yaml
+ *  §④ 豁免清单与 §⑤ 归属判据）。builtin.ts **不再**自己维护第二份豁免逻辑 ——
+ *  否则审批预检（hard_rules → classifier）与执行层各说各话，
+ *  用户就会看到「审批通过了、file_write 还是报被禁止」。
+ *
+ *  ## 为什么必须保留**两套基准**（而不是合成一个）
+ *  两个 base 的语义本就不同，**不能互相替代**：
+ *   · `PROJECT_ROOT` —— 豁免清单（`config/skills`、`config/plugins`）是**相对 slime 根**
+ *     写的（打包形态下 slime 根 = 运行时数据根，见 security-policy.yaml §④）。
+ *     这一路交给 classifier，它才认得豁免与资产归属。
+ *   · `ws` —— 会话绑定的工作目录。Agent 被指派到项目根外的目录时，那里叫 `config` /
+ *     `tools` / `core-ts` 的都是**用户自己的项目目录**，不该按 slime 源码目录判定。
+ *     这一路仍按「相对工作区取一级目录」，**不动既有语义**（动它会误伤用户工作区）。
+ *  两路是「或」：任一路判受保护就拦。`ws` 与 slime 根相同时**跳过第二路** ——
+ *  此时它与第一路判的是同一批路径，保留只会把豁免又堵回去（正是本条缺陷本身）。
+ *
+ *  ⚠️ **`.toml` 口径不在这里**：classifier 的 assessAction 用
+ *  `CLASSIFIER_WRITE_BLOCK_SUFFIXES`（**刻意不含 .toml**，否则会拦用户项目里
+ *  pyproject.toml 这类合法写入）；而本层是**工具锚定写入**，锚在 slime 自身配置上，
+ *  必须用含 `.toml` 的 `WRITE_BLOCK_SUFFIXES`。所以敏感名/后缀那一段留在
+ *  `isBlockedWritePath` 头部、**在目录判定之前** ⇒ 豁免永远盖不住它
+ *  （`config/skills/x/secret.enc` 仍被拦，`slime.toml` 仍被拦）。
+ */
+function isProtectedWriteDir(abs: string, ws: string): boolean {
+  if (isProtectedSourcePath(abs, PROJECT_ROOT)) { return true; }
+  if (!ws) { return false; }
+  const base = resolve(ws);
+  const proj = resolve(PROJECT_ROOT);
+  const sameAsProject = process.platform === "win32"
+    ? base.toLowerCase() === proj.toLowerCase()
+    : base === proj;
+  if (sameAsProject) { return false; }
+  const rel = abs.startsWith(base) ? abs.slice(base.length) : abs;
+  const first = rel.split(/[\\/]/).find((s) => s.length > 0);
+  return first !== undefined && WRITE_BLOCKED_DIRS.has(first.toLowerCase());
+}
+
+export function isBlockedWritePath(p: string, ws = ""): boolean {
   const name = basename(p).toLowerCase();
   const ext = extname(p).toLowerCase();
   if (WRITE_BLOCKED_NAMES.has(name) || WRITE_BLOCKED_SUFFIXES.has(ext)) {
     return true;
   }
-  const base = ws || PROJECT_ROOT;
-  const rel = p.startsWith(base) ? p.slice(base.length) : p;
-  const first = rel.split(/[\\/]/).find((s) => s.length > 0);
-  return first !== undefined && WRITE_BLOCKED_DIRS.has(first.toLowerCase());
+  return isProtectedWriteDir(p, ws);
 }
 
 
@@ -1194,6 +1232,7 @@ function renderSubAgentOutcome(run: SubAgentRunLike): string {
     "1) 对照你下发的子任务目标，核对该产出是否真的完成（别只看它说\"完成\"）；",
     "2) 与用户需求冲突/信息不足/结论存疑时，**不要直接当事实转述**：可点名同一个子代理追加补充，或自己补齐；",
     "3) 需要更多细节时用 subagent_result 取该 id 的完整快照（本工具只给了摘要）。",
+    "4) **多个子代理/批量场景：各自通过 ≠ 整体通过** —— 先核对彼此约定一致（接口/命名/共享基线），合并后按用户的原始目标做一次**端到端验证**，再宣布完成。",
   ].join("\n");
 }
 
@@ -1717,13 +1756,13 @@ export function registerBuiltinTools(target?: ToolRegistry): void {
     description:
       "**委派**一个**独立、自包含**的子任务给专家子代理执行（独立上下文 + 独立工具面），它的产出会作为本次工具结果交回给你验收。\n" +
       "何时用：子任务能独立完成、不需要跟你来回确认，且产出较冗长（调研/审查/数据分析/批量处理），你不想让它污染主线上下文。\n" +
-      "何时不用：主线对话本身（要频繁追问/修改/确认的）、一次工具调用就能拿到答案的（单文件读取 / 单文件精确查找）、以及必须共享同一上下文才能做的。\n" +
-      "怎么派：task 里必须写清 **①要达到的目标 ②期望的输出格式 ③边界**（不要只说\"研究一下 X\"，否则子代理会跑偏或和别的子代理重复劳动）。\n" +
+      "何时不用：主线对话本身（要频繁追问/修改/确认的）、一次工具调用就能拿到答案的（单文件读取 / 单文件精确查找）、以及必须共享同一上下文才能做的。派发有**成本**（派发与等待、重复读取、结果整合、冲突返工）——小任务、步骤强依赖前一步的、改动集中在同一模块的，优先自己做（收益盖过成本才拆）。\n" +
+      "怎么派：task 里必须写清 **①目标（要达到什么）②输入（相关文件路径与现状说明——子代理看不到你和用户的对话，它需要什么就写什么）③交付（期望的输出格式）④验收（什么条件算完成）**（不要只说\"研究一下 X\"，否则子代理会跑偏或和别的子代理重复劳动）。\n" +
       "并行：多个互不依赖的子任务，**在同一轮里一次性全部派出**——同一轮的工具调用本来就并发执行，不必串着来（每个调用各自阻塞等自己的结果）。只有当你需要\"派出去后自己接着做别的、稍后再收\"时才用 background=true，之后用 subagent_result 收口。\n" +
       "点名：想指定某个子代理就在 agent 里写它的名字（见系统提示里的「可用子代理」清单）；不确定就留空，会按任务语义自动选。\n" +
       "临时子代理：清单里没有合适的人时**现场定义一个**——填 systemPrompt（角色 + 约束），并按需填 tools（工具白名单）/ name（展示名）/ model（档位）；系统会据此造一个只跑这一次的执行者（**不写盘、不进清单、跑完即弃**）。此时不要再填 agent。\n" +
       "模型：见系统提示「子代理执行模型」段列出的档位——**可按子任务难度为不同子代理点名不同 model**（机械/批量活给便宜档、需要推理的给强档），用户明确要求用某模型时也填这里。不填 = 用默认执行档；想跟随主对话模型就填 inherit。\n" +
-      "批量：当任务能拆成**多个互不依赖的部分**（长视频分段、长文分章、多文件批处理、多模块代码）时，**由你自己拆好**填进 subtasks（每项写清该段的独立目标与边界），系统会**并行**派发、全部完成后把各段结果连同你给的 sharedSpec 一起交回给你整合。**不要**为了拆解再派一个'总协调'子代理——拆解判断是你（主 Agent）的活。⚠️ 填了 subtasks 就不要再填 agent。\n" +
+      "批量：当任务能拆成**多个互不依赖的部分**（长视频分段、长文分章、多文件批处理、多模块代码）时，**由你自己拆好**填进 subtasks（每项写清该段的独立目标与边界），系统会**并行**派发、全部完成后把各段结果连同你给的 sharedSpec 一起交回给你整合。**不要**为了拆解再派一个'总协调'子代理——拆解判断是你（主 Agent）的活。⚠️ 若两段会被迫**改同一份文件/模块**，先划边界：**指定唯一修改者，其余只出建议/审查**（同时写 = 冲突返工）。⚠️ 填了 subtasks 就不要再填 agent。\n" +
       "共享基线：分段任务若需跨段一致的约定（视频的 style/lighting/characters/continuity、代码的 tech_stack/接口签名/命名约定），写进 sharedSpec——它会注入**每一个**子代理，保证各段产出可拼接。不填则各子任务互不知晓，产出可能对不上。",
     parameters: {
       type: "object",
@@ -3553,4 +3592,7 @@ ${body}
   }));
 
   registerBrowserTools(registry);
+  /* A-1198 · git 工具层：把 AGENTS.md 的 Git 契约从文档层接到工具层（D1 三闸：
+     commit 门禁 / diff 评审 / 无合并权）。身份与评审通道由运行上下文注入，缺则 fail-closed。 */
+  registerGitTools(registry);
 }

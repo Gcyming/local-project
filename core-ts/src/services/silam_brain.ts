@@ -258,6 +258,9 @@ export class SilamBrainClient implements SilamBrain {
   private proc: ChildProcess | null = null;
   private alive = false;
   private buf = "";
+  /** stdout 上的非协议裸文本行累计数（模型侧 print，已知会混进来）——只用于出声汇总，不参与解析。 */
+  private noiseLines = 0;
+  private noiseReported = false;
   private readonly pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -398,6 +401,11 @@ export class SilamBrainClient implements SilamBrain {
     });
   }
 
+  /* A-1197：原先这里是两处裸continue（parse 失败 / 无 request_id）——
+   * 协议坏了也一声不吭，调用方只能等到超时才知道出了问题。
+   * 现在三档都出声，但**都不打断正常帧解析**（只 warn，不 throw、不 return、不吞后续行）。
+   * ⚠️ stdout 上混着非 JSON 行是**已知事实**：backbone.py:91/138、lang_core.py:321
+   * 的裸 print 也走 stdout ⇒ 非 JSON 不等于出错，故只汇总报一次，不逐行刷屏。 */
   private _onStdout(chunk: string): void {
     this.buf += chunk;
     let idx: number;
@@ -409,12 +417,26 @@ export class SilamBrainClient implements SilamBrain {
       try {
         msg = JSON.parse(line);
       } catch {
+        if (line.startsWith("{")) {
+          // 以 { 开头却解析失败 = sidecar 吐了半截 JSON / 协议被破坏，属真故障。
+          console.warn(`[silam] sidecar stdout 出现无法解析的 JSON 行（已跳过，不影响其它帧）：${line.slice(0, 200)}`);
+        } else {
+          // 模型侧裸 print（已知会混进来），累计后只报一次，避免刷屏。
+          this.noiseLines += 1;
+        }
         continue;
       }
       const rid = msg.request_id;
-      if (!rid) continue;
+      if (!rid) {
+        console.warn(`[silam] sidecar stdout 收到无 request_id 的 JSON 行（已跳过）：${line.slice(0, 200)}`);
+        continue;
+      }
       const entry = this.pending.get(rid);
-      if (!entry) continue;
+      if (!entry) {
+        // 已知关联请求不在表里：一般是超时/取消后迟到的响应。计数汇总，不逐行刷屏。
+        this.noiseLines += 1;
+        continue;
+      }
       clearTimeout(entry.timer);
       this.pending.delete(rid);
       if (msg.status === "success") {
@@ -422,6 +444,14 @@ export class SilamBrainClient implements SilamBrain {
       } else {
         entry.reject(new Error(msg.error ?? "sidecar 返回 error"));
       }
+    }
+    // 汇总出声一次（避免每来一行裸 print 就刷一次屏）。
+    if (this.noiseLines > 0 && !this.noiseReported) {
+      this.noiseReported = true;
+      console.warn(
+        `[silam] sidecar stdout 有 ${this.noiseLines} 行非协议内容（模型侧裸 print / 迟到响应，已忽略）：` +
+        `协议不受影响，JSON 帧照常解析`,
+      );
     }
   }
 
@@ -437,6 +467,11 @@ export class SilamBrainClient implements SilamBrain {
         agent_role: opts.agentRole,
         user_message: opts.userMessage,
         history: opts.history,
+        // A-1197：engine.ts 侧已加载该 Agent 的长期记忆（loadSlimeMemories / siliamMemoryLoader），
+        // 但此前转发时**只挑了上面4 个字段**，slime_memory 从未发出去；
+        // 而 sidecar 在silam_brain_sidecar.py:200-206 明确在等它并注入 state_text。
+        // 契约已在 SilamReplyOpts.slimeMemory（silam_brain.ts:53）声明，这里补上真正转发。
+        ...(opts.slimeMemory && opts.slimeMemory.length > 0 ? { slime_memory: opts.slimeMemory } : {}),
       })) as { reply?: unknown; reasoning?: unknown };
       const reply =
         typeof payload?.reply === "string" && payload.reply ? payload.reply : null;

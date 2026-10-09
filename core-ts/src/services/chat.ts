@@ -216,8 +216,7 @@ export interface ChatRequest {
   message: string;
   history?: ChatMessage[];
   retry?: boolean;
-  maxTokens?: number;
-  
+  maxTokens?: number;  
   sessionId?: string;
   
 
@@ -243,6 +242,17 @@ export interface ChatRequest {
 
 
   windowCap?: number;
+
+  /* A-1197 · B3（L4c 阶段机）：**阶段级覆盖** —— 只由 stageRunner 填；
+     不填 = 行为与现状逐字一致（loopBudget / agentToolsFor 的默认口径）。
+     ★ 只覆盖「跑什么」（工具白名单 + 轮次上限），**不覆盖**「怎么判权限」：
+       沙箱 / 硬规则 / 工具去重 / abort 竞跑全链路照旧（由主循环保证）。 */
+  stageOverride?: {
+    /** 本阶段工具白名单（引擎侧 `toolsOnly` 的等价物）。 */
+    toolsOnly?: string[];
+    /** 本阶段轮次上限（1..500；清单层已校验，这里不重校验）。 */
+    maxRounds?: number;
+  };
 }
 
 
@@ -1858,6 +1868,16 @@ export class ChatService {
     return { ...agent, model_choice: override };
   }
 
+  /** A-1197 · B3（L4c）执行侧：该 Agent **当前真实可用**的工具名（与 `agentToolsFor` 同产地：
+   *  profile ∩ 引擎工具表）—— 阶段机在每阶段开始前用它重查 `stage.tools`。
+   *  查不到 ⇒ 该阶段**不执行**并如实写进对话（不静默跳阶段，设计兜底表）。
+   *  返回 undefined = 拿不到工具表（此时不阻断 —— 交由既有链路，装配侧不得据此假装通过）。 */
+  async availableToolsFor(agentId: string): Promise<string[] | undefined> {
+    const agent = await this.runAgentFor(agentId);
+    if (!agent) { return undefined; }
+    return this.agentToolsFor(agent);
+  }
+
   async analyze(agentId: string, message: string): Promise<SwarmAnalysis> {
     const agent = await this.registry.findAgent(agentId);
     if (!agent) {
@@ -2131,10 +2151,10 @@ export class ChatService {
         
         networkEnabled: req.networkEnabled,
         
-        toolsOnly: this.agentToolsFor(agent),
+        toolsOnly: req.stageOverride?.toolsOnly ?? this.agentToolsFor(agent),
         
         
-        maxRounds: loopBudget.maxRounds,
+        maxRounds: req.stageOverride?.maxRounds ?? loopBudget.maxRounds,
         maxToolCalls: loopBudget.maxToolCalls,
         maxWallClockMs: loopBudget.maxWallClockMs ?? DEFAULT_TOOL_WALL_CLOCK_MS,
         maxTotalTokens: loopBudget.maxTotalTokens ?? DEFAULT_TOOL_MAX_TOTAL_TOKENS,

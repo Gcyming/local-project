@@ -14,6 +14,7 @@ import { ChatMessage, ChatRequest } from "shared/schemas";
 import { ToolRegistry } from "./tools/registry.js";
 import { targetFromArgs } from "./tools/hard_rules.js";
 import { SandboxManager } from "./sandbox.js";
+import { explainDenial } from "./tools/policy.js";
 import { OutputFilter, StreamFilter } from "./filter.js";
 
 import { drainSteers } from "./services/steerBus.js";
@@ -44,6 +45,10 @@ const SESSION_SCOPED_TOOLS = new Set(["todo_write", "plan_create", "plan_update"
 
 
 const UNDO_SCOPED_TOOLS = new Set(["file_write", "file_delete"]);
+
+/** A-1198：git_* 工具族 —— 写操作需要 Agent 身份注入（AGENTS.md §0/§4 的 author 与 trailers
+ *  身份来源；参数里的同名字段一律被本注入覆盖，Agent 无法自报身份）。 */
+const GIT_TOOL_NAMES = new Set(["git_status", "git_diff", "git_stage", "git_branch", "git_commit"]);
 
 
 
@@ -424,6 +429,8 @@ function extractImages(text: string, sink: string[]): string {
 export interface ToolLoopStreamOptions {
   agentId: string;
   agentName?: string;
+  /** A-1198：Agent 角色（git_commit 的身份头「我是 {name}，{role}」用）。 */
+  agentRole?: string;
   messages: ChatMessage[];
   initialToolCalls: FlatToolCall[];
   maxTokens?: number;
@@ -443,6 +450,8 @@ export interface ToolLoopStreamOptions {
 export interface ToolLoopOptions {
   agentId: string;
   agentName?: string;
+  /** A-1198：Agent 角色（git_commit 的身份头「我是 {name}，{role}」用）。 */
+  agentRole?: string;
   messages: ChatMessage[];
   initialToolCalls: FlatToolCall[];
   maxTokens?: number;
@@ -529,7 +538,10 @@ export class ToolLoop {
     pending: FlatToolCall[],
     agentId: string,
     dedup: Set<string>,
+    denials: Map<string, string>,
     agentName = "",
+    agentRole = "",
+    agentModel = "",
     sessionId?: string,
     signal?: AbortSignal,
     onEvent?: (ev: ToolLoopEvent) => void,
@@ -553,7 +565,7 @@ export class ToolLoop {
         return {
           tc,
           msg: await abortableToValue(
-            this.runOneTool(tc, agentId, dedup, agentName, sessionId, signal),
+            this.runOneTool(tc, agentId, dedup, denials, agentName, agentRole, agentModel, sessionId, signal),
             signal,
             "[已中断] 用户停止生成，工具执行被跳过",
           ),
@@ -688,7 +700,10 @@ export class ToolLoop {
     tc: FlatToolCall,
     agentId: string,
     dedup: Set<string>,
+    denials: Map<string, string>,
     agentName: string,
+    agentRole: string,
+    agentModel: string,
     sessionId: string | undefined,
     signal: AbortSignal | undefined,
   ): Promise<string> {
@@ -723,6 +738,20 @@ export class ToolLoop {
       || tc.name === "memory_recall" || tc.name === "memory_write") {
       delete args._agent_id;
       args._agent_id = agentId;
+    }
+    /* A-1198 · git 工具层：身份注入的唯一来源（Agent 无法自报身份——参数里的 _agent_* 一律覆盖）。
+       git_commit 缺身份会直接拒绝（不给假身份兜底）。 */
+    if (GIT_TOOL_NAMES.has(tc.name)) {
+      delete args._agent_id;
+      delete args._agent_name;
+      delete args._agent_role;
+      delete args._agent_model;
+      delete args._session_id;
+      args._agent_id = agentId;
+      args._agent_name = agentName;
+      args._agent_role = agentRole;
+      args._agent_model = agentModel;
+      args._session_id = sessionId ?? "";
     }
     
     
@@ -842,10 +871,21 @@ export class ToolLoop {
         }
       }
       if (denied) {
-        const hint = anomalyAlerts.length > 0
-          ? `（异常检测：${anomalyAlerts.join("、")}）`
-          : "该操作需要用户确认授权；若被拒绝请向用户说明并尝试其他方案。";
-        return `[沙箱拒绝] 工具 '${tc.name}' 未获授权（${denyReason ?? "权限不足"}）${hint}`;
+        const why = denyReason ?? "权限不足";
+        // A-1197：同一目标重复被拒时不再整条复读（避免聊天里刷屏同一句「被拒绝」），
+        // 但第一次必须把「为什么 + 下一步怎么办」说全，否则模型只能原地重试。
+        const key = `${tc.name}|${target}`;
+        if (denials.has(key)) {
+          return `[沙箱拒绝] 工具 '${tc.name}' 对同一目标的调用再次被拒（原因同上，${why}）。不要再重试，按上面的补救方式换做法。`;
+        }
+        denials.set(key, why);
+        const advice = explainDenial(why);
+        const hint = anomalyAlerts.length > 0 ? `（异常检测：${anomalyAlerts.join("、")}）` : "";
+        return [
+          `[沙箱拒绝] 工具 '${tc.name}' 未获授权（${why}）${hint}`,
+          advice.hard ? "［不可审批］" : "［需用户批准］",
+          advice.advice,
+        ].filter((s) => s !== "").join("\n");
       }
       
       
@@ -866,6 +906,8 @@ export class ToolLoop {
 
   async run(opts: ToolLoopOptions): Promise<ToolLoopResult> {
     const dedup = new Set<string>();
+    // A-1197：本轮已被拒的「工具|目标」—— 重复调用不再复读长篇拒绝理由
+    const denials = new Map<string, string>();
     let pending = opts.initialToolCalls;
     
     let reconciled = false;
@@ -878,6 +920,8 @@ export class ToolLoop {
     const reasonings: string[] = [];
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
+    const agentRole = opts.agentRole ?? "";
+    const agentModel = opts.model ?? "";
     
     const maxRounds = resolveMaxRounds(opts.maxRounds);
     const warnAt = Math.max(1, maxRounds - 3);
@@ -899,7 +943,7 @@ export class ToolLoop {
 
     for (let round = 1; round <= maxRounds; round++) {
       if (pending.some((tc) => tc.name === "todo_write")) { usedTodoWrite = true; }
-      const details = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId, opts.signal);
+      const details = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, denials, agentName, agentRole, agentModel, opts.sessionId, opts.signal);
       roundLog.push({ round, details });
       budget.toolCalls += details.length;
       budget.tokens += details.reduce((s, d) => s + tokEst(d.result), 0);
@@ -1016,6 +1060,8 @@ export class ToolLoop {
 
   async runStream(opts: ToolLoopStreamOptions): Promise<ToolLoopResult> {
     const dedup = new Set<string>();
+    // A-1197：同上（流式链路也要去重，否则首屏刷三遍同一句拒绝）
+    const denials = new Map<string, string>();
     let pending = opts.initialToolCalls;
     
     let reconciled = false;
@@ -1031,6 +1077,8 @@ export class ToolLoop {
     let tailText = "";
     const reasoningParams = this.reasoningParams();
     const agentName = opts.agentName ?? "";
+    const agentRole = opts.agentRole ?? "";
+    const agentModel = opts.model ?? "";
     
     const maxRounds = resolveMaxRounds(opts.maxRounds);
     const warnAt = Math.max(1, maxRounds - 3);
@@ -1048,7 +1096,7 @@ export class ToolLoop {
 
     for (let round = 1; round <= maxRounds; round++) {
       if (pending.some((tc) => tc.name === "todo_write")) { usedTodoWrite = true; }
-      const roundDetails = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, agentName, opts.sessionId, opts.signal, opts.onEvent);
+      const roundDetails = await this.executePendingTools(opts.messages, pending, opts.agentId, dedup, denials, agentName, agentRole, agentModel, opts.sessionId, opts.signal, opts.onEvent);
       roundLog.push({ round, details: roundDetails });
       budget.toolCalls += roundDetails.length;
       budget.tokens += roundDetails.reduce((s, d) => s + tokEst(d.result), 0);

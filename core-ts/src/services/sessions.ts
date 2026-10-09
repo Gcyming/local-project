@@ -110,6 +110,10 @@ export interface SessionMeta {
   leaderEffort?: string;
   
   type?: "normal" | "brainstorm";
+  /** A-1197 · B3（L4c）：显式运行模式 key（= 提供 mode 的**插件名**）。
+   *  在请求组装时读（resolveRunnerKind）；不填 = 默认「模型 + 工具」。
+   *  ⚠️ 它只覆盖「跑什么」（阶段清单 + 每阶段白名单/上限），不碰任何权限判定。 */
+  mode?: string;
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -219,8 +223,28 @@ export async function setSessionType(sessionId: string, type: "normal" | "brains
 }
 
 
-export async function setSessionAgent(sessionId: string, agentId: string): Promise<SessionMeta | null> {
+/** A-1197 · B3（L4c）：设置会话的**显式运行模式**（= 提供 mode 的插件名；空 ⇒ 清除=默认）。
+ *  与 `setSessionType` 同款（withWriteLock + atomicWrite）；请求组装时读（resolveRunnerKind）。 */
+export async function setSessionMode(sessionId: string, mode: string | null): Promise<SessionMeta | null> {
+  const clean = (mode ?? "").trim();
   let updated: SessionMeta | null = null;
+  await withWriteLock(async () => {
+    const all = await readAll();
+    const meta = all[sessionId];
+    if (!meta) { return; }
+    if (clean) {
+      meta.mode = clean.slice(0, 64);
+    } else {
+      delete meta.mode;
+    }
+    meta.updatedAt = new Date().toISOString();
+    await atomicWrite(all);
+    updated = meta;
+  });
+  return updated;
+}
+
+export async function setSessionAgent(sessionId: string, agentId: string): Promise<SessionMeta | null> {  let updated: SessionMeta | null = null;
   await withWriteLock(async () => {
     const all = await readAll();
     const meta = all[sessionId];

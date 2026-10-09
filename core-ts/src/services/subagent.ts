@@ -296,7 +296,8 @@ export function sanitizeSubagentRunName(raw: string): string {
 }
 
 const STRUCTURED_INSTRUCTION =
-  "请在最终回复末尾输出一个 JSON 代码块，形如 ```json {\"status\":\"completed|partial|failed\",\"summary\":\"...\",\"artifacts\":[\"...\"],\"confidence\":0.0} ```";
+  "请在最终回复末尾输出一个 JSON 代码块，形如 ```json {\"status\":\"completed|partial|failed\",\"summary\":\"...\",\"artifacts\":[\"...\"],\"confidence\":0.0} ```。" +
+  "summary 要如实写清四件事（对齐「交接单」）：**做了什么**（改动/产出；有改动请附**文件路径与位置**）· **依据**（依据的约定/现状）· **验证**（跑了什么、结果如何——没验证就明说没验证）· **遗留**（已知风险/未决问题）。**不要**只写「完成了」——主 Agent 与用户要靠这四点核验你的产出。";
 
 
 export function parseStructuredResult(text: string): SubAgentResult | null {

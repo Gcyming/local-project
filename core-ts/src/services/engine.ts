@@ -100,7 +100,6 @@ export interface SlimeEngineOptions {
   
   clientFactory?: ClientFactory;
   
-  defaultReply?: (agent: AgentState) => string;
   logger?: Pick<Console, "warn" | "info" | "debug">;
   
   onAskUser?: AskUserHook;
@@ -115,15 +114,6 @@ export interface SlimeEngineOptions {
 
   onSilamEvolve?: (agentId: string, state: SilamAffectState) => void;
 }
-
-function defaultReplyText(agent: AgentState): string {
-  return (
-    `你好，我是 ${agent.name}，${agent.role}。\n\n` +
-    `当前未配置 API Provider，请先通过 CLI 向导或 API 配置模型服务。\n` +
-    `使用 \`py slime_cli.py wizard\` 或 \`POST /providers\` 添加 Provider。`
-  );
-}
-
 
 export function estimateTokens(text: string): number {
   return Math.round(text.length * 0.6);
@@ -336,7 +326,6 @@ export class SlimeEngine implements ChatEngine {
   private tools: ToolRegistry;
   private sandbox: SandboxManager | null;
   private clientFactory: ClientFactory;
-  private defaultReply: (agent: AgentState) => string;
   private logger: Pick<Console, "warn" | "info" | "debug">;
   private onAskUser: AskUserHook | undefined;
   private silamBrain: SilamBrain | null;
@@ -441,7 +430,6 @@ export class SlimeEngine implements ChatEngine {
         timeoutMs: route.timeoutMs,
         rateLimit: { key: providerKeyOfRoute(route), model: route.model },
       }));
-    this.defaultReply = opts.defaultReply ?? defaultReplyText;
     this.logger = opts.logger ?? console;
     this.onAskUser = opts.onAskUser;
     this.silamBrain = opts.silamBrain ?? null;
@@ -595,8 +583,21 @@ export class SlimeEngine implements ChatEngine {
 
 
 
-  private fallbackNotice(agent: AgentState, error: string | null): string {
-    return `⚠️ 选中的模型「${agent.model_choice || "(空)"}」不可用，本轮由 SILAM 离线大脑兜底应答。\n原因：${error ?? "无可用路由"}`;
+
+  /* ── A-1197：silam 自研模型下线后的「无路由」兜底 ────────────────
+   * 旧实现在无 API/本地模型时让 SILAM 离线大脑接管应答（model="silam-brain"）。
+   * 实测该模型层质量未达标（6922 词表 d16 线性模型输出乱码 + max_len 硬截断），
+   * 于是「没配模型」的用户收到的是一堆乱码 —— 比一句「这里没有模型可用」糟得多。
+   * 现在兜底只讲一句实话：不假装是模型回答，且如实标 model="none"。
+   * 代码资产（silam_brain.ts / sidecar）保留，自研模型接回来时改回这两处即可。 */
+  private noModelRouteText(agent: AgentState, error: string | null): string {
+    return (
+      `本轮没有可用模型来应答 —— 这句话不是模型回答，是 slime 的如实提示。\n` +
+      `当前选择的模型：${agent.model_choice || "(空)"}\n` +
+      `原因：${error ?? "无可用路由"}\n` +
+      `去哪里配：设置 → 供应商 添加并启用一个模型（填 API Key 并选好模型），` +
+      `或在设置 → 模型 接一个本地模型服务；配好后回到这个对话重新发送。`
+    );
   }
 
   
@@ -646,12 +647,18 @@ export class SlimeEngine implements ChatEngine {
   }
 
   
-  private silamUnavailableText(agent: AgentState): string {
+  private silamPlaceholderText(agent: AgentState): string {
     return (
-      `你好，我是 ${agent.name}，${agent.role}。\n\n` +
-      `已选择 SILAM 离线大脑，但它当前不可用。请检查：\n` +
-      `- slime.toml [silam] 需 enabled=true 且 as_brain=true\n` +
-      `- 兑底 sidecar 是否存在（sidecar/silam_brain_sidecar.py，自动发现情感脑 80M 与语言脑 d16）`
+      `${agent.name}（${agent.role}）当前没有可用的大脑来回答。\n\n` +
+      `现状：silam 离线自研大脑已下线（slime.toml 的 [silam] 段 enabled=false），` +
+      `这一段和它的代码资产都还在，只是不再作为模型对外应答 —— ` +
+      `此前实测它的语言脑会输出乱码并在固定长度硬截断，启用它等于拿坏答案糊弄你。\n\n` +
+      `现在可以怎么办：到设置 → 供应商 配一个云端模型，或到设置 → 模型 接一个本地模型服务，` +
+      `然后把这个对话的模型切过去。\n\n` +
+      `将来自研模型接回来时，接的就是这几处契约：\n` +
+      `- slime.toml 的 [silam] 段（enabled / as_brain）\n` +
+      `- sidecar/silam_brain_sidecar.py 的 JSON 行协议（reply 返回 reply / reasoning）\n` +
+      `- core-ts/src/services/silam_brain.ts 的 SilamBrain 接口`
     );
   }
 
@@ -1178,29 +1185,19 @@ export class SlimeEngine implements ChatEngine {
           elapsedMs: Date.now() - started,
         };
       }
-      const reply = this.silamUnavailableText(opts.agent);
+      const reply = this.silamPlaceholderText(opts.agent);
       return { reply, replyRaw: reply, model: "none", promptTokens: 0, completionTokens: 0, elapsedMs: Date.now() - started };
     }
     const { router, error } = await this.resolveRouteInternal(opts.agent, opts.signal);
     if (!router) {
       this.logger.warn(`[engine] 无可路由模型（${opts.agent.model_choice}）：${error ?? "无可用路由"}`);
-      
-      const brain = await this.silamReply(opts);
-      if (brain?.reply) {
-        
-        const notice = this.fallbackNotice(opts.agent, error);
-        return {
-          reply: brain.reply,
-          replyRaw: brain.reply,
-          reasoning: brain.reasoning ? `${notice}\n\n${brain.reasoning}` : notice,
-          model: "silam-brain",
-          promptTokens: estimateTokens(opts.message),
-          completionTokens: estimateTokens(brain.reply),
-          elapsedMs: Date.now() - started,
-        };
-      }
+      // A-1197：此处曾让 SILAM 离线大脑接管应答（model="silam-brain"）。
+      // 该模型实测输出乱码 + 固定长度硬截断，对「没配任何模型」的用户是纯粹的伤害；
+      // 用户已授权「修不了就暂时去除」⇒ 现在只给一句如实的提示，model 如实为 "none"。
+      const reply = this.noModelRouteText(opts.agent, error);
       return {
-        reply: error ?? this.defaultReply(opts.agent),
+        reply,
+        replyRaw: reply,
         model: "none",
         promptTokens: 0,
         completionTokens: 0,
@@ -1239,7 +1236,7 @@ export class SlimeEngine implements ChatEngine {
         onAskUser: this.onAskUser,
         networkEnabled: opts.networkEnabled,
       });
-      const result = await loop.run({ agentId: opts.agent.id, agentName: opts.agent.name, messages, initialToolCalls: [], tools, maxTokens: effectiveMaxTokens(opts.agent, opts.maxTokens), sessionId: opts.sessionId, signal: opts.signal, maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs, maxRounds: opts.maxRounds });
+      const result = await loop.run({ agentId: opts.agent.id, agentName: opts.agent.name, agentRole: opts.agent.role, model: opts.agent.model_choice, messages, initialToolCalls: [], tools, maxTokens: effectiveMaxTokens(opts.agent, opts.maxTokens), sessionId: opts.sessionId, signal: opts.signal, maxToolCalls: opts.maxToolCalls, maxTotalTokens: opts.maxTotalTokens, maxWallClockMs: opts.maxWallClockMs, maxRounds: opts.maxRounds });
       const filtered = new OutputFilter().filter(result.raw, opts.agent.name);
       
       this.observeTutorDemo(opts, result.raw);
@@ -1471,33 +1468,16 @@ export class SlimeEngine implements ChatEngine {
         };
         return;
       }
-      const reply = this.silamUnavailableText(opts.agent);
+      const reply = this.silamPlaceholderText(opts.agent);
       yield { type: "done", reply, reply_raw: reply, model: "none", prompt_tokens: 0, completion_tokens: 0, elapsed_ms: Date.now() - started };
       return;
     }
     const { router, error } = await this.resolveRouteInternal(opts.agent, opts.signal);
     if (!router) {
       this.logger.warn(`[engine] 无可路由模型（${opts.agent.model_choice}）：${error ?? "无可用路由"}`);
-      
-      const brain = await this.silamReply(opts);
-      if (brain?.reply) {
-        
-        
-        const notice = this.fallbackNotice(opts.agent, error);
-        yield { type: "reasoning", content: brain.reasoning ? `${notice}\n\n${brain.reasoning}` : notice };
-        yield {
-          type: "done",
-          reply: brain.reply,
-          reply_raw: brain.reply,
-          reasoning: brain.reasoning ?? null,
-          model: "silam-brain",
-          prompt_tokens: estimateTokens(opts.message),
-          completion_tokens: estimateTokens(brain.reply),
-          elapsed_ms: Date.now() - started,
-        };
-        return;
-      }
-      const reply = error ?? this.defaultReply(opts.agent);
+      // A-1197：与 chat() 同一处置——不再让 SILAM 离线大脑接管（model 不能是 "silam-brain"），
+      // 只如实说明「没有可用模型」并指出去哪里配。
+      const reply = this.noModelRouteText(opts.agent, error);
       yield { type: "done", reply, reply_raw: reply, model: "none", prompt_tokens: 0, completion_tokens: 0, elapsed_ms: Date.now() - started };
       return;
     }
@@ -1541,6 +1521,8 @@ export class SlimeEngine implements ChatEngine {
         .runStream({
           agentId: opts.agent.id,
           agentName: opts.agent.name,
+          agentRole: opts.agent.role,
+          model: opts.agent.model_choice,
           messages,
           initialToolCalls: [],
           tools,
