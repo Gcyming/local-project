@@ -10,6 +10,7 @@
 import React, { type JSX } from "react";
 import { CloseIcon } from "../components/Icon.js";
 import { confirmAsync } from "../dialog.js";
+import { readUnsavedHintHidden, writeUnsavedHintHidden } from "./operationFocus.js";
 
 interface AgentBrief {
   id: string;
@@ -54,6 +55,27 @@ const EMPTY_TOOL_PROFILE: ToolProfileLocal = { mode: "default", skills: [], mcp:
 
 
 
+/** A-1197：把「可编辑字段」压成一个可比较的字符串，作为「有没有未保存改动」的判据。
+ *
+ *  刻意**只**覆盖 `saveDetail()` 真正会写回的那几项（见其 `patch` 构造）：
+ *  role / mode / show_thinking / tool_profile / subagent_dispatch。
+ *  多算一个字段（如 name、id）会让只读展示字段的差异也算成"脏" ⇒ 平白弹窗；
+ *  少算一个字段 ⇒ 那种改动会静默丢掉，正是这次要修的病。
+ *  tool_profile 的数组**排序后**再比：勾选顺序不同但集合相同，不该算改动。 */
+function unsavedSnapshot(d: AgentDetail | null): string {
+  if (!d) { return ""; }
+  const tp = d.tool_profile ?? EMPTY_TOOL_PROFILE;
+  return JSON.stringify({
+    role: d.role,
+    mode: d.mode,
+    show_thinking: d.show_thinking,
+    tool_profile: { mode: tp.mode, skills: [...tp.skills].sort(), mcp: [...tp.mcp].sort() },
+    subagent_dispatch: d.subagent_dispatch,
+  });
+}
+
+
+
 
 
 
@@ -82,15 +104,46 @@ interface ExtrasCatalog {
   mcpServers: Array<{ name: string; description?: string }>;
 }
 
+/** A-1197：设置外壳（`SettingsDialog`）注册进来的「离开闸门」。
+ *
+ *  ⚠️ **闸门的实现全部在面板内**（判脏 `unsavedSnapshot` / 弹窗 / `hintHidden` 只此一份），
+ *  外壳只负责表达"我想离开、去哪" ⇒ 外壳里不会出现第二份判脏逻辑（否则两份判据必然漂移）。
+ *  外壳拿到的是**能力**（gate），不是**状态快照**：状态随时可能变（用户还在改），
+ *  快照要么过期、要么得额外做同步，两种都是静默失守的产地。 */
+export interface AgentLeaveGate {
+  /** 当前是否真有未保存改动（面板自己的判脏，供外壳在需要时读；不缓存）。 */
+  isDirty: () => boolean;
+  /** 是否正挂着「有未保存的改动」确认弹窗。挂起期间外壳的手势（如 Esc）必须让位，
+   *  否则会在用户还没回答"要不要放弃"时先把整个设置弹窗关掉。 */
+  isConfirming: () => boolean;
+  /** 请求离开：无脏、或已勾「以后不再」⇒ 立即执行 `target.run()`；否则弹窗等用户确认。 */
+  requestLeave: (target: AgentShellLeave) => void;
+}
+
+/** 外壳的一条离开请求。`label` 只进弹窗文案（说清"离开去干什么"），`run` 是真正要执行的动作。 */
+export interface AgentShellLeave {
+  label: string;
+  run: () => void;
+}
+
+/** 挂起的离开动作（`null` = 没有待办，即正常态，由 `pendingLeave` state 表达）。
+ *  三类：面板内切 Agent / 关掉设置弹窗 / 在设置里切页。 */
+type PendingLeave =
+  | { kind: "select"; agentId: string }
+  | { kind: "shell"; label: string; run: () => void };
+
 interface Props {
   selectedAgentId?: string;
   onSelectAgent: (agentId: string) => void;
-  
+
   onAgentsChanged?: () => void;
-  
+
   providerKeys: string[];
-  
+
   localModels: Array<{ id: string; label: string; path: string }>;
+  /** A-1197：挂载期间把离开闸门交给设置外壳（关弹窗 / 切设置页都要过它）。
+   *  卸载时必须回传 `null` —— 否则外壳会拿着一个已随面板卸载的闸门去放行（= 没有闸门）。 */
+  onRegisterLeaveGate?: (gate: AgentLeaveGate | null) => void;
 }
 
 const MODE_OPTIONS: Array<{ value: string; label: string }> = [
@@ -294,10 +347,123 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
 
   const selectedId = localId ?? props.selectedAgentId ?? null;
 
+  /* ── A-1197：未保存改动的离开守卫 ──────────────────────────────────
+   *
+   *  用户原话：「Agent 修改不点保存保存不了」——`patchLocal()` 只改本地 state，
+   *  只有 `saveDetail()` 才写回。切到别的 Agent / 关掉设置 / 被别的面板顶替时，
+   *  `useEffect` 会用服务端值 `setDetail()` 覆盖，未保存的编辑就**静默消失**了。
+   *
+   *  `savedRef` 存"上次已落盘"的快照，于是脏判定 = 当前快照 ≠ 已落盘快照。
+   *  用 ref 而不是 state：它只被事件处理器读，不需要触发重渲染。 */
+  const savedRef = React.useRef<string>("");
+  const [dirty, setDirty] = React.useState(false);
+  /* ⚠️ 2026-10-08（用户实测报「不管是否修改都会弹窗」）：判脏改为**双条件** ——
+     ① 用户**真的编辑过**（editedRef，只有 patchDetail 会置位）
+     ② 当前快照与已落盘基线**不同**（savedRef）。
+     单独用 ② 时，任何"归一化 / 竞态"类差异都会变成**永久假脏**（拦下每一次离开）；
+     而实际拦截的价值只发生在"用户真改过、且真没存"的时候。任一条件不满足即**不拦**——
+     宁可漏拦一次（用户手动救），也不要把每一次切页都变成误报。
+     editedRef 的生命周期：patchDetail 置 true；markSavedFromServer（加载回填 / 保存成功）
+     置 false —— 与基线的重置同拍。 */
+  const editedRef = React.useRef(false);
+  /* 「以后不再提示」的**面板内常驻开关**：既是勾选框的落点，也是唯一的恢复路径
+   * （勾错了还能在这里改回来，不必去翻 localStorage）。 */
+  const [hintHidden, setHintHidden] = React.useState<boolean>(() => readUnsavedHintHidden());
+  /** 待确认的离开动作。null = 没有待办；确认弹窗期间用它存住"用户想去哪"。
+   *  A-1197：`kind` 区分三类离开 —— 面板内切 Agent（select）/ 设置外壳请求的离开（shell）。 */
+  const [pendingLeave, setPendingLeave] = React.useState<PendingLeave | null>(null);
+
+  /** 当前是否真有未保存改动：**双条件**（真编辑过 + 快照与基线不同，见 editedRef 注释）。
+   *  读快照，不依赖 state，避免闭包过期。 */
+  function isDirtyNow(): boolean {
+    return editedRef.current && unsavedSnapshot(detail) !== savedRef.current;
+  }
+
+  /** 详情从服务端加载完 ⇒ 此刻的内容就是"已落盘"，重置基线并清脏。 */
+  function markSavedFromServer(d: AgentDetail | null): void {
+    savedRef.current = unsavedSnapshot(d);
+    editedRef.current = false;
+    setDirty(false);
+  }
+
+  /** 真的执行离开（弹窗里点「放弃改动并离开」，或无需确认时的直接放行）。 */
+  function commitLeave(next: { kind: "select"; agentId: string }): void {
+    setPendingLeave(null);
+    if (next.kind === "select") {
+      setLocalId(next.agentId);
+      props.onSelectAgent(next.agentId);
+    }
+  }
+
+  /** 离开前的闸门：无脏、或用户勾过「以后不再」⇒ 直接放行；否则弹窗等确认。 */
+  function requestLeave(next: { kind: "select"; agentId: string }): void {
+    if (!isDirtyNow() || hintHidden) { commitLeave(next); return; }
+    setPendingLeave(next);
+  }
+
+  /* ── A-1197：交给设置外壳的那一半闸门 ────────────────────────────────
+   *
+   *  离开路径一共三条，全部必须拦：① 面板内切 Agent（上面 requestLeave）
+   *  ② 关掉整个设置弹窗（遮罩 / 关闭按钮 / Esc）③ 在设置弹窗里切到别的设置页。
+   *  ②③ 的手势发生在**外壳**，可外壳看不到 `detail`；若让外壳自己判脏，就得把
+   *  `unsavedSnapshot` 的字段清单复制一份 —— 两份判据迟早漂移（加字段只改一处 ⇒
+   *  某一路径静默失守），而"只在一处失守"恰恰是这类守卫最难发现的形态。
+   *  ⇒ 弹窗、判脏、`hintHidden` 三样**全部留在面板内**，外壳只送来"要去哪 + 干什么"。
+   *
+   *  放行条件与 `requestLeave` 逐字一致（同一对 `isDirtyNow()` / `hintHidden`），
+   *  所以"勾了以后不再就真的三条都不弹"是结构性的，不靠人记得同步两处。 */
+  function requestShellLeave(target: AgentShellLeave): void {
+    if (!isDirtyNow() || hintHidden) { commitShellLeave(target); return; }
+    setPendingLeave({ kind: "shell", label: target.label, run: target.run });
+  }
+
+  function commitShellLeave(target: AgentShellLeave): void {
+    setPendingLeave(null);
+    target.run();
+  }
+
+  /** 弹窗里那个「放弃改动并离开」的落点：按 kind 分派到对应的执行器。
+   *  两类离开共用这一个按钮 ⇒ 不可能出现"弹窗在、但某个 kind 没有出口"的死锁。 */
+  function commitPendingLeave(next: PendingLeave): void {
+    if (next.kind === "select") { commitLeave({ kind: "select", agentId: next.agentId }); return; }
+    commitShellLeave({ label: next.label, run: next.run });
+  }
+
+  /* 闸门对象每次渲染都刷新（闭包里的 `detail` / `hintHidden` / `pendingLeave` 才不过期），
+   * 而**注册只做一次**：外壳拿到的是这个 ref 指向的实现，不是一份会过期的快照。 */
+  const shellGateRef = React.useRef<AgentLeaveGate | null>(null);
+  React.useEffect(() => {
+    shellGateRef.current = {
+      isDirty: () => isDirtyNow(),
+      isConfirming: () => pendingLeave !== null,
+      requestLeave: (target: AgentShellLeave) => { requestShellLeave(target); },
+    };
+  });
+  React.useEffect(() => {
+    const register = props.onRegisterLeaveGate;
+    if (!register) { return; }
+    register(shellGateRef.current);
+    /* 卸载必须注销：否则外壳握着一个已随面板卸载的闸门去放行 = 闸门静默失效。 */
+    return () => { register(null); };
+  }, []);
+
+  /** 勾选「以后不再」：立刻持久化；取消勾选同样立刻写回（这就是恢复路径）。 */
+  function onHintHiddenChange(v: boolean): void {
+    setHintHidden(v);
+    writeUnsavedHintHidden(v);
+  }
+
+  /** 编辑动作统一从这里走 ⇒ 改完立刻把「有未保存改动」显示出来。 */
+  function patchDetail(patch: Partial<AgentDetail>): void {
+    editedRef.current = true;
+    setDetail((prev) => (prev ? { ...prev, ...patch } : prev));
+    setDirty(true);
+  }
+
   
   const selectAgent = (id: string): void => {
-    setLocalId(id);
-    props.onSelectAgent(id);
+    if (id === selectedId) { return; }
+    requestLeave({ kind: "select", agentId: id });
   };
 
   
@@ -342,7 +508,13 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
   
   React.useEffect(() => {
     if (!selectedId || !api.current) { return; }
-    api.current.agents.detail(selectedId).then((d: AgentDetail | null) => setDetail(d ? { ...d, tool_profile: d.tool_profile ?? { ...EMPTY_TOOL_PROFILE } } : null)).catch(() => setDetail(null));
+    api.current.agents.detail(selectedId).then((d: AgentDetail | null) => {
+      const next = d ? { ...d, tool_profile: d.tool_profile ?? { ...EMPTY_TOOL_PROFILE } } : null;
+      setDetail(next);
+      /* A-1197：服务端回填的这份就是「已落盘」的样子，把它设为基线，
+       * 否则切换 Agent 时新内容会被拿去和**上一个** Agent 的快照比较 ⇒ 满屏误报。 */
+      markSavedFromServer(next);
+    }).catch(() => { setDetail(null); markSavedFromServer(null); });
     void loadExtras();
   }, [selectedId, agents]);
 
@@ -366,7 +538,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
   
 
   function patchLocal(patch: Partial<AgentDetail>): void {
-    setDetail((prev) => (prev ? { ...prev, ...patch } : prev));
+    patchDetail(patch);
   }
 
   async function saveDetail(): Promise<void> {
@@ -388,6 +560,9 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
       const res = await api.current.agents.update(detail.id, patch);
       if (res.ok) {
         showNotice(true, `「${detail.name}」配置已保存`);
+        /* A-1197：**只有落盘成功**才能把当前内容当成新基线。
+         * 失败时保持 dirty，否则用户以为存好了、离开时也不再被拦。 */
+        markSavedFromServer(detail);
         await loadAgents();
       } else {
         showNotice(false, "保存失败");
@@ -558,11 +733,24 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
                 <span style={{ fontSize: 18, fontWeight: 800 }}>{detail.name}</span>
                 <span style={chip(lifecycleColor(detail.lifecycle))}>{detail.lifecycle}</span>
+                {dirty && (
+                  <span style={{ fontSize: 12, color: "var(--warning)", marginLeft: 8 }}>有未保存改动</span>
+                )}
                 <span style={{ flex: 1 }} />
                 <button className="btn success" onClick={saveDetail} disabled={busy} style={{ fontSize: 13 }}>
                   {busy ? "保存中…" : "保存配置"}
                 </button>
               </div>
+              {/* A-1197：常驻开关 = 勾选框的落点 **兼**唯一的恢复路径。
+                  勾错的人在这里能改回来，不必去翻 localStorage。 */}
+              <label style={{
+                display: "flex", alignItems: "center", gap: 6, marginBottom: 10,
+                fontSize: 11.5, color: "var(--text-dim)", cursor: "pointer", userSelect: "none",
+              }}>
+                <input type="checkbox" checked={hintHidden} style={{ accentColor: "var(--accent)" }}
+                  onChange={(e) => onHintHiddenChange(e.target.checked)} />
+                <span>以后不再提示未保存改动（关掉后，切 Agent / 离开本页将直接放行）</span>
+              </label>
               <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
                 身份铁律：name 不可修改；回答始终自称「{detail.name}」
               </div>
@@ -651,7 +839,7 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
               </div>
               <ToolProfilePicker
                 value={detail.tool_profile ?? { ...EMPTY_TOOL_PROFILE }}
-                onChange={(v) => setDetail({ ...detail, tool_profile: v })}
+                onChange={(v) => patchDetail({ tool_profile: v })}
                 extras={extras}
               />
             </div>
@@ -709,6 +897,41 @@ const AgentsPanel = React.memo(function AgentsPanel(props: Props): JSX.Element {
                 {busy ? "创建中…" : "创建"}
               </button>
               <button className="btn" onClick={() => setCreating(false)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {}
+      {pendingLeave && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 100, background: "rgba(2, 6, 23, 0.72)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div className="modal-card" style={{ width: 440, maxWidth: "92vw" }}>
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+              <h3 style={{ margin: 0, flex: 1 }}>有未保存的改动</h3>
+              <button className="titlebar-btn" title="留在此页继续编辑"
+                onClick={() => setPendingLeave(null)}><CloseIcon size={12} /></button>
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.65, marginBottom: 12 }}>
+              你在「<b>{detail?.name ?? ""}</b>」的配置里改了东西但还没点
+              <b style={{ color: "var(--warning)" }}> 保存配置 </b>。
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
+                现在{pendingLeave.kind === "shell" ? <>（{pendingLeave.label}）</> : null}离开会<b>直接丢掉</b>这些改动（设定 / 运行模式 / 子代理派发 / 工具能力），不会自动保留。
+              </div>
+            </div>
+            <label style={{
+              display: "flex", alignItems: "center", gap: 6, marginBottom: 14,
+              fontSize: 12, color: "var(--text-muted)", cursor: "pointer", userSelect: "none",
+            }}>
+              <input type="checkbox" checked={hintHidden} style={{ accentColor: "var(--accent)" }}
+                onChange={(e) => onHintHiddenChange(e.target.checked)} />
+              <span>以后不再出现此提示</span>
+            </label>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn" onClick={() => setPendingLeave(null)}>取消，留在此页保存</button>
+              <button className="btn danger" onClick={() => { commitPendingLeave(pendingLeave); }}>放弃改动并离开</button>
             </div>
           </div>
         </div>

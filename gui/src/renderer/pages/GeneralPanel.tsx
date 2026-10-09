@@ -57,6 +57,28 @@ function MiniBtn(props: { children: React.ReactNode; disabled?: boolean; danger?
   );
 }
 
+/** 数据目录卡片里的静态标记（自定义/默认/异常），只做展示，不可点。 */
+function Badge(props: { tone: "accent" | "muted" | "warn"; children: React.ReactNode }): JSX.Element {
+  const c = props.tone === "accent"
+    ? { border: "var(--accent)", bg: "var(--accent-soft)", fg: "var(--accent-hover)" }
+    : props.tone === "warn"
+      ? { border: "var(--warning)", bg: "var(--warning-soft)", fg: "var(--warning)" }
+      : { border: "var(--border)", bg: "var(--bg-hover)", fg: "var(--text-muted)" };
+  return (
+    <span style={{
+      flexShrink: 0, padding: "2px 9px", borderRadius: 999,
+      border: `1px solid ${c.border}`, background: c.bg, color: c.fg,
+      fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
+    }}>
+      {props.children}
+    </span>
+  );
+}
+
+
+type DataRootInfo = { root: string; custom: boolean; default: string; exists: boolean };
+
+
 const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
   const [autostart, setAutostart] = React.useState<boolean | null>(null);
   const [exitMode, setExitModeState] = React.useState<"quit" | "background">("quit");
@@ -89,11 +111,18 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
   const [ledgerCur, setLedgerCur] = React.useState<LedgerCurrencyPref>(() => readLedgerCurrencyPref());
   const [nBusy, setNBusy] = React.useState(false);
   const [soundBusy, setSoundBusy] = React.useState(false);
+  const [dataRoot, setDataRoot] = React.useState<DataRootInfo | null>(null);
+  const [drBusy, setDrBusy] = React.useState(false);
+  // api.current 在挂载后的 useEffect 里才赋值，memo 组件不会因赋值而重渲染，
+  // 所以「后端接口是否就绪」必须用 state 记，才能正确驱动按钮的禁用态。
+  const [sysReady, setSysReady] = React.useState(false);
   const api = React.useRef<any>(null);
+  const alive = React.useRef(true);
 
   const showNotice = (ok: boolean, text: string): void => {
+    if (!alive.current) { return; }
     setNotice({ ok, text });
-    window.setTimeout(() => setNotice(null), 4000);
+    window.setTimeout(() => { if (alive.current) { setNotice(null); } }, 4000);
   };
 
   
@@ -173,6 +202,8 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
   React.useEffect(() => {
     const w = window as unknown as { slimeAPI?: any };
     api.current = w.slimeAPI;
+    alive.current = true;
+    setSysReady(Boolean(w.slimeAPI?.system?.dataRootGet));
     if (api.current?.settings?.autostartGet) {
       void api.current.settings.autostartGet().then((r: { ok: boolean; enabled: boolean }) => {
         setAutostart(r.enabled);
@@ -203,7 +234,10 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
         if (Array.isArray(r?.providers)) { setFbProviders(r.providers); }
       }).catch(() => {});
     }
+    void refreshDataRoot();
   }, []);
+
+  React.useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   
   async function patchNotify(patch: Partial<Pick<NotifyConfigDTO, "enabled" | "soundEnabled">>, okText: string): Promise<void> {
@@ -327,6 +361,121 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
     }
   }
 
+  /* ── 数据目录（window.slimeAPI.system.dataRoot*） ── */
+
+  async function refreshDataRoot(): Promise<void> {
+    if (!api.current?.system?.dataRootGet) { return; }
+    try {
+      const r = await api.current.system.dataRootGet();
+      if (!alive.current) { return; }
+      if (r && typeof r.root === "string" && r.root) { setDataRoot(r as DataRootInfo); }
+    } catch { /* 读取失败保持骨架，不打扰用户 */ }
+  }
+
+  /** 迁移是复制而非移动：确认文案必须说清，且明确需要重启。 */
+  async function applyDataRoot(dir: string, migrate: boolean): Promise<void> {
+    if (!api.current?.system?.dataRootSet || drBusy) { return; }
+    setDrBusy(true);
+    try {
+      const r = await api.current.system.dataRootSet({ dir, migrate });
+      if (!alive.current) { return; }
+      if (!r?.ok) {
+        showNotice(false, `更改数据目录失败：${r?.error ?? "未知错误"}`);
+        return;
+      }
+      // 落盘后读回真实生效路径，避免界面停留在旧值。
+      const shown = (typeof r.root === "string" && r.root) ? r.root : dir;
+      setDataRoot((prev) => ({ root: shown, custom: true, default: prev?.default ?? "", exists: true }));
+      showNotice(
+        true,
+        `${migrate ? "已复制数据并切换到" : "已切换到"}：${shown}` +
+        (r.needRestart ? " —— 请完全退出并重启 Slime 后彻底生效" : "（下次启动生效）"),
+      );
+      void refreshDataRoot();
+    } catch (e) {
+      showNotice(false, `更改数据目录失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (alive.current) { setDrBusy(false); }
+    }
+  }
+
+  async function changeDataRoot(migrate: boolean): Promise<void> {
+    if (!api.current?.system?.dataRootPick || drBusy) { return; }
+    let picked: string;
+    try {
+      const r = await api.current.system.dataRootPick();
+      if (!r?.ok || r?.canceled) {
+        showNotice(false, "已取消选择，数据目录未改动");
+        return;
+      }
+      if (!r.dir) { showNotice(false, "未拿到目录路径，数据目录未改动"); return; }
+      picked = r.dir;
+    } catch (e) {
+      showNotice(false, `选择目录失败：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+
+    const from = dataRoot?.root ?? "（当前目录未知）";
+    const sure = await confirmAsync(
+      `把数据目录改到「${picked}」？`,
+      `当前生效目录：${from}\n\n` +
+      (migrate
+        ? "已选择「同时迁移现有数据」：应用会把现有数据复制到新目录后再切换过去。\n" +
+          "注意：迁移是复制，不会删除原目录里的数据；若新目录已有同名文件会被覆盖。原目录的旧数据需要你自己确认无误后手动清理。\n"
+        : "本次只改位置、不迁移：新目录会是空的。已有数据（API 密钥、Agent、技能、会话历史）仍留在旧目录里，不会自动带过去；\n" +
+          "若想继续沿用旧数据，请改用「更改并迁移…」。\n") +
+      "\n数据根在 Slime 启动时求值一次，所以改完必须完全退出并重启 Slime 才彻底生效。",
+    );
+    if (!sure) { showNotice(false, "已取消，数据目录未改动"); return; }
+    await applyDataRoot(picked, migrate);
+  }
+
+  async function resetDataRoot(): Promise<void> {
+    if (!api.current?.system?.dataRootReset || drBusy) { return; }
+    const to = dataRoot?.default ?? "系统默认位置";
+    const sure = await confirmAsync(
+      "把数据目录恢复为默认位置？",
+      `将改回：${to}\n\n` +
+      (dataRoot
+        ? `当前自定义目录「${dataRoot.root}」里的文件不会被删除，需要你自己确认后手动清理。\n`
+        : "当前使用的就是默认位置，此操作不会改变什么。\n") +
+      "\n数据根在 Slime 启动时求值一次，所以改完必须完全退出并重启 Slime 才彻底生效。",
+    );
+    if (!sure) { showNotice(false, "已取消，数据目录未改动"); return; }
+
+    setDrBusy(true);
+    try {
+      const r = await api.current.system.dataRootReset();
+      if (!alive.current) { return; }
+      if (!r?.ok) { showNotice(false, `恢复默认失败：${r?.error ?? "未知错误"}`); return; }
+      await refreshDataRoot();
+      showNotice(true, `已恢复默认数据目录：${to}` + (r.needRestart ? " —— 请完全退出并重启 Slime 后彻底生效" : ""));
+    } catch (e) {
+      showNotice(false, `恢复默认失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (alive.current) { setDrBusy(false); }
+    }
+  }
+
+  /** 打开目录用的是现成的 shell.openPath（slimeAPI.workspace.openPath），不是臆造的能力。 */
+  async function openDataRoot(): Promise<void> {
+    const target = dataRoot?.root;
+    if (!target) { showNotice(false, "数据目录尚未就绪，请稍后重试"); return; }
+    if (!api.current?.workspace?.openPath) {
+      showNotice(false, "当前版本不支持直接打开目录，请手动复制上方路径到资源管理器");
+      return;
+    }
+    setDrBusy(true);
+    try {
+      const r = await api.current.workspace.openPath(target);
+      showNotice(Boolean(r?.ok), r?.ok ? `已在资源管理器中打开：${target}` : `打开目录失败：${r?.error ?? "未知错误"}`);
+    } catch (e) {
+      showNotice(false, `打开目录失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (alive.current) { setDrBusy(false); }
+    }
+  }
+
   return (
     
     <div className="settings-pane" style={{ padding: "16px 0", overflowY: "auto", height: "100%" }}>
@@ -346,6 +495,72 @@ const GeneralPanel = React.memo(function GeneralPanel(): JSX.Element {
           {notice.text}
         </div>
       )}
+
+      {}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>数据目录</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
+          Slime 的全部本地数据都装在这一个目录下：<b>API 密钥、Agent 配置、技能（skill）/ 插件、会话历史、记忆与索引、下载缓存</b>。
+          换盘、重装系统、备份时只要搬这一个目录即可。
+          <br />
+          <b>改完必须完全退出并重启 Slime 才彻底生效</b>
+          <span style={{ color: "var(--text-dim)" }}>
+            —— 数据根在进程启动时只求值一次，运行中改设置不会让已打开的文件句柄换位置。
+          </span>
+        </div>
+
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10,
+          border: "1px solid var(--card-border, var(--border))",
+          background: "var(--card-surface, var(--bg-input))",
+        }}>
+          <code style={{
+            flex: 1, minWidth: 0, fontSize: 11.5, fontFamily: "Consolas, monospace",
+            color: "var(--text-secondary)", wordBreak: "break-all", lineHeight: 1.5,
+            userSelect: "text",
+          }}>
+            {dataRoot ? dataRoot.root : "正在读取当前数据目录…"}
+          </code>
+          {dataRoot && (
+            dataRoot.custom
+              ? <Badge tone="accent">自定义</Badge>
+              : <Badge tone="muted">默认</Badge>
+          )}
+          {dataRoot && !dataRoot.exists && <Badge tone="warn">目录不存在</Badge>}
+        </div>
+
+        <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <MiniBtn disabled={drBusy || !sysReady} onClick={() => void changeDataRoot(true)}>
+            {drBusy ? "处理中…" : "更改并迁移…"}
+          </MiniBtn>
+          <MiniBtn disabled={drBusy || !sysReady} onClick={() => void changeDataRoot(false)}>
+            仅更改位置
+          </MiniBtn>
+          <MiniBtn disabled={drBusy || !dataRoot} onClick={() => void openDataRoot()}>
+            打开目录
+          </MiniBtn>
+          <MiniBtn danger disabled={drBusy || !dataRoot?.custom} onClick={() => void resetDataRoot()}>
+            恢复默认
+          </MiniBtn>
+        </div>
+
+        {!sysReady && (
+          <div style={{ fontSize: 11, color: "var(--warning)", marginTop: 8, lineHeight: 1.5 }}>
+            当前版本未提供修改数据目录的能力，请升级应用后再试。
+          </div>
+        )}
+
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.5 }}>
+          「更改并迁移…」会把现有数据<b>复制</b>到新目录后再切换（不删除原目录里的数据，确认无误后请自行清理）；
+          「仅更改位置」只改路径，新目录是空的，旧数据仍留在原处。改完都需要重启 Slime。
+          {dataRoot && !dataRoot.custom && dataRoot.default && dataRoot.default !== dataRoot.root && (
+            <>
+              <br />
+              出厂默认位置：<span style={{ fontFamily: "Consolas, monospace" }}>{dataRoot.default}</span>
+            </>
+          )}
+        </div>
+      </div>
 
       {}
       <div className="card" style={{ marginBottom: 14 }}>

@@ -145,3 +145,38 @@ export function readOpFocusHintHidden(): boolean {
 export function writeOpFocusHintHidden(hidden: boolean): void {
   try { window.localStorage.setItem(OP_FOCUS_HINT_KEY, hidden ? "1" : "0"); } catch {  }
 }
+
+
+
+/** A-1197：未保存改动提醒的「以后不再」键位。
+ *
+ *  ⚠️ 与 `OP_FOCUS_HINT_KEY` **刻意不共用同一个键**，但完全沿用同一套命名与存储形态
+ *  （`slime.<域>.hintHidden`，值恒为 "1" / "0"）。
+ *  不共键的理由：两类提示互不相干——共用后「关掉操作焦点提示」会顺带关掉
+ *  「切 Agent 会丢改动」这条更重要的警告，反之亦然。
+ *  读写函数与提示本体同放一处，是为了避免第二产地各写一套 localStorage 形态（键位漂移）。
+ */
+export const UNSAVED_HINT_KEY = "slime.unsavedChanges.hintHidden";
+
+
+
+/** 读「以后不再提示未保存改动」。存储不可用（隐私模式 / preload 缺失）时**出声**后按"未隐藏"处理。 */
+export function readUnsavedHintHidden(): boolean {
+  try {
+    return window.localStorage.getItem(UNSAVED_HINT_KEY) === "1";
+  } catch (e) {
+    console.error("[unsaved-hint] 读取失败，本次按「仍要提示」处理：", e);
+    return false;
+  }
+}
+
+
+
+/** 写「以后不再提示未保存改动」。写失败必须出声——否则用户以为关掉了，其实每次都被弹。 */
+export function writeUnsavedHintHidden(hidden: boolean): void {
+  try {
+    window.localStorage.setItem(UNSAVED_HINT_KEY, hidden ? "1" : "0");
+  } catch (e) {
+    console.error("[unsaved-hint] 写入失败，「以后不再」未生效（下次仍会提示）：", e);
+  }
+}

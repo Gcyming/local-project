@@ -29,6 +29,34 @@ interface PluginRow {
   status: string;
   error?: string;
   dir: string;
+  /** A-1197 · B1：该插件声明了多少个设置项（0/ 缺省 = 不声明）。 */
+  settingsCount?: number;
+  /** A-1197 · B2/B4：UI 槽位 / 脚本声明计数 + 脚本信任状态（列表接口按需带）。 */
+  uiCount?: number;
+  scriptCount?: number;
+  trusted?: boolean;
+}
+
+/** A-1197 · B1：设置项回传形状（`secret` 项永远只有 `hasValue`，不会有 `value`）。 */
+interface PluginSettingItem {
+  key: string;
+  label: string;
+  type: string;
+  hint?: string;
+  options?: string[];
+  min?: number;
+  max?: number;
+  root?: string;
+  secret: boolean;
+  default?: unknown;
+  value?: unknown;
+  hasValue?: boolean;
+}
+
+interface PluginSettingsSnapshot {
+  plugin: string;
+  items: PluginSettingItem[];
+  warnings: string[];
 }
 
 interface PluginRejectedRow {
@@ -237,11 +265,22 @@ function SourcedPluginCard(props: {
   row: PluginRow;
   onToggle: (name: string, currentlyOn: boolean) => void;
   busy: boolean;
+  onSettingSubmit: (plugin: string, key: string, value: unknown) => void;
+  busySettingKey: string | null;
+  settingsToken: number;
+  /* A-1197 · B4（T1 脚本信任）：仅当 row.scriptCount > 0 时显示开关。 */
+  trusted?: boolean;
+  busyTrust?: boolean;
+  onTrustToggle?: (name: string, trusted: boolean) => void;
 }): JSX.Element {
   const { row, onToggle, busy } = props;
   const failed = row.status === "failed";
   const disabled = row.status === "disabled";
   const on = !disabled && !failed;
+  /* A-1197 · B1：设置区按需展开。设置项是持久数据，禁用插件后**保留**（关插件不该丢配置），
+     但插件未装载时主进程拒读写⇒ 设置区会显示「不可用」而不是假装还能改。 */
+  const hasSettings = (row.settingsCount ?? 0) > 0;
+  const [openSettings, setOpenSettings] = React.useState(false);
 
   return (
     <div style={{
@@ -257,7 +296,36 @@ function SourcedPluginCard(props: {
           tone="dim"
           title={row.status}
         />
+        {hasSettings && (
+          <Badge text={`设置 ${row.settingsCount} 项`} tone="dim"
+            title="插件声明的设置项（落在插件自己的目录，不影响主配置）" />
+        )}
         <span style={{ flex: 1 }} />
+        {hasSettings && (
+          <button className="btn" style={{ fontSize: 11, padding: "2px 9px" }}
+            onClick={() => { setOpenSettings((v) => !v); }}>
+            {openSettings ? "收起设置" : "设置"}
+          </button>
+        )}
+        {(row.scriptCount ?? 0) > 0 && (
+          /* A-1197 · B4（T1）：脚本信任开关 —— 开 = 允许本插件的脚本被装配为可执行工具
+             （一次性子进程、cwd 限定在插件目录、30s 超时）；关 = 立即撤装。 */
+          <>
+            <span style={{ fontSize: 11, color: props.trusted ? "var(--warning)" : "var(--text-dim)", flexShrink: 0 }}>
+              信任脚本（{row.scriptCount}）
+            </span>
+            <ToggleSwitch
+              on={props.trusted === true}
+              busy={props.busyTrust}
+              title={
+                props.trusted
+                  ? "已信任：本插件声明的脚本会被装配为工具（子进程执行）。关闭 = 立即撤装、工具注销。"
+                  : `本插件声明了 ${row.scriptCount} 个可执行脚本。打开开关表示你信任它并允许在本机以一次性子进程执行（cwd 限定在插件目录、30s 超时）。`
+              }
+              onToggle={() => { props.onTrustToggle?.(row.name, props.trusted !== true); }}
+            />
+          </>
+        )}
         {row.unloadable && (
           <ToggleSwitch
             on={on}
@@ -299,6 +367,188 @@ function SourcedPluginCard(props: {
           失败原因：{row.error || "未记录错误信息"}
         </div>
       )}
+
+      {hasSettings && openSettings && (
+        <PluginSettingsSection
+          plugin={row.name}
+          busyKey={props.busySettingKey}
+          reloadToken={props.settingsToken}
+          onSubmit={props.onSettingSubmit}
+        />
+      )}
+    </div>
+  );
+}
+
+/** A-1197 · B1：单个声明项的输入控件（宿主渲染器 —— 扩展**不能**自带组件，见 §5.1）。
+ *  写入前做一次本地校验只为「即时反馈」，主进程那份才是不信任的那一份。 */
+function SettingField(props: {
+  item: PluginSettingItem;
+  onSubmit: (key: string, value: unknown) => void;
+  busy: boolean;
+}): JSX.Element {
+  const { item, busy } = props;
+  const [draft, setDraft] = React.useState<string>(item.type === "boolean" ? "" : String(item.value ?? item.default ?? ""));
+  const [localError, setLocalError] = React.useState<string | null>(null);
+
+  const validate = (raw: string): string | null => {
+    if (item.type === "number") {
+      const n = Number(raw.trim());
+      if (raw.trim() === "" || !Number.isFinite(n)) { return "需要数值"; }
+      if (item.min !== undefined && n < item.min) { return `不得小于 ${item.min}`; }
+      if (item.max !== undefined && n > item.max) { return `不得大于 ${item.max}`; }
+      return null;
+    }
+    if (item.type === "enum") {
+      if (!(item.options ?? []).includes(raw)) { return "不在候选列表内"; }
+      return null;
+    }
+    if (item.type === "path") {
+      const t = raw.trim();
+      if (t === "") { return "不能为空"; }
+      if (/^[A-Za-z]:/.test(t) || t.startsWith("/") || t.startsWith("\\")) { return "必须是纯相对路径"; }
+      if (t.split(/[\\/]+/).includes("..")) { return "不得含 .."; }
+      return null;
+    }
+    return null;
+  };
+
+  const commit = (raw: string): void => {
+    const err = validate(raw);
+    setLocalError(err);
+    if (err) { return; }
+    if (item.type === "boolean") { props.onSubmit(item.key, raw === "true"); return; }
+    if (item.type === "number") { props.onSubmit(item.key, Number(raw.trim())); return; }
+    props.onSubmit(item.key, raw);
+  };
+
+  const row: JSX.Element = (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+      <span style={{ fontSize: 11.5, color: "var(--text-muted)", flexShrink: 0, minWidth: 120 }}>{item.label}</span>
+      {item.type === "boolean" ? (
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          style={{ fontSize: 11, padding: "2px 10px" }}
+          onClick={() => { const next = draft !== "true"; setDraft(next ? "true" : ""); props.onSubmit(item.key, next); }}>
+          {draft === "true" ? "已开启" : "已关闭"}
+        </button>
+      ) : item.type === "enum" ? (
+        <select
+          value={draft}
+          disabled={busy}
+          onChange={(e) => { setDraft(e.target.value); commit(e.target.value); }}
+          style={{ fontSize: 11.5, padding: "2px 6px", minWidth: 140 }}>
+          {(item.options ?? []).map((o) => (<option key={o} value={o}>{o}</option>))}
+        </select>
+      ) : (
+        <>
+          <input
+            value={draft}
+            disabled={busy}
+            placeholder={item.type === "path" ? `相对${item.root === "workspace" ? "会话工作目录" : "插件目录"}的路径` : ""}
+            onChange={(e) => { setDraft(e.target.value); }}
+            onBlur={() => { commit(draft); }}
+            style={{ fontSize: 11.5, padding: "2px 6px", minWidth: 160, flex: 1 }}
+          />
+          <button type="button" className="btn" disabled={busy}
+            style={{ fontSize: 11, padding: "2px 9px" }}
+            onClick={() => { commit(draft); }}>保存</button>
+        </>
+      )}
+      {item.type === "number" && item.min !== undefined && item.max !== undefined && (
+        <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{item.min} ~ {item.max}</span>
+      )}
+      {item.secret && (
+        <Badge text="已加密" tone="dim"
+          title="密文落盘（插件目录下的 settings.enc.json）；读回只告知是否已有值，不回显明文" />
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      {row}
+      {item.hint && <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.5 }}>{item.hint}</div>}
+      {item.secret && item.hasValue && (
+        <div style={{ fontSize: 10.5, color: "var(--text-dim)" }}>已保存（不回显明文）</div>
+      )}
+      {localError && <div style={{ fontSize: 10.5, color: "var(--warning)" }}>{localError}</div>}
+    </div>
+  );
+}
+
+/** A-1197 · B1：某插件的设置区（声明式 —— 宿主按声明渲染，扩展不带组件）。 */
+function PluginSettingsSection(props: {
+  plugin: string;
+  onSubmit: (plugin: string, key: string, value: unknown) => void;
+  busyKey: string | null;
+  reloadToken: number;
+}): JSX.Element | null {
+  const api = React.useRef<any>(null);
+  const [snap, setSnap] = React.useState<PluginSettingsSnapshot | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const load = React.useCallback(async (): Promise<void> => {
+    api.current = (window as any).slimeAPI ?? api.current;
+    const get = api.current?.extras?.pluginsSettingsGet;
+    if (!get) { setError("当前环境不支持读取插件设置"); return; }
+    try {
+      const res = await get(props.plugin);
+      if (res?.ok && res.dto) {
+        setSnap(res.dto);
+        setError(null);
+      } else {
+        /* 插件被禁用 / 未装载 / 未声明设置项 —— 这里如实显示，不静默留空 */
+        setSnap(null);
+        setError(res?.error ? String(res.error) : "读取插件设置失败");
+      }
+    } catch (e) {
+      setSnap(null);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [props.plugin]);
+
+  React.useEffect(() => {
+    void load();
+  }, [load, props.reloadToken]);
+
+  /* 插件被禁用时：主进程返回「未装载或已停用」⇒ 这里拿到 error ⇒ 设置区不显示任何输入框。 */
+  if (error && !snap) {
+    return (
+      <div style={{ fontSize: 11, color: "var(--text-dim)" }}>设置区不可用：{error}</div>
+    );
+  }
+  if (!snap) {
+    return null;
+  }
+
+  return (
+    <div style={{
+      border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px",
+      display: "flex", flexDirection: "column", gap: 8,
+      background: "transparent",
+    }}>
+      <div style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
+        该插件的设置项，落在它自己的目录里（不影响 slime 主配置）
+      </div>
+      {snap.warnings.length > 0 && (
+        <div style={{
+          fontSize: 10.5, color: "var(--warning)", lineHeight: 1.55,
+          border: "1px solid var(--warning)", borderRadius: 6, padding: "4px 8px",
+        }}>
+          {snap.warnings.map((w, i) => (<div key={i}>{w}</div>))}
+        </div>
+      )}
+      {snap.items.map((item) => (
+        <SettingField
+          key={`${props.plugin}:${item.key}`}
+          item={item}
+          busy={props.busyKey === `${props.plugin}:${item.key}`}
+          onSubmit={(key, value) => { props.onSubmit(props.plugin, key, value); }}
+        />
+      ))}
     </div>
   );
 }
@@ -353,6 +603,14 @@ export default function PluginsPanel(props: Props): JSX.Element {
   const [rejected, setRejected] = React.useState<PluginRejectedRow[]>([]);
   const [pluginsFailed, setPluginsFailed] = React.useState(false);
   const [busyName, setBusyName] = React.useState<string | null>(null);
+  /* A-1197 · B4：信任开关的忙碌态（独立于拨片的 busyName —— 两个开关可各自转）。 */
+  const [busyTrustName, setBusyTrustName] = React.useState<string | null>(null);
+  /* A-1197 · B6（D1）：开发者模式总开关（**会话级** —— 启动后默认关，须用户重新确认）。 */
+  const [devMode, setDevMode] = React.useState<{ enabled: boolean; lastConfirmedAt: number | null }>({ enabled: false, lastConfirmedAt: null });
+  const [devModeBusy, setDevModeBusy] = React.useState(false);
+  /** A-1197 · B1：正在写的设置项 `plugin:key`；写完递增 token 让设置区重拉。 */
+  const [busySettingKey, setBusySettingKey] = React.useState<string | null>(null);
+  const [settingsToken, setSettingsToken] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
 
@@ -446,9 +704,87 @@ export default function PluginsPanel(props: Props): JSX.Element {
     }
   }, [refresh]);
 
+  /* A-1197 · B6（D1 开发者模式）：总开关切换 —— 主进程落审计文件（config/dev-mode.json），
+     真正的写入门在 sandbox 侧（受管 worktree + slime/* 分支前缀硬约束）。 */
+  const doDevModeToggle = React.useCallback(async (next: boolean): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.pluginsDevModeSet) { showNotice(false, "当前环境不支持开发者模式开关"); return; }
+    setDevModeBusy(true);
+    try {
+      const res = await a.extras.pluginsDevModeSet(next);
+      if (res?.ok && res.state) {
+        setDevMode(res.state);
+        showNotice(true, next
+          ? "开发者模式已开启（本次会话有效；改主干请走受管 worktree，产物停 slime/* 分支）"
+          : "开发者模式已关闭（受保护目录立即恢复禁写；已产生的分支与 commit 保留）");
+      } else {
+        showNotice(false, res?.error ? `开发者模式切换失败：${res.error}` : "开发者模式切换失败");
+      }
+    } catch (e) {
+      showNotice(false, `开发者模式切换失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDevModeBusy(false);
+    }
+  }, []);
+
   const doToggle = React.useCallback((name: string, currentlyOn: boolean): void => {
     if (currentlyOn) { void doUnload(name); } else { void doEnable(name); }
   }, [doUnload, doEnable]);
+
+  /* A-1197 · B4（T1 脚本信任）：切换信任开关 —— 主进程写 trust.json 后自动重装，
+     快照直接带回（免一次往返）；失败如实提示（写盘失败/目录缺失都原样上抛）。 */
+  const doTrust = React.useCallback(async (name: string, trusted: boolean): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.pluginsTrustSet) {
+      showNotice(false, "当前环境不支持脚本信任开关");
+      return;
+    }
+    setBusyTrustName(name);
+    try {
+      const res = await a.extras.pluginsTrustSet(name, trusted);
+      const snap = res?.snapshot ? normalizeSnapshot(res.snapshot) : null;
+      if (snap) {
+        setPlugins(snap.plugins);
+        setRejected(snap.rejected);
+        setPluginsFailed(false);
+      }
+      if (res?.ok) {
+        showNotice(true, trusted ? `已信任 ${name} 的脚本（脚本工具已装配）` : `已撤销 ${name} 的脚本信任（工具立即注销）`);
+      } else {
+        showNotice(false, res?.error ? `信任开关操作失败：${res.error}` : "信任开关操作失败");
+      }
+      if (!snap) { await refresh(); }
+    } catch (e) {
+      showNotice(false, `信任开关操作失败：${e instanceof Error ? e.message : String(e)}`);
+      await refresh();
+    } finally {
+      setBusyTrustName(null);
+    }
+  }, [refresh]);
+
+  /* A-1197 · B1：写设置项。**渲染层不做持久化判断**（那是主进程的事），
+     这里只负责调通道 + 把结果如实显示（含主进程回传的 warnings）。 */
+  const doSettingSubmit = React.useCallback(async (plugin: string, key: string, value: unknown): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.pluginsSettingsSet) {
+      showNotice(false, "当前环境不支持修改插件设置");
+      return;
+    }
+    setBusySettingKey(`${plugin}:${key}`);
+    try {
+      const res = await a.extras.pluginsSettingsSet(plugin, key, value);
+      if (res?.ok) {
+        showNotice(true, `已保存 ${plugin} 的设置项 ${key}`);
+      } else {
+        showNotice(false, `保存失败：${res?.error ? String(res.error) : "未知原因"}`);
+      }
+    } catch (e) {
+      showNotice(false, `保存失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusySettingKey(null);
+      setSettingsToken((v) => v + 1);
+    }
+  }, []);
 
   const doReload = React.useCallback(async (): Promise<void> => {
     const a = api.current;
@@ -476,6 +812,24 @@ export default function PluginsPanel(props: Props): JSX.Element {
     api.current = (window as any).slimeAPI ?? null;
     void refresh();
   }, [refresh]);
+
+  /** A-1197：主进程自动重扫完成后（磁盘上新增/改了插件或技能）本页自己刷新 ——
+   *  必须排在 `api.current` 赋值之后，否则订阅挂在 null 上，等于没订阅。 */
+  React.useEffect(() => {
+    const off = api.current?.extras?.pluginsOnChanged?.(() => { void refresh(); });
+    return () => { off?.(); };
+  }, [refresh]);
+
+  /* A-1197 · B6（D1）：开发者模式状态（会话级；启动后默认关）。 */
+  React.useEffect(() => {
+    void (async () => {
+      const a = (window as unknown as { slimeAPI?: any }).slimeAPI;
+      const st = await a?.extras?.pluginsDevModeGet?.().catch(() => null);
+      if (st && typeof st === "object") {
+        setDevMode({ enabled: st.enabled === true, lastConfirmedAt: typeof st.lastConfirmedAt === "number" ? st.lastConfirmedAt : null });
+      }
+    })();
+  }, []);
 
   const stats = React.useMemo(() => {
     const byOrigin: Record<string, number> = { agent: 0, market: 0, user: 0, "": 0 };
@@ -532,6 +886,28 @@ export default function PluginsPanel(props: Props): JSX.Element {
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
         本页是三类插件来源的总览 —— 系统默认随应用提供不可卸载，Agent 自建与外部载入可用右侧拨片开关启停；
         技能与 MCP 两类机制仍各自独立管理，不受插件容器管辖。
+      </div>
+
+      {/* A-1197 · B6（D1 开发者模式）：**总开关**（不是逐插件信任）——开启后允许 Agent 在
+          「slime/* 分支的受管 worktree」里改**主干代码**（产物停分支等人工合并；主工作目录永远只读）。
+          ⚠️ 这是**会话级**授权：每次启动都要在这里重新确认（开关不会自动恢复）。 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 9,
+        border: `1px solid ${devMode.enabled ? "var(--warning)" : "var(--border)"}`,
+        background: devMode.enabled ? "rgba(251,191,36,0.08)" : "var(--card-surface)", marginBottom: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: devMode.enabled ? "var(--warning)" : "var(--text)" }}>
+            开发者模式{devMode.enabled ? "（本次会话已开启）" : ""}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6, marginTop: 2 }}>
+            允许在 <code>slime/*</code> 分支的受管 worktree 里改主干代码（主工作目录永远只读；
+            产物停在分支上等人工合并）。<b>会话级授权：每次启动都要重新确认</b>。
+            {devMode.lastConfirmedAt && !devMode.enabled
+              ? `（上次开启于 ${new Date(devMode.lastConfirmedAt).toLocaleString()}）` : ""}
+          </div>
+        </div>
+        <ToggleSwitch on={devMode.enabled} busy={devModeBusy}
+          title={devMode.enabled ? "关闭 = 立即收回主干改写的放行" : "开启 = 授权本次会话在受管 worktree 里改主干代码"}
+          onToggle={() => { void doDevModeToggle(!devMode.enabled); }} />
       </div>
 
       {notice && (
@@ -621,7 +997,9 @@ export default function PluginsPanel(props: Props): JSX.Element {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {stats.agentMade.map((p) => (
               <SourcedPluginCard key={p.name} row={p} busy={busyName === p.name}
-                onToggle={doToggle} />
+                onToggle={doToggle} onSettingSubmit={doSettingSubmit}
+                busySettingKey={busySettingKey} settingsToken={settingsToken}
+                trusted={p.trusted} busyTrust={busyTrustName === p.name} onTrustToggle={doTrust} />
             ))}
           </div>
         )}
@@ -651,7 +1029,9 @@ export default function PluginsPanel(props: Props): JSX.Element {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {stats.external.map((p) => (
               <SourcedPluginCard key={p.name} row={p} busy={busyName === p.name}
-                onToggle={doToggle} />
+                onToggle={doToggle} onSettingSubmit={doSettingSubmit}
+                busySettingKey={busySettingKey} settingsToken={settingsToken}
+                trusted={p.trusted} busyTrust={busyTrustName === p.name} onTrustToggle={doTrust} />
             ))}
           </div>
         )}

@@ -6,6 +6,18 @@
 
 import type { ModelPriceTiers, PriceCurrency } from "../../../shared/gen/model-capabilities.js";
 
+/** 数据根（skill / 配置 / 运行时状态的落盘根目录）对渲染层的只读视图。 */
+export interface DataRootInfo {
+  /** 本次进程实际生效的数据根 */
+  root: string;
+  /** 是否来自用户显式选择（false = 出厂默认） */
+  custom: boolean;
+  /** 出厂默认位置（供 UI 做「恢复默认」提示） */
+  default: string;
+  /** root 目录当前是否存在 */
+  exists: boolean;
+}
+
 export const IPC_CHANNELS = {
   
   chat_stream: "slime:chat:stream",
@@ -17,6 +29,8 @@ export const IPC_CHANNELS = {
   sessions_list: "slime:sessions:list",
   sessions_create: "slime:sessions:create",
   sessions_rename: "slime:sessions:rename",
+  /** A-1197 · B3（L4c）：设置会话的显式运行模式（插件 mode；空串 = 清除回默认）。 */
+  sessions_set_mode: "slime:sessions:setMode",
   sessions_remove: "slime:sessions:remove",
   sessions_load: "slime:sessions:load",
   sessions_clear: "slime:sessions:clear",
@@ -91,6 +105,24 @@ export const IPC_CHANNELS = {
   plugins_reload: "slime:plugins:reload",
   plugins_unload: "slime:plugins:unload",
   plugins_enable: "slime:plugins:enable",
+  /* A-1197 · B1（L4b 设置贡献点）：参数只有 plugin/key/value，**刻意没有 path**
+     —— 落盘路径只由 plugin.name 在主进程推导（见 core-ts/src/plugin/settings-store.ts）。 */
+  plugins_settings_get: "slime:plugins:settingsGet",
+  plugins_settings_set: "slime:plugins:settingsSet",
+  /** A-1197 · B2（L4a）：UI 槽位声明（按需拉取；列表接口只给 uiCount）。 */
+  plugins_ui: "slime:plugins:ui",
+  /** A-1197 · B4（T1）：信任开关状态读（按需拉）。 */
+  plugins_trust_get: "slime:plugins:trustGet",
+  /** A-1197 · B4（T1）：设置信任开关（写 trust.json，随后重装使脚本工具立即生效/撤装）。 */
+  plugins_trust_set: "slime:plugins:trustSet",
+  /** A-1197 · B5（L4a page）：打开扩展自有页面（按需起 127.0.0.1 静态服务，返回 url）。 */
+  plugins_page_open: "slime:plugins:pageOpen",
+  /** A-1197 · B6（D1 开发者模式）：总开关读（会话级；每次启动需重新确认）。 */
+  plugins_dev_mode_get: "slime:plugins:devModeGet",
+  /** A-1197 · B6（D1）：设置总开关（写 config/dev-mode.json 留审计痕迹）。 */
+  plugins_dev_mode_set: "slime:plugins:devModeSet",
+  
+  plugins_changed: "slime:plugins:changed",
   chat_suggest: "slime:chat:suggest",
   
   stats_snapshot: "slime:stats:snapshot",
@@ -175,6 +207,11 @@ export const IPC_CHANNELS = {
 
 
 
+  data_root_get: "slime:dataRoot:get",
+  data_root_pick: "slime:dataRoot:pick",
+  data_root_set: "slime:dataRoot:set",
+  data_root_reset: "slime:dataRoot:reset",
+  
   agentprocs_list: "slime:agentprocs:list",
   agentprocs_stop: "slime:agentprocs:stop",
   
@@ -355,8 +392,7 @@ export interface SessionItem {
   
   memberNames?: string[];
   
-  memberModels?: Record<string, string>;
-  
+  memberModels?: Record<string, string>;  
   leaderModel?: string;
   
   memberEfforts?: Record<string, string>;
@@ -364,6 +400,8 @@ export interface SessionItem {
   leaderEffort?: string;
   
   type?: "normal" | "brainstorm";
+  /** A-1197 · B3（L4c）：会话的显式运行模式（= 提供 mode 的插件名；缺省 = 默认 agent-loop）。 */
+  mode?: string;
 }
 
 
@@ -414,6 +452,8 @@ export interface PermissionRequestUI {
   options: PermissionOption[];
   
   sessionId?: string;
+  /** A-1198：可选长文本详情（git_commit 差异评审的 diff stat + 关键片段；弹窗内滚动展示）。 */
+  detail?: string;
 }
 
 
@@ -510,6 +550,37 @@ export interface PluginSnapshotDTO {
   rejected: PluginRejectedDTO[];
 }
 
+/** A-1197 · B1：单个设置项回渲染层的形状。
+ *  ⚠️ `secret: true` 的项**只会有 `hasValue`，永远不会有 `value`** —— 主进程不提供读明文的通道。 */
+export interface PluginSettingItemDTO {
+  key: string;
+  label: string;
+  type: string;
+  hint?: string;
+  options?: string[];
+  min?: number;
+  max?: number;
+  root?: string;
+  secret: boolean;
+  default?: unknown;
+  value?: unknown;
+  hasValue?: boolean;
+}
+
+export interface PluginSettingsDTO {
+  plugin: string;
+  items: PluginSettingItemDTO[];
+  /** 设置文件损坏 / 落盘值不再合法等告警（**如实上抛，不静默当空配置**） */
+  warnings: string[];
+}
+
+export interface PluginSettingsWriteDTO {
+  ok: boolean;
+  error?: string;
+  dto?: PluginSettingsDTO;
+  warnings?: string[];
+}
+
 export interface PluginSummaryDTO {
 
   name: string;
@@ -523,6 +594,40 @@ export interface PluginSummaryDTO {
   status: string;
   error?: string;
   dir: string;
+  /** A-1197 · B1：该插件**声明**了多少个设置项（0/ 缺省 = 不声明）。
+   *  刻意只给「声明条数」而不是直接塞值 —— 值按需拉（`plugins_settings_get`），
+   *  免得每次列插件都去读每个插件目录里的设置文件。 */
+  settingsCount?: number;
+  /** A-1197 · B2：该插件**声明**了多少条 UI 槽位（0/ 缺省 = 不声明）。
+   *  同理只给计数，明细按需拉（`plugins_ui`）。 */
+  uiCount?: number;
+  /** A-1197 · B4：该插件**声明**了多少个可执行脚本（0/ 缺省 = 不声明）。 */
+  scriptCount?: number;
+  /** A-1197 · B4：该插件的脚本是否已被用户信任（读 `trust.json`；默认拒绝）。 */
+  trusted?: boolean;
+  /** A-1197 · B3：该插件是否提供运行模式（`provides: ["mode"]`）+ 展示名（下拉数据源）。 */
+  hasMode?: boolean;
+  modeTitle?: string;
+}
+
+/** A-1197 · B2（L4a）：一条已接线的 UI 槽位声明（渲染层按它渲染；`冲突` 项禁用）。 */
+export interface PluginUiSlotDTO {
+  slot: string;
+  plugin: string;
+  id: string;
+  title?: string;
+  label?: string;
+  icon?: string;
+  order?: number;
+  refresh?: string;
+  when?: string;
+  /** 跨插件「同 slot 同 id」冲突时标 true —— 渲染成禁用态并显示冲突原因（不静默丢弃）。 */
+  conflict?: boolean;
+}
+
+export interface PluginUiSnapshotDTO {
+  slots: PluginUiSlotDTO[];
+  warnings: string[];
 }
 
 

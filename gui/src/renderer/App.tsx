@@ -109,6 +109,27 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
   const [showAgents, setShowAgents] = React.useState(false);
   const [examples, setExamples] = React.useState<string[]>([]);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
+  const aliveRef = React.useRef(true);
+  const noticeTimerRef = React.useRef<number | null>(null);
+
+  /* A-1197：欢迎页发送失败必须「可见」——沿用 GeneralPanel 的 showNotice 惯例
+     （局部 notice state + 内联 div + 自动消失），不新造一套 toast。
+     aliveRef 防组件卸载后 setState；卸载时清掉未触发的定时器。 */
+  React.useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      if (noticeTimerRef.current !== null) { window.clearTimeout(noticeTimerRef.current); }
+    };
+  }, []);
+
+  const showNotice = React.useCallback((ok: boolean, text: string): void => {
+    if (!aliveRef.current) { return; }
+    setNotice({ ok, text });
+    if (noticeTimerRef.current !== null) { window.clearTimeout(noticeTimerRef.current); }
+    noticeTimerRef.current = window.setTimeout(() => { if (aliveRef.current) { setNotice(null); } }, 5000);
+  }, []);
 
   
   const DEFAULT_EXAMPLES = [
@@ -187,6 +208,11 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
     setBusy(true);
     try {
       await onSend(trimmed);
+    } catch (e: unknown) {
+      /* A-1197：onSend（handleWelcomeSend）失败时用户此前完全看不到任何反馈
+         （「点了没反应」的表面症状之一）——这里把它接成可见的 notice。 */
+      console.error("[app] welcome send failed:", e);
+      showNotice(false, e instanceof Error ? `发送失败：${e.message}` : "发送失败，请稍后重试");
     } finally {
       setBusy(false);
     }
@@ -200,6 +226,16 @@ function WelcomeChat({ onSend, agents, onChooseAgent, onOpenAgents }: WelcomeCha
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", textAlign: "center", maxWidth: 420, lineHeight: 1.6, wordBreak: "break-word", padding: "0 8px", boxSizing: "border-box" }}>
         直接在这里输入想做的事；无需手动选择 Agent——后端会自动为你的会话分配最合适的助手。
       </div>
+      {notice && (
+        <div style={{
+          maxWidth: 680, width: "100%", padding: "8px 12px", boxSizing: "border-box",
+          fontSize: 12.5, lineHeight: 1.5, borderRadius: 8, border: "1px solid var(--border)",
+          background: notice.ok ? "var(--success-soft)" : "var(--danger-soft)",
+          color: notice.ok ? "var(--success)" : "#f87171", textAlign: "center", wordBreak: "break-word",
+        }}>
+          {notice.text}
+        </div>
+      )}
       {}
       <input
         ref={inputRef}
@@ -1499,7 +1535,12 @@ export default function App(): JSX.Element {
       else { list.push({ key: "local", label: "本地模型", kind: "local", models: [entry] }); }
     }
     if (silamOk) {
-      list.push({ key: "silam", label: "SILAM 自研", kind: "silam", models: [{ id: "silam", label: "silam（离线情感脑+语言脑兑底）" }] });
+      /* A-1197：silam 自研模型下线（slime.toml [silam] enabled=false）⇒ silamOk 恒为 false，
+       * 这个条目当前**不会**出现。代码与门控都保留作占位：自研模型接回来后，
+       * 只要 sidecar 的 status 如实返回 enabled，文案随之恢复即可。
+       * warning 文案必须如实：不再写「离线情感脑+语言脑兜底」——
+       * 那正是本轮下线的「无模型时拿它当兑底」这条路径，读起来像它能替你答。 */
+      list.push({ key: "silam", label: "SILAM 自研（实验中）", kind: "silam", models: [{ id: "silam", label: "silam（离线自研大脑，当前未启用）" }] });
     }
     return list;
   }, [providerModels, localModels, silamOk]);
@@ -1865,25 +1906,40 @@ export default function App(): JSX.Element {
 
   const handleWelcomeSend = React.useCallback(async (text: string): Promise<void> => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
-    if (!api || !text.trim()) { return; }
-    
+    // A-1197 根因 B：api 缺失时不再静默返回——抛出由 WelcomeChat.handleSend 接成可见 notice。
+    if (!api) { throw new Error("后端接口未就绪，无法创建会话"); }
+    if (!text.trim()) { return; }
+
     const res = await api.conversations.create().catch((e: unknown) => {
       console.error("[app] welcome create failed:", e);
-      return null;
+      throw new Error("会话创建失败，请稍后重试");
     });
-    if (!res?.ok || !res.session) { return; }
+    if (!res?.ok || !res.session) {
+      // 主进程返回失败（ok 为 false）也走这里（此前是「静默 return」⇒ 用户点了没任何反应）
+      console.error("[app] welcome create returned not-ok:", res);
+      throw new Error("会话创建未成功，请稍后重试");
+    }
     const sessionId = res.session.sessionId;
     const agentId = res.session.agentId;
+    // A-1197 根因 A：会话其实创建成功了，但 selectedSession = sessions.find(...) 要等
+    // loadSessions（全量 list + 历史聚合）回来才非空，期间渲染分支仍判 hasNoSession →
+    // 界面「点了没反应」。乐观插入 create 返回的完整 session，让 ChatPanel 立刻挂载并
+    // 订阅流（onChunk 在 ChatPanel 挂载的 effect 里才建立，早挂载 = 不丢首包）。
+    // loadSessions 随后到达会用服务端数据整体替换（含去重），不影响正确性。
+    setSessions((prev) => (prev.some((s) => s.sessionId === sessionId) ? prev : [res.session, ...prev]));
     setSelectedSessionId(sessionId);
     void loadSessions();
-    
+
     if (api?.chat?.stream && agentId) {
       const netOn = readNetworkEnabled();
-      void api.chat.stream({ agentId, message: text.trim(), sessionId, networkEnabled: netOn }).catch((e: unknown) => {
+      const sres = await api.chat.stream({ agentId, message: text.trim(), sessionId, networkEnabled: netOn }).catch((e: unknown) => {
         console.error("[app] welcome stream failed:", e);
+        return null;
       });
+      // 启动失败（ok:false）时主进程已另发 slime:chat:error，ChatPanel 错误横幅会呈现；此处仅留痕，不重复造提示。
+      if (!sres?.ok) { console.error("[app] welcome stream not started:", sres); }
     }
-    
+
     const histories: string[] = [];
     try {
       const stored = localStorage.getItem("slime_welcome_examples");
@@ -1893,7 +1949,7 @@ export default function App(): JSX.Element {
     try {
       localStorage.setItem("slime_welcome_examples", JSON.stringify(histories.slice(-20)));
     } catch {  }
-  }, []);
+  }, [loadSessions]);
 
   
   React.useEffect(() => {
@@ -1908,6 +1964,12 @@ export default function App(): JSX.Element {
   }, [selectedSessionId, selectedAgentId, workspaceTick]);
 
   
+  /* A-1197：silam 自研模型已下线（slime.toml [silam] enabled=false），
+   * 所以 status 现在稳定返回 { enabled: false } ⇒ siliamOk 恒false，
+   * 依赖它的入口（供应商列表的 siliam 分组、新建项目的 siliam 选项、
+   * ChatPanel 的模型下拉条目）都自动不可见。
+   * 这个查询本身**保留**：它是「自研模型是否可用」的唯一如实产地，
+   * 自研模型接回来后无需改调用方，只要 sidecar 真的起来就自动恢复显示。 */
   const refreshSilamStatus = React.useCallback((): void => {
     const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
     api?.silam?.status?.().then((r: { enabled: boolean }) => setSilamOk(r.enabled === true)).catch(() => setSilamOk(false));

@@ -162,6 +162,11 @@ export default function ProvidersPanel(): JSX.Element {
 
   
   const [edit, setEdit] = React.useState<EditState | null>(null);
+  /** A-1197：模型列表的搜索词（只作用于**当前这个供应商**的模型清单）。
+   *  聚合型供应商（OpenRouter 之类）动辄几百个模型，靠滚动找太费劲。
+   *  ⚠️ 过滤只影响**渲染**，绝不能改 `edit.models` 本身 —— 写回用的是**原始索引**
+   *  （`updateDraftModel(i, …)`），所以过滤时保留索引、不重排数组。 */
+  const [modelQuery, setModelQuery] = React.useState("");
   const [fetching, setFetching] = React.useState(false);
   const [scanDir, setScanDir] = React.useState("");
   const [scanned, setScanned] = React.useState<Array<{ path: string; label: string }> | null>(null);
@@ -395,6 +400,31 @@ export default function ProvidersPanel(): JSX.Element {
     if (!edit) { return; }
     setEdit({ ...edit, models: edit.models.map((m) => ({ ...m, selected: on })) });
   }
+
+  /** A-1197：换供应商（或换编辑目标）时清空搜索词。
+   *  不清的话，上一个供应商的搜索词会在下一个身上继续生效，
+   *  表现为「列表看着是空的、其实是被过滤掉了」—— 这种假象比没有搜索还糟。 */
+  React.useEffect(() => {
+    setModelQuery("");
+  }, [edit?.key, edit?.mode]);
+
+  /** A-1197：按搜索词筛出要渲染的模型行，**保留原始索引**。
+   *
+   *  为什么强调索引：`updateDraftModel(index, patch)` 是按**原始数组下标**写回的；
+   *  过滤后若重排名次（用 filter 后的下标），开关一拨就会改到**另一个模型**上 ——
+   *  这类错位在界面上看不出来（那一行显示的还是你以为的那个模型），是典型的静默改错。
+   *  ⇒ 所以只做「筛行」，行里永远带着原始 `i`。 */
+  const visibleModelRows = React.useMemo((): Array<{ m: DraftModel; i: number }> => {
+    if (!edit) { return []; }
+    const rows = edit.models.map((m, i) => ({ m, i }));
+    const q = modelQuery.trim().toLowerCase();
+    if (q === "") { return rows; }
+    return rows.filter(({ m }) => {
+      const id = String(m.id ?? "").toLowerCase();
+      const label = String((m as { label?: string }).label ?? "").toLowerCase();
+      return id.includes(q) || label.includes(q);
+    });
+  }, [edit, modelQuery]);
 
   function updateDraftModel(index: number, patch: Partial<DraftModel>): void {
     if (!edit) { return; }
@@ -812,7 +842,7 @@ export default function ProvidersPanel(): JSX.Element {
 }
                       {}
                       <div style={{
-                        display: "flex", alignItems: "center", gap: 8,
+                        display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
                         padding: "5px 8px 7px", borderBottom: "1px solid var(--border)",
                         position: "sticky", top: 0, background: "var(--bg-secondary, var(--bg-card))", zIndex: 1,
                       }}>
@@ -840,6 +870,27 @@ export default function ProvidersPanel(): JSX.Element {
                           快照 {pricingSnapshotMeta().generatedAt} · {pricingSnapshotMeta().count} 条
                         </span>
                         <span style={{ fontSize: 11.5, color: "var(--text-dim)", whiteSpace: "nowrap", flexShrink: 0 }}>共 {edit.models.length} 个 · 聊天界面只显示已启用</span>
+                        {/* A-1197：模型搜索栏 —— 放在 sticky 表头内（长列表滚动时也常驻），
+                            独占一行（flexBasis 100%），正对下方模型列表；只筛显示，不动配置。 */}
+                        <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                          <input
+                            className="input-field"
+                            value={modelQuery}
+                            onChange={(e) => setModelQuery(e.target.value)}
+                            placeholder={`搜索模型 ID（共 ${edit.models.length} 个）`}
+                            title="只筛当前供应商的模型清单，不改动任何启用状态与配置"
+                            style={{ flex: "1 1 auto", minWidth: 0, fontSize: 12.5, padding: "4px 10px" }}
+                          />
+                          {modelQuery.trim() !== "" && (
+                            <>
+                              <span style={{ fontSize: 11.5, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+                                {visibleModelRows.length} / {edit.models.length}
+                              </span>
+                              <button className="btn" style={{ fontSize: 11.5, padding: "3px 10px", whiteSpace: "nowrap" }}
+                                onClick={() => setModelQuery("")}>清除</button>
+                            </>
+                          )}
+                        </div>
                       </div>
                       {
 
@@ -937,7 +988,7 @@ export default function ProvidersPanel(): JSX.Element {
                         </tr>
                       </thead>
                         <tbody>
-                          {edit.models.map((m, i) => (
+                          {visibleModelRows.map(({ m, i }) => (
                             <React.Fragment key={m.id}>
                             <tr style={{ borderTop: "1px solid var(--border)" }}>
                               <td style={{ padding: "5px 6px 5px 8px" }}>
@@ -1058,6 +1109,17 @@ export default function ProvidersPanel(): JSX.Element {
                             </tr>
                             </React.Fragment>
                           ))}
+                          {/* A-1197：搜不到时的显式说明 —— 空白表格会被误读成「这个供应商没有模型」，
+                              而真相只是被搜索词筛掉了。 */}
+                          {visibleModelRows.length === 0 && (
+                            <tr>
+                              <td colSpan={7} style={{ padding: "12px 8px", fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.6 }}>
+                                没有匹配「{modelQuery.trim()}」的模型（该供应商共 {edit.models.length} 个）。
+                                <button className="btn" style={{ fontSize: 11.5, padding: "2px 9px", marginLeft: 8 }}
+                                  onClick={() => setModelQuery("")}>清除搜索</button>
+                              </td>
+                            </tr>
+                          )}
                         </tbody>
                       </table>
                     </div>

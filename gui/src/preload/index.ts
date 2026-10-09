@@ -15,6 +15,7 @@ import type {
   SuggestionItem, ExtrasList, MindConfigInfo, VectorTool, EmotionSnapshot, EvolutionSnapshot,
   DownloadTarget, DownloadProgressInfo, LocateDepResult, BootStatus, AdbDownloadProgressInfo,
   GuiPermissions, McpServerInfo, SkillInfo, ModelLoadingStatus, PluginSnapshotDTO,
+  PluginSettingsDTO, PluginSettingsWriteDTO, PluginUiSnapshotDTO,
   PermissionRequestUI, PermissionDecision, AskUserRequestUI, AskUserDecision, AskUserCancelNotice, WorkspaceListResult, TermResult,
   TermProfilesResult,
   AgentProcsListResult, AgentProcsStopResult,
@@ -28,6 +29,7 @@ import type {
   FallbackPoolEntryDTO,
   UpdateStatusDTO,
   OperationFocusUI,
+  DataRootInfo,
 } from "../shared/ipc.js";
 
 import type { SidebarOpenRequest } from "../shared/ipc.js";
@@ -130,6 +132,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     
     setType: (sessionId: string, type: "normal" | "brainstorm") =>
       ipcRenderer.invoke("slime:sessions:setType", { sessionId, type }) as Promise<{ ok: boolean; type?: string }>,
+    /* A-1197 · B3（L4c）：设置会话的显式运行模式（插件 mode；空串 = 清除回默认）。 */
+    setMode: (sessionId: string, mode: string) =>
+      ipcRenderer.invoke("slime:sessions:setMode", { sessionId, mode }) as Promise<{ ok: boolean; mode?: string; error?: string }>,
     
     setMembers: (sessionId: string, memberIds: string[]) =>
       ipcRenderer.invoke("slime:sessions:setMembers", { sessionId, memberIds }) as Promise<{ ok: boolean; session?: SessionItem }>,
@@ -253,6 +258,28 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /* A-1196：拨片开关「开」——从禁用名单移除并重新装载（返回最新快照，省一次往返）。 */
     pluginsEnable: (name: string) =>
       ipcRenderer.invoke("slime:plugins:enable", { name }) as Promise<{ ok: boolean; error?: string; snapshot?: PluginSnapshotDTO }>,
+    /* A-1197：磁盘上新增/改了插件或技能后由主进程广播（自动重扫完成），页面据此自刷新。 */
+    pluginsOnChanged: (cb: (e: { reason: string; at: number }) => void) => onMessage<{ reason: string; at: number }>("slime:plugins:changed", cb),
+    /* A-1197 · B1：设置项读/写。**参数里没有 path** —— 落盘位置由主进程按插件名推导。 */
+    pluginsSettingsGet: (plugin: string) =>
+      ipcRenderer.invoke("slime:plugins:settingsGet", { plugin }) as Promise<{ ok: boolean; dto?: PluginSettingsDTO; error?: string }>,
+    pluginsSettingsSet: (plugin: string, key: string, value: unknown) =>
+      ipcRenderer.invoke("slime:plugins:settingsSet", { plugin, key, value }) as Promise<PluginSettingsWriteDTO>,
+    /* A-1197 · B2（L4a）：UI 槽位声明（按需拉；列表接口只给 uiCount）。 */
+    pluginsUi: () => ipcRenderer.invoke("slime:plugins:ui") as Promise<PluginUiSnapshotDTO>,
+    /* A-1197 · B4（T1）：信任开关读/写（写后主进程会自动重装使脚本工具生效/撤装）。 */
+    pluginsTrustGet: (name: string) =>
+      ipcRenderer.invoke("slime:plugins:trustGet", { name }) as Promise<{ ok: boolean; trusted?: boolean; error?: string }>,
+    pluginsTrustSet: (name: string, trusted: boolean) =>
+      ipcRenderer.invoke("slime:plugins:trustSet", { name, trusted }) as Promise<{ ok: boolean; trusted?: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
+    /* A-1197 · B5（L4a page）：打开扩展自有页面（返回要加载的 127.0.0.1 url）。 */
+    pluginsPageOpen: (name: string) =>
+      ipcRenderer.invoke("slime:plugins:pageOpen", { name }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
+    /* A-1197 · B6（D1）：开发者模式总开关（会话级）。 */
+    pluginsDevModeGet: () =>
+      ipcRenderer.invoke("slime:plugins:devModeGet") as Promise<{ enabled: boolean; lastConfirmedAt: number | null }>,
+    pluginsDevModeSet: (enabled: boolean) =>
+      ipcRenderer.invoke("slime:plugins:devModeSet", { enabled }) as Promise<{ ok: boolean; state?: { enabled: boolean; lastConfirmedAt: number | null }; error?: string }>,
   },
   runtime: {
     
@@ -549,6 +576,16 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     onEvent: (cb: (s: BootStatus) => void) => onMessage<BootStatus>("slime:boot:event", cb),
     
     version: () => ipcRenderer.invoke("slime:app:version") as Promise<string>,
+  },
+  system: {
+    dataRootGet: () =>
+      ipcRenderer.invoke("slime:dataRoot:get") as Promise<DataRootInfo>,
+    dataRootPick: () =>
+      ipcRenderer.invoke("slime:dataRoot:pick") as Promise<{ ok: boolean; canceled?: boolean; dir?: string; error?: string }>,
+    dataRootSet: (p: { dir: string; migrate: boolean }) =>
+      ipcRenderer.invoke("slime:dataRoot:set", p) as Promise<{ ok: boolean; error?: string; migrated?: boolean; root?: string; needRestart?: boolean }>,
+    dataRootReset: () =>
+      ipcRenderer.invoke("slime:dataRoot:reset") as Promise<{ ok: boolean; error?: string; needRestart?: boolean }>,
   },
   workspace: {
     
@@ -920,6 +957,8 @@ declare global {
         load: (sessionId: string) => Promise<ConversationMessage[]>;
         create: (opts?: { agentId?: string; title?: string; workspace?: string | null; memberIds?: Array<string | { id: string; model?: string; effort?: string }>; leaderModel?: string; type?: "normal" | "brainstorm" }) => Promise<{ ok: boolean; session?: SessionItem }>;
         setAgent: (sessionId: string, agentId: string) => Promise<{ ok: boolean }>;
+        /* A-1197 · B3（L4c）：显式运行模式（插件 mode；空串 = 清除回默认）。 */
+        setMode: (sessionId: string, mode: string) => Promise<{ ok: boolean; mode?: string; error?: string }>;
         setMembers: (sessionId: string, memberIds: string[]) => Promise<{ ok: boolean; session?: SessionItem }>;
         
         setMemberEffort: (sessionId: string, memberId: string, effort: string | null) => Promise<{ ok: boolean; memberEfforts?: Record<string, string>; leaderEffort?: string }>;
@@ -959,6 +998,23 @@ declare global {
         pluginsList: () => Promise<PluginSnapshotDTO>;
         pluginsReload: () => Promise<PluginSnapshotDTO>;
         pluginsUnload: (name: string) => Promise<{ ok: boolean; error?: string }>;
+        /* A-1196：拨片开关「开」。 */
+        pluginsEnable: (name: string) => Promise<{ ok: boolean; error?: string; snapshot?: PluginSnapshotDTO }>;
+        /* A-1197：贡献目录自动重扫完成（返回订阅的取消函数）。 */
+        pluginsOnChanged: (cb: (e: { reason: string; at: number }) => void) => () => void;
+        /* A-1197 · B1：设置项读/写（无 path 参数 —— 落盘位置由主进程按插件名推导）。 */
+        pluginsSettingsGet: (plugin: string) => Promise<{ ok: boolean; dto?: PluginSettingsDTO; error?: string }>;
+        pluginsSettingsSet: (plugin: string, key: string, value: unknown) => Promise<PluginSettingsWriteDTO>;
+        /* A-1197 · B2（L4a）：UI 槽位声明（按需拉）。 */
+        pluginsUi: () => Promise<PluginUiSnapshotDTO>;
+        /* A-1197 · B4（T1）：信任开关读/写。 */
+        pluginsTrustGet: (name: string) => Promise<{ ok: boolean; trusted?: boolean; error?: string }>;
+        pluginsTrustSet: (name: string, trusted: boolean) => Promise<{ ok: boolean; trusted?: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
+        /* A-1197 · B5（L4a page）：打开扩展自有页面。 */
+        pluginsPageOpen: (name: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
+        /* A-1197 · B6（D1）：开发者模式总开关（会话级）。 */
+        pluginsDevModeGet: () => Promise<{ enabled: boolean; lastConfirmedAt: number | null }>;
+        pluginsDevModeSet: (enabled: boolean) => Promise<{ ok: boolean; state?: { enabled: boolean; lastConfirmedAt: number | null }; error?: string }>;
       };
       runtime: {
         list: () => Promise<{
@@ -1099,6 +1155,12 @@ declare global {
         status: () => Promise<BootStatus>;
         onEvent: (cb: (s: BootStatus) => void) => () => void;
         version: () => Promise<string>;
+      };
+      system: {
+        dataRootGet: () => Promise<DataRootInfo>;
+        dataRootPick: () => Promise<{ ok: boolean; canceled?: boolean; dir?: string; error?: string }>;
+        dataRootSet: (p: { dir: string; migrate: boolean }) => Promise<{ ok: boolean; error?: string; migrated?: boolean; root?: string; needRestart?: boolean }>;
+        dataRootReset: () => Promise<{ ok: boolean; error?: string; needRestart?: boolean }>;
       };
       workspace: {
         list: (root: string, rel: string) => Promise<WorkspaceListResult>;

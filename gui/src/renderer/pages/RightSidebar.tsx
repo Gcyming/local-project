@@ -64,7 +64,7 @@ import { pricingDisplayCurrency, formatUsdAs, type PriceCurrency } from "../../.
 
 import { readLedgerCurrencyPref, resolveLedgerCurrency, LEDGER_CURRENCY_EVENT, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
 
-type TabType = "tasks" | "terminal" | "browser" | "git" | "file";
+type TabType = "tasks" | "terminal" | "browser" | "git" | "file" | "page";
 
 
 const IMG_MIME: Record<string, string> = {
@@ -318,7 +318,7 @@ export default function RightSidebar(props: {
   React.useEffect(() => {
     const t = tabs.find((x) => x.id === activeId) ?? null;
     const kind: SidebarTabKind = t?.type ?? "none";
-    const raw = t?.type === "browser" ? (t.url ?? "").trim() : "";
+    const raw = (t?.type === "browser" || t?.type === "page") ? (t.url ?? "").trim() : "";
     publishSidebarTab(
       { kind, url: raw || (kind === "browser" ? searchHomeUrl : ""), title: (t?.title ?? "").trim() },
       searchHomeUrl,
@@ -680,6 +680,16 @@ export default function RightSidebar(props: {
     setActiveId(tab.id);
   };
 
+  /* A-1197 · B5（L4a page）：扩展自有页面 —— 同 url 去重复用（照 openBrowserTab 口径）。 */
+  const openPageTab = (url: string, title: string): void => {
+    const pages = tabs.filter((t) => t.type === "page");
+    const same = pages.find((t) => t.url === url);
+    if (same) { setActiveId(same.id); return; }
+    const tab = createTab("page");
+    setTabs((prev) => [...prev, { ...tab, url, title }]);
+    setActiveId(tab.id);
+  };
+
   
 
 
@@ -871,6 +881,9 @@ export default function RightSidebar(props: {
 
         if (shouldRenderAsWeb(d.rel, d.name)) { openWebPreview(d.rel, d.name); }
         else { openFileAbs(d.rel, d.name); }
+      } else if (d.kind === "plugin-page" && d.url) {
+        /* A-1197 · B5（L4a page）：扩展自有页面 —— 沙箱 iframe 承接（跨源 ⇒ 碰不到宿主）。 */
+        openPageTab(d.url, d.title ?? d.plugin);
       } else if (d.kind === "terminal") {
         
 
@@ -1272,8 +1285,36 @@ export default function RightSidebar(props: {
               if (gitIdx >= 0) { setActiveId(tabs[gitIdx].id); }
             }} />
         )}
+        {activeTab && activeTab.type === "page" && (
+          <PluginPageTab tab={activeTab} />
+        )}
       </div>
     </aside>
+  );
+}
+
+/** A-1197 · B5（L4a page）：扩展自有页面 —— **沙箱 iframe** 承接。
+ *  为什么不是 webview：§5.4 的三条合成层限制（祖先不得带 opacity/filter/backdrop-filter）
+ *  对 iframe 不存在；iframe 的 sandbox 属性即可钉住隔离（跨源 ⇒ 碰不到宿主对象）。
+ *  `allow-scripts` 让扩展页能跑自己的 JS；`allow-same-origin` 让它能 fetch 同服务的资源，
+ *  但那个源是 `127.0.0.1:<port>` —— 与宿主不同源，隔离不破。 */
+function PluginPageTab(props: { tab: TabInstance }): JSX.Element {
+  const { tab } = props;
+  if (!tab.url) {
+    return <div style={{ padding: 16, fontSize: 12, color: "var(--text-dim)" }}>页面 url 缺失。</div>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, flexShrink: 0 }}>
+        <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.url}</span>
+      </div>
+      <iframe
+        title={tab.title}
+        src={tab.url}
+        sandbox="allow-scripts allow-same-origin allow-forms"
+        style={{ flex: 1, width: "100%", border: "none", background: "#fff" }}
+      />
+    </div>
   );
 }
 
@@ -2805,7 +2846,7 @@ function FileTab(props: { tab: TabInstance; workspace: string; onBack: () => voi
     const sid = props.sessionId ?? "";
     const aid = props.agentId ?? "";
     const hit = aid && sid
-      ? findSessionFileDiff(readSessionProducts(aid, sid), preview.rel || preview.name || "")
+      ? findSessionFileDiff(readSessionProducts(aid, sid), preview.rel || preview.name || "", props.workspace ?? "")
       : null;
     if (hit && !hit.trimmed) {
       setSessionDiff(hit); setDiffSource("session");

@@ -385,9 +385,23 @@ const norm = (p: string): string => String(p ?? "").replace(/\\/g, "/").replace(
 export function findSessionFileDiff(
   byOrdinal: Record<string, ProductItem[]> | null | undefined,
   file: string,
+  /** 工作区根（可选）：用于「绝对路径 ↔ 工作区相对路径」的**等价**匹配。
+   *  2026-10-08（用户实测）：右栏文件预览给的是**绝对路径**（tab.fileAbs），而产物记录的
+   *  `rel` 是**工具 detail 原样**（常见为工作区相对，如 opencode-zen/gemmy.proj）——
+   *  只做字面比较时永远匹配不上，右栏就对「本次会话明明改过」的文件报「不在 git 仓内」。 */
+  workspace?: string,
 ): SessionFileDiff | null {
   const want = norm(file);
   if (!want || !byOrdinal) { return null; }
+  /* 等价候选集 = 原值 + 「绝对 ↔ 工作区相对」互换（**两个方向都收**：谁是绝对都成立）。
+     ⚠️ 只做**前缀级**推算（startsWith + 切片）；**不做 basename 兜底** ——
+        那会把不同目录下的同名文件指向同一份 diff（张冠李戴比不显示更糟）。 */
+  const wants = new Set<string>([want]);
+  const nws = norm(workspace ?? "").replace(/\/+$/, "");
+  if (nws) {
+    if (want.startsWith(nws + "/")) { wants.add(want.slice(nws.length + 1)); }              // 绝对 → 相对
+    else if (!want.startsWith("/") && !/^[a-z]:\//.test(want)) { wants.add(nws + "/" + want); } // 相对 → 绝对
+  }
   const keys = Object.keys(byOrdinal).sort((a, b) => Number(b) - Number(a));  
   for (const k of keys) {
     const list = Array.isArray(byOrdinal[k]) ? byOrdinal[k] : [];
@@ -395,7 +409,7 @@ export function findSessionFileDiff(
       const p = list[i];
       if (!p) { continue; }
       if (p.kind !== "write") { continue; }
-      if (norm(p.rel) !== want && norm(p.name) !== want) { continue; }
+      if (!wants.has(norm(p.rel)) && !wants.has(norm(p.name))) { continue; }
       if (p.diffFull) { return { old: p.diffFull.old, new: p.diffFull.new, trimmed: false, name: p.name }; }
       if (p.diffTrimmed) { return { old: "", new: "", trimmed: true, name: p.name }; }
     }

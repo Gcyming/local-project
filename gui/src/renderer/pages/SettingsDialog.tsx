@@ -3,7 +3,7 @@
 
 
 import React, { type JSX } from "react";
-import AgentsPanel from "./AgentsPanel.js";
+import AgentsPanel, { type AgentLeaveGate } from "./AgentsPanel.js";
 import ProvidersPanel from "./ProvidersPanel.js";
 import StatusPanel from "./StatusPanel.js";
 import MindHubPanel from "./MindHubPanel.js";
@@ -22,10 +22,11 @@ import LlmGatewayPanel from "./LlmGatewayPanel.js";
 
 import SearchIndexPanel from "./SearchIndexPanel.js";
 import type { DownloadProgressInfo } from "../../shared/ipc.js";
+import { UiSlotPanel } from "../components/UiSlotHost.js";
 import { SearchIcon, SettingsIcon, CloseIcon } from "../components/Icon.js";
 import type { ThemeName } from "../theme.js";
 
-export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "plugins" | "permissions" | "general" | "appearance" | "resident" | "runtime" | "usage" | "experimental" | "searchengine";
+export type SettingsTab = "mind" | "agents" | "providers" | "status" | "skills" | "mcp" | "plugins" | "permissions" | "general" | "appearance" | "resident" | "runtime" | "usage" | "experimental" | "searchengine" | `ui:${string}`;
 
 
 
@@ -185,9 +186,73 @@ interface Props {
   onThemeChange?: (t: ThemeName) => void;
 }
 
+/** 设置页的人类可读名（弹窗文案里要说清"离开去干什么"，不能只丢一个英文 id）。 */
+function sectionLabel(id: SettingsTab): string {
+  return SECTIONS.find((s) => s.id === id)?.label ?? id;
+}
+
 const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Element {
   const [tab, setTab] = React.useState<SettingsTab>(props.initialTab);
   const [query, setQuery] = React.useState("");
+
+  /* ── A-1197：外壳这一侧的离开闸门 ────────────────────────────────────
+   *
+   *  未保存的 Agent 改动只有三个去处会把它弄丢：切 Agent（面板内自己拦）、
+   *  **关掉这个设置弹窗**、**在设置里切到别的页**。后两个手势只发生在外壳，
+   *  而判脏的那份数据（`detail` 快照）在 AgentsPanel 里 —— 所以外壳不自己判脏，
+   *  而是持有面板注册上来的闸门（见 `onRegisterLeaveGate`）。
+   *
+   *  为什么是 **ref 而不是 state**：`isDirty()` 是**每次手势当场问一次**的活判据，
+   *  不是要渲染出来的值。存进 state 就得在每次编辑时同步（面板每敲一个键都 setState，
+   *  整棵设置树跟着重渲），而且同步漏一次 = 外壳拿着过期判据静默放行 ——
+   *  比"没有闸门"更难查。ref 里存的是**闸门实现**（活读面板闭包），本身永不过期。
+   *
+   *  ⚠️ 面板不在当前页时（用户已切到别的设置页）闸门为 null：此时**没有可丢的未保存改动**
+   *  （面板已卸载 ⇒ `detail` 没了），直接放行即可，不必拦。 */
+  const shellGateRef = React.useRef<AgentLeaveGate | null>(null);
+  const registerLeaveGate = React.useCallback((gate: AgentLeaveGate | null): void => {
+    shellGateRef.current = gate;
+  }, []);
+
+  /** 无脏 / 已勾「以后不再」/ 面板不在本页 ⇒ 直接执行；有脏 ⇒ 交给面板弹窗等确认。
+   *  ⚠️ 刻意**不叫** `requestLeave`：那是闸门上的方法名（`gate.requestLeave`），
+   *  同名会让"外壳自己写了一个 requestLeave"与"外壳调了闸门的 requestLeave"在文本上
+   *  混成一件 —— 守卫也就没法分辨第二产地了。 */
+  function leaveViaGate(label: string, run: () => void): void {
+    const gate = shellGateRef.current;
+    if (!gate) { run(); return; }
+    /* 确认弹窗已经挂着（面板内自己弹的）⇒ 让位给那个弹窗：否则用户点遮罩 / 按 Esc
+     * 会在还没回答"要不要放弃"时先把整个设置弹窗关掉 —— 弹窗留在一个已卸载的面板上。 */
+    if (gate.isConfirming()) { return; }
+    gate.requestLeave({ label, run });
+  }
+
+  /** 请求关闭设置弹窗（遮罩 / 关闭按钮 / Esc 三条路都汇到这儿）。 */
+  function requestClose(): void {
+    leaveViaGate("关闭设置", () => { props.onClose(); });
+  }
+
+  /** 请求切到另一个设置页。`clearQuery` 供「从别的页跳过来」用（跳转要顺手清掉搜索词）。 */
+  function requestTab(next: SettingsTab, clearQuery = false): void {
+    leaveViaGate(`切到「${labelOf(next)}」`, () => {
+      setTab(next);
+      if (clearQuery) { setQuery(""); }
+    });
+  }
+
+  /* A-1197：Esc 也是「关掉设置弹窗」的一条真实路径，必须与遮罩 / 关闭按钮同一个闸门
+   * —— 只挂前两者而漏掉 Esc，等于给键盘用户留了一个无提示的丢改动入口。
+   * 挂 window（而非卡片）：焦点可能在搜索框 / 侧栏按钮上，卡片级 onKeyDown 收不到。 */
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape") { return; }
+      requestClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("keydown", onKey); };
+    // 只在挂载期订一次：requestClose 读的是 ref + props.onClose，永远是最新值。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   React.useEffect(() => {
     setTab(props.initialTab);
@@ -195,20 +260,57 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
   }, [props.initialTab]);
 
   const q = query.trim().toLowerCase();
+  /* A-1197 · B2（L4a）：扩展声明的 `settings_panel` 动态追加为设置页（声明即出现；
+     `plugins_changed` 一到就重拉全量 ⇒ 卸载/禁用后该页随之消失，不留幽灵页）。 */
+  const [uiSections, setUiSections] = React.useState<SectionDef[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    const a = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    const pull = async (): Promise<void> => {
+      const res = await (a?.extras?.pluginsUi?.() as Promise<{ slots?: Array<{ slot: string; plugin: string; id: string; title?: string }> } | null | undefined>).catch(() => null);
+      const slots = Array.isArray(res?.slots) ? res.slots.filter((s) => s.slot === "settings_panel") : [];
+      if (!alive) { return; }
+      setUiSections(slots.map((s) => ({
+        id: `ui:${s.plugin}:${s.id}`,
+        label: s.title ?? s.id,
+        group: "common" as SectionGroup,
+        keywords: [s.plugin, "扩展", "插件"],
+        features: [`${s.plugin} 的专属设置页`],
+      })));
+    };
+    void pull();
+    const off = a?.extras?.pluginsOnChanged?.(() => { void pull(); });
+    return () => { alive = false; if (typeof off === "function") { off(); } };
+  }, []);
+  /** 设置页的人类可读名（含扩展动态页）。 */
+  const labelOf = (id: SettingsTab): string =>
+    uiSections.find((s) => s.id === id)?.label ?? sectionLabel(id);
+  const allSections = React.useMemo<SectionDef[]>(() => [...SECTIONS, ...uiSections], [uiSections]);
   const tokens = q ? q.split(/\s+/).filter(Boolean) : [];
   
   
   const filtered = tokens.length > 0
-    ? SECTIONS.filter((s) => {
+    ? allSections.filter((s) => {
         const terms = [s.id, s.label, ...s.keywords, ...s.features].map((k) => k.toLowerCase());
         return tokens.every((tk) => terms.some((k) => k.includes(tk)));
       })
-    : SECTIONS;
+    : allSections;
   
   const matchedOf = (s: SectionDef): string[] => tokens.length > 0
     ? s.features.filter((f) => tokens.some((tk) => f.toLowerCase().includes(tk)))
     : [];
-  const activeTab = filtered.some((s) => s.id === tab) ? tab : (filtered[0]?.id ?? tab);
+  /* A-1197：搜索框也是「切到别的设置页」的一条路径 —— `activeTab` 是从 query **派生**的，
+   *  所以在搜索框敲一个字就能把「Agent 管理」从 filtered 里滤掉 ⇒ AgentsPanel 被卸载 ⇒
+   *  未保存改动当场消失，而且**连一次点击都没有**（用户压根不觉得自己"切了页"）。
+   *
+   *  这里不能弹窗（每敲一个键弹一次 = 骚扰到没法打字），也不该静默放行，
+   *  所以改成**钉住**：Agent 页有未保存改动时，搜索不再把本页顶掉，
+   *  并在搜索框下方明确说清为什么（要出声，不要静默）。
+   *  读 ref 而非 state：`isDirty()` 是活判据，钉住与否每次渲染重算一次即可，不需要存。 */
+  const pinnedByUnsaved = tab === "agents" && shellGateRef.current?.isDirty() === true;
+  const activeTab = pinnedByUnsaved
+    ? "agents"
+    : (filtered.some((s) => s.id === tab) ? tab : (filtered[0]?.id ?? tab));
 
   return (
     <div style={{
@@ -218,7 +320,7 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
       background: "rgba(2, 6, 23, 0.78)",
       display: "flex", alignItems: "center", justifyContent: "center",
     }}
-      onClick={(e) => { if (e.target === e.currentTarget) { props.onClose(); } }}>
+      onClick={(e) => { if (e.target === e.currentTarget) { requestClose(); } }}>
       <div style={{
         width: 1180, maxWidth: "96vw", height: "84vh", maxHeight: "90vh",
         display: "flex", flexDirection: "column", overflow: "hidden",
@@ -232,7 +334,7 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
             <SettingsIcon size={18} /> 设置
           </span>
           <span style={{ flex: 1 }} />
-          <button className="titlebar-btn" title="关闭设置" onClick={props.onClose}><CloseIcon size={14} /></button>
+          <button className="titlebar-btn" title="关闭设置" onClick={requestClose}><CloseIcon size={14} /></button>
         </div>
 
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -250,6 +352,12 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
                 onChange={(e) => setQuery(e.target.value)}
               />
             </div>
+            {/*
+              2026-10-08（用户实测）：此处原有一块「[Agent 管理] 有未保存改动，已暂时固定在
+              本书页…」的黄色**文字提示** —— 用户明确要求去掉（「左侧没必要加这个提示，
+              只要有个弹窗就够了」）。**钉住行为本身保留**（见 `pinnedByUnsaved`：搜索词
+              不得把未保存的 Agent 页顶掉，否则面板被卸载 = 改动静默丢失），只是不再常驻
+              一段说明文字；用户真正需要被拦的那一刻（切页/关窗）有确认弹窗兜底。 */}
             <div style={{ flex: 1, overflowY: "auto" }}>
               {(() => {
                 
@@ -262,7 +370,7 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
                   const matched = matchedOf(s);
                   return (
                     <button key={s.id}
-                      onClick={() => setTab(s.id)}
+                      onClick={() => requestTab(s.id)}
                       style={{
                         display: "flex", alignItems: "center", gap: 8, width: "100%",
                         textAlign: "left", padding: "9px 12px", marginBottom: 3,
@@ -329,11 +437,15 @@ const SettingsDialog = React.memo(function SettingsDialog(props: Props): JSX.Ele
                 onAgentsChanged={props.onAgentsChanged}
                 providerKeys={props.providerKeys}
                 localModels={props.localModels}
+                onRegisterLeaveGate={registerLeaveGate}
               />
             )}
             {activeTab === "skills" && <SkillsPanel />}
             {activeTab === "mcp" && <McpPanel />}
-            {activeTab === "plugins" && <PluginsPanel onNavigate={(t) => { setTab(t); setQuery(""); }} />}
+            {activeTab === "plugins" && <PluginsPanel onNavigate={(t) => { requestTab(t, true); }} />}
+            {/* A-1197 · B2（L4a）：扩展声明的 settings_panel —— `ui:<plugin>:<id>`。
+                槽位不可用时 UiSlotPanel 自己如实说明（不留幽灵页、不空白）。 */}
+            {typeof activeTab === "string" && activeTab.startsWith("ui:") && <UiSlotPanel slotKey={activeTab} />}
             {activeTab === "permissions" && <PermissionsPanel />}
             {activeTab === "providers" && <ProvidersPanel />}
             {activeTab === "status" && <StatusPanel />}

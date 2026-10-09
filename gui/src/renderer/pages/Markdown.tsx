@@ -32,7 +32,11 @@ export type SidebarOpenPayload =
 
 
 
-  | { kind: "doc"; rel: string; name?: string; from?: "site" | "user"; sessionId?: string };
+  | { kind: "doc"; rel: string; name?: string; from?: "site" | "user"; sessionId?: string }
+  /* A-1197 · B5（L4a page）：扩展自有页面（toolbar_item 点击后由 ChatPanel 侧解析出 url 再发）。
+     `from`/`sessionId` 可选：只为参与右栏既有的「按会话延迟派发」中转逻辑（类型层面统一），
+     语义上它们对插件页无意义。 */
+  | { kind: "plugin-page"; plugin: string; url: string; title?: string; from?: "site" | "user"; sessionId?: string };
 export function requestSidebarOpen(payload: SidebarOpenPayload): void {
   window.dispatchEvent(new CustomEvent<SidebarOpenPayload>(SIDEBAR_OPEN_EVENT, { detail: payload }));
 }

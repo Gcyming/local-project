@@ -70,6 +70,7 @@ function openDocInSidebar(path: string, name?: string): void {
    是同一组数的第二个产地：主进程一改，界面回显与刻度线就悄悄对不上（静默失效家族）。 */
 import { DEFAULT_COMPRESS_RATIO, RATIO_MIN, RATIO_MAX } from "../../../../core-ts/src/services/context_compress.js";
 import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, TerminalIcon, DownloadIcon, CloudUploadIcon, NotesIcon, HistoryIcon, StageListIcon, type IconProps } from "../components/Icon.js";
+import { PluginChatActions, PluginToolbarItems } from "../components/UiSlotHost.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
 /** A-980-R19/R21：悬浮窗唤出按钮图标（用户指定目录 message-circle.svg——聊天悬浮窗=对话气泡） */
 import floatToggleIcon from "../../../icon/icon_fpbc119q3rk/message-circle.svg";
@@ -282,6 +283,12 @@ export const TOOL_LABELS: Record<string, { label: string; Icon: React.ComponentT
   sidebar_mount: { label: "读右栏挂载", Icon: RefFileIcon },
   /* A-1195：创造模式自验工具（只读；仅 creator 工具面可见，见 agentTools.CREATOR_ONLY_TOOL_NAMES）。 */
   plugin_status: { label: "查看插件状态", Icon: SitemapIcon },
+  /* A-1198：git_* 工具族（版本控制走工具层，AGENTS.md §8）。 */
+  git_status: { label: "查看 Git 状态", Icon: StageListIcon },
+  git_diff: { label: "查看改动", Icon: RefFileIcon },
+  git_stage: { label: "暂存改动", Icon: EditIcon },
+  git_branch: { label: "分支操作", Icon: SitemapIcon },
+  git_commit: { label: "提交改动", Icon: CloudUploadIcon },
 };
 
 export function resolveToolLabel(name: string): { label: string; Icon: React.ComponentType<IconProps> } {
@@ -402,7 +409,7 @@ import {
  *  历史落库只存 reasoning 文本（无交错顺序/无 token 统计），重启后思考历程退化为文本平铺、上下文清零；
  *  此处把 timelineSteps（按 assistant 消息序数）与最近一次窗口占用快照随会话存下来，
  *  加载会话时按序数回填交错时间线、恢复环与右栏占用值。 */
-import { readSessionCtxMeta, clearSessionCtxMeta, updateSessionCtxMeta, attachTimelineToHistory, restoreUsed, capForModel, type TimelineStepLite } from "./sessionCtxMeta.js";
+import { readSessionCtxMeta, clearSessionCtxMeta, updateSessionCtxMeta, attachTimelineToHistory, restoreUsed, capForModel, writeTurnTimeline, type TimelineStepLite } from "./sessionCtxMeta.js";
 import { normalizeForCompare, decideRestoreKeep } from "./restoreDedup.js";
 import { createMonitor, bumpMonitor, monitorElapsed, type StreamMonitor } from "./streamMonitor.js";
 import { contextRatio, contextPct, ringLevel, fmtTokens } from "./contextMath.js";
@@ -2463,6 +2470,22 @@ export default function ChatPanel({
   React.useEffect(() => { inputValueRef.current = input; }, [input]);
   const [loading, setLoading] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
+  /* A-1197：silam 自研模型下线 ⇒ 模型下拉里的「silam」条目**必须门控**。
+   * 此前它是无条件硬编码在options 里的（不受任何开关约束），于是即便
+   * slime.toml 的 [silam] enabled=false，用户仍能选中它、然后只拿到一段占位文案。
+   * 数据源与 App.tsx:1537-1539 / NewProjectDialog.tsx:123 同源：slimeAPI.silam.status().enabled。 */
+  const [silamOk, setSilamOk] = React.useState(false);
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: { silam?: { status?: () => Promise<{ enabled: boolean }> } } }).slimeAPI;
+    let dead = false;
+    const load = (): void => {
+      void api?.silam?.status?.()
+        .then((r: { enabled: boolean }) => { if (!dead) setSilamOk(r?.enabled === true); })
+        .catch(() => { if (!dead) setSilamOk(false); });
+    };
+    load();
+    return () => { dead = true; };
+  }, []);
   const [partial, setPartial] = React.useState("");
   /* A-1056②：这里原本挂着一份 `PLACEHOLDER_PHRASES`（8 句，其中两句是**用法说明**：
      "输入消息… Enter 发送，/ 展开指令，Shift+Enter 换行"、"提示：可粘贴 / 拖拽图片识图…"），
@@ -3048,6 +3071,59 @@ export default function ChatPanel({
    *  才恢复正常（因为切走会重跑 load effect 从存储重建）。现在错误收尾自动 +1 → 立刻对齐，等同手动切换。 */
   const [reloadTick, setReloadTick] = React.useState(0);
   const [sessionConfig, setSessionConfig] = React.useState<SessionConfig>({ approval: "auto", workspace: "" });
+
+  /* A-1197 · B3（L4c）：**运行模式**（默认 agent-loop / 扩展提供的阶段机）。
+     选项 = pluginsList 里已装载且声明了 mode 的插件（**禁用/卸载的不出现**——与拨片同一份状态）；
+     当前值 = 会话 meta.mode（懒拉一次，随 sessionId 变化重拉）；切换要二次确认（会丢弃当前阶段上下文）。 */
+  const [sessionRunMode, setSessionRunMode] = React.useState("");
+  const [runModeOptions, setRunModeOptions] = React.useState<Array<{ value: string; label: string; title?: string }>>([]);
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    void (async () => {
+      try {
+        const snap = await api?.extras?.pluginsList?.();
+        const rows = Array.isArray(snap?.plugins) ? snap.plugins : [];
+        setRunModeOptions(rows
+          .filter((p: { hasMode?: boolean; status?: string }) => p?.hasMode === true && p?.status === "loaded")
+          .map((p: { name?: string; modeTitle?: string }) => ({
+            value: String(p.name ?? ""),
+            label: String(p.modeTitle ?? p.name ?? "扩展模式"),
+            title: `扩展「${p.name}」提供的阶段机运行模式`,
+          })));
+      } catch { /* 拿不到列表 ⇒ 下拉不显示（不装假入口） */ }
+    })();
+  }, []);
+  React.useEffect(() => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!sessionId) { setSessionRunMode(""); return; }
+    let alive = true;
+    void (async () => {
+      try {
+        const list = await api?.sessions?.list?.();
+        const row = Array.isArray(list) ? list.find((x: { sessionId?: string }) => x?.sessionId === sessionId) : null;
+        if (alive) { setSessionRunMode(typeof row?.mode === "string" ? row.mode : ""); }
+      } catch { /* 保持空 = 默认 */ }
+    })();
+    return () => { alive = false; };
+  }, [sessionId]);
+  const changeRunMode = React.useCallback(async (next: string): Promise<void> => {
+    const api = (window as unknown as { slimeAPI?: any }).slimeAPI;
+    if (!sessionId || !api?.sessions?.setMode) { return; }
+    const label = next ? (runModeOptions.find((o) => o.value === next)?.label ?? next) : "默认（模型 + 工具）";
+    const ok = await confirmAsync(`切换运行模式为「${label}」？`, "会丢弃当前阶段的中间上下文；下一轮请求起生效。");
+    if (!ok) { return; }
+    try {
+      const res = await api.sessions.setMode(sessionId, next);
+      if (res?.ok) {
+        setSessionRunMode(next);
+        void alertAsync(next ? `运行模式已切换为「${label}」` : "运行模式已回默认（模型 + 工具）");
+      } else {
+        void alertAsync("运行模式切换失败", res?.error ? String(res.error) : undefined);
+      }
+    } catch (e) {
+      void alertAsync("运行模式切换失败", e instanceof Error ? e.message : String(e));
+    }
+  }, [sessionId, runModeOptions]);
   const [renaming, setRenaming] = React.useState(false);
   const [renameDraft, setRenameDraft] = React.useState("");
   /** 自分裂（fork）GUI 已移除并并入子代理体系（A-943）——子代理派发见「设置→后台任务」 */
@@ -3726,19 +3802,24 @@ export default function ChatPanel({
       let aiOrd = 0;
       const hist = msgs.map((m, i) => {
         const a = attaches[i] ?? {};
+        /* A-1197：思考原文优先用 `a.reasoning`（`attachTimelineToHistory` 的输出）——
+           它在 `m.reasoning` 缺失时会用**指纹通道**补上「切走期间后台结束」那条的思考。
+           只读 `m.reasoning` 的话，补回来的思考会被在这里丢掉（等于白补）。
+           两者都没有时 `a.reasoning` 就是 undefined，行为与改动前一致。 */
+        const recoveredReasoning = a.reasoning ?? m.reasoning;
         // A-980-R18：ts 带上原始历史时间戳（分页加载更早历史的定位锚 + 消息真实时刻）
-        const extra: Partial<Message> = { time: fmtTime(m.time), ts: m.ts, reasoning: m.reasoning, elapsedMs: m.elapsedMs, agentName: m.agentName, agentId: m.agentId, failed: m.failed };
+        const extra: Partial<Message> = { time: fmtTime(m.time), ts: m.ts, reasoning: recoveredReasoning, elapsedMs: m.elapsedMs, agentName: m.agentName, agentId: m.agentId, failed: m.failed };
         if (a.assistantOrdinal) {
           aiOrd = a.assistantOrdinal;
           const productFiles = productsByOrd[String(a.assistantOrdinal)] ?? [];
-          if (a.timeline || m.reasoning || productFiles.length > 0) {
+          if (a.timeline || recoveredReasoning || productFiles.length > 0) {
             const toolSteps = (a.timeline ?? []).filter((s): s is TimelineStepLite & { kind: "tool" } => s.kind === "tool");
             const tools: ToolEvent[] = toolSteps.map((t, tIdx) => ({
               id: a.assistantOrdinal! * 1000 + tIdx, name: t.name ?? "", label: t.label ?? t.name ?? "",
               detail: t.detail, result: t.result,
             }));
             extra.stages = {
-              reads: [], urls: [], tools, reasoning: m.reasoning, timeline: a.timeline,
+              reads: [], urls: [], tools, reasoning: recoveredReasoning, timeline: a.timeline,
               ...(productFiles.length > 0 ? { products: productFiles } : {}),
             };
           }
@@ -4221,8 +4302,10 @@ export default function ChatPanel({
           const sid = m.sessionId;
           // A-970：后台流 done 镜像——把完整正文写回该会话快照（此前只清 hasActive 不写正文 →
           // done 与切回之间的竞态窗口内，快照仍是空壳 → 切回占位气泡空白）。
-          // reasoning 不动：思考文本只由上面 onChunk 的 reasoning 镜像累积，done 里无思考原文，
-          // 用 reply 冒充会把正文写进思考区（污染折叠卡「思考过程」）。
+          // ⚠️ 这里**不用 m.reply 冒充思考**（那会把正文写进思考区，污染折叠卡「思考过程」）。
+          // 思考原文另有来源：上面 onChunk 的 reasoning 镜像一直在往 `snap.reasoning` 累积，
+          // A-1197 起由下方 `writeTurnTimeline` 把它**落盘**（此前只留在内存里，
+          // 快照在会话恢复末尾被 delete ⇒ 切走期间结束的那条思考永久丢失）。
           const snap = perSessionStreamCache.current[sid];
           if (snap) {
             snap.hasActive = false;
@@ -4245,6 +4328,26 @@ export default function ChatPanel({
               const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
               void attachApi?.chat?.attachTimeline?.(agentId, sid, snap.timeline as unknown[]);
             }
+            /* A-1197：**这条思考必须落盘，否则「切走期间结束」的回复思考永久消失。**
+               localStorage 通道此前在这条路径上是**断**的：只有「前台 onDone」才写
+               （见下方 A-934 块，它靠 `assistantOrdinalRef` 定位），而本分支必须早退
+               —— 面板不在场，不能碰当前会话的 UI 状态，于是那条路**永不写**。
+               而切回时读的就是它（`cached.reasoning` / `attachTimelineToHistory`），
+               内存快照又会在 `hasActive=false` 后被 `delete` 掉（见会话恢复末尾）
+               ⇒ 思考只剩内存，重启/重载即永久丢失（用户实测「切走就丢」）。
+
+               按**回复指纹**落盘（`writeTurnTimeline`）：不需要序数 —— 本会话此刻是第几轮
+               无从得知，猜错就是把思考挂到别人的卡片上（比不挂更糟）；读侧也按指纹取。
+               思考原文取`snap.reasoning`：那是后台 onChunk 镜像一路累积下来的
+               （`snap.reasoning += content`，见上方镜像分支），此刻已完整。
+               ⚠️ 与上面的 `attachTimeline` **并存**，两条通道各有分工：
+               那条写 history.jsonl（重启后仍在，本分支的既有职责）；
+               这条写 localStorage（时间线 + 思考原文，能补上没落 reasoning 的记录）。 */
+            writeTurnTimeline(
+              agentId, sid, m.reply,
+              (snap.timeline ?? []) as TimelineStepLite[],
+              (snap.reasoning ?? "").trim() || undefined,
+            );
           }
           return;
         }
@@ -4460,6 +4563,17 @@ export default function ChatPanel({
           const attachApi = (window as unknown as { slimeAPI?: { chat?: { attachTimeline?: (a: string, s: string | undefined, t: unknown[]) => Promise<unknown> } } }).slimeAPI;
           void attachApi?.chat?.attachTimeline?.(agentId, sessionRef.current, finalTimeline as unknown[]);
         }
+        /* A-1197：**前景这一轮也要按指纹落一份**，否则读侧指纹通道只对「切走期间结束」那几条
+           有数据、其余轮次仍全靠序数 —— 那样只要会话里出现过**一次**后台结束（写侧留空洞），
+           空洞之后那些轮次照样错位（前一轮的思考挂到后一条卡片上）。
+           两端都写，指纹通道才是这个会话的**主键**，序数退化成纯兜底。
+           指纹用 `m.reply`（与后台分支同一个入参）而不是 `doneText`：读侧是拿
+           `history.jsonl` 的 `ai` 算指纹的，那份文本来自 core-ts 的 reply，两侧必须同源。 */
+        writeTurnTimeline(
+          agentId, sessionRef.current, m.reply,
+          finalTimeline as TimelineStepLite[],
+          finalReasoning,
+        );
       }
       onConversationsChanged?.();
       // A-918：流已落库（done）→ 移除该会话的现场快照，释放内存且防止切回后再残留"生成中"
@@ -6146,6 +6260,23 @@ export default function ChatPanel({
               onClick={() => { setRenameDraft(sessionTitle); setRenaming(true); }}>
               <EditIcon size={14} />
             </button>
+            {/* A-1197 · B3（L4c）：运行模式选择（默认 / 扩展阶段机；切换二次确认、下一轮起生效）。 */}
+            {(runModeOptions.length > 0 || !!sessionRunMode) && (
+              <GhostSelect
+                value={sessionRunMode}
+                options={[
+                  { value: "", label: "默认（模型 + 工具）", title: "默认 agent-loop" },
+                  ...runModeOptions,
+                  ...(sessionRunMode && !runModeOptions.some((o) => o.value === sessionRunMode)
+                    ? [{ value: sessionRunMode, label: `${sessionRunMode}（已停用）`, title: "该扩展当前未装载——下一条消息将回落到默认模式" }]
+                    : []),
+                ]}
+                onChange={(m) => { void changeRunMode(m); }}
+                title="运行模式：默认 = 模型 + 工具；扩展模式 = 该扩展定义的阶段清单（切换会丢弃当前阶段的中间上下文）"
+                maxWidth={220}
+                style={{ maxWidth: 160, fontSize: 11.5 }}
+              />
+            )}
           </span>
         )}
         <button onClick={() => onNewSessionRequested?.()} disabled={loading}
@@ -7095,6 +7226,15 @@ export default function ChatPanel({
               }}>
                 {tightenCjkSpacing(normalizeBrokenLines(pendingPerm.taskDescription || "Agent 请求执行以下操作："))}
               </div>
+              {/* A-1198：长文本详情（git_commit 差异评审的 diff stat + 关键片段）——滚动观看，不截断展示 */}
+              {pendingPerm.detail && (
+                <pre style={{
+                  fontSize: 11, lineHeight: 1.55, fontFamily: "monospace", color: "var(--text-dim)",
+                  background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 10,
+                  padding: "8px 10px", marginBottom: 10, maxHeight: 260, overflow: "auto",
+                  whiteSpace: "pre-wrap", wordBreak: "break-word", margin: "0 0 10px 0",
+                }}>{pendingPerm.detail}</pre>
+              )}
               {/* 待授权动作列表 */}
               <div style={{ marginBottom: 10, display: "flex", flexDirection: "column", gap: 4 }}>
                 {pendingPerm.actions.map((a, i) => (
@@ -7476,7 +7616,13 @@ export default function ChatPanel({
               style={{ fontSize: 11.5, padding: "3px 6px", maxWidth: 150 }}
               maxWidth={420}
               options={[
-                { value: "silam", label: "silam", group: "内置", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" },
+                /* A-1197：silam 条目**受 silamOk 门控**（原先是无条件可见的死选项）。
+                 * slamOk=false（当前默认，slime.toml [silam] enabled=false）时整个条目不出现，
+                 * 用户不会被一个选了就只能拿到占位文案的选项坑到。
+                 * 自研模型接回来后，把标题改回如实描述即可，门控本身不用动。 */
+                ...(silamOk
+                  ? [{ value: "silam", label: "silam", group: "内置", title: "SILAM 双脑（情感脑+语言脑，grow 成长模式）" }]
+                  : []),
                 ...(providerModels ?? []).flatMap((p) => {
                   const enabled = (p.models ?? []).filter((m) => m.selected !== false);
                   if (enabled.length === 0) {
@@ -7577,6 +7723,12 @@ export default function ChatPanel({
               <InternetIcon size={14} style={{ color: networkEnabled ? "#22c55e" : "var(--text-dim)" }} />
               联网搜索
             </button>
+            {/* A-1197 · B2（L4a）：扩展声明的 chat_action（无声明时不渲染任何东西）——
+                点击把动作提示插入输入框（宿主行为；扩展只声明 label/icon/when）。 */}
+            <PluginChatActions onInsert={(t) => setInput((v) => (v ? `${v} ${t}` : t))} />
+            {/* A-1197 · B5（L4a page）：扩展声明的 toolbar_item —— 点击在右栏打开扩展自有页面
+                （经 127.0.0.1 静态服务 + 沙箱 iframe；无声明时不渲染任何东西）。 */}
+            <PluginToolbarItems />
             {/* A-1056③：这里原本是**「插入方式」胶囊**（中途插入 / 即将插入，全局默认且持久化）。
                 撤掉的理由见 send() 与 insertQueueItemNow 的注释：用户对它的原话是
                 "即将插入是什么鬼？"。现在唯一入口是待发气泡卡片上的「直接插入」图标 ——

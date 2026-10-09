@@ -120,6 +120,9 @@ export default function NewProjectDialog(props: NewProjectDialogProps): React.Re
   const resolveSavedModel = React.useCallback((agentId: string): string | null => {
     const choice = agentConfig[agentId]?.model_choice;
     if (!choice) { return null; }
+    /* A-1197：silam 自研模型下线（slime.toml [silam] enabled=false ⇒ siliamOk 恒 false）
+     * ⇒ 选 siliam 一律归null（视为不可用），不会写进新建的配置。
+     * 门控与契约都保留作占位：自研模型接回来后，这里自动放行。 */
     if (choice === "silam" || choice.startsWith("silam:")) { return props.silamOk ? "silam" : null; }
     if (choice.startsWith("local:")) {
       const id = choice.slice(6);

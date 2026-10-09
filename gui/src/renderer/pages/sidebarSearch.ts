@@ -80,7 +80,8 @@ export function __resetSearchPageDeliveryForTest(): void {
 
 
 export interface SidebarTabView {
-  kind: "browser" | "file" | "terminal" | "tasks" | "git" | "none";
+  /* A-1197 · B5：`page` = 扩展自有页面（沙箱 iframe）。 */
+  kind: "browser" | "file" | "terminal" | "tasks" | "git" | "page" | "none";
   
   url: string;
   title: string;
@@ -166,6 +167,7 @@ export function __resetSidebarViewForTest(): void {
 
 const KIND_LABEL: Record<SidebarTabView["kind"], string> = {
   browser: "浏览器",
+  page: "扩展页面",
   file: "文件",
   terminal: "终端",
   tasks: "任务",
