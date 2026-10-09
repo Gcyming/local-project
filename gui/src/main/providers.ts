@@ -350,7 +350,32 @@ function normalizeBaseUrl(base: string): string {
 
 
 
+/** loopback 目标（`localhost` · `127.0.0.0/8` · `::1`）——**永远直连、不走系统代理**。
+ *  为什么单独写、不复用 `isLocalEndpoint`：那个还含「私有网段 / 0.0.0.0 / 容器主机名」，
+ *  对"该不该经代理"来说太宽（企业代理可以合法地转发内网流量）；这里只要 RFC 6761
+ *  意义上的 loopback。 */
+function isLoopbackTarget(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return h === "localhost" || h === "::1" || /^127\./.test(h);
+  } catch { return false; }
+}
+
+/** 解析系统代理（环境变量优先，其次 Windows 注册表）。
+ *  ⚠️ 2026-10-08 拍板：**loopback 目标直接返回 null（不走代理）**。两份依据：
+ *    ① RFC 6761 —— 本机名不该经代理；
+ *    ② 10-07 的现场诊断：直连失败 → 本函数兜底拿系统代理 → 代理对**本地端口**
+ *       返回 **502** ⇒ `chromiumFetch` 如实 resolve 出一个 502 响应，把清晰的
+ *       「连不上」翻译成含糊的「服务器答了 502」（a1195-chromiumfetch-bounds 曾在
+ *       开代理的机器上因此稳定假红）。
+ *  ——与 a1026「本地端点不吃兜底」（`isLocalEndpoint` 短路）同一设计哲学：
+ *    本机流量要在**最早**的地方与代理路径分叉。
+ *  另注（502 语义的本轮决策）：chromiumFetch 对**非 loopback** 目标经代理拿到的
+ *  5xx（含 502）**保持 resolve**（fetch 契约：拿到响应即成功，HTTP 错误码由
+ *  `res.ok/status` 表达）——上层（tryFetchModels / LLM 客户端）已按 `res.ok` 正确处理，
+ *  不在本层把 5xx 重新翻译成 reject（那会破坏与全局 fetch 降级步的一致语义）。 */
 function resolveSystemProxy(targetUrl: string): string | null {
+  if (isLoopbackTarget(targetUrl)) { return null; }
   const env = process.env;
   const isHttps = targetUrl.toLowerCase().startsWith("https:");
   const fromEnv = (isHttps ? env.HTTPS_PROXY || env.https_proxy : env.HTTP_PROXY || env.http_proxy) || env.ALL_PROXY || env.all_proxy;

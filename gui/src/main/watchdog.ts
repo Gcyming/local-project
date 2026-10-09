@@ -12,7 +12,7 @@
 
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { INSTALL_ROOT } from "./boot.js";
+import { runtimeStateDir } from "./dataRoot.js";
 
 
 const LAG_WARN_MS = 2000;
@@ -34,7 +34,7 @@ export function markMainActivity(label: string): void {
 
 function persist(line: string): void {
   try {
-    appendFileSync(join(INSTALL_ROOT, "data", "watchdog.log"), `${line}\n`, "utf8");
+    appendFileSync(join(runtimeStateDir(), "watchdog.log"), `${line}\n`, "utf8");
   } catch {  }
 }
 

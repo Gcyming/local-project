@@ -198,8 +198,16 @@ feed_url = ""
 # 随发行版内置：情感脑 backbone_80m.npz + 对话脑 lang_core_d16.npz + 词表 vocab.v3.1-6921.json，
 # 位于安装根 models/ 与 configs/（extraFiles 自带，首启无需下载）。
 # 成长脑持久化于用户数据目录 ~/.slimeagent/silam-default/brain/（启动自动恢复，群聊/对话自动观察落盘）。
+#
+# A-1197：自研模型质量未达标（乱码 + 硬截断），暂时下线；资产保留作占位。
+# 整段保留**不要删**：代码资产（core-ts/src/services/silam_brain.ts、
+# sidecar/silam_brain_sidecar.py、backbone.py、lang_core.py、d16 权重）都还在，
+# 将来自研模型接回来时，契约就接在这一段 + SilamBrain 接口上。
+# ⚠️ 本模板是**随包发出去的那份**（electron-builder.json 收录为安装根 slime.toml，
+#    而仓库根的 slime.toml 被 gitignore、不入库）—— 新用户装完看到的就是这一段，
+#    所以下线必须在这里也断开关，否则干净安装上引擎仍会调真实 SILAM、输出乱码。
 
 [silam]
-enabled = true
-as_brain = true
+enabled = false
+as_brain = false
 agent_id = "silam-default"

@@ -12,6 +12,10 @@
 
 import "./boot.js"; 
 import { INSTALL_ROOT, BUNDLE_ROOT } from "./boot.js";
+import {
+  clearDataRootPointer, dataRootExists, defaultDataRoot, isCustomDataRoot,
+  runtimeStateDir, writeDataRootPointer, RUNTIME_DATA_DIR,
+} from "./dataRoot.js";
 
 import { clearSubagentRuns, mergedSubagentRuns, syncSubagentRuns } from "./subagentStore.js";
 
@@ -318,7 +322,7 @@ const ensureTray = (): void => {
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, screen, session, shell, Tray, Menu, nativeImage } from "electron";
 import { join, resolve, sep, dirname, basename, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, statSync, readFileSync, watch, cpSync } from "node:fs";
 import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 
@@ -351,6 +355,10 @@ import { basePortFor, getModelServer, ModelServerManager, setModelServer } from 
 import { capabilityMatchesModel, clearLocalCapabilityCache, getLocalCapability, isLoopbackBaseUrl, probeManagedChatCapability } from "./localServerProbe.js";
 import { resolveWindowCap } from "../../../core-ts/src/model_introspect.js";
 import { ChatService } from "../../../core-ts/src/services/chat.js";
+import { resolveRunnerKind, runnerLabel } from "../../../core-ts/src/services/chatRunner.js";
+import { buildStageMessage, clipCarry, stageProgressText } from "../../../core-ts/src/services/stageRunner.js";
+import { validateModeTools } from "../../../core-ts/src/plugin/mode.js";
+import { setGitReviewCallback, buildReviewDetail, type GitReviewRequest } from "../../../core-ts/src/tools/git.js";
 import { SchedulerService } from "../../../core-ts/src/services/scheduler.js";
 import { SubAgentManager, DEFAULT_EXEC_BUDGET_MS, normalizeModelPool, sanitizeSubagentRunName } from "../../../core-ts/src/services/subagent.js";
 import { buildSharedSpecBlock } from "../../../core-ts/src/services/subagent_batch.js";
@@ -451,10 +459,14 @@ import { BUILTIN_PLUGIN_GROUPS, builtinPluginManifests } from "../../../core-ts/
 import { loadPluginsFromDisk, pluginSkillsRoot } from "../../../core-ts/src/plugin/loader.js";
 import type { RejectedPluginDir } from "../../../core-ts/src/plugin/loader.js";
 import { markPluginDisabled, readDisabledPlugins, unmarkPluginDisabled } from "../../../core-ts/src/plugin/disabled-store.js";
-import { SKILL_ENTRY_TOOL_NAMES } from "../../../core-ts/src/services/agentTools.js";
-import type { PluginRejectedDTO, PluginSnapshotDTO, PluginSummaryDTO } from "../shared/ipc.js";
+import type { PluginUiContribution } from "../../../core-ts/src/plugin/contributes.js";
+import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
+import { getDevModeState, setDevModeEnabled } from "../../../core-ts/src/plugin/dev-mode.js";
+import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
+import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
+import type { PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
-import { getRegistry, setToolCategoryGate } from "../../../core-ts/src/tools/registry.js";
+import { getRegistry, setToolCategoryGate, Tool } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
 import { targetFromArgs } from "../../../core-ts/src/tools/hard_rules.js";
 import { gateToolCall, classifyToolCall } from "../../../core-ts/src/tools/policy.js";
@@ -948,7 +960,10 @@ async function* streamGroupTalkFlow(opts: {
             agent: thinking,
             message: prompt,
             history: [],
-            systemPrompt: `${agent.identity_prompt || `你是 ${agent.name}，你的角色是：${agent.role}`}\n\n输出规范：正文只输出你的观点（≤200 字、一段、直接可读），严禁在正文中出现 <thinking> 标签、思考过程、草稿、自我检查或任何元叙述；思考只能作为你的内部过程。如需最新信息可调用 web_search / web_fetch（仅联网工具），并注明来源。\n\n硬性输出约束：必须直接围绕议题输出有信息量的实质内容；严禁输出「我在听/请说得更明确/你想问什么/先给个目标/我正在衡量」这类空泛确认、反问式等待或仅自我介绍（身份声明最多一句话前缀，正文须立即进入实质回答）；若议题看似不完整，按最可能的意图直接作答并顺带询问唯一的待确认点。`,
+            /* A-1198：群聊成员也是 Agent —— 发言提示同样带能力自述（与主对话**同一产地**，
+               不另写一份文案）。这里用 selfAwarenessGuide（机制与边界）而不是 agentSkillGuide：
+               本发言位的工具面只有联网工具，带「白名单清单」反而失真。 */
+            systemPrompt: `${agent.identity_prompt || `你是 ${agent.name}，你的角色是：${agent.role}`}\n\n输出规范：正文只输出你的观点（≤200 字、一段、直接可读），严禁在正文中出现 <thinking> 标签、思考过程、草稿、自我检查或任何元叙述；思考只能作为你的内部过程。如需最新信息可调用 web_search / web_fetch（仅联网工具），并注明来源。\n\n硬性输出约束：必须直接围绕议题输出有信息量的实质内容；严禁输出「我在听/请说得更明确/你想问什么/先给个目标/我正在衡量」这类空泛确认、反问式等待或仅自我介绍（身份声明最多一句话前缀，正文须立即进入实质回答）；若议题看似不完整，按最可能的意图直接作答并顺带询问唯一的待确认点。` + selfAwarenessGuide(resolveAgentToolProfile(agent.tool_profile)),
             toolsOnly: opts.networkEnabled ? ["web_search", "web_fetch"] : [],
             maxTokens: 2048,
             networkEnabled: opts.networkEnabled,
@@ -1063,7 +1078,7 @@ import {
 } from "./downloader.js";
 import {
   listSessions, getSession, createSession, renameSession, removeSession,
-  ensureDefaultSession, setSessionMembers, setSessionType, removeSessionsForAgent, removeSessionsForWorkspace,
+  ensureDefaultSession, setSessionMembers, setSessionType, setSessionMode, removeSessionsForAgent, removeSessionsForWorkspace,
   setSessionAgent, setSessionWorkspace, setSessionSummary, touchSessionWithMessage, SESSIONS_PATH,
   memberIdsOf, memberModelsOf, memberEffortsOf, setSessionMemberEffort, type MemberEntry,
   
@@ -1087,6 +1102,107 @@ let agentRegistry: AgentRegistry | null = null;
 let engine: SlimeEngine | null = null;
 
 let silamBrain: SilamBrain | null = null;
+
+/** A-1197 · B3（L4c 阶段机）：**纯用户定义的阶段流** —— main 侧执行器（薄壳）。
+ *
+ * 每阶段 = 构造消息（目标 + 上阶段收束 + 本阶段 prompt；**history 置空 = 阶段间裁剪**）
+ * → 复用 `chatService.stream` 跑（`stageOverride` 带阶段级 toolsOnly/maxRounds；signal 透传）
+ * → 收束文本作为下一阶段的「上一阶段结论」（只留最终文本，不保留完整工具输出）。
+ *
+ * ⚠️ 一个安全环节都不省：沙箱 / 硬规则 / 工具去重 / 预算 / abort 竞跑全在既有链路里照旧；
+ *    本函数只换「跑什么」（阶段清单 + 每阶段白名单/上限），不碰「怎么判权限」。
+ * ⚠️ 边界（设计兜底表）：abort ⇒ 后续阶段不再开始；插件离线 ⇒ 收束本回合并如实说明
+ *    （**下一回合** `resolveRunnerKind` 会自然回落 agent-loop —— 不静默换模式）。 */
+async function* streamStageFlow(opts: {
+  chatService: ChatService;
+  agentId: string;
+  goal: string;
+  stages: Array<import("../../../core-ts/src/plugin/mode.js").StageDecl>;
+  modeTitle: string;
+  signal?: AbortSignal;
+  sessionId?: string;
+  modelChoice?: string;
+  networkEnabled?: boolean;
+  /** 每阶段开始前的在线检查（插件仍 loaded？）——不传 = 不检查。 */
+  canContinue?: () => boolean;
+  /** 每阶段开始前的**工具表重查**（A-1197 · B3 第二层其二）——返回该 Agent 当前可用的
+   *  工具名；查不到就跳过该阶段并如实说明（不静默）。返回 undefined = 判不了（不阻断）。 */
+  availableTools?: () => Promise<string[] | undefined>;
+}): AsyncGenerator<{ seq: number; type: string; data: Record<string, unknown> }> {
+  let seq = 0;
+  let carried = "";
+  const total = opts.stages.length;
+  let skipped = 0;
+  const stopNote = "用户已停止：后续阶段不再执行。";
+  for (let i = 0; i < total; i++) {
+    const stage = opts.stages[i];
+    if (opts.signal?.aborted) {
+      yield { seq: ++seq, type: "notice", data: { text: stopNote } };
+      return;
+    }
+    if (opts.canContinue && !opts.canContinue()) {
+      yield { seq: ++seq, type: "notice", data: { text: `「${opts.modeTitle}」所属扩展已停用 —— 本回合在此收束（下一条消息将回落到默认模式）。` } };
+      return;
+    }
+    /* A-1197 · B3（L4c）第二层其二：**运行前（每阶段开始时）重查工具表** ——
+       查不到 ⇒ 该阶段不执行并如实写进对话（设计兜底表：不静默跳阶段）。
+       重查本身失败（拿不到表）⇒ 出声但不阻断（既有链路继续，绝不假装查过）。 */
+    if (stage.tools && stage.tools.length > 0 && opts.availableTools) {
+      const available = await opts.availableTools().catch((e) => {
+        console.warn(`[gui:stage] 阶段工具表重查失败（本阶段照常执行，但存在静默缺工具风险）: ${e instanceof Error ? e.message : String(e)}`);
+        return undefined;
+      });
+      if (available) {
+        const missing = stage.tools.filter((t) => !available.includes(t));
+        if (missing.length > 0) {
+          skipped += 1;
+          yield { seq: ++seq, type: "notice", data: { text: `⚠️ 阶段「${stage.title ?? stage.id}」因工具不可用被跳过：${missing.join("、")} 不在当前工具表（去「设置 → 权限」开启对应工具、检查 MCP 连接 / 扩展页的脚本信任，或关掉本扩展）。**该阶段未执行。**` } };
+          continue;
+        }
+      }
+    }
+    yield { seq: ++seq, type: "notice", data: { text: stageProgressText(stage.title ?? stage.id, i + 1, total) } };
+
+    const message = buildStageMessage({ goal: opts.goal, carried, stage, index: i + 1, total });
+    let stageText = "";
+    let doneReply = "";
+    const req: ChatRequest = {
+      message,
+      history: [],                                   // ← 阶段间裁剪的另一半：不带完整会话历史
+      ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+      ...(opts.modelChoice ? { modelChoice: opts.modelChoice } : {}),
+      ...(opts.networkEnabled !== undefined ? { networkEnabled: opts.networkEnabled } : {}),
+      stageOverride: {
+        ...(stage.tools && stage.tools.length > 0 ? { toolsOnly: [...stage.tools] } : {}),
+        ...(stage.maxRounds ? { maxRounds: stage.maxRounds } : {}),
+      },
+      /* A-1026 守卫口径：引擎请求必须带 windowCap（不然上下文压缩的保险门永远放行）。
+         与主 stream 路径同款：由 resolveSessionWindowCap 的唯一决策函数定。 */
+      windowCap: await resolveSessionWindowCap(opts.agentId, opts.modelChoice ?? "").catch(() => undefined),
+    };
+    for await (const ev of opts.chatService.stream(opts.agentId, req, 0, opts.signal)) {
+      yield { seq: ++seq, type: ev.type, data: (ev.data ?? {}) as Record<string, unknown> };
+      if (ev.type === "chunk") {
+        const c = (ev.data as { content?: string } | undefined)?.content;
+        if (typeof c === "string") { stageText += c; }
+      } else if (ev.type === "done") {
+        const r = (ev.data as { reply?: string } | undefined)?.reply;
+        if (typeof r === "string" && r) { doneReply = r; }
+      }
+    }
+    carried = clipCarry(doneReply || stageText);
+    if (opts.signal?.aborted) {
+      yield { seq: ++seq, type: "notice", data: { text: stopNote } };
+      return;
+    }
+  }
+  if (skipped === 0) {
+    yield { seq: ++seq, type: "notice", data: { text: `✅ 全部 ${total} 个阶段已完成（「${opts.modeTitle}」）。` } };
+  } else {
+    /* 有阶段被跳过 ⇒ 收束语必须如实 —— 不许把「跳过 K 步」说成「全部完成」。 */
+    yield { seq: ++seq, type: "notice", data: { text: `⚠️ 阶段流结束（「${opts.modeTitle}」）：${total - skipped}/${total} 步已执行，${skipped} 步因工具不可用被跳过（见上文逐条）。` } };
+  }
+}
 
 const activeChats = new Map<string, AbortController>();
 
@@ -1120,6 +1236,65 @@ const askCoordinator = new AskCoordinator({ timeoutMs: ASK_TIMEOUT_MS });
 let statsPoll: NodeJS.Timeout | null = null;
 
 let selectedAgentId: string | null = null;
+
+/* ── A-1198 · git_commit 的「差异评审」通道（D1 第二闸）─────────────────────────
+   git_commit 每次提交前把 diff stat + 关键片段送进**权限弹窗**（复用 pendingPerms +
+   slime:perm:request/resolve 基建，无第二套弹窗）；用户点头才落 commit。
+   两条不可绕的边界，与权限审批同口径：
+     · 后台子代理（__subagent__: 会话）无人可交互 ⇒ 一律拒绝（不静默放行）；
+     · 无窗口 / 渲染层不可用 ⇒ 拒绝。
+   评审详情的拼装在 core 侧（buildReviewDetail，单一产地）。 */
+function requestGitReview(req: GitReviewRequest): Promise<{ approved: boolean; reason?: string }> {
+  return new Promise((resolve) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win || win.isDestroyed()) {
+      resolve({ approved: false, reason: "无窗口（无法展示差异评审）" });
+      return;
+    }
+    const sid = agentStreamSessionMap.get(req.agentId);
+    if (typeof sid === "string" && sid.startsWith(SUBAGENT_SESSION_PREFIX)) {
+      resolve({
+        approved: false,
+        reason: "后台子代理无人可交互确认 —— commit 差异评审不适用（请在主对话里发起提交）",
+      });
+      return;
+    }
+    const requestId = `gitr_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    const ui: PermissionRequestUI = {
+      requestId,
+      agentId: req.agentId,
+      agentName: req.agentName,
+      taskDescription:
+        `git commit 差异评审（D1 门禁）\n${req.title}\n`
+        + `分支 ${req.branch} · ${req.stats.files} 个文件 / +-${req.stats.lines} 行 · 门禁：${req.qaSummary}`
+        + (req.protectedModules.length > 0 ? "\n⚠️ 包含受保护模块（AGENTS.md §6）—— 需要你的显式批准。" : ""),
+      detail: buildReviewDetail(req),
+      actions: [{ action: "git_commit", target: `${req.branch} @ ${req.repoRoot}`, level: 3 }],
+      options: [
+        { id: "allow-once", label: "批准提交", hint: "按上方 diff 落 commit（author=Agent 身份；产物停在当前分支，**不会合并**——合并永远是你的动作）。" },
+        { id: "deny", label: "拒绝本次提交", hint: "不落任何 commit，拒绝原因会带回给 Agent。" },
+      ],
+      sessionId: sid,
+    };
+    const timer = setTimeout(() => {
+      if (pendingPerms.delete(requestId)) {
+        try { win.webContents.send("slime:perm:timeout", { requestId }); } catch { /* 窗口可能已销毁 */ }
+        resolve({ approved: false, reason: "差异评审超时（用户未决策）" });
+      }
+    }, PERM_TIMEOUT_MS);
+    pendingPerms.set(requestId, (d) => {
+      clearTimeout(timer);
+      resolve({ approved: d.approved === true, ...(d.reason ? { reason: d.reason } : {}) });
+    });
+    try {
+      win.webContents.send("slime:perm:request", ui);
+    } catch {
+      clearTimeout(timer);
+      pendingPerms.delete(requestId);
+      resolve({ approved: false, reason: "渲染层不可用" });
+    }
+  });
+}
 
 function isTrustedSender(sender: Electron.WebContents): boolean {
   if (!mainWindow) {
@@ -1455,11 +1630,124 @@ interface PluginHostState {
  */
 const pluginSkillSourceHandles = new Map<string, Promise<{ name: string; dispose: () => void }>>();
 
+/* ── A-1197 · B2（L4a UI 贡献点）：运行期槽位登记表 ──────────────────────────
+ * 真源仍是**清单**（`PluginRecord.manifest.contributes.ui`）；本表只装「已接线」插件的声明：
+ * activate 时 registerUi 写入、dispose 时按插件名精确移除（与 pluginSkillSourceHandles 同模式）。
+ * 被卸载/被禁用/rejected 的插件不在表里 ⇒ `plugins_ui` 自然回不出它们的槽位（不留幽灵）。 */
+const pluginUiDecls = new Map<string, PluginUiContribution[]>();
+
+/** 汇总各插件已接线的 UI 声明（`plugins_ui` handler 的唯一数据源）。
+ *  冲突裁决（设计 §4.1）：同 slot 同 id 时按 order（缺省 0）再按插件名排序取第一个，
+ *  其余标 `conflict: true` —— **不静默丢弃、不静默覆盖**。 */
+function pluginUiSnapshot(): PluginUiSnapshotDTO {
+  const rows: PluginUiSlotDTO[] = [];
+  for (const [plugin, decls] of pluginUiDecls) {
+    for (const d of decls) {
+      rows.push({
+        slot: d.slot,
+        plugin,
+        id: d.id,
+        ...(d.title !== undefined ? { title: d.title } : {}),
+        ...(d.label !== undefined ? { label: d.label } : {}),
+        ...(d.icon !== undefined ? { icon: d.icon } : {}),
+        ...(d.order !== undefined ? { order: d.order } : {}),
+        ...(d.refresh !== undefined ? { refresh: d.refresh } : {}),
+        ...(d.when !== undefined ? { when: d.when } : {}),
+      });
+    }
+  }
+  const byKey = new Map<string, PluginUiSlotDTO[]>();
+  for (const r of rows) {
+    const key = `${r.slot}\u0000${r.id}`;
+    const list = byKey.get(key) ?? [];
+    list.push(r);
+    byKey.set(key, list);
+  }
+  const out: PluginUiSlotDTO[] = [];
+  for (const list of byKey.values()) {
+    if (list.length <= 1) { out.push(...list); continue; }
+    const sorted = [...list].sort(
+      (a, b) => (a.order ?? 0) - (b.order ?? 0)
+        || (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0),
+    );
+    sorted.forEach((r, i) => { out.push(i === 0 ? r : { ...r, conflict: true }); });
+  }
+  const slotRank = new Map<string, number>([["settings_panel", 0], ["status_item", 1], ["chat_action", 2]]);
+  out.sort((a, b) =>
+    (slotRank.get(a.slot) ?? 99) - (slotRank.get(b.slot) ?? 99)
+    || (a.order ?? 0) - (b.order ?? 0)
+    || (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0)
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { slots: out, warnings: [] };
+}
+
+/* ── A-1197 · B4（T1 脚本信任）：扩展脚本的执行边界（设计 §5.1）──────────────
+ * 一次性子进程：cwd = 该插件目录、不注入任何宿主对象、只以 stdout 返回结果、
+ * 显式 timeout、输出上限。这是本平台唯一能安全跑扩展代码的形态。 */
+const PLUGIN_SCRIPT_TIMEOUT_MS = 30_000;
+const PLUGIN_SCRIPT_OUTPUT_CAP = 256 * 1024;
+
+interface PluginScriptRun { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string; }
+
+/** 脚本工具的注册名：`plugin__<插件>__<脚本>`（跨插件不撞名；连字符转下划线以匹配 LLM 工具名规则）。 */
+function pluginScriptToolName(plugin: string, script: string): string {
+  return `plugin__${plugin.replace(/-/g, "_")}__${script.replace(/-/g, "_")}`;
+}
+
+function execPluginScript(entryAbs: string, cwd: string, input: string): Promise<PluginScriptRun> {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    let out = "";
+    let err = "";
+    let settled = false;
+    let child: ChildProcess;
+    const finish = (code: number | null, error?: string): void => {
+      if (settled) { return; }
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, stdout: out, stderr: err, timedOut, ...(error ? { error } : {}) });
+    };
+    try {
+      child = spawn(process.execPath, [entryAbs], {
+        cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        env: { ...process.env },
+      });
+    } catch (e) {
+      resolve({ code: null, stdout: "", stderr: "", timedOut: false, error: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch { /* 进程可能已退出 */ }
+    }, PLUGIN_SCRIPT_TIMEOUT_MS);
+    child.stdout?.on("data", (d: Buffer) => { if (out.length < PLUGIN_SCRIPT_OUTPUT_CAP) { out += d.toString("utf8"); } });
+    child.stderr?.on("data", (d: Buffer) => { if (err.length < PLUGIN_SCRIPT_OUTPUT_CAP) { err += d.toString("utf8"); } });
+    child.on("error", (e: Error) => finish(null, e.message));
+    child.on("close", (code: number | null) => finish(code));
+    child.stdin?.end(input);
+  });
+}
+
 function createPluginHost(dirs: Map<string, string>): PluginHost {
   const toolReg = getRegistry();
   return new PluginHost({
     // 工具贡献：本宿主不由 host 代为登记任何内置工具，故无句柄可给（如实留空）。
     registerTools: () => [],
+    /* A-1197 · B3（L4c）第二层其一：**装载时查一次** mode 声明的工具名。
+       工具表为空（引擎尚未装配 / 拿不到注册表）⇒ 返回空 = 「判不了」而不是「不存在」，
+       不得据此拒绝装载（加载顺序不是清单错误）；运行前每阶段重查是另一半兜底。 */
+    checkModeTools: (manifest) => {
+      if (!manifest.mode) {
+        return [];
+      }
+      const names = new Set(toolReg.listToolNames());
+      if (names.size === 0) {
+        return [];
+      }
+      return validateModeTools(manifest.mode, (n) => names.has(n));
+    },
     // 指令贡献：磁盘来源的插件按「插件自己的 skills 根」装配，撤销句柄就是
     // loadFromSource 的按名精确撤销（宿主撤它 ⇒ 只摘该插件本次真正新增的技能名）。
     registerInstructions: (manifest) => {
@@ -1501,6 +1789,109 @@ function createPluginHost(dirs: Map<string, string>): PluginHost {
             handle.dispose();
             if (pluginSkillSourceHandles.get(manifest.name) === pending) {
               pluginSkillSourceHandles.delete(manifest.name);
+            }
+          },
+        },
+      ];
+    },
+    // UI 槽位贡献（B2）：登记声明进运行期表；撤销 = 按插件名精确移除
+    // （renderer 侧按 `plugins_changed` 全量重算自然摘除；「get === ui」守卫防重装时误删新表）。
+    registerUi: (manifest) => {
+      const ui = manifest.contributes?.ui;
+      if (!ui || ui.length === 0) {
+        return [];
+      }
+      pluginUiDecls.set(manifest.name, ui);
+      return [
+        {
+          label: `${manifest.name} 的 UI 槽位（${ui.length} 条）`,
+          dispose: () => {
+            if (pluginUiDecls.get(manifest.name) === ui) {
+              pluginUiDecls.delete(manifest.name);
+            }
+          },
+        },
+      ];
+    },
+    // 脚本贡献（B4/T1）：**只有**用户在扩展页信任过（trust.json）才装配；
+    // 未声明/无目录/未信任 ⇒ 返回空（host 如实记「尚未接线」，不假装已生效）。
+    // 关信任 ⇒ 重装（reload）→ 旧 handle 撤销 ⇒ 工具立即注销（走 ContributionScope）。
+    registerScripts: (manifest) => {
+      const decl = manifest.contributes?.scripts;
+      if (!decl || decl.length === 0) {
+        return [];
+      }
+      const dir = dirs.get(manifest.name);
+      if (!dir) {
+        return [];
+      }
+      if (!readPluginTrust(dir)) {
+        return [];
+      }
+      const toolReg = getRegistry();
+      const mounted: string[] = [];
+      for (const s of decl) {
+        const toolName = pluginScriptToolName(manifest.name, s.name);
+        const entryAbs = join(dir, s.entry.replace(/\\/g, "/"));
+        toolReg.register(new Tool({
+          name: toolName,
+          description: `[扩展：${manifest.name}] ${s.description ?? s.name} —— 由本扩展脚本执行（一次性子进程；cwd 限定在插件目录、${PLUGIN_SCRIPT_TIMEOUT_MS / 1000}s 超时）。`,
+          parameters: {
+            type: "object",
+            properties: { input: { type: "string", description: "传给脚本的输入（作为 stdin 的 JSON.prompt）" } },
+            required: [],
+          },
+          executeFn: async (args: Record<string, unknown>): Promise<string> => {
+            const prompt = typeof args.input === "string" ? args.input : "";
+            const r = await execPluginScript(entryAbs, dir, JSON.stringify({ prompt }));
+            if (r.error) { return `[错误] 扩展脚本启动失败：${r.error}`; }
+            if (r.timedOut) { return `[错误] 扩展脚本超时（>${PLUGIN_SCRIPT_TIMEOUT_MS / 1000}s 已终止）：${s.entry}`; }
+            if (r.code !== 0) { return `[错误] 扩展脚本退出码 ${r.code}：${s.entry}\n${r.stderr.slice(0, 2000)}`; }
+            return r.stdout.trim() || "（脚本无输出）";
+          },
+          permissions: ["terminal"],
+        }), true);
+        mounted.push(toolName);
+      }
+      return [
+        {
+          label: `${manifest.name} 的脚本工具（${mounted.join("/")}）`,
+          dispose: () => {
+            for (const n of mounted) {
+              toolReg.unregister(n);
+            }
+          },
+        },
+      ];
+    },
+    /* A-1197 · B5（L4a page）：扩展自有页面 —— 服务**按需**起（plugins_page_open 时
+       serve 插件目录），dispose 负责按目录精确 stop（防「page 的 http 服务泄漏」，
+       见设计 §4.1 兜底表；stop 失败如实 console.error，不静默）。 */
+    registerPage: (manifest) => {
+      const page = manifest.contributes?.page;
+      if (!page) {
+        return [];
+      }
+      const dir = dirs.get(manifest.name);
+      if (!dir) {
+        return [];
+      }
+      return [
+        {
+          label: `${manifest.name} 的页面（${page.kind}:${page.entry}）`,
+          dispose: async () => {
+            try {
+              const list = await httpServer.list();
+              for (const e of list) {
+                if (resolve(e.dir) === resolve(dir)) {
+                  const r = await httpServer.stop(e.id);
+                  if (!r.ok) {
+                    console.error(`[gui:plugins] 插件页面服务 stop 失败（${manifest.name} / ${e.id}）：${r.error ?? "未知原因"}`);
+                  }
+                }
+              }
+            } catch (e) {
+              console.error(`[gui:plugins] 插件页面服务清理异常（${manifest.name}）：${e instanceof Error ? e.message : String(e)}`);
             }
           },
         },
@@ -1560,12 +1951,107 @@ async function ensurePluginHost(): Promise<PluginHostState> {
   return ensurePluginHostOnce();
 }
 
+/* ── A-1197 · B1：设置项服务（每次调用新建，不缓存） ────────────────────────────
+   **刻意不缓存**：设置项是持久数据、读取时机由渲染层决定（打开设置区才拉），
+   缓存一份就会变成「第二个真相源」—— 那正是设计文档 §4.2 明确要避免的。
+   `isLoaded` 直接接host 的status：插件被禁用 / 装载失败 ⇒ 读写一律拒。 */
+function pluginSettingsService(state: PluginHostState): SettingsService {
+  return new SettingsService({
+    pluginsRoot: PLUGINS_ROOT,
+    declarations: (name) => state.host.get(name)?.manifest.contributes?.settings,
+    isLoaded: (name) => state.host.get(name)?.status === "loaded",
+  });
+}
+
 async function reloadPlugins(): Promise<PluginHostState> {
   const state = await ensurePluginHost();
   const scanned = await scanAndLoadInto(state.host, state.dirs);
   state.rejected = scanned.rejected;
   state.warnings = scanned.warnings;
   return state;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// A-1197：贡献目录变更后自动重扫
+//
+// 缺陷现场（用户实测）：Agent 刚写好的插件/技能，在「扩展」页要到**重启 slime** 才出现。
+// 根因：插件清单只在 app 启动（ensurePluginHostOnce）或用户手动点「重新装载」时扫盘，
+//       中间没有任何变更信号 —— 文件已经躺在 config/plugins 里，宿主状态却还是上一轮快照。
+// 方案：对两个用户自助贡献目录挂 watcher，去抖后重扫 + 重装配技能工具，并广播给渲染层，
+//       让已打开的「扩展」页自己刷新（而不是让用户去猜要重启）。
+// 兜底：Watcher 不可用/失败都不致命 —— 「重新装载」按钮与重启仍是可用的老路。
+// ───────────────────────────────────────────────────────────────────────────
+const CONTRIB_RESCAN_DEBOUNCE_MS = 500;
+let contribRescanTimer: NodeJS.Timeout | null = null;
+let contribRescanQueue: Promise<void> = Promise.resolve();
+
+function broadcastContribRescan(reason: string): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) { continue; }
+    try {
+      w.webContents.send(IPC_CHANNELS.plugins_changed, { reason, at: Date.now() });
+    } catch {
+      // 单个窗口发不出不影响其它窗口，也不应打断重扫
+    }
+  }
+}
+
+async function runContribRescan(reason: string): Promise<void> {
+  // 串行化：重扫涉及技能的全部卸载/重装载，并发会互相踩正在置换的 scope。
+  const run = contribRescanQueue.then(async () => {
+    try {
+      await reloadPlugins();
+      await refreshAgentSkills();
+      broadcastContribRescan(reason);
+    } catch (e) {
+      console.warn(`[gui:plugins] 自动重扫失败（不影响对话，可手动点「重新装载」）: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, async () => {
+    // 上一轮失败也要放这一轮进来，不能让队列永久卡死
+    try {
+      await reloadPlugins();
+      await refreshAgentSkills();
+      broadcastContribRescan(reason);
+    } catch { /* 已在上面出声 */ }
+  });
+  contribRescanQueue = run.catch(() => undefined);
+  await run;
+}
+
+function scheduleContribRescan(reason: string): void {
+  if (contribRescanTimer) { clearTimeout(contribRescanTimer); }
+  contribRescanTimer = setTimeout(() => {
+    contribRescanTimer = null;
+    void runContribRescan(reason);
+  }, CONTRIB_RESCAN_DEBOUNCE_MS);
+}
+
+/**
+ * 挂载贡献目录 watcher。两个目录都不存在时（全新数据根）也要先建起来再监听，
+ * 否则第一个插件是被 Agent 用 mkdir -p 连带建出来的，watch 会 ENOENT 直接哑掉。
+ */
+export function startContributionWatchers(): void {
+  const roots = [
+    { dir: PLUGINS_ROOT, what: "扩展" },
+    { dir: join(PROJECT_ROOT, "config", "skills"), what: "技能" },
+  ];
+  for (const { dir, what } of roots) {
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      // 建不出来也照样尝试 watch（父目录异常时下面会出声）
+    }
+    try {
+      const w = watch(dir, (_event, filename) => {
+        scheduleContribRescan(`${what}目录变更：${String(filename ?? "").slice(0, 40)}`);
+      });
+      w.on("error", (e) => {
+        console.warn(`[gui:plugins] ${what}目录监听失效（自动重扫停用，仍可手动重装）: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    } catch (e) {
+      console.warn(`[gui:plugins] ${what}目录无法监听（自动重扫停用，仍可手动重装）: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 }
 
 
@@ -1589,6 +2075,17 @@ function summarizePlugins(state: PluginHostState): PluginSummaryDTO[] {
       status: record.status,
       error: record.error,
       dir: state.dirs.get(record.manifest.name) ?? "",
+      settingsCount: record.manifest.contributes?.settings?.length ?? 0,
+      uiCount: record.manifest.contributes?.ui?.length ?? 0,
+      scriptCount: record.manifest.contributes?.scripts?.length ?? 0,
+      /* A-1197 · B3：运行模式声明（下拉数据源——只列已装载且声明了 mode 的插件）。 */
+      hasMode: record.manifest.mode !== undefined,
+      ...(record.manifest.mode?.title ? { modeTitle: record.manifest.mode.title } : {}),
+      /* B4：信任状态按需从 trust.json 读（默认拒绝）；无目录（如 builtin）恒 false。 */
+      trusted: (() => {
+        const dir = state.dirs.get(record.manifest.name);
+        return dir ? readPluginTrust(dir) : false;
+      })(),
     };
   });
 }
@@ -1860,17 +2357,27 @@ const ensureServicesOnce = singleFlight<void>(async () => {
     },
   });
   chatService = new ChatService({ registry, engine, bus: a2aBus ?? undefined });
+  /* A-1198：把 git_commit 的差异评审接到权限弹窗（D1 第二闸）。
+     不注入 ⇒ git_commit 直接拒绝（评审不可省略）——所以这行是 git 工具可用的**前提**。 */
+  setGitReviewCallback(requestGitReview);
   
   
   await refreshAgentSkills();
+  // A-1197：挂上贡献目录 watcher —— 放在技能/插件首次装配之后，
+  // 这样 watcher 建立时目录已经存在，也不会和首轮装载抢同一批 scope。
+  try {
+    startContributionWatchers();
+  } catch (e) {
+    console.warn(`[gui:plugins] 贡献目录 watcher 启动失败（不影响对话）: ${e instanceof Error ? e.message : String(e)}`);
+  }
   
   
   
   
   try {
-    const schedPath = join(INSTALL_ROOT, "data", "schedules.json");
+    const schedPath = join(runtimeStateDir(), "schedules.json");
     const schedDefs = existsSync(schedPath) ? JSON.parse(readFileSync(schedPath, "utf8")) : [];
-    const statePath = join(INSTALL_ROOT, "data", "scheduler-state.json");
+    const statePath = join(runtimeStateDir(), "scheduler-state.json");
     if (Array.isArray(schedDefs) || existsSync(statePath)) {
       const scheduler = new SchedulerService();
       
@@ -1888,7 +2395,11 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         }
         let reply = "";
         if (!engine) { throw new Error("引擎未就绪"); }
-        const system = await engine.buildSystem(agent, undefined, undefined);
+        /* A-1198：定时任务也是「Agent 在跑」—— 系统提示必须带能力指引（与主对话**同产地**：
+           chat.systemPromptFor 里的 agentSkillGuide）。不带上 = 定时任务里的 Agent
+           又成了「不知道自己能力」的那个（用户口径：所有 Agent 都要知道自己的功能）。 */
+        const system = await engine.buildSystem(agent, undefined, undefined)
+          + agentSkillGuide(resolveAgentToolProfile(agent.tool_profile));
         for await (const ev of engine.stream({
           agent,
           message: `${job.prompt}\n\n（本条为后台定时任务触发，触发时间：${new Date().toLocaleString()}）`,
@@ -1897,7 +2408,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         })) {
           if (ev.type === "done") { reply = ev.reply ?? ""; }
         }
-        const dir = join(INSTALL_ROOT, "data", "generated");
+        const dir = join(runtimeStateDir(), "generated");
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         writeFileSync(join(dir, `schedule-${job.name}-${stamp}.md`), reply, "utf8");
@@ -1982,7 +2493,7 @@ const ensureServicesOnce = singleFlight<void>(async () => {
         
         const aborted = ctx?.signal.aborted === true;
         if (!reply || reply.trim() === "（生成已被中断）") { reply = acc.join(""); }
-        const dir = join(INSTALL_ROOT, "data", "generated");
+        const dir = join(runtimeStateDir(), "generated");
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         
@@ -2295,8 +2806,104 @@ let residentStateProvider: () => ResidentState = () => ({ scheduler: [], subagen
 
 
 
-const REQUESTS_FILE = join(INSTALL_ROOT, "config", "requests.json");
+function dataRootInfo(): {
+  root: string; custom: boolean; default: string; exists: boolean;
+} {
+  const root = RUNTIME_DATA_DIR;
+  return { root, custom: isCustomDataRoot(), default: defaultDataRoot(), exists: dataRootExists(root) };
+}
+
+/**
+ * 把旧数据根的内容递归**复制**到新数据根（dataRootSet 的 migrate 分支）。
+ *
+ * 只复制不删除：来源目录原地保留，任何一步失败都只 console.warn 并在返回值里计数，
+ * 不让「迁移」变成「丢数据」。临时/进程态文件（run.lock / 日志 / 端口文件）跳过 ——
+ * 换了根它们本来就该重新生成。
+ */
+function copyDataRootTree(from: string, to: string): { copied: number; failed: number } {
+  let copied = 0;
+  let failed = 0;
+  if (!existsSync(from)) { return { copied, failed }; }
+  for (const name of readdirSync(from)) {
+    if (RUNTIME_ONLY_FILES.has(name)) { continue; }
+    const src = join(from, name);
+    const dst = join(to, name);
+    if (existsSync(dst)) { continue; }
+    try {
+      cpSync(src, dst, { recursive: true, force: false, errorOnExist: false });
+      copied++;
+    } catch (e) {
+      failed++;
+      console.warn(`[gui:dataRoot] 迁移复制失败（已跳过，来源保留）：${src} → ${dst}：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return { copied, failed };
+}
+
+/** 迁移时跳过的临时/进程态文件 —— 换了数据根它们本来就该重新生成，跟着搬没有意义。 */
+const RUNTIME_ONLY_FILES = new Set([
+  "run.lock",
+  "watchdog.log",
+  "crash-report.log",
+  "DevToolsActivePort",
+]);
+
+const REQUESTS_FILE = join(runtimeStateDir(), "requests.json");
 const DEFAULT_REQUESTS = { concurrency: 2, reconnectBaseMs: 3000 };
+/**
+ * 一次性把旧版散落在安装目录下的运行时文件**复制**到数据根。
+ *
+ * 背景：早期版本把 `data\\`（run.lock / schedules.json / generated\\ …）与 `config\\requests.json`
+ * 直接写在安装目录下，于是用户的 D:\\…\\slimecode 下凭空长出这些文件。安装目录常常不可写、
+ * 升级时还会被整体替换。现在这些文件都归数据根管，但**不能删用户的老数据**。
+ *
+ * 三条硬约束（改之前先读一遍）：
+ *   · 只复制，**绝不删除/移动来源文件** —— 迁移失败也不会丢东西。
+ *   · 目标已存在同名文件 ⇒ 跳过，不覆盖用户在新位置的选择。
+ *   · 任一项失败只 console.warn，**不阻断启动**。
+ */
+function migrateLegacyInstallDirData(): void {
+  try {
+    const rt = runtimeStateDir();
+    const legacyData = join(INSTALL_ROOT, "data");
+    const legacyConfigFile = join(INSTALL_ROOT, "config", "requests.json");
+    if (!existsSync(legacyData) && !existsSync(legacyConfigFile)) { return; }
+
+    // 安装目录恰好就是数据根（例如用户直接把数据根设成安装目录）⇒ 无需迁移
+    const legacyRt = resolve(legacyData);
+    if (legacyRt === resolve(rt) || legacyRt === resolve(rt, "..")) { return; }
+
+    let copied = 0;
+    if (existsSync(legacyData)) {
+      for (const name of readdirSync(legacyData)) {
+        if (RUNTIME_ONLY_FILES.has(name)) { continue; }
+        const from = join(legacyData, name);
+        const to = join(rt, name);
+        if (existsSync(to)) { continue; }
+        try {
+          cpSync(from, to, { recursive: true, force: false, errorOnExist: false });
+          copied++;
+        } catch (e) {
+          console.warn(`[gui:dataRoot] 旧数据复制失败（已跳过，来源文件原地保留）：${from} → ${to}：${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+    if (existsSync(legacyConfigFile) && !existsSync(REQUESTS_FILE)) {
+      try {
+        cpSync(legacyConfigFile, REQUESTS_FILE, { force: false, errorOnExist: false });
+        copied++;
+      } catch (e) {
+        console.warn(`[gui:dataRoot] 旧 requests.json 复制失败（已跳过，来源文件原地保留）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (copied > 0) {
+      console.log(`[gui:dataRoot] 已从安装目录复制 ${copied} 项历史运行时数据到 ${rt}（来源文件保留在安装目录，未删除）`);
+    }
+  } catch (e) {
+    console.warn(`[gui:dataRoot] 历史数据迁移跳过（不影响启动）：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 function readRequests(): typeof DEFAULT_REQUESTS {
   try {
     if (existsSync(REQUESTS_FILE)) {
@@ -3376,6 +3983,81 @@ function registerIpcHandlers(): void {
     return { ok: true, error: null };
   });
 
+  handleTrusted<void>("slime:dataRoot:get", async () => {
+    try {
+      return dataRootInfo();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[gui:dataRoot] 读取数据根失败:", e);
+      return { root: "", custom: false, default: "", exists: false, error: msg };
+    }
+  });
+
+  handleTrusted<void>("slime:dataRoot:pick", async () => {
+    try {
+      const win = BrowserWindow.getAllWindows()[0];
+      const r = win && !win.isDestroyed()
+        ? await dialog.showOpenDialog(win, {
+            title: "选择数据根目录",
+            properties: ["openDirectory", "createDirectory"],
+            defaultPath: dataRootInfo().root,
+          })
+        : await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+      if (r.canceled || r.filePaths.length === 0) {
+        return { ok: false, canceled: true };
+      }
+      return { ok: true, canceled: false, dir: r.filePaths[0] };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[gui:dataRoot] 选择目录失败:", e);
+      return { ok: false, canceled: false, error: msg };
+    }
+  });
+
+  handleTrusted<{ dir: string; migrate: boolean }>("slime:dataRoot:set", async (_event, payload) => {
+    const dir = typeof payload?.dir === "string" ? payload.dir.trim() : "";
+    if (!dir) {
+      return { ok: false, error: "目录不能为空" };
+    }
+    let migrated = false;
+    try {
+      mkdirSync(dir, { recursive: true });
+      if (!dataRootExists(dir)) {
+        return { ok: false, error: `目录创建失败：${dir}` };
+      }
+      if (payload?.migrate === true) {
+        const r = copyDataRootTree(RUNTIME_DATA_DIR, dir);
+        migrated = r.copied > 0;
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[gui:dataRoot] 切换数据根失败:", e);
+      return { ok: false, error: msg };
+    }
+    try {
+      writeDataRootPointer(dir);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[gui:dataRoot] 数据根记录写入失败:", e);
+      return { ok: false, error: msg, migrated };
+    }
+    /* root 必须与 dataRootInfo() 同产（同一事实只有一个产地）：那边给的是已 resolve 的
+     * RUNTIME_DATA_DIR，这边若回传原始入参（可能是 `..` / 相对路径），渲染层会先乐观显示
+     * 一个值、随即被下一次回刷成另一个。 */
+    return { ok: true, migrated, root: resolve(dir), needRestart: true };
+  });
+
+  handleTrusted<void>("slime:dataRoot:reset", async () => {
+    try {
+      clearDataRootPointer();
+      return { ok: true, needRestart: true };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[gui:dataRoot] 恢复默认数据根失败:", e);
+      return { ok: false, error: msg };
+    }
+  });
+
   handleTrusted<ChatInput>("slime:chat:stream", async (_event, input: ChatInput) => {
     try {
     await ensureServices();
@@ -3447,7 +4129,54 @@ function registerIpcHandlers(): void {
     
     void (async () => {
       try {
-        const evSource = isBrainstorm
+        /* A-1197 · B3（L4c）：运行器解析 —— **显式 mode > brainstorm > agent-loop**。
+           mode 可用性 = 该插件已装载（status loaded）且声明了 mode；不可用 ⇒ 回落 agent-loop，
+           并把原因**写进对话**（不静默换模式；下一回合 resolveRunnerKind 也会自然回落）。 */
+        const sessionMode = typeof brainMeta?.mode === "string" ? brainMeta.mode.trim() : "";
+        let modeRec: { stages: Array<import("../../../core-ts/src/plugin/mode.js").StageDecl>; title: string } | null = null;
+        let modeHost: { get: (n: string) => { status?: string } | undefined } | null = null;
+        if (sessionMode) {
+          try {
+            const st = await ensurePluginHost();
+            modeHost = st.host as unknown as { get: (n: string) => { status?: string } | undefined };
+            const rec = st.host.get(sessionMode);
+            if (rec?.status === "loaded" && rec.manifest.mode) {
+              modeRec = {
+                stages: rec.manifest.mode.stages,
+                title: runnerLabel(`mode:${sessionMode}`, rec.manifest.mode.title),
+              };
+            }
+          } catch { /* host 拿不到 ⇒ 当作不可用，走回落 */ }
+        }
+        const runnerKind = resolveRunnerKind({
+          sessionMode,
+          isBrainstorm,
+          isModeAvailable: () => modeRec !== null,
+        });
+        if (runnerKind.fellBack) {
+          chunkSender.push(toStreamChunk({ seq: -1, type: "notice", data: { text: `${runnerKind.reason}。` } }, cancelKey));
+        }
+        /** 阶段边界检查：插件在本回合中途被停用 ⇒ 收束（不静默换模式）。 */
+        const canContinueStage = (): boolean => {
+          if (!sessionMode || !modeHost) { return true; }
+          const r = modeHost.get(sessionMode);
+          return !!r && r.status === "loaded";
+        };
+        const evSource = modeRec
+          ? streamStageFlow({
+              chatService: chatService!,
+              agentId,
+              goal: req.message,
+              stages: modeRec.stages,
+              modeTitle: modeRec.title,
+              signal: controller.signal,
+              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              ...(brainMeta?.modelChoice ? { modelChoice: brainMeta.modelChoice } : {}),
+              ...(input.networkEnabled !== undefined ? { networkEnabled: input.networkEnabled } : {}),
+              canContinue: canContinueStage,
+              availableTools: async () => (chatService ? await chatService.availableToolsFor(agentId) : undefined),
+            })
+          : isBrainstorm
           ? streamGroupTalkFlow({
               engine: engine!, 
               
@@ -4118,7 +4847,7 @@ function registerIpcHandlers(): void {
       if (r.timestamp > agg.lastTime) { agg.lastTime = r.timestamp; }
       byKey.set(key, agg);
     }
-    const items: Array<{ sessionId: string; agentId: string; agentName: string; workspace?: string; title: string; count: number; lastTime: string; memberIds?: string[]; memberNames?: string[]; memberModels?: Record<string, string>; leaderModel?: string; memberEfforts?: Record<string, string>; leaderEffort?: string; type?: "normal" | "brainstorm"; modelChoice?: string }> = [];
+    const items: Array<{ sessionId: string; agentId: string; agentName: string; workspace?: string; title: string; count: number; lastTime: string; memberIds?: string[]; memberNames?: string[]; memberModels?: Record<string, string>; leaderModel?: string; memberEfforts?: Record<string, string>; leaderEffort?: string; type?: "normal" | "brainstorm"; modelChoice?: string; mode?: string }> = [];
     for (const meta of metas) {
       
       const agg = byKey.get(`${meta.agentId}::${meta.id}`) ?? byKey.get(`${meta.agentId}::default`);
@@ -4141,6 +4870,7 @@ function registerIpcHandlers(): void {
         memberEfforts: memberEffortsOf(meta.members),
         leaderEffort: meta.leaderEffort,
         type: meta.type,
+        mode: meta.mode,
       });
     }
     
@@ -4238,6 +4968,14 @@ function registerIpcHandlers(): void {
     if (!payload?.sessionId) { return { ok: false, error: "sessionId 必填" }; }
     const meta = await setSessionType(payload.sessionId, payload.type === "brainstorm" ? "brainstorm" : null);
     return { ok: !!meta, sessionId: payload.sessionId, type: meta?.type ?? "normal" };
+  });
+
+  /* A-1197 · B3（L4c）：设置会话的**显式运行模式**（= 提供 mode 的插件名；空串 = 清除回默认）。
+     只写 meta（请求组装时读）——下一轮请求立即生效，不需重启（与 loop_config 同口径）。 */
+  handleTrusted<{ sessionId: string; mode?: string }>(IPC_CHANNELS.sessions_set_mode, async (_event, payload) => {
+    if (!payload?.sessionId) { return { ok: false as const, error: "sessionId 必填" }; }
+    const meta = await setSessionMode(payload.sessionId, (payload.mode ?? "").trim() || null);
+    return { ok: !!meta, sessionId: payload.sessionId, mode: meta?.mode ?? "" };
   });
 
   
@@ -4790,6 +5528,128 @@ function registerIpcHandlers(): void {
     }
     const enabledState = await reloadPlugins();
     return { ok: true, snapshot: snapshotPlugins(enabledState) };
+  });
+
+  /* ── A-1197 · B1（L4b 设置贡献点）─────────────────────────────────────────────
+     设置项的读/ 写。两条硬边界写在代码里而不是文档里：
+       ① **入参只有 plugin / key / value** —— 没有 path。落盘位置由 `plugin.name`
+          在 settings-store 里推导（并在那里独立 assert 一次名字合法性）。
+       ② 读写都先过 `host.get(name)?.status === "loaded"`：未装载 / 已禁用 / 装载失败
+          一律拒 —— 关掉的插件不能被偷偷改设置，界面上的设置区也随插件一起被摘掉。
+  */
+  const readPluginSettingsFor = async (
+    name: string,
+  ): Promise<{ ok: true; dto: PluginSettingsDTO } | { ok: false; error: string }> => {
+    const state = await ensurePluginHost();
+    const record = state.host.get(name);
+    if (!record) {
+      return { ok: false, error: `插件未装载：${name}` };
+    }
+    if (record.status !== "loaded") {
+      return { ok: false, error: `插件未装载或已停用（status=${record.status}）：${name}` };
+    }
+    return pluginSettingsService(state).get(name);
+  };
+
+  handleTrusted<{ plugin: string }>(IPC_CHANNELS.plugins_settings_get, async (_event, p) => {
+    const name = String(p?.plugin ?? "").trim();
+    if (!name) {
+      return { ok: false, error: "缺少插件名" };
+    }
+    return readPluginSettingsFor(name);
+  });
+
+  handleTrusted<{ plugin: string; key: string; value: unknown }>(IPC_CHANNELS.plugins_settings_set, async (_event, p) => {
+    const name = String(p?.plugin ?? "").trim();
+    if (!name) {
+      return { ok: false, error: "缺少插件名" };
+    }
+    const key = String(p?.key ?? "").trim();
+    if (!key) {
+      return { ok: false, error: "缺少设置项 key" };
+    }
+    const state = await ensurePluginHost();
+    const record = state.host.get(name);
+    if (!record) {
+      return { ok: false, error: `插件未装载：${name}` };
+    }
+    if (record.status !== "loaded") {
+      return { ok: false, error: `插件未装载或已停用（status=${record.status}）：${name}` };
+    }
+    const result: PluginSettingsWriteDTO = pluginSettingsService(state).set(name, key, p?.value);
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+    return { ok: true, dto: result.dto, warnings: result.warnings };
+  });
+
+  /* A-1197 · B2（L4a UI 贡献点）：UI 槽位声明（按需拉 —— 列表接口只给 uiCount 计数）。
+     数据源 = `pluginUiDecls`（activate 时 registerUi 写入、dispose 时移除）——
+     只回「已接线」插件的槽位；跨插件冲突项已标 `conflict: true`（渲染层渲染成禁用态）。 */
+  handleTrusted<void>(IPC_CHANNELS.plugins_ui, async (): Promise<PluginUiSnapshotDTO> => pluginUiSnapshot());
+
+  /* A-1197 · B4（T1 脚本信任）：读信任状态（按需拉；默认拒绝）。 */
+  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_trust_get, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
+    const state = await ensurePluginHost();
+    const dir = state.dirs.get(name);
+    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录（builtin 或未装载）：${name}` }; }
+    return { ok: true as const, trusted: readPluginTrust(dir) };
+  });
+
+  /* A-1197 · B4（T1）：设置信任开关 —— 写 `trust.json` 后**重装**：
+     开 ⇒ registerScripts 装配脚本工具；关 ⇒ 旧 handle 撤销、工具立即注销（不残留）。 */
+  handleTrusted<{ name: string; trusted: boolean }>(IPC_CHANNELS.plugins_trust_set, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
+    const state = await ensurePluginHost();
+    const dir = state.dirs.get(name);
+    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录（builtin 或未装载）：${name}` }; }
+    const trusted = p?.trusted === true;
+    try {
+      writePluginTrust(dir, trusted);
+    } catch (e) {
+      return { ok: false as const, error: `信任状态写入失败：${e instanceof Error ? e.message : String(e)}` };
+    }
+    const next = await reloadPlugins();
+    return { ok: true as const, trusted, snapshot: snapshotPlugins(next) };
+  });
+
+  /* A-1197 · B5（L4a page）：打开扩展自有页面 —— 按需起 `127.0.0.1` 静态服务
+     （复用既有 `httpServer`；同一插件目录天然复用同一服务），返回渲染层要的 url。
+     **绝不 `file://`**（§5.4 的明文口径）；服务生命周期见 registerPage 的 dispose。 */
+  handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_page_open, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
+    const state = await ensurePluginHost();
+    const record = state.host.get(name);
+    if (!record) { return { ok: false as const, error: `插件未装载：${name}` }; }
+    if (record.status !== "loaded") { return { ok: false as const, error: `插件未装载或已停用（status=${record.status}）：${name}` }; }
+    const page = record.manifest.contributes?.page;
+    if (!page) { return { ok: false as const, error: `插件未声明页面（contributes.page）：${name}` }; }
+    const dir = state.dirs.get(name);
+    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录：${name}` }; }
+    const served = await httpServer.serve({ dir, host: "127.0.0.1", origin: "agent" });
+    if (!served.ok || !served.urls?.[0]) {
+      return { ok: false as const, error: `页面服务启动失败：${served.error ?? "未知原因"}` };
+    }
+    const base = served.urls[0].endsWith("/") ? served.urls[0] : `${served.urls[0]}/`;
+    const entry = page.entry.replace(/\\/g, "/");
+    return { ok: true as const, url: `${base}${entry}`, reused: served.reused === true };
+  });
+
+  /* A-1197 · B6（D1 开发者模式）：总开关（**会话级** —— 每次启动都要用户重新确认，见 dev-mode.ts）。
+     本 handler 只管开关与状态查询；**写入门**在 sandbox 的 `devModeWriteAllowed`（受管 worktree
+     + `slime/*` 分支前缀硬约束）。合并/commit 门禁属 `git_*` 工具层（AGENTS.md §8）。 */
+  handleTrusted<void>(IPC_CHANNELS.plugins_dev_mode_get, async () => getDevModeState());
+  handleTrusted<{ enabled: boolean }>(IPC_CHANNELS.plugins_dev_mode_set, async (_event, p) => {
+    try {
+      setDevModeEnabled(p?.enabled === true, join(PROJECT_ROOT, "config"));
+    } catch (e) {
+      return { ok: false as const, error: `开发者模式审计文件写入失败：${e instanceof Error ? e.message : String(e)}` };
+    }
+    return { ok: true as const, state: getDevModeState() };
   });
 
   
@@ -7688,6 +8548,7 @@ function main(): void {
 
       try { guardLocalFileDownloads(session.defaultSession); } catch {  }
       try { guardLocalFileDownloads(session.fromPartition("persist:slime-browser")); } catch {  }
+      migrateLegacyInstallDirData();
       createWindow();
       
       

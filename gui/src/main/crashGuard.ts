@@ -22,9 +22,12 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { INSTALL_ROOT } from "./boot.js";
+import { runtimeStateDir } from "./dataRoot.js";
 
-const DATA_DIR = join(INSTALL_ROOT, "data");
+/* A-1197④：crash 取证/看门狗日志属**运行时可写状态**，必须跟数据根走。
+   此前它们写在 `<安装目录>/data` —— 安装目录可能只读（Program Files），
+   且升级时会被整个替换，日志与 crash 取证会跟着丢。 */
+const DATA_DIR = runtimeStateDir();
 const LOCK_PATH = join(DATA_DIR, "run.lock");
 const REPORT_PATH = join(DATA_DIR, "crash-report.log");
 const WATCHDOG_PATH = join(DATA_DIR, "watchdog.log");

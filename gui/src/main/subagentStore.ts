@@ -17,7 +17,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { INSTALL_ROOT } from "./boot.js";
+import { runtimeStateDir } from "./dataRoot.js";
 import type { SubAgentRunView } from "../shared/ipc.js";
 
 
@@ -60,7 +60,7 @@ const RESULT_CAP = 8000;
 const TASK_CAP = 2000;
 
 function runsPath(): string {
-  return join(INSTALL_ROOT, "data", "subagent-runs.json");
+  return join(runtimeStateDir(), "subagent-runs.json");
 }
 
 

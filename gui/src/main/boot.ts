@@ -17,6 +17,9 @@ import { app } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { seedDefaultSkills } from "./skill_seed.js";
+/* A-1197④：数据根不再是写死的 %APPDATA%\\slime-data —— 由 dataRoot.ts 统一决定
+   （用户在设置里选的路径从这里生效；切换需要重启，原因见 dataRoot.ts 顶部注释）。 */
+import { RUNTIME_DATA_DIR } from "./dataRoot.js";
 
 
 
@@ -72,7 +75,7 @@ export const BUNDLE_ROOT = app.isPackaged
   : findProjectRoot(app.getAppPath());
 
 if (app.isPackaged) {
-  const slimeRoot = join(app.getPath("userData"), "slime-data");
+  const slimeRoot = RUNTIME_DATA_DIR;
   process.env.SLIME_ROOT = slimeRoot;
   console.info(`[gui:boot] 打包模式：数据根 = ${slimeRoot}，安装根 = ${INSTALL_ROOT}，随包资源根 = ${BUNDLE_ROOT}`);
   bootstrapToml(slimeRoot);
