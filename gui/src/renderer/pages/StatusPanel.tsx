@@ -11,7 +11,7 @@ import { alertAsync } from "../dialog.js";
 import PlanPanel from "./PlanPanel.js";
 import TraceViewer from "./TraceViewer.js";
 import ReleaseNotesView from "./ReleaseNotesView.js";
-import { PluginStatusItems } from "../components/UiSlotHost.js";
+import { PluginStatusBarItems, PluginStatusItems } from "../components/UiSlotHost.js";
 
 
 function fmtBytes(n: number | undefined): string {
@@ -458,6 +458,9 @@ export default function StatusPanel(): JSX.Element {
       </section>
       {/* A-1197 · B2（L4a）：扩展声明的 status_item（无声明时不渲染任何东西） */}
       <PluginStatusItems />
+      {/* A-1200 · B1：`status_bar` 区域（扩展声明的底部状态条一行）。
+          ⚠️ 与上面 `status_item` **是两个区域**：那是右栏状态行，这是贴在面板最底下的一条。 */}
+      <PluginStatusBarItems />
     </div>
   );
 }

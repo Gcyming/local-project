@@ -1,7 +1,7 @@
 import { ContributionScope } from "./scope.js";
 import type { DisposeReport } from "./scope.js";
 import type { PluginManifest } from "./manifest.js";
-import { describePluginSettings, describePluginUi, describePluginScripts, describePluginTheme, describePluginCss } from "./contributes.js";
+import { describePluginSettings, describePluginUi, describePluginScripts, describePluginTheme, describePluginThemes, describePluginCss, describePluginViews } from "./contributes.js";
 import { describeMode } from "./mode.js";
 
 export type PluginStatus = "loaded" | "disabled" | "failed";
@@ -37,8 +37,18 @@ export interface PluginHostOptions {
   /** A-1198 · 主题贡献点（皮肤）：登记**声明式设计令牌**（主进程侧维护主题汇总表）。
    *  纯数据、无副作用 —— 撤销 = 按插件名精确移除（渲染层按 `plugins_changed` 重算并回落默认）。 */
   registerTheme?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1200 · B2：`contributes.themes`（**一个插件多套皮肤**）的登记钩子。
+   *  与 `registerTheme` 分开而不是复用同一个：登记形状不同（一个 decl vs 一组 decl），
+   *  且清单层已保证两者**互斥**（同写即拒）⇒ 不会出现「同一插件两条都进表」的歧义。 */
+  registerThemes?: (manifest: PluginManifest) => PluginContributionHandle[];
   /** A-1198 · 续：CSS 贡献点登记钩子（纯数据；落值在渲染层 PluginCssHost）。 */
   registerCss?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1200 · B3：**插件自有栏目**（`contributes.views`）的登记钩子 ——
+   *  纯数据登记进主进程侧的栏目表（渲染层按 `plugins_changed` 全量重算），
+   *  与 `registerUi` 同款：这里**只登记「声明在案」**，服务由渲染层按需经
+   *  `plugins_view_open` 触发（懒加载：一个从没被点开的栏目不该占着一个 127.0.0.1 端口）。
+   *  dispose 负责把该插件的栏目从表里按名精确移除（可开可关的关键一行）。 */
+  registerViews?: (manifest: PluginManifest) => PluginContributionHandle[];
   /** A-1197 · B3（L4c）第二层：**装载时查一次**模式声明的工具名（由**有工具表**的装配侧注入）。
    *  返回该清单里「不存在于当前工具表」的工具名；非空 ⇒ 该插件 `failed`（不给
    *  「配了但不生效」的假自由度，设计 §4.3）。运行前每阶段还会重查（执行侧）。 */
@@ -63,7 +73,9 @@ export class PluginHost {
   private registerScripts: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerPage: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerTheme: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerThemes: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerCss: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerViews: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private checkModeTools: ((manifest: PluginManifest) => string[]) | null;
   private unloadable: (manifest: PluginManifest) => boolean;
 
@@ -74,7 +86,9 @@ export class PluginHost {
     this.registerScripts = opts.registerScripts ?? null;
     this.registerPage = opts.registerPage ?? null;
     this.registerTheme = opts.registerTheme ?? null;
+    this.registerThemes = opts.registerThemes ?? null;
     this.registerCss = opts.registerCss ?? null;
+    this.registerViews = opts.registerViews ?? null;
     this.checkModeTools = opts.checkModeTools ?? null;
     this.unloadable = opts.unloadable ?? ((m) => m.origin !== "builtin");
   }
@@ -341,12 +355,28 @@ export class PluginHost {
       const wiring = this.contribute(scope, this.registerTheme, manifest);
       contributions.push(`theme:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginTheme(themeDecl)}`);
     }
+    /* A-1200 · B2：`themes`（多套皮肤）与 `theme` 同一套钩子（registerTheme）——
+       两者在清单层**互斥**（同写即拒，见 parsePluginContributes），所以这里不会重复登记。
+       登记形状不同（一个 decl vs 一组 decl），主进程按 manifest 读到的字段分派。 */
+    const themesDecl = manifest.contributes?.themes;
+    if (themesDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerThemes, manifest);
+      contributions.push(`themes:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginThemes(themesDecl)}`);
+    }
     /* A-1198 · 续：CSS 贡献点。与 theme 同款走 contribute（撤销句柄把样式从可用列表摘掉，
        渲染层回落内置外观）；文本本身由渲染层包 @layer + 作用域类后落 <style>。 */
     const cssDecl = manifest.contributes?.css;
     if (cssDecl !== undefined) {
       const wiring = this.contribute(scope, this.registerCss, manifest);
       contributions.push(`css:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginCss(cssDecl)}`);
+    }
+    /* A-1200 · B3：**插件自有栏目**（views）—— 与 ui/page 同款走 contribute（进 scope）。
+       栏目是「一整块插件自有 UI」，撤销必须与入口**同生共死**（否则界面上留一块空白幽灵视图）。
+       清单层已保证 `page` 与 `views` 互斥，不会两条都进表。 */
+    const viewsDecl = manifest.contributes?.views;
+    if (viewsDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerViews, manifest);
+      contributions.push(`views:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginViews(viewsDecl)}`);
     }
     entry.record.contributions = contributions;
   }

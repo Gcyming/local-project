@@ -65,12 +65,81 @@ export interface PluginSettingDecl {
  * 四个白名单槽位里 B2 先落三个（`settings_panel` / `status_item` / `chat_action`）；
  * **B5** 补上 `toolbar_item`（「打开扩展自己的页面」——必须与 `page` 配对声明，
  * 见下方交叉校验）。`webview` 形态的 page 暂拒（需显式 guest preload/sandbox 配置，
- * 见设计 §5.4）——写了就是拒，fail-closed，不装假插座。 */
-export const PLUGIN_UI_SLOTS = ["settings_panel", "status_item", "chat_action", "toolbar_item"] as const;
-export type PluginUiSlot = (typeof PLUGIN_UI_SLOTS)[number];
+ * 见设计 §5.4）——写了就是拒，fail-closed，不装假插座。
+ *
+ * ── A-1200 · B1：4 个固定槽位 → **13 个区域注册表**（对标 DSH「任意位置挂按钮」）──
+ * 既有 4 个名字**原样保留**（老插件不改一个字照常工作，向后兼容是硬要求），
+ * 新增 9 个区域让声明可以落到界面任意位置。
+ * ⚠️ **`PLUGIN_UI_SLOTS` 保留为 `PLUGIN_UI_REGIONS` 的别名导出**：一次性改爆所有调用方
+ * （渲染层 / 守卫 / 变异脚本都按这个名字打锚点）收益为零、风险全在。
+ * 两个名字指向**同一个数组**，所以「别名」不是两份清单漂移的入口。 */
+export const PLUGIN_UI_REGIONS = [
+  /* ── 既有 4 个（A-1197 · B2/B5 的槽位，名字与语义都不动）── */
+  "settings_panel",
+  "status_item",
+  "chat_action",
+  "toolbar_item",
+  /* ── A-1200 · B1 新增 9 个 ── */
+  "titlebar_start",
+  "titlebar_end",
+  "chat_input_leading",
+  "chat_input_trailing",
+  "chat_message_actions",
+  "sidebar_section",
+  "status_bar",
+  "overlay_floating",
+  "overlay_fullscreen",
+] as const;
+
+export type PluginUiRegion = (typeof PLUGIN_UI_REGIONS)[number];
+
+/** A-1197 起的旧名（A-1200 · B1 起为 `PLUGIN_UI_REGIONS` 的**别名**，同一数组，非副本）。 */
+export const PLUGIN_UI_SLOTS = PLUGIN_UI_REGIONS;
+export type PluginUiSlot = PluginUiRegion;
 
 /** 单个插件最多声明多少条 UI 槽位（防「一个插件塞一堆条目把界面撑爆」）。 */
 export const MAX_PLUGIN_UI_SLOTS = 16;
+
+/* ── A-1200 · B1：两种贡献形态 ────────────────────────────────────────────────
+ * `item`（缺省）：宿主渲染的按钮/行 —— 扩展只声明 label/icon，界面由宿主实现（红线不变）。
+ * `panel`：扩展自带 HTML，宿主起 `127.0.0.1` 静态服务并用**沙箱 iframe** 挂到任意区域
+ * （与 `contributes.page` 同一套底子，panel 是它的泛化：不再只限「右栏一个 tab」）。
+ * ⚠️ **绝不把扩展代码注入宿主页面**（不做 DSH 的 `__ModuleLoader__` 路线 —— 理由见
+ * `docs/plugin-ui-freedom-design.md` §0/§5：DSH 官方 SAFETY.md 自己承认那不构成安全边界）。 */
+export const PLUGIN_UI_KINDS = ["item", "panel"] as const;
+export type PluginUiKind = (typeof PLUGIN_UI_KINDS)[number];
+
+/**
+ * **形态-区域兼容表（单一产地）** —— 守卫与校验都只认这张表。
+ *
+ * 为什么要有这张表：`overlay_*` 两个区域在语义上就是「一块自己定位的 UI」，
+ * 让 item 形态挂上去只会得到一个**永远不显示**的声明（渲染器按形态分派，
+ * 而 overlay 层只渲染 panel）⇒ 「配了但不生效」＝本项目判据里的陷阱，必须在清单层就拒。
+ * 另一半方向同样要拒：`settings_panel` 是**既有的整页形态**（宿主渲染标题 + 说明），
+ * 改成 panel 会让同一个区域出现两套互斥的渲染路径 ⇒ 结构上不许。
+ * 其余区域两种形态都收（item = 宿主渲染的按钮/行；panel = 扩展自己的 UI 块）。
+ */
+export const PLUGIN_UI_REGION_KINDS: Readonly<Record<PluginUiRegion, readonly PluginUiKind[]>> = {
+  settings_panel: ["item"],
+  status_item: ["item", "panel"],
+  chat_action: ["item", "panel"],
+  toolbar_item: ["item", "panel"],
+  titlebar_start: ["item", "panel"],
+  titlebar_end: ["item", "panel"],
+  chat_input_leading: ["item", "panel"],
+  chat_input_trailing: ["item", "panel"],
+  chat_message_actions: ["item", "panel"],
+  sidebar_section: ["item", "panel"],
+  status_bar: ["item", "panel"],
+  overlay_floating: ["panel"],
+  overlay_fullscreen: ["panel"],
+};
+
+/** 该区域是否接受给定形态（查表；区域名不认识时返回 false —— 不许静默放行）。 */
+export function isPluginUiRegionKind(region: string, kind: PluginUiKind): boolean {
+  const allowed = (PLUGIN_UI_REGION_KINDS as Record<string, readonly PluginUiKind[]>)[region];
+  return Array.isArray(allowed) && allowed.includes(kind);
+}
 
 /** 槽位声明里标题/文案字段的长度上限（声明会回传渲染层，无上限会被撑爆面板）。 */
 export const MAX_UI_TITLE = 80;
@@ -82,9 +151,18 @@ export const PLUGIN_UI_REFRESH = ["manual", "on_event"] as const;
 export type PluginUiRefresh = (typeof PLUGIN_UI_REFRESH)[number];
 
 export interface PluginUiContribution {
-  slot: PluginUiSlot;
+  /** 落点区域名（13 个白名单之一，见 `PLUGIN_UI_REGIONS`；不认识 ⇒ 整份拒）。 */
+  slot: PluginUiRegion;
   /** 同插件内唯一；跨插件的槽位冲突留给宿主裁决（见设计 §4.1「失控时怎么兜」）。 */
   id: string;
+  /** A-1200 · B1：贡献形态，**缺省 `item`**（向后兼容：老清单不写这个字段也照常工作）。
+   *  · `item`  —— 宿主渲染的按钮/行（本文件以下的 title/label/icon/refresh/when 全是它的字段）；
+   *  · `panel` —— 扩展自带 HTML（必须给 `entry`），宿主起静态服务 + 沙箱 iframe 挂到本区域。 */
+  kind?: PluginUiKind;
+  /** 仅 `kind: "panel"`：**必填**、**纯相对**的 HTML 入口（如 `panel.html`）。
+   *  校验口径与 `contributes.page.entry` 同款（`validateRelativeEntry`）。
+   *  ⚠️ `kind: "item"` 时**必须不存在** —— 写了就是「声明了但没人用」，一律拒（不静默丢弃）。 */
+  entry?: string;
   /** 仅 `settings_panel`：页面标题（必填）。 */
   title?: string;
   /** 其余槽位：条目文案（必填）。 */
@@ -109,11 +187,22 @@ export interface PluginContributes {
   /** A-1198 · 主题贡献点（皮肤）：声明一组**白名单设计令牌**，宿主校验后应用到全局 CSS 变量 ——
    *  可开可关（卸载/停用即恢复默认），且**没有任何扩展 CSS 进入宿主样式表**（红线不变，见下方节注）。 */
   theme?: PluginThemeDecl;
+  /** A-1200 · B2：一个插件的**多套皮肤**（对标 DSH `dsh-theme-gallery` 一次 12 套）。
+   *  `theme` 是本字段长度为 1 的特例，两者**语义等价但不可同写**（同写 ⇒ 整份拒，见
+   *  `parsePluginContributes` 的交叉校验：口径冲突不猜「以哪个为准」）。 */
+  themes?: PluginThemeDecl[];
   /** A-1198 · 续：CSS 贡献点（用户口径「把CSS 修改权限全面放开，通过插件来进行开关可控的改动」）。
    *  纯 CSS 文本，fail-closed 静态禁令（禁 @import/url()/@font-face/!important/全局选择器/position:fixed），
    *  落地时收进 `@layer slime-plugin`（**低于**宿主层 ⇒ 盖不掉权限弹窗等安全关键 UI），
    *  选择器自动收进 `.slime-plugin-scope` 作用域。停用/卸载即整段撤下（可开可关）。 */
   css?: PluginCssDecl;
+  /** A-1200 · B3：**插件自有栏目**（一插件可多个）——
+   *  这是本设计最重要的一格（用户口径：「别人甚至能自己造一个影响应用整体风格的功能栏目」）。
+   *  与 `ui` 的根本差别：`ui` 是**插入点**（在宿主既有区域里放小组件），`views` 是**整块栏目**
+   *  （插件开辟自己的功能区，有独立入口与整块 UI）——用户感受是「这个插件给 slime 加了一整个新功能区」。
+   *  `page`（B5）是本字段的**特例**：语义 = `views` 里唯一一个 `placement: "right"` 的栏目。
+   *  ⚠️ `page` 与 `views` **不可同写**（口径冲突不猜，见 `parsePluginContributes` 的交叉校验）。 */
+  views?: PluginViewDecl[];
 }
 
 /* ── A-1197 · B4（T1 脚本信任）──────────────────────────────────────────────
@@ -166,10 +255,11 @@ const ALLOWED_DECL_FIELDS: readonly string[] = [
 ];
 
 /** `contributes` 顶层允许出现的字段。 */
-const ALLOWED_CONTRIBUTES_FIELDS: readonly string[] = ["settings", "ui", "scripts", "page", "theme", "css"];
+const ALLOWED_CONTRIBUTES_FIELDS: readonly string[] = ["settings", "ui", "scripts", "page", "theme", "themes", "css", "views"];
 
-/** 单条 UI 槽位声明允许出现的全部字段（出现表外的键即拒绝）。 */
-const ALLOWED_UI_FIELDS: readonly string[] = ["slot", "id", "title", "label", "icon", "order", "refresh", "when"];
+/** 单条 UI 槽位声明允许出现的全部字段（出现表外的键即拒绝）。
+ *  A-1200 · B1 起含 `kind` 与 `entry`（panel 形态）。 */
+const ALLOWED_UI_FIELDS: readonly string[] = ["slot", "id", "kind", "entry", "title", "label", "icon", "order", "refresh", "when"];
 
 export function isPluginSettingType(value: unknown): value is PluginSettingType {
   return typeof value === "string" && (PLUGIN_SETTING_TYPES as readonly string[]).includes(value);
@@ -526,14 +616,41 @@ export function parsePluginContributes(raw: unknown): { ok: true; contributes: P
     const parsed = parsePluginTheme(raw.theme);
     if (!parsed.ok) { errors.push(...parsed.errors); } else { out.theme = parsed.theme; }
   }
+  if (raw.themes !== undefined) {
+    const parsed = parsePluginThemes(raw.themes);
+    if (!parsed.ok) { errors.push(...parsed.errors); } else { out.themes = parsed.themes; }
+  }
   if (raw.css !== undefined) {
     const parsed = parsePluginCss(raw.css);
     if (!parsed.ok) { errors.push(...parsed.errors); } else { out.css = parsed.css; }
   }
-  /* 交叉校验（B5）：`toolbar_item` 的唯一用途就是「打开本插件的 page」——
-     有它却没 page ⇒ 点了没东西可开（假按钮）。fail-closed：整份拒。 */
-  if ((out.ui ?? []).some((u) => u.slot === "toolbar_item") && out.page === undefined) {
-    errors.push("contributes.ui 含 toolbar_item 但缺少 contributes.page：该槽位的唯一用途是打开扩展自己的页面，没有 page 就是假按钮");
+  if (raw.views !== undefined) {
+    const parsed = parsePluginViews(raw.views);
+    if (!parsed.ok) { errors.push(...parsed.errors); } else { out.views = parsed.views; }
+  }
+  /* 交叉校验（A-1200 · B2）：`theme`（单对象）与 `themes`（数组）**同写即拒**。
+     理由：两者语义是「长度 1 与长度 N」的特例关系，同时写会让「用户以为生效的那一套」
+     取决于宿主内部读哪个字段 —— 口径冲突不猜（与 settings/ui 同样 fail-closed）。
+     换句话说：老清单继续写 `theme`（零改动），新清单写 `themes`（可多套），二选一。 */
+  if (raw.theme !== undefined && raw.themes !== undefined) {
+    errors.push("contributes.theme 与 contributes.themes 不可同时声明（前者是后者长度为 1 的特例）：写其中之一即可，同时写属口径冲突");
+  }
+  /* 交叉校验（B5）：`toolbar_item` 的唯一用途就是「打开本插件的页面」——
+     有它却没页面 ⇒ 点了没东西可开（假按钮）。fail-closed：整份拒。
+     ⚠️ A-1200 · B3：`page` 已被定义为「`views` 里唯一一个 `placement:"right"` 的特例」，
+     所以「本插件自己的页面」有两种声明方式：`page`（B5 老写法，零改动）或
+     `views` 里带一个 `placement:"right"` 的栏目。**两者都没有**才是假按钮（仍拒）——
+     若只认 `page`，「page 是 views 的特例」这句话在实践中就是假的。 */
+  const hasOwnPage = out.page !== undefined || (out.views ?? []).some((v) => v.placement === "right");
+  if ((out.ui ?? []).some((u) => u.slot === "toolbar_item") && !hasOwnPage) {
+    errors.push("contributes.ui 含 toolbar_item 但缺少 contributes.page：该槽位的唯一用途是打开扩展自己的页面，没有 page 就是假按钮（也可改为在 contributes.views 里声明一个 placement=right 的栏目）");
+  }
+  /* 交叉校验（A-1200 · B3）：`page`（B5 的「一插件一页」）与 `views`（B3 的「一插件多栏目」）
+     是**特例与一般**的关系（page ≡ 唯一一个 placement:"right" 的栏目）—— 同时写会让
+     「用户以为生效的那一块」取决于宿主内部读哪个字段。口径冲突不猜（与 theme/themes 同款）：
+     写其中之一即可。老插件继续写 `page`（零改动照常工作），新插件写 `views`。 */
+  if (raw.page !== undefined && raw.views !== undefined) {
+    errors.push("contributes.page 与 contributes.views 不可同时声明（前者是后者里唯一一个 placement=right 的特例）：写其中之一即可，同时写属口径冲突");
   }
   if (errors.length > 0) {
     return { ok: false, errors };
@@ -657,6 +774,191 @@ export function parsePluginPage(raw: unknown): { ok: true; page: PluginPageDecl 
   return { ok: true, page: { kind: kind as PluginPageKind, entry: entryStr.trim() } };
 }
 
+/* ── A-1200 · B3：**插件自有栏目** `contributes.views` ─────────────────────────
+ * 用户口径（本批灵魂，原话）：「我不是要你去开发外观市场啊，我是给你举个例子。
+ * **别人甚至能自己造一个影响应用整体风格的功能栏目**，而我的 slime 只能小修小补。」
+ * ⇒ 对标 DSH 的 `dsh-better-sidebar`（把文件树 + 编辑器 + 终端 + Git 面板塞成**一整块**侧栏工作台，
+ *   装上后整个应用看起来像VSCode）。
+ *
+ * ## 与 B1 的 `ui` 的根本差别（做偏了就白做）
+ *   · `ui`       = **插入点**：在宿主既有区域里放小组件 → 用户感受还是「在别人界面里加东西」。
+ *   · `views`    = **整块栏目**：插件开辟自己的功能区，有独立入口与整块 UI → 「加了一整个新功能区」。
+ *
+ * ## 落点（`placement`，**只认这三个枚举值**，其它值一律拒）
+ *   · `main`  —— 主区整块视图（主区可在「对话 / 插件视图」之间切换；切过去整块区域归它）。最接近「影响整体风格」。
+ *   · `right` —— 右栏 tab（**泛化既有 `contributes.page`**：从「一插件一页」变成「一插件多 tab」）。
+ *   · `left`  —— 左栏栏目块（工作区列表下方的独立栏目，可折叠）。
+ *
+ * ## 三条硬口径
+ *   ① `entry` 的校验**照抄** `parsePluginPage` 的既有口径（`validateRelativeEntry`：纯相对、
+ *      不含 `..`、不含盘符、不以分隔符开头）—— 栏目 iframe 的 src 由主进程按此拼 url，
+ *      放行 `..` 就等于让栏目爬出插件目录。
+ *   ② **fail-closed**：任一栏目非法 ⇒ **整份清单拒**（与本文件既有口径一致，不静默忽略单个字段）。
+ *   ③ **向后兼容**：`contributes.page` 保留，语义 = `views` 里唯一一个 `placement:"right"` 的特例；
+ *      两者**同写即拒**（口径冲突不猜「以哪个为准」）。既有插件（只用 `page`）零改动照常工作。 */
+
+/** 栏目的落点（**只有三个**，其它值一律拒 —— 不给「随便写个字符串落哪儿」的口子）。 */
+export const PLUGIN_VIEW_PLACEMENTS = ["main", "right", "left"] as const;
+export type PluginViewPlacement = (typeof PLUGIN_VIEW_PLACEMENTS)[number];
+
+/**
+ * 单个插件最多声明多少栏目（防「一个插件塞满整屏 tab，把界面撑到没法用」）。
+ * 取 8：够一个「工作站型」插件铺开主区 + 右栏 + 左栏三处，又不至于把 tab 条挤爆。
+ */
+export const MAX_PLUGIN_VIEWS = 8;
+
+export interface PluginViewDecl {
+  /** 同插件内唯一；跨插件冲突由宿主标`conflict`（与 ui 同款裁决）。 */
+  id: string;
+  /** 栏目展示名（**必填** —— 入口要显示它，留空就是「有栏目没名字」）。 */
+  title: string;
+  /** **纯相对**入口路径（如 `workbench.html`）—— 校验口径与 `contributes.page.entry` 同款。 */
+  entry: string;
+  /** 落点：主区整块视图 / 右栏 tab / 左栏栏目块（三选一，其它值拒）。 */
+  placement: PluginViewPlacement;
+  icon?: string;
+  order?: number;
+}
+
+const ALLOWED_VIEW_FIELDS: readonly string[] = ["id", "title", "entry", "placement", "icon", "order"];
+
+export type ParsePluginViewsResult =
+  | { ok: true; views: PluginViewDecl[] }
+  | { ok: false; errors: string[] };
+
+/**
+ * 解析 `contributes.views`（**数组**，一插件可多个栏目）—— fail-closed 全量校验：
+ * 必须是数组 / 不得为空 / 不得超上限 / id 命名与同插件内去重 / `placement` 三选一 /
+ * `title` 必填 / `entry` 走 `validateRelativeEntry`（`..`、盘符、前导分隔符全拒）/ 未知字段拒 / 长度上限。
+ * **任意一条非法 ⇒ 整份拒**（绝不静默丢弃那一条 —— 丢弃即「配了但界面上看不见」＝本项目判据里的陷阱）。
+ */
+export function parsePluginViews(raw: unknown): ParsePluginViewsResult {
+  if (!Array.isArray(raw)) {
+    return { ok: false, errors: ["contributes.views 必须是数组（单栏目请用 contributes.page）"] };
+  }
+  if (raw.length === 0) {
+    return { ok: false, errors: ["contributes.views 不得为空数组（不声明就别写这个字段）"] };
+  }
+  if (raw.length > MAX_PLUGIN_VIEWS) {
+    return { ok: false, errors: [`contributes.views 超过上限 ${MAX_PLUGIN_VIEWS} 个栏目：${raw.length}`] };
+  }
+
+  const views: PluginViewDecl[] = [];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const where = `contributes.views[${i}]`;
+    const item = raw[i];
+    if (!isPlainObject(item)) {
+      errors.push(`${where} 必须是对象`);
+      continue;
+    }
+    for (const field of Object.keys(item)) {
+      if (!ALLOWED_VIEW_FIELDS.includes(field)) {
+        errors.push(`${where} 含未知字段：${field}（允许的字段：${ALLOWED_VIEW_FIELDS.join("、")}）`);
+      }
+    }
+
+    const id = item.id;
+    if (typeof id !== "string" || !PLUGIN_NAME_PATTERN.test(id)) {
+      errors.push(`${where}.id 缺失或不合法（须匹配 ${PLUGIN_NAME_PATTERN.source}）`);
+    } else if (seen.has(id)) {
+      errors.push(`${where}.id 与同插件内另一个栏目重复：${id}`);
+    } else {
+      seen.add(id);
+    }
+
+    const title = item.title;
+    if (typeof title !== "string" || title.trim() === "") {
+      errors.push(`${where}.title 缺失或为空（栏目要有展示名：入口要显示它）`);
+    } else if (title.length > MAX_UI_TITLE) {
+      errors.push(`${where}.title 过长（${title.length} > ${MAX_UI_TITLE}）`);
+    }
+
+    /* placement：只认 main / right / left。**没有第四个值**，也没有「缺省落点」
+       —— 缺省必须是错（否则「忘了写 placement」会静默落到某个默认位置，
+       而那个位置可能压根没接线 ⇒ 声明了看不见）。 */
+    const placementRaw = item.placement;
+    const placementOk = typeof placementRaw === "string" && (PLUGIN_VIEW_PLACEMENTS as readonly string[]).includes(placementRaw);
+    if (!placementOk) {
+      errors.push(`${where}.placement 缺失或不合法（须为 ${PLUGIN_VIEW_PLACEMENTS.join(" / ")}）`);
+    }
+
+    /* entry：与 `contributes.page.entry` **同一条判据**（validateRelativeEntry）——
+       两处不许各写一套（栏目的 src 与 page 一样会拼进 127.0.0.1 服务的 url）。 */
+    const entryRaw = item.entry;
+    if (typeof entryRaw !== "string") {
+      errors.push(`${where}.entry 缺失（须为纯相对路径，如 workbench.html）`);
+    } else {
+      errors.push(...validateRelativeEntry(entryRaw).map((e) => `${where}: ${e}`));
+    }
+
+    const decl: PluginViewDecl = {
+      id: typeof id === "string" ? id : "",
+      title: typeof title === "string" ? title.trim() : "",
+      entry: typeof entryRaw === "string" ? entryRaw.trim() : "",
+      placement: (placementOk ? placementRaw : "main") as PluginViewPlacement,
+    };
+
+    if (item.icon !== undefined) {
+      if (typeof item.icon !== "string" || item.icon.trim() === "") {
+        errors.push(`${where}.icon 必须是非空字符串`);
+      } else if (item.icon.length > MAX_UI_ICON) {
+        errors.push(`${where}.icon 过长（${item.icon.length} > ${MAX_UI_ICON}）`);
+      } else {
+        decl.icon = item.icon.trim();
+      }
+    }
+    if (item.order !== undefined) {
+      if (typeof item.order !== "number" || !Number.isFinite(item.order)) {
+        errors.push(`${where}.order 必须是有限数值`);
+      } else {
+        decl.order = item.order;
+      }
+    }
+
+    views.push(decl);
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+  return { ok: true, views };
+}
+
+/** 栏目声明的摘要（给 `PluginRecord.contributions` 计数用，让扩展页一眼看出「给了几个栏目、落在哪」）。 */
+export function describePluginViews(views: PluginViewDecl[] | undefined): string {
+  if (!views || views.length === 0) { return "0个"; }
+  const byPlacement = new Map<string, number>();
+  for (const v of views) {
+    byPlacement.set(v.placement, (byPlacement.get(v.placement) ?? 0) + 1);
+  }
+  return `${views.length}个（${[...byPlacement.entries()].map(([p, n]) => `${p}×${n}`).join("/")}）`;
+}
+
+/**
+ * A-1200 · B3：**栏目 → 落点** 的登记形状（主进程运行期表与渲染层快照共用这一份）。
+ *
+ * ## 为什么宿主要维护这张表而不是渲染层现拉清单
+ * 渲染层拿不到「插件目录 ↔ 静态服务基址」的映射（那是主进程的越权防护点，见 `pluginCssAssetBases`
+ * 的同款理由）。所以：主进程在 `registerViews` 里把**已接线**插件的栏目登记进表，
+ * 渲染层只按快照渲染、要 url 时调 `plugins_view_open`（与 `plugins_panel_open` 同款底子）。
+ * 被卸载/停用/rejected 的插件不在表里 ⇒ 快照里自然没有它的栏目（不留幽灵）。
+ */
+export interface PluginViewDTO {
+  plugin: string;
+  id: string;
+  title: string;
+  /** **纯相对**入口（清单层已 fail-closed 校验过 `..`/盘符/前导分隔符）。
+   *  渲染层**不自己拼 url** —— 调 `plugins_view_open` 由主进程起服务并给出绝对 url。 */
+  entry: string;
+  placement: PluginViewPlacement;
+  icon?: string;
+  order?: number;
+  /** 跨插件「同 placement 同 id」冲突时标 true（渲染成禁用态，不静默丢弃）。 */
+  conflict?: boolean;
+}
+
 /**
  * 解析 `contributes.ui`（UI 槽位声明数组）——fail-closed 全量校验：
  * 槽位白名单 / id 命名与同插件内去重 / 按槽位分支校验必填字段（`settings_panel` 要 `title`，
@@ -706,12 +1008,69 @@ export function parsePluginUiSlots(raw: unknown): { ok: true; ui: PluginUiContri
     }
 
     const decl: PluginUiContribution = {
-      slot: (slotOk ? slotRaw : "settings_panel") as PluginUiSlot,
+      slot: (slotOk ? slotRaw : "settings_panel") as PluginUiRegion,
       id: typeof id === "string" ? id : "",
     };
 
-    /* ---- 按槽位分支：settings_panel 用 title；其余槽位用 label ---- */
-    if (slotRaw === "settings_panel") {
+    /* ---- A-1200 · B1：形态（缺省 item）+ entry 的对称校验 + 形态-区域兼容 ----
+       顺序刻意是「先认 kind、再按形态分派字段」：kind 不认识时下面的分支一律按 item 走，
+       而 errors 非空 ⇒ 整份拒（fail-closed），所以「猜错分支」不会变成放行。 */
+    const kindRaw = item.kind;
+    let kind: PluginUiKind = "item";
+    if (kindRaw !== undefined) {
+      if (typeof kindRaw !== "string" || !(PLUGIN_UI_KINDS as readonly string[]).includes(kindRaw)) {
+        errors.push(`${where}.kind 缺失或不合法（须为 ${PLUGIN_UI_KINDS.join(" / ")}）`);
+      } else {
+        kind = kindRaw as PluginUiKind;
+      }
+    }
+    if (slotOk) {
+      /* ⚠️ 判据用**解析后的 kind**（缺省 = item），不是原始 `item.kind`：
+         若按原始值判，「不写 kind + 落在只收 panel 的区域」会被整段跳过 ⇒ overlay_* 的
+         item 声明就能混过清单（而界面上那个区域只渲染 panel ⇒ 声明了永远看不见）。
+         那个洞是本条判据本身要防的东西，不能自己漏。 */
+      const allowed = (PLUGIN_UI_REGION_KINDS as Record<string, readonly PluginUiKind[]>)[slotRaw as string] ?? [];
+      if (!allowed.includes(kind)) {
+        errors.push(`${where}：区域 ${slotRaw} 不接受形态 ${kind}（该区域只接受 ${allowed.join(" / ")}）`);
+      }
+    }
+    if (kind === "panel") {
+      decl.kind = "panel";
+    }
+
+    /* ---- entry：panel 必填且纯相对；item 必须**不存在**（对称校验） ----
+       两个方向都要拒：panel 缺 entry = 起不了服务（假声明）；item 写了 entry = 声明了没人用。 */
+    const entryRaw = item.entry;
+    if (kind === "panel") {
+      if (typeof entryRaw !== "string") {
+        errors.push(`${where}.entry 对 kind=panel 是必填（须为纯相对路径，如 panel.html）`);
+      } else {
+        errors.push(...validateRelativeEntry(entryRaw).map((e) => `${where}: ${e}`));
+        decl.entry = entryRaw.trim();
+      }
+    } else if (entryRaw !== undefined) {
+      errors.push(`${where}.entry 只对 kind=panel 有意义（当前形态 ${kind}）`);
+    }
+
+    /* ---- 按形态与槽位分支：panel 只要可选文案；item 沿用「settings_panel 用 title、其余用 label」 ---- */
+    if (kind === "panel") {
+      /* panel 的界面由扩展自己画 ⇒ label/title 都不是必填（但给了就当面板标题用，仍走长度上限）。
+         refresh / when 描述的是**宿主行为**（手动刷新、显示条件），panel 一概用不到 ⇒ 拒，
+         不做「留着吧反正不用」的静默放行。 */
+      for (const field of ["title", "label"] as const) {
+        const v = item[field];
+        if (v === undefined) { continue; }
+        if (typeof v !== "string") {
+          errors.push(`${where}.${field} 必须是字符串`);
+        } else if (v.length > MAX_UI_TITLE) {
+          errors.push(`${where}.${field} 过长（${v.length} > ${MAX_UI_TITLE}）`);
+        } else if (v.trim() !== "") {
+          decl[field] = v.trim();
+        }
+      }
+      if (item.refresh !== undefined) { errors.push(`${where}.refresh 对 kind=panel 无意义`); }
+      if (item.when !== undefined) { errors.push(`${where}.when 对 kind=panel 无意义`); }
+    } else if (slotRaw === "settings_panel") {
       const title = item.title;
       if (typeof title !== "string" || title.trim() === "") {
         errors.push(`${where}.title 对 settings_panel 是必填`);
@@ -782,12 +1141,14 @@ export function parsePluginUiSlots(raw: unknown): { ok: true; ui: PluginUiContri
   return { ok: true, ui };
 }
 
-/** UI 槽位声明的摘要（给 `PluginRecord.contributions` 计数用）。 */
+/** UI 槽位声明的摘要（给 `PluginRecord.contributions` 计数用）。
+ *  A-1200 · B1：panel 形态按「区域×2」计数，让扩展页一眼看出「几条是自带 UI 的」。 */
 export function describePluginUi(ui: PluginUiContribution[] | undefined): string {
   if (!ui || ui.length === 0) { return "0条"; }
   const bySlot = new Map<string, number>();
   for (const item of ui) {
-    bySlot.set(item.slot, (bySlot.get(item.slot) ?? 0) + 1);
+    const key = item.kind === "panel" ? `${item.slot}(panel)` : item.slot;
+    bySlot.set(key, (bySlot.get(key) ?? 0) + 1);
   }
   return [...bySlot.entries()].map(([slot, n]) => `${slot}×${n}`).join("/");
 }
@@ -863,6 +1224,66 @@ export const PLUGIN_THEME_HEX_RE = /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/;
 const ALLOWED_THEME_FIELDS: readonly string[] = ["name", "tokens"];
 
 const THEME_TOKEN_KEYS: readonly string[] = [...Object.keys(PLUGIN_THEME_COLOR_VARS), "font", "radius"];
+
+/**
+ * A-1200 · B2：单个插件最多声明多少套皮肤（`contributes.themes` 的数组上限）。
+ * 取 16 是对标 DSH 的 `dsh-theme-gallery`（一次 12 套）并留一点余量；
+ * 同时也是一道防「一个插件塞几百套把外观页撑爆 / 主进程登记表膨胀」的闸。
+ */
+export const MAX_PLUGIN_THEMES = 16;
+
+/**
+ * 解析 `contributes.themes`（**数组**，A-1200 · B2）。
+ *
+ * ## 判据全部复用 `parsePluginTheme`（不另写一套）
+ * 每套皮肤**逐条**交给 `parsePluginTheme` 判 —— 白名单令牌/hex/枚举/未知字段/长度上限
+ * 全部同款判据。理由：本项目最忌「声明层与校验层两套口径」，一旦分叉就会出现
+ * 「A 处放行、B 处拒绝」的幽灵皮肤。
+ *
+ * ## 本函数**额外**只管三件数组级的事（单套管不了的）
+ *   ① 必须是数组、**不得为空**（不声明就别写这个字段）、**不得超上限**；
+ *   ② 同插件内**皮肤名不得重复** —— 否则外观页出现两个同名选项，用户分不清自己选的是哪一套；
+ *   ③ **任意一套非法 ⇒ 整份拒**（fail-closed，与 settings/ui/themes 同款：绝不静默丢弃那一套）。
+ *
+ * ## 为什么不「逐套尽力解析」
+ * 静默丢弃一套坏皮肤 = 用户在外观页看到 11 套而不是 12 套，且**没有任何提示** ——
+ * 这正是本项目的判据「能配但没生效 = 陷阱」。
+ */
+export function parsePluginThemes(raw: unknown): { ok: true; themes: PluginThemeDecl[] } | { ok: false; errors: string[] } {
+  if (!Array.isArray(raw)) {
+    return { ok: false, errors: ["contributes.themes 必须是数组（单套皮肤请用 contributes.theme）"] };
+  }
+  if (raw.length === 0) {
+    return { ok: false, errors: ["contributes.themes 不得为空数组（不声明就别写这个字段）"] };
+  }
+  if (raw.length > MAX_PLUGIN_THEMES) {
+    return { ok: false, errors: [`contributes.themes 超过上限 ${MAX_PLUGIN_THEMES} 套：${raw.length}`] };
+  }
+  const themes: PluginThemeDecl[] = [];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const where = `contributes.themes[${i}]`;
+    const parsed = parsePluginTheme(raw[i]);
+    if (!parsed.ok) {
+      /* 复用单套判据，但错误前缀改成本数组的下标（否则报错指向 contributes.theme，
+         而清单里根本没有那个字段 ⇒ 用户查不到是哪一套坏了）。 */
+      for (const e of parsed.errors) { errors.push(`${where}: ${e}`); }
+      continue;
+    }
+    const name = parsed.theme.name;
+    if (seen.has(name)) {
+      errors.push(`${where}.name 与同插件内另一套皮肤重复：${name}（外观页会出现两个同名选项，用户分不清）`);
+      continue;
+    }
+    seen.add(name);
+    themes.push(parsed.theme);
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+  return { ok: true, themes };
+}
 
 /**
  * 解析 `contributes.theme`（单对象）。fail-closed 全量校验：
@@ -971,12 +1392,17 @@ export function themeTokenAssignments(theme: PluginThemeDecl): Array<{ variable:
 //
 // ## 护栏二：fail-closed 的静态禁令（收窄而非放开）
 // 允许「改外观」，但**禁止**这几类能自我扩权或外联的动作 —— 它们不是外观，是侧信道：
-//   · `@import` / `url()` —— 外联 = 把用户数据发出去 / 引入远程代码（外观不需要外联）；
+//   · `@import` —— 外联 = 把用户数据发出去 / 引入远程代码（外观不需要外联）；
 //   · `!important` —— 有了 @layer 也不需要它就能覆盖宿主非关键 UI；留着是**绕过层叠的旁门**；
 //   · 全局 `*` / `html` / `body` / `:root` —— 能改根字号/根背景 = 事实上的"接管全站"，
 //     且能藏掉宿主自身的安全提示样式；定位作用域改用 `.slime-plugin-scope` 前缀类；
 //   · `position: fixed` —— 固定定位能盖住安全关键 UI（不依赖层叠就能视觉遮蔽）。
 // 这四条是**列举式**的：没列到的属性随便写（布局、间距、字号、边框、动画、字体…）。
+//
+// ### `url()` 的口径（A-1200 · B2 起变了；理由见下方 `PLUGIN_ASSET_SCHEME` 节注）
+// 原来是「`url(` 一律拒」；B2 起**只放行 `url(plugin-asset:<纯相对路径>)`** 这一种形态
+// （皮肤要能有壁纸/背景图，否则外观市场是空的），其余 `url(...)` 形态**仍全拒**——
+// 外观不需要外联，放开外联等于开一个数据外泄面。
 //
 // 作用域约定：宿主渲染层给 <html> 挂 `.slime-plugin-scope` 类（有生效 CSS 时挂上），
 // 插件 CSS 里的选择器**自动**被限制在该类之下（见 scopePluginCss）——
@@ -995,15 +1421,78 @@ export const MAX_PLUGIN_CSS_BYTES = 128 * 1024;
 
 const ALLOWED_CSS_FIELDS: readonly string[] = ["name", "css"];
 
+/* ── A-1200 · B2：皮肤资源（壁纸 / 背景图）—— `url(plugin-asset:<相对路径>)` ──────
+ * ## 为什么放开这一种（且**只有**这一种）
+ * 之前的禁令是 `url(` 一律拒（防外联）。但用户口径要的是 DSH 那种「全屏覆盖 + 壁纸」，
+ * 而**没有图片的皮肤市场等于没有**（纯色/边框能做的有限）。
+ * ⇒ 放开**唯一一种**形态：`url(plugin-asset:bg.png)`。
+ *
+ * ## `plugin-asset:` 是什么
+ * 它是**宿主自造的协议前缀，不是真 URL**：不会去解析、不会去联网络，
+ * 宿主在校验通过后把它**改写**成该插件目录经`127.0.0.1` 静态服务后的真实地址
+ * （与 `contributes.page` / B1 的 panel 同一套 `httpServer.serve` 机制）。
+ * 也就是说：插件写的是「我目录里的这张图」，不是「互联网上那张图」。
+ *
+ * ## 为什么其余一切 `url(...)` 仍然拒
+ * 外观**不需要外联**。一旦放行 `http(s)://` / `//` / `data:` / 裸相对路径，就等于给了插件
+ * 一个数据外泄面（用户在对话框里输入的内容、剪贴板，都能被 `url()` 带出去）——
+ * 那是**安全面的扩大**，不是外观自由度。所以白名单精确到**一种形态**而不是「图片类 URL」。
+ *
+ * ## 路径口径
+ * 路径必须是**纯相对**（不含 `..` / 不含盘符 / 不以分隔符开头）——照抄
+ * `validateRelativeEntry`（`contributes.page.entry` 与 B1 panel 的 entry 共用同一份判据）。
+ * 理由同上：改写后的地址若能爬出插件目录，就等于跨插件/跨目录读文件 = 越权。*/
+
+/** 资源协议前缀（宿主自造，非真URL；见上方节注）。 */
+export const PLUGIN_ASSET_SCHEME = "plugin-asset";
+
+/**
+ * 取出一段 CSS 里的所有 `url(...)` 参数（**纯函数**，守卫与实现同判据）。
+ * 只做「原样截取 + 去引号 + trim」，不做任何放行判断（放行判据在 `findPluginCssViolations`）。
+ */
+export function extractPluginCssUrls(css: string): string[] {
+  const out: string[] = [];
+  const re = /url\s*\(\s*(['"]?)([^'")]*)\1\s*\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(css)) !== null) { out.push(m[2].trim()); }
+  return out;
+}
+
+/** 判断一段 `url(...)` 取值是不是「合法的插件内资源引用」（纯函数，可单测）。 */
+export function isAllowedPluginAssetUrl(value: string): { ok: true; path: string } | { ok: false; why: string } {
+  const raw = value.trim();
+  if (!raw) { return { ok: false, why: "url() 取值为空" }; }
+  const prefix = `${PLUGIN_ASSET_SCHEME}:`;
+  if (!raw.toLowerCase().startsWith(prefix)) {
+    /* ⚠️ 这里**必须**把「形态不符」与「路径不合法」分开说：前者是「你该用 plugin-asset:」，
+       后者是「你的路径会爬出目录」—— 两者的修法完全不同，混成一句话会让用户瞎改。 */
+    return {
+      ok: false,
+      why: `url() 只允许插件目录内的相对资源，形如 url(${prefix}bg.png)（外观不需要外联：http(s)://、//、data:、裸相对路径一律拒）`,
+    };
+  }
+  const path = raw.slice(prefix.length).trim();
+  if (path === "") { return { ok: false, why: `url(${prefix}) 缺少资源路径` }; }
+  /* ⚠️ 复用 `validateRelativeEntry`（纯相对口径的**单一产地**，page.entry / panel.entry 同款）。
+     它的错误文案以 "entry " 开头，这里换成资源语义再返回，避免用户看到「entry」却无处可查。 */
+  const errors = validateRelativeEntry(path).map((e) => e.replace(/^entry /, "资源路径 "));
+  if (errors.length > 0) { return { ok: false, why: `url(${prefix}${path}) 不合法：${errors.join("；")}` }; }
+  return { ok: true, path };
+}
+
 /**
  * 静态禁令：命中即**整份拒**（fail-closed，与 theme/settings 同款）。
  * 逐条正则都刻意收紧（选择器部分只允许 `.xxx`/标签名，避免 `a[href^=http]` 这类外联触发器）。
+ *
+ * ⚠️ A-1200 · B2：`url(` **不再**是静态禁令里的一条（改由 `checkPluginAssetUrls` 判）——
+ * 放开的是 `url(plugin-asset:<纯相对>)` 这一种形态，其余 `url(...)` 仍全拒。
+ * 为什么单独判而不在这里用一条正则：形态判据需要**逐个参数**校验（取协议前缀、查路径是否纯相对），
+ * 一条正则表达不了「只放过一种形态」，而「哪种形态被放过」正是本条不变量本身。
  */
 const CSS_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
   { re: /@import/i, why: "@import（外联/引入远程样式）" },
   { re: /@charset/i, why: "@charset" },
   { re: /@namespace/i, why: "@namespace" },
-  { re: /url\s*\(/i, why: "url()（外联资源：外观不需要外联）" },
   { re: /expression\s*\(/i, why: "expression()（IE 动态表达式）" },
   { re: /-moz-binding/i, why: "-moz-binding（XBL 绑定）" },
   { re: /!\s*important/i, why: "!important（绕过层叠的旁门）" },
@@ -1018,12 +1507,26 @@ const CSS_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
   { re: /@supports/i, why: "@supports（同上：嵌套块的作用域改写未覆盖）" },
 ];
 
+/**
+ * `url(...)` 的逐个参数判据（A-1200 · B2）—— 唯一放行的形态是 `url(plugin-asset:<纯相对>)`。
+ * 导出以便渲染层与守卫复用同一判据（不许两套口径）。
+ */
+export function checkPluginAssetUrls(css: string): string[] {
+  const out: string[] = [];
+  for (const value of extractPluginCssUrls(css)) {
+    const r = isAllowedPluginAssetUrl(value);
+    if (!r.ok) { out.push(`url() 被拒：${r.why}`); }
+  }
+  return [...new Set(out)];
+}
+
 /** 判断某段 CSS 是否命中禁令（导出以便渲染层/守卫复用同一判据）。 */
 export function findPluginCssViolations(css: string): string[] {
   const out: string[] = [];
   for (const rule of CSS_FORBIDDEN) {
     if (rule.re.test(css)) { out.push(rule.why); }
   }
+  out.push(...checkPluginAssetUrls(css));
   return [...new Set(out)];
 }
 
@@ -1062,6 +1565,45 @@ export function parsePluginCss(raw: unknown): { ok: true; css: PluginCssDecl } |
     return { ok: false, errors };
   }
   return { ok: true, css: { name, css } };
+}
+
+/**
+ * A-1200 · B2：**宿主侧**把 `url(plugin-asset:<相对路径>)` 改写成该插件目录的真实服务地址
+ *（**纯函数**，可单测；守卫与实现同判据）。
+ *
+ * ## 为什么必须改写（以及为什么只能在宿主侧）
+ * `plugin-asset:` 不是浏览器认识的协议 —— 不改写就是一张**永远 404 的图**，
+ * 而「皮肤有图但看不见」比「皮肤没图」更坏（用户查不出原因）。所以宿主在落值前把它换成
+ * 该插件目录经 `httpServer.serve({dir, host:"127.0.0.1"})` 得到的真实地址
+ * （**与 `contributes.page` / B1 的 panel 同一套机制** —— 同一个静态服务，不新增第二个出口）。
+ *
+ * ## 边界（两条，都是安全不变量）
+ *   ① **只改写本插件自己的资源**：`baseUrl` 由主进程按 `dirs.get(插件名)` 注入，
+ *     跨插件读文件 = 越权，主进程那条通道就不给别的目录（守卫钉住「url 来自该插件的 dir」）。
+ *   ② **资源文件不存在 ⇒ 如实回退**（返回 `null`）：把该 `url()` **整段删掉**，
+ *     宁可少一张图，也不留一个指向 404 的地址（静默留 404 = 又一个"说了不算"）。
+ *
+ * @param baseUrl 该插件目录静态服务的基址（如 `http://127.0.0.1:52341/`，**必须**已带尾斜杠）
+ * @param exists  宿主注入的「该插件目录内是否存在这个文件」判据（测试传替身；生产用 fs.existsSync）
+ */
+export function rewritePluginAssetUrls(
+  css: string,
+  baseUrl: string,
+  exists: (relativePath: string) => boolean,
+): string {
+  const prefix = `${PLUGIN_ASSET_SCHEME}:`;
+  const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  return css.replace(
+    /url\s*\(\s*(['"]?)plugin-asset:([^'")]*)\1\s*\)/gi,
+    (_whole: string, _quote: string, rawPath: string) => {
+      const path = rawPath.trim();
+      const judged = isAllowedPluginAssetUrl(`${prefix}${path}`);
+      if (!judged.ok) { return ""; }
+      /* ⚠️ 文件不存在 ⇒ 整段删掉（而不是留一个 404 的 url）。理由见上方节注②。 */
+      if (!exists(judged.path)) { return ""; }
+      return `url("${base}${judged.path.replace(/\\/g, "/")}")`;
+    },
+  );
 }
 
 /**
@@ -1113,4 +1655,13 @@ export function describePluginCss(css: PluginCssDecl | undefined): string {
 export function describePluginTheme(theme: PluginThemeDecl | undefined): string {
   if (!theme) { return "0"; }
   return `${theme.name}（${Object.keys(theme.tokens).length} 令牌）`;
+}
+
+/**
+ * A-1200 · B2：`contributes.themes`（多套）的摘要 —— 与 `describePluginTheme` 同款口径，
+ * 只是把「一套」换成「几套」。扩展页要能一眼看出「这个插件给了几套皮肤」。
+ */
+export function describePluginThemes(themes: PluginThemeDecl[] | undefined): string {
+  if (!themes || themes.length === 0) { return "0"; }
+  return themes.map((t) => `${t.name}（${Object.keys(t.tokens).length} 令牌）`).join("/");
 }

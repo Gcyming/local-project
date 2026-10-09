@@ -265,6 +265,16 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /* A-1197 · B5（L4a page）：打开扩展自有页面（返回要加载的 127.0.0.1 url）。 */
     pluginsPageOpen: (name: string) =>
       ipcRenderer.invoke("slime:plugins:pageOpen", { name }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
+    /* A-1200 · B1：取某个 panel 声明的可加载 url（主进程按需起 127.0.0.1 静态服务）。
+       ⚠️ 入参虽带 `entry`，主进程**只把它当定位键**：真实 entry 一律从**已校验的声明**里取
+       （清单层已 fail-closed 查过 `..`/盘符/前导分隔符）—— 渲染层不得成为绕过校验的旁门。 */
+    pluginsPanelOpen: (name: string, entry: string) =>
+      ipcRenderer.invoke("slime:plugins:panelOpen", { name, entry }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
+    /* A-1200 · B3：取某个**栏目**（`contributes.views`）的可加载 url —— 与 panel/page 同款底子。
+       ⚠️ 与 panelOpen 同一条纪律：入参 `entry` 只作定位键，主进程**只把它当查找键**，
+       真实 entry 一律从已校验的声明里取（渲染层不得成为绕过清单校验的旁门）。 */
+    pluginsViewOpen: (name: string, entry: string) =>
+      ipcRenderer.invoke("slime:plugins:viewOpen", { name, entry }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
     /* A-1198：安装官方示例扩展（活教材）—— 已存在则不覆盖。 */
     pluginsInstallExample: () =>
       ipcRenderer.invoke("slime:plugins:installExample") as Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
@@ -998,6 +1008,10 @@ declare global {
         pluginsUi: () => Promise<PluginUiSnapshotDTO>;
         /* A-1197 · B5（L4a page）：打开扩展自有页面。 */
         pluginsPageOpen: (name: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
+        /* A-1200 · B1：取 panel 声明的可加载 url（entry 只作定位键，真值取自已校验声明）。 */
+        pluginsPanelOpen: (name: string, entry: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
+        /* A-1200 · B3：取**栏目**（`contributes.views`）声明的可加载 url（同 panelOpen 纪律）。 */
+        pluginsViewOpen: (name: string, entry: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
         /* A-1198：安装官方示例扩展。 */
         pluginsInstallExample: () => Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
         /* A-1198：扩展页保存并生效（写盘 + 重扫 + 广播，**不退出进程**；回带新快照）。 */

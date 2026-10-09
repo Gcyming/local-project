@@ -23,6 +23,7 @@ import {
 } from "./railParams.js";
 import {
   getCachedPluginThemes, getPluginThemeSelection, setPluginThemeSelection, subscribePluginTheme,
+  pluginThemeSelectionKey,
   type AvailablePluginTheme,
 } from "../pluginTheme.js";
 import {
@@ -266,7 +267,9 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
         </div>
 
         {/* A-1198：扩展皮肤 —— 由插件 `contributes.theme` 声明的白名单设计令牌（配色/字体族/圆角）。
-            可开可关：停用或卸载该插件后，这里消失并自动回落到默认（「精装/武装」口径的落点）。 */}
+            可开可关：停用或卸载该插件后，这里消失并自动回落到默认（「精装/武装」口径的落点）。
+            ⚠️ A-1200 · B2：一个插件可以声明**多套**皮肤（`contributes.themes`），所以下面
+            每套皮肤各占一张卡 —— key 用 `plugin::皮肤名`（只用 plugin 会让同一插件的多套串成一个）。 */}
         <div className="card" style={{ marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
             <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>扩展皮肤</div>
@@ -292,12 +295,15 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
               </div>
             </button>
             {pluginThemes.map((t) => {
-              const active = pluginSkin === t.plugin;
+              /* ⚠️ key 与选择值都必须是 `plugin::皮肤名`：只用 plugin 时同一插件的多套皮肤
+                 会共用一个 key（React 复用错卡片）且持久化选择互相覆盖。 */
+              const cardKey = pluginThemeSelectionKey(t.plugin, t.id);
+              const active = pluginSkin === cardKey;
               const swatch = [t.tokens.accent, t.tokens.bg, t.tokens.text].filter((c): c is string => typeof c === "string");
               return (
                 <button
-                  key={t.plugin}
-                  onClick={() => setPluginThemeSelection(t.plugin)}
+                  key={cardKey}
+                  onClick={() => setPluginThemeSelection(cardKey)}
                   title={`由扩展「${t.plugin}」提供；停用该扩展即自动回落默认`}
                   style={{
                     flex: "0 1 190px", textAlign: "left", cursor: "pointer",

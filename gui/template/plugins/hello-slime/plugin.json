@@ -1,7 +1,7 @@
 {
   "name": "hello-slime",
   "version": "1.0.0",
-  "description": "官方示例扩展（活教材）：把插件全部贡献类型演示一遍——设置项 / 四个 UI 槽位 / 脚本工具 / 自有页面 / 运行模式 / 主题皮肤 / CSS 外观 / 指令。当用户想了解 slime 扩展机制、想要一份可照抄的插件样例，或想体验「可开可关」的皮肤与面板时使用。",
+  "description": "官方示例扩展（活教材）：把插件全部贡献类型演示一遍——设置项 / 四个 UI 槽位 / 脚本工具 / 插件自有栏目（views：主区整块视图 + 右栏 tab）/ 多套皮肤（themes） / CSS 外观 / 指令。当用户想了解 slime 扩展机制、想要一份可照抄的插件样例，或想体验「可开可关」的皮肤、面板与「整块功能栏目」时使用。",
   "origin": "agent",
   "provides": [
     "instructions",
@@ -48,33 +48,68 @@
         "description": "示例脚本工具：报一声当前时间并回显一句话（演示「用户信任后才装配」的脚本贡献）"
       }
     ],
-    "page": {
-      "kind": "html",
-      "entry": "panel.html"
-    },
-    "theme": {
-      "name": "示例·暮色青",
-      "tokens": {
-        "accent": "#2dd4bf",
-        "accentHover": "#5eead4",
-        "accentSoft": "#2dd4bf29",
-        "bg": "#071312",
-        "bgSecondary": "#0c1f1d",
-        "bgCard": "#0e211f",
-        "bgInput": "#0a1a18",
-        "bgHover": "#143833",
-        "border": "#1d4a44",
-        "text": "#e7f6f3",
-        "textSecondary": "#9fd0c8",
-        "textMuted": "#6d9a93",
-        "font": "system",
-        "radius": "round"
-      }
-    },
     "css": {
       "name": "示例·紧凑圆角",
-      "css": "/* 示例扩展的 CSS 外观：改圆角 / 内边距 / 字距 —— 逐条选择器自动收进 .slime-plugin-scope，\n   落进 @layer slime-plugin（低于宿主层 ⇒ 盖不掉权限确认弹窗等安全关键界面）。 */\n.card { border-radius: 18px; }\n.settings-pane .card { padding: 14px 16px; }\n.btn { border-radius: 10px; letter-spacing: 0.02em; }\n.card h3 { letter-spacing: 0.01em; }\n.status-item { opacity: 0.92; }"
-    }
+      "css": "/* 示例扩展的 CSS 外观：改圆角 / 内边距 / 字距 —— 逐条选择器自动收进 .slime-plugin-scope，\n   落进 @layer slime-plugin（低于宿主层 ⇒ 盖不掉权限确认弹窗等安全关键界面）。 */\n.card { border-radius: 18px; }\n.settings-pane .card { padding: 14px 16px; }\n.btn { border-radius: 10px; letter-spacing: 0.02em; }\n.card h3 { letter-spacing: 0.01em; }\n.status-item { opacity: 0.92; }\n/* A-1200 · B2 演示两件事：\n   ① 皮肤资源：url(plugin-asset:assets/skin-bg.svg) 引本插件目录里的图，宿主在主进程侧\n      改写成该插件目录经 127.0.0.1 静态服务后的真实地址（只对自己插件的目录生效）；\n   ② 全屏皮肤层：#slime-skin-layer 是宿主在应用最底层给皮肤准备的专用容器\n      （pointer-events:none，z-index 1100 < 对话框 backdrop 1200 ⇒ 盖不掉权限确认弹窗）。 */\n#slime-skin-layer { background-image: url(plugin-asset:assets/skin-bg.svg); background-size: cover; }"
+    },
+    "themes": [
+      {
+        "name": "示例·暮色青",
+        "tokens": {
+          "accent": "#2dd4bf",
+          "accentHover": "#5eead4",
+          "accentSoft": "#2dd4bf29",
+          "bg": "#071312",
+          "bgSecondary": "#0c1f1d",
+          "bgCard": "#0e211f",
+          "bgInput": "#0a1a18",
+          "bgHover": "#143833",
+          "border": "#1d4a44",
+          "text": "#e7f6f3",
+          "textSecondary": "#9fd0c8",
+          "textMuted": "#6d9a93",
+          "font": "system",
+          "radius": "round"
+        }
+      },
+      {
+        "name": "示例·雪夜微光",
+        "tokens": {
+          "accent": "#7aa2f7",
+          "accentHover": "#a9c4ff",
+          "accentSoft": "#7aa2f726",
+          "bg": "#0b1020",
+          "bgSecondary": "#131a33",
+          "bgCard": "#161f3d",
+          "bgInput": "#0e1528",
+          "bgHover": "#1e2a52",
+          "border": "#2b3a6b",
+          "text": "#e6ecff",
+          "textSecondary": "#a9b6e0",
+          "textMuted": "#7281ad",
+          "font": "serif",
+          "radius": "sharp"
+        }
+      }
+    ],
+    "views": [
+      {
+        "id": "workbench",
+        "title": "示例工作台",
+        "icon": "🛠",
+        "entry": "panel.html",
+        "placement": "main",
+        "order": 0
+      },
+      {
+        "id": "sidebar-panel",
+        "title": "示例面板",
+        "icon": "📄",
+        "entry": "panel.html",
+        "placement": "right",
+        "order": 10
+      }
+    ]
   },
   "mode": {
     "kind": "stages",

@@ -70,7 +70,7 @@ function openDocInSidebar(path: string, name?: string): void {
    是同一组数的第二个产地：主进程一改，界面回显与刻度线就悄悄对不上（静默失效家族）。 */
 import { DEFAULT_COMPRESS_RATIO, RATIO_MIN, RATIO_MAX } from "../../../../core-ts/src/services/context_compress.js";
 import { SendIcon, EditIcon, ChevronIcon, ThinkingIcon, PlusIcon, InternetIcon, BoltIcon, LoadingCircleIcon, CheckIcon, CloseIcon, PaperclipIcon, CopyIcon, RotateIcon, SitemapIcon, RefFileIcon, BrainThinkingIcon, FolderIcon, TodoListIcon, PlayIcon, ClockIcon, MessageCircleIcon, SearchIcon, StarIcon, ImageIcon, ManualIcon, AutoModeIcon, CustomIcon, WarningIcon, FileTypeIcon, StopIcon, TerminalIcon, DownloadIcon, CloudUploadIcon, NotesIcon, HistoryIcon, StageListIcon, type IconProps } from "../components/Icon.js";
-import { PluginChatActions, PluginToolbarItems } from "../components/UiSlotHost.js";
+import { PluginChatActions, PluginChatInputLeading, PluginChatInputTrailing, PluginMessageActions, PluginToolbarItems, PLUGIN_INSERT_INPUT_EVENT } from "../components/UiSlotHost.js";
 import downIcon from "../../../icon/icon_fpbc119q3rk/down.svg";
 /** A-980-R19/R21：悬浮窗唤出按钮图标（用户指定目录 message-circle.svg——聊天悬浮窗=对话气泡） */
 import floatToggleIcon from "../../../icon/icon_fpbc119q3rk/message-circle.svg";
@@ -1214,6 +1214,8 @@ const UserMessage = React.memo(function UserMessage({ m, onRollback }: { m: Mess
           onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}>
           {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
         </button>
+        {/* A-1200 · B1：`chat_message_actions` 区域（扩展声明的消息级动作；无声明时渲染 null）。 */}
+        <PluginMessageActions />
       </div>
     </div>
   );
@@ -2356,6 +2358,8 @@ const AssistantMessage = React.memo(function AssistantMessage({ m, agentName, sh
               <span>思考</span>
             </button>
           )}
+          {/* A-1200 · B1：`chat_message_actions` 区域（助手消息侧同样挂一份）。 */}
+          <PluginMessageActions />
         </div>
         {/* A-174：思考过程展开区——参考内容 与 思考过程 是两个互相独立的折叠面板 */}
         {/* A-1015：`showThinking` 是**数据存在性守卫**（无思考数据就不渲染空壳，保留）；
@@ -6190,6 +6194,20 @@ export default function ChatPanel({
     api?.publishSidebarMount?.(sideStatus && sid ? { sessionId: sid, text: sideStatus.inject } : null);
   }, [sideStatus?.inject, sessionId]);
 
+  /* A-1200 · B1：接收「插入输入框」的窗口事件。
+     谁会发？`titlebar_*`（在 App.tsx）与 `chat_message_actions`（在 memo 子组件里）
+     —— 这两处**拿不到本组件的 setInput**，而「点击把动作提示插入输入框」是那些 item 形态
+     唯一的宿主行为。没有这条通道它们就是**假按钮**（点了什么也不发生）。 */
+  React.useEffect(() => {
+    const onInsert = (e: Event): void => {
+      const text = (e as CustomEvent<string>).detail;
+      if (typeof text !== "string" || text === "") { return; }
+      setInput((v) => (v ? `${v} ${text}` : text));
+    };
+    window.addEventListener(PLUGIN_INSERT_INPUT_EVENT, onInsert);
+    return () => { window.removeEventListener(PLUGIN_INSERT_INPUT_EVENT, onInsert); };
+  }, []);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, position: "relative", overflow: "hidden" }}>
       {/* 顶部工具栏：会话组 | 思考开关 | 工作目录 | 计时 | 上下文圆环（模型/模式/审批/推理已移入输入框） */}
@@ -7562,6 +7580,9 @@ export default function ChatPanel({
             }}
           />
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px 10px" }}>
+            {/* A-1200 · B1：`chat_input_leading` 区域（扩展声明的输入栏左端入口；
+                放在「+」展开按钮**之后**、AI 配置之前 —— 与既有 chat_action/toolbar_item 同排。 */}
+            <PluginChatInputLeading onInsert={(t) => setInput((v) => (v ? `${v} ${t}` : t))} />
             <button onClick={() => void openPlusPanel()}
               title="展开：指令 / 技能 / MCP 选择"
               style={{
@@ -7734,6 +7755,9 @@ export default function ChatPanel({
                 "即将插入是什么鬼？"。现在唯一入口是待发气泡卡片上的「直接插入」图标 ——
                 **动作贴着它作用的那条指令**，而不是一个改全局默认的开关。 */}
             <div style={{ flex: 1 }} />
+            {/* A-1200 · B1：`chat_input_trailing` 区域（扩展声明的输入栏右端入口；
+                挨着弹性空隙之后、字数统计之前 —— 「右端」就该在那儿）。 */}
+            <PluginChatInputTrailing onInsert={(t) => setInput((v) => (v ? `${v} ${t}` : t))} />
             <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 8, display: loading ? "none" : "block" }}>
               {input ? `${input.length} 字` : ""}
             </span>

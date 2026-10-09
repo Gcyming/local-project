@@ -140,18 +140,64 @@ A-1196 把这条写进 `creatorGuide`（第五节），给出三条固化路径�
 
 #### 目标
 
-扩展在**四个白名单槽位**里声明 UI，宿主按声明渲染：
+扩展在**13 个白名单区域**里声明 UI，宿主按声明渲染（A-1200 · B1 从「4 个固定槽位」升级而来，
+既有 4 个名字原样保留 ⇒ 老插件零改动）：
 
-| 槽位 | 声明字段 | 宿主挂载点 | 典型用途 |
+| 区域 | 形态 | 声明字段 | 宿主挂载点 | 典型用途 |
+| --- | --- | --- | --- | --- |
+| `settings_panel` ← 既有 | item | `id` / `title` / `icon?` / `order?` | `SettingsDialog.tsx` 的 `SECTIONS` 之后动态追加 + `ui:` 前缀分支渲染 `UiSlotPanel` | 一个专属设置页（含 L4b 的设置项） |
+| `status_item` ← 既有 | item | `id` / `label` / `order?` / `refresh: "manual" \| "on_event"` | 右侧栏 `StatusPanel` 底部新增一行 | 展示本扩展的运行态 / 计数 / 一键动作 |
+| `chat_action` ← 既有 | item | `id` / `label` / `icon?` / `when?` | 输入栏动作区（与「联网搜索」开关同级） | 「用本扩展处理这条消息」 |
+| `toolbar_item` ← 既有 | item | `id` / `label` / `icon?` | 输入栏动作区 | 打开扩展自己的页面（`page` 字段，见下） |
+| `titlebar_start` | item | `id` / `label` / `icon?` | `App.tsx` 的 `header.titlebar` 内（标题名之后） | 标题栏左端入口 |
+| `titlebar_end` | item | 同上 | 同上（弹性空隙之后、右栏开关之前） | 标题栏右端入口 |
+| `chat_input_leading` | item | `id` / `label` / `icon?` | `ChatPanel` 输入栏左端（「+」展开按钮之后） | 输入框左侧的常驻入口 |
+| `chat_input_trailing` | item | 同上 | `ChatPanel` 输入栏右端（弹性空隙之后、字数统计之前） | 输入框右侧的常驻入口 |
+| `chat_message_actions` | item | 同上 | 每条消息的 `.msg-hover` 动作行（用户消息 + 助手消息两处） | 「对这条消息用本扩展处理」 |
+| `sidebar_section` | **item + panel** | `id` / `label`（item）或 `entry`（panel） | `RightSidebar` 的 `<aside>` 内、`.right-body` 之外 | 右栏一块整分区（自带 UI 的文件树/编辑器类插件） |
+| `status_bar` | item | `id` / `label` / `icon?` | `StatusPanel` 最底部（与 `status_item` **是两个区域**） | 贴在面板底部的一行状态 |
+| `overlay_floating` | **panel** | `id` / `entry` | `App.tsx` 根部全屏 `pointer-events:none` 容器 | **全屏自由定位**的面板（想贴哪个角落由插件自己决定） |
+| `overlay_fullscreen` | **panel** | `id` / `entry` | 同上，默认铺满 | 全屏接管型UI（可自行接管整屏） |
+
+**两种贡献形态**（A-1200 · B1 新增）：
+
+| 形态 | 声明 | 谁渲染界面 | 隔离手段 |
 | --- | --- | --- | --- |
-| `settings_panel` | `id` / `title` / `icon?` / `order?` | `SettingsDialog.tsx:73` 的 `SECTIONS` 之后动态追加 + `:319` 的 switch 增分支 | 一个专属设置页（含 L4b 的设置项） |
-| `status_item` | `id` / `label` / `order?` / `refresh: "manual" \| "on_event"` | 右侧栏 `StatusPanel` 底部新增一行 | 展示本扩展的运行态 / 计数 / 一键动作 |
-| `chat_action` | `id` / `label` / `icon?` / `when?` | 输入栏动作区（与「联网搜索」开关同级） | 「用本扩展处理这条消息」 |
-| `toolbar_item` | `id` / `label` / `icon?` | 会话头部工具条 | 打开扩展自己的页面（`page` 字段，见下） |
+| `item`（**`kind` 缺省值**） | `label` / `icon` / … | **宿主**（`UiSlotHost` 里每区域一个渲染器） | 不需要（只有声明进宿主 DOM） |
+| `panel` | `entry`（**必填**、纯相对路径） | **扩展自己的 HTML** | `httpServer.serve({dir, host:"127.0.0.1"})` + `<iframe sandbox="allow-scripts allow-same-origin allow-forms">` |
+
+**形态-区域兼容表**（`PLUGIN_UI_REGION_KINDS`，**单一产地**，写在就拒）：
+
+- `overlay_floating` / `overlay_fullscreen` **只收 panel** —— 它们本就是「一块自己定位的 UI」，
+  挂个 item 按钮上去会得到一个**永远不显示**的声明（渲染器按形态分派）⇒ 假自由度，必须在清单层拒；
+- `settings_panel` **只收 item**（既有整页形态；改成 panel 会出现两套互斥渲染路径）；
+- `sidebar_section` 两种都收；其余区域两种都收。
+
+**panel 的落点与生命周期**：`entry` 拼进 `127.0.0.1` 静态服务的 url（**绝不 `file://`**），
+渲染层**按需**经 IPC（`slime:plugins:panelOpen`）取 url后挂沙箱 iframe —— 懒加载（一个从没被
+看见的面板不该占着端口）。url 里的 entry 一律取自**已校验的声明**（主进程按 `(plugin, entry)`
+在 `pluginUiDecls` 里精确匹配），**渲染层传来的字符串不被信任**（否则这条通道就成了绕过清单
+校验的旁门）。插件停用/卸载 ⇒ 声明撤销 ⇒ `plugins_changed` 触发渲染层全量重算 ⇒ iframe 随之
+卸载（复用既有口径，无需新机制）。取 url 失败**如实显示错误文案**，不静默空白。
+
+> **⚠️ 2026-10-09 · A-1200 · B1 的路线选择（为什么不抄 DSH）**
+> DSH 能「任意位置 + 自带 UI + 全屏皮肤」，是因为它的**插件代码直接跑在宿主页面里**
+> （`dsh.client` + `window.__ModuleLoader__.load()` 注入客户端 ESM，与宿主同权）——
+> 而 DSH 官方 `SAFETY.md` 自己承认那「不构成安全边界」。
+> slime **不抄这条**：本批的「任意位置」由**区域注册表**提供（13 个落点，覆盖 DSH 能注入的
+> 绝大多数常规位置），「自带 UI」由**沙箱 iframe** 提供（`contributes.page` 已证明可行）。
+> ⇒ **不引入任何把扩展代码注入宿主页面的通道**（守卫按代码形态钉死：`new Function`/`eval` 皆不许）。
+>
+> **两个浮层的 z-index 取 1100**（既有实测值：对话框 backdrop 1200、本地模型加载面板 1000、
+> `.op-focus-frame` 900/901）：高于应用内容，**低于对话框** ⇒ 插件面板**盖不掉权限确认/设置对话框**
+> （§5.2「不让扩展覆盖宿主安全关键 UI」在浮层上的落点）。且插件**无法**用 `z-index` 逃出这个约定 ——
+> 它的 iframe 是独立文档，`z-index` 只在 iframe 内部生效。
 
 外加一个可选的**自有页面**：`page: { kind: "webview", entry: "panel.html" }` 或
 `{ kind: "html", entry: "panel.html" }`。`html` 走 `gui/src/main/httpServer.ts` 的
-`127.0.0.1` 静态服务（**绝不 `file://`**，理由见 §5.4）。
+`127.0.0.1` 静态服务（**绝不 `file://`**，理由见 §5.4）。**`page` 与 `panel` 的关系**：
+`page` 保留（右栏工具条打开 = `toolbar_item` + `page` 的组合），**panel 是它的泛化** ——
+同一份 HTML，从「一个固定 tab」变成「任意区域可挂」。
 
 **明确不做**（红线，写进清单校验）：扩展**不能**贡献 JSX、不能注入脚本、不能改宿主**代码**、
 不能注册全局快捷键、不能覆盖宿主已有槽位。UI 只能是「宿主已实现的渲染器 + 声明」。
@@ -664,6 +710,11 @@ T1 那个子进程的边界也要说死：`cwd` = 该插件目录、**不注入�
 - **B7 ✅ 已完成**（2026-10-09，用户明确要求）：**主题贡献点（皮肤）** + **官方示例扩展包**（见 §4.6）。
   口径来自用户原话：「高自由度扩展本质是**外部插件，可开可关的**……更像『精装』或者说『武装』」——
   皮肤是外部武器的一种：装上就有、卸下即恢复原样，**不修改程序本身**。
+- **B1' ✅ 已完成 · A-1200**（2026-10-09）：**区域注册表 + panel 形态**（§4.1 顶部）——
+  13 个区域（前4 个既有槽位名原样保留）+ `kind: "panel"` 自带UI。
+  守卫 `tests/core-ts/a1200-plugin-regions.spec.ts`（39 例）+ 变异 20条全抓。
+  ⚠️ **未接线**：无（9 个新区域全部接上了；`status_bar` 落在 `StatusPanel` 底部 ——
+  本仓**没有**全局底部状态条，故不新造一个位置，就近挂在既有面板底部）。
 
 **并发约束（硬约束，不是建议）**：`AGENTS.md` §1.3 明确「同工作目录禁止并发写代码」。
 本轮 B1–B5 全部落在 `core-ts/` `gui/src/` `tests/` 三个目录 ⇒ **必须串行派工，或用

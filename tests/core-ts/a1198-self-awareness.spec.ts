@@ -159,9 +159,17 @@ describe("A-1198-S ② creatorGuide 必须涵盖五类 contributes（B2–B6 + �
   it("③ 自有页面：kind 只认 html + 127.0.0.1（不是 file://）+ 沙箱 iframe", () => {
     expect(GUIDE).toContain("contributes.page");
     expect(GUIDE).toContain('{ "kind": "html", "entry": "panel.html" }');
-    expect(GUIDE).toContain("127.0.0.1");
-    expect(GUIDE).toContain("**不是** file://");
-    expect(GUIDE).toContain("沙箱 iframe");
+    /* ⚠️ 2026-10-09 收窄断言域（A-1200 · B2 实测顶出来的守卫退化）：
+       这三条原本是**整篇导引**的 toContain。A-1200 · B2 在别处又提到了
+       `127.0.0.1`（皮肤资源改写那段）与「沙箱 iframe」（panel 区域那段）——
+       于是 `mut-a1197-creator-promise` M21「删掉 page 段那两行」照样绿（实测存活）。
+       ⇒ 判据必须**限定在 page 段内**：导引的意图是「page 那一节自己讲清了这三件事」，
+       不是「全文某处提过一次」。这里按「③ 小节起→ 下一节 ④ 止」切段再断言。 */
+    const pageSection = /\*\*③ 自有页面\*\*[\s\S]*?(?=\*\*④ )/.exec(GUIDE)?.[0] ?? "";
+    expect(pageSection, "导引里找不到 ③ 自有页面小节").not.toBe("");
+    expect(pageSection).toContain("127.0.0.1");
+    expect(pageSection).toContain("**不是** file://");
+    expect(pageSection).toContain("沙箱 iframe");
   });
 
   it("④ 运行模式：声明形状 + 第二层校验的两种时机都写清", () => {
@@ -193,13 +201,16 @@ describe("A-1198-S ③ 关键数字与实现同源（不同源 = 教 Agent 写�
     expect(GUIDE).toContain(`maxRounds\` 1–${m![1]}`);
   });
 
-  it("四个 UI 槽位名与 contributes.ts 的白名单同源（少一个 = 那个槽位写了也白写）", () => {
-    const m = /export const PLUGIN_UI_SLOTS = \[([^\]]+)\] as const;/.exec(CONTRIBUTES_SRC);
-    expect(m, "contributes.ts 里找不到 PLUGIN_UI_SLOTS").not.toBeNull();
+  /* ⚠️ A-1200 · B1 起区域名有 13 个且**分成两段声明**（前4 个既有 + 后 9 个新增，中间夹着
+     一段块注释）⇒ 正则必须能跨注释取全，否则会只数到前 4 个、把「导引漏了区域 X」判成假绿。
+     判据仍是「区域白名单与导引**同源**」这条不变。 */
+  it("13 个 UI 区域名与 contributes.ts 的白名单同源（少一个 = 那个区域写了也白写）", () => {
+    const m = /export const PLUGIN_UI_REGIONS = \[([\s\S]*?)\] as const;/.exec(CONTRIBUTES_SRC);
+    expect(m, "contributes.ts 里找不到 PLUGIN_UI_REGIONS").not.toBeNull();
     const slots = [...m![1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
-    expect(slots.length, "槽位白名单实测条数（若为 0 说明正则没匹配上，断言会假绿）").toBe(4);
+    expect(slots.length, "区域白名单实测条数（若为 0 说明正则没匹配上，断言会假绿）").toBe(13);
     for (const s of slots) {
-      expect(GUIDE, `导引漏了槽位 ${s}`).toContain(s);
+      expect(GUIDE, `导引漏了区域 ${s}`).toContain(s);
     }
   });
 

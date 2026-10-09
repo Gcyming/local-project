@@ -51,9 +51,15 @@ describe("A-1198 ① `parsePluginUiSlots`：合法声明", () => {
     }
   });
 
-  it("白名单常量本身：B5 后四槽位齐备（toolbar_item 与 page 一起落）", () => {
-    expect([...PLUGIN_UI_SLOTS]).toEqual(["settings_panel", "status_item", "chat_action", "toolbar_item"]);
-  });
+it("白名单常量本身：A-1200 · B1 起 13 个区域（前四个是老名字，原样保留 ⇒ 老插件零改动）", () => {
+expect([...PLUGIN_UI_SLOTS]).toEqual([
+    "settings_panel", "status_item", "chat_action", "toolbar_item",
+    "titlebar_start", "titlebar_end",
+    "chat_input_leading", "chat_input_trailing", "chat_message_actions",
+    "sidebar_section", "status_bar",
+    "overlay_floating", "overlay_fullscreen",
+  ]);
+});
 });
 
 describe("A-1198 ② `parsePluginUiSlots`：反例矩阵（每条必须被拒）", () => {

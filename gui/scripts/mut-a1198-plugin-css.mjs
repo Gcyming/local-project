@@ -72,13 +72,19 @@ const MUTATIONS = [
       "",
     ),
   },
+  /* ⚠️ 2026-10-09 锚点重打（A-1200 · B2）：`url(` 不再是 `CSS_FORBIDDEN` 里的一条静态禁令 ——
+     放开的是「只许 `url(plugin-asset:<纯相对>)`」，判据搬到了 `checkPluginAssetUrls`。
+     ⇒ 本条的**等价缺陷**（删掉这条禁令 ⇒ 外联 URL 被放行）必须改锚到新判据的承载行：
+     跳过 url 逐参检查（`findPluginCssViolations` 里那一句push）。
+     ⚠️ 这不是"换个地方锚"的文字游戏：删掉旧行后 url() 会被**新判据**照常拒 ⇒ 旧变异已成等价变异
+     （实测存活），必须换点才能真正碰到「外联被拒」这条不变量。 */
   {
-    name: "2 url() 禁令删（背景图外联）",
+    name: "2 url() 白名单判据不生效（外联 URL 被放行）",
     file: F_CONTRIB,
     mutate: (t) => sub(
       t,
-      '  { re: /url\\s*\\(/i, why: "url()（外联资源：外观不需要外联）" },',
-      "",
+      "  out.push(...checkPluginAssetUrls(css));",
+      "  /* 变异：不查 url 逐参白名单 */",
     ),
   },
   {

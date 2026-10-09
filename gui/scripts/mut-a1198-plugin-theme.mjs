@@ -26,7 +26,7 @@
  * | 15 | 脏选择清理删 | 停用插件后选择悬空（下次误显示） | T ④渲染层 |
  * | 16 | 外观页「默认」按钮不生效 | 选不回默认（皮肤卸不下来） | T ④外观页 |
  * | 17 | extraFiles 丢 template/plugins | 打包后示例包不存在（播种静默缺位） | T ⑤打包 |
- * | 18 | 示例 plugin.json 的 page.kind 改 webview | 示例包自己过不了清单校验 | T ⑤真解析 |
+ * | 18 | 示例的栏目 entry 改成逃出插件目录 | 示例包自己过不了清单校验 | T ⑤真解析 |
  * | 19 | boot 少一条 bootstrapPlugins 调用 | 打包/开发二选一漏播种 | T ⑤播种 |
  *
  * ⚠️ name 序号 == 数组位置（check-mut-anchors 逐条核对）；锚必须唯一；变异体保持语法合法。
@@ -140,12 +140,15 @@ const MUTATIONS = [
     ),
   },
   {
+    /* ⚠️ 2026-10-09 锚点重打（A-1200 · B2：多皮肤后 `resolveActiveTheme` 改为走
+       `parsePluginThemeSelection` + 同插件内筛选，「找不到就返回选中值」这一行的**位置与形态都变了**。
+       重打后的变异保留原缺陷语义：找不到匹配时**伪造一个皮肤对象**（幽灵皮肤）。 */
     name: "9 resolveActiveTheme 找不到也返回（幽灵皮肤）",
     file: F_STORE,
     mutate: (t) => sub(
       t,
-      "  return themes.find((t) => t.plugin === selected) ?? null;",
-      "  return themes.find((t) => t.plugin === selected) ?? ({ plugin: selected } as T);",
+      "  return samePlugin.find((t) => (t.id ?? t.name) === parsed.skinName) ?? null;",
+      "  return samePlugin.find((t) => (t.id ?? t.name) === parsed.skinName) ?? ({ plugin: selected } as T);",
     ),
   },
   {
@@ -167,12 +170,15 @@ const MUTATIONS = [
     ),
   },
   {
+    /* ⚠️ 2026-10-09 锚点重打（A-1200 · B2：多皮肤后 themes 快照改成「两表合并」，
+       旧的「单表 map 成空数组」那行已不存在。缺陷语义不变：**快照里一份皮肤都回不出来**
+       ⇒ 外观页永远看不到任何皮肤。 */
     name: "12 main 快照 themes 置空（外观页永远看不到皮肤）",
     file: F_MAIN,
     mutate: (t) => sub(
       t,
-      "  const themes: PluginThemeDTO[] = [...pluginThemeDecls.entries()]\n    .map(([plugin, theme]) => ({ plugin, name: theme.name, tokens: theme.tokens }))\n    .sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0));",
-      "  const themes: PluginThemeDTO[] = [];\n  void pluginThemeDecls;",
+      "  const themes: PluginThemeDTO[] = [\n    ...[...pluginThemeDecls.entries()].map(([plugin, theme]) => ({ plugin, id: theme.name, name: theme.name, tokens: theme.tokens })),\n    ...[...pluginThemesDecls.entries()].flatMap(([plugin, list]) =>\n      list.map((theme) => ({ plugin, id: theme.name, name: theme.name, tokens: theme.tokens }))),\n  ].sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));",
+      "  const themes: PluginThemeDTO[] = [];\n  void pluginThemeDecls; void pluginThemesDecls;",
     ),
   },
   {
@@ -221,14 +227,20 @@ const MUTATIONS = [
     ),
   },
   {
-    name: "18 示例 page.kind 改 webview（示例自己过不了校验）",
+    name: "18 示例的栏目 entry 逃出插件目录（示例自己过不了校验）",
     file: F_EXAMPLE,
     /* ⚠️ 2026-10-09 锚点重打：示例清单加入 contributes.css 时用JSON.stringify 重写过，
-       `"page": { "kind": "html", "entry": "panel.html" }` 这一行被展开成多行 ⇒ 旧单行锚点失效。 */
+       `"page": { "kind": "html", "entry": "panel.html" }` 这一行被展开成多行 ⇒ 旧单行锚点失效。
+       ⚠️ 2026-10-09 再重打（A-1200 · B3）：示例的 `contributes.page` 已**泛化**成
+       `contributes.views`（page ≡ 唯一一个 placement:"right" 的栏目，两者不可同写）
+       ⇒ 旧锚点指向的 `page` 块整个不存在了。
+       ⇒ 换成一个**仍然落在同一份声明上**、且同样能让示例自己过不了清单校验的变异：
+       把栏目的 `entry` 改成逃出插件目录的相对路径（`../../evil.html`）——
+       守的还是「示例自己必须真能过 parsePluginManifest」这条不变量。 */
     mutate: (t) => sub(
       t,
-      "    \"page\": {\n      \"kind\": \"html\",\n      \"entry\": \"panel.html\"\n    },",
-      "    \"page\": {\n      \"kind\": \"webview\",\n      \"entry\": \"panel.html\"\n    },",
+      "    \"views\": [\n      {\n        \"id\": \"workbench\",\n        \"title\": \"示例工作台\",\n        \"icon\": \"🛠\",\n        \"entry\": \"panel.html\",\n        \"placement\": \"main\",\n        \"order\": 0\n      },",
+      "    \"views\": [\n      {\n        \"id\": \"workbench\",\n        \"title\": \"示例工作台\",\n        \"icon\": \"🛠\",\n        \"entry\": \"../../evil.html\",\n        \"placement\": \"main\",\n        \"order\": 0\n      },",
     ),
   },
   {

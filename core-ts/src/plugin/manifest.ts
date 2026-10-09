@@ -124,7 +124,14 @@ export function parsePluginManifest(raw: unknown): ParsePluginManifestResult {
     const parsedContributes = parsePluginContributes(contributesRaw);
     if (!parsedContributes.ok) {
       errors.push(...parsedContributes.errors);
-    } else if (parsedContributes.contributes.settings !== undefined || parsedContributes.contributes.ui !== undefined || parsedContributes.contributes.scripts !== undefined || parsedContributes.contributes.page !== undefined || parsedContributes.contributes.theme !== undefined) {
+    } else if (Object.keys(parsedContributes.contributes).length > 0) {
+      /* ⚠️ A-1200 · B2 修掉一处**静默丢弃**（本项目判据里的头号陷阱）：
+         原来的判据是「手写一份字段名清单，逐个 !== undefined」，而那份清单**漏了 `css`**
+         —— 于是「只声明 contributes.css 的插件」解析全部通过、却拿到 `contributes: undefined`，
+         插件照常装载但外观永远不生效，用户查不出为什么（正是设计 §4「不静默失效」要拒的那种）。
+         `themes`（本批新增的第二个入口）会立刻踩同一个坑。
+         ⇒ 改成「解析结果里有任何键就保留」：**清单的字段名只有 `ALLOWED_CONTRIBUTES_FIELDS`
+         一处**（contributes.ts），这里不再维护第二份 —— 两份必然漂移，且漂移的那份是静默的。 */
       contributes = parsedContributes.contributes;
     }
   }

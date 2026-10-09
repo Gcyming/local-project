@@ -15,8 +15,46 @@
 
 import { themeTokenAssignments, type PluginThemeDecl } from "../../../core-ts/src/plugin/contributes.js";
 
-/** 选择持久化的键（值 = 插件名；缺省/空 = 跟随内置主题）。与内置主题的 `slime-theme` 并列。 */
+/** 选择持久化的键（值 = `plugin` 或 `plugin::皮肤名`；缺省/空 = 跟随内置主题）。
+ *  与内置主题的 `slime-theme` 并列。 */
 export const PLUGIN_THEME_STORAGE_KEY = "slime-plugin-theme";
+
+/**
+ * A-1200 · B2：**选择值的分段分隔符**（`<plugin>::<皮肤名>`）。
+ *
+ * ## 为什么需要它（多皮肤后旧格式不够用）
+ * 旧格式只存插件名 ⇒ 一个插件多套皮肤时**分不清选的是哪一套**（甚至两套皮肤共用一个 key，
+ * 持久化后互相串台）。所以新格式带皮肤名。
+ *
+ * ## ⚠️ 向后兼容分支（老选择必须还能生效）
+ * 读到**不含**该分隔符的值 ⇒ 它是 A-1198 时代存的老格式（只有插件名）⇒ 解析成
+ * 「**该插件的第一套**」。这样老用户升级后选择不丢（而不是静默回落默认 = 体验倒退）。
+ */
+export const PLUGIN_THEME_KEY_SEP = "::";
+
+/** 由插件名 + 皮肤名拼出选择值（新格式，唯一 key 产地）。 */
+export function pluginThemeSelectionKey(plugin: string, skinName: string): string {
+  return `${plugin}${PLUGIN_THEME_KEY_SEP}${skinName}`;
+}
+
+/**
+ * 解析选择值 → `{plugin, skinName}`；`skinName` 为 `null` 表示**老格式**（该插件的第一套）。
+ * 纯函数（可单测）：不含分隔符 ⇒ 老格式；含 ⇒ 取第一段与最后一段（插件名不含分隔符）。
+ */
+export function parsePluginThemeSelection(
+  selected: string,
+): { plugin: string; skinName: string | null } | null {
+  const raw = typeof selected === "string" ? selected.trim() : "";
+  if (!raw) { return null; }
+  const at = raw.indexOf(PLUGIN_THEME_KEY_SEP);
+  /* ⚠️ 分隔符出现在开头/结尾也算非法（那不是老格式，是写坏了）⇒ 当成无效选择，
+     让调用方回落默认 —— 而不是拿一个半截字符串去匹配皮肤。 */
+  if (at < 0) { return { plugin: raw, skinName: null }; }
+  const plugin = raw.slice(0, at);
+  const rest = raw.slice(at + PLUGIN_THEME_KEY_SEP.length);
+  if (!plugin || !rest) { return null; }
+  return { plugin, skinName: rest };
+}
 
 /* ── 可用皮肤缓存（由 PluginThemeHost 每次快照刷新时写入；外观页订阅它）──────── */
 let cachedThemes: AvailablePluginTheme[] = [];
@@ -25,6 +63,8 @@ const listeners = new Set<() => void>();
 
 export interface AvailablePluginTheme {
   plugin: string;
+  /** A-1200 · B2：同插件内区分第几套（= 皮肤名；与快照 DTO 同源）。 */
+  id: string;
   name: string;
   tokens: PluginThemeDecl["tokens"];
 }
@@ -44,8 +84,8 @@ export function getPluginThemeSelection(): string {
 }
 
 /** 用户选择（"" = 默认）。选择不合法（插件不在列表）时调用方会经 resolve 回落并清空。 */
-export function setPluginThemeSelection(plugin: string): void {
-  const next = typeof plugin === "string" ? plugin.trim() : "";
+export function setPluginThemeSelection(pluginOrKey: string): void {
+  const next = typeof pluginOrKey === "string" ? pluginOrKey.trim() : "";
   if (next === selection) { return; }
   selection = next;
   writeSelection(next);
@@ -71,9 +111,9 @@ function readSelection(): string {
   }
 }
 
-function writeSelection(plugin: string): void {
+function writeSelection(value: string): void {
   try {
-    if (plugin) { localStorage.setItem(PLUGIN_THEME_STORAGE_KEY, plugin); }
+    if (value) { localStorage.setItem(PLUGIN_THEME_STORAGE_KEY, value); }
     else { localStorage.removeItem(PLUGIN_THEME_STORAGE_KEY); }
   } catch {
     /* 隐私模式 / 无 localStorage：选择不持久化，本次会话仍生效（内存态已更新）。 */
@@ -81,12 +121,27 @@ function writeSelection(plugin: string): void {
 }
 
 /**
- * 解析生效皮肤：选择为空、或选中的插件已不在可用列表（被停用/卸载/删目录）⇒ null（回落默认）。
+ * 解析生效皮肤：选择为空、或选中的那一套已不在可用列表（被停用/卸载/删目录）⇒ null（回落默认）。
  * 「可开可关、卸下即恢复原样」的核心就这一行判断。
+ *
+ * ⚠️ A-1200 · B2：两套匹配口径**都要走**（老格式兼容分支就在这里）：
+ *   · 新格式 `<plugin>::<皮肤名>` ⇒ 精确命中同一插件的**那一套**；
+ *   · 老格式 `<plugin>`（无分隔符）⇒ 命中**该插件的第一套**（向后兼容，见
+ *     `parsePluginThemeSelection` 的节注）。
  */
-export function resolveActiveTheme<T extends { plugin: string }>(themes: T[], selected: string): T | null {
+export function resolveActiveTheme<T extends { plugin: string; id?: string; name?: string }>(
+  themes: T[], selected: string,
+): T | null {
   if (!selected) { return null; }
-  return themes.find((t) => t.plugin === selected) ?? null;
+  const parsed = parsePluginThemeSelection(selected);
+  if (!parsed) { return null; }
+  const samePlugin = themes.filter((t) => t.plugin === parsed.plugin);
+  if (samePlugin.length === 0) { return null; }
+  if (parsed.skinName === null) {
+    /* 老选择（只存了插件名）⇒ 取该插件的**第一套**（快照按 plugin+id 排序 ⇒ 顺序稳定）。 */
+    return samePlugin[0] ?? null;
+  }
+  return samePlugin.find((t) => (t.id ?? t.name) === parsed.skinName) ?? null;
 }
 
 /** 上一条落值写过的变量（移除时按它清理 —— 只清自己写过的，不碰别人的内联属性）。 */

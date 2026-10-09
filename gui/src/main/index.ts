@@ -459,12 +459,14 @@ import { BUILTIN_PLUGIN_GROUPS, builtinPluginManifests } from "../../../core-ts/
 import { loadPluginsFromDisk, pluginSkillsRoot } from "../../../core-ts/src/plugin/loader.js";
 import type { RejectedPluginDir } from "../../../core-ts/src/plugin/loader.js";
 import { markPluginDisabled, readDisabledPlugins, unmarkPluginDisabled } from "../../../core-ts/src/plugin/disabled-store.js";
-import type { PluginUiContribution } from "../../../core-ts/src/plugin/contributes.js";
+import type { PluginUiContribution, PluginViewDecl } from "../../../core-ts/src/plugin/contributes.js";
+import { PLUGIN_UI_REGIONS, PLUGIN_VIEW_PLACEMENTS } from "../../../core-ts/src/plugin/contributes.js";
 import type { PluginCssDecl, PluginThemeDecl } from "../../../core-ts/src/plugin/contributes.js";
+import { PLUGIN_ASSET_SCHEME, rewritePluginAssetUrls } from "../../../core-ts/src/plugin/contributes.js";
 import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
 import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
 import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
-import type { PluginCssDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
+import type { PluginCssDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO, PluginViewDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate, Tool } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
@@ -1642,10 +1644,20 @@ const pluginUiDecls = new Map<string, PluginUiContribution[]>();
  *  纯数据表 —— activate 时写入、dispose 时按插件名移除；渲染层按 `plugins_changed` 重算。 */
 const pluginThemeDecls = new Map<string, PluginThemeDecl>();
 
+/** A-1200 · B2：已接线的**多套皮肤**声明（一插件多套，对标 DSH 的 theme-gallery）。
+ *  与 `pluginThemeDecls` 分表：清单层保证 `theme` / `themes` 互斥，不会两条都进表。 */
+const pluginThemesDecls = new Map<string, PluginThemeDecl[]>();
+
 /** A-1198 · 续：已接线的 CSS 外观声明（`plugins_ui` 快照的 cssStyles 数据源）。
  *  纯数据表 —— activate 时写入、dispose 时按插件名移除；渲染层按 `plugins_changed` 重算。
  *  ⚠️ 主进程**只搬运文本、不落值**：落值在渲染层（要包 @layer + 作用域类，且要能整段撤下）。 */
 const pluginCssDecls = new Map<string, PluginCssDecl>();
+
+/** A-1200 · B3：**已接线的栏目**声明**（`plugins_ui` 快照的 views 数据源）。
+ *  与 `pluginUiDecls` 分表而不是复用：两者是**两种贡献形态**（插入点 vs 整块栏目），
+ *  落点、撤销时机、渲染路径全都不同，混在一张表里迟早串台。
+ *  纯数据表—— activate 时写入、dispose 时按插件名精确移除；渲染层按 `plugins_changed` 重算。 */
+const pluginViewDecls = new Map<string, PluginViewDecl[]>();
 
 /** 汇总各插件已接线的 UI 声明（`plugins_ui` handler 的唯一数据源）。
  *  冲突裁决（设计 §4.1）：同 slot 同 id 时按 order（缺省 0）再按插件名排序取第一个，
@@ -1658,6 +1670,10 @@ function pluginUiSnapshot(): PluginUiSnapshotDTO {
         slot: d.slot,
         plugin,
         id: d.id,
+        /* A-1200 · B1：**形态一律显式带上**（缺省即 item）—— 渲染层按它分派
+           「宿主渲染的按钮」与「沙箱 iframe 面板」，缺省会走错分支（且错得静默）。 */
+        kind: d.kind ?? "item",
+        ...(d.kind === "panel" ? { entry: d.entry } : {}),
         ...(d.title !== undefined ? { title: d.title } : {}),
         ...(d.label !== undefined ? { label: d.label } : {}),
         ...(d.icon !== undefined ? { icon: d.icon } : {}),
@@ -1683,21 +1699,116 @@ function pluginUiSnapshot(): PluginUiSnapshotDTO {
     );
     sorted.forEach((r, i) => { out.push(i === 0 ? r : { ...r, conflict: true }); });
   }
-  const slotRank = new Map<string, number>([["settings_panel", 0], ["status_item", 1], ["chat_action", 2]]);
+  /* A-1200 · B1：区域排序改用 `PLUGIN_UI_REGIONS` 的**下标**（单一产地就在 contributes.ts）——
+     旧口径是硬编码的 3 项 `slotRank`（`toolbar_item` 与新增 9 个区域全落在 `?? 99` 的同一档，
+     于是同区域内只剩 order/插件名排序）。下标法让「区域表顺序」就是界面顺序。 */
+  const slotRank = new Map<string, number>(PLUGIN_UI_REGIONS.map((r, i) => [r, i]));
   out.sort((a, b) =>
     (slotRank.get(a.slot) ?? 99) - (slotRank.get(b.slot) ?? 99)
     || (a.order ?? 0) - (b.order ?? 0)
     || (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0)
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  /* A-1198 · 主题（皮肤）：按插件名排序保证快照稳定（渲染层按 plugin 名持久化选择）。 */
-  const themes: PluginThemeDTO[] = [...pluginThemeDecls.entries()]
-    .map(([plugin, theme]) => ({ plugin, name: theme.name, tokens: theme.tokens }))
-    .sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0));
-  /* A-1198 · 续：CSS 外观 —— 同样按插件名排序保证快照稳定。 */
+  /* A-1198 · 主题（皮肤）：按插件名排序保证快照稳定（渲染层按 plugin 名持久化选择）。
+     A-1200 · B2：`id` 是「同一插件内区分第几套」的稳定键（= 皮肤名）；单套 `theme` 的
+     `id` 也取自己的 `name` —— 于是渲染层的 key / 持久化只有**一种**形态，不用两套。 */
+  const themes: PluginThemeDTO[] = [
+    ...[...pluginThemeDecls.entries()].map(([plugin, theme]) => ({ plugin, id: theme.name, name: theme.name, tokens: theme.tokens })),
+    ...[...pluginThemesDecls.entries()].flatMap(([plugin, list]) =>
+      list.map((theme) => ({ plugin, id: theme.name, name: theme.name, tokens: theme.tokens }))),
+  ].sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  /* A-1198 · 续：CSS 外观 —— 同样按插件名排序保证快照稳定。
+     ⚠️ A-1200 · B2：`url(plugin-asset:…)` 在**这里**（宿主侧）改写成该插件目录的真实地址。
+     为什么改写点选这里而不是渲染层：① 渲染层拿不到「插件目录对应的静态服务基址」；
+     ② 越权防护必须在宿主侧（跨插件读文件 = 越权 —— 只有宿主知道哪个基址属于哪个插件）。 */
   const cssStyles: PluginCssDTO[] = [...pluginCssDecls.entries()]
-    .map(([plugin, decl]) => ({ plugin, name: decl.name, css: decl.css }))
+    .map(([plugin, decl]) => ({ plugin, name: decl.name, css: rewriteCssAssets(plugin, decl) }))
     .sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0));
-  return { slots: out, themes, cssStyles, warnings: [] };
+  /* A-1200 · B3：**插件自有栏目** —— 冲突裁决与 slots 同款（设计 §4.1）：
+     同 `placement` 同 `id` 时按 order（缺省 0）再按插件名排序取第一个，其余标 `conflict: true`
+     （渲染成禁用态，不静默丢弃、不静默覆盖）。
+     ⚠️ 排序键用 `PLUGIN_VIEW_PLACEMENTS` 的**下标**（单一产地就在 contributes.ts）⇒
+     「placement 的声明顺序 = 界面顺序」，主区 → 右栏 → 左栏。 */
+  const placementRank = new Map<string, number>(PLUGIN_VIEW_PLACEMENTS.map((p, i) => [p, i]));
+  const viewRows: PluginViewDTO[] = [...pluginViewDecls.entries()].flatMap(([plugin, decls]) =>
+    decls.map((v) => ({
+      plugin,
+      id: v.id,
+      title: v.title,
+      entry: v.entry,
+      placement: v.placement,
+      ...(v.icon !== undefined ? { icon: v.icon } : {}),
+      ...(v.order !== undefined ? { order: v.order } : {}),
+    })));
+  const viewsByKey = new Map<string, PluginViewDTO[]>();
+  for (const r of viewRows) {
+    const key = `${r.placement}\u0000${r.id}`;
+    const list = viewsByKey.get(key) ?? [];
+    list.push(r);
+    viewsByKey.set(key, list);
+  }
+  const viewsOut: PluginViewDTO[] = [];
+  for (const list of viewsByKey.values()) {
+    if (list.length <= 1) { viewsOut.push(...list); continue; }
+    const sorted = [...list].sort(
+      (a, b) => (a.order ?? 0) - (b.order ?? 0)
+        || (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0),
+    );
+    sorted.forEach((r, i) => { viewsOut.push(i === 0 ? r : { ...r, conflict: true }); });
+  }
+  viewsOut.sort((a, b) =>
+    (placementRank.get(a.placement) ?? 99) - (placementRank.get(b.placement) ?? 99)
+    || (a.order ?? 0) - (b.order ?? 0)
+    || (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0)
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { slots: out, themes, cssStyles, views: viewsOut, warnings: [] };
+}
+
+/**
+ * A-1200 · B2：`plugin-asset:` 资源的**宿主侧改写登记表**（插件名 → 静态服务基址 / 该插件自己的目录）。
+ *
+ * ## 为什么改写必须在宿主侧（这是安全不变量，不是实现偏好）
+ * 渲染层拿不到「某插件目录对应哪个静态服务地址」的映射，而**能自己拼地址等于能读任意目录**。
+ * 所以改写用的基址**只从这张表取**，而这张表只由 `registerCss` 钩子按 **`dirs.get(插件名)`**
+ * （装载时扫盘填的唯一可信来源）填 ⇒「只读自己目录里的文件」**结构上**成立。
+ * 表里没有 ⇒ 原样返回（图片不显示，但绝不指向别人的目录 —— 那就是越权）。
+ */
+const pluginCssAssetBases = new Map<string, string>();
+const pluginCssAssetDirs = new Map<string, string>();
+
+/**
+ * A-1200 · B2：把一份 CSS 声明里的 `plugin-asset:` 改写成真实地址（同步、纯查表）。
+ *
+ * 拿不到基址 ⇒ 原样返回（**不静默留一个 404 的 url**，也不改成别人的目录）。
+ * 文件不存在 ⇒ 改写函数把整个 `url()` **删掉**（少一张图好过一个指向 404 的地址）。
+ */
+function rewriteCssAssets(plugin: string, decl: PluginCssDecl): string {
+  if (!decl.css.includes(`${PLUGIN_ASSET_SCHEME}:`)) { return decl.css; }
+  const base = pluginCssAssetBases.get(plugin);
+  const dir = pluginCssAssetDirs.get(plugin);
+  if (!base || !dir) { return decl.css; }
+  return rewritePluginAssetUrls(decl.css, base, (rel) => existsSync(join(dir, rel)));
+}
+
+/**
+ * A-1200 · B2：按需为某插件起 `127.0.0.1` 静态服务，把基址与目录写进登记表。
+ * 与 `page` / `panel` **同一个** `httpServer`（同一目录天然复用同一服务），
+ * 生命周期由 `registerPage` 的 dispose 兜底 stop —— **不新增第二个出口**。
+ */
+async function ensurePluginAssetBase(plugin: string, dir: string): Promise<boolean> {
+  try {
+    const served = await httpServer.serve({ dir, host: "127.0.0.1", origin: "agent" });
+    const url = served.ok ? served.urls?.[0] : undefined;
+    if (!url) {
+      console.error(`[gui:plugins] 皮肤资源服务启动失败（${plugin}）：${served.ok ? "未返回地址" : served.error ?? "未知原因"}`);
+      return false;
+    }
+    pluginCssAssetBases.set(plugin, url.endsWith("/") ? url : `${url}/`);
+    pluginCssAssetDirs.set(plugin, dir);
+    return true;
+  } catch (e) {
+    console.error(`[gui:plugins] 皮肤资源服务异常（${plugin}）：${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
 }
 
 /* ── A-1197 · B4（T1 脚本信任）：扩展脚本的执行边界（设计 §5.1）──────────────
@@ -1815,15 +1926,19 @@ function createPluginHost(dirs: Map<string, string>): PluginHost {
     },
     // UI 槽位贡献（B2）：登记声明进运行期表；撤销 = 按插件名精确移除
     // （renderer 侧按 `plugins_changed` 全量重算自然摘除；「get === ui」守卫防重装时误删新表）。
+    // A-1200 · B1：**panel 形态也登记进同一张表**（它同样要先"声明在案"渲染层才知道去渲染），
+    // 但**不在这里起服务** —— 服务由渲染层按需经 `plugins_panel_open` 触发（懒加载：
+    // 一个从没被看见的浮层面板不该占着一个 127.0.0.1 端口）。
     registerUi: (manifest) => {
       const ui = manifest.contributes?.ui;
       if (!ui || ui.length === 0) {
         return [];
       }
       pluginUiDecls.set(manifest.name, ui);
+      const panels = ui.filter((u) => u.kind === "panel").length;
       return [
         {
-          label: `${manifest.name} 的 UI 槽位（${ui.length} 条）`,
+          label: `${manifest.name} 的 UI 槽位（${ui.length} 条${panels > 0 ? `，含 ${panels} 个自带 UI 面板` : ""}）`,
           dispose: () => {
             if (pluginUiDecls.get(manifest.name) === ui) {
               pluginUiDecls.delete(manifest.name);
@@ -1936,6 +2051,25 @@ function createPluginHost(dirs: Map<string, string>): PluginHost {
         },
       ];
     },
+    /* A-1200 · B2：一个插件的**多套皮肤** —— 与 `registerTheme` 同款纯数据登记，
+       区别是进 `pluginThemesDecls`（一组 decl）；清单层保证两者互斥，不会都进表。 */
+    registerThemes: (manifest) => {
+      const list = manifest.contributes?.themes;
+      if (!list || list.length === 0) {
+        return [];
+      }
+      pluginThemesDecls.set(manifest.name, list);
+      return [
+        {
+          label: `${manifest.name} 的 ${list.length} 套皮肤（${list.map((t) => t.name).join("、")}）`,
+          dispose: () => {
+            if (pluginThemesDecls.get(manifest.name) === list) {
+              pluginThemesDecls.delete(manifest.name);
+            }
+          },
+        },
+      ];
+    },
     /* A-1198 · 续：CSS 贡献点 —— 纯数据登记（与 theme 同款），文本本身**不经主进程落值**：
        渲染层 PluginCssHost 把它包进 `@layer slime-plugin` + `.slime-plugin-scope` 后落 <style>。
        撤销 = 按插件名精确移除 ⇒ 渲染层重算时该样式从可用列表消失、自动回落内置外观（「可开可关」）。 */
@@ -1945,12 +2079,49 @@ function createPluginHost(dirs: Map<string, string>): PluginHost {
         return [];
       }
       pluginCssDecls.set(manifest.name, decl);
+      /* A-1200 · B2：CSS 里引用了插件内图片 ⇒ 按需起该插件目录的静态服务，
+         把基址/目录写进改写登记表（**只对��插件自己的目录**生效 —— 越权防护在宿主侧）。
+         失败只如实打日志：不改写（图片不显示）但**绝不**改成指向别的目录的地址。 */
+      if (decl.css.includes(`${PLUGIN_ASSET_SCHEME}:`)) {
+        const dir = dirs.get(manifest.name);
+        if (!dir) {
+          console.error(`[gui:plugins] 皮肤资源无从解析（插件没有磁盘目录）：${manifest.name}`);
+        } else {
+          void ensurePluginAssetBase(manifest.name, dir).then((ok) => {
+            if (ok) { broadcastContribRescan("皮肤资源服务已起"); }
+          });
+        }
+      }
       return [
         {
           label: `${manifest.name} 的 CSS 外观（${decl.name}）`,
           dispose: () => {
             if (pluginCssDecls.get(manifest.name) === decl) {
               pluginCssDecls.delete(manifest.name);
+            }
+            /* A-1200 · B2：撤销时**连改写登记表一起清**（不残留一个指向已卸载插件的基址）。 */
+            pluginCssAssetBases.delete(manifest.name);
+            pluginCssAssetDirs.delete(manifest.name);
+          },
+        },
+      ];
+    },
+    /* A-1200 · B3：**插件自有栏目** —— 纯数据登记（与 registerUi 同款：只登记「声明在案」）。
+       三个落点（main / right / left）由渲染层按`placement` 各自接线；服务**不在这里起**
+       （懒加载：没被点开的栏目不该占着一个 127.0.0.1 端口），由渲染层按需经 `plugins_view_open` 触发。
+       撤销 = 按插件名精确移除 ⇒ 渲染层重算时栏目与入口一并消失（可开可关，不留幽灵视图）。 */
+    registerViews: (manifest) => {
+      const views = manifest.contributes?.views;
+      if (!views || views.length === 0) {
+        return [];
+      }
+      pluginViewDecls.set(manifest.name, views);
+      return [
+        {
+          label: `${manifest.name} 的 ${views.length} 个栏目（${views.map((v) => `${v.title}@${v.placement}`).join("、")}）`,
+          dispose: () => {
+            if (pluginViewDecls.get(manifest.name) === views) {
+              pluginViewDecls.delete(manifest.name);
             }
           },
         },
@@ -5703,6 +5874,68 @@ function registerIpcHandlers(): void {
     }
     const base = served.urls[0].endsWith("/") ? served.urls[0] : `${served.urls[0]}/`;
     const entry = page.entry.replace(/\\/g, "/");
+    return { ok: true as const, url: `${base}${entry}`, reused: served.reused === true };
+  });
+
+  /* A-1200 · B1：取某条 `kind: "panel"` 声明的可加载 url —— 与 `plugins_page_open` 同款底子
+     （同一个 `httpServer`、同一个「目录白名单 = 该插件自己的目录」口径），区别只在服务哪个入口：
+     `page` 是插件的整页，`panel` 是挂在任意区域（标题栏 / 输入栏 / 右栏 / 全屏浮层…）的小块 UI。
+     ⚠️ **入参的 entry 只作定位键**：真实 entry 一律从 **`pluginUiDecls`**（已接线插件的**已校验**声明）
+     里按（plugin, entry）**精确匹配**取回 —— 清单层已 fail-closed 查过纯相对（`..`/盘符/前导分隔符），
+     而渲染层/任何调用方传来的字符串**一律不被信任**（否则这条通道就成了绕过清单校验的旁门）。
+     查 `pluginUiDecls` 而不是 `manifest`：它只装**当前已接线**的声明 ⇒ 顺带把「未装载/已停用/
+     被 rejected」也挡住了，且不多一套判据。**绝不 `file://`**（§5.4）；服务生命周期见 registerPage 的 dispose。 */
+  handleTrusted<{ name: string; entry: string }>(IPC_CHANNELS.plugins_panel_open, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
+    const entryKey = String(p?.entry ?? "").trim();
+    if (!entryKey) { return { ok: false as const, error: "缺少面板入口" }; }
+    const state = await ensurePluginHost();
+    const panels = (pluginUiDecls.get(name) ?? []).filter(
+      (u) => u.kind === "panel" && u.entry === entryKey,
+    );
+    if (panels.length === 0) {
+      return { ok: false as const, error: `插件没有已接线的该面板（contributes.ui 里没有 kind=panel 且 entry=${entryKey}）：${name}` };
+    }
+    const dir = state.dirs.get(name);
+    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录：${name}` }; }
+    const served = await httpServer.serve({ dir, host: "127.0.0.1", origin: "agent" });
+    if (!served.ok || !served.urls?.[0]) {
+      return { ok: false as const, error: `面板服务启动失败：${served.error ?? "未知原因"}` };
+    }
+    const base = served.urls[0].endsWith("/") ? served.urls[0] : `${served.urls[0]}/`;
+    /* 从**声明**里取的 entry（不是入参那个字符串）—— 这是「渲染层无法伪造路径」的关键一行。 */
+    const entry = panels[0].entry!.replace(/\\/g, "/");
+    return { ok: true as const, url: `${base}${entry}`, reused: served.reused === true };
+  });
+
+  /* A-1200 · B3：取某个**栏目**（`contributes.views`）的可加载 url —— 与 `plugins_panel_open`
+     **逐字同款**（同一个 `httpServer`、同一个「目录白名单 = 该插件自己的目录」口径、同样的沙箱 iframe），
+     区别只是**服务哪个入口**（栏目 = 整块功能区；panel = 插入点上的一小块）。
+     ⚠️ **入参的 entry 只作定位键**：真实 entry 一律从 `pluginViewDecls`（已接线插件的**已校验**声明）
+     里按（plugin, entry）**精确匹配**取回 —— 清单层已 fail-closed 查过纯相对（`..`/盘符/前导分隔符），
+     渲染层传来的字符串**一律不被信任**（否则这条通道就成了绕过清单校验的旁门）。
+     查 `pluginViewDecls` 而不是 `manifest`：它只装**当前已接线**的声明 ⇒ 顺带把「未装载/已停用/
+     被 rejected」也挡住了。**绝不 `file://`**（§5.4）。 */
+  handleTrusted<{ name: string; entry: string }>(IPC_CHANNELS.plugins_view_open, async (_event, p) => {
+    const name = String(p?.name ?? "").trim();
+    if (!name) { return { ok: false as const, error: "缺少插件名" }; }
+    const entryKey = String(p?.entry ?? "").trim();
+    if (!entryKey) { return { ok: false as const, error: "缺少栏目入口" }; }
+    const state = await ensurePluginHost();
+    const declared = (pluginViewDecls.get(name) ?? []).filter((v) => v.entry === entryKey);
+    if (declared.length === 0) {
+      return { ok: false as const, error: `插件没有已接线的该栏目（contributes.views 里没有 entry=${entryKey}）：${name}` };
+    }
+    const dir = state.dirs.get(name);
+    if (!dir) { return { ok: false as const, error: `插件没有磁盘目录：${name}` }; }
+    const served = await httpServer.serve({ dir, host: "127.0.0.1", origin: "agent" });
+    if (!served.ok || !served.urls?.[0]) {
+      return { ok: false as const, error: `栏目服务启动失败：${served.error ?? "未知原因"}` };
+    }
+    const base = served.urls[0].endsWith("/") ? served.urls[0] : `${served.urls[0]}/`;
+    /* 从**声明**里取的 entry（不是入参那个字符串）—— 这是「渲染层无法伪造路径」的关键一行。 */
+    const entry = declared[0].entry.replace(/\\/g, "/");
     return { ok: true as const, url: `${base}${entry}`, reused: served.reused === true };
   });
 

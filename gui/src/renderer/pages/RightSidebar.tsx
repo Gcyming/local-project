@@ -26,6 +26,10 @@ import { failTitle, failHint, failCodeName } from "./browserErrors.js";
 import TopicRail, { type RailEntry } from "./TopicRail.js";
 import { loadRailParams, onRailParams, type RailParams } from "./railParams.js";
 import BrainstormPanel from "./BrainstormPanel.js";
+import { PluginSidebarSections } from "../components/UiSlotHost.js";
+/* A-1200 · B3：插件自有栏目（`contributes.views` 里 `placement:"right"` 的那些）——
+   **泛化**既有 `contributes.page`：从「一插件一页」变成「一插件多 tab」，tab 条本身就是入口。 */
+import { PluginViewFrame, usePluginViews, viewKey, viewsAt } from "../components/PluginViewHost.js";
 import { onCtxUpdate, readAutoCompressCfg, AUTOCOMPRESS_CFG_EVENT, resolveToolLabel, readSessionProducts } from "./ChatPanel.js";
 
 import { readLiveMonitor } from "./liveMonitor.js";
@@ -64,7 +68,7 @@ import { pricingDisplayCurrency, formatUsdAs, type PriceCurrency } from "../../.
 
 import { readLedgerCurrencyPref, resolveLedgerCurrency, LEDGER_CURRENCY_EVENT, type LedgerCurrencyPref } from "./ledgerCurrencyCfg.js";
 
-type TabType = "tasks" | "terminal" | "browser" | "git" | "file" | "page";
+type TabType = "tasks" | "terminal" | "browser" | "git" | "file" | "page" | "view";
 
 
 const IMG_MIME: Record<string, string> = {
@@ -119,6 +123,13 @@ interface TabInstance {
 
   browseRel?: string;
   
+
+  /* A-1200 · B3：**插件自有栏目** tab（`contributes.views` 里 `placement:"right"` 的那些）。
+     这三个字段是 tab 与栏目声明的**唯一纽带** —— 插件被停用时靠它们把 tab 精确摘掉
+     （见上面那个清理 useEffect），否则 tab 条上会留一个点开是空白的死 tab。 */
+  viewPlugin?: string;
+  viewId?: string;
+  viewEntry?: string;
 
   isDefault?: boolean;
 }
@@ -317,7 +328,11 @@ export default function RightSidebar(props: {
   const searchHomeUrl = searchDelivery?.url ?? "";
   React.useEffect(() => {
     const t = tabs.find((x) => x.id === activeId) ?? null;
-    const kind: SidebarTabKind = t?.type ?? "none";
+    /* ⚠️ A-1200 · B3：栏目 tab（`view`）在这一层归成 `page` —— 搜索桥要回答的是
+   「把当前右栏的什么东西喂给模型」，而栏目与 `contributes.page` 在这件事上**同类**
+   （都是扩展在右栏里的沙箱页，都不是可搜索的宿主本地文件）。不做这个归一的话
+   类型上就过不了，而把它当成 file/terminal 会让搜索桥去取一个根本不存在的位置。 */
+    const kind: SidebarTabKind = t?.type === "view" ? "page" : (t?.type ?? "none");
     const raw = (t?.type === "browser" || t?.type === "page") ? (t.url ?? "").trim() : "";
     publishSidebarTab(
       { kind, url: raw || (kind === "browser" ? searchHomeUrl : ""), title: (t?.title ?? "").trim() },
@@ -690,6 +705,40 @@ export default function RightSidebar(props: {
     setActiveId(tab.id);
   };
 
+  /* A-1200 · B3：**插件自有栏目**（`placement:"right"`）—— 与 openPageTab 同款机制
+     （tab 条即入口），差别只有两处：
+       ① tab 实例带 `viewPlugin`/`viewId`/`viewEntry` —— 于是插件一停用，宿主能**按 id 精确剔除**
+          这几个 tab（下面那个 useEffect），不会在 tab 条上留一个点开是空白的死 tab；
+       ② url 走 `plugins_view_open`（与 `plugins_panel_open` 同款：只从**已校验的声明**里取回真实 entry）。
+     ⚠️ 冲突项（跨插件同 placement 同 id）**不建 tab**（渲染成禁用态即可，见下）——
+        「两个栏目抢同一个 tab」不如明确显示冲突。 */
+  const pluginViews = usePluginViews();
+  const rightPluginViews = viewsAt(pluginViews, "right");
+  const openPluginViewTab = (view: { plugin: string; id: string; entry: string; title: string }): void => {
+    const same = tabs.find((t) => t.type === "view" && t.viewPlugin === view.plugin && t.viewId === view.id);
+    if (same) { setActiveId(same.id); return; }
+    const tab: TabInstance = {
+      id: uid(), type: "view", title: view.title,
+      viewPlugin: view.plugin, viewId: view.id, viewEntry: view.entry,
+    };
+    setTabs((prev) => [...prev, tab]);
+    setActiveId(tab.id);
+  };
+
+  /* ⚠️ **幽灵 tab 不变量**：持有该栏目的插件被停用/卸载 ⇒ 快照里不再有它 ⇒ 这里把对应的 tab 摘掉
+     （并把焦点移到相邻 tab）。不做这一步 = 用户点开是空白，而插件已经不在了。 */
+  React.useEffect(() => {
+    setTabs((prev) => {
+      const stale = prev.filter((t) => t.type === "view" && !rightPluginViews.some((v) => v.plugin === t.viewPlugin && v.id === t.viewId));
+      if (stale.length === 0) { return prev; }
+      const staleIds = new Set(stale.map((t) => t.id));
+      const next = prev.filter((t) => !staleIds.has(t.id));
+      /* `activeId` 是 `string | undefined`（无 tab 时为 undefined），故回落值给 undefined 而非 ""。 */
+      setActiveId((cur) => (cur !== undefined && staleIds.has(cur) ? (next.find((t) => t.type !== "view")?.id ?? next[0]?.id) : cur));
+      return next;
+    });
+  }, [rightPluginViews]);
+
   
 
 
@@ -1031,8 +1080,11 @@ export default function RightSidebar(props: {
       <div className="right-tabbar" style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border)", padding: "0 4px", background: "var(--sidebar-bg, #1e1e2e)" }}>
         <div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0, overflowX: "auto", overflowY: "hidden" }}>
           {tabs.map((tab) => {
-            const meta = TAB_TYPE_META.find((m) => m.type === tab.type)!;
-            const Icon = meta.icon;
+            const meta = TAB_TYPE_META.find((m) => m.type === tab.type);
+            /* A-1200 · B3：`view` 形态**不进「新建」菜单**（`TAB_TYPE_META` 里没有它 ——
+               栏目 tab 只能由插件自己的栏目声明开出来，不许用户凭空建一个空的）。
+               所以这里给它一个显式的显示名与图标兜底，而不是 `!` 断言崩掉整条 tab 条。 */
+            const Icon = meta?.icon ?? FileIcon;
             const isActive = tab.id === activeId;
             const isDragging = tab.id === dragId;
             const isDragOver = tab.id === dragOverId;
@@ -1091,6 +1143,37 @@ export default function RightSidebar(props: {
                   <CloseIcon size={12} />
                 </button>
                 )}
+              </div>
+            );
+          })}
+          {/* A-1200 · B3：`placement:"right"` 栏目的**入口** —— 一行「栏目 tab」，
+              点击后从 tab 条切换到该栏目（`openPluginViewTab`）。
+              tab 条本身就是入口，所以这一行与上面的 tab 并列摆在同一个条里。
+              冲突项渲染成禁用态并说明原因（不静默丢弃、不静默覆盖）。 */}
+          {rightPluginViews.map((v) => {
+            const open = tabs.find((t) => t.type === "view" && t.viewPlugin === v.plugin && t.viewId === v.id);
+            const isActive = open?.id === activeId;
+            return (
+              <div
+                key={viewKey(v)}
+                className={`right-tab${isActive ? " active" : ""}`}
+                title={v.conflict
+                  ? "与该落点的另一个插件栏目冲突，已禁用（调整 order 或改名可解）"
+                  : `${v.plugin} 扩展声明的栏目（在右栏整块打开）`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  padding: "5px 10px", marginRight: 2, borderRadius: "6px 6px 0 0",
+                  background: isActive ? "var(--tab-active-bg, #2a2a3e)" : "var(--tab-inactive-bg, transparent)",
+                  color: isActive ? "var(--text-primary)" : "var(--text-secondary)",
+                  cursor: v.conflict ? "not-allowed" : "pointer",
+                  fontSize: 12, whiteSpace: "nowrap", maxWidth: 160, minWidth: 80, flexShrink: 0,
+                  opacity: v.conflict ? 0.55 : 1,
+                  border: isActive ? "1px solid var(--border)" : "1px solid transparent",
+                }}
+                onClick={() => { if (!v.conflict) { openPluginViewTab(v); } }}
+              >
+                <FileIcon size={14} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", flex: "1", minWidth: 0 }}>{v.title}</span>
               </div>
             );
           })}
@@ -1288,7 +1371,18 @@ export default function RightSidebar(props: {
         {activeTab && activeTab.type === "page" && (
           <PluginPageTab tab={activeTab} />
         )}
+        {/* A-1200 · B3：`placement:"right"` 栏目的**本体** —— iframe 写法照抄上方
+            `PluginPageTab`（同一套沙箱口径：跨源 + sandbox ⇒ 扩展碰不到宿主对象），
+            唯一区别是 src 由 `plugins_view_open` 现取（`PluginViewFrame` 内做），
+            而不是打开 tab 时就拿好的固定 url。 */}
+        {activeTab && activeTab.type === "view" && activeTab.viewPlugin && activeTab.viewId && (
+          <PluginRightViews tab={activeTab} />
+        )}
       </div>
+      {/* A-1200 · B1：`sidebar_section` 区域（扩展声明的右栏整块分区，**item + panel 都收**；
+          panel 走沙箱 iframe，见 UiSlotHost）。放在 `.right-body` **之外**、`<aside>` 之内 ——
+          这样它是右栏的固定分区，不随当前打开的页签切换而消失。 */}
+      <PluginSidebarSections />
     </aside>
   );
 }
@@ -1318,7 +1412,38 @@ function PluginPageTab(props: { tab: TabInstance }): JSX.Element {
   );
 }
 
-
+/** A-1200 · B3：`placement:"right"` 栏目的**本体**（tab 内容区）。
+ *
+ *  ## 为什么不复用上面的 `PluginPageTab`
+ *  `PluginPageTab` 吃的是**打开 tab 时就取好的固定 url**（`contributes.page` 走 `plugins_page_open`）；
+ *  栏目这边走 `plugins_view_open`（主进程只从**已校验的声明**里取回真实 entry），
+ *  且要在 tab 被切到时才去取（懒加载：没被点开的栏目不该占着一个 127.0.0.1 端口）。
+ *  iframe 的 `sandbox` 属性由 `PluginViewHost` 的 `VIEW_SANDBOX` 给 —— 与 `PluginPageTab` **逐字同款**。
+ *  ⚠️ 声明已在上面那个清理 useEffect 里按 (plugin,id) 校验过；这里仍**如实兜一层**：
+ *  tab 上的三项丢了就显示「栏目声明已变更」，而不是静默空白。 */
+function PluginRightViews(props: { tab: TabInstance }): JSX.Element {
+  const { tab } = props;
+  const views = viewsAt(usePluginViews(), "right");
+  const view = views.find((v) => v.plugin === tab.viewPlugin && v.id === tab.viewId);
+  if (!view) {
+    return (
+      <div style={{ padding: 16, fontSize: 12, color: "var(--text-dim)", lineHeight: 1.7 }}>
+        该栏目的声明已不可用（插件被卸载 / 停用，或声明已改）。
+        栏目随 `plugins_changed` 全量重算，不留幽灵 tab。
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, flexShrink: 0 }}>
+        <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {view.plugin} 扩展声明的栏目：{view.entry}
+        </span>
+      </div>
+      <PluginViewFrame view={view} style={{ display: "block", flex: 1, width: "100%", minHeight: 0, background: "#fff" }} />
+    </div>
+  );
+}
 
 function GitTab(props: { workspace: string; onFileClick?: (rel: string, name: string) => void }): JSX.Element {
   const api = (window as unknown as { slimeAPI?: any }).slimeAPI;

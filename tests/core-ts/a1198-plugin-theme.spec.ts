@@ -173,6 +173,22 @@ describe("A-1198-T ③ 生效解析与环境落值（停用即回落、不残留
     expect(resolveActiveTheme(themes, "gone")).toBeNull();
   });
 
+  it("resolveActiveTheme：插件还在但**那一套**不在 → null（多皮肤后与「插件没了」是两处判据）", () => {
+    /* ⚠️ A-1200 · B2 补的**实测缺口**：B2 把 `resolveActiveTheme` 改成「同插件筛选 + 皮肤名匹配」，
+       于是「找不到」有**两处**判据：`themes.filter(plugin)` 为空（插件没了）与
+       `samePlugin.find(皮肤名)` 落空（插件在、但那一套被改名/换掉了）。
+       本文件原来只钉了前者 —— 后者当时被`mut-a1198-plugin-theme` M9 实测存活顶出来
+       （旧M9 变异锚在 `?? null` 那行，改成"返回一个伪造对象"，只钉前者的守卫照样绿）。
+       ⇒ 这里把「插件在但套名对不上」也钉死，两处判据各有守卫。 */
+    const themes = [{ plugin: "a", id: "第一套" }, { plugin: "a", id: "第二套" }, { plugin: "b", id: "别的" }];
+    expect(resolveActiveTheme(themes, "a::第一套")).toEqual(themes[0]);
+    expect(resolveActiveTheme(themes, "a::第二套")).toEqual(themes[1]);
+    /* 插件在、套名悬空 ⇒ null（不许返回一个"看起来生效"的幽灵皮肤）。 */
+    expect(resolveActiveTheme(themes, "a::已被改名的套")).toBeNull();
+    /* 老格式（只存插件名）⇒ 该插件第一套（向后兼容分支）。 */
+    expect(resolveActiveTheme(themes, "a")).toEqual(themes[0]);
+  });
+
   it("applyPluginTheme：落值 / 换成令牌更少的皮肤时旧变量被清理 / null 全清", () => {
     const root = fakeRoot();
     const n1 = applyPluginTheme(
@@ -206,10 +222,18 @@ describe("A-1198-T ④ 接线：host / main / ipc / 渲染层 / 外观页", () =
   it("main：主题表 + 注册钩子 + 快照 themes + 安装示例通道", () => {
     expect(MAIN_SRC).toContain("const pluginThemeDecls = new Map<string, PluginThemeDecl>();");
     expect(MAIN_SRC).toContain("registerTheme: (manifest) => {");
-    expect(MAIN_SRC).toContain("const themes: PluginThemeDTO[] = [...pluginThemeDecls.entries()]");
+    /* ⚠️ 2026-10-09（A-1200 · B2）：快照 themes 的产出行从「一表一map」改成**两表合并**
+       （单套 `theme` + 多套 `themes`），所以旧的 `const themes: PluginThemeDTO[] =
+       [...pluginThemeDecls.entries()]` 单行锚点失效 —— 改为钉合并表达式本身。 */
+    expect(MAIN_SRC).toContain("const themes: PluginThemeDTO[] = [");
+    expect(MAIN_SRC).toContain("...pluginThemeDecls.entries()");
+    expect(MAIN_SRC).toContain("...pluginThemesDecls.entries()");
     /* ⚠️ 2026-10-09 锚点更新（A-1198 · 续：CSS 贡献点）：快照多带了 cssStyles（扩展 CSS 外观），
-       返回形状从 `{ slots, themes, warnings }` 变成 `{ slots, themes, cssStyles, warnings }`。 */
-    expect(MAIN_SRC).toContain("return { slots: out, themes, cssStyles, warnings: [] };");
+       返回形状从 `{ slots, themes, warnings }` 变成 `{ slots, themes, cssStyles, warnings }`。
+       ⚠️ 2026-10-09 再更新（A-1200 · B3：插件自有栏目 views）：快照又多了 views
+       ⇒ 返回形状变成 `{ slots, themes, cssStyles, views, warnings }`。
+       判据仍是「整个返回对象字面量」—— 少一个键都该红（那正是「快照漏了某类贡献」的现场）。 */
+    expect(MAIN_SRC).toContain("return { slots: out, themes, cssStyles, views: viewsOut, warnings: [] };");
     expect(MAIN_SRC).toContain("IPC_CHANNELS.plugins_install_example");
     expect(MAIN_SRC).toContain("const EXAMPLE_PLUGIN_NAME = \"hello-slime\";");
   });
@@ -261,8 +285,19 @@ describe("A-1198-T ⑤ 官方示例扩展（hello-slime）：结构齐全 + 真�
     expect(c?.settings?.length).toBeGreaterThan(0);
     expect(c?.ui?.length).toBe(4);
     expect(c?.scripts?.length).toBe(1);
-    expect(c?.page?.kind).toBe("html");
-    expect(c?.theme?.name).toBeTruthy();
+    /* ⚠️ 2026-10-09（A-1200 · B3）：示例包的 `contributes.page` 已泛化成
+       `contributes.views`（page ≡ 唯一一个 placement:"right" 的栏目，两者**不可同写**）。
+       ⇒ 这里钉的是「示例声明了栏目，且含一个右栏栏目」，而不是「示例声明了 page」。
+       老写法由 A-1198-P spec 与 a1200-plugin-views spec 单独钉住（向后兼容不靠示例包证明）。 */
+    expect(c?.views?.length, "示例包应演示「插件自有栏目」").toBeGreaterThanOrEqual(2);
+    expect(c?.views?.filter((v) => v.placement === "right").length, "示例应有至少一个右栏栏目（page 的等价物）").toBe(1);
+    expect(c?.views?.some((v) => v.placement === "main"), "示例应有一个主区整块视图栏目").toBe(true);
+    expect(c?.page, "示例不再用 page（与 views 互斥）").toBeUndefined();
+    /* ⚠️ 2026-10-09（A-1200 · B2）：示例包从单 `theme` 改成**两套** `themes`
+       （演示「一个插件多套皮肤」，对标 DSH 的 theme-gallery）。
+       `theme` 字段本身仍在（向后兼容的独立断言，见下一条），这里只钉多套。 */
+    expect(c?.themes?.length).toBe(2);
+    expect(new Set((c?.themes ?? []).map((t) => t.name)).size).toBe(2);
     expect(r.manifest.mode?.kind).toBe("stages");
   });
 

@@ -77,13 +77,17 @@ const MUTATIONS = [
       "          dispose: () => {\n            void ui;\n          },",
     ),
   },
+  /* ⚠️ 锚点重打（2026-10-09 · A-1200 · B1）：槽位表从 4 个扩成 13 个区域，且
+     `PLUGIN_UI_SLOTS` 变成 `PLUGIN_UI_REGIONS` 的**别名** ⇒ 原锚点整行已不存在
+     （check-mut-anchors 报「未命中」＝这条守卫已失去保护，正是它该抓的那种漂移）。
+     变异意图不变：从**区域白名单**里删掉 toolbar_item ⇒ B5 槽位声明被拒。 */
   {
     name: "M5 toolbar_item 从白名单被删（B5 槽位声明被拒 ⇒ 按钮永远出不来）",
     file: F_CONTRIBUTES,
     mutate: (t) => sub(
       t,
-      "export const PLUGIN_UI_SLOTS = [\"settings_panel\", \"status_item\", \"chat_action\", \"toolbar_item\"] as const;",
-      "export const PLUGIN_UI_SLOTS = [\"settings_panel\", \"status_item\", \"chat_action\"] as const;",
+      "  \"toolbar_item\",\n",
+      "",
     ),
   },
   /* ── 2026-10-08 · B5：page / toolbar_item ───────────────────────── */
@@ -99,9 +103,14 @@ const MUTATIONS = [
   {
     name: "M7 交叉校验被删：toolbar_item 无 page 也放行（假按钮）",
     file: F_CONTRIBUTES,
+    /* ⚠️ 2026-10-09 锚点重打（A-1200 · B3）：B3 把 `page` 泛化成「`views` 里唯一一个
+       `placement:"right"` 的栏目」⇒ 这条判据的判据式从 `out.page === undefined` 变成
+       `!hasOwnPage`（多了一个 `hasOwnPage` 的定义行），错误文案尾部也补了「也可改为在
+       contributes.views 里声明一个 placement=right 的栏目」。⇒ 旧锚点未命中。
+       变异**语义不变**（仍然忠实复现「判据被删 ⇒ toolbar_item 无页面也放行」）。 */
     mutate: (t) => sub(
       t,
-      "  if ((out.ui ?? []).some((u) => u.slot === \"toolbar_item\") && out.page === undefined) {\n    errors.push(\"contributes.ui 含 toolbar_item 但缺少 contributes.page：该槽位的唯一用途是打开扩展自己的页面，没有 page 就是假按钮\");\n  }\n",
+      "  const hasOwnPage = out.page !== undefined || (out.views ?? []).some((v) => v.placement === \"right\");\n  if ((out.ui ?? []).some((u) => u.slot === \"toolbar_item\") && !hasOwnPage) {\n    errors.push(\"contributes.ui 含 toolbar_item 但缺少 contributes.page：该槽位的唯一用途是打开扩展自己的页面，没有 page 就是假按钮（也可改为在 contributes.views 里声明一个 placement=right 的栏目）\");\n  }\n",
       "",
     ),
   },

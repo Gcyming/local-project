@@ -675,13 +675,23 @@ describe("A-1198 · 续：插件技能对 Agent 可见（审计修复②）", ()
  * 现场：`contributes` 实际六类（settings/ui/scripts/page/theme/css），
  * 但自述写「共五类」且完全没提 `css` ⇒ Agent 不知道自己能写 CSS（能力存在但无人知道 = 等于没有）。
  * 另有一处**自相矛盾**：同一段先说 CSS 任意、后说「扩展提供不了任意 CSS」（旧红线残留）。
+ *
+ * ⚠️ A-1200 · B2：解析白名单多了 `themes`（一个插件多套皮肤）⇒ 本审计的类别数
+ * 从六类变七类。**下面的名字清单与类别计数必须与 `ALLOWED_CONTRIBUTES_FIELDS` 同源**
+ * —— ④ 那条守卫已经自动按白名单长度算中文数字，所以这一条也必须是七类。
+ * ⚠️ A-1200 · B3：白名单多了 `views`（插件自有栏目）⇒ 七类 → **八类**（下面是硬写的，
+ * 而 ④ 那条会自动算，两者不一致时必有一条红 —— 这正是本守卫的设计意图）。
  */
-describe("A-1198 · 续：Agent 自述覆盖六类贡献点（审计）", () => {
+describe("A-1198 · 续：Agent 自述覆盖八类贡献点（审计）", () => {
   const GUIDE = readFileSync(join(__dirname, "../../core-ts/src/services/agentTools.ts"), "utf8");
 
-  it("① 自述声明六类，且六类名字逐一出现（少一类 = Agent 不知道有这能力）", () => {
-    expect(GUIDE).toContain("共六类");
-    for (const k of ["`settings`", "`ui`", "`scripts`", "`page`", "`theme`", "`css`"]) {
+  it("① 自述声明八类，且八类名字逐一出现（少一类 = Agent 不知道有这能力）", () => {
+    /* ⚠️ 2026-10-09（A-1200 · B2）：`themes`（多套皮肤）进白名单 ⇒ 六类 → 七类。
+       ⚠️ 2026-10-09（A-1200 · B3）：`views`（插件自有栏目）进白名单 ⇒ 七类 → 八类。
+       类别数不是随手写的：`④` 会按 ALLOWED_CONTRIBUTES_FIELDS 的长度算中文数字，
+       两处不一致时必有一条红。 */
+    expect(GUIDE).toContain("共八类");
+    for (const k of ["`settings`", "`ui`", "`scripts`", "`page`", "`views`", "`theme`", "`themes`", "`css`"]) {
       expect(GUIDE, `自述缺贡献点 ${k}`).toContain(k);
     }
   });

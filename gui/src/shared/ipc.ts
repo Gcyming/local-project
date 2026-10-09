@@ -111,6 +111,15 @@ export const IPC_CHANNELS = {
   plugins_ui: "slime:plugins:ui",
   /** A-1197 · B5（L4a page）：打开扩展自有页面（按需起 127.0.0.1 静态服务，返回 url）。 */
   plugins_page_open: "slime:plugins:pageOpen",
+  /** A-1200 · B1：取某个 panel 声明的可加载 url（按需起 127.0.0.1 静态服务）。
+   *  与 `plugins_page_open` 同款底子（同一个 `httpServer`、同样的目录白名单口径），
+   *  区别只是**服务哪个入口**：`page` 是插件的整页，`panel` 是挂在任意区域的小块 UI。 */
+  plugins_panel_open: "slime:plugins:panelOpen",
+  /** A-1200 · B3：取某个**栏目**（`contributes.views`）声明的可加载 url。
+   *  与 `plugins_panel_open` / `plugins_page_open` **完全同一套底子**（同一个 `httpServer`、
+   *  同样的「目录白名单 = 该插件自己的目录」口径、同样的沙箱 iframe）——
+   *  栏目不是新机制，只是「整块 UI」的又一种落点。 */
+  plugins_view_open: "slime:plugins:viewOpen",
   /** A-1198：安装官方示例扩展（从随包 template/plugins 复制到 config/plugins；已存在则拒绝覆盖）。 */
   plugins_install_example: "slime:plugins:installExample",
   /** A-1198：统一保存扩展页的拨片 / 信任改动（一次写盘 停用名单 + trust.json，随后重扫+广播使其生效；**不退出进程**）。 */
@@ -609,6 +618,12 @@ export interface PluginUiSlotDTO {
   slot: string;
   plugin: string;
   id: string;
+  /** A-1200 · B1：贡献形态（`item` = 宿主渲染；`panel` = 扩展自带 HTML）。
+   *  缺省按 `item` 处理（老 DTO 兼容），但主进程快照一律显式带上 —— 渲染层要靠它分派。 */
+  kind?: string;
+  /** 仅 `kind: "panel"`：**纯相对**入口（清单层已 fail-closed 校验过 `..`/盘符/前导分隔符）。
+   *  渲染层**不自己拼 url** —— 调 `plugins_panel_open` 由主进程起服务并给出绝对 url。 */
+  entry?: string;
   title?: string;
   label?: string;
   icon?: string;
@@ -622,6 +637,10 @@ export interface PluginUiSlotDTO {
 /** A-1198 · 主题贡献点（皮肤）：一条已接线的主题声明（渲染层按它落 CSS 变量；卸载即消失）。 */
 export interface PluginThemeDTO {
   plugin: string;
+  /** A-1200 · B2：**同一插件内区分第几套**的稳定键（= 皮肤名）。
+   *  ⚠️ 不能只用 `plugin` —— 一个插件多套皮肤时会全部撞成同一个 key（外观页两套皮肤
+   *  互相串台，且持久化选择分不清"选的是哪一套"）。 */
+  id: string;
   name: string;
   /** 白名单设计令牌（解析已 fail-closed 校验；渲染层只需落值，无需再验）。 */
   tokens: import("../../../core-ts/src/plugin/contributes.js").PluginThemeTokens;
@@ -635,12 +654,34 @@ export interface PluginCssDTO {
   css: string;
 }
 
+/** A-1200 · B3：**插件自有栏目**的一条已接线声明（渲染层按 `placement` 挂到三个落点之一）。
+ *  与 `PluginUiSlotDTO` 是**两种贡献形态**，不是同一件事的两个名字。 */
+export interface PluginViewDTO {
+  plugin: string;
+  /** 同插件内唯一；跨插件「同 placement 同 id」冲突时标 `conflict`（渲染成禁用态）。 */
+  id: string;
+  /** 栏目展示名（清单层必填校验过；入口要显示它）。 */
+  title: string;
+  /** **纯相对**入口（清单层已 fail-closed 校验过 `..`/盘符/前导分隔符）。
+   *  渲染层**不自己拼 url** —— 调 `plugins_view_open` 由主进程起服务并给出绝对 url。 */
+  entry: string;
+  /** 落点：`main`（主区整块视图）/ `right`（右栏 tab）/ `left`（左栏栏目块）。 */
+  placement: import("../../../core-ts/src/plugin/contributes.js").PluginViewPlacement;
+  icon?: string;
+  order?: number;
+  conflict?: boolean;
+}
+
 export interface PluginUiSnapshotDTO {
   slots: PluginUiSlotDTO[];
   /** A-1198：可用的扩展皮肤（空数组 = 没有插件声明 theme）。 */
   themes: PluginThemeDTO[];
   /** A-1198 · 续：可用的扩展 CSS 外观（空数组 = 没有插件声明 contributes.css）。 */
   cssStyles: PluginCssDTO[];
+  /** A-1200 · B3：**插件自有栏目**（整块功能区；空数组 = 没有插件声明 contributes.views）。
+   *  ⚠️ 与 `slots` 的根本差别：slot 是「在宿主既有区域里放小组件的插入点」，
+   *     view 是「插件开辟自己的功能区 + 独立入口」（主区 / 右栏 tab / 左栏栏目块）。 */
+  views: PluginViewDTO[];
   warnings: string[];
 }
 

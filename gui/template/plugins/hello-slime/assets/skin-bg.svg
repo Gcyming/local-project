@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <!-- 示例扩展自带的壁纸（A-1200 · B2：皮肤资源）。CSS 里用 url(plugin-asset:assets/skin-bg.svg) 引用，
+       宿主在主进程侧改写成该插件目录经 127.0.0.1 静态服务后的真实地址（只对自己插件的目录生效）。
+       ⚠️ 这是纯本文件自包含的 SVG（无外链、无脚本），随示例包一起播种到用户磁盘。 -->
+  <defs>
+    <linearGradient id="dusk" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1a2a"/>
+      <stop offset="55%" stop-color="#132a44"/>
+      <stop offset="100%" stop-color="#1d1436"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="800" fill="url(#dusk)"/>
+  <circle cx="980" cy="150" r="220" fill="#2dd4bf" opacity="0.10"/>
+  <circle cx="180" cy="680" r="260" fill="#7c3aed" opacity="0.10"/>
+</svg>

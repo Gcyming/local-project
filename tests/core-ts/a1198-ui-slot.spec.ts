@@ -37,7 +37,9 @@ describe("A-1198-UI ① 全量重算与三元组 key（卸载不彻底的高发�
   });
 
   it("未知槽位渲染成「本槽位尚未接线」而不是空白（不静默）", () => {
-    expect(src).toContain("本槽位尚未接线");
+    /* ⚠️ A-1200 · B1 起未知区域的文案是「本区域尚未接线（…）」/`本区域尚未接线：…`
+       —— 槽位升级成区域后「槽」这个字不再准确（守卫按字面比对，不靠 includes 糊过去）。 */
+    expect(src).toContain("本区域尚未接线");
   });
 
   it("冲突项渲染成**禁用态**（不静默丢弃、不静默覆盖）", () => {
@@ -58,13 +60,16 @@ describe("A-1198-UI ② 三处挂载点真的接了", () => {
 
   it("StatusPanel：底部挂载 PluginStatusItems", () => {
     const src = read("gui/src/renderer/pages/StatusPanel.tsx");
-    expect(src).toContain("import { PluginStatusItems } from \"../components/UiSlotHost.js\"");
+    /* ⚠️ A-1200 · B1 起这条 import 多了 `PluginStatusBarItems`（status_bar 区域）⇒ 只认组件名。 */
+    expect(src).toMatch(/import \{[^}]*PluginStatusItems[^}]*\} from "\.\.\/components\/UiSlotHost\.js"/);
     expect(src).toMatch(/<PluginStatusItems \/>/);
   });
 
   it("ChatPanel：输入栏动作区挂载 PluginChatActions（插文本）与 PluginToolbarItems（B5 开页面）", () => {
     const src = read("gui/src/renderer/pages/ChatPanel.tsx");
-    expect(src).toMatch(/import \{ PluginChatActions(?:, PluginToolbarItems)? \} from "\.\.\/components\/UiSlotHost\.js"/);
+    /* ⚠️ A-1200 · B1 起这条 import变长了（多了输入栏两端与消息动作区）⇒ 锚点不能写死整行，
+       只认「从 UiSlotHost 导入了 PluginChatActions」这件事本身。 */
+    expect(src).toMatch(/import \{[^}]*PluginChatActions[^}]*\} from "\.\.\/components\/UiSlotHost\.js"/);
     expect(src).toMatch(/<PluginChatActions onInsert=\{\(t\) => setInput\(\(v\) => \(v \? `\$\{v\} \$\{t\}` : t\)\)\} \/>/);
     /* A-1197 · B5：toolbar_item 挂载（点击在右栏打开扩展自有页面）。 */
     expect(src).toMatch(/<PluginToolbarItems \/>/);
@@ -81,9 +86,18 @@ describe("A-1198-UI ③ 主进程汇总：唯一数据源 / 冲突标记 / 卸�
   });
 
   it("冲突裁决：同 slot 同 id 按 order→插件名排序取第一个，其余标 `conflict: true`", () => {
-    // 精确到**代码形态**（注释里也出现过 `conflict: true` 字样 —— 宽断言会被注释喂饱，实测踩过）
-    expect(src).toMatch(/\{ \.\.\.r, conflict: true \}/);
-    expect(src).toMatch(/const sorted = \[\.\.\.list\]\.sort\(/);
+    /* ⚠️ 2026-10-09 判据收窄（A-1200 · B3实测顶出来的守卫退化）：
+       `{ ...r, conflict: true }` 这个 token 在 B3 之后**出现在两处**（slots 的冲突裁决 +
+       栏目 views 的冲突裁决，同款机制）⇒ 原来的 `toMatch` 会被另一处喂饱。
+       实测后果：`mut-a1198-ui-slot` M3（把**slots** 那处的 `forEach` 改成不标 conflict）
+       跑批**存活**了 —— 守卫绿着，而缺陷是真的。
+       ⇒ 判据必须**锁定在 slots 那一段**（`byKey` 分组 + `out.push`），不是全文 grep。
+       这里按「`const byKey = ` 到 `const out: PluginUiSlotDTO[]` 之间」切段。 */
+    const seg = /const byKey = new Map<string, PluginUiSlotDTO\[\]>\(\);[\s\S]*?const out: PluginUiSlotDTO\[\] = \[\];[\s\S]*?\n  \}/.exec(src);
+    expect(seg, "main/index.ts 里找不到 slots 的冲突裁决段（byKey 分组 → out 汇总）").not.toBeNull();
+    expect(seg![0], "slots 的冲突裁决必须标 conflict: true").toMatch(/\{ \.\.\.r, conflict: true \}/);
+    /* 精确到**代码形态**（注释里也出现过 `conflict: true` 字样 —— 宽断言会被注释喂饱，实测踩过）。 */
+    expect(seg![0]).toMatch(/const sorted = \[\.\.\.list\]\.sort\(/);
   });
 
   it("`plugins_ui` 通道已注册（handler 直接回汇总快照）", () => {

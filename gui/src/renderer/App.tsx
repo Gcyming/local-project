@@ -18,6 +18,13 @@ import { ChevronIcon, EditIcon, MenuIcon, PlusIcon, SettingsIcon, SidebarLeftIco
 import { ThemeDialogHost } from "./components/ThemeDialog.js";
 import { PluginThemeHost } from "./components/PluginThemeHost.js";
 import { PluginCssHost } from "./components/PluginCssHost.js";
+import { PluginSkinLayer } from "./components/PluginSkinLayer.js";
+import { PluginOverlayFloating, PluginOverlayFullscreen, PluginTitlebarItems } from "./components/UiSlotHost.js";
+/* A-1200 · B3：插件自有栏目（`contributes.views`）——主区整块视图 + 左栏栏目块 + 标题栏切换器。
+   与上面的 UiSlotHost 是**两种贡献形态**（插入点 vs 整块栏目），刻意不合并。 */
+import { PluginLeftViews, PluginMainView, PluginMainViewBar, PluginMainViewSwitcher, usePluginViews, viewsAt } from "./components/PluginViewHost.js";
+/* 一个扩展的栏目炸了不许带塌整页（与 UiSlotHost 各区域外层包 ErrorBoundary 同款纪律）。 */
+import ErrorBoundary from "./ErrorBoundary.js";
 
 import OperationFocusOverlay from "./components/OperationFocusOverlay.js";
 
@@ -2235,6 +2242,32 @@ export default function App(): JSX.Element {
     return () => { document.body.classList.remove("float-layout"); };
   }, [mainIsFloatLayout]);
 
+  /* ── A-1200 · B3：主区在「对话 / 插件栏目」之间的切换态 ────────────────────
+   * 用户口径：「别人甚至能自己造一个影响应用整体风格的功能栏目」⇒ 落点 `main`
+   * 的栏目能**整块接管主区**（对标 DSH 的 better-sidebar 让整个应用看起来像 VSCode）。
+   *
+   * ## 为什么不持久化（会话级就够）
+   * 这不是「用户配置」，是「这一会儿在看哪块」。持久化反而会留下「重启后主区莫名其妙是空的」
+   * （那正是幽灵视图的一种）。真正的持久需求由 `view.placement` 的落点本身满足。
+   *
+   * ## ⚠️ 幽灵视图不变量（停用插件必须自动切回对话）
+   * 两道防线，缺一不可：
+   *   ① **派生**：`mainPluginView` 由「当前 activeId + 最新的 views 快照」解析而来。
+   *      插件被停用/卸载 ⇒ `plugins_changed` ⇒ 快照里没有那一项 ⇒ 解析为 null ⇒ 渲染对话。
+   *      （**不是**把 activeId 改掉，而是「找不到就不生效」—— 少一次状态同步就少一个时序坑。）
+   *   ② **显式清态**：下面的 `useEffect` 把 activeId 置空，避免切回对话后再切别的栏目时状态是脏的。 */
+  const pluginViews = usePluginViews();
+  const [mainViewId, setMainViewId] = React.useState<string>("");
+  const mainPluginView = viewsAt(pluginViews, "main").find((v) => v.id === mainViewId) ?? null;
+
+  React.useEffect(() => {
+    if (mainViewId === "") { return; }
+    if (!viewsAt(pluginViews, "main").some((v) => v.id === mainViewId)) {
+      /* 持有该栏目的插件被停用/卸载了 ⇒ 立刻把主区交回对话（否则是一块空白幽灵视图）。 */
+      setMainViewId("");
+    }
+  }, [pluginViews, mainViewId]);
+
   React.useEffect(() => {
     if (floatState !== "none" && !rightOpen) { setFloatState("none"); }
   }, [rightOpen, floatState]);
@@ -2356,6 +2389,19 @@ export default function App(): JSX.Element {
       {/* A-1198 · 续：扩展 CSS 外观（@layer slime-plugin + .slime-plugin-scope；不退出、不重载）。 */}
       <PluginCssHost />
 
+      {/* A-1200 · B2：全屏皮肤层（`#slime-skin-layer`，pointer-events:none）——
+          皮肤可对它下样式（全屏背景 / 壁纸 / 纹理），从而做到 DSH 那种"全屏覆盖"。
+          z-index 沿用 B1 的 PLUGIN_OVERLAY_Z 取值（1100）⇒ 低于对话框 backdrop(1200)，
+          **盖不掉权限确认等安全关键 UI**。无生效外观时不渲染（不残留空容器）。 */}
+      <PluginSkinLayer />
+
+      {/* A-1200 · B1：插件全屏浮层（`overlay_floating` / `overlay_fullscreen` 两个区域）。
+          容器 `pointer-events:none` + 面板自身 `auto` ⇒ 插件能贴任意角落，但不会把整个界面
+          变成死区（详见 UiSlotHost 里 z-index 取 1100 的理由：低于对话框 backdrop(1200)
+          ⇒ 盖不掉权限确认等安全关键 UI）。无声明时两者都渲染 null。 */}
+      <PluginOverlayFloating />
+      <PluginOverlayFullscreen />
+
       {
 }
       <OperationFocusOverlay />
@@ -2422,7 +2468,14 @@ export default function App(): JSX.Element {
           <MenuIcon size={16} />
         </button>
         <span className="titlebar-title">Slime</span>
+        {/* A-1200 · B1：`titlebar_start` 区域（扩展声明的标题栏左端入口；无声明时渲染 null）。 */}
+        <PluginTitlebarItems region="titlebar_start" />
         <span style={{ flex: 1 }} />
+        {/* A-1200 · B1：`titlebar_end` 区域（扩展声明的标题栏右端入口）。 */}
+        <PluginTitlebarItems region="titlebar_end" />
+        {/* A-1200 · B3：`placement:"main"` 栏目的**入口**（视图切换器；无栏目时渲染 null）。
+            挂在标题栏 ⇒ 用户可达 —— 声明了却没入口 = 「说了不算」。 */}
+        <PluginMainViewSwitcher activeId={mainPluginView?.id ?? ""} onSelect={setMainViewId} />
         {}
         <button className={`titlebar-btn${rightOpen ? " titlebar-btn-active" : ""}`}
           onClick={() => animateRightSidebar(!rightOpen)}
@@ -2633,6 +2686,11 @@ export default function App(): JSX.Element {
             )}
           </div>
 
+          {/* A-1200 · B3：`placement:"left"` 栏目的落点 —— 工作区列表**下方**的独立栏目块
+              （每块自带标题栏 + 折叠按钮 ⇒ 入口自洽，不需要另找入口）。
+              放在工作区列表之后、底部 slime 行之前：既不挤掉会话列表，也紧邻底部固定区。 */}
+          <PluginLeftViews />
+
           <div className="sidebar-sep" />
 
           {}
@@ -2743,7 +2801,22 @@ export default function App(): JSX.Element {
               <button className="titlebar-btn" title="收起悬浮窗（恢复普通布局：聊天回到中间）" onClick={(e) => { e.stopPropagation(); dismissFloat(); }}>▢</button>
             </div>
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
-              {chatPanelJsx}
+              {/* A-1200 · B3：主区在「对话 / 插件栏目」之间切换。
+                  `mainPluginView` 非空 ⇒ 整块区域归插件（对话不渲染）；为 null（含插件刚被停用）
+                  ⇒ 回到对话。**判据是派生量而不是 activeId 本身**，所以插件一停用就自动回落对话，
+                  不会留下一块空白幽灵视图。
+                  ⚠️ 对话分支写成 `{chatPanelJsx}`（不是裸 `chatPanelJsx`）：A-1152 的「唯一宿主」
+                  守卫按 `{chatPanelJsx}` 这个 token 数出现次数，必须恰好 1 处。
+                  这里仍然是 1 处 —— 浮窗/内联切换依旧只换样式不换节点，被换掉的只是
+                  「主区此刻显示对话还是插件栏目」这一层，与浮窗宿主无关。 */}
+              {mainPluginView ? (
+                <ErrorBoundary>
+                  <PluginMainViewBar active={mainPluginView} onBack={() => setMainViewId("")} />
+                  <PluginMainView view={mainPluginView} />
+                </ErrorBoundary>
+              ) : (
+                <>{chatPanelJsx}</>
+              )}
               {
 
 }

@@ -11,6 +11,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PROJECT_ROOT } from "../../core-ts/src/paths.js";
+import { parsePluginManifest } from "../../core-ts/src/plugin/manifest.js";
 
 const read = (rel: string): string => readFileSync(join(PROJECT_ROOT, rel), "utf8");
 const MAIN = "gui/src/main/index.ts";
@@ -82,9 +83,30 @@ describe("A-1198-P ② 渲染层：toolbar 点击 → 沙箱 iframe", () => {
 });
 
 describe("A-1198-P ③ 交叉校验：假按钮进不来", () => {
-  it("contributes：`toolbar_item` 缺 `page` ⇒ 整份 rejected（parsePluginContributes 的交叉约束）", () => {
+  it("contributes：`toolbar_item` 缺页面 ⇒ 整份rejected（parsePluginContributes 的交叉约束）", () => {
     const src = read("core-ts/src/plugin/contributes.ts");
-    expect(src).toMatch(/toolbar_item[\s\S]{0,120}?page === undefined/);
+    /* ⚠️ 2026-10-09（A-1200 · B3）锚点更新：原判据是 `toolbar_item … page === undefined`，
+       而 B3 把「本插件自己的页面」泛化成**两种**声明方式（`page` 或 `views` 里一个
+       `placement:"right"` 的栏目），判据相应变成 `!hasOwnPage`。
+       窗口从 120 放宽到 400 —— 因为 `hasOwnPage` 的定义里带了 `(out.views ?? [])` 这一段。
+       ⚠️ 语义没放宽：仍然是「两者都没有 ⇒ 拒」（A-1200-B3 的 spec 里另有行为级反例钉住）。 */
+    expect(src).toMatch(/toolbar_item[\s\S]{0,400}?!hasOwnPage/);
+    expect(src).toMatch(/const hasOwnPage = out\.page !== undefined \|\|/);
     expect(src).toMatch(/没有 page 就是假按钮/);
+  });
+
+  it("`toolbar_item` + 一个右栏栏目（placement right）⇒ 放行（B3：`page` 是 views 的特例，不是唯一入口）", () => {
+    const r = parsePluginManifest({
+      name: "toolbar-with-view",
+      version: "1.0.0",
+      description: "用 views 的右栏栏目满足 toolbar_item",
+      origin: "user",
+      provides: ["instructions"],
+      contributes: {
+        ui: [{ slot: "toolbar_item", id: "open", label: "打开我的栏目" }],
+        views: [{ id: "files", title: "文件树", entry: "files.html", placement: "right" }],
+      },
+    });
+    expect(r.ok, r.ok ? "" : r.errors.join("；")).toBe(true);
   });
 });
