@@ -109,6 +109,11 @@ export interface PluginContributes {
   /** A-1198 · 主题贡献点（皮肤）：声明一组**白名单设计令牌**，宿主校验后应用到全局 CSS 变量 ——
    *  可开可关（卸载/停用即恢复默认），且**没有任何扩展 CSS 进入宿主样式表**（红线不变，见下方节注）。 */
   theme?: PluginThemeDecl;
+  /** A-1198 · 续：CSS 贡献点（用户口径「把CSS 修改权限全面放开，通过插件来进行开关可控的改动」）。
+   *  纯 CSS 文本，fail-closed 静态禁令（禁 @import/url()/@font-face/!important/全局选择器/position:fixed），
+   *  落地时收进 `@layer slime-plugin`（**低于**宿主层 ⇒ 盖不掉权限弹窗等安全关键 UI），
+   *  选择器自动收进 `.slime-plugin-scope` 作用域。停用/卸载即整段撤下（可开可关）。 */
+  css?: PluginCssDecl;
 }
 
 /* ── A-1197 · B4（T1 脚本信任）──────────────────────────────────────────────
@@ -161,7 +166,7 @@ const ALLOWED_DECL_FIELDS: readonly string[] = [
 ];
 
 /** `contributes` 顶层允许出现的字段。 */
-const ALLOWED_CONTRIBUTES_FIELDS: readonly string[] = ["settings", "ui", "scripts", "page", "theme"];
+const ALLOWED_CONTRIBUTES_FIELDS: readonly string[] = ["settings", "ui", "scripts", "page", "theme", "css"];
 
 /** 单条 UI 槽位声明允许出现的全部字段（出现表外的键即拒绝）。 */
 const ALLOWED_UI_FIELDS: readonly string[] = ["slot", "id", "title", "label", "icon", "order", "refresh", "when"];
@@ -520,6 +525,10 @@ export function parsePluginContributes(raw: unknown): { ok: true; contributes: P
   if (raw.theme !== undefined) {
     const parsed = parsePluginTheme(raw.theme);
     if (!parsed.ok) { errors.push(...parsed.errors); } else { out.theme = parsed.theme; }
+  }
+  if (raw.css !== undefined) {
+    const parsed = parsePluginCss(raw.css);
+    if (!parsed.ok) { errors.push(...parsed.errors); } else { out.css = parsed.css; }
   }
   /* 交叉校验（B5）：`toolbar_item` 的唯一用途就是「打开本插件的 page」——
      有它却没 page ⇒ 点了没东西可开（假按钮）。fail-closed：整份拒。 */
@@ -943,6 +952,161 @@ export function themeTokenAssignments(theme: PluginThemeDecl): Array<{ variable:
     out.push({ variable: PLUGIN_THEME_COLOR_VARS[token as PluginThemeColorToken], value: String(value) });
   }
   return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// A-1198 · 续：CSS 贡献点（contributes.css）—— 用户口径「把CSS 修改权限全面放开，
+//通过插件来进行开关可控的改动」。
+//
+// ## 为什么这次敢放开（与"红线"的关系）
+// 之前的禁令针对的是「远程插件包 / 不可信来源」。用户本轮明确：插件是**他自己装、自己开关**的，
+// 换配色换布局属于"用插件武装"而不是"改穿程序本身"。⇒ 放开 `contributes.css`，但：
+//
+// ## 护栏一：@layer（这是技术性必需，不是安全说教）
+// slime 有**安全关键的 HTML 渲染 UI**：权限请求弹窗（git commit 门禁、diff 评审、脚本执行确认）
+// 走 JSX +宿主页CSS。CSS 全权在层内若直接生效，`#f00{display:none}` 就能把「允许/拒绝」藏掉，
+// 让误操作默认通过 —— 那是**功能性失效**，不是难看。
+// 解法用 CSS 原生层叠：`@layer slime-host, slime-plugin;` 声明顺序 ⇒ 插件层永远**低于**宿主层，
+// 无论插件写多强的选择器都盖不掉宿主的安全关键 UI；其他地方则完全自由。
+//
+// ## 护栏二：fail-closed 的静态禁令（收窄而非放开）
+// 允许「改外观」，但**禁止**这几类能自我扩权或外联的动作 —— 它们不是外观，是侧信道：
+//   · `@import` / `url()` —— 外联 = 把用户数据发出去 / 引入远程代码（外观不需要外联）；
+//   · `!important` —— 有了 @layer 也不需要它就能覆盖宿主非关键 UI；留着是**绕过层叠的旁门**；
+//   · 全局 `*` / `html` / `body` / `:root` —— 能改根字号/根背景 = 事实上的"接管全站"，
+//     且能藏掉宿主自身的安全提示样式；定位作用域改用 `.slime-plugin-scope` 前缀类；
+//   · `position: fixed` —— 固定定位能盖住安全关键 UI（不依赖层叠就能视觉遮蔽）。
+// 这四条是**列举式**的：没列到的属性随便写（布局、间距、字号、边框、动画、字体…）。
+//
+// 作用域约定：宿主渲染层给 <html> 挂 `.slime-plugin-scope` 类（有生效 CSS 时挂上），
+// 插件 CSS 里的选择器**自动**被限制在该类之下（见 scopePluginCss）——
+// 不强制插件作者每条都写前缀（那样太难用），但也不会波及 iframe 内的扩展页面。
+export interface PluginCssDecl {
+  /** 展示名（去重/选择器用）。 */
+  name: string;
+  /** 纯 CSS 文本（已 fail-closed 校验）。 */
+  css: string;
+}
+
+/** 展示名长度上限（会回传渲染层并进下拉框）。 */
+export const MAX_PLUGIN_CSS_NAME = 24;
+/** 单份 CSS 字节上限（防「一个插件塞 2MB 样式把渲染层卡死」）。 */
+export const MAX_PLUGIN_CSS_BYTES = 128 * 1024;
+
+const ALLOWED_CSS_FIELDS: readonly string[] = ["name", "css"];
+
+/**
+ * 静态禁令：命中即**整份拒**（fail-closed，与 theme/settings 同款）。
+ * 逐条正则都刻意收紧（选择器部分只允许 `.xxx`/标签名，避免 `a[href^=http]` 这类外联触发器）。
+ */
+const CSS_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
+  { re: /@import/i, why: "@import（外联/引入远程样式）" },
+  { re: /@charset/i, why: "@charset" },
+  { re: /@namespace/i, why: "@namespace" },
+  { re: /url\s*\(/i, why: "url()（外联资源：外观不需要外联）" },
+  { re: /expression\s*\(/i, why: "expression()（IE 动态表达式）" },
+  { re: /-moz-binding/i, why: "-moz-binding（XBL 绑定）" },
+  { re: /!\s*important/i, why: "!important（绕过层叠的旁门）" },
+  { re: /javascript\s*:/i, why: "javascript: 协议" },
+  { re: /behaviou?r\s*:/i, why: "behavior（IE 行为绑定）" },
+  { re: /<\/?[a-z]/i, why: "HTML 标签文本（CSS 里出现标签名 = 混入非样式内容）" },
+  { re: /position\s*:\s*fixed/i, why: "position:fixed（能盖住安全关键 UI，不依赖层叠就能遮蔽）" },
+  { re: /(?:^|[^.\w-])(?:\*|html|body|:root)\s*(?=[,{.#:\[])/im, why: "全局选择器（* / html / body / :root —— 能接管全站并藏掉宿主安全提示）" },
+  { re: /@font-face/i, why: "@font-face（自定义字体文件 = 外部资源加载；字体族走 contributes.theme 的枚举令牌）" },
+  { re: /@keyframes/i, why: "@keyframes（动画名不是选择器，作用域改写会连引用一起坏掉；外观请用 transition/变量过渡）" },
+  { re: /@media/i, why: "@media（媒体查询块的选择器同样会被作用域改写，改写规则尚未覆盖嵌套块）" },
+  { re: /@supports/i, why: "@supports（同上：嵌套块的作用域改写未覆盖）" },
+];
+
+/** 判断某段 CSS 是否命中禁令（导出以便渲染层/守卫复用同一判据）。 */
+export function findPluginCssViolations(css: string): string[] {
+  const out: string[] = [];
+  for (const rule of CSS_FORBIDDEN) {
+    if (rule.re.test(css)) { out.push(rule.why); }
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * 解析 `contributes.css`（单对象）。fail-closed 全量校验：
+ * 非对象 / 未知字段 / name 缺失或超长 / css 缺失或非字符串 / 超字节上限 /
+ * 命中任一静态禁令⇒ 整份拒。
+ */
+export function parsePluginCss(raw: unknown): { ok: true; css: PluginCssDecl } | { ok: false; errors: string[] } {
+  if (!isPlainObject(raw)) {
+    return { ok: false, errors: ["contributes.css 必须是对象"] };
+  }
+  const errors: string[] = [];
+  for (const field of Object.keys(raw)) {
+    if (!ALLOWED_CSS_FIELDS.includes(field)) {
+      errors.push(`contributes.css 含未知字段：${field}（允许的字段：${ALLOWED_CSS_FIELDS.join("、")}）`);
+    }
+  }
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (!name) {
+    errors.push("contributes.css.name 缺失或为空（这套外观要有展示名）");
+  } else if (name.length > MAX_PLUGIN_CSS_NAME) {
+    errors.push(`contributes.css.name 过长（${name.length} > ${MAX_PLUGIN_CSS_NAME}）`);
+  }
+  const css = typeof raw.css === "string" ? raw.css : "";
+  if (!css.trim()) {
+    errors.push("contributes.css.css 缺失或为空（不声明就别写 css）");
+  } else if (Buffer.byteLength(css, "utf8") > MAX_PLUGIN_CSS_BYTES) {
+    errors.push(`contributes.css.css 过大（${Buffer.byteLength(css, "utf8")} > ${MAX_PLUGIN_CSS_BYTES} 字节）`);
+  } else {
+    for (const why of findPluginCssViolations(css)) {
+      errors.push(`contributes.css.css 被拒：${why}`);
+    }
+  }
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+  return { ok: true, css: { name, css } };
+}
+
+/**
+ * 把插件 CSS 收进 `.slime-plugin-scope` 作用域（**纯函数**，单一产地）。
+ *
+ * 逐条规则改写选择器：`h1` → `.slime-plugin-scope h1`；
+ * 逗号分隔的多个选择器逐个加前缀（`.a, .b` → `.slime-plugin-scope .a, .slime-plugin-scope .b`）。
+ * 宿主只在「有生效 CSS 时」给 <html> 挂这个类 ⇒ 没有插件 CSS 时宿主 CSS 完全不受影响。
+ *
+ * @keyframes 不改写（@keyframes 名字不是选择器，改了会连引用一起坏掉）——
+ * 所以调用方**还要**拒掉带 @keyframes 的 CSS（见 CSS_FORBIDDEN 的最后一条）。
+ */
+export function scopePluginCss(css: string, scopeClass = "slime-plugin-scope"): string {
+  const out: string[] = [];
+  for (const raw of css.split("\n")) {
+    const line = raw;
+    const m = /^(\s*)([^{}@]+)(\{[\s\S]*)$/.exec(line);
+    if (!m) { out.push(line); continue; }
+    const [, indent, selectorRaw, rest] = m;
+    /* ⚠️ 保留选择器段末尾的空白（`.card {` 里的那个空格）—— 直接 trim 后拼回去会得到
+       `.card{`，属��"改写了作者的 CSS 文本"（守卫按字面比对时会假失败）。 */
+    const trailingWs = /\s*$/.exec(selectorRaw)?.[0] ?? "";
+    const selector = trailingWs ? selectorRaw.slice(0, selectorRaw.length - trailingWs.length) : selectorRaw;
+    const scoped = selector
+      .split(",")
+      .map((one) => {
+        const s = one.trim();
+        if (!s) { return s; }
+        // 已经是作用域自身（`:root`类已被静态禁令拒，这里只防 `.slime-plugin-scope` 自引用）
+        if (s === `.${scopeClass}` || s === `.${scopeClass}:root` || s === `.${scopeClass} html` || s === `.${scopeClass} body`) {
+          return `.${scopeClass}`;
+        }
+        if (s.startsWith(`.${scopeClass}`)) { return s; }
+        return `.${scopeClass} ${s}`;
+      })
+      .join(", ");
+    out.push(`${indent}${scoped}${trailingWs}${rest}`);
+  }
+  return out.join("\n");
+}
+
+/** CSS 声明的摘要（给 `PluginRecord.contributions` 计数用）。 */
+export function describePluginCss(css: PluginCssDecl | undefined): string {
+  if (!css) { return "0"; }
+  return `1（${css.name}，${Buffer.byteLength(css.css, "utf8")} 字节）`;
 }
 
 /** 主题声明的摘要（给 `PluginRecord.contributions` 计数用）。 */

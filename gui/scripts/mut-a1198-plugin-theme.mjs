@@ -223,10 +223,12 @@ const MUTATIONS = [
   {
     name: "18 示例 page.kind 改 webview（示例自己过不了校验）",
     file: F_EXAMPLE,
+    /* ⚠️ 2026-10-09 锚点重打：示例清单加入 contributes.css 时用JSON.stringify 重写过，
+       `"page": { "kind": "html", "entry": "panel.html" }` 这一行被展开成多行 ⇒ 旧单行锚点失效。 */
     mutate: (t) => sub(
       t,
-      "    \"page\": { \"kind\": \"html\", \"entry\": \"panel.html\" },",
-      "    \"page\": { \"kind\": \"webview\", \"entry\": \"panel.html\" },",
+      "    \"page\": {\n      \"kind\": \"html\",\n      \"entry\": \"panel.html\"\n    },",
+      "    \"page\": {\n      \"kind\": \"webview\",\n      \"entry\": \"panel.html\"\n    },",
     ),
   },
   {

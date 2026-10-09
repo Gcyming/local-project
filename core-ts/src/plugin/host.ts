@@ -1,7 +1,7 @@
 import { ContributionScope } from "./scope.js";
 import type { DisposeReport } from "./scope.js";
 import type { PluginManifest } from "./manifest.js";
-import { describePluginSettings, describePluginUi, describePluginScripts, describePluginTheme } from "./contributes.js";
+import { describePluginSettings, describePluginUi, describePluginScripts, describePluginTheme, describePluginCss } from "./contributes.js";
 import { describeMode } from "./mode.js";
 
 export type PluginStatus = "loaded" | "disabled" | "failed";
@@ -37,6 +37,8 @@ export interface PluginHostOptions {
   /** A-1198 · 主题贡献点（皮肤）：登记**声明式设计令牌**（主进程侧维护主题汇总表）。
    *  纯数据、无副作用 —— 撤销 = 按插件名精确移除（渲染层按 `plugins_changed` 重算并回落默认）。 */
   registerTheme?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1198 · 续：CSS 贡献点登记钩子（纯数据；落值在渲染层 PluginCssHost）。 */
+  registerCss?: (manifest: PluginManifest) => PluginContributionHandle[];
   /** A-1197 · B3（L4c）第二层：**装载时查一次**模式声明的工具名（由**有工具表**的装配侧注入）。
    *  返回该清单里「不存在于当前工具表」的工具名；非空 ⇒ 该插件 `failed`（不给
    *  「配了但不生效」的假自由度，设计 §4.3）。运行前每阶段还会重查（执行侧）。 */
@@ -61,6 +63,7 @@ export class PluginHost {
   private registerScripts: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerPage: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerTheme: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerCss: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private checkModeTools: ((manifest: PluginManifest) => string[]) | null;
   private unloadable: (manifest: PluginManifest) => boolean;
 
@@ -71,6 +74,7 @@ export class PluginHost {
     this.registerScripts = opts.registerScripts ?? null;
     this.registerPage = opts.registerPage ?? null;
     this.registerTheme = opts.registerTheme ?? null;
+    this.registerCss = opts.registerCss ?? null;
     this.checkModeTools = opts.checkModeTools ?? null;
     this.unloadable = opts.unloadable ?? ((m) => m.origin !== "builtin");
   }
@@ -336,6 +340,13 @@ export class PluginHost {
     if (themeDecl !== undefined) {
       const wiring = this.contribute(scope, this.registerTheme, manifest);
       contributions.push(`theme:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginTheme(themeDecl)}`);
+    }
+    /* A-1198 · 续：CSS 贡献点。与 theme 同款走 contribute（撤销句柄把样式从可用列表摘掉，
+       渲染层回落内置外观）；文本本身由渲染层包 @layer + 作用域类后落 <style>。 */
+    const cssDecl = manifest.contributes?.css;
+    if (cssDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerCss, manifest);
+      contributions.push(`css:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginCss(cssDecl)}`);
     }
     entry.record.contributions = contributions;
   }

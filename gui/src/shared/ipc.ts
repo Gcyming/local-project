@@ -627,10 +627,20 @@ export interface PluginThemeDTO {
   tokens: import("../../../core-ts/src/plugin/contributes.js").PluginThemeTokens;
 }
 
+/** A-1198 · 续：扩展 CSS 外观声明（已在 core-ts fail-closed 校验；渲染层负责包 @layer + 作用域）。 */
+export interface PluginCssDTO {
+  plugin: string;
+  name: string;
+  /** 纯 CSS 文本（静态禁令已在解析阶段拒掉：外联/@font-face/!important/全局选择器/position:fixed 等）。 */
+  css: string;
+}
+
 export interface PluginUiSnapshotDTO {
   slots: PluginUiSlotDTO[];
   /** A-1198：可用的扩展皮肤（空数组 = 没有插件声明 theme）。 */
   themes: PluginThemeDTO[];
+  /** A-1198 · 续：可用的扩展 CSS 外观（空数组 = 没有插件声明 contributes.css）。 */
+  cssStyles: PluginCssDTO[];
   warnings: string[];
 }
 

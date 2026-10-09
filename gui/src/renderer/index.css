@@ -1,5 +1,15 @@
-/* gui/src/renderer/index.css — slime GUI 样式（Campanula 布局参考，配色保持 slate 深色 + 天蓝 accent） */
-
+/* gui/src/renderer/index.css — slime GUI 样式（Campanula 布局参考，配色保持 slate 深色 + 天蓝 accent）
+ *
+ * ⚠️ A-1198 · 续：**整份文件包在 `@layer slime-host` 里**（唯一改动就是下面这两行 + 末尾一个 `}`）。
+ * 原因：扩展的 contributes.css 落进 `@layer slime-plugin`，层叠顺序由首个 `@layer` 声明决定
+ *（渲染层 PluginCssHost 落值时先写一次 `@layer slime-host, slime-plugin;` 定序）。
+ * ⇒ 插件层**永远低于**宿主层：插件 CSS 在任何地方都盖不掉宿主规则 ——
+ * 尤其盖不掉安全关键的权限请求弹窗（git 门禁 / diff 评审 / 脚本执行确认走 JSX + 本文件样式）。
+ * 这不是"削弱插件"，而是让"插件改外观"不至于变成"插件让误操作默认通过"。
+ * ⚠️ 刻意**不重排缩进**：本文件有 1000+ 行且被几十条守卫按行锚点匹配，缩进一变就假失败。
+ *   层内 @media / @keyframes 都合法（只有嵌套 @layer 不合法，本文件没有）。
+ */
+@layer slime-host {
 /* ── Alpha 主题（默认）：slate 深色 + 天蓝 accent ── */
 :root {
   /* ── 色板（与既有 UI 色值一致，未引入新色） ── */
@@ -3968,4 +3978,4 @@ body.slime-freezing .chat-scroll {
   pointer-events: auto;         /* 唯一可点元素 */
 }
 .op-focus-hide:hover { background: var(--bg-hover); color: var(--text); }
-
+}

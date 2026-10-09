@@ -25,6 +25,10 @@ import {
   getCachedPluginThemes, getPluginThemeSelection, setPluginThemeSelection, subscribePluginTheme,
   type AvailablePluginTheme,
 } from "../pluginTheme.js";
+import {
+  getCachedPluginCss, getPluginCssSelection, setPluginCssSelection, subscribePluginCss,
+  type AvailablePluginCss,
+} from "../pluginCss.js";
 
 type TabId = "chat" | "md";
 
@@ -113,6 +117,17 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
     const off = subscribePluginTheme(() => {
       setPluginThemes(getCachedPluginThemes());
       setPluginSkin(getPluginThemeSelection());
+    });
+    return off;
+  }, []);
+
+  /* A-1198 · 续：扩展 CSS 外观 —— 订阅 pluginCss 缓存（宿主组件负责拉数据与落值）。 */
+  const [pluginCssList, setPluginCssList] = React.useState<AvailablePluginCss[]>(getCachedPluginCss());
+  const [pluginCss, setPluginCss] = React.useState<string>(getPluginCssSelection());
+  React.useEffect(() => {
+    const off = subscribePluginCss(() => {
+      setPluginCssList(getCachedPluginCss());
+      setPluginCss(getPluginCssSelection());
     });
     return off;
   }, []);
@@ -309,6 +324,75 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
           {pluginThemes.length === 0 && (
             <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 6 }}>
               还没有扩展提供皮肤 —— 去「扩展」页点「安装示例扩展」，装好后这里会出现示例皮肤（随时可切回默认）。
+            </div>
+          )}
+        </div>
+
+        {/* A-1198 · 续：扩展 CSS 外观（插件 `contributes.css` 声明的完整 CSS）——
+            与皮肤同一套「可开可关」语义：停用/卸载该插件即从列表消失并自动回落内置外观。
+            ⚠️ 与皮肤**互斥生效**（一次只生效一套：皮肤改令牌、CSS 改任意属性，
+            同时开会互相打补丁，用户无法判断自己在看谁的效果）—— 选了 CSS 就清掉皮肤选择。 */}
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>扩展 CSS 外观</div>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {pluginCssList.length > 0 ? `${pluginCssList.length} 套可用` : "无扩展提供"}
+            </span>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 8 }}>
+            扩展可声明任意 CSS（布局 / 间距 / 字号 / 边框 / 动画…），逐条选择器自动收进
+            <code> .slime-plugin-scope </code>作用域，并落进 <code>@layer slime-plugin</code> ——
+            <b>低于宿主样式层</b>，所以插件盖不掉权限确认弹窗等安全关键界面。
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button
+              onClick={() => setPluginCssSelection("")}
+              title="不套用任何扩展 CSS，使用内置外观"
+              style={{
+                flex: "0 1 190px", textAlign: "left", cursor: "pointer",
+                padding: "9px 12px", borderRadius: 12,
+                border: `1.5px solid ${pluginCss === "" ? "var(--accent)" : "var(--border)"}`,
+                background: pluginCss === "" ? "var(--accent-soft)" : "var(--bg-input)",
+              }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: pluginCss === "" ? "var(--accent-hover)" : "var(--text)" }}>
+                  默认（不用扩展 CSS）
+                </span>
+                {pluginCss === "" && <span style={{ fontSize: 11, color: "var(--accent-hover)", marginLeft: "auto" }}>使用中</span>}
+              </div>
+            </button>
+            {pluginCssList.map((c) => {
+              const active = pluginCss === c.plugin;
+              return (
+                <button
+                  key={c.plugin}
+                  onClick={() => {
+                    setPluginCssSelection(c.plugin);
+                    /* 互斥：选了 CSS 就清掉皮肤选择（避免两套外观互相打补丁）。 */
+                    if (getPluginThemeSelection() !== "") { setPluginThemeSelection(""); }
+                  }}
+                  title={`由扩展「${c.plugin}」提供；停用该扩展即自动回落内置外观`}
+                  style={{
+                    flex: "0 1 190px", textAlign: "left", cursor: "pointer",
+                    padding: "9px 12px", borderRadius: 12,
+                    border: `1.5px solid ${active ? "var(--accent)" : "var(--border)"}`,
+                    background: active ? "var(--accent-soft)" : "var(--bg-input)",
+                  }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: active ? "var(--accent-hover)" : "var(--text)" }}>{c.name}</span>
+                    {active && <span style={{ fontSize: 11, color: "var(--accent-hover)", marginLeft: "auto" }}>使用中</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    来自扩展：{c.plugin} · {c.css.length} 字符
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          {pluginCssList.length === 0 && (
+            <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 6 }}>
+              还没有扩展提供 CSS 外观 —— 插件在 <code>plugin.json</code> 里声明
+              <code> contributes.css {'{ name, css }'}</code> 即可出现在这里。
             </div>
           )}
         </div>

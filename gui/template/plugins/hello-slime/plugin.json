@@ -1,9 +1,12 @@
 {
   "name": "hello-slime",
   "version": "1.0.0",
-  "description": "官方示例扩展（活教材）：把插件全部贡献类型演示一遍——设置项 / 四个 UI 槽位 / 脚本工具 / 自有页面 / 运行模式 / 主题皮肤 / 指令。当用户想了解 slime 扩展机制、想要一份可照抄的插件样例，或想体验「可开可关」的皮肤与面板时使用。",
+  "description": "官方示例扩展（活教材）：把插件全部贡献类型演示一遍——设置项 / 四个 UI 槽位 / 脚本工具 / 自有页面 / 运行模式 / 主题皮肤 / CSS 外观 / 指令。当用户想了解 slime 扩展机制、想要一份可照抄的插件样例，或想体验「可开可关」的皮肤与面板时使用。",
   "origin": "agent",
-  "provides": ["instructions", "mode"],
+  "provides": [
+    "instructions",
+    "mode"
+  ],
   "contributes": {
     "settings": [
       {
@@ -15,10 +18,28 @@
       }
     ],
     "ui": [
-      { "slot": "settings_panel", "id": "about", "title": "示例扩展说明" },
-      { "slot": "status_item", "id": "badge", "label": "示例扩展在岗", "refresh": "manual" },
-      { "slot": "chat_action", "id": "stamp", "label": "插入示例问候", "when": "任何时候" },
-      { "slot": "toolbar_item", "id": "open", "label": "打开示例面板" }
+      {
+        "slot": "settings_panel",
+        "id": "about",
+        "title": "示例扩展说明"
+      },
+      {
+        "slot": "status_item",
+        "id": "badge",
+        "label": "示例扩展在岗",
+        "refresh": "manual"
+      },
+      {
+        "slot": "chat_action",
+        "id": "stamp",
+        "label": "插入示例问候",
+        "when": "任何时候"
+      },
+      {
+        "slot": "toolbar_item",
+        "id": "open",
+        "label": "打开示例面板"
+      }
     ],
     "scripts": [
       {
@@ -27,7 +48,10 @@
         "description": "示例脚本工具：报一声当前时间并回显一句话（演示「用户信任后才装配」的脚本贡献）"
       }
     ],
-    "page": { "kind": "html", "entry": "panel.html" },
+    "page": {
+      "kind": "html",
+      "entry": "panel.html"
+    },
     "theme": {
       "name": "示例·暮色青",
       "tokens": {
@@ -46,6 +70,10 @@
         "font": "system",
         "radius": "round"
       }
+    },
+    "css": {
+      "name": "示例·紧凑圆角",
+      "css": "/* 示例扩展的 CSS 外观：改圆角 / 内边距 / 字距 —— 逐条选择器自动收进 .slime-plugin-scope，\n   落进 @layer slime-plugin（低于宿主层 ⇒ 盖不掉权限确认弹窗等安全关键界面）。 */\n.card { border-radius: 18px; }\n.settings-pane .card { padding: 14px 16px; }\n.btn { border-radius: 10px; letter-spacing: 0.02em; }\n.card h3 { letter-spacing: 0.01em; }\n.status-item { opacity: 0.92; }"
     }
   },
   "mode": {

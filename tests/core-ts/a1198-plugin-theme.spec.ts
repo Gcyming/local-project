@@ -207,7 +207,9 @@ describe("A-1198-T ④ 接线：host / main / ipc / 渲染层 / 外观页", () =
     expect(MAIN_SRC).toContain("const pluginThemeDecls = new Map<string, PluginThemeDecl>();");
     expect(MAIN_SRC).toContain("registerTheme: (manifest) => {");
     expect(MAIN_SRC).toContain("const themes: PluginThemeDTO[] = [...pluginThemeDecls.entries()]");
-    expect(MAIN_SRC).toContain("return { slots: out, themes, warnings: [] };");
+    /* ⚠️ 2026-10-09 锚点更新（A-1198 · 续：CSS 贡献点）：快照多带了 cssStyles（扩展 CSS 外观），
+       返回形状从 `{ slots, themes, warnings }` 变成 `{ slots, themes, cssStyles, warnings }`。 */
+    expect(MAIN_SRC).toContain("return { slots: out, themes, cssStyles, warnings: [] };");
     expect(MAIN_SRC).toContain("IPC_CHANNELS.plugins_install_example");
     expect(MAIN_SRC).toContain("const EXAMPLE_PLUGIN_NAME = \"hello-slime\";");
   });
@@ -229,7 +231,10 @@ describe("A-1198-T ④ 接线：host / main / ipc / 渲染层 / 外观页", () =
 
   it("外观页：有「扩展皮肤」选择段（默认 + 各插件 + 空态指引）", () => {
     expect(PANEL_SRC).toContain("扩展皮肤");
-    expect(PANEL_SRC).toContain("setPluginThemeSelection(\"\")");
+    /* ⚠️ 2026-10-09 收窄断言（变异实测存活）：CSS 外观的「互斥」逻辑新增了第二处
+       `setPluginThemeSelection("")`（选CSS 时清掉皮肤选择）⇒ anywhere 的 toContain 被它顶上了，
+       「默认按钮」的onClick 删掉也照样绿。⇒ 必须**限定在按钮那一行**。 */
+    expect(PANEL_SRC).toMatch(/onClick=\{\(\) => setPluginThemeSelection\(""\)\}/);
     expect(PANEL_SRC).toContain("安装示例扩展");
   });
 });

@@ -460,11 +460,11 @@ import { loadPluginsFromDisk, pluginSkillsRoot } from "../../../core-ts/src/plug
 import type { RejectedPluginDir } from "../../../core-ts/src/plugin/loader.js";
 import { markPluginDisabled, readDisabledPlugins, unmarkPluginDisabled } from "../../../core-ts/src/plugin/disabled-store.js";
 import type { PluginUiContribution } from "../../../core-ts/src/plugin/contributes.js";
-import type { PluginThemeDecl } from "../../../core-ts/src/plugin/contributes.js";
+import type { PluginCssDecl, PluginThemeDecl } from "../../../core-ts/src/plugin/contributes.js";
 import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
 import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
 import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
-import type { PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
+import type { PluginCssDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate, Tool } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
@@ -1642,6 +1642,11 @@ const pluginUiDecls = new Map<string, PluginUiContribution[]>();
  *  纯数据表 —— activate 时写入、dispose 时按插件名移除；渲染层按 `plugins_changed` 重算。 */
 const pluginThemeDecls = new Map<string, PluginThemeDecl>();
 
+/** A-1198 · 续：已接线的 CSS 外观声明（`plugins_ui` 快照的 cssStyles 数据源）。
+ *  纯数据表 —— activate 时写入、dispose 时按插件名移除；渲染层按 `plugins_changed` 重算。
+ *  ⚠️ 主进程**只搬运文本、不落值**：落值在渲染层（要包 @layer + 作用域类，且要能整段撤下）。 */
+const pluginCssDecls = new Map<string, PluginCssDecl>();
+
 /** 汇总各插件已接线的 UI 声明（`plugins_ui` handler 的唯一数据源）。
  *  冲突裁决（设计 §4.1）：同 slot 同 id 时按 order（缺省 0）再按插件名排序取第一个，
  *  其余标 `conflict: true` —— **不静默丢弃、不静默覆盖**。 */
@@ -1688,7 +1693,11 @@ function pluginUiSnapshot(): PluginUiSnapshotDTO {
   const themes: PluginThemeDTO[] = [...pluginThemeDecls.entries()]
     .map(([plugin, theme]) => ({ plugin, name: theme.name, tokens: theme.tokens }))
     .sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0));
-  return { slots: out, themes, warnings: [] };
+  /* A-1198 · 续：CSS 外观 —— 同样按插件名排序保证快照稳定。 */
+  const cssStyles: PluginCssDTO[] = [...pluginCssDecls.entries()]
+    .map(([plugin, decl]) => ({ plugin, name: decl.name, css: decl.css }))
+    .sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0));
+  return { slots: out, themes, cssStyles, warnings: [] };
 }
 
 /* ── A-1197 · B4（T1 脚本信任）：扩展脚本的执行边界（设计 §5.1）──────────────
@@ -1922,6 +1931,26 @@ function createPluginHost(dirs: Map<string, string>): PluginHost {
           dispose: () => {
             if (pluginThemeDecls.get(manifest.name) === theme) {
               pluginThemeDecls.delete(manifest.name);
+            }
+          },
+        },
+      ];
+    },
+    /* A-1198 · 续：CSS 贡献点 —— 纯数据登记（与 theme 同款），文本本身**不经主进程落值**：
+       渲染层 PluginCssHost 把它包进 `@layer slime-plugin` + `.slime-plugin-scope` 后落 <style>。
+       撤销 = 按插件名精确移除 ⇒ 渲染层重算时该样式从可用列表消失、自动回落内置外观（「可开可关」）。 */
+    registerCss: (manifest) => {
+      const decl = manifest.contributes?.css;
+      if (!decl) {
+        return [];
+      }
+      pluginCssDecls.set(manifest.name, decl);
+      return [
+        {
+          label: `${manifest.name} 的 CSS 外观（${decl.name}）`,
+          dispose: () => {
+            if (pluginCssDecls.get(manifest.name) === decl) {
+              pluginCssDecls.delete(manifest.name);
             }
           },
         },
