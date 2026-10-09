@@ -551,6 +551,30 @@ export interface PluginRejectedDTO {
 export interface PluginSnapshotDTO {
   plugins: PluginSummaryDTO[];
   rejected: PluginRejectedDTO[];
+  /** A-1200 · B4：本次启动**实际发生**的示例扩展升级 —— 扩展页据此如实告知（不静默升级）。
+   *  一次性：主进程读走即清（同一启动内不会反复提示）。 */
+  seedUpgrades?: PluginSeedUpgradeDTO[];
+  /** A-1200 · B4：官方示例扩展的版本对照（决定按钮是「安装」还是「更新」）。 */
+  example?: PluginExampleStatusDTO;
+}
+
+/** A-1200 · B4：一次示例扩展升级的记录（升级前必定有备份 —— 备份失败就不升级）。 */
+export interface PluginSeedUpgradeDTO {
+  name: string;
+  from: string;
+  to: string;
+  /** 旧版备份目录（出问题可从它回滚）。 */
+  backup: string;
+}
+
+/** A-1200 · B4：官方示例扩展的版本对照。 */
+export interface PluginExampleStatusDTO {
+  /** 随包模板里的版本（读不到 ⇒ null）。 */
+  templateVersion: string | null;
+  /** 数据根里已装版本（未装 ⇒ null）。 */
+  installedVersion: string | null;
+  /** 模板版本**严格高于**已装版本 ⇒ 按钮该显示「更新示例扩展」。 */
+  canUpgrade: boolean;
 }
 
 /** A-1197 · B1：单个设置项回渲染层的形状。

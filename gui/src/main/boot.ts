@@ -16,7 +16,7 @@
 import { app } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { seedDefaultDirs } from "./skill_seed.js";
+import { seedDefaultDirs, seedOrUpgradeDirs, type SeedUpgradeRecord } from "./skill_seed.js";
 import { PROJECT_ROOT } from "../../../core-ts/src/paths.js";
 /* A-1197④：数据根不再是写死的 %APPDATA%\\slime-data —— 由 dataRoot.ts 统一决定
    （用户在设置里选的路径从这里生效；切换需要重启，原因见 dataRoot.ts 顶部注释）。 */
@@ -216,9 +216,15 @@ function bootstrapSkills(slimeRoot: string): void {
  * A-1198：播种**官方示例扩展**（「活教材」）—— 从随包 `template/plugins` 复制到
  * `<数据根>/config/plugins`，装载逻辑与普通用户扩展完全一致（origin=agent、可卸载、可开关）。
  *
+ * A-1200 · B4：**随包示例改版后老用户要能拿到新版**（否则新能力永远只存在于源码里）。
+ * 于是这里从「只播种」升级为「播种 + 版本感知升级」：
+ *   · 逐文件覆盖（模板里没有的文件 = 用户数据，一个都不碰）；
+ *   · 覆盖前备份到 `<数据根>/config/plugins-backup/`，**备份失败就不升级**（fail-closed）；
+ *   · 升级结果记进 `pluginSeedUpgrades` 供扩展页如实告知（不静默升级）。
+ *
  * 边界（写清）：
- *   · 复用与技能播种同一个台账实现（`seedDefaultDirs`：不覆盖已存在目录、删掉后不复活）；
- *   · 播种失败只告警不阻塞启动（示例缺位不是致命问题；扩展页「安装示例扩展」按钮是第二条路）；
+ *   · 不覆盖用户自建/改过的同名目录；删掉的不复活（台账语义，见 skill_seed.ts）；
+ *   · 失败只告警不阻塞启动（示例缺位不是致命问题；扩展页「安装/更新示例扩展」是第二条路）；
  *   · 目标目录用 `PROJECT_ROOT`（= 主进程 `PLUGINS_ROOT` 的同一产地），保证「播种落点 = 扫描落点」。
  */
 function bootstrapPlugins(): void {
@@ -229,13 +235,29 @@ function bootstrapPlugins(): void {
       return;
     }
     const target = join(PROJECT_ROOT, "config", "plugins");
-    const seeded = seedDefaultDirs(seedDir, target);
-    if (seeded.length > 0) {
-      console.info(`[gui:boot] 已播种 ${seeded.length} 个示例扩展 → ${target}：${seeded.join("、")}`);
-    } else {
-      console.info(`[gui:boot] 示例扩展无需播种（台账已齐或目录已存在）：${target}`);
+    const backupRoot = join(PROJECT_ROOT, "config", "plugins-backup");
+    const res = seedOrUpgradeDirs(seedDir, target, { backupRoot });
+    if (res.seeded.length > 0) {
+      console.info(`[gui:boot] 已播种 ${res.seeded.length} 个示例扩展 → ${target}：${res.seeded.join("、")}`);
+    }
+    for (const u of res.upgraded) {
+      console.info(`[gui:boot] 示例扩展已升级：${u.name} ${u.from} → ${u.to}（旧版备份在 ${u.backup}）`);
+    }
+    seedUpgrades = res.upgraded;
+    if (res.seeded.length === 0 && res.upgraded.length === 0) {
+      console.info(`[gui:boot] 示例扩展无需播种/升级（台账已齐、目录已存在或版本未变）：${target}`);
     }
   } catch (e) {
     console.warn(`[gui:boot] 示例扩展播种失败（不影响启动；可在扩展页手动安装）: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/* A-1200 · B4：本次启动实际发生的示例升级 —— 供扩展页**如实告知**（不静默升级）。
+   为什么放在模块级而不是返回值：`bootstrapPlugins()` 在应用启动早期跑，
+   而扩展页要等到用户打开设置才读 —— 中间隔着窗口创建与 IPC，返回值传不过去。 */
+let seedUpgrades: SeedUpgradeRecord[] = [];
+export function takeSeedUpgrades(): SeedUpgradeRecord[] {
+  const out = seedUpgrades;
+  seedUpgrades = [];
+  return out;
 }

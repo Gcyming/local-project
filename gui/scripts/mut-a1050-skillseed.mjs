@@ -17,7 +17,13 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const GUARDS = ["tests/core-ts/a1050-guards.spec.ts"];
+/* A-1200 · B4：skill_seed.ts 的实现被升级路径重写，判定它要**同时**看两份守卫 ——
+   a1050（播种/不覆盖/不复活/幂等的原始语义）+ a1200-plugin-seed-upgrade（升级语义）。
+   只挂 a1050 会让「无条件覆盖用户目录」这类变异在两份守卫的缝里存活。 */
+const GUARDS = [
+  "tests/core-ts/a1050-guards.spec.ts",
+  "tests/core-ts/a1200-plugin-seed-upgrade.spec.ts",
+];
 const F_SEED = "gui/src/main/skill_seed.ts";
 const F_BOOT = "gui/src/main/boot.ts";
 const F_EB = "gui/electron-builder.json";
@@ -27,20 +33,33 @@ const MUTATIONS = [
   {
     name: "M1 省掉台账判断 → 用户删掉的默认技能每次启动都复活",
     file: F_SEED,
-    from: `      if (known.has(name)) { continue; }`,
-    to: `      if (false) { continue; }`,
+    /* ⚠️ 2026-10-09 锚点重打（A-1200 · B4）：决策从 known.has(name) 重写为
+       「台账没有 + 目录没有 ⇒ 首次播种」两段式（升级路径引入）。变异意图不变：
+       废掉「台账里有记录 ⇒ 不复活」这半条 —— 用户删过的示例/技能每次启动都回来。 */
+    from: `      if (!entry && !existsSync(targetChild)) {`,
+    to: `      if (!existsSync(targetChild)) {`,
   },
   {
-    name: "M2 无条件覆盖 → 用户改过的同名技能被随包版本冲掉",
+    name: "M2 无条件覆盖 → 用户改过的同名目录被随包版本冲掉",
     file: F_SEED,
-    from: `      if (existsSync(target)) { continue; }`,
-    to: `      if (false) { continue; }`,
+    /* ⚠️ 2026-10-09 锚点重打 + **换点**（A-1200 · B4）：原变异打的是第二个 if 里的
+       `!existsSync` 那半条 —— 实测**存活**，读码核实为**等价变异**：
+       目录不存在时 `from = readPluginVersion(不存在)` 本就是 null ⇒ 版本判据会自己 continue
+       （「不复活」有第二道防线）。⇒ 换点打真正承重的 `!entry`（「用户自建目录不认领」）：
+       废掉它之后，用户自建的目录会被当"可升级"处理（版本更高就覆盖）。
+       ⚠️ 这条只有 a1200 的守卫能抓（a1050 的技能目录没有 plugin.json ⇒ 版本判据永远拦下），
+       所以本脚本的 GUARDS 必须同时挂两份 —— 见文件头 GUARDS 处的说明。 */
+    from: `      if (!entry || !existsSync(targetChild)) { continue; }`,
+    to: `      if (!existsSync(targetChild)) { continue; }`,
   },
   {
-    name: "M3 把「因用户已有而跳过」也记账 → 用户删掉自己那份后默认再也补不上",
+    name: "M3 把「用户自建目录」也记账 → 用户删掉自己那份后默认再也补不上",
     file: F_SEED,
-    from: `      if (existsSync(target)) { continue; }\n      cpSync(join(seedDir, name), target, { recursive: true });\n      known.add(name);`,
-    to: `      known.add(name);\n      if (existsSync(target)) { continue; }\n      cpSync(join(seedDir, name), target, { recursive: true });`,
+    /* ⚠️ 2026-10-09 锚点重打（A-1200 · B4）：新实现里"记账"发生在首次播种之后。
+       变异意图不变：把**不该记的也记上** —— 在「用户自建目录」那一支跳过前先记账，
+       于是台账里出现一个我们从未播过的名字；用户随后删掉自己那份时会被「不复活」挡住。 */
+    from: `      if (!entry || !existsSync(targetChild)) { continue; }`,
+    to: `      known.set(name, { name, version: null });\nif (!entry || !existsSync(targetChild)) { continue; }`,
   },
   {
     name: "M4 不过滤隐藏目录 → .disabled 之类的状态目录被当技能复制",
@@ -49,10 +68,12 @@ const MUTATIONS = [
     to: `    if (false) { return false; }`,
   },
   {
-    name: "M5 复制不递归 → 带 scripts/ references/ 的技能只进来一个空壳目录",
+    name: "M5 播种复制不递归 → 带 scripts/ references/ 的技能只进来一个空壳目录",
     file: F_SEED,
-    from: `      cpSync(join(seedDir, name), target, { recursive: true });`,
-    to: `      cpSync(join(seedDir, name), target, { recursive: false });`,
+    /* ⚠️ 2026-10-09 锚点重打（A-1200 · B4）：新实现里播种的 cpSync 写成
+       cpSync(seedChild, targetChild, { recursive: true })。变异意图不变。 */
+    from: `        cpSync(seedChild, targetChild, { recursive: true });`,
+    to: `        cpSync(seedChild, targetChild, { recursive: false });`,
   },
   {
     name: "M6 把播种挪出打包分支（回归：开发模式播种会遮蔽「打包版空库」故障）",

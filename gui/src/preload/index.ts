@@ -275,9 +275,10 @@ contextBridge.exposeInMainWorld("slimeAPI", {
        真实 entry 一律从已校验的声明里取（渲染层不得成为绕过清单校验的旁门）。 */
     pluginsViewOpen: (name: string, entry: string) =>
       ipcRenderer.invoke("slime:plugins:viewOpen", { name, entry }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
-    /* A-1198：安装官方示例扩展（活教材）—— 已存在则不覆盖。 */
+    /* A-1198：安装官方示例扩展（活教材）。
+       A-1200 · B4：已存在时走**升级路径**（不在原地报错）—— action 如实区分三种结果。 */
     pluginsInstallExample: () =>
-      ipcRenderer.invoke("slime:plugins:installExample") as Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
+      ipcRenderer.invoke("slime:plugins:installExample") as Promise<{ ok: boolean; action?: "installed" | "upgraded" | "current"; to?: string; snapshot?: PluginSnapshotDTO; error?: string }>,
     /* A-1198：扩展页「保存并生效」—— 拨片/信任改动一次写盘，主进程随后**重扫 + 广播**
        使其生效并回带新快照（**不退出进程**，窗口不中断）。 */
     pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) =>
@@ -1013,7 +1014,7 @@ declare global {
         /* A-1200 · B3：取**栏目**（`contributes.views`）声明的可加载 url（同 panelOpen 纪律）。 */
         pluginsViewOpen: (name: string, entry: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
         /* A-1198：安装官方示例扩展。 */
-        pluginsInstallExample: () => Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
+        pluginsInstallExample: () => Promise<{ ok: boolean; action?: "installed" | "upgraded" | "current"; to?: string; snapshot?: PluginSnapshotDTO; error?: string }>;
         /* A-1198：扩展页保存并生效（写盘 + 重扫 + 广播，**不退出进程**；回带新快照）。 */
         pluginsApplyChanges: (payload: { toggles: Array<{ name: string; enabled: boolean }>; trust: Array<{ name: string; trusted: boolean }> }) => Promise<{ ok: boolean; applied?: { toggles: number; trust: number }; snapshot?: PluginSnapshotDTO; error?: string }>;
       };

@@ -1,6 +1,6 @@
 {
   "name": "hello-slime",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "官方示例扩展（活教材）：把插件全部贡献类型演示一遍——设置项 / 四个 UI 槽位 / 脚本工具 / 插件自有栏目（views：主区整块视图 + 右栏 tab）/ 多套皮肤（themes） / CSS 外观 / 指令。当用户想了解 slime 扩展机制、想要一份可照抄的插件样例，或想体验「可开可关」的皮肤、面板与「整块功能栏目」时使用。",
   "origin": "agent",
   "provides": [

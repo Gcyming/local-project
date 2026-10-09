@@ -11,7 +11,8 @@
 
 
 import "./boot.js"; 
-import { INSTALL_ROOT, BUNDLE_ROOT } from "./boot.js";
+import { INSTALL_ROOT, BUNDLE_ROOT, takeSeedUpgrades } from "./boot.js";
+import { seedOrUpgradeDirs, comparePluginVersions, type SeedUpgradeRecord } from "./skill_seed.js";
 import {
   clearDataRootPointer, dataRootExists, defaultDataRoot, isCustomDataRoot,
   runtimeStateDir, writeDataRootPointer, RUNTIME_DATA_DIR,
@@ -466,7 +467,7 @@ import { PLUGIN_ASSET_SCHEME, rewritePluginAssetUrls } from "../../../core-ts/sr
 import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
 import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
 import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
-import type { PluginCssDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO, PluginViewDTO } from "../shared/ipc.js";
+import type { PluginCssDTO, PluginExampleStatusDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO, PluginViewDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate, Tool } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
@@ -1615,6 +1616,10 @@ const EXAMPLE_PLUGIN_NAME = "hello-slime";
 /* A-1196：插件禁用名单（持久化）—— 扩展页拨片开关「关」的记录。
    重扫/重启后按名单把对应插件装载后立即卸载（记录在、贡献撤），开关保持「关」。 */
 const PLUGINS_DISABLED_FILE = join(PROJECT_ROOT, "config", "plugins-disabled.json");
+/* A-1200 · B4：旧版备份根 —— 示例扩展升级前的回滚点（备份失败 ⇒ 不升级，见 skill_seed.ts）。 */
+const PLUGINS_BACKUP_ROOT = join(PROJECT_ROOT, "config", "plugins-backup");
+/* A-1200 · B4：随包示例模板根（启动播种与扩展页按钮共用同一产地）。 */
+const EXAMPLE_TEMPLATE_ROOT = () => join(INSTALL_ROOT, "template", "plugins");
 
 interface PluginHostState {
   host: PluginHost;
@@ -2322,7 +2327,39 @@ function summarizePlugins(state: PluginHostState): PluginSummaryDTO[] {
 
 function snapshotPlugins(state: PluginHostState): PluginSnapshotDTO {
   const rejected: PluginRejectedDTO[] = state.rejected.map((r) => ({ dir: r.dir, errors: [...r.errors] }));
-  return { plugins: summarizePlugins(state), rejected };
+  /* A-1200 · B4：升级记录**读走即清**（一次性）—— 同一启动不会反复提示；
+     但每次快照都查一次「模板版本 vs 已装版本」，按钮文案随真实状态走。 */
+  const upgrades = takeSeedUpgrades().map((u) => ({ name: u.name, from: u.from, to: u.to, backup: u.backup }));
+  const out: PluginSnapshotDTO = { plugins: summarizePlugins(state), rejected };
+  if (upgrades.length > 0) { out.seedUpgrades = upgrades; }
+  const ex = examplePluginStatus();
+  if (ex !== null) { out.example = ex; }
+  return out;
+}
+
+/** A-1200 · B4：官方示例扩展的版本对照（模板版本 / 已装版本 / 能否升级）。
+ *  读不到任一版本 ⇒ 返回 null（**不猜**：没版本依据就不给"可更新"的承诺）。 */
+function examplePluginStatus(): PluginExampleStatusDTO | null {
+  const tpl = readPluginJsonVersion(join(EXAMPLE_TEMPLATE_ROOT(), EXAMPLE_PLUGIN_NAME));
+  const installed = readPluginJsonVersion(join(PLUGINS_ROOT, EXAMPLE_PLUGIN_NAME));
+  if (tpl === null) { return null; }
+  return {
+    templateVersion: tpl,
+    installedVersion: installed,
+    canUpgrade: installed !== null && comparePluginVersions(tpl, installed) > 0,
+  };
+}
+
+/** 读某插件目录的 `plugin.json` 版本；读不到 ⇒ null。 */
+function readPluginJsonVersion(dir: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(dir, "plugin.json"), "utf8"));
+    if (parsed === null || typeof parsed !== "object") { return null; }
+    const v = (parsed as { version?: unknown }).version;
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 
@@ -5779,22 +5816,46 @@ function registerIpcHandlers(): void {
   /* A-1198：安装官方示例扩展（活教材）—— 从随包 `template/plugins/<name>` 复制到
      `<数据根>/config/plugins/<name>`，装完立即重扫（扩展页自己刷新）。
      已存在 ⇒ 拒绝覆盖（先卸载并删除再装 —— 示例只是起点，用户改过的东西不能被覆盖）。 */
-  handleTrusted<void>(IPC_CHANNELS.plugins_install_example, async (): Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }> => {
-    const src = join(INSTALL_ROOT, "template", "plugins", EXAMPLE_PLUGIN_NAME);
-    const dest = join(PLUGINS_ROOT, EXAMPLE_PLUGIN_NAME);
+  /* A-1198：安装官方示例扩展（活教材）。
+     A-1200 · B4：**已存在时不再报错退出，而是走与启动播种同一套升级路径** ——
+     否则老用户永远拿不到新版示例（那正是"用户界面上看不见新能力"的根因）。
+     三条边界沿用 skill_seed.ts：只升不降 / 逐文件覆盖（保用户数据）/ 备份失败就不升级。
+     返回值里的 `action` 让界面如实区分「已安装 / 已更新到 vX / 已是最新」。 */
+  handleTrusted<void>(IPC_CHANNELS.plugins_install_example, async (): Promise<{ ok: boolean; action?: "installed" | "upgraded" | "current"; to?: string; snapshot?: PluginSnapshotDTO; error?: string }> => {
+    const seedDir = EXAMPLE_TEMPLATE_ROOT();
+    const src = join(seedDir, EXAMPLE_PLUGIN_NAME);
     if (!existsSync(src)) {
       return { ok: false, error: `随包示例扩展缺位（检查打包配置 extraFiles: template/plugins）：${src}` };
     }
-    if (existsSync(dest)) {
-      return { ok: false, error: `已存在同名扩展目录，不覆盖（如需重来：先卸载并删除该目录）：${dest}` };
-    }
+    let res: { seeded: string[]; upgraded: SeedUpgradeRecord[] };
     try {
-      cpSync(src, dest, { recursive: true });
+      res = seedOrUpgradeDirs(seedDir, PLUGINS_ROOT, {
+        backupRoot: PLUGINS_BACKUP_ROOT,
+        only: [EXAMPLE_PLUGIN_NAME],
+      });
     } catch (e) {
-      return { ok: false, error: `复制失败：${e instanceof Error ? e.message : String(e)}` };
+      return { ok: false, error: `安装/升级失败：${e instanceof Error ? e.message : String(e)}` };
     }
-    const state = await reloadPlugins();
-    return { ok: true, snapshot: snapshotPlugins(state) };
+    const up = res.upgraded[0];
+    if (up) {
+      console.info(`[gui:plugins] 示例扩展已升级：${up.name} ${up.from} → ${up.to}（旧版备份在 ${up.backup}）`);
+      const state = await reloadPlugins();
+      return { ok: true, action: "upgraded", to: up.to, snapshot: snapshotPlugins(state) };
+    }
+    if (res.seeded.length > 0) {
+      const state = await reloadPlugins();
+      return { ok: true, action: "installed", snapshot: snapshotPlugins(state) };
+    }
+    /* 既没播也没升：可能是「已是最新」，也可能是「用户自建/改过 ⇒ 不认领」或「备份失败 ⇒ 不升级」。
+       ⚠️ **不许一刀切成"已是最新"** —— 那会把后两种如实情况盖掉。按版本对照分别说清。 */
+    const st = examplePluginStatus();
+    if (st !== null && st.installedVersion !== null && st.canUpgrade) {
+      return { ok: false, error: `检测到新版（v${st.templateVersion}），但升级未执行 —— 可能是备份目录不可写。旧版保持原样，未做任何修改。` };
+    }
+    if (st !== null && st.installedVersion === null) {
+      return { ok: false, error: `同名目录已存在但不是随包示例（未认领，未做任何修改）：${PLUGINS_ROOT}` };
+    }
+    return { ok: true, action: "current", to: st?.installedVersion ?? undefined, snapshot: snapshotPlugins(await reloadPlugins()) };
   });
 
   /* A-1198：扩展页「保存并生效」—— 把草稿里的拨片 / 信任改动**一次写盘**（停用名单 + trust.json），

@@ -70,7 +70,10 @@ describe("A-1003：随包资源根 —— 开发模式不能用 app.getAppPath()
   });
 
   it("随包依赖必须走 resolveBundled（枚举全部取用点，漏一个就少一项）", () => {
-    expect(MAIN).toContain("import { INSTALL_ROOT, BUNDLE_ROOT } from \"./boot.js\";");
+    /* A-1200 · B4：该 import 多带了 takeSeedUpgrades（示例扩展升级结果 → 扩展页如实告知）。
+       断言按**前缀**匹配而不是整行 —— 整行会在每次加/减一个具名导入时假红（这次就是）。
+       真正要钉的不变量是「INSTALL_ROOT / BUNDLE_ROOT 从 boot.js 来」，不是导入列表的精确形状。 */
+    expect(MAIN).toMatch(/import \{[^}]*INSTALL_ROOT[^}]*BUNDLE_ROOT[^}]*\} from "\.\/boot\.js";/);
     expect(MAIN).toContain("function resolveBundled(subpath: string): string {");
     expect(MAIN).toContain("return join(BUNDLE_ROOT, subpath);");
     for (const p of [

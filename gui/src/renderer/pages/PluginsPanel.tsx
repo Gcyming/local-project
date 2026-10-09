@@ -78,6 +78,10 @@ interface PluginRejectedRow {
 interface PluginSnapshot {
   plugins: PluginRow[];
   rejected: PluginRejectedRow[];
+  /** A-1200 · B4：本次启动发生的示例扩展升级（主进程读走即清 ⇒ 同一启动只提示一次）。 */
+  seedUpgrades?: Array<{ name: string; from: string; to: string; backup: string }>;
+  /** A-1200 · B4：官方示例扩展的版本对照（决定按钮是「安装」还是「更新」）。 */
+  example?: { templateVersion: string | null; installedVersion: string | null; canUpgrade: boolean };
 }
 
 const CONTRIBUTION_LABEL: Record<string, string> = {
@@ -263,10 +267,12 @@ function normalizeSnapshot(raw: unknown): PluginSnapshot | null {
     return { plugins: raw as PluginRow[], rejected: [] };
   }
   if (raw && typeof raw === "object") {
-    const o = raw as { plugins?: unknown; rejected?: unknown };
+    const o = raw as { plugins?: unknown; rejected?: unknown; seedUpgrades?: unknown; example?: unknown };
     return {
       plugins: Array.isArray(o.plugins) ? (o.plugins as PluginRow[]) : [],
       rejected: Array.isArray(o.rejected) ? (o.rejected as PluginRejectedRow[]) : [],
+      ...(Array.isArray(o.seedUpgrades) ? { seedUpgrades: o.seedUpgrades as PluginSnapshot["seedUpgrades"] } : {}),
+      ...(o.example && typeof o.example === "object" ? { example: o.example as PluginSnapshot["example"] } : {}),
     };
   }
   return null;
@@ -633,6 +639,9 @@ export default function PluginsPanel(props: Props): JSX.Element {
   const [settingsToken, setSettingsToken] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [notice, setNotice] = React.useState<{ ok: boolean; text: string } | null>(null);
+  /* A-1200 · B4：示例扩展的版本对照（按钮文案）+ 本次启动的升级记录（如实告知）。 */
+  const [exampleStatus, setExampleStatus] = React.useState<PluginSnapshot["example"] | undefined>(undefined);
+  const [seedUpgrades, setSeedUpgrades] = React.useState<NonNullable<PluginSnapshot["seedUpgrades"]>>([]);
 
   const showNotice = (ok: boolean, text: string): void => {
     setNotice({ ok, text });
@@ -658,6 +667,10 @@ export default function PluginsPanel(props: Props): JSX.Element {
       if (pl.snap) {
         setPlugins(pl.snap.plugins);
         setRejected(pl.snap.rejected);
+        setExampleStatus(pl.snap.example);
+        /* 升级记录是一次性的（主进程读走即清）—— 只在**本次拉到**时替换，
+           拉不到就保留上一次的显示（否则刚弹出的提示会被下一次刷新擦掉）。 */
+        if (pl.snap.seedUpgrades) { setSeedUpgrades(pl.snap.seedUpgrades); }
         setPluginsFailed(false);
       } else {
         setPlugins([]);
@@ -772,10 +785,18 @@ export default function PluginsPanel(props: Props): JSX.Element {
     try {
       const res = await a.extras.pluginsInstallExample();
       if (res?.ok) {
-        showNotice(true, "示例扩展 hello-slime 已安装（出现在下方列表；拨片可随时停用/卸载）");
+        /* A-1200 · B4：如实区分三种结果 —— 「装上了」「升到新版了」「已经是最新的」，
+           不把三种都糊成一句「已安装」（那会让用户以为升级发生了而其实没有，或反之）。 */
+        if (res.action === "upgraded") {
+          showNotice(true, `示例扩展已更新到 v${String(res.to ?? "?")}（旧版已备份，可在 config/plugins-backup 找回）`);
+        } else if (res.action === "installed") {
+          showNotice(true, "示例扩展 hello-slime 已安装（出现在下方列表；拨片可随时停用/卸载）");
+        } else {
+          showNotice(true, `示例扩展已是最新（v${String(res.to ?? "?")}）`);
+        }
         await refresh();
       } else {
-        showNotice(false, res?.error ? `安装示例扩展失败：${String(res.error)}` : "安装示例扩展失败");
+        showNotice(false, res?.error ? `安装/更新示例扩展失败：${String(res.error)}` : "安装/更新示例扩展失败");
       }
     } catch (e) {
       showNotice(false, `安装示例扩展失败：${e instanceof Error ? e.message : String(e)}`);
@@ -869,11 +890,33 @@ export default function PluginsPanel(props: Props): JSX.Element {
         <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
           disabled={loading}
           onClick={() => { void doInstallExample(); }}
-          title="从随包模板安装官方示例扩展（hello-slime）—— 把扩展的全部贡献类型演示一遍；已安装则不覆盖">安装示例扩展</button>
+          title={exampleStatus?.canUpgrade
+            ? `随包示例有新版本（v${String(exampleStatus.templateVersion ?? "?")}，当前 v${String(exampleStatus.installedVersion ?? "?")}）—— 点此升级；升级前会备份旧版，你的设置与信任状态都保留`
+            : "从随包模板安装官方示例扩展（hello-slime）—— 把扩展的全部贡献类型演示一遍；已安装且无新版时不会改动任何文件"}>
+          {exampleStatus?.canUpgrade ? `更新示例扩展 v${String(exampleStatus.templateVersion ?? "")}` : "安装示例扩展"}</button>
         <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
           disabled={loading}
           onClick={() => { void doReload(); }}>重新装载</button>
       </div>
+
+      {/* A-1200 · B4：示例扩展**本次启动被升级过** ⇒ 如实告知（不静默升级）。
+          一次性：主进程读走即清，所以同一次启动里不会反复弹。 */}
+      {seedUpgrades.length > 0 && (
+        <div style={{
+          marginBottom: 12, padding: "9px 12px", borderRadius: 9, fontSize: 12,
+          border: "1px solid var(--accent)", background: "var(--accent-soft)", lineHeight: 1.7,
+        }}>
+          <b>示例扩展已更新</b>
+          {seedUpgrades.map((u) => (
+            <span key={u.name}>
+              ：「{u.name}」{u.from} → <b>v{u.to}</b>
+            </span>
+          ))}
+          <span style={{ color: "var(--text-muted)" }}>
+            （旧版已备份，如有问题可从 <code>config/plugins-backup</code> 找回；你的设置与信任状态均已保留）
+          </span>
+        </div>
+      )}
 
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
         本页是三类插件来源的总览 —— 系统默认随应用提供不可卸载，Agent 自建与外部载入可用右侧拨片开关启停；

@@ -74,8 +74,8 @@ const MUTATIONS = [
     file: F_CONTRIB,
     mutate: (t) => sub(
       t,
-      'export const PLUGIN_VIEW_PLACEMENTS = ["main", "right", "left"] as const;',
-      'export const PLUGIN_VIEW_PLACEMENTS = ["right", "left"] as const;',
+      "export const PLUGIN_VIEW_PLACEMENTS = [\"main\", \"right\", \"left\"] as const;",
+      "export const PLUGIN_VIEW_PLACEMENTS = [\"right\", \"left\"] as const;",
     ),
   },
   {
@@ -86,12 +86,16 @@ const MUTATIONS = [
   {
     /* ⚠️ 这一条动的是**唯一承载该判据的那一行**（不是去放宽枚举）：
        删掉之后 `raw.length === 0` 一路走到循环（不执行）⇒ 返回 `{ ok: true, views: [] }`
-       ⇒ 用户写了个空数组，插件照常装载、界面上什么都没有。 */
+       ⇒ 用户写了个空数组，插件照常装载、界面上什么都没有。
+       ⚠️ 锚点写法纪律（见 mut-a1200-plugin-regions 的同款注记）：**一律用双引号字面量**，
+       不用单引号 —— `check-mut-anchors` 的 `readConcat` 只解析双引号字面量，单引号锚点
+       它读不出来 ⇒ 会落进「未命中（源码已漂移）」的**假红**（源码其实没漂移，`sub()` 实跑能命中）。
+       2026-10-09 实测踩到：M3 最初写成单引号，全量核验报「未命中 1」，而实跑 21/21 全抓。 */
     name: "3 空数组放行（配了但界面上什么都没有＝本项目判据里的陷阱）",
     file: F_CONTRIB,
     mutate: (t) => sub(
       t,
-      '  if (raw.length === 0) {\n    return { ok: false, errors: ["contributes.views 不得为空数组（不声明就别写这个字段）"] };\n  }\n',
+      "  if (raw.length === 0) {\n    return { ok: false, errors: [\"contributes.views 不得为空数组（不声明就别写这个字段）\"] };\n  }\n",
       "",
     ),
   },
@@ -148,7 +152,7 @@ const MUTATIONS = [
     file: F_CONTRIB,
     mutate: (t) => sub(
       t,
-      '  if (raw.page !== undefined && raw.views !== undefined) {\n    errors.push("contributes.page 与 contributes.views 不可同时声明（前者是后者里唯一一个 placement=right 的特例）：写其中之一即可，同时写属口径冲突");\n  }\n',
+      "  if (raw.page !== undefined && raw.views !== undefined) {\n    errors.push(\"contributes.page 与 contributes.views 不可同时声明（前者是后者里唯一一个 placement=right 的特例）：写其中之一即可，同时写属口径冲突\");\n  }\n",
       "",
     ),
   },
@@ -161,7 +165,7 @@ const MUTATIONS = [
     file: F_CONTRIB,
     mutate: (t) => sub(
       t,
-      '  if (v.split(/[\\\\/]+/).includes("..")) { errors.push(`entry 不得含 .. 段（不得爬出插件目录）：${raw}`); }',
+      "  if (v.split(/[\\\\/]+/).includes(\"..\")) { errors.push(`entry 不得含 .. 段（不得爬出插件目录）：${raw}`); }",
       "  /* mutated: 不校验 .. */",
     ),
   },
@@ -191,8 +195,8 @@ const MUTATIONS = [
     file: F_VIEWH,
     mutate: (t) => sub(
       t,
-      '          setState({ url: "", error: `栏目加载失败：${res?.error ? String(res.error) : "主进程未返回 url"}`, loading: false });',
-      '          setState({ url: "", error: "", loading: false });',
+      "          setState({ url: \"\", error: `栏目加载失败：${res?.error ? String(res.error) : \"主进程未返回 url\"}`, loading: false });",
+      "          setState({ url: \"\", error: \"\", loading: false });",
     ),
   },
   {
@@ -214,8 +218,8 @@ const MUTATIONS = [
     file: F_APP,
     mutate: (t) => sub(
       t,
-      '  const mainPluginView = viewsAt(pluginViews, "main").find((v) => v.id === mainViewId) ?? null;',
-      '  const mainPluginView = mainViewId === "" ? null : (viewsAt(pluginViews, "main")[0] ?? null);',
+      "  const mainPluginView = viewsAt(pluginViews, \"main\").find((v) => v.id === mainViewId) ?? null;",
+      "  const mainPluginView = mainViewId === \"\" ? null : (viewsAt(pluginViews, \"main\")[0] ?? null);",
     ),
   },
   {
