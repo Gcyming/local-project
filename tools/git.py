@@ -34,6 +34,19 @@ from typing import Any
 
 from tools.registry import Tool, get_registry
 
+# A-1197：写入禁写判定的**唯一真相源**在 tools/builtin.py（file_write 等入口都用它）。
+#   本模块的 checkpoint 还原链（_write_patch_file）与 git_restore 也必须用同一个，
+#   否则「还原链」就成了绕过全部写入保护的后门。
+#   ⚠️ 为什么可以顶层 import 而不必函数内延迟 import：
+#     依赖方向是单向的 —— builtin.py 只 import tools.registry，**从不** import tools.git
+#     （已核对 builtin.py 全文无 git 引用），而本模块同样只 import tools.registry。
+#     两者共用叶子模块 tools.registry，**不存在环**；已实测 import tools.git 与
+#     import tools.builtin 双向 OK，打包形态（gui/*/win-unpacked/tools/）两者也同在。
+#     若将来 builtin.py 反向 import tools.git 才真的成环，那时才需要改成函数内延迟
+#     import 或把判定下沉到公共模块 —— 现在提前写延迟 import 只会把「为什么可以顶层导」
+#     这条关键信息藏进函数体，后人容易误以为成环而不敢动。
+from tools.builtin import _is_blocked_write_path
+
 # 锚定项目根（与 tools/builtin.py 保持一致，cwd 任意启动都 OK）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,6 +70,74 @@ PROTECTED_DIRECTORIES_AGAINST_GLOBS = (
     "core/mcp_client.py",   # 权限映射部分
 )
 BRANCH_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,47}$")
+
+# ── checkpoint **采集端**过滤（A-1197 续）────────────────────────────────────
+# 为什么收窄采集源：还原端 `_write_patch_file` 已按写入黑名单跳过受保护文件
+# ⇒ 这些内容**采了也还原不回去**，纯白存（还把 config/agents.json / slime.toml /
+# core/agent.py 的**全文**搬进 .slime/checkpoints/*.patch）。
+# ⇒ 收窄是纯收益：功能零损失（本来就恢复不了）+ 敏感内容不进 patch 包 + 包体积变小。
+# 三条规则，且与还原端**同口径**：
+#   ① 受保护路径 —— 委派 builtin._is_blocked_write_path（写入保护的**唯一真相源**，
+#      绝不 here 再写一份：双端各写一份历史上已漂移过多次，见 _write_patch_file 的注释）；
+#   ② 过大文件 —— patch 是用来**回滚代码**的，不该把大二进制/构建产物搬进去；
+#   ③ .slime/ 自身 —— 否则 checkpoint 把自己再打进下一个 checkpoint，逐轮膨胀。
+CHECKPOINT_UNTRACKED_MAX_BYTES = 2 * 1024 * 1024
+
+SKIP_REASON_PROTECTED = "受保护路径"
+SKIP_REASON_TOO_LARGE = "超过体积上限"
+SKIP_REASON_SELF_REF = "checkpoint 自身目录"
+
+
+def _filter_checkpoint_untracked(rels: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """把未追踪文件列表分成「可采集」与「跳过（含理由）」两拨。
+
+    返回 `(keep, skipped)`，`skipped` 元素是 `(相对路径, 理由)`。
+
+    ⚠️ **出声是本函数自身的义务**，不是调用方的 —— 过滤一旦静默，调用方会以为
+    「文件都在包里」，而还原时才发现少了一批，正是本项目铁律禁止的静默失效。
+    所以跳过项非空时在这里汇总成**一条** log.warning（逐条刷屏反而没人看），
+    内容含条数、各类分布、以及被跳过里最大的一条及其体积。
+    ⚠️ .slime 判定用**词法** `relative_to`（不用 resolve）：`_is_blocked_write_path`
+    内部也是词法口径，两边同源；`.resolve()` 只会引入符号链接/大小写折叠的噪声。
+    """
+    slime_dir = _PROJECT_ROOT / ".slime"
+    keep: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    biggest: tuple[str, int] = ("-", 0)
+    for rel in rels:
+        abs_path = _PROJECT_ROOT / rel
+        try:
+            sz = abs_path.stat().st_size
+        except OSError:
+            sz = -1
+        reason = ""
+        try:
+            abs_path.relative_to(slime_dir)
+            reason = SKIP_REASON_SELF_REF
+        except ValueError:
+            pass
+        if not reason and _is_blocked_write_path(abs_path):
+            reason = SKIP_REASON_PROTECTED
+        if not reason and sz > CHECKPOINT_UNTRACKED_MAX_BYTES:
+            reason = SKIP_REASON_TOO_LARGE
+        if reason:
+            skipped.append((rel, reason))
+            if sz > biggest[1]:
+                biggest = (rel, sz)
+        else:
+            keep.append(rel)
+    if skipped:
+        detail = "、".join(
+            f"{r} {sum(1 for _, x in skipped if x == r)} 条"
+            for r in (SKIP_REASON_PROTECTED, SKIP_REASON_TOO_LARGE, SKIP_REASON_SELF_REF)
+            if any(x == r for _, x in skipped)
+        )
+        log.warning(
+            "[tools/git] checkpoint 采集过滤：跳过 %d 条未追踪文件（%s）；其中最大的一条 %s（%.1f MB）。"
+            "这些路径还原端本就会拒收，采进包也只是白存。",
+            len(skipped), detail, biggest[0], max(biggest[1], 0) / 1024 / 1024,
+        )
+    return keep, skipped
 
 log = logging.getLogger("slime.git-tools")
 
@@ -317,13 +398,40 @@ async def git_stage(args: dict) -> str:
 
 
 async def git_restore(args: dict) -> str:
-    """回滚工作区修改（到 HEAD 状态），可按 path 精确回退；不重写历史。"""
+    """回滚工作区修改（到 HEAD 状态），可按 path 精确回退；不重写历史。
+
+    A-1197：paths 原先**零校验**，`git_restore -- slime.toml` 能把受保护文件回滚掉。
+    它只回到 HEAD 状态（不新建内容），危害低于 checkpoint 还原链，但属同一类缺口。
+    这里复用与 _write_patch_file / file_write **同一个**判定（builtin._is_blocked_write_path），
+    命中即整单拒绝并**列出被拒的路径**（不静默过滤 —— 调用方必须知道哪几条没生效，
+    否则会误以为全部已回滚）。
+    """
     err = _ensure_git_repo()
     if err:
         return f"[拒绝] {err}"
     paths = [p for p in (args.get("paths") or []) if isinstance(p, str) and p.strip()]
     if not paths:
         return "[拒绝] git_restore 必须传 paths=[...]（精确到文件/目录），禁止整仓库 restore"
+    # A-1197：受保护路径前置过滤（同一真相源，不另写一套；import 见文件头）。
+    # 项目外路径沿用既有语义：不在项目内 ⇒ 也算越界，一并拒绝。
+    blocked: list[str] = []
+    for p in paths:
+        raw = Path(p)
+        if not raw.is_absolute():
+            raw = _PROJECT_ROOT / raw
+        try:
+            resolved = raw.resolve()
+            resolved.relative_to(_PROJECT_ROOT.resolve())
+        except ValueError:
+            blocked.append(f"{p}（超出项目范围）")
+            continue
+        if _is_blocked_write_path(resolved):
+            blocked.append(p)
+    if blocked:
+        return ("[拒绝] git_restore 命中受保护路径，已整单拒绝（未回滚任何文件）：\n  - "
+                + "\n  - ".join(blocked)
+                + "\n口径与 file_write 一致（敏感文件名/后缀、受保护源码目录均禁写）。"
+                  "确需回滚请由用户手工执行 git restore。")
     source = args.get("source") or "HEAD"  # 允许 restore -s <commit>
     cmd = ["restore"]
     if source and source != "HEAD":
@@ -914,20 +1022,29 @@ async def git_checkpoint_save(args: dict) -> str:
             patch = _run_git(["diff", "--no-color", "HEAD"], allow_nonzero=True).stdout or ""
             staged_patch = _run_git(["diff", "--cached", "--no-color"], allow_nonzero=True).stdout or ""
             untracked_lines = [ln[3:] for ln in status_short.splitlines() if ln.startswith("?? ")]
+            # A-1197 续：**采集端**收窄。还原端 _write_patch_file 已按写入黑名单拒收，
+            # 所以这里采了也还原不回去 —— 纯白存，且会把受保护文件的**全文**写进
+            # .slime/checkpoints/*.patch。口径与还原端同源（同一个 _is_blocked_write_path）。
+            # ⚠️ 出声由 _filter_checkpoint_untracked 自己负责（汇总一条 warning，不逐条刷屏）。
+            untracked_keep, untracked_skipped = _filter_checkpoint_untracked(untracked_lines)
             # 把 patch 写入 bundle_path 文件作为"文本补丁包"后缀 .patch（比 .bundle 更可读）
             patch_bundle = CHECKPOINTS_DIR / f"{cp_id}.patch"
             with patch_bundle.open("w", encoding="utf-8") as f:
                 f.write(f"# slime checkpoint fallback patch — id={cp_id}\n")
                 f.write(f"# HEAD={head_hash}\n")
                 f.write(f"# label={label}\n")
+                if untracked_skipped:
+                    f.write(f"# UNTRACKED SKIPPED（采集端过滤，共 {len(untracked_skipped)} 条）：\n")
+                    for srel, sreason in untracked_skipped:
+                        f.write(f"# SKIPPED {srel} [{sreason}]\n")
                 f.write("# === DIFF HEAD (working tree) ===\n")
                 f.write(patch)
                 f.write("\n# === DIFF CACHED (staged) ===\n")
                 f.write(staged_patch)
                 f.write("\n# === UNTRACKED FILES ===\n")
-                if untracked_lines:
+                if untracked_keep:
                     # 逐个写入 untracked 内容（相对路径 + 文件内容）
-                    for rel in untracked_lines:
+                    for rel in untracked_keep:
                         abs_path = _PROJECT_ROOT / rel
                         if abs_path.is_file() and abs_path.exists():
                             try:
@@ -1118,12 +1235,36 @@ async def git_checkpoint_restore(args: dict) -> str:
 
 
 def _write_patch_file(rel: str, lines: list[str]) -> None:
-    """写 patch/FILE 块到项目根（fallback 路径）。"""
+    """写 patch/FILE 块到项目根（fallback 路径）。
+
+    A-1197 / P0 写入绕过：本函数原先**只判「在项目根内」**，等于绕过了 Python 侧
+    全部写入保护 —— checkpoint 还原链（git_checkpoint_save 的 fallback 把未追踪文件
+    全文写进 .slime/checkpoints/<id>.patch ⇒ git_checkpoint_restore 解析 FILE 行
+    ⇒ 本函数落盘）能覆写 config/agents.json / slime.toml / core/agent.py。
+    根因之一是 .slime/ 既不在 PROTECTED_DIRS 又被 .gitignore 忽略 ⇒ 它自己是「未追踪
+    文件」，能进下一轮 checkpoint 的采集包，形成自举闭环。
+
+    修法：复用 builtin._is_blocked_write_path（Python 侧写入禁写的**唯一真相源**），
+    不在这里另写一套判定 —— 那样必然与 file_write 漂移（历史上双端各写一份已漏过多次）。
+
+    ⚠️ **取舍（有意为之，不是遗漏）**：slime.toml 与 config/agents.json 都在
+    _WRITE_BLOCKED_NAMES 里 ⇒ checkpoint 还原**从此不再能恢复这两个文件**。
+    这与 file_write 的现行口径完全一致（同样拦），是刻意对齐：还原链不是后门。
+    命中时**出声**（log.warning）而非静默 return —— 静默失效是本项目铁律禁止的。
+    """
     target = (_PROJECT_ROOT / rel).resolve()
     try:
         target.relative_to(_PROJECT_ROOT.resolve())
     except ValueError:
         return  # 越界跳过
+    # A-1197：命中写入黑名单 ⇒ 跳过该 FILE 块。放在 relative_to 之后、mkdir 之前 ——
+    # 既不越界处理，也不给受保护目录凭空造出父目录。
+    if _is_blocked_write_path(target):
+        log.warning(
+            "[tools/git] checkpoint 还原跳过受保护文件（写入黑名单）：%s"
+            "（还原链不再是写入后门；口径与 file_write 一致）", rel,
+        )
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text("\n".join(lines) + "\n", encoding="utf-8")

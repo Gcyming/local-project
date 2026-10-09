@@ -23,6 +23,60 @@ PROTECTED_DIRS: tuple[str, ...] = (
     ".git",
 )
 
+# protected_path_exemptions（来自 shared/security-policy.yaml）
+PROTECTED_PATH_EXEMPTIONS: tuple[str, ...] = (
+    "config/skills",
+    "config/plugins",
+)
+
+# contribution_reserved_assets（来自 shared/security-policy.yaml）
+CONTRIBUTION_RESERVED_ASSETS: tuple[str, ...] = (
+    "config/plugins/subagent",
+    "config/plugins/file-io",
+    "config/plugins/doc-authoring",
+    "config/plugins/shell-exec",
+    "config/plugins/web-access",
+    "config/plugins/user-interaction",
+    "config/plugins/planning",
+    "config/plugins/memory",
+    "config/plugins/android-device",
+    "config/plugins/http-service",
+    "config/plugins/sidebar",
+    "config/plugins/screen-control",
+    "config/plugins/browser",
+    "config/plugins/skill-instructions",
+    "config/plugins/doc-parsing",
+    "config/plugins/office-render",
+    "config/plugins/online-search",
+    "config/plugins/mind",
+    "config/plugins/silam",
+    "config/plugins/local-model",
+    "config/plugins/sandbox",
+    "config/plugins/terminal-shell",
+    "config/plugins/social",
+    "config/plugins/multi-agent",
+    "config/plugins/guardrails",
+    "config/plugins/encryption",
+    "config/plugins/observability",
+    "config/plugins/model-routing",
+    "config/plugins/mcp-bridge",
+    "config/plugins/plugin-management",
+)
+
+# contribution_owner_markers（来自 shared/security-policy.yaml）
+CONTRIBUTION_OWNER_MARKERS: tuple[str, ...] = (
+    "plugin.json",
+    "manifest.yaml",
+    "manifest.json",
+    "SKILL.md",
+)
+
+# contribution_owner_field（来自 shared/security-policy.yaml；标量）
+CONTRIBUTION_OWNER_FIELD: str = "origin"
+
+# contribution_owner_value（来自 shared/security-policy.yaml；标量）
+CONTRIBUTION_OWNER_VALUE: str = "agent"
+
 # sensitive_filenames（来自 shared/security-policy.yaml）
 SENSITIVE_FILENAMES: tuple[str, ...] = (
     ".slime_pass",

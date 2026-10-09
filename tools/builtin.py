@@ -6,6 +6,7 @@ slime 内置只读工具
 """
 
 import os
+import re
 from pathlib import Path
 from .registry import Tool, get_registry
 
@@ -100,10 +101,31 @@ _MAX_WRITE_BYTES = 5 * 1024 * 1024
 # ── 安全清单：单一真相源 shared/security-policy.yaml（经 scripts/gen_security_policy.py 生成） ──
 # 与 core-ts/src/tools/classifier.ts 同源。历史上双端各写一份导致主链路缺失引擎源码保护，
 # 故改为生成物共享；此处不再手写清单。
-def _load_security_policy() -> tuple[frozenset[str], frozenset[str], tuple[str, ...]]:
+def _load_security_policy() -> tuple[
+    frozenset[str], frozenset[str], tuple[str, ...], tuple[str, ...],
+    tuple[str, ...], tuple[str, ...], str, str,
+]:
     """载入 shared/gen/security_policy.py。打包场景若未附带 shared/ 则回退内嵌镜像，
-    镜像与源的一致性由 tests/test_security_policy.py 断言（漂移即测试失败）。"""
+    镜像与源的一致性由 tests/test_security_policy.py 断言（漂移即测试失败）。
+
+    返回值第 4 项是 A-1197 新增的「受保护目录豁免子路径」（小写 POSIX 相对路径），
+    与 core-ts/src/tools/classifier.ts 同源于 shared/security-policy.yaml §④；
+    第 5~8 项是 §⑤ 的归属口径（保留资产目录 / 来源标记文件名 / 标记字段 / 标记取值），
+    判据本体见 core-ts/src/tools/classifier.ts 的 isProtectedSourcePath（单一真相源）。"""
     import importlib.util
+
+    def _load(mod: object, name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            return tuple(str(x).lower() for x in getattr(mod, name, default))
+        except Exception:
+            return default
+
+    def _scalar(mod: object, name: str, default: str) -> str:
+        try:
+            v = getattr(mod, name, default)
+            return str(v).strip().lower() if v else default
+        except Exception:
+            return default
 
     path = _PROJECT_ROOT / "shared" / "gen" / "security_policy.py"
     try:
@@ -115,6 +137,11 @@ def _load_security_policy() -> tuple[frozenset[str], frozenset[str], tuple[str, 
                 frozenset(str(x).lower() for x in mod.PROTECTED_DIRS),
                 frozenset(str(x).lower() for x in mod.SENSITIVE_FILENAMES),
                 tuple(str(x).lower() for x in mod.WRITE_BLOCK_SUFFIXES),
+                _load(mod, "PROTECTED_PATH_EXEMPTIONS", ()),
+                _load(mod, "CONTRIBUTION_RESERVED_ASSETS", ()),
+                _load(mod, "CONTRIBUTION_OWNER_MARKERS", ()),
+                _scalar(mod, "CONTRIBUTION_OWNER_FIELD", "origin"),
+                _scalar(mod, "CONTRIBUTION_OWNER_VALUE", "agent"),
             )
     except Exception:
         pass
@@ -133,10 +160,81 @@ def _load_security_policy() -> tuple[frozenset[str], frozenset[str], tuple[str, 
             "qa.py", "run_tests.py", "pytest.ini",
         }),
         (".enc", ".toml", ".key", ".pem", ".p12", ".pfx"),
+        ("config/skills", "config/plugins"),
+        # ⚠️ 保留资产目录的回退镜像必须与 yaml §⑤ 一致 —— 由 tests/test_security_policy.py
+        # 断言（改 yaml 忘了改镜像即测试失败）。此处只列内置插件名，勿手改。
+        tuple(
+            "config/plugins/" + n for n in (
+                "subagent", "file-io", "doc-authoring", "shell-exec", "web-access",
+                "user-interaction", "planning", "memory", "android-device", "http-service",
+                "sidebar", "screen-control", "browser", "skill-instructions", "doc-parsing",
+                "office-render", "online-search", "mind", "silam", "local-model", "sandbox",
+                "terminal-shell", "social", "multi-agent", "guardrails", "encryption",
+                "observability", "model-routing", "mcp-bridge", "plugin-management",
+            )
+        ),
+        ("plugin.json", "manifest.yaml", "manifest.json", "skill.md"),
+        "origin",
+        "agent",
     )
 
 
-_WRITE_BLOCKED_DIRS, _WRITE_BLOCKED_NAMES, _WRITE_BLOCKED_SUFFIXES = _load_security_policy()
+(
+    _WRITE_BLOCKED_DIRS,
+    _WRITE_BLOCKED_NAMES,
+    _WRITE_BLOCKED_SUFFIXES,
+    _WRITE_DIR_EXEMPTIONS,
+    _RESERVED_ASSETS,
+    _OWNER_MARKERS,
+    _OWNER_FIELD,
+    _OWNER_VALUE,
+) = _load_security_policy()
+
+
+def _contribution_asset_dir(rel_posix: str) -> str | None:
+    """把 `<豁免根>/<资产目录>` 这一层抠出来；不在任何豁免根下则返回 None。
+
+    ⚠️ 只认**恰好一层**资产目录（与 TS 侧 contributionAssetDir 同口径）：
+    config/plugins/demo-tool/skills/x/SKILL.md 的资产目录是 config/plugins/demo-tool，
+    不是 skills/x —— 否则「改别人插件里的一个技能」会被误当成一个新资产而放行。"""
+    for ex in _WRITE_DIR_EXEMPTIONS:
+        if not ex:
+            continue
+        if rel_posix == ex:
+            return ex
+        prefix = ex + "/"
+        if not rel_posix.startswith(prefix):
+            continue
+        segs = [s for s in rel_posix[len(prefix):].split("/") if s]
+        return f"{ex}/{segs[0]}" if segs else ex
+    return None
+
+
+def _asset_declares_agent_origin(asset_dir: Path) -> bool:
+    """读资产目录的来源声明：标记字段 == 标记取值 才算「agent 自己建的」。
+
+    ⚠️ 与 TS 侧 assetDeclaresAgentOrigin **逐条同口径**（双端漂移过一次源码写入保护，
+    这里必须成套改）：JSON（plugin.json / manifest.json）用正则取 "origin": "…"；
+    YAML（manifest.yaml / SKILL.md）只认**顶层** origin: value（行首无缩进）。
+    fail-closed：判不出来一律 False（宁可拦一次让 Agent 换写法）。"""
+    for marker in _OWNER_MARKERS:
+        f = asset_dir / marker
+        try:
+            if not f.is_file():
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if marker.endswith(".json"):
+            m = re.search(r'"%s"\s*:\s*"([^"]*)"' % re.escape(_OWNER_FIELD), text, re.I)
+            if m and m.group(1).strip().lower() == _OWNER_VALUE:
+                return True
+            continue
+        for line in text.splitlines():
+            m = re.match(r"^%s\s*:\s*(.+?)\s*$" % re.escape(_OWNER_FIELD), line, re.I)
+            if m:
+                return m.group(1).strip().strip("\"'").lower() == _OWNER_VALUE
+    return False
 
 
 def _is_blocked_write_path(p: Path) -> bool:
@@ -149,8 +247,23 @@ def _is_blocked_write_path(p: Path) -> bool:
         return True
     try:
         rel = p.relative_to(_PROJECT_ROOT)
-        first = rel.parts[0].lower() if rel.parts else ""
+        parts = [x.lower() for x in rel.parts]
+        first = parts[0] if parts else ""
         if first in _WRITE_BLOCKED_DIRS:
+            # A-1197：受保护目录下的「用户自助贡献目录」豁免 —— 与 TS 侧同口径。
+            # 只认写全的相对目录前缀（含其下全部），父目录依旧是禁区。
+            rel_posix = "/".join(parts)
+            asset_rel = _contribution_asset_dir(rel_posix)
+            if asset_rel is not None:
+                # A-1197 收口：豁免 ≠ 整目录随便写。三条判据见 security-policy.yaml §⑤：
+                #   ① 资产目录不存在 ⇒ 放行（「新建」）；② 已存在但自带 agent 来源声明 ⇒
+                #   放行（「迭代自己刚建的」）；③ 命中保留资产目录 ⇒ 拦（永不放行）。
+                for rv in _RESERVED_ASSETS:
+                    if asset_rel == rv or asset_rel.startswith(rv + "/"):
+                        return True
+                if not (_PROJECT_ROOT / asset_rel).exists():
+                    return False
+                return not _asset_declares_agent_origin(_PROJECT_ROOT / asset_rel)
             return True
     except ValueError:
         pass  # 项目外路径已在调用处拦截

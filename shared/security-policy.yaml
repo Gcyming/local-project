@@ -29,6 +29,88 @@ protected_dirs:
   - tests          # 测试基线（篡改测试=篡改验收标准）
   - .git           # 版本历史
 
+# ④ 受保护目录的**豁免子路径**（相对 slime 根；命中即不受上面的 protected_dirs 约束）
+#
+# 背景（2026-10-07 实测缺陷 = 用户报的「造不了扩展」+「总是被拒绝」）：
+#   protected_dirs 原本是给**源码目录**写的（core-ts / gui / tools …装的都是代码），
+#   但打包形态下 slime 根就是**运行时数据根**（%APPDATA%\slime-gui\slime-data），
+#   于是 `config`（本意保护 config/agents.json 等主配置）把
+#   `config/skills`（技能）与 `config/plugins`（插件）**一起封**了 ——
+#   创造模式的导引明确要求 Agent 往这两个目录写，写入却是 block 级硬规则，
+#   **任何审批档位/开关都批不了**，用户侧就只会看到一句「被拒绝」。
+#
+# 放行口径（三条缺一不可，改动前先自问）：
+#   · 只放**目录及其下全部子路径**，且必须写全相对路径（不许只写 `config`）；
+#   · 这两个目录里只放 **Markdown 指令 + JSON 清单**（无可执行代码、无入口可被 require/import）；
+#   · 真正要保护的主配置（slime.toml / agents.json / *.enc）由 sensitive_filenames
+#     与 write_block_suffixes **继续拦着**，本豁免**不放开**它们。
+protected_path_exemptions:
+  - config/skills       # 技能库：SKILL.md + manifest.yaml
+  - config/plugins      # 扩展容器：plugin.json + skills/
+
+# ⑤ 贡献资产的**归属口径**（配合 §④ 使用；A-1197 收口）
+#
+# 背景（§④ 整目录豁免带来的副作用）：豁免放行了 config/plugins 与 config/skills
+# **整目录**，于是「任何 Agent 都能改任何一个插件/技能目录」—— 包括改别人的、
+# 以及在 config/plugins 下**新建一个与内置插件同名的目录**（后者会让同名清单重复
+# 而装载失败，等于变相把内置能力下线）。后面还有更大的能力扩展在排队，
+# 暴露面只会变大，所以在这里收紧。
+#
+# 判据（判在**资产目录**这一层，不是文件层；三个键合起来才是一条完整判据）：
+#   ① 资产目录**在磁盘上还不存在** ⇒ 放行（这就是「新建」）；
+#   ② 已存在 ⇒ 只有它的来源标记声明自己是 agent 自建时才放行（这就是「迭代自己刚建的那个」）；
+#   ③ 资产目录整体命中 contribution_reserved_assets ⇒ 永不放行（内置插件同名目录）。
+# 标记文件名/字段/取值都放在这里，双端从同一份生成，避免「谁认哪个字段」双端漂移。
+#
+# ⚠️ 失效场景（改动前必读 —— 这三条是**已知且刻意接受**的，不是没想清楚）：
+#   · 这是**来源归属**，不是**会话归属**：另一个创造模式 Agent 仍能改这个 Agent 建的目录。
+#     真按会话隔离要把 sessionId/agentName 铺到 hardRuleCheck，而那条调用链在
+#     core-ts/src/tool_loop.ts 与 core-ts/src/services/** —— 本轮不在改动范围内。
+#     本仓在 hardRuleCheck 拿到的只有 {name, riskKind, target, projectRoot}，无身份可用。
+#   · 标记字段由写方自己填，理论上可伪造；但要写进某个目录必须先通过 ①/②
+#     （目录不存在，或已是自己声明的资产），所以「伪造标记」不构成提权。
+#     真正与标记无关的口子是 ③（目录名），它对新建目录同样生效。
+#   · 已存在的**空目录**（无任何标记文件）按 ① 放行 —— 与「先 mkdir 再写」等价；
+#     空目录在装载器眼里根本不是资产（无 plugin.json 直接跳过），不构成越权。
+contribution_reserved_assets:      # ③ 永不放行的资产目录（写全相对路径，含 / 边界）
+  - config/plugins/subagent
+  - config/plugins/file-io
+  - config/plugins/doc-authoring
+  - config/plugins/shell-exec
+  - config/plugins/web-access
+  - config/plugins/user-interaction
+  - config/plugins/planning
+  - config/plugins/memory
+  - config/plugins/android-device
+  - config/plugins/http-service
+  - config/plugins/sidebar
+  - config/plugins/screen-control
+  - config/plugins/browser
+  - config/plugins/skill-instructions
+  - config/plugins/doc-parsing
+  - config/plugins/office-render
+  - config/plugins/online-search
+  - config/plugins/mind
+  - config/plugins/silam
+  - config/plugins/local-model
+  - config/plugins/sandbox
+  - config/plugins/terminal-shell
+  - config/plugins/social
+  - config/plugins/multi-agent
+  - config/plugins/guardrails
+  - config/plugins/encryption
+  - config/plugins/observability
+  - config/plugins/model-routing
+  - config/plugins/mcp-bridge
+  - config/plugins/plugin-management
+contribution_owner_markers:       # ② 读取来源声明的候选文件名（按扩展名决定解析方式）
+  - plugin.json                   # 插件清单（JSON）
+  - manifest.yaml                 # 技能清单（YAML）
+  - manifest.json                 # 技能清单（JSON）
+  - SKILL.md                      # 技能正文 frontmatter（YAML 形态）
+contribution_owner_field: origin
+contribution_owner_value: agent
+
 # ② 敏感文件名（写 → block；大小写不敏感比对）
 sensitive_filenames:
   - .slime_pass          # passphrase
