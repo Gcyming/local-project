@@ -117,10 +117,6 @@ export const IPC_CHANNELS = {
   plugins_trust_set: "slime:plugins:trustSet",
   /** A-1197 · B5（L4a page）：打开扩展自有页面（按需起 127.0.0.1 静态服务，返回 url）。 */
   plugins_page_open: "slime:plugins:pageOpen",
-  /** A-1197 · B6（D1 开发者模式）：总开关读（会话级；每次启动需重新确认）。 */
-  plugins_dev_mode_get: "slime:plugins:devModeGet",
-  /** A-1197 · B6（D1）：设置总开关（写 config/dev-mode.json 留审计痕迹）。 */
-  plugins_dev_mode_set: "slime:plugins:devModeSet",
   
   plugins_changed: "slime:plugins:changed",
   chat_suggest: "slime:chat:suggest",

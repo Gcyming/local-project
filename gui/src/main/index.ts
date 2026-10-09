@@ -461,7 +461,6 @@ import type { RejectedPluginDir } from "../../../core-ts/src/plugin/loader.js";
 import { markPluginDisabled, readDisabledPlugins, unmarkPluginDisabled } from "../../../core-ts/src/plugin/disabled-store.js";
 import type { PluginUiContribution } from "../../../core-ts/src/plugin/contributes.js";
 import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
-import { getDevModeState, setDevModeEnabled } from "../../../core-ts/src/plugin/dev-mode.js";
 import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
 import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
 import type { PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
@@ -5637,19 +5636,6 @@ function registerIpcHandlers(): void {
     const base = served.urls[0].endsWith("/") ? served.urls[0] : `${served.urls[0]}/`;
     const entry = page.entry.replace(/\\/g, "/");
     return { ok: true as const, url: `${base}${entry}`, reused: served.reused === true };
-  });
-
-  /* A-1197 · B6（D1 开发者模式）：总开关（**会话级** —— 每次启动都要用户重新确认，见 dev-mode.ts）。
-     本 handler 只管开关与状态查询；**写入门**在 sandbox 的 `devModeWriteAllowed`（受管 worktree
-     + `slime/*` 分支前缀硬约束）。合并/commit 门禁属 `git_*` 工具层（AGENTS.md §8）。 */
-  handleTrusted<void>(IPC_CHANNELS.plugins_dev_mode_get, async () => getDevModeState());
-  handleTrusted<{ enabled: boolean }>(IPC_CHANNELS.plugins_dev_mode_set, async (_event, p) => {
-    try {
-      setDevModeEnabled(p?.enabled === true, join(PROJECT_ROOT, "config"));
-    } catch (e) {
-      return { ok: false as const, error: `开发者模式审计文件写入失败：${e instanceof Error ? e.message : String(e)}` };
-    }
-    return { ok: true as const, state: getDevModeState() };
   });
 
   

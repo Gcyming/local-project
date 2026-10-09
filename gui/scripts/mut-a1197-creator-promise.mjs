@@ -53,7 +53,9 @@
  * | 23 | 自述六项清单删掉「运行模式」（两种模式一起瞎） | 用户不问就永远不知道有阶段机 | a1198-self-awareness ① |
  * | 24 | `provides` 合法值改回「三个」（mode 不告而别） | 写了 mode 却不知道自己漏了宣告 | a1197-creator-promise B + silam E2 |
  * | 25 | 自定义模式的自述换成「默认模式」文案 | 标签失真（自定义模式是另一个可选模式） | a1198-self-awareness ① |
- * | 26 | 开发者模式的会话寿命写成「长期有效」 | 安全语义被改坏（授权必须有会话寿命） | a1198-self-awareness ① |
+ * | 26 | 自述里复活「开发者模式」改主干承诺 | D1 口径回潮（用户明确否决：扩展=外部武装） | a1198-self-awareness ① |
+ * | 27 | sandbox 残留 dev-mode 放行文案 | 「改程序本身」的通路回潮 | a1198-self-awareness ① |
+ * | 28 | 扩展页文案复活「开发者模式」 | 界面口径回潮（用户以为能改程序） | a1198-self-awareness ① |
  *
  * ⚠️ 2026-10-08 锚点重打（A-1198 同步）：1/2/5/10 四条锚点所在的行文本随本轮改写而变
  * （`provides` 段补 `mode`、工具能力改「两条真路径」、`contributes` 段从「只有 settings」扩到四类）。
@@ -81,7 +83,11 @@ const SPECS = [
 ];
 
 const F_GUIDE = "core-ts/src/services/agentTools.ts";
-const TARGETS = [F_GUIDE];
+/* 2026-10-09 反回归（用户口径「扩展 = 外部武装，不改程序本身」）：
+   M27/M28 分别打 sandbox 与扩展页 —— 那两处是「改主干」通路曾出现过的地方。 */
+const F_SANDBOX = "core-ts/src/sandbox.ts";
+const F_PANEL = "gui/src/renderer/pages/PluginsPanel.tsx";
+const TARGETS = [F_GUIDE, F_SANDBOX, F_PANEL];
 
 const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1197");
 
@@ -363,12 +369,32 @@ const MUTATIONS = [
     ),
   },
   {
-    name: "26 开发者模式的会话寿命被写成「长期有效」（安全语义被改坏）",
+    name: "26 自述里复活「开发者模式」改主干承诺（D1 口径回潮）",
     file: F_GUIDE,
+    /* ⚠️ 2026-10-09 锚点重打（设计更正）：原 M26 打的是 dev-mode 会话寿命文案 —— 该段已随 D1 撤除。
+       新意图：把「外部武装」口径换成「可以改主干」的 D1 承诺 ⇒ 反回归守卫必须红。 */
     mutate: (t) => sub(
       t,
-      "    \"    · 开发者模式（「扩展」页的总开关，**每次启动都要用户重新确认**）：开启后，只有会话工作目录在\",",
-      "    \"    · 开发者模式（「扩展」页的总开关，一次开启长期有效）：开启后，只有会话工作目录在\",",
+      "    \"  落在**外部插件目录**里。不要把「高自由度」说成改程序 —— 如实告诉用户「能力以可开可关的外部插件形态提供」。\",",
+      "    \"  用户可在「扩展」页开开发者模式，随后你在 slime 的 worktree 里改主干源码（每次启动需确认）。\",",
+    ),
+  },
+  {
+    name: "27 sandbox 残留 dev-mode 放行文案（改主干通路回潮）",
+    file: F_SANDBOX,
+    mutate: (t) => sub(
+      t,
+      "      return { allowed: false, reason: `目标 '${target}' 超出工作目录范围（需用户确认）`, level, anomalyDetected: false, anomalyAlerts: [] };",
+      "      return { allowed: false, reason: `devModeWriteAllowed：目标 '${target}' 超出工作目录范围（需用户确认）`, level, anomalyDetected: false, anomalyAlerts: [] };",
+    ),
+  },
+  {
+    name: "28 扩展页文案复活「开发者模式」（界面口径回潮）",
+    file: F_PANEL,
+    mutate: (t) => sub(
+      t,
+      "        扩展一律是<b>外部</b>能力（可开可关、卸下即恢复原样）——<b>不改动应用本身</b>。",
+      "        扩展一律是可开可关的外部能力；如需改应用本身请走开发者模式（见下方开关）。",
     ),
   },
 ];

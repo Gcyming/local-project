@@ -2,7 +2,10 @@
  * A-1198 · git_* 工具层（桌面端）：把 AGENTS.md 的 Git 契约从文档层接到工具层 ——
  * 让「可追溯」从承诺变成机制（docs/PROJECT_OVERVIEW.md 未来演进方向 §3）。
  *
- * ## D1 的三道闸（docs/creator-freedom-design.md §5.1 的 D1 表）
+ * ## 三道闸（本层的存在理由）
+ * ⚠️ 2026-10-09 设计更正（用户口径）：本层原以「D1 开发者模式（改主干）」为背景落地 ——
+ *    该模式已**撤除**（扩展一律是外部插件、可开可关，不开「改程序本身」的通路）。
+ *    本层**独立保留**为「Agent 提交代码」的治理层：对**任何**工作区仓库通用，不再隶属 D1。
  *   ① commit 门禁 —— commit 前必过质量门禁（TS：根/gui tsc + 全量 vitest；Python：py qa.py；
  *      纯文档跳过）；门禁不绿 ⇒ 不允许 commit。
  *   ② diff 评审 —— 每次 commit 前把 `git diff --stat` + 关键片段**展示给用户**，
@@ -63,7 +66,6 @@ export const PROTECTED_MODULES: ReadonlyArray<{ path: string; why: string }> = [
   { path: "core-ts/src/tools/policy.ts", why: "工具授权策略" },
   { path: "core-ts/src/tools/hard_rules.ts", why: "硬规则（不可绕过的安全边界）" },
   { path: "core-ts/src/tools/classifier.ts", why: "命令分类/预检" },
-  { path: "core-ts/src/plugin/dev-mode.ts", why: "开发者模式开关（主干可写判据）" },
   { path: "core-ts/src/plugin/trust.ts", why: "脚本信任（执行边界开关）" },
   { path: "core-ts/src/services/agentTools.ts", why: "能力自述与工具白名单（Agent 自我认知）" },
 ];

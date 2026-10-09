@@ -275,11 +275,6 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /* A-1197 · B5（L4a page）：打开扩展自有页面（返回要加载的 127.0.0.1 url）。 */
     pluginsPageOpen: (name: string) =>
       ipcRenderer.invoke("slime:plugins:pageOpen", { name }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
-    /* A-1197 · B6（D1）：开发者模式总开关（会话级）。 */
-    pluginsDevModeGet: () =>
-      ipcRenderer.invoke("slime:plugins:devModeGet") as Promise<{ enabled: boolean; lastConfirmedAt: number | null }>,
-    pluginsDevModeSet: (enabled: boolean) =>
-      ipcRenderer.invoke("slime:plugins:devModeSet", { enabled }) as Promise<{ ok: boolean; state?: { enabled: boolean; lastConfirmedAt: number | null }; error?: string }>,
   },
   runtime: {
     
@@ -1012,9 +1007,6 @@ declare global {
         pluginsTrustSet: (name: string, trusted: boolean) => Promise<{ ok: boolean; trusted?: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
         /* A-1197 · B5（L4a page）：打开扩展自有页面。 */
         pluginsPageOpen: (name: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
-        /* A-1197 · B6（D1）：开发者模式总开关（会话级）。 */
-        pluginsDevModeGet: () => Promise<{ enabled: boolean; lastConfirmedAt: number | null }>;
-        pluginsDevModeSet: (enabled: boolean) => Promise<{ ok: boolean; state?: { enabled: boolean; lastConfirmedAt: number | null }; error?: string }>;
       };
       runtime: {
         list: () => Promise<{

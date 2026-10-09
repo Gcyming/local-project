@@ -12,7 +12,6 @@
 import { mkdir, appendFile, writeFile, readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { PROJECT_ROOT } from "./paths.js";
-import { isDevModeEnabled, devModeWriteAllowed } from "./plugin/dev-mode.js";
 import { randomUUID } from "node:crypto";
 
 export { PROJECT_ROOT };
@@ -473,13 +472,9 @@ export class SandboxManager {
     }
 
     if (cfg.workspace && target && !validateWorkspace(cfg.workspace, target)) {
-      /* A-1197 · B6（D1 开发者模式）：目标在「`slime/*` 分支的受管 worktree」内 ⇒ 这是
-         「改主干」的**正确形态**（改的是工作副本、产物停分支等人工合并）⇒ 明确放行并打标记。
-         ⚠️ 判据全部在 `devModeWriteAllowed`（主干目录永远不放行 / 分支前缀硬约束）；
-         开关是**会话级**的（每次启动都要用户重新确认，见 dev-mode.ts）。 */
-      if (isDevModeEnabled() && devModeWriteAllowed(target, cfg.workspace)) {
-        return { allowed: true, reason: "开发者模式：受管 worktree（slime/* 分支）内的写入", level, anomalyDetected: false, anomalyAlerts: [] };
-      }
+      /* 2026-10-09 设计更正（用户口径）：这里曾有一条「开发者模式放行受管 worktree 写入」（D1）分支 ——
+         已撤除：扩展一律是**外部插件**（可开可关、卸下即恢复原样），**不开「改程序本身」的通路**。
+         工作目录外的写入仍然只走下面两条：`allowOutsideWorkspace` 自动放行，或逐目标人工审批。 */
       if (cfg.allowOutsideWorkspace) {
         return { allowed: true, reason: "审批档位自动放行（工作目录外）", level, anomalyDetected: false, anomalyAlerts: [] };
       }

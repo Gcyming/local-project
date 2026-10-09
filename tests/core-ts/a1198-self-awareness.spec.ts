@@ -23,7 +23,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,6 +48,12 @@ const CONTRIBUTES_SRC = read("core-ts/src/plugin/contributes.ts");
 const HOST_SRC = read("core-ts/src/plugin/host.ts");
 const CHAT_SRC = read("core-ts/src/services/chat.ts");
 const MAIN_SRC = read("gui/src/main/index.ts");
+/* 2026-10-09 反回归（用户口径）：扩展 = 外部武装（可开可关），不开「改程序本身」的通路。
+   下面这些源文件是「D1 开发者模式」曾经落过的全部触点 —— 必须一个都不残留。 */
+const SANDBOX_SRC = read("core-ts/src/sandbox.ts");
+const PRELOAD_SRC = read("gui/src/preload/index.ts");
+const PANEL_SRC = read("gui/src/renderer/pages/PluginsPanel.tsx");
+const IPC_SRC = read("gui/src/shared/ipc.ts");
 
 describe("A-1198-S ① 两种模式的自述都必须涵盖六项能力", () => {
   const six: Array<[string, string]> = [
@@ -85,18 +91,38 @@ describe("A-1198-S ① 两种模式的自述都必须涵盖六项能力", () => 
     expect(c).toContain("也不要假装已具备");
   });
 
-  it("开发者模式（D1）也在自述里：能改主干的条件 + 「开关是会话级」都必须写清", () => {
-    for (const g of [selfAwarenessGuide(DEF), selfAwarenessGuide(CREATOR), selfAwarenessGuide(CUSTOM)]) {
-      expect(g).toContain("开发者模式");
-      expect(g).toContain("worktree");
-      // 会话寿命是安全语义：写成「长期有效 / 一次开启永久」即传播错误
-      expect(g).toContain("每次启动都要用户重新确认");
-      // 条件不满足时不许假装能改（与「不要假装已具备」同族）
-      expect(g).toContain("不要假装能改");
+  it("扩展是「外部武装」不是改程序：三模式自述都不许出现改源码/开发者模式的承诺（用户 2026-10-09 口径）", () => {
+    /* 口径（用户原话）：「高自由度扩展本质是外部插件，可开可关的，而非对程序本身进行修改 ——
+       更像『精装』或者说『武装』」。⇒ 自述里既不许复活 D1 表述，必须正面讲「外部 / 可开可关」。
+       注：只锚「复活的 D1 表述」这组词（开发者模式 / worktree / 改主干）——
+       正文里「不存在『改源码』这条路」是**否定句**，不在此列（文本层守卫不做语法分析）。 */
+    for (const [label, g] of [["默认", DEF], ["创造", CREATOR], ["自定义", CUSTOM]] as const) {
+      const text = selfAwarenessGuide(g);
+      expect(text, `${label}模式出现 D1 表述（改程序本身）`).not.toMatch(/开发者模式|worktree|改主干/);
+      expect(text, `${label}模式缺「外部」口径`).toContain("外部");
+      expect(text, `${label}模式缺「可开可关」口径`).toContain("可开可关");
     }
-    // 主干与 main 永远不放行（D1 不例外）也要写清
-    expect(selfAwarenessGuide(DEF)).toContain("永远不放行");
-    expect(selfAwarenessGuide(DEF)).toContain("没有合并权");
+  });
+
+  it("反回归：仓库里不存在「改程序本身」的通路（D1 已按用户口径撤除）", () => {
+    /* 这条锁的是**设计决定**：D1 撤除后，源码/守卫/脚本里都不许再长出该通路。
+       将来若有人（含未来的我）想把「改主干」加回来，必须先显式改这条守卫 ——
+       决定被锁住，回归必须是一次可见的动作，而不是悄悄长回来。
+       ⚠️ 判据剥注释再匹配（与 a1197-silam-off 同口径）：沙箱里那条**解释撤除原因**的历史
+       注释是应该留的（后人要知道为什么没有这条路），但代码/字符串里**真出现**即违规。 */
+    const stripComments = (s: string): string =>
+      s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+    expect(existsSync(join(ROOT, "core-ts/src/plugin/dev-mode.ts")), "dev-mode.ts 又出现了（D1 不许复活）").toBe(false);
+    const surfaces: Array<[string, string]> = [
+      ["core-ts/src/sandbox.ts", SANDBOX_SRC],
+      ["gui/src/main/index.ts", MAIN_SRC],
+      ["gui/src/preload/index.ts", PRELOAD_SRC],
+      ["gui/src/shared/ipc.ts", IPC_SRC],
+      ["gui/src/renderer/pages/PluginsPanel.tsx", PANEL_SRC],
+    ];
+    for (const [name, src] of surfaces) {
+      expect(stripComments(src), `${name} 残留 dev-mode 触点`).not.toMatch(/dev-mode|devMode|DevMode|开发者模式/);
+    }
   });
 
   it("创造模式自述把五个字段名指到导引（「能做什么」与「怎么写」的分工不变）", () => {

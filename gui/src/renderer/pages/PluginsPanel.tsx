@@ -605,9 +605,6 @@ export default function PluginsPanel(props: Props): JSX.Element {
   const [busyName, setBusyName] = React.useState<string | null>(null);
   /* A-1197 · B4：信任开关的忙碌态（独立于拨片的 busyName —— 两个开关可各自转）。 */
   const [busyTrustName, setBusyTrustName] = React.useState<string | null>(null);
-  /* A-1197 · B6（D1）：开发者模式总开关（**会话级** —— 启动后默认关，须用户重新确认）。 */
-  const [devMode, setDevMode] = React.useState<{ enabled: boolean; lastConfirmedAt: number | null }>({ enabled: false, lastConfirmedAt: null });
-  const [devModeBusy, setDevModeBusy] = React.useState(false);
   /** A-1197 · B1：正在写的设置项 `plugin:key`；写完递增 token 让设置区重拉。 */
   const [busySettingKey, setBusySettingKey] = React.useState<string | null>(null);
   const [settingsToken, setSettingsToken] = React.useState(0);
@@ -704,29 +701,6 @@ export default function PluginsPanel(props: Props): JSX.Element {
     }
   }, [refresh]);
 
-  /* A-1197 · B6（D1 开发者模式）：总开关切换 —— 主进程落审计文件（config/dev-mode.json），
-     真正的写入门在 sandbox 侧（受管 worktree + slime/* 分支前缀硬约束）。 */
-  const doDevModeToggle = React.useCallback(async (next: boolean): Promise<void> => {
-    const a = api.current;
-    if (!a?.extras?.pluginsDevModeSet) { showNotice(false, "当前环境不支持开发者模式开关"); return; }
-    setDevModeBusy(true);
-    try {
-      const res = await a.extras.pluginsDevModeSet(next);
-      if (res?.ok && res.state) {
-        setDevMode(res.state);
-        showNotice(true, next
-          ? "开发者模式已开启（本次会话有效；改主干请走受管 worktree，产物停 slime/* 分支）"
-          : "开发者模式已关闭（受保护目录立即恢复禁写；已产生的分支与 commit 保留）");
-      } else {
-        showNotice(false, res?.error ? `开发者模式切换失败：${res.error}` : "开发者模式切换失败");
-      }
-    } catch (e) {
-      showNotice(false, `开发者模式切换失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setDevModeBusy(false);
-    }
-  }, []);
-
   const doToggle = React.useCallback((name: string, currentlyOn: boolean): void => {
     if (currentlyOn) { void doUnload(name); } else { void doEnable(name); }
   }, [doUnload, doEnable]);
@@ -820,17 +794,7 @@ export default function PluginsPanel(props: Props): JSX.Element {
     return () => { off?.(); };
   }, [refresh]);
 
-  /* A-1197 · B6（D1）：开发者模式状态（会话级；启动后默认关）。 */
-  React.useEffect(() => {
-    void (async () => {
-      const a = (window as unknown as { slimeAPI?: any }).slimeAPI;
-      const st = await a?.extras?.pluginsDevModeGet?.().catch(() => null);
-      if (st && typeof st === "object") {
-        setDevMode({ enabled: st.enabled === true, lastConfirmedAt: typeof st.lastConfirmedAt === "number" ? st.lastConfirmedAt : null });
-      }
-    })();
-  }, []);
-
+  
   const stats = React.useMemo(() => {
     const byOrigin: Record<string, number> = { agent: 0, market: 0, user: 0, "": 0 };
     for (const s of skills) {
@@ -886,28 +850,7 @@ export default function PluginsPanel(props: Props): JSX.Element {
       <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 12 }}>
         本页是三类插件来源的总览 —— 系统默认随应用提供不可卸载，Agent 自建与外部载入可用右侧拨片开关启停；
         技能与 MCP 两类机制仍各自独立管理，不受插件容器管辖。
-      </div>
-
-      {/* A-1197 · B6（D1 开发者模式）：**总开关**（不是逐插件信任）——开启后允许 Agent 在
-          「slime/* 分支的受管 worktree」里改**主干代码**（产物停分支等人工合并；主工作目录永远只读）。
-          ⚠️ 这是**会话级**授权：每次启动都要在这里重新确认（开关不会自动恢复）。 */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 9,
-        border: `1px solid ${devMode.enabled ? "var(--warning)" : "var(--border)"}`,
-        background: devMode.enabled ? "rgba(251,191,36,0.08)" : "var(--card-surface)", marginBottom: 12 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: devMode.enabled ? "var(--warning)" : "var(--text)" }}>
-            开发者模式{devMode.enabled ? "（本次会话已开启）" : ""}
-          </div>
-          <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6, marginTop: 2 }}>
-            允许在 <code>slime/*</code> 分支的受管 worktree 里改主干代码（主工作目录永远只读；
-            产物停在分支上等人工合并）。<b>会话级授权：每次启动都要重新确认</b>。
-            {devMode.lastConfirmedAt && !devMode.enabled
-              ? `（上次开启于 ${new Date(devMode.lastConfirmedAt).toLocaleString()}）` : ""}
-          </div>
-        </div>
-        <ToggleSwitch on={devMode.enabled} busy={devModeBusy}
-          title={devMode.enabled ? "关闭 = 立即收回主干改写的放行" : "开启 = 授权本次会话在受管 worktree 里改主干代码"}
-          onToggle={() => { void doDevModeToggle(!devMode.enabled); }} />
+        扩展一律是<b>外部</b>能力（可开可关、卸下即恢复原样）——<b>不改动应用本身</b>。
       </div>
 
       {notice && (
