@@ -394,6 +394,22 @@ export class SkillRegistry {
   private skills = new Map<string, Skill>();
   private loaded = false;
   private unloadedSources = new Set<string>();
+  /**
+   * A-1198 · 续（审计修复）：**按来源装配过的插件技能根**（`loadFromSource` 登记）。
+   *
+   * ⚠️ 修的是一个真 bug（审计实证）：`loadSkills()` 会 `skills.clear()` 后只重扫
+   * `scanRoots()`（= skillDir + extraDirs）—— 插件技能根**从来不在**这个列表里，
+   * 所以任何一次全量重载都会把插件技能**抹掉且再也不扫回来**。
+   * 而 `refreshAgentSkills()`（内部就是 `loadAllSkills` → `loadSkills()`）在
+   * **每次发消息**（`chat:stream` 开头）与每次「保存并生效」后都会跑 ⇒
+   * 用户装的扩展一旦发过一条消息，它的技能就从 `skill_search` 里消失了
+   * （"Agent 检测不到用户加的扩展"的真实根因之一）。
+   *
+   * 修法：装配过的来源根记在这里，`scanRoots()` 一并纳入（仍受 `unloadedSources` 拦截）。
+   * 语义边界：**只**记 `loadFromSource` 显式装配的（不猜、不扫磁盘），
+   * 撤销过的（`unloadedSources`）照旧挡住 ⇒ 「卸载不复活」的既有语义不变。
+   */
+  private assembledSources = new Set<string>();
 
   constructor(opts: SkillRegistryOptions = {}) {
     this.skillDir = opts.skillDir ?? DEFAULT_SKILL_DIR;
@@ -412,13 +428,36 @@ export class SkillRegistry {
   }
 
   private scanRoots(): string[] {
-    return [this.skillDir, ...this.extraDirs].filter(
+    return [this.skillDir, ...this.extraDirs, ...this.assembledSources].filter(
       (root) => root && !this.unloadedSources.has(normalizePathKey(root)),
     );
   }
 
   listUnloadedSources(): string[] {
     return [...this.unloadedSources];
+  }
+
+  /**
+   * A-1198 · 续（审计修复②）：该技能是否由**已装配的插件**贡献。
+   *
+   * ⚠️ 修的是第二个真 bug（审计实证，非推测）：插件技能对 Agent **两种模式都不可见**。
+   *   · 默认模式：`resolveSkillVisibilityScope` 的 allowed 只有内置推荐集（6 个名字），
+   *     插件技能不在其中 ⇒ skill_search 搜不到；
+   *   · 创造模式：`allowAgentAuthored` 放行 `origin=agent`，但 `origin` **只从
+   *     manifest.yaml/manifest.json 读**，SKILL.md frontmatter 里的 origin **根本不解析**
+   *     ⇒ 照《创造模式导引》写的插件技能（只写 SKILL.md）照样搜不到。
+   *   ⇒ 《导引》「四、落位后必须自验」第 2 步（skill_search 复核技能能被检索到）**永远过不了**。
+   *
+   * 判据（与项目既有口径一致）：设计文档 §「判断标准」写明
+   *   「**能写但看不见**（写了技能但白名单不认）… 都不算自由度，算陷阱」。
+   * 所以插件贡献的技能**应当可见** —— 它的开关由**插件本身的启停**承担（用户可控），
+   * 而不是由 per-agent 技能白名单二次拦截（那会让"装好的插件"对 Agent 静默失效）。
+   */
+  private isPluginContributed(skill: Skill): boolean {
+    for (const root of this.assembledSources) {
+      if (skillBelongsToSource(skill.path, root)) { return true; }
+    }
+    return false;
   }
 
   async loadSkillsFromDirs(roots: string[]): Promise<string[]> {
@@ -576,7 +615,7 @@ export class SkillRegistry {
       }
       return `[错误] 技能 '${name}' 未找到`;
     }
-    if (scope && !isSkillNameVisible(skill.name, scope, skill.isAgentAuthored())) {
+    if (scope && !isSkillNameVisible(skill.name, scope, skill.isAgentAuthored()) && !this.isPluginContributed(skill)) {
       return skillVisibilityDenial(skill.name, scope);
     }
     if (skill.executeFn && !this.checkPermissions(skill.manifest.permissions)) {
@@ -627,7 +666,9 @@ export class SkillRegistry {
     const n = Math.max(1, Math.min(limit ? parseInt(String(limit), 10) : 10, 50));
     const scored: Array<[number, string, Skill]> = [];
     for (const s of this.skills.values()) {
-      if (scope && !isSkillNameVisible(s.name, scope, s.isAgentAuthored())) {
+      /* 插件贡献的技能不受 per-agent 技能白名单约束（见 isPluginContributed 的长注释：
+         「能写但看不见」被本项目明确定为陷阱；插件技能的开关是插件启停本身）。 */
+      if (scope && !isSkillNameVisible(s.name, scope, s.isAgentAuthored()) && !this.isPluginContributed(s)) {
         continue;
       }
       if (!q) {
@@ -685,6 +726,7 @@ export class SkillRegistry {
       throw new Error(`${SKILL_SOURCE_PROTECTED_PREFIX} 系统来源的技能不可按来源卸载：${root}`);
     }
     const key = normalizePathKey(root);
+    this.assembledSources.delete(root);
     const removed: string[] = [];
     for (const [name, skill] of [...this.skills]) {
       if (!skillBelongsToSource(skill.path, root)) {
@@ -710,6 +752,8 @@ export class SkillRegistry {
     const root = String(sourceRoot ?? "").trim();
     const key = normalizePathKey(root);
     this.unloadedSources.delete(key);
+    /* 登记为「已装配来源」⇒ 之后的任何全量重载（refreshAgentSkills）都会把它扫回来。 */
+    this.assembledSources.add(root);
     const before = new Set(this.skills.keys());
     await this.loadSkillsFromDirs([root]);
     const added: string[] = [];
@@ -730,6 +774,8 @@ export class SkillRegistry {
           this.skills.delete(n);
         }
         this.unloadedSources.add(key);
+        /* 撤销后不再是「已装配来源」（unloadedSources 会挡住它，这里同步清掉避免集合无限增长）。 */
+        this.assembledSources.delete(root);
         if (added.length > 0) {
           this.loaded = true;
           console.info(`[skills] 撤销来源 ${pluginName} 的技能 ${added.length} 个（${root}）`);

@@ -13,7 +13,11 @@ import {
   skillScopeFromArgs,
 } from "../../core-ts/src/skills.js";
 import { ToolRegistry } from "../../core-ts/src/tools/registry.js";
-import { UNRESTRICTED_SKILL_VISIBILITY } from "../../core-ts/src/services/agentTools.js";
+import {
+  UNRESTRICTED_SKILL_VISIBILITY,
+  DEFAULT_TOOL_PROFILE,
+  resolveSkillVisibilityScope,
+} from "../../core-ts/src/services/agentTools.js";
 import {
   PLUGIN_SKILLS_SUBDIR,
   pluginSkillsRoot,
@@ -482,5 +486,233 @@ describe("loader：插件自带技能的事实来源", () => {
     const bare = join(tmp, "bare");
     mkdirSync(bare, { recursive: true });
     expect(await readPluginSkillNames(bare)).toBeUndefined();
+  });
+});
+
+/**
+ * ⚠️ A-1198 · 续（审计发现并修复的真 bug）：**插件技能必须扛得住全量重载**。
+ *
+ * 缺陷现场（审计实证，非推测）：`SkillRegistry.loadSkills()` 先 `skills.clear()`
+ * 再只重扫 `scanRoots()`（= `skillDir` + `extraDirs`）—— 插件技能根从来不在这个列表里，
+ * 于是**任何一次全量重载都会把插件技能抹掉且再也不扫回来**。
+ *
+ * 为什么这是严重的：`refreshAgentSkills()`（内部 `loadAllSkills` → `loadSkills()`）
+ * 在**每次发消息**（`gui/src/main/index.ts` 的 `chat:stream` 开头）与每次「保存并生效」后都跑。
+ * 后果 = 用户装好扩展、发第一条消息之后，扩展的技能就从 `skill_search` 里消失了 ——
+ * 正是「Agent 检测不到用户加的扩展」这条口子。
+ *
+ * 修法：`loadFromSource` 把来源根登记进 `assembledSources`，`scanRoots()` 一并纳入。
+ * 本组守卫钉住修复的三条不变量（少任一条都会退回原 bug 或破坏既有语义）。
+ */
+describe("A-1198 · 续：插件技能跨全量重载存活（审计修复）", () => {
+  it("① 全量重载后插件技能仍在（skill_search 搜得到）—— 原 bug 的正面回归锁", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    await reg.loadSkills();
+    await reg.loadFromSource(rootA, "plugin-a");
+    expect(reg.listSkillNames()).toEqual(["a-one"]);
+
+    /* 复刻 refreshAgentSkills 的真实形状：全量重载（不传 skillDir ⇒ 同一个实例）。 */
+    await reg.loadSkills();
+
+    expect(reg.listSkillNames()).toContain("a-one");
+    expect(reg.search("a-one", 50, UNRESTRICTED_SKILL_VISIBILITY).map((s) => s.name)).toEqual(["a-one"]);
+  });
+
+  it("② 撤销过的来源仍不许被全量重载扫回来（既有语义不许被修复破坏）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    const handle = await reg.loadFromSource(rootA, "plugin-a");
+    handle.dispose();
+
+    await reg.loadSkills();
+    expect(reg.listSkillNames()).toEqual([]);
+    expect(reg.search("a-one", 50, UNRESTRICTED_SKILL_VISIBILITY)).toEqual([]);
+  });
+
+  it("③ 多来源并存：重载后 A/B 都在；撤 A 重载后只有 B 在（不误伤）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+    const rootB = makePlugin(tmp, "plugin-b", [["b-one", "b-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    const hA = await reg.loadFromSource(rootA, "plugin-a");
+    await reg.loadFromSource(rootB, "plugin-b");
+    await reg.loadSkills();
+    expect(reg.listSkillNames().sort()).toEqual(["a-one", "b-one"]);
+
+    hA.dispose();
+    await reg.loadSkills();
+    expect(reg.listSkillNames()).toEqual(["b-one"]);
+  });
+
+  it("④ 源码锁：scanRoots 必须纳入 assembledSources（防回退成只扫系统根）", () => {
+    const src = readFileSync(join(__dirname, "../../core-ts/src/skills.ts"), "utf8");
+    /* 这条是**结构性**的：光测行为的话，将来有人把 assembledSources 换个实现仍能过；
+       这里直接钉住「全量扫描根 = 系统根 + 已装配来源根」这个式子本身。 */
+    expect(src).toMatch(/private scanRoots\(\)[\s\S]{0,200}?\[this\.skillDir, \.\.\.this\.extraDirs, \.\.\.this\.assembledSources\]/);
+    expect(src).toMatch(/this\.assembledSources\.add\(root\)/);
+    /* 撤销时必须移出（否则集合无限增长，且语义含糊）。 */
+    expect(src).toMatch(/this\.assembledSources\.delete\(root\)/);
+    /* refreshAgentSkills 必须仍然走全量重载（不是被改成"只装配不重扫"绕过本 bug）。 */
+    const main = readFileSync(join(__dirname, "../../gui/src/main/index.ts"), "utf8");
+    const fn = /async function refreshAgentSkills\(\)[\s\S]*?\n\}/.exec(main);
+    expect(fn).not.toBeNull();
+    expect(fn![0]).toMatch(/loadAllSkills\(/);
+  });
+});
+
+/**
+ * ⚠️ A-1198 · 续（审计修复②）：**插件贡献的技能必须对 Agent 可见**。
+ *
+ * 缺陷现场（审计实证）：插件技能两种模式都搜不到 ——
+ *   · 默认模式：`resolveSkillVisibilityScope` 的 allowed 只有内置推荐集（6 个名字）；
+ *   · 创造模式：`allowAgentAuthored` 只放行 `origin=agent`，而 `origin` **只从
+ *     manifest.yaml/manifest.json 读**，SKILL.md frontmatter 的 origin 根本不解析
+ *     ⇒ 照《创造模式导引》写插件（只写 SKILL.md）的技能照样搜不到。
+ * 后果：《导引》「四、落位后必须自验」第 2 步（skill_search 复核技能能被检索到）永不通过；
+ * 且直接违反本设计文档 §判断标准 ——「能写但看不见（写了技能但白名单不认）…算陷阱」。
+ *
+ * 修法：`SkillRegistry.isPluginContributed()`（来源 = `assembledSources`）在
+ * `search` 与 `callSkill` 两处放行插件技能。开关交给**插件启停本身**（用户可控）。
+ * 本组守卫同时钉住「不许连带放开非插件技能」——那会把 P4 的白名单强制力一起废掉。
+ */
+describe("A-1198 · 续：插件技能对 Agent 可见（审计修复②）", () => {
+  it("① 默认模式下插件技能搜得到（原 bug 的正面回归锁）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    await reg.loadFromSource(rootA, "plugin-a");
+
+    const scope = resolveSkillVisibilityScope(DEFAULT_TOOL_PROFILE);
+    expect(reg.search("a-one", 50, scope).map((s) => s.name)).toEqual(["a-one"]);
+  });
+
+  it("② 创造模式同样搜得到（SKILL.md 只写 name/description 也得可见）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    await reg.loadFromSource(rootA, "plugin-a");
+
+    const scope = resolveSkillVisibilityScope({ ...DEFAULT_TOOL_PROFILE, mode: "creator" });
+    expect(reg.search("a-one", 50, scope).map((s) => s.name)).toEqual(["a-one"]);
+  });
+
+  it("③ skill_lookup 也放行插件技能（search 能搜到但 lookup 拿不到 = 半截可用）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    await reg.loadFromSource(rootA, "plugin-a");
+
+    const scope = resolveSkillVisibilityScope(DEFAULT_TOOL_PROFILE);
+    const body = await reg.callSkill("a-one", {}, scope);
+    expect(body).not.toContain(SKILL_VISIBILITY_DENIED_PREFIX);
+    expect(body).toContain("a-one");
+  });
+
+  it("④ ⚠️ 不连带放开非插件技能：白名单对系统技能仍然生效（P4 语义不许被修复破坏）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    writeSkill(systemRoot, "sys-one", "sys-one");   // 系统技能（非插件来源）
+
+    const reg = newRegistry(systemRoot);
+    await reg.loadSkills();
+    expect(reg.listSkillNames()).toEqual(["sys-one"]);
+
+    const scope = resolveSkillVisibilityScope(DEFAULT_TOOL_PROFILE);
+    /* 系统技能不在白名单里 ⇒ 必须仍然搜不到（这是 P4 的核心锁）。 */
+    expect(reg.search("sys-one", 50, scope)).toEqual([]);
+    const body = await reg.callSkill("sys-one", {}, scope);
+    expect(body).toContain(SKILL_VISIBILITY_DENIED_PREFIX);
+  });
+
+  it("⑤ 撤销后立刻不可见（插件停了技能就停了 —— 开关交给插件启停）", async () => {
+    const tmp = makeRoot();
+    const systemRoot = join(tmp, "system-skills");
+    mkdirSync(systemRoot, { recursive: true });
+    const rootA = makePlugin(tmp, "plugin-a", [["a-one", "a-one"]]);
+
+    const reg = newRegistry(systemRoot);
+    const handle = await reg.loadFromSource(rootA, "plugin-a");
+    const scope = resolveSkillVisibilityScope(DEFAULT_TOOL_PROFILE);
+    expect(reg.search("a-one", 50, scope).map((s) => s.name)).toEqual(["a-one"]);
+
+    handle.dispose();
+    expect(reg.search("a-one", 50, scope)).toEqual([]);
+  });
+
+  it("⑥ 源码锁：search 与 callSkill 两处都要放行（只改一处 = 半截可用）", () => {
+    const src = readFileSync(join(__dirname, "../../core-ts/src/skills.ts"), "utf8");
+    const n = (src.match(/&& !this\.isPluginContributed\(/g) ?? []).length;
+    /* search 一处 + callSkill 一处 = 恰好 2；少一处就是"能搜到但读不了正文"。 */
+    expect(n).toBe(2);
+    expect(src).toMatch(/private isPluginContributed\(skill: Skill\): boolean/);
+  });
+});
+
+/**
+ * A-1198 · 续（审计）：**Agent 自述必须如实覆盖全部贡献点**。
+ *
+ * 现场：`contributes` 实际六类（settings/ui/scripts/page/theme/css），
+ * 但自述写「共五类」且完全没提 `css` ⇒ Agent 不知道自己能写 CSS（能力存在但无人知道 = 等于没有）。
+ * 另有一处**自相矛盾**：同一段先说 CSS 任意、后说「扩展提供不了任意 CSS」（旧红线残留）。
+ */
+describe("A-1198 · 续：Agent 自述覆盖六类贡献点（审计）", () => {
+  const GUIDE = readFileSync(join(__dirname, "../../core-ts/src/services/agentTools.ts"), "utf8");
+
+  it("① 自述声明六类，且六类名字逐一出现（少一类 = Agent 不知道有这能力）", () => {
+    expect(GUIDE).toContain("共六类");
+    for (const k of ["`settings`", "`ui`", "`scripts`", "`page`", "`theme`", "`css`"]) {
+      expect(GUIDE, `自述缺贡献点 ${k}`).toContain(k);
+    }
+  });
+
+  it("② 自述有 contributes.css 的声明示例与边界（不只是提个名字）", () => {
+    expect(GUIDE).toContain("contributes.css");
+    /* 必须给出真实可抄的形状。 */
+    expect(GUIDE).toMatch(/"name": "紧凑圆角", "css":/);
+    /* 必须说清两条护栏，否则 Agent 会写 @media/url() 然后被拒、白费一轮。 */
+    expect(GUIDE).toContain("@layer slime-plugin");
+    expect(GUIDE).toContain("静态禁令");
+    expect(GUIDE).toContain("@media");
+  });
+
+  it("③ ⚠️ 不许有「提供不了任意 CSS」这类自相矛盾（红线已作废）", () => {
+    expect(GUIDE).not.toContain("扩展提供不了任意 CSS");
+    expect(GUIDE).not.toContain("改不了 slime 的样式表本身");
+    /* 同时不许写成「能改一切」——层叠边界必须如实说。 */
+    expect(GUIDE).toContain("权限弹窗");
+  });
+
+  it("④ 自述的贡献点清单与实际解析白名单**同源**（防两套口径漂移）", () => {
+    const contrib = readFileSync(join(__dirname, "../../core-ts/src/plugin/contributes.ts"), "utf8");
+    const allowed = /ALLOWED_CONTRIBUTES_FIELDS[^=]*=\s*\[([^\]]+)\]/.exec(contrib)?.[1] ?? "";
+    const keys = allowed.split(",").map((x) => x.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    /* 解析白名单里的每一项，自述都必须提到 —— 新增贡献点忘了写自述，这条会红。 */
+    for (const k of keys) {
+      expect(GUIDE, `解析器接受 contributes.${k} 但自述没提`).toContain(`\`${k}\``);
+    }
+    /* 类别数也要对上（防「新增了但计数没改」）。 */
+    const cn = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"][keys.length - 1];
+    expect(GUIDE).toContain(`共${cn}类`);
   });
 });

@@ -186,6 +186,41 @@ config/plugins/<plugin-name>/
 `agentTools.ts:74` 的 `agentToolsOnly()` **从未读过 `profile.skills`**（只读 `profile.mcp`），
 即技能白名单不是"没强制力"，而是**从未被使用过**。已在 P4 修复（并顺带修了一处 child agent 绕过）。
 
+### ⚠️ 2026-10-09 全链路审计：发现并修复两处「插件对 Agent 不可用」
+
+用户口径：「扩展能否被 Agent 检测到并正常使用」。**审计用实证探针跑出来（非阅读推测）**：
+
+1. **插件技能被全量重载抹掉**（`skills.ts`）
+   现场：`loadSkills()` 先 `skills.clear()` 再只重扫 `scanRoots()`（= `skillDir` + `extraDirs`）——
+   插件技能根**从来不在**那个列表里 ⇒ 任何一次全量重载都把插件技能抹掉且不再扫回来。
+   而 `refreshAgentSkills()`（内部即 `loadAllSkills` → `loadSkills()`）在**每次发消息**
+   （`chat:stream` 开头）与每次「保存并生效」后都会跑。
+   ⇒ 用户装好扩展、**发第一条消息之后**，扩展技能就从 `skill_search` 里消失了。
+   修法：`loadFromSource` 把来源根登记进 `assembledSources`，`scanRoots()` 一并纳入
+   （仍受 `unloadedSources` 拦截 ⇒「卸载不复活」语义不变）。
+
+2. **插件技能对 Agent 两种模式都不可见**（`skills.ts` + 白名单交互）
+   现场：默认模式的 `allowed` 只有内置推荐集（6 个名字）；创造模式的 `allowAgentAuthored`
+   只放行 `origin=agent`，而 `origin` **只从 `manifest.yaml/json` 读**
+   （SKILL.md frontmatter 的 origin 根本不解析）⇒ 照《创造模式导引》写的插件技能两种模式都搜不到。
+   ⇒ 导引「四、落位后必须自验」第 2 步（`skill_search` 复核）**永远过不了**；
+   且直接违反 `creator-freedom-design.md` §判断标准
+   ——「**能写但看不见**（写了技能但白名单不认）… 都不算自由度，算陷阱」。
+   修法：`SkillRegistry.isPluginContributed()`（来源 = `assembledSources`）在
+   `search` 与 `callSkill` **两处**放行插件技能；开关交给**插件启停本身**（用户可控）。
+   ⚠️ 刻意**不**连带放开非插件技能 —— 那会把 P4 的技能白名单强制力一起废掉（守卫已钉）。
+
+**同时修的自述三处**（Agent 不知道的能力 = 不存在）：
+`contributes` 计数「五类」→「六类」+ 补 `css` 的声明示例与两条护栏；
+删掉「扩展提供不了任意 CSS」这句（红线已作废，与同段新写的「CSS 任意」自相矛盾）；
+主题皮肤段不再宣称"外观武装的全部接口"。
+
+**验证**：`plugin-unload-scope.spec.ts` 25 → **39 例**（新增 14：跨重载存活 4 / 对 Agent 可见 6 /
+自述覆盖 4）；新增变异 `mut-a1198-plugin-skill-visibility.mjs` **7/7 全抓**
+（含一轮等价变异 triage：`assembledSources.delete` 是不可观测的纯清理 ⇒ 换点）。
+
+---
+
 ### 遗留（已知，未修）
 
 1. **`host.ts` 两处架构瑕疵**（已裁决接受，不做 API 洁癖）：
