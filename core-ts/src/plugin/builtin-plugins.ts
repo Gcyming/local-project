@@ -49,6 +49,18 @@ export const BUILTIN_PLUGIN_GROUPS: BuiltinPluginGroup[] = [
     modules: ["core-ts/src/tools/builtin.ts", "core-ts/src/terminal/profiles.ts", "core-ts/src/terminal/ansi.ts"],
     unloadable: false,
   },
+  /* A-1198：git_* 工具层（桌面端）——AGENTS.md §8 说「版本控制走 git_* 工具族」，
+     本组就是那族的登记处（身份注入 / commit 门禁 / 差异评审 / Lint Gate 全在 git.ts）。
+     ⚠️ description 里**不许出现 slime 加斜杠星号的字面写法**：多处守卫用朴素正则剥注释，
+     字符串里的斜杠星号会被当成注释开头，把后面的代码整段吞掉（本轮实测踩到）。 */
+  {
+    name: "git",
+    description: "需要看版本控制状态、暂存改动、建 slime 分支或做语义化提交时（不要用 terminal_run 裸调 git 写操作）。",
+    contributions: ["tools"],
+    tools: ["git_status", "git_diff", "git_stage", "git_branch", "git_commit"],
+    modules: ["core-ts/src/tools/git.ts"],
+    unloadable: false,
+  },
   {
     name: "web-access",
     description: "需要抓取某个网址的正文，或联网检索资料时。",
@@ -234,7 +246,12 @@ export const BUILTIN_PLUGIN_GROUPS: BuiltinPluginGroup[] = [
   },
   {
     name: "silam",
-    description: "需要 SILAM 心智内核参与推理、或维护长期人格状态时。",
+    /* A-1197：自研模型下线，登记降级为「实验中/占位」。
+     * 原描述「需要 SILAM 心智内核参与推理」读起来像它现在能用；实测语言脑输出乱码 +
+     * 固定长度硬截断，且已不再作为模型对外应答（slime.toml [silam] enabled=false）。
+     * 这里**不删登记**：模块与 sidecar 资产都留着，自研模型接回来后改回如实描述即可。
+     * unloadable 仍为 false —— 资产保留，不提供「卸载」这个会让人以为能彻底移除的假动作。 */
+    description: "实验中（占位）：SILAM 离线自研心智内核，当前未启用；资产保留，待自研模型接回 [silam] 契约。",
     contributions: ["prompt"],
     modules: ["core-ts/src/services/silam_brain.ts", "core-ts/src/services/engine.ts"],
     unloadable: false,

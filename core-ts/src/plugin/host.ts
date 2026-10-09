@@ -1,6 +1,8 @@
 import { ContributionScope } from "./scope.js";
 import type { DisposeReport } from "./scope.js";
 import type { PluginManifest } from "./manifest.js";
+import { describePluginSettings, describePluginUi, describePluginScripts } from "./contributes.js";
+import { describeMode } from "./mode.js";
 
 export type PluginStatus = "loaded" | "disabled" | "failed";
 
@@ -24,6 +26,18 @@ export interface PluginHostOptions {
   registerTools?: (manifest: PluginManifest) => PluginContributionHandle[];
   /** 登记指令（技能）贡献 */
   registerInstructions?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1197 · B2（L4a）：登记 UI 槽位贡献（主进程侧维护 slot 汇总表）；返回撤销函数。 */
+  registerUi?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1197 · B4（T1 脚本信任）：装配**脚本工具**（仅在用户信任该插件的脚本后，
+   *  由主进程实现读 `trust.json` 判断；未信任 ⇒ 返回空 ⇒ 记「尚未接线」）。 */
+  registerScripts?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1197 · B5（L4a page）：登记扩展**自有页面**（按需起 127.0.0.1 静态服务；
+   *  dispose 负责 stop —— 服务泄漏的兜底，见设计 §4.1「失控时怎么兜」）。 */
+  registerPage?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1197 · B3（L4c）第二层：**装载时查一次**模式声明的工具名（由**有工具表**的装配侧注入）。
+   *  返回该清单里「不存在于当前工具表」的工具名；非空 ⇒ 该插件 `failed`（不给
+   *  「配了但不生效」的假自由度，设计 §4.3）。运行前每阶段还会重查（执行侧）。 */
+  checkModeTools?: (manifest: PluginManifest) => string[];
   /** 可覆盖默认的「是否可卸载」判定；默认 origin !== "builtin" */
   unloadable?: (manifest: PluginManifest) => boolean;
 }
@@ -40,11 +54,19 @@ export class PluginHost {
   private order: string[] = [];
   private registerTools: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerInstructions: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerUi: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerScripts: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerPage: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private checkModeTools: ((manifest: PluginManifest) => string[]) | null;
   private unloadable: (manifest: PluginManifest) => boolean;
 
   constructor(opts: PluginHostOptions) {
     this.registerTools = opts.registerTools ?? null;
     this.registerInstructions = opts.registerInstructions ?? null;
+    this.registerUi = opts.registerUi ?? null;
+    this.registerScripts = opts.registerScripts ?? null;
+    this.registerPage = opts.registerPage ?? null;
+    this.checkModeTools = opts.checkModeTools ?? null;
     this.unloadable = opts.unloadable ?? ((m) => m.origin !== "builtin");
   }
 
@@ -108,6 +130,25 @@ export class PluginHost {
       const gaps = (nodes.get(name)!.requires ?? []).filter((dep) => !nodes.has(dep));
       if (gaps.length > 0) {
         failed.set(name, `缺少依赖插件：${gaps.join("、")}`);
+      }
+    }
+    /* A-1197 · B3（L4c）第二层其一：**装载时查一次**模式声明的工具名。
+       装配侧没注入钩子（纯层不知道工具表）⇒ 不查、留运行前重查兜底；
+       注入了但返回空数组 = 「当前工具表判不了」（如引擎尚未装配）——
+       那不是「不存在」，不得据此拒绝装载（避免把加载顺序误判成非法清单）。 */
+    if (this.checkModeTools) {
+      for (const name of this.order) {
+        if (failed.has(name)) {
+          continue;
+        }
+        const manifest = nodes.get(name)!;
+        if (!manifest.mode) {
+          continue;
+        }
+        const missing = this.checkModeTools(manifest);
+        if (missing.length > 0) {
+          failed.set(name, `mode 声明的工具不存在于当前工具表：${missing.join("、")}（拒绝装载 —— 不留「配了但不生效」的假自由度）`);
+        }
       }
     }
 
@@ -239,6 +280,12 @@ export class PluginHost {
         contributions.push(
           `instructions:${this.contribute(scope, this.registerInstructions, manifest)}`,
         );
+      } else if (kind === "mode") {
+        /* A-1197 · B3（L4c）：mode 的「接线」在**会话侧**（下拉选中 → 阶段流分派），
+           这里没有可注册的句柄（装载时已做工具存在性检查，见 `checkModeTools`）——
+           所以如实登记**声明摘要**（阶段步数），不套用「尚未接线」（那是假陈述：
+           用户确实能在会话顶选中它）。 */
+        contributions.push(`mode:${describeMode(manifest.mode)}`);
       } else {
         contributions.push(`${kind}:${WIRING_PENDING}`);
       }
@@ -247,6 +294,37 @@ export class PluginHost {
     entry.scope = scope;
     entry.record.status = "loaded";
     entry.record.error = undefined;
+    /* A-1197 · B1（L4b 设置贡献点）：设置项是**持久数据**而非运行期副作用，
+       所以刻意**不进 scope**（禁用插件后数据保留、启用后仍在 —— 关插件不该丢用户配置）。
+       代价是它不参与撤销：本层只登记「声明了几项」，真正的读写在settings-store（按需读盘），
+       卸载后前端不再回传该插件的声明 ⇒ 界面自然摘除，不留幽灵设置项。 */
+    const settingCount = manifest.contributes?.settings;
+    if (settingCount !== undefined) {
+      contributions.push(`settings:${describePluginSettings(settingCount)}`);
+    }
+    /* A-1197 · B2（L4a UI 贡献点）：槽位是**运行期接线**（主进程注册 → 按需回传渲染层），
+       所以走 `contribute`（进 scope、卸载可撤销）；卸载后渲染层按 `plugins_changed`
+       全量重算自然摘除（UI 侧不做增量 diff，见 UiSlotHost）。 */
+    const uiDecl = manifest.contributes?.ui;
+    if (uiDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerUi, manifest);
+      contributions.push(`ui:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginUi(uiDecl)}`);
+    }
+    /* A-1197 · B4（T1 脚本信任）：脚本贡献走 `contribute`（进 scope、卸载/关信任立即撤装）。
+       「装不装」由主进程实现读 `trust.json` 判定（未信任 ⇒ 钩子返回空 ⇒ 如实记「尚未接线」，
+       不假装已生效）；这里只负责「声明了脚本就调钩子」。 */
+    const scriptDecl = manifest.contributes?.scripts;
+    if (scriptDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerScripts, manifest);
+      contributions.push(`scripts:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginScripts(scriptDecl)}`);
+    }
+    /* A-1197 · B5（L4a page）：自有页面走 `contribute`（进 scope —— dispose 负责 stop 静态服务，
+       防「page 的 http 服务泄漏」，见设计 §4.1 兜底表）。 */
+    const pageDecl = manifest.contributes?.page;
+    if (pageDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerPage, manifest);
+      contributions.push(`page:${wiring === WIRING_PENDING ? WIRING_PENDING : pageDecl.kind}`);
+    }
     entry.record.contributions = contributions;
   }
 
