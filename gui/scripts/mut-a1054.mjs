@@ -23,7 +23,7 @@
  *
  * 用法：node gui/scripts/mut-a1054.mjs
  */
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
@@ -31,7 +31,10 @@ import { fileURLToPath } from "node:url";
 import { sub, subLines, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const GUARDS = [
+/* ⚠️ 2026-10-08：本清单原名叫 GUARDS，与 _run-mut-batch.sh 的约定（它只认 const SPECS，
+   见该脚本第 42 行的正则）不一致 ⇒ 跑批读不出判据，直接报「没传 spec」并以退出码 2 结束
+   （于是这份脚本从来没被整批跑过）。改名为 SPECS 以符合约定；判据的唯一产地仍是这里。 */
+const SPECS = [
   "tests/core-ts/a1054-guards.spec.ts",
   "tests/core-ts/a1054-queue.spec.ts",
   "tests/core-ts/a1054-livestatus.spec.ts",
@@ -99,6 +102,10 @@ const MUTATIONS = [
   {
     name: "R3 hasReasoningData 的 `> 0` 全改成 `>= 0` → 每条消息都判有数据，懒挂载当场失效",
     file: GATE,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）。本条改的是该函数体内部的全部 `> 0`（不止一处），
+       不是单一文本替换 ⇒ from 只能声明「定位锚」（证明那个函数还在、且唯一定位），
+       它不覆盖函数体内的逐处替换 —— 这层限度由真跑变异体负责。 */
+    from: "export function hasReasoningData",
     mutate: (t) => {
       const a = t.indexOf("export function hasReasoningData");
       const b = t.indexOf("\n}", a);
@@ -125,8 +132,11 @@ const MUTATIONS = [
   {
     name: "R6 首帧两个字段一起置位 → 首次展开没有中间帧（两帧提交被「顺手简化」掉）",
     file: GATE,
+    /* 2026-10-07 重打锚点：原锚点末尾带了行尾**注释原文**（第 1 帧：挂正文，不展开），
+       注释被系统剥离成空白后必然断裂。改为**只锚代码行**（纯 if/return 语句）——
+       不含注释文本，实测在 reasoningGate.ts 里唯一。语义未变，仍是「首帧直接置位」。 */
     mutate: (t) => sub(t,
-      "  if (!everMounted) { return { everMounted: true, readyToOpen: false }; } // 第 1 帧：挂正文，不展开",
+      "  if (!everMounted) { return { everMounted: true, readyToOpen: false }; }",
       "  if (!everMounted) { return { everMounted: true, readyToOpen: true }; }"),
   },
   {
@@ -139,11 +149,18 @@ const MUTATIONS = [
   {
     name: "C1 删掉 ReasoningSection 里的 shouldMountBody 守卫 → 闸门形同虚设（组件仍 import 着它）",
     file: CHAT,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）。
+       运行期仍走 inSection —— 它要把替换限定在 ReasoningSection 作用域内，这不是单一文本替换。
+       但核验器认不出自定义 helper ⇒ 这些条目原先一直报「未核验 = 没人核验 = 没有保护」。
+       ⚠️ from 与 inSection 的第一个实参必须逐字一致，改一处就要改另一处。 */
+    from: "  if (!shouldMountBody(open, everMounted)) { return null; }\n\n",
     mutate: (t) => inSection(t, "  if (!shouldMountBody(open, everMounted)) { return null; }\n\n", ""),
   },
   {
     name: "C2 删掉 hasReasoningData 守卫 → 无思考数据的消息也渲染空壳（A-1015 语义回退）",
     file: CHAT,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 理由同 C1。 */
+    from: "  if (!hasReasoningData(m)) { return null; }\n\n",
     mutate: (t) => inSection(t, "  if (!hasReasoningData(m)) { return null; }\n\n", ""),
   },
   {
@@ -158,6 +175,9 @@ const MUTATIONS = [
   {
     name: "C4 把闸门挪到时间线计算**之后** → 调用还在（接线测试仍绿），但白工照跑：顺序才是命门",
     file: CHAT,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 闭包式写法核验器读不到，原先报「未核验」。
+       from 取闭包内 guard 的值（实测在目标文件里唯一）。 */
+    from: "  if (!shouldMountBody(open, everMounted)) { return null; }\n",
     mutate: (t) => {
       const guard = "  if (!shouldMountBody(open, everMounted)) { return null; }\n";
       const lateAnchor = "  if (timeline.length === 0 && localFiles.length === 0 && localUrls.length === 0) { return null; }\n";
@@ -197,11 +217,16 @@ const MUTATIONS = [
   {
     name: "M1 agnes 家族 context 被改回 2^19（表内值口径漂移；⚠️ 显示层两种进制都读 512K，本条已不代表可见故障）",
     file: CAPS,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— setFamilyContext 是自定义 helper，核验器读不到。
+       from 锚该家族在能力表里的 key（实测唯一）。 */
+    from: 'key: "agnes"',
     mutate: (t) => setFamilyContext(t, "agnes", 524288),
   },
   {
     name: "M2 note（小红书 dots）家族 context 被改回 2^19（同上，数值层守卫变红）",
     file: CAPS,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 理由同 M1。 */
+    from: 'key: "note"',
     mutate: (t) => setFamilyContext(t, "note", 524288),
   },
   {
@@ -230,6 +255,10 @@ const MUTATIONS = [
   {
     name: "L3 把「正在输出正文」提到「等用户」之前 → 等审批时若已有在途正文，界面显示「正在输出」（用户于是不去点确认）",
     file: LIVE,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 闭包式写法核验器读不到。
+       且核验器不认加号拼接的常量（constMap 会落到「解析失败」）⇒ from 用合并后的**单个字面量**。
+       本行刻意放在下面那段 existing 注释**之前**（那段里有反引号，会截断核验器的 STR 扫描器）。 */
+    from: '  if ((input.replyChars ?? 0) > 0) {\n    return { kind: "writing", text: "正在输出回复", detail, animated: true };\n  }\n',
     mutate: (t) => {
       /* ⚠️ 连"存在性检查"都不能用字面量 `t.includes(...)` —— 锚点带换行时它同样对行尾敏感
          （L3/L4 第一版被行尾自检抓出：`includes` 在 CRLF 下为 false → 直接 return t →
@@ -247,6 +276,8 @@ const MUTATIONS = [
   {
     name: "L4 把「没有在跑的轮次就返回 null」提到最前 → 空闲时残留正文会让状态行一直显示「正在输出」",
     file: LIVE,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 理由同 L3（闭包式 + 反引号注释的避让）。 */
+    from: "  if (!input.loading) { return null; }\n",
     mutate: (t) => {
       /* 同上：存在性判据由 `sub` 派生，不用字面量 `includes`。 */
       const guard = "  if (!input.loading) { return null; }\n";
@@ -317,11 +348,14 @@ const MUTATIONS = [
       'className="text-scan-light"'),
   },
   /* W4（状态行是否真的接上线）已**移交** `gui/scripts/mut-a1056.mjs`：
-     那条断言住在 `tests/core-ts/a1056-guards.spec.ts`，不在本脚本的 GUARDS 集合里 ——
+     那条断言住在 `tests/core-ts/a1056-guards.spec.ts`，不在本脚本的 SPECS 集合里 ——
      留在这里只会因为"本集合内没有守卫覆盖它"而**假存活**（正是本轮实测抓到的假存活）。 */
   {
     name: "W5 绕过 syncQueue 直写队列 ref → 界面显示的队列与实际要发的队列漂移",
     file: CHAT,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 核验器认不出 subLines 的数组实参，
+       原先报「未核验」。from 取 subLines 的第一个锚点元素。 */
+    from: "      syncQueue([]);",
     mutate: (t) => subLines(t,
       ["      syncQueue([]);", "      setInput((prev) =>"],
       ["      interruptQueueRef.current = [];", "      setInput((prev) =>"]),
@@ -337,7 +371,7 @@ const MUTATIONS = [
 function runGuards() {
   const r = spawnSync(
     process.execPath,
-    [resolve(ROOT, "node_modules/vitest/vitest.mjs"), "run", ...GUARDS, "--reporter=dot"],
+    [resolve(ROOT, "node_modules/vitest/vitest.mjs"), "run", ...SPECS, "--reporter=dot"],
     { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   return { ok: r.status === 0, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
@@ -354,6 +388,67 @@ const snapshot = () => {
 const restore = (snap) => { for (const [p, buf] of snap) { writeFileSync(p, buf); } };
 const sha = (buf) => createHash("sha256").update(buf).digest("hex").slice(0, 12);
 const treeHash = (snap) => [...snap.entries()].map(([p, b]) => `${p}:${sha(b)}`).join("|");
+
+/* ── 骨架：--list / --apply N / --restore ──────────────────────────────────
+ * 与 mut-a1091 / mut-a1037 / mut-a1042 / mut-a1053 / mut-a1064 同款约定（全仓一致）。
+ * ⚠️ --restore **无参可用**，且**变异态下也能跑**。
+ * ⚠️ `--apply` 必须调**同一个** `m.mutate`（本脚本条目全是闭包，且部分走
+ *   `setFamilyContext` / `inSection` 这类**作用域受限**的替换）——
+ *   绝不能自己拼 from/to，否则 apply 与全量模式走两套判据（假绿）。
+ */
+const SAVE_DIR = resolve(ROOT, "gui", "scripts", "_tmp-mut-a1054");
+const argv = process.argv.slice(2);
+const mode = argv.includes("--list") ? "list"
+  : argv.includes("--restore") ? "restore"
+    : argv.includes("--apply") ? "apply"
+      : "full";
+
+if (mode === "list") {
+  for (const [i, m] of MUTATIONS.entries()) { console.log(`  ${i + 1}. [${m.file}] ${m.name}`); }
+  process.exit(0);
+}
+
+if (mode === "apply" || mode === "restore") {
+  const manifestPath = resolve(SAVE_DIR, "manifest.json");
+  if (mode === "apply") {
+    const idx = Number(argv[argv.indexOf("--apply") + 1]);
+    const m = MUTATIONS[idx - 1];
+    if (!m) { console.error(`--apply 需要条目号（1..${MUTATIONS.length}）`); process.exit(1); }
+    if (existsSync(manifestPath)) {
+      console.error("上一轮的变异还没还原（manifest 还在）—— 先跑 --restore，否则会把变异后的源码当基线。");
+      process.exit(1);
+    }
+    const path = resolve(ROOT, m.file);
+    if (!existsSync(path)) { console.error(`快照里没有 ${m.file}`); process.exit(1); }
+    const src = readFileSync(path, "utf8");
+    mkdirSync(SAVE_DIR, { recursive: true });
+    writeFileSync(resolve(SAVE_DIR, "orig.txt"), src);
+    const next = m.mutate(src);          // ← 与全量模式**同一个** mutate
+    if (next === src) {
+      console.error(`锚点未命中（源码已漂移）：${m.name}`);
+      rmSync(SAVE_DIR, { recursive: true, force: true });
+      process.exit(1);
+    }
+    writeFileSync(path, next, "utf8");
+    writeFileSync(manifestPath, JSON.stringify({
+      index: idx, name: m.name, file: m.file,
+      sha256: createHash("sha256").update(src).digest("hex"),
+    }, null, 2));
+    console.log(`已变异 ${idx}：${m.name}`);
+    process.exit(0);
+  }
+  if (!existsSync(manifestPath)) { console.log("没有待还原的变异（manifest 不存在）—— 无需操作。"); process.exit(0); }
+  const man = JSON.parse(readFileSync(manifestPath, "utf8"));
+  writeFileSync(resolve(ROOT, man.file), readFileSync(resolve(SAVE_DIR, "orig.txt")));
+  const now = createHash("sha256").update(readFileSync(resolve(ROOT, man.file))).digest("hex");
+  rmSync(SAVE_DIR, { recursive: true, force: true });
+  if (now !== man.sha256) {
+    console.error(`❌ 还原校验失败：${man.file}\n   期望 ${man.sha256}\n   实际 ${now}`);
+    process.exit(1);
+  }
+  console.log(`已逐字节还原 ${man.file}（sha256 一致）`);
+  process.exit(0);
+}
 
 function main() {
   const snap = snapshot();

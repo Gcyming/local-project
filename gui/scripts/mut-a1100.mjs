@@ -78,8 +78,15 @@ const REG_SETMODELS_LINE =
   "\n"
   + "  ipcMain.handle(\"slime:resident:subagent:setModels\", (_e, p: { models?: unknown }) => setSubagentModels(p?.models));";
 
-/** 惰性块里那句「A-1096」注释头 —— 用它当插入点（把注册"搬回"惰性块） */
-const LAZY_BLOCK_ANCHOR = "      /* A-1096：子代理「可派发」读写 —— **与 Agent 设置里的开关同一个真相源**";
+/** 惰性块（`ensureServicesOnce`，定义于 main/index.ts L1720）里那句 `getSelection` 注册 ——
+ *  用它当插入点（把注册"搬回"惰性块）。
+ *  ⚠️ **锚点重打（2026-10-08）**：原锚点是这段注释的**首行**（`/* A-1096：子代理「可派发」读写 …`）。
+ *     2026-10-05 全仓注释剥离把整段注释换成**空行**（见 `index.ts.bak-comments` L2018-2025，
+ *     剥离前那段 `/* … *​/` 正好压在 L2311 这行 `getSelection` 注册之上）
+ *     ⇒ 锚点断裂 = 这条守卫静默失去保护。违反锚点三原则 ①（不跨注释行）②（不依赖注释文本）。
+ *  ⇒ 招1：直接锚**紧邻其下的代码行**（6 空格缩进，惰性块特征），实测全文件唯一。
+ *     位置语义不变：仍在惰性块内 ⇒ 守卫 T1「恰好注册 1 次」会数到 2 处 ⇒ 判红。 */
+const LAZY_BLOCK_ANCHOR = "      ipcMain.handle(\"slime:resident:subagent:getSelection\", () => ({";
 
 /** 惰性块缩进（6 空格）的同一行注册 —— 用于制造"两处注册"。
  *  ⚠️ 它**不是**删除锚点（那是 REG_SETMODELS_LINE），只是插入体，故无需唯一。 */

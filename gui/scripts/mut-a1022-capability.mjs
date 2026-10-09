@@ -51,9 +51,14 @@ const variants = [
   {
     name: "③ 在问服务器之前提前 return 模型条目的 ctx_len（原级联病灶：配置压过事实）",
     file: INDEX,
-    from: "    /* ②a slime 托管的本地模型 —— 问服务器，并确认它服务的就是这个模型 */",
+    /* ⚠️ 锚点**只锚代码行**：这一段原本锚的是那行块注释（②a slime 托管的本地模型…），
+       而2026-10-05 的全仓注释剥离把它换成了空行 ⇒ 多行锚必然断裂（剥离态下的新规矩：不跨注释行）。
+       守卫（a1022-guards.spec① 的「★ 不许在问服务器之前提前 return」）判的是
+       `resolveSessionWindowCap` 里 probeManagedChatCapability 之前出现的 return ⇒ 变异体插在
+       这个 if 的**开头**即命中同一判据，语义与原锚点完全一致（配置压过事实）。 */
+    from: "    if (localSpec || modelId.startsWith(\"local:\")) {",
     to: "    if (localSpec?.ctx_len && localSpec.ctx_len > 0) { return localSpec.ctx_len; }\n"
-      + "    /* ②a slime 托管的本地模型 —— 问服务器，并确认它服务的就是这个模型 */",
+      + "    if (localSpec || modelId.startsWith(\"local:\")) {",
   },
   {
     name: "④ 同域兜底的取值顺序反过来（chat.ctx_len 压过模型条目 ctx_len）",
@@ -101,7 +106,10 @@ const variants = [
   {
     name: "⑩ 问不出身份时默认放行（宁可要一个可能是别的模型的数字）",
     file: PROBE,
-    from: "  /* 问不出身份 → **不认**。宁可回落同域兜底，也不要一个可能是别的模型的数字。 */\n  return false;",
+    /* ⚠️ 同③：原锚点是一行块注释 + 一行代码的**多行**锚，注释被剥离成空行后必然断裂。
+       这里缩成**单行代码锚**（capabilityMatchesModel 末尾那条唯一的 `return false;`）——
+       它就是「问不出身份 → 不认」这条纪律的落点，语义与原锚点逐字对应。 */
+    from: "  return false;",
     to: "  return true;",
   },
   {

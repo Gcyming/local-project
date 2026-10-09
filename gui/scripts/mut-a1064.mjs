@@ -7,7 +7,7 @@
  *
  * 用法：node gui/scripts/mut-a1064.mjs
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
@@ -20,6 +20,26 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SPEC = "tests/core-ts/a1064-stream-relay.spec.ts";
 const CHAT_SVC = "core-ts/src/services/chat.ts";
 const TARGETS = [CHAT_SVC];
+
+/**
+ * 中继 `if` 链里 **`error` 显式分支的开头**（紧接在 `heldDone` 之后）—— 兜底块就跟在它后面。
+ *
+ * ⚠️ 2026-10-07：这份脚本的 7 条变异都用**运行期切出的子块**当作用域
+ *   （`withRelayElse` / `indexOf` 切片），核验器的 `from` 计数是**在整份目标文件上**数
+ *   —— 锚点作用域对不上，于是 7 条全部落进「未核验（`from` 藏在 `mutate:` 闭包里）」，
+ *   即**一条都没被核验过**。
+ *   而 `relayElseRange()` **本来就是以 `error` 分支为定位锚**的（见下方注释里那句
+ *   「定位**必须**以 `error` 分支为锚」）—— 那个锚点是**纯代码、无注释、且全文唯一**
+ *   （实测 1 次；单看 `} else if (chunk.type === "error") {` 则是 2 次，不唯一）。
+ *   ⇒ 把它提成模块级常量并写进各条目的 `from:`：**运行期一个字都没改**
+ *   （`mutate` 闭包照旧按 `relayElseRange` 定位），只是让核验器**看得见**这条变异锚在哪。
+ *
+ * ⚠️ 这条 `from` 是**定位锚的声明**，不是"该条目实际改动的那一行"（后者在子块里，
+ *   静态数不了）。它能证明的是「中继的 error 分支与兜底块还在、且只有一处」，
+ *   也就是**源码漂移到别处时会被抓到**；它**不能**证明子块内部那三行没被改。
+ *   后者由本脚本 `--apply` / 全量模式的**真跑**负责（判据：没人核验 = 没有保护）。
+ */
+const RELAY_ANCHOR = 'heldDone = chunk;\n        } else if (chunk.type === "error") {';
 
 /**
  * 在中继的**兜底透传块**内部做替换。
@@ -63,11 +83,17 @@ const RAW_MUTATIONS = [
   {
     name: "1 兜底透传被删 —— 未列举的事件类型又被静默吞掉（回归旧形态）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: withRelayElse(() => ""),
   },
   {
     name: "2 假修：兜底退化成只补三个名字的 else if（heartbeat / member 仍被吞）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: withRelayElse((blk) => blk.replace(
       "} else {",
       "} else if (chunk.type === \"tool-start\" || chunk.type === \"steer\" || chunk.type === \"notice\") {",
@@ -76,21 +102,33 @@ const RAW_MUTATIONS = [
   {
     name: "3 兜底不原样透传：吞掉 steerId（卡片永远撤不掉 → 本轮结束重发一遍）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: inRelayElse((blk) => blk.replace("yield emitChunk(chunk);", "yield emitChunk({ ...chunk, steerId: undefined });")),
   },
   {
     name: "4 兜底不原样透传：吞掉 content（notice 变成一句没有信息的空状态）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: inRelayElse((blk) => blk.replace("yield emitChunk(chunk);", "yield emitChunk({ ...chunk, content: undefined });")),
   },
   {
     name: "5 兜底不原样透传：吞掉 toolId（实时行与完成卡配不上 → 永远停在执行中）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: inRelayElse((blk) => blk.replace("yield emitChunk(chunk);", "yield emitChunk({ ...chunk, toolId: undefined });")),
   },
   {
     name: "6 已列举的 error 分支不再转发（穷举断言必须覆盖显式分支，不只覆盖兜底）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: (t) => {
       const at = t.indexOf('} else if (chunk.type === "error") {');
       if (at < 0) { return t; }
@@ -103,6 +141,9 @@ const RAW_MUTATIONS = [
   {
     name: "7 兜底变成空块（结构与行为断言必须同时红）",
     file: CHAT_SVC,
+    /* 定位锚见 RELAY_ANCHOR 的注释：运行期 mutate 闭包照旧按 relayElseRange 切子块，
+       这里只是让核验器能看见锚点（声明式，不参与运行期）。 */
+    from: RELAY_ANCHOR,
     mutate: inRelayElse((blk) => blk.replace("yield emitChunk(chunk);", "")),
   },
 ];
@@ -119,6 +160,66 @@ function runSpec() {
     { cwd: ROOT, encoding: "utf8" },
   );
   return r.status === 0;
+}
+
+/* ── 骨架：--list / --apply N / --restore ──────────────────────────────────
+ * 与 mut-a1091 / mut-a1037 / mut-a1042 / mut-a1053 同款约定（全仓一致）。
+ * ⚠️ --restore **无参可用**，且**变异态下也能跑**。
+ * ⚠️ 本脚本七条都是**运行期切子块**的变异（`withRelayElse`），所以 `--apply`
+ *   必须调用**同一个** `m.mutate`（不能自己拼 from/to）—— 否则 apply 与全量模式
+ *   会走两套判据，"全量能红、apply 没改"这种假绿就回来了。
+ */
+const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1064");
+const argv = process.argv.slice(2);
+const mode = argv.includes("--list") ? "list"
+  : argv.includes("--restore") ? "restore"
+    : argv.includes("--apply") ? "apply"
+      : "full";
+
+if (mode === "list") {
+  for (const [i, m] of MUTATIONS.entries()) { console.log(`  ${i + 1}. [${m.file}] ${m.name}`); }
+  process.exit(0);
+}
+
+if (mode === "apply" || mode === "restore") {
+  const manifestPath = join(SAVE_DIR, "manifest.json");
+  if (mode === "apply") {
+    const idx = Number(argv[argv.indexOf("--apply") + 1]);
+    const m = MUTATIONS[idx - 1];
+    if (!m) { console.error(`--apply 需要条目号（1..${MUTATIONS.length}）`); process.exit(1); }
+    if (existsSync(manifestPath)) {
+      console.error("上一轮的变异还没还原（manifest 还在）—— 先跑 --restore，否则会把变异后的源码当基线。");
+      process.exit(1);
+    }
+    const path = join(ROOT, m.file);
+    const src = readFileSync(path, "utf8");
+    mkdirSync(SAVE_DIR, { recursive: true });
+    writeFileSync(join(SAVE_DIR, "orig.txt"), src);
+    const next = m.mutate(src);          // ← 与全量模式**同一个** mutate
+    if (next === src) {
+      console.error(`锚点未命中（源码已漂移）：${m.name}`);
+      rmSync(SAVE_DIR, { recursive: true, force: true });
+      process.exit(1);
+    }
+    writeFileSync(path, next);
+    writeFileSync(manifestPath, JSON.stringify({
+      index: idx, name: m.name, file: m.file,
+      sha256: createHash("sha256").update(src).digest("hex"),
+    }, null, 2));
+    console.log(`已变异 ${idx}：${m.name}`);
+    process.exit(0);
+  }
+  if (!existsSync(manifestPath)) { console.log("没有待还原的变异（manifest 不存在）—— 无需操作。"); process.exit(0); }
+  const man = JSON.parse(readFileSync(manifestPath, "utf8"));
+  writeFileSync(join(ROOT, man.file), readFileSync(join(SAVE_DIR, "orig.txt")));
+  const now = createHash("sha256").update(readFileSync(join(ROOT, man.file))).digest("hex");
+  rmSync(SAVE_DIR, { recursive: true, force: true });
+  if (now !== man.sha256) {
+    console.error(`❌ 还原校验失败：${man.file}\n   期望 ${man.sha256}\n   实际 ${now}`);
+    process.exit(1);
+  }
+  console.log(`已逐字节还原 ${man.file}（sha256 一致）`);
+  process.exit(0);
 }
 
 const originals = new Map();

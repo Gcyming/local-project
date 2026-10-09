@@ -74,10 +74,16 @@ const MUTATIONS = [
   {
     name: "M7 刷新状态但不清 store 缓存（旧的仍是降级态，下载完也不生效）",
     file: F_MAIN,
-    from: `  // 已缓存的 store 是在旧结论下构造的（可能已被降级）→ 全部作废重建
-  memoryStores.clear();`,
-    to: `  // 已缓存的 store 是在旧结论下构造的（可能已被降级）→ 全部作废重建
-  void 0;`,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点第一行是注释「已缓存的 store 是在旧结论下构造的…」。
+       2026-10-05 全仓注释剥离把注释替换成**空行** ⇒ 这条多行锚必然断裂，
+       核验器报「未命中」= 这条守卫**已经失去保护**。
+       ⇒ 招1+2：改成**两行纯代码**（memoryStores.clear() 后面紧跟 refreshLancedbComponent
+       里的 console.log( —— 全文件其它3 处 clear() 后面跟的都是别的语句，实测命中唯一 = 1）。
+       ⚠️ 单行 `  memoryStores.clear();` 在本文件出现 **4 次** ⇒ 不能单独用它当锚点。 */
+    from: `  memoryStores.clear();
+  console.log(`,
+    to: `  void 0;
+  console.log(`,
   },
   {
     name: "M8 配置接口不再如实返回组件状态（界面无从告知降级）",

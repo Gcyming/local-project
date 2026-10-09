@@ -49,9 +49,16 @@ const MUTATIONS = [
   {
     name: "1 repairStreamingTablePre 被摘掉（`|---` 变孤立 hr，表头行裸露 `|`）",
     file: F_MD,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点第一行是注释「3) 表格半成品…必须在净化链**之前**」。
+       2026-10-05 全仓注释剥离把注释替换成**空行**（行尾留 2 个空格）⇒ 锚点断裂，
+       核验器报「未命中」= 这条守卫**已经失去保护**。
+       ⇒ 招 1（去注释）+ 招 2（收窄）：锚点只剩**纯代码两段** ——
+       `text = repairStreamingTablePre(text);` + 它后面那个空行 + `  return text;`
+       （实测命中唯一 = 1）。保留中间那个空行是为了**仍能一次摘掉整段**（名字说的是
+       "被摘掉"），只锚调用行则会把 `return text;` 留下、变成另一种缺陷。 */
     mutate: (t) => sub(
       t,
-      "  // 3) 表格半成品（打字中的分隔行）补全 —— 必须在净化链**之前**（见 repairStreamingTablePre）\n  text = repairStreamingTablePre(text);\n\n  return text;",
+      "  text = repairStreamingTablePre(text);\n\n  return text;",
       "  return text;",
     ),
   },
@@ -125,9 +132,15 @@ const MUTATIONS = [
   {
     name: "9 PURE_MARKER / TABLE_SEP_MARKER 早退被删（`**` `#` `|---|---|` 整块不再隐藏）",
     file: F_FADE,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点第三行是注释「表格分隔单元（如 `---`、`|---|---|`）…」。
+       2026-10-05 全仓注释剥离把它替换成**空行**（行尾留 2 个空格）⇒ 锚点断裂，
+       核验器报「未命中」= 这条守卫**已经失去保护**。
+       ⇒ 招 1+2：去掉那行注释，锚点写成「三行早退 + 中间夹**剥离残留的那一个空行**」
+       （实测命中唯一 = 1）。⚠️ 三个早退必须**一起**改：名字说的是「整块不再隐藏」，
+       只摘 PURE 或只摘 TABLE_SEP 都是弱化变异体（红了，却不因为要证明的这件事）。 */
     mutate: (t) => sub(
       t,
-      "  if (PURE_MARKER.test(raw)) { return \"\"; }\n  if (ORDERED_MARKER.test(raw)) { return \"\"; }\n  // 表格分隔单元（如 `---`、`|---|---|`）——`PURE_MARKER` 已挡纯 `-`，这里挡带 `:`/`|` 的变体\n  if (TABLE_SEP_MARKER.test(raw) && /-/.test(raw)) { return \"\"; }",
+      "  if (PURE_MARKER.test(raw)) { return \"\"; }\n  if (ORDERED_MARKER.test(raw)) { return \"\"; }\n  \n  if (TABLE_SEP_MARKER.test(raw) && /-/.test(raw)) { return \"\"; }",
       "",
     ),
   },

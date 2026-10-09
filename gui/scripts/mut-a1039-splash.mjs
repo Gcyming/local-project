@@ -53,8 +53,18 @@ const RAW_MUTATIONS = [
   {
     name: "M4 markFirstLoad 只 setState 到一半（登记表永远收不齐）→ 靠 8s 兜底才放行",
     file: "gui/src/renderer/App.tsx",
-    from: 'markFirstLoad("providers"); // A-1039：记入启动门',
-    to: "void 0;",
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点 `markFirstLoad("providers"); // A-1039：记入启动门`
+       依赖**行尾注释**。2026-10-05 全仓注释剥离把注释替换成**空行**（行尾留下一个空格），
+       于是这条锚必然断裂 —— 核验器报「未命中」，即这条守卫**已经失去保护**。
+       ⇒ 招 1（去注释）+ 招 2（补上下文求唯一）：
+       `markFirstLoad("providers");` 在本文件里出现 **2 次**（成功路径 + catch 路径），
+       单行锚不唯一（不唯一 = 可能改错对象）。而守卫要的恰恰是"**成功/失败两条路径都覆盖**"
+       （tests/gui/a1039-guards.spec.ts 的 `toBeGreaterThanOrEqual(2)`）⇒ 必须只打**成功路径**那处。
+       现场形态：成功路径紧跟在 `api.providers.list()` 的 `.then(...)` 收尾 `})));` 之后，
+       catch 路径前面是 `console.error(e);` ⇒ 带上一行即可唯一（实测命中 1 次）。
+       变异语义不变：成功路径不再登记 providers ⇒ 登记表少一项，只能靠 8s 兜底放行。 */
+    from: "        })));\n        markFirstLoad(\"providers\");",
+    to: "        })));\n        void 0;",
   },
   {
     name: "M5 总超时兜底删掉（某个数据源挂掉 → 用户被永久关在加载页）",

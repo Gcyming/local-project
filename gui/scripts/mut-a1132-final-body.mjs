@@ -70,20 +70,90 @@ const MUTATIONS = [
       '  return tailText ?? "";',
     ),
   },
+  /* ⚠️ 下面 3/4 两条：两处收尾 return 的**前 12 行逐字节相同**（连行尾那个空格都一样），
+     原锚靠行尾注释 `// A-1132（run）` / `// A-1132（runStream）` 区分；
+     2026-10-05 注释剥离后注释变成空行（在 `text:` 的**上方**），两处锚点同时失效。
+     ⇒ 改锚**该路径独有的行**：往下走到 `opts.messages.push` 之后，
+        run() 是 `content: msg?.content ?? null,`、runStream() 是 `content: null,`。
+     ⚠️ 实测深度：到 `role: "assistant",` 为止时 runStream 侧仍命中 2 次（那 12 行两边全同），
+        必须**含上 `content:` 那一行**才唯一。
+     ⚠️ 往下锚（而不是往上）还有个好处：往上要先跨过 runStream 侧 12 个空行 / run 侧 3 个空行，
+        跨空行违反「锚点不跨剥离残留」这一条。往下这几行**全是代码、零空行**。 */
   {
     name: "3 非流式 run() 收尾退回裸 raw（两路径口径又不一致）",
     file: F_LOOP,
-    mutate: (t) => sub(t, "          text: pickFinalBody(tailText, allText), // A-1132（run）", "          text: raw,"),
+    mutate: (t) => sub(t,
+      "          text: pickFinalBody(tailText, allText), \n"
+      + "          raw: pickFinalBody(tailText, allText),\n"
+      + "          rounds: round,\n"
+      + "          roundLog: roundLog.map((r) => r.details).flat(),\n"
+      + "          reasonings,\n"
+      + "          lastUsage,\n"
+      + "          usage: usageAcc,\n"
+      + "        };\n"
+      + "      }\n"
+      + "      opts.messages.push({\n"
+      + '        role: "assistant",\n'
+      + "        content: msg?.content ?? null,",
+      "          text: raw, \n"
+      + "          raw: pickFinalBody(tailText, allText),\n"
+      + "          rounds: round,\n"
+      + "          roundLog: roundLog.map((r) => r.details).flat(),\n"
+      + "          reasonings,\n"
+      + "          lastUsage,\n"
+      + "          usage: usageAcc,\n"
+      + "        };\n"
+      + "      }\n"
+      + "      opts.messages.push({\n"
+      + '        role: "assistant",\n'
+      + "        content: msg?.content ?? null,",
+    ),
   },
   {
     name: "4 流式 runStream() 收尾退回裸 allText（原 bug 原样复发）",
     file: F_LOOP,
-    mutate: (t) => sub(t, "          text: pickFinalBody(tailText, allText), // A-1132（runStream）", "          text: allText,"),
+    /* 分叉行是 `content: null,`（流式路径下一律推 null，正文在别处已 flush 过）。 */
+    mutate: (t) => sub(t,
+      "          text: pickFinalBody(tailText, allText), \n"
+      + "          raw: pickFinalBody(tailText, allText),\n"
+      + "          rounds: round,\n"
+      + "          roundLog: roundLog.map((r) => r.details).flat(),\n"
+      + "          reasonings,\n"
+      + "          lastUsage,\n"
+      + "          usage: usageAcc,\n"
+      + "        };\n"
+      + "      }\n"
+      + "      opts.messages.push({\n"
+      + '        role: "assistant",\n'
+      + "        content: null,\n"
+      + "        tool_calls: toContract(nextCalls),",
+      "          text: allText, \n"
+      + "          raw: pickFinalBody(tailText, allText),\n"
+      + "          rounds: round,\n"
+      + "          roundLog: roundLog.map((r) => r.details).flat(),\n"
+      + "          reasonings,\n"
+      + "          lastUsage,\n"
+      + "          usage: usageAcc,\n"
+      + "        };\n"
+      + "      }\n"
+      + "      opts.messages.push({\n"
+      + '        role: "assistant",\n'
+      + "        content: null,\n"
+      + "        tool_calls: toContract(nextCalls),",
+    ),
   },
   {
     name: "5 中断路径被顺手改成 pickFinalBody（按停止后已产出正文被截断）",
     file: F_LOOP,
-    mutate: (t) => sub(
+    /* ⚠️ `all: true` = 显式声明整组替换。**这条闸门本身就是计数闸门**：
+       spec 数 `text: allText,` 的出现次数**必须恰好是 2**（run 与 runStream 各一处，
+       A-1194 给非流式 run 补了中断返回）。而这条锚点在两处**逐字节相同**
+       （实测 2 次命中）—— 那是源码的**真实结构**，不是锚点漂移。
+       只改一处会把计数从 2 变成 1，红是红了，却不是「这条变异名字说的那个缺陷」
+       （用户按停止后两条路径里仍有一条正常，弱化变异体）。
+       ⚠️ 与第 6 条（预算熔断）同宗：那里原本也不唯一，已按同一理由显式声明整组替换。 */
+    all: true,
+    mutate: (t) => subAll(
       t,
       "          text: allText,\n          raw: allText,\n          rounds: round,\n          roundLog: roundLog.map((r) => r.details).flat(),\n          reasonings,\n          interrupted: true,",
       "          text: pickFinalBody(tailText, allText),\n          raw: pickFinalBody(tailText, allText),\n          rounds: round,\n          roundLog: roundLog.map((r) => r.details).flat(),\n          reasonings,\n          interrupted: true,",

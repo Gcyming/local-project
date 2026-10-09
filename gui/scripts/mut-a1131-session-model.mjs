@@ -67,10 +67,15 @@ const MUTATIONS = [
   {
     name: "5 chat() 绕过收口点（回退 findAgent）",
     file: F_CHAT,
+    /* ⚠️ 锚点必须含 `this.registerSkillVisibility(agent);`（chat 独有）——
+       chat() 与 stream() 的「runAgentFor → 空判 → 抛 404」三行**逐字节相同**，
+       原本靠其后紧跟的那行区分；2026-10-05 注释剥离把中间那行注释变成了空行，
+       而 stream() 那一侧根本没有 registerSkillVisibility ⇒ 少这一行就命中 2 次。
+       实测：不含它 = 0 次（剥离后 systemPromptFor 前多了一个空行）；含它 = 1 次。 */
     mutate: (t) => sub(
       t,
-      "    const agent = await this.runAgentFor(agentId, req.modelChoice);\n    if (!agent) {\n      throw new ChatServiceError(404, \"Agent 不存在\");\n    }\n    const systemPrompt = await this.systemPromptFor(agent);",
-      "    const agent = await this.registry.findAgent(agentId);\n    if (!agent) {\n      throw new ChatServiceError(404, \"Agent 不存在\");\n    }\n    const systemPrompt = await this.systemPromptFor(agent);",
+      "    const agent = await this.runAgentFor(agentId, req.modelChoice);\n    if (!agent) {\n      throw new ChatServiceError(404, \"Agent 不存在\");\n    }\n    this.registerSkillVisibility(agent);\n    const systemPrompt = await this.systemPromptFor(agent);",
+      "    const agent = await this.registry.findAgent(agentId);\n    if (!agent) {\n      throw new ChatServiceError(404, \"Agent 不存在\");\n    }\n    this.registerSkillVisibility(agent);\n    const systemPrompt = await this.systemPromptFor(agent);",
     ),
   },
   {

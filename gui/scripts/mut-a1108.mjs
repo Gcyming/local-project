@@ -254,10 +254,16 @@ const MUTATIONS = [
   {
     name: "21 主进程硬编码 `fallback-pool.json`（文件名第二产地，改名即静默错位）",
     file: F_MAIN,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点是一行注释（靠「注释里出现文件名」来被判红）。
+       2026-10-05 全仓注释剥离把注释换成**空行** ⇒ 这条锚点必然断裂（核验器报未命中）。
+       ⇒ 招1+2：改成**一行纯代码**（import 行，实测全仓唯一），把文件名常量**定义到主进程**里。
+       判红路径不变：守卫 D8 断言 main 里**不含** fallback-pool.json 这两个字面量
+       （`expect(src.includes(FALLBACK_POOL_FILE)).toBe(false)`）⇒ 变异后 main 自带一份常量 = 第二产地。
+       保持 import 行原样（不改 D5 依赖的 handler 形态）⇒ 只有 D8 红，指向的就是本条意图。 */
     mutate: (t) => sub(
       t,
-      "// A-1108：全局降级池（设置 → 通用）。判据唯一出处是 core-ts 的 fallbackPool 模块",
-      "// A-1108：全局降级池（设置 → 通用）。配置写在 config/fallback-pool.json，判据唯一出处是 core-ts 的 fallbackPool 模块",
+      'import { readFallbackPool, writeFallbackPool } from "../../../core-ts/src/services/fallbackPool.js";',
+      'import { readFallbackPool, writeFallbackPool } from "../../../core-ts/src/services/fallbackPool.js"; const FALLBACK_POOL_FILE = "fallback-pool.json";',
     ),
   },
 

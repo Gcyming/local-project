@@ -94,20 +94,69 @@ const MUTATIONS = [
     file: F_MODULE,
     mutate: (t) => sub(t, '  return typeof p === "string" && p ? p : "（继续）";', '  return typeof p === "string" ? p : "";'),
   },
+  /* ⚠️ 下面 9/10 两条的锚点必须**夹到该入口独有的行**为止（`try {` vs `let started = false;`）。
+     原锚靠行尾注释 `// A-1129（chat 入口）` 区分两个入口，而 2026-10-05 全仓注释剥离把注释
+     换成了空行 ⇒ 两行变成**逐字节相同**（`    payload = sanitizeWirePayload(payload); `，
+     连尾随空格都一样）⇒ 单行锚点必然命中 2 次。
+     ⚠️ 顺带注意：入口到分叉点之间那 8 行**也是逐字节相同**的，所以锚点必须一路走到分叉行，
+     只往下扩一两行没有用（实测 2/3/4/5/6/7 行都是 2 次命中）。 */
   {
     name: "9 router.chat 不再过门（非流式路径照旧 400）",
     file: F_ROUTER,
-    mutate: (t) => sub(t, "    payload = sanitizeWirePayload(payload); // A-1129（chat 入口）\n", ""),
+    mutate: (t) => sub(t,
+      "    payload = sanitizeWirePayload(payload); \n"
+      + '    const chain = this.fallbackChain("chat");\n'
+      + "    if (chain.length === 0) {\n"
+      + "      throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);\n"
+      + "    }\n"
+      + "    const errors: string[] = [];\n"
+      + "    for (let i = 0; i < chain.length; i++) {\n"
+      + "      const route = chain[i];\n"
+      + "      try {",
+      '    const chain = this.fallbackChain("chat");\n'
+      + "    if (chain.length === 0) {\n"
+      + "      throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);\n"
+      + "    }\n"
+      + "    const errors: string[] = [];\n"
+      + "    for (let i = 0; i < chain.length; i++) {\n"
+      + "      const route = chain[i];\n"
+      + "      try {",
+    ),
   },
   {
     name: "10 router.chatStream 不再过门（流式 = GUI 主路径，照旧 400）",
     file: F_ROUTER,
-    mutate: (t) => sub(t, "    payload = sanitizeWirePayload(payload); // A-1129（chatStream 入口）\n", ""),
+    /* 同上：分叉行是 `let started = false;`（流式要记录「这一轮是否已开始输出」）。 */
+    mutate: (t) => sub(t,
+      "    payload = sanitizeWirePayload(payload); \n"
+      + '    const chain = this.fallbackChain("chat");\n'
+      + "    if (chain.length === 0) {\n"
+      + "      throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);\n"
+      + "    }\n"
+      + "    const errors: string[] = [];\n"
+      + "    for (let i = 0; i < chain.length; i++) {\n"
+      + "      const route = chain[i];\n"
+      + "      let started = false;",
+      '    const chain = this.fallbackChain("chat");\n'
+      + "    if (chain.length === 0) {\n"
+      + "      throw new Error(`无可用 chat 路由（roles=chat 的路由表为空）`);\n"
+      + "    }\n"
+      + "    const errors: string[] = [];\n"
+      + "    for (let i = 0; i < chain.length; i++) {\n"
+      + "      const route = chain[i];\n"
+      + "      let started = false;",
+    ),
   },
   {
     name: "11 落点搬回 engine（假保险：管不到 tool_loop 的中途重发）",
     file: F_ENGINE,
-    mutate: (t) => sub(t, "    if (reminder) { out = foldUserReminder(out, reminder); }\n    /*", "    if (reminder) { out = foldUserReminder(out, reminder); }\n    out = sanitizeOutgoingMessages(out);\n    /*"),
+    /* 原锚的 `to` 挂在紧随其后的块注释上（`\n    /*`）⇒ 注释剥离后断裂。
+       改成**只锚这一行代码**并在它后面插入：语义不变（仍是「在 engine 多接一道」），
+       且不再依赖任何注释。守卫 = spec 的 engine 侧不许出现 sanitizeOutgoingMessages。 */
+    mutate: (t) => sub(t,
+      "    if (reminder) { out = foldUserReminder(out, reminder); }",
+      "    if (reminder) { out = foldUserReminder(out, reminder); }\n    out = sanitizeOutgoingMessages(out);",
+    ),
   },
   {
     name: "12 无 messages 的请求也被塞一个 messages: []（embeddings 从此非法）",

@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 /* `sub` = 行尾无关的替换（共享模块，不要在本脚本另写一份）—— 见 `_mut-eol.mjs`。 */
-import { sub, nlOf, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
+import { sub, nlOf, moveAfter, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
 
 // ⚠️ 不能用 `new URL(...).pathname`：项目根含空格，pathname 会把空格编码成 %20 → ENOENT。
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -31,20 +31,10 @@ const MAIN = "gui/src/main/index.ts";
 const PRELOAD = "gui/src/preload/index.ts";
 const TARGETS = [MODULE, PANEL, MAIN, PRELOAD];
 
-/** 把 `[start, end)` 那段搬到 `afterMarker` 之后 —— 只有「搬位置」类变异需要它。
- *  `sub` 只认字面量，70 行的 JSX 块逐字写进锚点不现实（且一改缩进就失效）。
- *  ⚠️ 三个锚点都必须是**能唯一命中的字面量**；命中不了就原样返回（主流程按"未命中"报错）。 */
-function moveAfter(text, startMarker, endMarker, afterMarker) {
-  const p = text.indexOf(startMarker);
-  const e = text.indexOf(endMarker);
-  if (p < 0 || e < 0 || p >= e) { return text; }
-  const block = text.slice(p, e);
-  const rest = text.slice(0, p) + text.slice(e);
-  const at = rest.indexOf(afterMarker);
-  if (at < 0) { return text; }
-  const cut = at + afterMarker.length;
-  return rest.slice(0, cut) + nlOf(text) + block + rest.slice(cut);
-}
+/* ⚠️ 2026-10-08：「搬位置」helper（moveAfter / moveBefore）已**提炼到 `_mut-eol.mjs` 共享**
+   （原先本文件与 a1074 各有一份逐字相同的本地实现）。共享后 `_run-mut-one.mjs` 用**同一份**，
+   不存在"助手模拟 vs 脚本执行"的行为分叉；本脚本改为 import（见上方 import 行）。
+   锚点规矩不变：三个锚必须**能唯一命中**；命中不了就原样返回（主流程按「未命中」报错）。 */
 
 const MUTATIONS = [
   // ── A 纯模块判据 ───────────────────────────────────────────────────────────
@@ -157,6 +147,9 @@ const MUTATIONS = [
   {
     name: "B1 坞被搬到输入框**下方**（用户要的是「输入栏上方」—— 位置错了等于没做）",
     file: PANEL,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 运行期走 moveAfter（三段锚搬位置），核验器认不出该指令，
+       原先报「未核验 = 没人核验」。from 取它的 startMarker（实测在 ChatPanel.tsx 里唯一命中 1 次）。 */
+    from: '<div className="float-dock">',
     /* A-1074 迁移：搬的对象从"通栏按钮块"变成**整个坞**（坞是输入框的前一个兄弟）。
        只搬 `{agentProcs?.any && (` 那段会把坞的容器留在原地 → 搬完是一段坏 JSX（假红：解析失败）。 */
     mutate: (t) => moveAfter(

@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { subLines, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const GUARDS = [
+const SPECS = [
   "tests/core-ts/a1055-guards.spec.ts",
   "tests/core-ts/a1021-guards.spec.ts",
 ];
@@ -214,6 +214,10 @@ const MUTATIONS = [
   {
     name: "A-1055④ main() 里不再建托盘（只在关窗时才出现 → 用户看到的是「要的时候没有」）",
     file: MAIN,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 运行期走 subRe（跨 0-4 行的正则），
+       核验器认不出正则实参 ⇒ 原先报「未核验」。from 取该正则的**起点**：
+       ensureTray(); 在文件里出现 2 次（不唯一），createWindow(); 只 1 次（实测）。 */
+    from: "      createWindow();",
     mutate: (t) => subRe(t, /(      createWindow\(\);\r?\n(?:[^\n]*\r?\n){0,4}?)      ensureTray\(\);\r?\n/, "$1"),
   },
   {
@@ -257,7 +261,7 @@ const MUTATIONS = [
 function runGuards() {
   const r = spawnSync(
     process.execPath,
-    [resolve(ROOT, "node_modules/vitest/vitest.mjs"), "run", ...GUARDS, "--reporter=dot"],
+    [resolve(ROOT, "node_modules/vitest/vitest.mjs"), "run", ...SPECS, "--reporter=dot"],
     { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   return { ok: r.status === 0, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };

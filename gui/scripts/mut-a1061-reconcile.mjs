@@ -35,14 +35,32 @@ const RAW_MUTATIONS = [
   {
     name: "1 收尾核对整块被删（清单可以永远停在半途 = 用户遇到的原形）",
     file: LOOP,
-    from: '        /* A-1061⑫：引导之后再做**计划收尾核对**（顺序刻意的 —— 用户刚插进来的请求\n           优先于"清单有没有划掉"；且引导本身可能又添了新待办，核对必须在它之后）。\n           准入条件 = 本轮运行真的碰过计划 且 还没核对过（见 usedTodoWrite 的注释）。 */\n        if (this.reconcilePlan(opts.sessionId, opts.messages, roundText, !reconciled && usedTodoWrite)) {\n          reconciled = true;\n          continue;\n        }\n',
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点开头是三行**块注释**（`/* A-1061⑫：引导之后…*​/`）。
+       2026-10-05 全仓注释剥离把注释换成**空行**（源码 L995-996 现在是空行）
+       ⇒ 多行锚必然断裂（核验器报未命中）。违反锚点三原则 ①（不跨注释行）②（不依赖注释文本）。
+       ⇒ 招1+2：只锚**调用点整块**（`if (…reconcilePlan…) { reconciled = true; continue; }`）。
+         唯一性来自第三个实参 `raw` —— 非流式 run() 传 `raw`，流式 runStream 传 `roundText`，
+         两处因此天然区分（条目 6 锚 roundText 那处）。实测 count=1。 */
+    from: "\n"
+      + "        if (this.reconcilePlan(opts.sessionId, opts.messages, raw, !reconciled && usedTodoWrite)) {\n"
+      + "          reconciled = true;\n"
+      + "          continue;\n"
+      + "        }",
     to: "",
   },
   {
     name: "2 核对面不留本轮正文（模型不知道自己刚宣布过「完成」就被追问）",
     file: LOOP,
-    from: '    if (roundText) { messages.push({ role: "assistant", content: roundText }); } // ②',
-    to: "    void roundText; // ②",
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点尾部带行内注释（`// ②`），注释剥离后
+       变成行尾空白（源码 L682 现在是 `…content: roundText }); } ` + 一个空格）⇒ 断裂。
+       ⇒ 招1+2：两行纯代码（留正文那行 + 紧随的 `messages.push(… user … ask)`）。
+         第二行不是凑数：它证明"这后面紧跟着核对提问"，也就是这条变异要破坏的**语义位置**
+         （把正文那行删掉，模型就只收到提问、看不到自己刚说了什么）。
+         守卫 `todo-store.spec` 也正是断言这两行都在 `reconcilePlan` 函数体里。实测 count=1。 */
+    from: "    if (roundText) { messages.push({ role: \"assistant\", content: roundText }); } \n"
+      + "    messages.push({ role: \"user\", content: ask });",
+    to: "    void roundText;\n"
+      + "    messages.push({ role: \"user\", content: ask });",
   },
   {
     name: "3 「只核对一次」失效（模型选择留到下一轮 → 被无限追问到轮次上限）",
@@ -73,7 +91,16 @@ const RAW_MUTATIONS = [
   {
     name: "6 非流式路径的收尾核对被删（run() 与 runStream 语义分叉）",
     file: LOOP,
-    from: '        /* A-1061⑫：引导之后再做**计划收尾核对**（顺序刻意的 —— 用户刚插进来的请求\n           优先于"清单有没有划掉"；且引导本身可能又添了新待办，核对必须在它之后）。\n           准入条件 = 本轮运行真的碰过计划 且 还没核对过（见 usedTodoWrite 的注释）。 */\n        if (this.reconcilePlan(opts.sessionId, opts.messages, raw, !reconciled && usedTodoWrite)) {\n          reconciled = true;\n          continue;\n        }\n',
+    /* ⚠️ **锚点重打（2026-10-08）**：同条目 1 —— 原锚点开头是三行块注释，剥离后断裂。
+       ⚠️ 另注意**名字与锚点曾是错位**的：条目 1 原锚 `roundText`（流式），
+          本条目原锚 `raw`（非流式），名字说的却是"非流式路径" —— 现在按名字对齐：
+          条目 1 = `raw`（非流式 run()），本条目 = `roundText`（流式 runStream，行为测试跑的那条）。
+       ⇒ 两处靠第三实参区分，各自 count=1。 */
+    from: "\n"
+      + "        if (this.reconcilePlan(opts.sessionId, opts.messages, roundText, !reconciled && usedTodoWrite)) {\n"
+      + "          reconciled = true;\n"
+      + "          continue;\n"
+      + "        }",
     to: "",
   },
 

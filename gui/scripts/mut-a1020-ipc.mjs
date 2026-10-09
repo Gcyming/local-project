@@ -19,9 +19,16 @@ const VITEST = path.join(ROOT, "node_modules", "vitest", "vitest.mjs");
 const SPEC = "tests/core-ts/a1020-guards.spec.ts";
 const sha = (p) => createHash("sha1").update(fs.readFileSync(p)).digest("hex");
 
+/* ⚠️ A-1197 收尾（2026-10-08）：本常量必须与 `index.ts` **现场字节**逐字一致。
+   注册段此后新增了 `pushSearchTheme` 一行；它上方两行「4 空格空行」是**注释剥离的残留**
+   （2026-10-05 全仓注释剥离：注释 → 空行）。**顺手清理这两行会让本锚点命中 0 次** ——
+   已知脆弱点，按现场字节保留（A-1090 同款教训：清空格会静默打断锚点）。 */
 const NEW_HANDLER = `  handleTrusted<{ theme: string }>("slime:theme:set", (_event, p) => {
     writePersistedTheme(p.theme);
     mainWindow?.setTitleBarOverlay({ ...titleBarColors(p.theme), height: 40 });
+    
+    
+    pushSearchTheme(searchThemeOf(p.theme));
   });`;
 
 const variants = [

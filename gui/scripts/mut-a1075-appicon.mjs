@@ -108,6 +108,7 @@ const BIN_MUTATIONS = [
   {
     name: "A1 ICO 头 type 改成 0（不是图标 ⇒ 系统当无效文件）",
     buf: (b) => { const c = Buffer.from(b); c.writeUInt16LE(0, 2); return c; },
+    unverifiable: "二进制字节改写（缓冲直接改字节）—— 静态核验器不解读字节（保护由真跑提供）",
   },
   {
     name: "A2 删掉 16×16 那一条（托盘只能自己缩 256² ⇒ 又回到「糊」）",
@@ -119,10 +120,12 @@ const BIN_MUTATIONS = [
       b.copy(c, 6, 6 + 16, 6 + 16 * n);
       return c;
     },
+    unverifiable: "二进制字节改写（缓冲直接改字节）—— 静态核验器不解读字节（保护由真跑提供）",
   },
   {
     name: "A3 16×16 那条的字节数被写大（编码参数错了，托盘要读几十 KB）",
     buf: (b) => { const c = Buffer.from(b); c.writeUInt32LE(9000, 6 + 8); return c; },
+    unverifiable: "二进制字节改写（缓冲直接改字节）—— 静态核验器不解读字节（保护由真跑提供）",
   },
 ];
 

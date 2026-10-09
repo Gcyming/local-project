@@ -7,7 +7,7 @@
  * ⚠️ 中文句子里不许夹 ASCII 双引号（A-1056 自伤；中文引号一律「」）。
  * 用法：node gui/scripts/mut-a1063-streamerrors.mjs
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
@@ -74,7 +74,10 @@ const RAW_MUTATIONS = [
   {
     name: "A-1081-1 超限判据只留 code、删掉散文（OpenAI 的 code 在 200 字符截断后已丢失 → 漏判，超限又走 9 次重连）",
     file: ERR,
-    from: "  if (/maximum context length/i.test(m)) { return true; }          // OpenAI / DeepSeek 系\n",
+    /* 2026-10-07 重打锚点：原锚点行尾带了**中文行尾注释原文**（OpenAI / DeepSeek 系）
+       + 精确的补空格数，注释被系统剥离成空白后必然断裂。
+       改为**只锚代码行**（纯 if 条件 + return）—— 不含注释文本，实测唯一。 */
+    from: "  if (/maximum context length/i.test(m)) { return true; }",
     to: "",
   },
   {
@@ -92,6 +95,65 @@ const RAW_MUTATIONS = [
 ];
 
 const MUTATIONS = RAW_MUTATIONS.map((m) => ({ ...m, mutate: (t) => sub(t, m.from, m.to) }));
+
+/* ── 骨架：--list / --apply N / --restore ──────────────────────────────────
+ * 与 mut-a1091 / mut-a1037 / mut-a1042 / mut-a1053 / mut-a1064 同款约定（全仓一致）。
+ * ⚠️ --restore **无参可用**，且**变异态下也能跑**。
+ * ⚠️ `--apply` 调用**同一个** `m.mutate`（`sub(t, from, to)`），不另拼锚点 ——
+ *   否则 apply 与全量模式走两套判据，"全量能红、apply 没改"的假绿就回来了。
+ */
+const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1063");
+const argv = process.argv.slice(2);
+const mode = argv.includes("--list") ? "list"
+  : argv.includes("--restore") ? "restore"
+    : argv.includes("--apply") ? "apply"
+      : "full";
+
+if (mode === "list") {
+  for (const [i, m] of MUTATIONS.entries()) { console.log(`  ${i + 1}. [${m.file}] ${m.name}`); }
+  process.exit(0);
+}
+
+if (mode === "apply" || mode === "restore") {
+  const manifestPath = join(SAVE_DIR, "manifest.json");
+  if (mode === "apply") {
+    const idx = Number(argv[argv.indexOf("--apply") + 1]);
+    const m = MUTATIONS[idx - 1];
+    if (!m) { console.error(`--apply 需要条目号（1..${MUTATIONS.length}）`); process.exit(1); }
+    if (existsSync(manifestPath)) {
+      console.error("上一轮的变异还没还原（manifest 还在）—— 先跑 --restore，否则会把变异后的源码当基线。");
+      process.exit(1);
+    }
+    const path = join(ROOT, m.file);
+    const src = readFileSync(path, "utf8");
+    mkdirSync(SAVE_DIR, { recursive: true });
+    writeFileSync(join(SAVE_DIR, "orig.txt"), src);
+    const next = m.mutate(src);          // ← 与全量模式**同一个** mutate
+    if (next === src) {
+      console.error(`锚点未命中（源码已漂移）：${m.name}\n    ${m.from.slice(0, 60)}…`);
+      rmSync(SAVE_DIR, { recursive: true, force: true });
+      process.exit(1);
+    }
+    writeFileSync(path, next);
+    writeFileSync(manifestPath, JSON.stringify({
+      index: idx, name: m.name, file: m.file,
+      sha256: createHash("sha256").update(src).digest("hex"),
+    }, null, 2));
+    console.log(`已变异 ${idx}：${m.name}`);
+    process.exit(0);
+  }
+  if (!existsSync(manifestPath)) { console.log("没有待还原的变异（manifest 不存在）—— 无需操作。"); process.exit(0); }
+  const man = JSON.parse(readFileSync(manifestPath, "utf8"));
+  writeFileSync(join(ROOT, man.file), readFileSync(join(SAVE_DIR, "orig.txt")));
+  const now = createHash("sha256").update(readFileSync(join(ROOT, man.file))).digest("hex");
+  rmSync(SAVE_DIR, { recursive: true, force: true });
+  if (now !== man.sha256) {
+    console.error(`❌ 还原校验失败：${man.file}\n   期望 ${man.sha256}\n   实际 ${now}`);
+    process.exit(1);
+  }
+  console.log(`已逐字节还原 ${man.file}（sha256 一致）`);
+  process.exit(0);
+}
 
 const hash = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 

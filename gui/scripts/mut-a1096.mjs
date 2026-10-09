@@ -34,7 +34,10 @@ import { fileURLToPath } from "node:url";
 import { sub, subAll, eolProblems, reportEolProblems, selfTestEolDetector, installRestoreOnSignal } from "./_mut-eol.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const SPECS = ["tests/core-ts/a1096-subagent-dispatch.spec.ts"];
+const SPECS = [
+  "tests/core-ts/a1096-subagent-dispatch.spec.ts",
+  "tests/core-ts/delegate-subagent.spec.ts",
+];
 
 const F_CATALOG = "core-ts/src/services/subagentCatalog.ts";
 const F_SUBAGENT = "core-ts/src/services/subagent.ts";
@@ -65,13 +68,21 @@ const FALLBACK_TIER = "    const fallbackTier = this.defaultModels[0] ?? \"\";";
    收尾用函数之后那两行 banner（`// 派发 / 查询 / 取消 / 等待` 在本文件**仅 1 处**；
    分隔线那行不能省 —— 省了就落到 `spawn()` 尾部那段**同形**代码上，实测 count=0）。
    ⚠️ 分隔线本身在文件里出现多次，**唯一性来自整体组合**，不是来自单行。 */
+/* ⚠️ **锚点重打（2026-10-08）**：原锚点结尾是注释分隔线 + 「派发 / 查询 / 取消 / 等待」。
+   2026-10-05 全仓注释剥离把这两行注释换成**空行** ⇒ 多行锚必然断裂（核验器报未命中）。
+   违反锚点三原则 ①（不跨注释行）②（不依赖注释文本）。
+   ⇒ 招1+2：改成**纯代码行**，用 `def.outputSchema`（spawnFromDef **独有**、`spawn()` 里没有）
+     把锚点限定在该函数内；实测全文件唯一（`networkEnabled: overrides.networkEnabled,`
+     单行 count=2 —— `spawn()` 里也有一份，**不能**单行锚）。
+   跨的那几个空行是注释剥离的残留（每行只剩缩进），符合原则 ③「可跨剥离残留的空行，实测唯一」。 */
 const SPAWNFROM_NET =
-  "      networkEnabled: overrides.networkEnabled,\n"
-  + "    });\n"
-  + "  }\n"
-  + "\n"
-  + "  // -------------------------------------------------------------------------\n"
-  + "  // 派发 / 查询 / 取消 / 等待";
+  "      outputSchema: overrides.outputSchema ?? def.outputSchema,\n"
+  + "      \n"
+  + "      \n"
+  + "      \n"
+  + "      \n"
+  + "      networkEnabled: overrides.networkEnabled,\n"
+  + "    });";
 const BUILTIN_SHARED = "  return renderSubagentCatalogLines(groupSubagentCatalog(cat)).join(\"\\n\");";
 const BUILTIN_LOCAL =
   "  const user = cat.filter((c) => c.source === \"user\");\n"
@@ -148,7 +159,13 @@ const MUTATIONS = [
   {
     name: "8 spawnFromDef 漏传 networkEnabled（关了联网的子代理照样联网）",
     file: F_SUBAGENT,
-    mutate: (t) => sub(t, SPAWNFROM_NET, "    });\n  }\n\n  // -------------------------------------------------------------------------\n  // 派发 / 查询 / 取消 / 等待"),
+    /* 变异 = **只删掉 networkEnabled 那一行**（漏传），其余原样 ⇒ 守卫
+       「spawnFromDef 必须透传 networkEnabled」读到该函数体里没有这一行 ⇒ 红。 */
+    mutate: (t) => sub(
+      t,
+      SPAWNFROM_NET,
+      "      outputSchema: overrides.outputSchema ?? def.outputSchema,\n      \n      \n      \n      \n    });",
+    ),
   },
   {
     name: "9 工具层自建一套清单渲染（系统提示与工具回执两套说法）",
@@ -198,6 +215,34 @@ const MUTATIONS = [
     name: "14c preload 通道名改坏（渲染层调用永远静默失败）",
     file: F_PRELOAD,
     mutate: (t) => sub(t, PRELOAD_CHANNEL, "      ipcRenderer.invoke(\"slime:resident:subagent:setModelsTYPO\", { models })"),
+  },
+  /* ── 2026-10-08：多 Agent 协作设计对齐（派发四件事 / 交接单 / 汇合）────────── */
+  {
+    name: "15a 派发指引丢掉「输入」一件（子代理看不到主对话却没有输入说明 ⇒ 跑偏）",
+    file: F_BUILTIN,
+    mutate: (t) => sub(
+      t,
+      "②输入（相关文件路径与现状说明——子代理看不到你和用户的对话，它需要什么就写什么）",
+      "",
+    ),
+  },
+  {
+    name: "15b 汇报契约丢掉「交接单四段」引导（只报「完成了」，主 Agent 无从核验）",
+    file: F_SUBAGENT,
+    mutate: (t) => sub(
+      t,
+      "\"summary 要如实写清四件事（对齐「交接单」）：**做了什么**（改动/产出；有改动请附**文件路径与位置**）· **依据**（依据的约定/现状）· **验证**（跑了什么、结果如何——没验证就明说没验证）· **遗留**（已知风险/未决问题）。**不要**只写「完成了」——主 Agent 与用户要靠这四点核验你的产出。\";",
+      "\"\";",
+    ),
+  },
+  {
+    name: "15c 验收要求丢掉「汇合」条（各自完成被误当整体完成）",
+    file: F_BUILTIN,
+    mutate: (t) => sub(
+      t,
+      "    \"4) **多个子代理/批量场景：各自通过 ≠ 整体通过** —— 先核对彼此约定一致（接口/命名/共享基线），合并后按用户的原始目标做一次**端到端验证**，再宣布完成。\",\n",
+      "",
+    ),
   },
 ];
 

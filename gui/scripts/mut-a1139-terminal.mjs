@@ -386,7 +386,13 @@ const MUTATIONS = [
   {
     name: "50 main：超时不杀进程树（留下孤儿 + `close` 永不到来 ⇒ 终端挂死）",
     file: F_MAIN,
-    mutate: (t) => sub(t, 'killProcessTree(child.pid, { onDone: () => { try { child.kill(); } catch { /* 已退出 */ } } });',
+    /* ⚠️ 原锚在 catch 块里写了一句「已退出」的注释，那句已被 2026-10-05 剥离 ⇒
+       该行现为 catch 后面跟两个空格再 `}`（没有注释），整行不再逐字相符。
+       ⇒ 用剥离后的真实字节重建**整行**（保持单行、只删这一个调用）。
+       ⚠️ 不缩到 catch 之前：那会让删掉的范围止于 try 块中间，留下悬空的右括号 ⇒
+         变异体变成语法错误，而不是「超时只 kill 一下、不杀进程树」这个缺陷。
+         ⚠️ 本段注释刻意不写出注释的起止标记（写出来会在本行自我截断，见 check-mut-anchors 文档）。 */
+    mutate: (t) => sub(t, 'killProcessTree(child.pid, { onDone: () => { try { child.kill(); } catch {  } } });',
       'child.kill();'),
   },
   {

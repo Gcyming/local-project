@@ -390,8 +390,11 @@ const MUTATIONS = [
   {
     name: "50 service：跨 URL 内容去重失效（镜像/转载被当成新页 ⇒ 结果页全是同一条）",
     file: F_SERVICE,
-    mutate: (t) => sub(t, "    if (state.fpTaken.has(fp)) { stats.dups += 1; continue; } // 别处已收录同样内容（镜像/转载）",
-      "    if (false) { stats.dups += 1; continue; } // 别处已收录同样内容（镜像/转载）"),
+    /* ⚠️ 原锚那行尾部带注释（`别处已收录同样内容（镜像/转载）`），2026-10-05 剥离后
+       变成「代码 + 1 个尾随空格」⇒ 单行锚点不再逐字相符。
+       ⇒ 缩到**纯代码**（去掉行尾空白与已消失的注释）。实测唯一命中，语义不变。 */
+    mutate: (t) => sub(t, "    if (state.fpTaken.has(fp)) { stats.dups += 1; continue; }",
+      "    if (false) { stats.dups += 1; continue; }"),
   },
   {
     name: "51 service：清空时**不重建**（`fpTaken` 残留 ⇒ 同一篇再也收不进来，索引永远是空的）",

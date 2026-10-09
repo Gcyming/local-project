@@ -72,6 +72,25 @@
  *
  * ⚠️ 本脚本**不改任何文件**，纯只读。
  *
+ * ## 硬防护：**切出 0 条条目 = 失败，绝不打勾**（2026-10-07 修，A-1197 现场实测）
+ *
+ * 判据只有一句：**只有"每一条锚点都被核验且可用"才配打勾**；"这条没查"不是通过。
+ * 而静态切分是**启发式**（"行首 `{` 起头算一条"）—— 它一旦失配，
+ * 这份脚本的**全部**锚点就**一条都没被数过**，可旧输出打的是 `命中可用 0/0 ✓`：
+ * 分母 0、分子 0，**看起来完美通过，实则完全没看**。这比「未命中」更恶劣
+ * （未命中会响），是本仓铁律「静默失效 / 假绿」的教科书形态：**检测器自己空转，
+ * 然后为自己鼓掌**。
+ *
+ * 实测触发路径：旧切分 `/\n\s*\{\n/` **只认 LF**（`\s*` 虽含 `\r`，但模式要求 `{` 后紧跟 `\n`）
+ * ⇒ 本批唯一一份 **CRLF** 脚本（`mut-a1197-git-write-guard.mjs`，它改的 `tools/git.py`
+ * 磁盘上是 CRLF、作者跟着用了 CRLF）被切成 0 条 ⇒ **7 条锚点全部逃脱核验**。
+ * ⇒ 双保险：**①** 切分认 LF 与 CRLF（`/\r?\n\s*\{\r?\n/`）；
+ *        **②** 切出 0 条时报错退出（非 0 退出码）并说清原因与可操作提示。
+ * 只有 ① 是不够的 —— 将来出现第三种写法时仍会退回"0 条打勾"，② 才是主闸。
+ * ⚠️ 反空转自检（必做，别省）：改这类防护后**必须**造一个「切不出条目」的临时场景
+ *   确认核验器**确实报错退出**。本项目铁律「自检夹具会随环境腐坏」在此的现场应用 ——
+ *   **验证「检测器本身能检测」这一步本身就是最容易被跳过的一步。**
+ *
  * 用法：
  *   node gui/scripts/check-mut-anchors.mjs                # 扫全部 mut-*.mjs
  *   node gui/scripts/check-mut-anchors.mjs --show-skipped # 打印每一条未核验的**具名理由**
@@ -118,13 +137,33 @@ function constMap(src) {
      ⇒ 引用它的 `from: A` 报「锚点写法未识别」⇒ **又是"没人核验"**。
      本仓确有这种形态（`mut-a1026-wincap.mjs` 的 `REQ_CAP_RETRY` 是多行锚点拼出来的）。
      ⚠️ 走 `readConcat`（**注释感知 + 截断即拒**）—— 旧正则遇注释即截断并给出**前缀假值**，
-     导致"核验器说命中、运行期说未命中"的假绿。理由见 `readConcat` 的文档。 */
+     导致"核验器说命中、运行期说未命中"的假绿。理由见 `readConcat` 的文档。
+     ⚠️ **A-1197 收尾（2026-10-08）**：第三参 `consts` 传 **`m`（正在构建中的表）** ——
+     让「**已登记常量 + 字面量**」混拼（`const CAP_RETRY = CAP_RETRY_HEAD + "…"`）也能解析。
+     不传时该形态 `parts.length === 0` ⇒ **静默不登记** ⇒ `from: CAP_RETRY` 落「未核验」（实测 a1026 ⑦⑧）。
+     顺序天然正确：`matchAll` 按源码顺序走，被引用常量在声明处已先登记；前向引用解析不出 ⇒
+     落回「截断即拒 / 不登记」，与旧行为逐字一致（不新造噪音）。 */
   for (const g of src.matchAll(/const\s+([A-Z][A-Z0-9_]*)\s*=\s*/g)) {
     if (m.has(g[1])) { continue; }
-    const r = readConcat(src, g.index + g[0].length);
+    const r = readConcat(src, g.index + g[0].length, m);
     if (r.parts.length === 0) { continue; }          // 不是字面量形态（join / 对象 / 标识符…）
     if (r.truncated) { bad.push(g[1]); continue; }   // 截断 ⇒ 拒登记（绝不给前缀假值）
-    if (r.parts.length === 1) { continue; }          // 单字面量：由上面那段负责
+    if (r.parts.length === 1) {
+      /* 单字面量里的**模板**（`` `…` ``）此前掉进缝里：上面那段正则只认 `"` / `'`、
+         这里又写着「单字面量由上面那段负责」—— 两边互推 ⇒ 模板常量**永远不登记** ⇒
+         引用它的 `from: 常量名` 全部落进「未核验」（= 没人查）。A-1197 收尾实测：
+         `a1019` / `a1020` / `a1043` 共 6 条卡在这。
+         补上，但只认**值形态安全**的写法 —— 模板之后必须紧跟 `;` / `,`（`r.end` 见 `readConcat`）；
+         若被 `.trim()` / `[0]` / `(` 再加工，登记的是**加工前**的值 = 假值
+         （核验器与运行期两边打架、且错的那边不响）⇒ 不放行，落回响亮可查的「未核验」。
+         含 `${…}` 插值的模板根本进不到这里（`STR` 已拒，`parts` 为空）。 */
+      const only = r.parts[0];
+      if (only.startsWith("`") && r.end !== undefined && /^\s*[;,]/.test(src.slice(r.end))) {
+        const v = unlit(only);
+        if (v !== null) { m.set(g[1], v); }
+      }
+      continue;
+    }
     if (r.parts.some((p) => unlit(p) === null)) { bad.push(g[1]); continue; }
     m.set(g[1], r.parts.map((p) => unlit(p)).join(""));
   }
@@ -237,7 +276,10 @@ function readConcat(src, i, consts) {
     }
     if (j === null) { return { parts, truncated: true }; }
     if (src[j] === "+") { j = skip(j + 1); if (j === null) { return { parts, truncated: true }; } continue; }
-    return { parts, truncated: false };
+    /* `end` = 值**结束后的位置**（已跳过空白/注释）——调用方（`constMap` 的单模板分支）靠它
+       检查「模板之后紧跟的是 `;` / `,`」；若被 `.trim()` / `[0]` 等再加工，登记原值就是**假值**
+       （核验器与运行期两边打架、且错的那边不响）⇒ 宁可拒登记。A-1197 收尾（2026-10-08）补。 */
+    return { parts, truncated: false, end: j };
   }
 }
 
@@ -456,6 +498,19 @@ let ok = 0;
 let missed = 0;
 let ambiguous = 0;
 let unverified = 0;
+/** A-1197（2026-10-08）：条目**显式声明**「本质不可静态核验」的计数。
+ *
+ *  为什么要有这个：二进制改写 / 整文件替换 / 新建文件这三类**没有文本锚点可验**
+ *  （核验器文件头早已列明），但它们的条目原先一律落进「未核验」——
+ *  于是真正的「该核验却没人核验」被淹没在噪音里，分母也就没法解释了。
+ *
+ *  ⚠️ 三条防腐烂的硬约束（少一条它就会变成新的假绿通道）：
+ *    ① **必须带理由**（空串视同没写，照旧按未核验处理）；
+ *    ② **与 from 互斥** —— 有文本锚点的条目不许挂免检牌（那是滥用，直接报红）；
+ *    ③ **单独计数、单独列名** —— 绝不许并入 unverified，否则又是"数字好看、事情更糟"。
+ */
+let declaredUnverifiable = 0;
+const declaredSkips = [];
 /** 未核验的**理由分类**计数（末行汇总用；见输出处的注释：分母要能被解释） */
 const reasonTally = new Map();
 /** 其中有多少条是 `all: true` 的整组替换（用于把"命中且唯一"这个说法说准） */
@@ -508,6 +563,18 @@ function soleWriteTarget(src, consts) {
    **零核验却打勾**（比真红危险：它不响）。同一个陷阱还能由「拼错文件名」触发。
    ⇒ 不存在的脚本一律计入 `missingFiles`，与「未命中」同等对待。 */
 const missingFiles = [];
+/* ⚠️⚠️ **「切出 0 条条目」是一等失败，不是「跳过」**（2026-10-07 修，A-1197 现场实测）：
+   本项目的判据是「没人核验 = 没有保护」。而切分失败意味着这份脚本的**全部**锚点
+   **一条都没被核验过** —— 它比「未命中」更彻底（未命中至少还数过一次），
+   却曾经只体现为一行 `命中可用 0/0 ✓`：分母是 0，分子是 0，**打勾**。
+   ⇒ 这是本文件反复警告的那种**自欺**：核验器的核心价值是「发现锚点失效」，
+     而「我一条都没看」被判成「我看了，都好」。
+   ⇒ 症状为什么能长期存活：旧切分 `/\n\s*\{\n/` **只认 LF**，本批唯一一份 CRLF 脚本
+     （`mut-a1197-git-write-guard.mjs`，它改的 `tools/git.py` 磁盘上是 CRLF，作者跟着用了 CRLF）
+     被切成 0 条 ⇒ 7 条锚点全部逃脱核验，而输出是「命中可用 0/0 ✓」。 */
+const zeroEntryFiles = [];
+/** 每份脚本里「切出了条目但一条都没被核验」的份数（同一族假绿的第二形态，见输出处注释） */
+const vacuousFiles = [];
 const nameDrift = [];
 /** 非纯数字前缀（`A1` / `C4` / `14a` …）⇒ 位置期望值推不出来，只能记数（见下方检查处注释） */
 let nameUnchecked = 0;
@@ -523,8 +590,57 @@ for (const rel of files) {
   const { map: consts, bad: constBad } = constMap(src);
   /* 脚本级默认目标（条目内缺 `file:` 时的**可证**兜底，见 `soleWriteTarget`） */
   const defaultFile = soleWriteTarget(src, consts);
-  // 条目切分：以行首 `{` 起头的一段算一条（够用：这些脚本格式统一）
-  const entries = src.split(/\n\s*\{\n/).slice(1);
+  /* ⚠️⚠️ **切分必须同时认 LF 与 CRLF**（2026-10-07 修，A-1197 现场实测）：
+     旧写法 `src.split(/\n\s*\{\n/)` **只认 LF** —— `\s*` 虽然含 `\r`，
+     但模式要求 `{` 之后**紧跟** `\n`，CRLF 脚本里那里是 `\r` ⇒ **整份切成 0 条**。
+     症状最恶劣的地方不是"少认了几条"，而是它**打勾**：`命中可用 0/0 ✓` ——
+     分母 0、分子 0，看起来像"全部核验通过"，实则**一条都没被核验过**。
+     本仓检出**行尾是混的**（`tools/git.py`、`mut-a1197-git-write-guard.mjs` 是 CRLF，
+     多数脚本是 LF），所以这不是假想边界，是**每批都会踩到**的边界。
+     ⇒ 判据：**切分结果为 0 条 = 这份脚本的全部锚点都没被核验 = 失败**（见 `zeroEntryFiles`）。
+     ⚠️ 只放宽切分**不够**：万一将来出现第三种写法（`{\r` 开头、或条目前有别的分隔），
+     仍会退回"0 条打勾"。所以下面那条硬防护是这一族防护的**主闸**，切分只是让它别天天触发。 */
+  const entries = src.split(/\r?\n\s*\{\r?\n/).slice(1);
+  /* ⚠️⚠️ **切出 0 条 = 硬失败，绝不打勾**（2026-10-07 修，A-1197 现场实测；这一族防护的主闸）。
+     为什么必须报错退出而不是"跳过"：
+       · 本脚本的**全部价值**是「发现锚点失效」。切不出条目 ⇒ 这份脚本的每一条锚点
+         都**没被数过一次** ⇒ 我们对它**一无所知**，而"一无所知"绝不能被输出成"✓"。
+       · 它比「未命中」更彻底：未命中至少还数了一次并如实报红；0 条连"红"都没有 ——
+         分子分母同时为 0，`0/0` 在任何读法下都长得像"完美通过"。
+       · 这正是本仓铁律「静默失效 / 假绿」的教科书形态：**检测器自己空转，然后为自己鼓掌**。
+     为什么不能靠"放宽切分正则"了事：切分形态是**启发式**（"行首 `{` 起头算一条"），
+     将来出现第三种写法（分隔符不是换行、条目前有别的装饰）时会**再次退回 0 条打勾**。
+     ⇒ 正确做法是**双保险**：切分尽量宽容（认 CRLF），切不出时**响亮地失败**。
+     这里额外打印**行尾实测**与**可操作提示**，让"检测器坏了"这件事本身可被快速定位 ——
+     一个说不出原因的报错，下一次就会被当成噪音忽略。 */
+  if (entries.length === 0) {
+    zeroEntryFiles.push(rel);
+    /* 行尾实测（诊断用）：CRLF / 裸 LF / **裸 CR** 各数多少行。
+       ⚠️ **裸 CR 必须单独计数**：老式 Mac 行尾（纯 `\r`）既不是 CRLF 也不是 LF，
+       用「只数 \n」的口径会把它报成「无换行」—— 而真相是"有 8 行、只是行尾不认识"，
+       那个措辞会把排查者引到错误方向（去找"文件是不是只有一行"）。
+       这正是「诊断信息本身误导」与「假绿」同族：**响的数字也要指向真的原因**。 */
+    const crlf = (src.match(/\r\n/g) ?? []).length;
+    const bareLf = (src.match(/(?<!\r)\n/g) ?? []).length;
+    const bareCr = (src.match(/\r(?!\n)/g) ?? []).length;
+    const parts = [];
+    if (crlf) parts.push(`CRLF ${crlf} 行`);
+    if (bareLf) parts.push(`裸 LF ${bareLf} 行`);
+    if (bareCr) parts.push(`**裸 \\r ${bareCr} 行（老式 Mac 行尾，核验器不认）**`);
+    const eol = parts.length ? parts.join(" / ") : "无换行（单行文件？）";
+    console.log(`\n=== ${rel} ===  命中可用 0/0 ✗✗ **一条条目都没切出来 ⇒ ${"全部锚点一条都没被核验过"}**`);
+    console.log(`  ✗ 静态切分切出 0 条（切分规则：以行首 { 起头算一条）。行尾实测：${eol}。`);
+    console.log(`  ⇒ 可操作提示：这份脚本可能用了核验器不认的**行尾**或**条目写法** —— 请检查：`);
+    console.log(`      1) 行尾：核验器只认 LF 与 CRLF（已同时支持）。上面「行尾实测」里若出现**裸 \\r**，`);
+    console.log(`         那是老式 Mac 行尾，核验器**故意不认**（它会让整份脚本变成一行）⇒ 请归一为 LF/CRLF；`);
+    console.log(`      2) 条目写法：核验器要求每个条目形如「换行 + 可选缩进 + { + 换行」。`);
+    console.log(`         若条目把 { 与 name 写在**同一行**、或数组用别的分隔（如逗号后紧跟 {），`);
+    console.log(`         核验器就切不出来 —— 此时**要么修核验器的切分规则，要么修脚本的写法**，`);
+    console.log(`         绝不能让它继续以「0/0 ✓」的形式混过去（那等于无人核验却报通过）。`);
+    /* ⚠️ 这里**不计入** `nameDrift`：0 条已被本条硬失败覆盖，再叠一条「无法核验序号」只是噪音
+       （噪音长红 = 没人看）。同理直接 `continue`，不走下面的逐条计数 —— 那只会重演「0/0 ✓」。 */
+    continue;
+  }
   const bad = [];
   const skipped = [];
   /* ── 「序号 ↔ name 前缀」一致性（A-1117 补）────────────────────────────────
@@ -565,6 +681,25 @@ for (const rel of files) {
   let n = 0;
   for (const e of entries) {
     const a = anchorOf(e, consts, defaultFile);
+    /* A-1197（2026-10-08）：显式声明的「本质不可静态核验」（二进制 / 整文件 / 新建 —— 无文本锚可验）。
+       它与 unverified **分开计数**：前者是"机制上验不了"（设计使然），后者是"该核验却没核验"（缺陷）。
+       混在一起就会让真正的漏网之鱼藏在噪音里。 */
+    /* ⚠️ 实测踩到：`e` 是**文本块**（entries = src.split(...) 的结果），**不是对象** ——
+       写成 e.unverifiable 会恒为 undefined（声明全部读不到）。必须用正则读字段，
+       且**先剥注释**：否则在注释里写一句 unverifiable: 就能给自己挂免检牌。 */
+    const declaredRaw = /^\s*unverifiable:\s*("(?:\\.|[^"\\\n])*")/m.exec(maskComments(e));
+    const declared = declaredRaw ? (unlit(declaredRaw[1]) ?? "").trim() : "";
+    if (declared) {
+      /* 防腐烂约束②：有文本锚点的条目不许挂免检牌 —— 那是最容易走成的假绿通道。 */
+      if (a.from) {
+        missed += 1;
+        bad.push(`声明矛盾（既有 from 又标 unverifiable —— 有锚点就必须真核验，不许挂免检牌）：${a.label}\n      file=${a.file}`);
+        continue;
+      }
+      declaredUnverifiable += 1;
+      declaredSkips.push(`· 已声明不可静态核验（${declared}）：${a.label}`);
+      continue;
+    }
     if (a.unverified) {
       unverified += 1;
       skipped.push(`· 未核验（${a.why}）：${a.label}`);
@@ -596,7 +731,22 @@ for (const rel of files) {
     if (cnt === 0) { missed += 1; bad.push(`未命中${" ".repeat(0)}（源码已漂移，该守卫已失效）：${a.label}\n      file=${a.file}\n      from=${JSON.stringify(a.from.slice(0, 100))}`); }
     else { ambiguous += 1; bad.push(`不唯一（命中 ${cnt} 次，无法确定改的是哪一处）：${a.label}\n      file=${a.file}\n      若这条闸门本身就是"计数闸门"（每条变异都要整组改），请在条目里写 all: true`); }
   }
-  console.log(`\n=== ${rel} ===  命中可用 ${n - bad.length}/${n}${bad.length ? "" : " ✓"}`);
+  /* ⚠️⚠️ **打勾的前置条件是「分子分母都有内容」**（2026-10-07 修，A-1197 现场实测的**第二个**同族形态）：
+     判据是「没人核验 = 没有保护」。若这份脚本**一条都没被核验**（n === 0，例如全部落进「未核验」，
+     或目标文件都不存在），那 `0/0` 与上面切分失败的情形**在语义上完全一样**：
+     我们对这份脚本**一无所知**，却输出 `命中可用 0/0 ✓` + 末行 `✅ 全部…都命中且可用`。
+     ⚠️ 上一轮实测：`mut-a1197-git-write-guard.mjs` 切分修好后 7/7 是真的（我另做了漂移夹具反证，
+       见汇报），但**同形的 `命中可用 0/0 ✓` 仍会在"全部未核验"时出现** —— 只修切分不修这里，
+       等于给假绿换了块招牌。
+     ⇒ 分子分母任一为 0 时**一律不打勾**，并直说「这条脚本一条都没被核验」。 */
+  const vacuous = (n === 0);
+  if (vacuous) { vacuousFiles.push(rel); }
+  console.log(`\n=== ${rel} ===  命中可用 ${n - bad.length}/${n}${vacuous ? " ✗✗ **一条都没被核验**（0 条被核验 ≠ 通过）" : (bad.length ? "" : " ✓")}`);
+  if (vacuous) {
+    console.log(`  ✗ 这份脚本切出了 ${entries.length} 条，但**没有一条的锚点被成功核验**`
+      + `（其余 ${entries.length} 条见下方「未核验」/「目标文件不存在」）`);
+    console.log(`    ⇒ 零核验不许打勾：对这份脚本的锚点状态，核验器当前**一无所知**（判据：没人核验 = 没有保护）`);
+  }
   for (const b of bad) { console.log(`  ✗ ${b}`); }
   /* ⚠️ 未核验**必须出声**：它不参与 ok/missed 计数，静默跳过等于"这份脚本有 N 条变异
      但没人知道其中几条根本没被核验过" —— 与"变异脚本静默不命中"同族。 */
@@ -606,7 +756,11 @@ for (const rel of files) {
   }
 }
 
-console.log(`\n合计：命中且唯一 ${ok - allCount} · 整组替换（all: true）${allCount} · 未命中 ${missed} · 不唯一 ${ambiguous} · 未核验 ${unverified} · 脚本不存在 ${missingFiles.length} · 序号错位 ${nameDrift.length} · 序号不可核验 ${nameUnchecked}`);
+console.log(`\n合计：命中且唯一 ${ok - allCount} · 整组替换（all: true）${allCount} · 未命中 ${missed} · 不唯一 ${ambiguous} · 未核验 ${unverified} · 已声明不可核验 ${declaredUnverifiable} · 未切出条目（切分失败）${zeroEntryFiles.length} · 整份零核验（有条目但一条没核验）${vacuousFiles.length} · 脚本不存在 ${missingFiles.length} · 序号错位 ${nameDrift.length} · 序号不可核验 ${nameUnchecked}`);
+if (declaredSkips.length > 0) {
+  console.log("按条目显式声明为「本质不可静态核验」（二进制 / 整文件 / 新建 —— 无文本锚可验，不是缺陷）：");
+  for (const line of declaredSkips) { console.log(`  ${line}`); }
+}
 /* ⚠️ **未核验必须按理由分类打出来**（2026-09-24 补）：只给一个数字时，
    它读起来像"这些本来就没法核验"，于是年复一年没人动它（本仓实测：这个数字长期停在 190+，
    而被笼统写成「moveAfter/mutateBuf 等写法」——"等"字把**六种本质不同的原因**糊成一条）。
@@ -618,11 +772,35 @@ if (unverified > 0) {
     console.log(`  · ${String(cnt).padStart(3)} 条 —— ${why}`);
   }
 }
-/* ⚠️ **"跳过"不许算通过**（见上方 `missingFiles` 注释）：不存在 / 拼错路径都计入失败。
-   一句话判据：**只有"每一条锚点都被核验且可用"才配打勾**；"这条没查"不是通过。 */
-const failed = missed + ambiguous + missingFiles.length + nameDrift.length;
+/* ⚠️ **"跳过"不许算通过**（见上方 `missingFiles` 注释）：不存在 / 拼错路径 / **切不出条目**
+   都计入失败。一句话判据：**只有"每一条锚点都被核验且可用"才配打勾**；"这条没查"不是通过。
+   ⚠️⚠️ `zeroEntryFiles` 是这一族里**最重**的一项（2026-10-07 修，A-1197 现场实测）：
+     它不是"漏查了几条"，而是"这份脚本一条都没查"却曾输出 `命中可用 0/0 ✓`。
+     分母为 0 时"全部命中"在数学上成立、在**语义上完全相反** —— 故必须计入 `failed`。 */
+/* ⚠️⚠️ `vacuousFiles`（2026-10-07 修）=「切出了条目，但**一条都没被核验**」的份数。
+   它与 `zeroEntryFiles` 是**同一族假绿的两个形态**，都必须计入 `failed`：
+     · `zeroEntryFiles`：切不出条目（分母为 0）
+     · `vacuousFiles`：条目切出来了，但全部落进「未核验」/「目标文件不存在」（**有效核验数**为 0）
+   两者在语义上是一句话：**对这份脚本的锚点状态一无所知**，而旧输出都说"✓"。
+   ⚠️ 刻意**不**把单条的「未核验」计入失败（那62 条既存分母会让工具永久长红）：
+     本项只抓「**整份脚本零核验**」这个极端形态，逐条层面的出声由每份脚本脚下的清单负责。 */
+const failed = missed + ambiguous + missingFiles.length + nameDrift.length
+  + zeroEntryFiles.length + vacuousFiles.length;
 if (missingFiles.length > 0) {
   console.log(`⚠️ 有 ${missingFiles.length} 份脚本没找到（未核验 —— 多半是入参路径写错）：${missingFiles.join("、")}`);
+}
+/* ⚠️ 逐条点名（不只给数字）：读者必须能立刻知道**是哪几份没被核验**，才能去改行尾/改写法。 */
+if (vacuousFiles.length > 0) {
+  console.log(`⚠️ 有 ${vacuousFiles.length} 份脚本**一条锚点都没被核验**（切出了条目，但全部未核验/目标文件不存在）：`);
+  for (const z of vacuousFiles) {
+    console.log(`  ✗ ${z} —— 该脚本的锚点当前处于「无人核验」状态；请先让它们可解析（或改用能核验的写法）`);
+  }
+}
+if (zeroEntryFiles.length > 0) {
+  console.log(`⚠️ 有 ${zeroEntryFiles.length} 份脚本**切出 0 条条目**（= 全部锚点一条都没被核验，绝不算通过）：`);
+  for (const z of zeroEntryFiles) {
+    console.log(`  ✗ ${z} —— 请检查该脚本的行尾（核验器认 LF/CRLF）与条目写法（须为「换行 + { + 换行」）`);
+  }
 }
 /* ⚠️ 序号错位**必须计入失败**并逐条点名：它是"假绿"的产地 ——
    `--apply N` 跑的不是 N 描述的那条，测试红了会让人以为"N 被捕获"。 */
@@ -630,9 +808,29 @@ if (nameDrift.length > 0) {
   console.log(`⚠️ 有 ${nameDrift.length} 处「name 序号 ↔ 位置序号」不一致（会让 --apply 跑到别的条目 ⇒ 假绿）：`);
   for (const d of nameDrift) { console.log(`  ✗ ${d}`); }
 }
+/* ⚠️⚠️ **末行的「✅」也必须受同一条判据约束**（2026-10-07 修）：
+     `failed === 0` 只说明"没有报红的"，**不等于"每条都被核验过"** ——
+     「未核验」不参与 `failed`（它有62 条的既存分母，放进失败会变成长红 = 没人看）。
+     于是会出现这一种读法：**全部未核验 ⇒ failed 为 0 ⇒ 末行打 ✅「锚点都命中且可用」**，
+     而实际上一条都没核验。这是**与 `命中可用 0/0 ✓` 同一个假绿**，只是发生在末行。
+     ⇒ 末行打勾的三个必要条件（缺一即不许打勾）：
+        ① failed === 0（有报红的都清了）
+        ② files.length > 0
+        ③ **本次运行至少成功核验了一条**（ok + allCount > 0）
+     条件 ③ 弱但必要：它是"完全零核验"这一**极端形态**的兜底。
+     ⚠️ 注意它**故意不**要求"每条都核验"：那会让 62 条既存未核验把工具永久打红，
+       而按本文件 §8.5，那些未核验是"已具名归档、需换手段"的类别，不是今天的回归。
+       逐条层面的"没人核验"由每份脚本脚下的「未核验」清单与本行的 `未核验 N` 计数负责出声。 */
+const totalVerified = ok + allCount;
+if (failed === 0 && totalVerified === 0) {
+  console.log("⚠️ 本次运行**没有成功核验任何一条锚点**（0 条被核验）—— 上面每一份脚本的「未核验」都必须先被认领，");
+  console.log("   否则这份报告整体不可信：它对所有锚点的状态一无所知，却长得像「全部通过」。");
+}
 console.log(failed === 0
-  ? `✅ 全部 ${files.length} 份脚本的锚点都命中且可用（序号一致）`
-  : `⚠️ 有 ${failed} 项需要处理（未命中=该守卫已失去保护；不唯一=可能改错对象；脚本不存在=压根没核验；序号错位=--apply 会跑错条目）`);
+  ? (totalVerified === 0
+    ? `⚠️ 锚点状态：**零核验**（无一条被成功核验）—— 不可读作「都命中且可用」`
+    : `✅ 全部 ${files.length} 份脚本的锚点都命中且可用（序号一致，且本次真的核验了 ${totalVerified} 条）`)
+  : `⚠️ 有 ${failed} 项需要处理（未命中=该守卫已失去保护；不唯一=可能改错对象；未切出条目/一条都没核验=零核验却曾报通过；脚本不存在=压根没核验；序号错位=--apply 会跑错条目）`);
 if (files.length === 0) {
   console.log("⚠️ 没有核验任何脚本（`files` 为空 —— 检查入参）");
 }

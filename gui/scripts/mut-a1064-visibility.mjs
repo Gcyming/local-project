@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 /* `sub` = 行尾无关的替换（共享模块，不要在本脚本另写一份）—— 见 `_mut-eol.mjs`。 */
-import { sub, nlOf, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
+import { sub, eolProblems, reportEolProblems, selfTestEolDetector } from "./_mut-eol.mjs";
 
 // ⚠️ 不能用 `new URL(...).pathname`：项目根含空格，pathname 会把空格编码成 %20 → ENOENT。
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -29,26 +29,48 @@ const PANEL = "gui/src/renderer/pages/ChatPanel.tsx";
 const LOOP = "core-ts/src/tool_loop.ts";
 const TARGETS = [PANORAMA, CTX_META, PANEL, LOOP];
 
-/** TimelineNode 里 steer 那一支的范围（[起, 止)）。缺任一锚点 → null（脚本按"未命中"报错）。 */
-const steerRenderRange = (t) => {
-  const start = t.indexOf('if (step.kind === "steer") {');
-  if (start < 0) { return null; }
-  const end = t.indexOf("// 工具调用：小型行", start);
-  if (end < 0) { return null; }
-  return { start, end };
-};
+/* ⚠️ 2026-10-08：`steerRenderRange` / `inSteerRender` / `COLLAPSE_CLS` **已删除**。
+ * 它们只服务于第 5/6/7 条，而那三条的锚点现已提成下方模块级字面量常量。
+ * ⇒ 删掉的理由不是「没人用了」而是**两个真相来源**：
+ *   范围规则（`indexOf` 两个标记）留在脚本里、锚点常量又另抄一份，
+ *   两者一旦漂移，核验器数的是常量、运行期切的是范围 ⇒ 两边结论打架而错的那边不响。
+ *   删掉之后「steer 块在哪」只有常量这一个出处。 */
 
-/** 在该范围内做替换（范围不存在 → 原样返回，由主流程报"未命中"）。 */
-const inSteerRender = (fn) => (t) => {
-  const r = steerRenderRange(t);
-  if (!r) { return t; }
-  const blk = fn(t.slice(r.start, r.end));
-  if (blk === t.slice(r.start, r.end)) { return t; }
-  return t.slice(0, r.start) + blk + t.slice(r.end);
-};
-
-/** 引导卡的折叠类名（既有 collapse 机制的唯一判据字串）。 */
-const COLLAPSE_CLS = 'className={`collapse${expanded ? " is-open" : ""}`}';
+/* ── ⑤⑥⑦ 的锚点常量（2026-10-08 补：把「`from` 藏在 `mutate:` 闭包里」改成可静态核验）──
+ *
+ * 这三条原先靠 `steerRenderRange(t)` 在**闭包里**indexOf 两个标记、切出中间那一块，
+ * 再对它做删除 / 搬移 / 换类名。核验器看不到闭包里的切片 ⇒ 报「未核验」。
+ * 按铁律「没人核验 = 没有保护」，这三条守卫的保护强度是 0，
+ * 且比「未命中」更隐蔽（未命中会响，未核验是静默的 —— 运行期它们显示「解析不了」，
+ * 也就是说这三条**从未被运行验证过**，而静态那边显示的是「未核验」，不是红）。
+ *
+ * ⇒ 正解不是把范围规则硬塞给核验器（它只认证据），而是**把那一整块提成模块级字面量**：
+ *   · ⑤「整支删掉」= from =整块，to = 空串；
+ *   · ⑥「挪到工具卡兜底之后」= from = 整块 + 工具卡那两行，to = 工具卡那两行 + 整块
+ *     （**一次替换**表达搬移；长度相等 = 1245 = 1245，已自检）。
+ *     ⚠️⚠️ **不能**写成 `sub(BLK, BLK + 工具卡那两行)` 之类 —— 那会把工具卡那段**复制**一份
+ *       （原文不复制），变成另一种缺陷（重复声明）⇒ 弱化/走偏的变异体。
+ *   · ⑦「另造第二种动画」= from = 带`steer-card-text` 的那三行（收窄到唯一），
+ *     to = 同三行但类名换成 `steer-anim`。
+ *
+ * ⚠️ 每个常量都是**逐字节抄自当前源码**的连续片段，且各自**唯一命中**（已实测）。
+ * ⚠️ 都是**单个**双引号字面量、**不许 `+` 拼接**：拼接会让 `constMap`
+ *   落到「常量字面量解析失败」⇒ 又变回未核验（实测）。
+ * ⚠️ `${…}` 在双引号字面量里**不是插值**（那是模板字面量的语法），所以锚点里的
+ *   `${expanded ? …}` 不需要转义 `$`，也不会被核验器的「拒绝插值」规则吃掉。
+ *
+ * ⑤⑥ 用的是**同一段范围规则**切出来的（起点 `if (step.kind === "steer") {`、
+ * 终点 `// 工具调用：小型行`）—— 与下面 `steerRenderRange` 的两个标记**逐字一致**，
+ * 所以「删掉整块」与「把它搬到别处」表达的是同一件事实。 */
+const A1064_STEER_BLOCK = "if (step.kind === \"steer\") {\n    const text = step.text ?? \"\";\n    if (!text) { return <span style={{ display: \"none\" }} />; }\n    return (\n      <div className=\"think-step\">\n        <span className=\"think-step-mark steer-step-mark\" />\n        <div className=\"steer-card\">\n          <button\n            className=\"steer-card-head\"\n            onClick={() => setExpanded((v) => !v)}\n            title={expanded ? \"收起这条引导\" : \"展开这条引导（全文）\"}\n          >\n            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: \"var(--text-dim)\" }} />\n            <SendIcon size={12} style={{ flexShrink: 0, color: \"var(--accent-hover)\" }} />\n            <span className=\"steer-card-title\">引导</span>\n            {!expanded && <span className=\"steer-card-preview\" title={text}>{stripMarkdown(text).slice(0, 80)}</span>}\n          </button>\n          {/* A-1015：常驻挂载 + 只切 is-open（与思考段/规划卡同一套展开节奏，不新增第二种动画） */}\n          <div className={`collapse${expanded ? \" is-open\" : \"\"}`}>\n            <div>\n              <div className=\"steer-card-text\">{text}</div>\n            </div>\n          </div>\n        </div>\n      </div>\n    );\n  }\n  ";
+/** ⑥ 的 from：steer 整块 **+** 其后紧邻的工具卡那两行（到`const tool = …` 为止）。 */
+const A1064_STEER_AFTER_TOOLPAIR = "if (step.kind === \"steer\") {\n    const text = step.text ?? \"\";\n    if (!text) { return <span style={{ display: \"none\" }} />; }\n    return (\n      <div className=\"think-step\">\n        <span className=\"think-step-mark steer-step-mark\" />\n        <div className=\"steer-card\">\n          <button\n            className=\"steer-card-head\"\n            onClick={() => setExpanded((v) => !v)}\n            title={expanded ? \"收起这条引导\" : \"展开这条引导（全文）\"}\n          >\n            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: \"var(--text-dim)\" }} />\n            <SendIcon size={12} style={{ flexShrink: 0, color: \"var(--accent-hover)\" }} />\n            <span className=\"steer-card-title\">引导</span>\n            {!expanded && <span className=\"steer-card-preview\" title={text}>{stripMarkdown(text).slice(0, 80)}</span>}\n          </button>\n          {/* A-1015：常驻挂载 + 只切 is-open（与思考段/规划卡同一套展开节奏，不新增第二种动画） */}\n          <div className={`collapse${expanded ? \" is-open\" : \"\"}`}>\n            <div>\n              <div className=\"steer-card-text\">{text}</div>\n            </div>\n          </div>\n        </div>\n      </div>\n    );\n  }\n  // 工具调用：小型行 + 折叠详情（含结果：成功显示访问/编辑内容，失败显示失败原因）\n  const tool = step as TimelineStep & { kind: \"tool\" };";
+/** ⑥ 的 to：**交换**后（工具卡那两行在前、steer 整块在后）—— 长度与 from 完全相同。 */
+const A1064_TOOLPAIR_STEER = "// 工具调用：小型行 + 折叠详情（含结果：成功显示访问/编辑内容，失败显示失败原因）\n  const tool = step as TimelineStep & { kind: \"tool\" };if (step.kind === \"steer\") {\n    const text = step.text ?? \"\";\n    if (!text) { return <span style={{ display: \"none\" }} />; }\n    return (\n      <div className=\"think-step\">\n        <span className=\"think-step-mark steer-step-mark\" />\n        <div className=\"steer-card\">\n          <button\n            className=\"steer-card-head\"\n            onClick={() => setExpanded((v) => !v)}\n            title={expanded ? \"收起这条引导\" : \"展开这条引导（全文）\"}\n          >\n            <ChevronIcon size={12} rotate={expanded ? 90 : 0} style={{ flexShrink: 0, color: \"var(--text-dim)\" }} />\n            <SendIcon size={12} style={{ flexShrink: 0, color: \"var(--accent-hover)\" }} />\n            <span className=\"steer-card-title\">引导</span>\n            {!expanded && <span className=\"steer-card-preview\" title={text}>{stripMarkdown(text).slice(0, 80)}</span>}\n          </button>\n          {/* A-1015：常驻挂载 + 只切 is-open（与思考段/规划卡同一套展开节奏，不新增第二种动画） */}\n          <div className={`collapse${expanded ? \" is-open\" : \"\"}`}>\n            <div>\n              <div className=\"steer-card-text\">{text}</div>\n            </div>\n          </div>\n        </div>\n      </div>\n    );\n  }\n  ";
+/** ⑦ 的锚点：引导卡里那处 `collapse` 类名（**带两行下文**收窄到唯一 —— 裸类名在文件里出现 4 次）。 */
+const A1064_STEER_COLLAPSE = "          <div className={`collapse${expanded ? \" is-open\" : \"\"}`}>\n            <div>\n              <div className=\"steer-card-text\">{text}</div>";
+/** ⑦ 的目标：另造第二种动画类名 `steer-anim`（不复用既有 collapse 机制）。 */
+const A1064_STEER_ANIM = "          <div className={`steer-anim${expanded ? \" is-open\" : \"\"}`}>\n            <div>\n              <div className=\"steer-card-text\">{text}</div>";
 
 const MUTATIONS = [
   {
@@ -93,31 +115,33 @@ const MUTATIONS = [
   {
     name: "5 steer 渲染分支被整支删掉（引导掉进工具卡兜底 → 变成长着 undefined 名字的工具）",
     file: PANEL,
-    mutate: (t) => {
-      const r = steerRenderRange(t);
-      if (!r) { return t; }
-      return t.slice(0, r.start) + t.slice(r.end);
-    },
+    /* ⚠️ 2026-10-08：锚点提成模块级字面量常量 + 补显式的 from 字段（见上方常量区注释）。
+       语义完全没变：删掉 [起点标记, 终点标记) 这一段（与旧 `steerRenderRange` 同一对标记）。 */
+    from: A1064_STEER_BLOCK,
+    to: "",
+    mutate: (t) => sub(t, A1064_STEER_BLOCK, ""),
   },
   {
     name: "6 steer 渲染分支被挪到工具卡兜底**之后**（顺序断言必须独立锁住）",
     file: PANEL,
-    mutate: (t) => {
-      const r = steerRenderRange(t);
-      if (!r) { return t; }
-      const blk = t.slice(r.start, r.end);
-      const rest = t.slice(0, r.start) + t.slice(r.end);
-      const anchor = 'const tool = step as TimelineStep & { kind: "tool" };';
-      const at = rest.indexOf(anchor);
-      if (at < 0) { return t; }
-      const ins = at + anchor.length;
-      return rest.slice(0, ins) + nlOf(t) + blk + rest.slice(ins);
-    },
+    /* ⚠️ 2026-10-08：改成**一次替换的交换**（见上方常量区注释）。
+       语义与旧写法一致（把steer 整块搬到工具卡那两行之后），
+       但**没有把工具卡那段复制一份** —— 长度 1245 = 1245，可证是干净的重排。 */
+    from: A1064_STEER_AFTER_TOOLPAIR,
+    to: A1064_TOOLPAIR_STEER,
+    mutate: (t) => sub(t, A1064_STEER_AFTER_TOOLPAIR, A1064_TOOLPAIR_STEER),
   },
   {
     name: "7 引导卡另造第二种展开动画（不复用 collapse → 节拍与思考段/规划卡不一致）",
     file: PANEL,
-    mutate: inSteerRender((blk) => blk.replace(COLLAPSE_CLS, 'className={`steer-anim${expanded ? " is-open" : ""}`}')),
+    /* ⚠️ 2026-10-08：锚点提成模块级字面量常量 + 补显式的 from 字段。
+       ⚠️ 锚点比旧写法**多了两行下文**（`steer-card-text` 那两行）：裸类名
+       `className={`collapse…`}` 在ChatPanel.tsx 里出现 **4** 次（思考段/规划卡/引导卡…）
+       ⇒ 旧写法靠 `inSteerRender` 先切到 steer 范围才能定位，而那个范围核验器看不见。
+       现在带下文收窄到**唯一命中**（已实测）。 */
+    from: A1064_STEER_COLLAPSE,
+    to: A1064_STEER_ANIM,
+    mutate: (t) => sub(t, A1064_STEER_COLLAPSE, A1064_STEER_ANIM),
   },
   {
     name: "8 编排指令不再钉死 action=add（模型会落到 replace → 用户既有计划被整表抹掉）",

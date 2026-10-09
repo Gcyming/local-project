@@ -428,8 +428,13 @@ const MUTATIONS = [
   {
     name: "43 onWait 改到 sleep 之后回调（=「等完了才出声」）",
     file: F_RPMLIM,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点第 1 行尾部带行内注释（`// 先上报，再睡`），
+       2026-10-05 注释剥离后变成**行尾空白**（源码 L339 现在是 `notify(plan.waitMs);` + 一串空格）
+       ⇒ 锚点断裂。违反锚点三原则 ②（不依赖注释文本）。
+       ⇒ 招1+2：两行纯代码（notify → sleep 的**先后顺序**本身就是被测语义，必须两行都在），
+         保留 notify 行尾的剥离残留空白以精确匹配；实测全文件 count=1。 */
     mutate: (t) => sub(t,
-      "      notify(plan.waitMs);                // 先上报，再睡\n      await this.clock.sleep(plan.waitMs);",
+      "      notify(plan.waitMs);                \n      await this.clock.sleep(plan.waitMs);",
       "      await this.clock.sleep(plan.waitMs);\n      notify(plan.waitMs);"),
   },
   {
@@ -440,18 +445,26 @@ const MUTATIONS = [
   {
     name: "45 client 不把 onWait 传下去（回到旧写法：等完了才说）",
     file: F_CLIENT,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点整段依赖两行注释（`// A-1061④ 同纪律…`），
+       注释剥离后断裂（违反原则 ①跨注释行 ②依赖注释文本）。
+       ⚠️ 另外**代码形状也变了**：acquire 已被包进 `abortableWait(…, externalSignal)`
+       （源码 L383-395），不再是裸 `await …acquire(…)` ⇒ 光把注释删掉仍然匹配不上。
+       ⇒ 招1+2：锚 `abortableWait` 里的**实参块**（L384-393，纯代码 + 剥离残留空行），
+         缩进按现状（8/10 空格）；实测 count=1。判红路径不变：守卫 M4 断言
+         client 里含 `acquire(rateLimit.key, rateLimit.model, (ms) => {`
+         ⇒ 去掉第三参即红。 */
     mutate: (t) => sub(t,
-      "      await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {\n" +
-      '        // A-1061④ 同纪律：等超过 1s 就必须说出来，否则界面上是"一整段什么都没有"\n' +
-      "        //（而实际是我们在自我限速）。\n" +
-      "        if (ms >= 1000) {\n" +
-      "          noteUpstream(\n" +
-      '            "retry",\n' +
-      "            `上游每分钟请求额度已用满，需要等 ${Math.round(ms / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,\n" +
-      "          );\n" +
-      "        }\n" +
-      "      });",
-      "      await getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model);"),
+      "        getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model, (ms) => {\n" +
+      "          \n" +
+      "          \n" +
+      "          if (ms >= 1000) {\n" +
+      "            noteUpstream(\n" +
+      '              "retry",\n' +
+      "              `上游每分钟请求额度已用满，需要等 ${Math.round(ms / 1000)}s 再发 —— 这是避免撞限流（429）的自我保护，不是故障。`,\n" +
+      "            );\n" +
+      "          }\n" +
+      "        }),",
+      "        getSharedRpmLimiter().acquire(rateLimit.key, rateLimit.model),"),
   },
   /* ── ⑧ 压缩比率的唯一出处 ─────────────────────────────────────────── */
   {
@@ -921,7 +934,14 @@ MUTATIONS.push(
   {
     name: "99 聚光变量写在 resizer 自己身上（父级读不到 ⇒ 聚光永远停在兜底 50%，静默失灵）",
     file: F_GLINT,
-    mutate: (t) => sub(t, "  const host = el.parentElement;   // 分隔线的主人 = 父级（border 在它身上）", "  const host = el;"),
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点尾部带行内注释（`// 分隔线的主人 = 父级…`），
+       注释剥离后变成行尾空白（源码 L40 = `const host = el.parentElement;` + 空格）⇒ 断裂。
+       ⇒ 招1+2：两行纯代码（`const host = …` + 紧随的 `if (!host) { return; }`）。
+         后一行不是凑数：它证明 host 的类型是 `HTMLElement | null`，
+         去掉这行锚点就只锚到一半语义；实测 count=1。 */
+    mutate: (t) => sub(t,
+      "  const host = el.parentElement;   \n  if (!host) { return; }",
+      "  const host = el;\n  if (!host) { return; }"),
   },
   {
     name: "100 clear 忘了清父级的变量（聚光卡在最后一次的位置上，鼠标移开也不消失）",

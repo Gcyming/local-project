@@ -50,13 +50,23 @@ const RAW_MUTATIONS = [
   {
     name: "5 引擎的 tool-start 分支被删（落进 tool 兜底 = 一张空工具卡）",
     file: ENGINE,
-    from: '            } else if (ev.type === "tool-start") {\n              // A-1061②：工具开始执行 → 界面立刻显示「执行中…」（toolId 用于与完成事件配对）\n              liveQueue.push({ type: "tool-start", name: ev.name, args: ev.args, toolId: ev.id });\n',
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点第二行是注释「A-1061②：工具开始执行 → …」。
+       2026-10-05 全仓注释剥离把注释替换成**空行**（行尾留一个空格）⇒ 多行锚必然断裂，
+       核验器报「未命中」= 这条守卫**已经失去保护**。
+       ⇒ 招 2：锚点改为「分支头 + 剥离残留的那一个空行 + liveQueue.push」三段，
+       **实测命中唯一 = 1**（该push 只此一处；空行是剥离残留、上下文已由前后行夹住）。
+       变异语义不变：整个 tool-start 分支被删 ⇒ 事件落进 `else` 的 tool 兜底。 */
+    from: '            } else if (ev.type === "tool-start") {\n              \n              liveQueue.push({ type: "tool-start", name: ev.name, args: ev.args, toolId: ev.id });\n',
     to: "",
   },
   {
     name: "6 白名单漏掉 toolId（界面永远翻不过状态）",
     file: MAIN,
-    from: '      // A-1061②：工具调用 id 必须显式透传 —— 白名单构造漏一行就会被静默丢掉，\n      // 界面于是无法把「执行中…」翻成「成功/失败」（那一行会永远停在执行中）。\n      toolId: typeof d.toolId === "string" ? d.toolId : undefined,\n',
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点前两行是注释（解释为什么必须显式透传 toolId）。
+       2026-10-05 全仓注释剥离把它们变成空行 ⇒ 多行锚断裂，守卫**已失去保护**。
+       ⇒ 招 1+2：直接用**那一行代码本身**当锚点 ——实测 `toolId: typeof d.toolId === "string" ? …`
+       在 `gui/src/main/index.ts` 里出现 **1 次**（实测唯一），所以不需要再补上下文行。 */
+    from: '      toolId: typeof d.toolId === "string" ? d.toolId : undefined,\n',
     to: "",
   },
   {

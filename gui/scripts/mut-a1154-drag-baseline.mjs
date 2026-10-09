@@ -155,10 +155,14 @@ const MUTATIONS = [
   {
     name: "9 endChatFreeze 不取消阶段定时器（残留路径）",
     file: F_APP,
+    /* ⚠️ 2026-10-07 重打锚点：源码注释被**系统性剥离**（注释 → 空行，见 .bak-comments），
+       原锚点跨过注释行 ⇒ 断裂。新锚点**不含注释文本**，只跨剥离后留下的那个空行；
+       靠尾部的 chatSettleTimerRef 行与 startChatDip 里的同形代码段区分（实测唯一）。
+       ⚠️ 本注释里刻意不写反引号（核验器的 STR 扫描器会被反引号截断）。 */
     mutate: (t) => sub(
       t,
-      "    window.clearTimeout(dragPhaseTimerRef.current);\n    dragPhaseTimerRef.current = 0;\n    // ⚠️ A-1190：本轮已恢复 ⇒ 取消\"宽度停住 ⇒ 恢复\"定时器（见 chatSettleTimerRef）。\n    window.clearTimeout(chatSettleTimerRef.current);\n    chatSettleTimerRef.current = 0;\n    requestAnimationFrame(() => {\n      document.body.classList.remove(\"slime-fading\");\n    });",
-      "    // ⚠️ A-1190：本轮已恢复 ⇒ 取消\"宽度停住 ⇒ 恢复\"定时器（见 chatSettleTimerRef）。\n    window.clearTimeout(chatSettleTimerRef.current);\n    chatSettleTimerRef.current = 0;\n    requestAnimationFrame(() => {\n      document.body.classList.remove(\"slime-fading\");\n    });",
+      "    window.clearTimeout(dragPhaseTimerRef.current);\n    dragPhaseTimerRef.current = 0;\n    \n    window.clearTimeout(chatSettleTimerRef.current);",
+      "    \n    window.clearTimeout(chatSettleTimerRef.current);",
     ),
   },
   {

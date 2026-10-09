@@ -180,10 +180,12 @@ const MUTATIONS = [
   {
     name: "12 工具执行去掉 abort 短路（长工具飞行中停止要等工具跑完）",
     file: F_TOOLLOOP,
+    /* ⚠️ 2026-10-09 锚点重打（A-1198）：runOneTool 调用串加了 agentRole/agentModel 两个身份注入
+       参数（git 工具用）⇒ 原锚尾部漂移。变异意图不变：拿掉 abortableToValue 竞跑（abort 短路）。 */
     mutate: (t) => sub(
       t,
-      "        return {\n          tc,\n          msg: await abortableToValue(\n            this.runOneTool(tc, agentId, dedup, agentName, sessionId, signal),\n            signal,\n            \"[已中断] 用户停止生成，工具执行被跳过\",\n          ),\n        };",
-      "        return { tc, msg: await this.runOneTool(tc, agentId, dedup, agentName, sessionId, signal) };",
+      "        return {\n          tc,\n          msg: await abortableToValue(\n            this.runOneTool(tc, agentId, dedup, denials, agentName, agentRole, agentModel, sessionId, signal),\n            signal,\n            \"[已中断] 用户停止生成，工具执行被跳过\",\n          ),\n        };",
+      "        return { tc, msg: await this.runOneTool(tc, agentId, dedup, denials, agentName, agentRole, agentModel, sessionId, signal) };",
     ),
   },
 

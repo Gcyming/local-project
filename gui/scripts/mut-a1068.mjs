@@ -77,7 +77,7 @@ const MUTATIONS = [
   {
     name: "A7 else 兜底删掉（配不上的结果事件静默消失：历史回退路径整段没卡）",
     file: PANEL,
-    /* 迁移（2026-09-24 复核实测）：① 内联的 `displayLabel.replace(/^⟳\s*/, "")` 已抽成
+    /* 迁移（2026-09-24 复核实测）：① 内联的 `displayLabel.replace(/^⟳\s*​/, "")` 已抽成
        `stripToolTraceMark(displayLabel)`；② `appendTimelineStep(` 的参数块现在**换行**了
        （原锚点按单行写 ⇒ 未命中 ⇒ 守卫静默失效）。判据不变：删掉 else 兜底 ⇒
        配不上的结果事件静默消失。按当前实际形态（含换行）重写锚点。 */

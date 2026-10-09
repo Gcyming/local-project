@@ -100,6 +100,41 @@ export const subAll = (text, from, to) => {
   return re.test(text) ? text.replace(re, () => body) : text;
 };
 
+/** 把 `[startMarker, endMarker)` 整段搬到 `afterMarker` **之后**（插入处补一个文件行尾）。
+ *  「把某块挪到后面/挪下去」类变异用它（`mut-a1069` B1、`mut-a1074` B20）。
+ *
+ *  ⚠️ **锚点命中不了就原样返回**（p/e/at < 0 或 p >= e）—— 调用方（主流程）按「未命中」报错，
+ *     与 `sub` 的「未命中与存活同罪」同一判据，绝不静默放行。
+ *  ⚠️ block **不含** endMarker 本身（它留在原地）—— 与 `moveBefore` 的边界**刻意不同**。
+ *  ⚠️ 2026-10-08 从 `mut-a1069`/`mut-a1074` 的**同名本地实现**原样提炼（两处逐字相同）——
+ *     提炼后两份脚本改为 import 本模块（语义零漂移）；`_run-mut-one.mjs` 也 import 它，
+ *     从而**不再有"助手模拟 vs 脚本执行"分叉**的可能。 */
+export const moveAfter = (text, startMarker, endMarker, afterMarker) => {
+  const p = text.indexOf(startMarker);
+  const e = text.indexOf(endMarker);
+  if (p < 0 || e < 0 || p >= e) { return text; }
+  const block = text.slice(p, e);
+  const rest = text.slice(0, p) + text.slice(e);
+  const at = rest.indexOf(afterMarker);
+  if (at < 0) { return text; }
+  const cut = at + afterMarker.length;
+  return rest.slice(0, cut) + nlOf(text) + block + rest.slice(cut);
+};
+
+/** 把 `[startMarker, endMarker]`（**含 endMarker 本身**）搬到 `beforeMarker` **之前** ——
+ *  「把某块塞到前面/包起来」类变异用它（`mut-a1074` B21）。命中不了原样返回（同上）。 */
+export const moveBefore = (text, startMarker, endMarker, beforeMarker) => {
+  const p = text.indexOf(startMarker);
+  const e = text.indexOf(endMarker);
+  if (p < 0 || e < 0 || p >= e) { return text; }
+  const cut = e + endMarker.length;
+  const block = text.slice(p, cut);
+  const rest = text.slice(0, p) + text.slice(cut);
+  const at = rest.indexOf(beforeMarker);
+  if (at < 0) { return text; }
+  return rest.slice(0, at) + block + nlOf(text) + rest.slice(at);
+};
+
 /** 把整段文本换到**相反**的行尾（用于自检："换个行尾还命中吗？"） */
 export const withOtherEol = (text) =>
   text.includes("\r\n") ? text.replace(/\r\n/g, "\n") : text.replace(/\n/g, "\r\n");

@@ -68,28 +68,39 @@ const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1155");
 /* dismissFloat 的起点清理块（三条摘除 + setRightMin0）
    ⚠️⚠️ A-1157-R2 同步锚点：退场起点被重排过（"先量/清残值 → 挂 exit 类 → 摘变量"），
      锚点必须跟着改，否则 `sub()` 找不到 ⇒ **变异静默失效**（实测 M1/M2/M4 三条一起
-     "锚点未命中"，而脚本只报"存活 3"，很容易被当成"守卫不够严"而去加错的断言）。 */
-const D_EXIT_BLOCK = [
-  "    const rwExit = rwExitPre;",
-  "    if (rwExit) {",
-  '      rwExit.style.removeProperty("--right-body-pin");',
-  '      rwExit.style.removeProperty("--right-target-w");',
-].join("\n");
+     "锚点未命中"，而脚本只报"存活 3"，很容易被当成"守卫不够严"而去加错的断言）。
+   ⚠️ 2026-10-08：从 `[…].join("\n")` 改成**单个双引号字面量**（取值**逐字节未变**，
+     已实测与旧 join 值 `===`）。原因：`check-mut-anchors.mjs` 的 `constMap` 不认
+     `[…].join()` 形态 ⇒ M2/M6 的锚点解析不出来 ⇒ 报「未核验」⇒ 按铁律
+     「没人核验 = 没有保护」，这两条的保护强度是 0，且比「未命中」更隐蔽（未命中会响）。
+     ⚠️ 必须是**单个**字面量、不许 `+` 拼接（拼接会让 constMap 落到
+       「常量字面量解析失败」⇒ 又变未核验，实测）。 */
+const D_EXIT_BLOCK = "    const rwExit = rwExitPre;\n    if (rwExit) {\n      rwExit.style.removeProperty(\"--right-body-pin\");\n      rwExit.style.removeProperty(\"--right-target-w\");";
 
 /* animateRightSidebar 的入口清理块 */
-const A_ENTRY_BLOCK = [
-  "    setRightMin0(false);",
-  "    const rwReset = rightWrapperRef.current;",
-  "    if (rwReset) {",
-  '      rwReset.style.removeProperty("--right-body-pin");',
-  '      rwReset.style.removeProperty("--right-target-w");',
-].join("\n");
+const A_ENTRY_BLOCK = "    setRightMin0(false);\n    const rwReset = rightWrapperRef.current;\n    if (rwReset) {\n      rwReset.style.removeProperty(\"--right-body-pin\");\n      rwReset.style.removeProperty(\"--right-target-w\");";
+
+/* M2 / M6 的**目标**常量：上面两块各自**删掉 `--right-body-pin` 那一行**之后**的形态。
+   ⚠️⚠️ 2026-10-08：原写法是 `sub(t, D_EXIT_BLOCK, D_EXIT_BLOCK.replace(<删一行>, ""))`
+     —— 「to」侧是**函数调用**。`check-mut-anchors.mjs` 与 `_run-mut-one.mjs` 的
+     `evalArgExpr`都只认字面量 / 常量 / `+` 链 ⇒取不到它的值
+     ⇒ 运行期这两条显示「⚠️解析不了」＝**从未被运行验证过**（静态却绿）。
+     ⇒ 把两侧预先算成字面量：核验器与运行期读**同一份**常量。
+   ⚠️ 这两个「目标」不是恒等替换（已自检：长度 157→102 / 173→118，**确实少了一行**），
+     删掉的正是 `--right-body-pin` 的摘除 ⇒ 忠实表达该条要证明的缺陷。 */
+const D_EXIT_BLOCK_MINUS_PIN = "    const rwExit = rwExitPre;\n    if (rwExit) {\n      rwExit.style.removeProperty(\"--right-target-w\");";
+const A_ENTRY_BLOCK_MINUS_PIN = "    setRightMin0(false);\n    const rwReset = rightWrapperRef.current;\n    if (rwReset) {\n      rwReset.style.removeProperty(\"--right-target-w\");";
 
 /* 浮层稳态宽的 JSX 三元 */
 /* ⚠️⚠️ A-1179：浮层过渡分支的容器宽度已改成 `undefined`（⇒ `auto` ⇒ 容器贴合内容，
    消除「容器已到位、内容还在长」那一帧黑屏），退场期靠 `rightExitAnim` 分流。
    ⇒ 这三个变异（M8/M9/M10）的 `FLOAT_W` 必须跟着改，否则锚点漂移、守卫**假失效**。 */
-const FLOAT_W = 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")';
+/* ⚠️ 2026-10-07 重打锚点：源码注释被**系统性剥离**（注释 → 空行，见 .bak-comments），
+   原本一体的两行之间现在夹着 20+ 空行 ⇒ 跨行常量必然断裂。
+   ⇒ 拆成两段**单行**常量（各自实测唯一）：M8 改首行（稳态宽），M9 改次行（回落值）。
+   ⚠️ 两段都是从 App.tsx 里逐字抄来的，改源码时必须同步改这里，否则又会漂移。 */
+const FLOAT_W = 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"';
+const FLOAT_W_TAIL = ': (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")';
 
 /* 唤出路径的第三参 */
 const FLOAT_CALL = "animateRightSidebar(true, floatTargetW, true)";
@@ -104,14 +115,18 @@ const MUTATIONS = [
     file: F_APP,
     mutate: (t) => sub(
       t,
-      "    setRightMin0(false);\n    /* ⚠️⚠️ A-1157-R2：退场**保持**",
-      "    /* ⚠️⚠️ A-1157-R2：退场**保持**",
+      "    setRightMin0(false);\n    const rwReset = rightWrapperRef.current;",
+      "    const rwReset = rightWrapperRef.current;",
     ),
   },
   {
     name: "M2 dismissFloat 起点不摘 --right-body-pin（→ 现象④ 内容冲出窗口）",
     file: F_APP,
-    mutate: (t) => sub(t, D_EXIT_BLOCK, D_EXIT_BLOCK.replace('      rwExit.style.removeProperty("--right-body-pin");\n', "")),
+    /* ⚠️ 2026-10-08：两侧都改成字面量常量（见上方注释），并补显式的 from 字段 ——
+       原写法的「to」侧是函数调用，运行期解析不了（=从未被运行验证过）。语义完全没变。 */
+    from: D_EXIT_BLOCK,
+    to: D_EXIT_BLOCK_MINUS_PIN,
+    mutate: (t) => sub(t, D_EXIT_BLOCK, D_EXIT_BLOCK_MINUS_PIN),
   },
   {
     name: "M3 dismissFloat 起点不摘 --right-target-w（过渡目标宽残留）",
@@ -131,8 +146,8 @@ const MUTATIONS = [
        后面才是三条 removeProperty；锚点跟着新形状改。 */
     mutate: (t) => sub(
       t,
-      '      setRightExitAnim(false);\n      /* ⚠️⚠️ A-1158-R：**必须清掉内层包裹层的 opacity 残留**',
-      '      /* ⚠️⚠️ A-1158-R：**必须清掉内层包裹层的 opacity 残留**',
+      "      setRightExitAnim(false);\n",
+      "",
     ),
   },
 
@@ -149,7 +164,10 @@ const MUTATIONS = [
   {
     name: "M6 animateRightSidebar 入口不摘 --right-body-pin",
     file: F_APP,
-    mutate: (t) => sub(t, A_ENTRY_BLOCK, A_ENTRY_BLOCK.replace('      rwReset.style.removeProperty("--right-body-pin");\n', "")),
+    /* ⚠️ 2026-10-08：同 M2（两侧字面量常量 + 显式的 from 字段）。 */
+    from: A_ENTRY_BLOCK,
+    to: A_ENTRY_BLOCK_MINUS_PIN,
+    mutate: (t) => sub(t, A_ENTRY_BLOCK, A_ENTRY_BLOCK_MINUS_PIN),
   },
   {
     name: "M7 animateRightSidebar 入口不摘 --right-target-w",
@@ -172,9 +190,9 @@ const MUTATIONS = [
        ⚠️ 改 FLOAT_W 时必须同步改这两处 from，否则又漂移。
        ⚠️⚠️ 本注释里**刻意不写反引号**：核验器的 STR 扫描器会把 from 之前最近的
           反引号当成锚点边界（实测 mut-a1090 第 23 条就是这样假红的）。 */
-    from: 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")',
+    from: 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"',
     /* ⚠️ A-1179：替换体也要保留 `rightExitAnim` 分流（否则改动后语法/结构与基线不一致）。 */
-    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "100%"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")'),
+    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "100%"'),
   },
   {
     name: "M9 非浮层态不回落 auto（普通展开被内联宽污染）",
@@ -183,8 +201,8 @@ const MUTATIONS = [
        （`sub(t, FLOAT_W, ...)`）⇒ 会判成「未命中（守卫假失效）」。
        ⇒ 显式写出与 FLOAT_W 逐字相同的 from。⚠️ 改 FLOAT_W 时必须同步改这里。
        ⚠️⚠️ 本注释里刻意不写反引号（核验器的 STR 扫描器会被反引号截断，见 M8 处说明）。 */
-    from: 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")',
-    mutate: (t) => sub(t, FLOAT_W, 'width: (mainIsFloatLayout && !rightMin0) ? "calc(100% - var(--left-w, 0px))"\n              : (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : undefined)'),
+    from: ': (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : "auto")',
+    mutate: (t) => sub(t, FLOAT_W_TAIL, ': (mainIsFloatLayout ? (rightExitAnim ? "var(--right-target-w)" : undefined) : undefined)'),
   },
 
   /* ── R6：判据与真状态同源 ── */

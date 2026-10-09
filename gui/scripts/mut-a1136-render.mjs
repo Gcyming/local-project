@@ -94,6 +94,35 @@ const F_PROCKILL = "core-ts/src/procKill.ts";
 const F_VIEW = "gui/src/renderer/pages/docView.ts";
 const F_CHATPANEL = "gui/src/renderer/pages/ChatPanel.tsx";
 const F_BUILTIN = "core-ts/src/tools/builtin.ts";
+/* ── A1136 ①②③ 的锚点常量（2026-10-08 补）────────────────────────────────────
+ * 这三条原先把 `from` 写在 `mutate:` 闭包里按 `indexOf` 切块，核验器解析不出来
+ * ⇒ 报「未核验」。按铁律「没人核验 = 没有保护」，那三条锚点**从未被数过一次**
+ * （而「未命中」至少会响，未核验是静默的）。
+ * ⇒ 改成**模块级字面量常量**：`check-mut-anchors.mjs` 的 `constMap`认它
+ *   （`const X = "…"` 单行字面量形态），`_run-mut-one.mjs` 的常量表也认它
+ *   —— 两边都从同一份常量取值，不会出现「核验器说命中、运行期说未命中」的两边打架。
+ * ⚠️ 三条常量都是**逐字节抄自当前源码**的连续块，且各自在目标文件里**唯一命中**
+ *   （改源码形状时必须重新抄，否则这里报「未命中」——那正是它该报的）。
+ * ⚠️ 一律用双引号字面量（换行写成转义 `\n`），**不用模板字面量**：
+ *   锚点里天然含反引号与 `${`，模板形态会被插值规则吃掉（见 `_run-mut-one.mjs` 的
+ *   `readTemplateLiteral`），双引号形态没有这个歧义。
+ * ⚠️⚠️ 三条常量必须各自是**单个**字面量，**不许用 `+` 拼接**（2026-10-08 实测）：
+ *   `check-mut-anchors.mjs` 的 `constMap` 对拼接形态走`readConcat`，而它要求
+ *   每一段都是字面量；本文件的 M10 锚点里含 `${…}` 与反引号（模板文本），
+ *   拼接写法会让它落到「常量字面量解析失败」⇒ `from` 解析不出来 ⇒ 又报「未核验」
+ *   —— 也就是"改完还是没人核验"。分号收尾的单字面量才走第一段那个正则。 */
+/** 落回块：`docs.read` 调用 + 失败闸门 + 后续空行（第 9 条的锚点）。 */
+const A1136_SIDEBAR_DR_BLOCK = "const dr = await api?.docs?.read?.(path).catch(() => null) as\n        { ok?: boolean; text?: string; error?: string } | null | undefined;\n      if (!dr?.ok) {\n        openFileAbs(path, label, `${routeNote}\\n（另外，文本提取也没成功：${dr?.error ?? \"未知原因\"}）`);\n        return;\n      }\n      \n      ";
+/** 保真块：`docs.renderPage` 调用 + routeNote 计算（第 10 条锚点的前半段）。 */
+const A1136_SIDEBAR_RP_BLOCK = "const rp = await api?.docs?.renderPage?.({ path, name: label }).catch(() => null) as\n        { ok?: boolean; dir?: string; name?: string; error?: string; degrade?: boolean;\n          needs?: string; hint?: string; reason?: string; transient?: boolean } | null | undefined;\n      \n\n\n\n\n\n\n      let routeNote = \"\";\n      if (rp?.ok && rp.dir) {\n        const served = await api?.http?.serve?.({ dir: rp.dir }).catch(() => null) as\n          { ok?: boolean; urls?: string[]; error?: string } | null | undefined;\n        const url = served?.ok ? buildPreviewUrl(served.urls, rp.name ?? \"index.html\") : null;\n        if (url) { openBrowserTab(url, label); return; }\n        routeNote = `保真渲染页已生成，但本地服务没起来或没返回可用地址（${served?.error ?? \"未知原因\"}）。`\n          + \"当前按文本结构重排显示，不是原版式。\";\n      } else if (rp && rp.ok === false) {\n        routeNote = (rp.needs === \"libreoffice\" && rp.reason === \"no-libreoffice\")\n          ? `${rp.hint ?? \"需要本机安装 LibreOffice。\"}（当前按文本结构重排显示，不是原版式）`\n          : (rp.needs === \"libreoffice\" && rp.reason === \"failed\")\n            ? `LibreOffice 转换失败：${rp.error ?? \"未知原因\"}（当前按文本结构重排显示，不是原版式）`\n            : `保真渲染不可用：${rp.error ?? \"未知原因\"}（当前按文本结构重排显示，不是原版式）`;\n      } else {\n        \n\n        routeNote = \"保真渲染通道没有响应（若应用刚更新过，请**重启应用**后再试）。\"\n          + \"当前按文本结构重排显示，不是原版式。\";\n      }\n\n      ";
+/** 「保真块 + 落回块」**连续**一段（第 10 条的锚点：两段中间没有别的语句，交换它们 = 顺序颠倒）。 */
+const A1136_SIDEBAR_RP_DR_BLOCK = "const rp = await api?.docs?.renderPage?.({ path, name: label }).catch(() => null) as\n        { ok?: boolean; dir?: string; name?: string; error?: string; degrade?: boolean;\n          needs?: string; hint?: string; reason?: string; transient?: boolean } | null | undefined;\n      \n\n\n\n\n\n\n      let routeNote = \"\";\n      if (rp?.ok && rp.dir) {\n        const served = await api?.http?.serve?.({ dir: rp.dir }).catch(() => null) as\n          { ok?: boolean; urls?: string[]; error?: string } | null | undefined;\n        const url = served?.ok ? buildPreviewUrl(served.urls, rp.name ?? \"index.html\") : null;\n        if (url) { openBrowserTab(url, label); return; }\n        routeNote = `保真渲染页已生成，但本地服务没起来或没返回可用地址（${served?.error ?? \"未知原因\"}）。`\n          + \"当前按文本结构重排显示，不是原版式。\";\n      } else if (rp && rp.ok === false) {\n        routeNote = (rp.needs === \"libreoffice\" && rp.reason === \"no-libreoffice\")\n          ? `${rp.hint ?? \"需要本机安装 LibreOffice。\"}（当前按文本结构重排显示，不是原版式）`\n          : (rp.needs === \"libreoffice\" && rp.reason === \"failed\")\n            ? `LibreOffice 转换失败：${rp.error ?? \"未知原因\"}（当前按文本结构重排显示，不是原版式）`\n            : `保真渲染不可用：${rp.error ?? \"未知原因\"}（当前按文本结构重排显示，不是原版式）`;\n      } else {\n        \n\n        routeNote = \"保真渲染通道没有响应（若应用刚更新过，请**重启应用**后再试）。\"\n          + \"当前按文本结构重排显示，不是原版式。\";\n      }\n\n      const dr = await api?.docs?.read?.(path).catch(() => null) as\n        { ok?: boolean; text?: string; error?: string } | null | undefined;\n      if (!dr?.ok) {\n        openFileAbs(path, label, `${routeNote}\\n（另外，文本提取也没成功：${dr?.error ?? \"未知原因\"}）`);\n        return;\n      }\n      \n      ";
+/** 交换后的产物（落回块在前 + 保真块在后）—— 与锚点**长度完全相同**（1586 = 1586），
+ *  所以这条变异改完文件**长度不变**、花括号仍平衡（不是"改成语法错误"的弱化变异体）。 */
+const A1136_SIDEBAR_DR_RP_BLOCK = "const dr = await api?.docs?.read?.(path).catch(() => null) as\n        { ok?: boolean; text?: string; error?: string } | null | undefined;\n      if (!dr?.ok) {\n        openFileAbs(path, label, `${routeNote}\\n（另外，文本提取也没成功：${dr?.error ?? \"未知原因\"}）`);\n        return;\n      }\n      \n      const rp = await api?.docs?.renderPage?.({ path, name: label }).catch(() => null) as\n        { ok?: boolean; dir?: string; name?: string; error?: string; degrade?: boolean;\n          needs?: string; hint?: string; reason?: string; transient?: boolean } | null | undefined;\n      \n\n\n\n\n\n\n      let routeNote = \"\";\n      if (rp?.ok && rp.dir) {\n        const served = await api?.http?.serve?.({ dir: rp.dir }).catch(() => null) as\n          { ok?: boolean; urls?: string[]; error?: string } | null | undefined;\n        const url = served?.ok ? buildPreviewUrl(served.urls, rp.name ?? \"index.html\") : null;\n        if (url) { openBrowserTab(url, label); return; }\n        routeNote = `保真渲染页已生成，但本地服务没起来或没返回可用地址（${served?.error ?? \"未知原因\"}）。`\n          + \"当前按文本结构重排显示，不是原版式。\";\n      } else if (rp && rp.ok === false) {\n        routeNote = (rp.needs === \"libreoffice\" && rp.reason === \"no-libreoffice\")\n          ? `${rp.hint ?? \"需要本机安装 LibreOffice。\"}（当前按文本结构重排显示，不是原版式）`\n          : (rp.needs === \"libreoffice\" && rp.reason === \"failed\")\n            ? `LibreOffice 转换失败：${rp.error ?? \"未知原因\"}（当前按文本结构重排显示，不是原版式）`\n            : `保真渲染不可用：${rp.error ?? \"未知原因\"}（当前按文本结构重排显示，不是原版式）`;\n      } else {\n        \n\n        routeNote = \"保真渲染通道没有响应（若应用刚更新过，请**重启应用**后再试）。\"\n          + \"当前按文本结构重排显示，不是原版式。\";\n      }\n\n      ";
+/** vendor 副本的**文件末尾** 70 字节（第 13 条的锚点；唯一命中）。 */
+const A1136_VENDOR_TAIL = " self?self:\"undefined\"!=typeof window?window:{})},{}]},{},[10])(10)});";
+const A1136_VENDOR_DRIFT_PROBE = "\n/* A-1136-⑫-vendor-drift-probe */\n";
 const TARGETS = [F_PLAN, F_PAGE, F_SIDEBAR, F_MAIN, F_VENDOR_JSZIP, F_LO, F_DOCTEXT, F_CONV, F_PROCKILL, F_VIEW, F_CHATPANEL, F_BUILTIN];
 const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1136");
 
@@ -156,28 +185,34 @@ const MUTATIONS = [
   {
     name: "9 RightSidebar：删掉 docs.read 落回（Agent 通道被保真渲染挤掉 —— 用户点名担心的）",
     file: F_SIDEBAR,
-    mutate: (t) => {
-      const i = t.indexOf("const dr = await api?.docs?.read?.(path)");
-      if (i < 0) { return t; }
-      const j = t.indexOf("const html = docViewToHtml(", i);
-      if (j < 0) { return t; }
-      return t.slice(0, i) + t.slice(j);
-    },
+    /* ⚠️ 2026-10-08：从闭包内 `indexOf` 切片改成**字面量锚点**。
+       旧写法把 `from` 藏在 `mutate:` 闭包里 ⇒ 核验器解析不出来 ⇒ 报「未核验」
+       （= 没人核验 = 没有保护，且比「未命中」更隐蔽：未命中会响，未核验是静默的）。
+       语义完全不变：删掉 [落回块起点, `docViewToHtml(` 起点) 这一段。
+       ⚠️ 锚点里那几行**空行/ 缩进被剥离残留**是源码原样，别顺手"整理"——
+         整理会让它变成「未命中」，而症状读起来像"源码漂移了"（假警报指向错误对象）。 */
+    from: A1136_SIDEBAR_DR_BLOCK,
+    to: "",
+    mutate: (t) => sub(t, A1136_SIDEBAR_DR_BLOCK, ""),
   },
   {
     name: "10 RightSidebar：保真与落回顺序颠倒（永远走旧通道 ⇒「没变化啊」复发）",
     file: F_SIDEBAR,
-    mutate: (t) => {
-      /* 把保真分支整块挪到 `docs.read` 之后 —— 等价于"先抽文本、能抽就不保真" */
-      const i = t.indexOf("const rp = await api?.docs?.renderPage?.(");
-      const j = t.indexOf("const dr = await api?.docs?.read?.(path)");
-      if (i < 0 || j < 0 || j < i) { return t; }
-      const block = t.slice(i, j);
-      return t.slice(0, i) + t.slice(j).replace(
-        "const dr = await api?.docs?.read?.(path)",
-        "const dr = await api?.docs?.read?.(path)",
-      ) + block;
-    },
+    /* ⚠️ 2026-10-08：**修掉一个弱化变异体**（实测发现，原写法压根没颠倒顺序）。
+       旧写法是 `t.slice(0,i) + t.slice(j).replace(同串→同串) + block`：
+       那个 `.replace()` 把它自己接在同串后面 ⇒ **恒等替换**（什么也没做），
+       于是整条退化成「把保真块**追加到文件末尾**」——
+         · 文件里 `renderPage` 变成 **3 处**、`docs?.read` 变成 **2 处**；
+         · 守卫的顺序断言 `iRender < iRead` 在 openBody 切片里**仍然成立**（实测绿）；
+         · 它之所以还是变红，是被a1136-stage-c 里两条**别的**断言撞上的
+           （结构化页构造被挪走 / `notice: routeNote` 不在那段里），
+           也就是"红了，但不是因为这条名字说的那个缺陷" —— 弱化变异体的教科书形态。
+       现在改成**真交换**：把「落回块」整块搬到「保真块」之前（两段各自语法完整，
+       花括号仍平衡、长度 delta 为 0），实测**恰好打破顺序断言那条**：
+       `两条通道的先后：保真在前、落回在后`（+ stage-c 那两条）。 */
+    from: A1136_SIDEBAR_RP_DR_BLOCK,
+    to: A1136_SIDEBAR_DR_RP_BLOCK,
+    mutate: (t) => sub(t, A1136_SIDEBAR_RP_DR_BLOCK, A1136_SIDEBAR_DR_RP_BLOCK),
   },
   {
     name: "11 main：IPC 不再判 planRender（老格式也去生成渲染页 ⇒ 白屏）",
@@ -197,8 +232,16 @@ const MUTATIONS = [
        vendor 副本是 A-1136 里唯一的"手抄第二产地"（本仓铁律 10）—— 抄错不报错。
        把副本末尾追加几个字节 ⇒ 逐字节一致性判据必须变红（模拟"升级了依赖却忘了重新复制"）。 */
     name: "13 gui/vendor/jszip.min.js：副本被改脏（依赖升级后忘了重新复制 ⇒ 画的是旧版本）",
-    file: "gui/vendor/jszip.min.js",
-    mutate: (t) => t + "\n/* A-1136-⑫-vendor-drift-probe */\n",
+    file: F_VENDOR_JSZIP,
+    /* ⚠️ 2026-10-08：从「整文件 `t + 探针`」改成**尾部锚点**。
+       旧写法**压根没有 `from`**（核验器报「压根没有 from」⇒ 未核验 = 没人核验）。
+       现在锚「文件末尾 70 字节」（实测唯一命中）+ 追加探针，
+       **破坏方式逐字不变**（产物与旧的 `t + 探针` 完全相同：末尾多一段注释）。
+       ⚠️ 为什么不用「整文件追加」当锚点：核验器只认 `from`/`to`/`sub(t,…)` 三种形态，
+         「往后追加」没有可数的锚点 —— 而"没有锚点"就等于这条守卫从未被核验过。 */
+    from: A1136_VENDOR_TAIL,
+    to: A1136_VENDOR_TAIL + A1136_VENDOR_DRIFT_PROBE,
+    mutate: (t) => sub(t, A1136_VENDOR_TAIL, A1136_VENDOR_TAIL + A1136_VENDOR_DRIFT_PROBE),
   },
   {
     /* 用户实测反馈（2026-09-29 截图）：「只显示一半」= 宽度写死。
@@ -379,12 +422,18 @@ const MUTATIONS = [
   {
     name: "44 RightSidebar：使用处不传 `plugins`（只声明不传 ⇒ 同样空白）",
     file: F_SIDEBAR,
-    /* ⚠️ 锚点曾写成「`plugins` 紧跟 A-1045 那条注释」，A-1137 在两者之间插入了 `preload`
-       那段注释后就**未命中**了 —— 改源码形状必须同步锚点（本仓铁律 31 同宗①）。
-       现在锚在 `allowpopups` 之后的整个属性块上，不依赖任何后来插入的注释。 */
+    /* ⚠️ 锚点曾两次漂移：先是在 `allowpopups` 与 `plugins` 之间被插入注释（A-1137），
+       2026-10-05 全仓注释剥离又把那段注释变成了空行 ⇒ 整块（连注释三行）不再逐字相符。
+       ⇒ 现在只锚「`plugins` 那一行 + 它后面那一行被剥离成空白的残留」——
+         **不再跨任何注释、也不跨任何有内容的行**；实测唯一命中。
+       ⚠️ 刻意**不**把 `allowpopups` 一起锚进来：这条变异的名字说的是「不传 plugins」，
+         若连 `allowpopups` 一起删掉，红的原因就多了「popups 也没传」这一层
+         （弱化变异体：红了，却不是这条名字说的那个缺陷）。
+       ⚠️ 也刻意不用「向上扩到 partition/src」—— 那会跨好几个剥离残留的空行。 */
     mutate: (t) => sub(t,
-      "          allowpopups\n          /* 防守性开启（**不是**某个 bug 的修复 —— 实测这版 Electron 开不开都能渲染 PDF，\n             见 `WebviewTag` 定义处的长注释：A/B 白纸占比都是 0.641、差 0.0）。 */\n          plugins",
-      "          allowpopups\n          /* 防守性开启（**不是**某个 bug 的修复 —— 实测这版 Electron 开不开都能渲染 PDF，\n             见 `WebviewTag` 定义处的长注释：A/B 白纸占比都是 0.641、差 0.0）。 */"),
+      "          plugins\n          ",
+      "",
+    ),
   },
   {
     name: "45 main：把临时目录当页面 rootDir（**复现用户实测**：页面随临时目录一起被删 ⇒ 服务报「目录不存在」）",

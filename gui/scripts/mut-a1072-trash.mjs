@@ -33,19 +33,18 @@ const BUILTIN = "core-ts/src/tools/builtin.ts";
 const MAIN = "gui/src/main/index.ts";
 const TARGETS = [BUILTIN, MAIN];
 
-/** 主进程里那段回收站注入（整块）—— W1 需要把它**真的删掉**，不能只加条件。 */
-const TRASH_INJECTION = [
-  "  setTrashService({",
-  "    trash: async (absPath: string) => {",
-  "      try {",
-  "        await shell.trashItem(absPath);",
-  "        return { ok: true };",
-  "      } catch (e) {",
-  "        return { ok: false, error: e instanceof Error ? e.message : String(e) };",
-  "      }",
-  "    },",
-  "  });",
-].join("\n");
+/** 主进程里那段回收站注入（整块）—— W1 需要把它**真的删掉**，不能只加条件。
+ *  ⚠️ 2026-10-08：从 `[…].join("\n")` 改成**模块级单个双引号字面量**。
+ *    旧写法 `check-mut-anchors.mjs` 的 `constMap` **解析不到**（它只认单/双引号字面量、
+ *    `+` 拼接、`path.join`、对象映射表这四种形态，`[…].join()` 不在其列）
+ *    ⇒ W1 的 `from` 解析不出来 ⇒ 报「未核验」⇒ 按铁律「没人核验 = 没有保护」，
+ *    这条守卫的保护强度是 0，且比「未命中」更隐蔽（未命中至少会响）。
+ *    ⇒ 逐字节**与旧值相同**（已实测 `===` 为 true），在 `gui/src/main/index.ts` 里
+ *    **唯一命中**；核验器与运行期（`_run-mut-one.mjs` 的常量表）读同一份常量，
+ *    不会出现「核验器说命中、运行期说未命中」的两边打架。
+ *  ⚠️ 必须是**单个**字面量，**不许用 `+` 拼接**：拼接形态会让 `constMap` 落到
+ *    「常量字面量解析失败」⇒ 又变回未核验（实测）。 */
+const TRASH_INJECTION = "  setTrashService({\n    trash: async (absPath: string) => {\n      try {\n        await shell.trashItem(absPath);\n        return { ok: true };\n      } catch (e) {\n        return { ok: false, error: e instanceof Error ? e.message : String(e) };\n      }\n    },\n  });";
 
 const MUTATIONS = [
   // ── T 行为三态（file_delete）────────────────────────────────────────────────
@@ -76,6 +75,10 @@ const MUTATIONS = [
   {
     name: "W1 注入整块被移除（主进程忘了调用 → 回收站能力从未装配，而门禁全绿）",
     file: MAIN,
+    /* ⚠️ 2026-10-08：补显式的 from 字段（锚点已提成模块级字面量常量，见上方注释），
+       让核验器能解析它 —— 语义完全没变。 */
+    from: TRASH_INJECTION,
+    to: "  /* A-1072 变异：注入被移除 */",
     mutate: (t) => sub(t, TRASH_INJECTION, "  /* A-1072 变异：注入被移除 */"),
   },
   {

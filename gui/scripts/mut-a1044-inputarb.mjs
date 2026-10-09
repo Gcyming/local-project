@@ -11,7 +11,7 @@
  * ⚠️ 全程快照 + 还原：任何时刻中断，源文件内容都必须回到原样（末尾核对哈希）。
  * 用法：node gui/scripts/mut-a1044-inputarb.mjs
  */
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
@@ -91,8 +91,11 @@ const MUTATIONS = [
   {
     name: "M9 可视化回调不再兜异常（界面画框失败会打断动作执行）",
     file: F_CTL,
-    from: `  private emitFocus(e: OperationFocusEvent): void {\n    try { this.onOperationFocus?.(e); } catch { /* 可视化失败不影响动作 */ }\n  }`,
-    to: `  private emitFocus(e: OperationFocusEvent): void {\n    this.onOperationFocus?.(e);\n  }`,
+    /* 2026-10-07 重打锚点：原锚点把 catch 里的**注释原文**抄了进去，
+       注释被系统剥离成空白后必然断裂。改为**只锚代码行**（catch 那一行的代码部分）——
+       它不含任何注释文本，且实测在 controller.ts 里唯一。 */
+    from: `    try { this.onOperationFocus?.(e); } catch {`,
+    to: `    this.onOperationFocus?.(e);`,
   },
 
   /* ── ③ 桌面空闲探针 ── */
@@ -105,7 +108,14 @@ const MUTATIONS = [
   {
     name: "M11 探针失败改为抛出（一次探测失败把整条图形操作打断）",
     file: F_DESK,
-    from: `    } catch {\n      // 宿主未就绪/超时：探测不可用。**不抛**——让位判据的语义是"探测不到就放行但留痕"，\n      // 而不是让一次探针失败把用户的图形操作整条打断。\n      return null;\n    }`,
+    /* 2026-10-07 重打锚点：原锚点整段抄了 catch 里的三行**中文注释**，
+       剥离后必然断裂。改为**只锚代码行**：catch 块的收尾两行
+       （`} catch {` + `return null;`）—— 纯代码、不含注释文本，实测唯一。
+       ⚠️ 中间那两行是剥离残留的空白，所以锚点跨了「一个空行」；实测命中 1 次。
+       ⚠️ 语义等价性已实测：改后 catch 体变成 `throw e;`，
+       守卫 a1044-guards.spec.ts:206 的「catch 里不许 throw」与 207 的
+       「整个探针主体都不允许出现 throw」两条断言同时红。 */
+    from: `    } catch {\n      \n      \n      return null;\n    }`,
     to: `    } catch (e) {\n      throw e;\n    }`,
   },
   {
@@ -211,6 +221,74 @@ function restore(snap) {
 }
 
 const sha = (s) => createHash("sha256").update(s).digest("hex").slice(0, 12);
+
+/* ── 骨架：--list / --apply N / --restore ──────────────────────────────────
+ * 与 mut-a1091 / mut-a1037 / mut-a1042 / mut-a1053 / mut-a1064 同款约定（全仓一致）。
+ * ⚠️ --restore **无参可用**，且**变异态下也能跑**。
+ * ⚠️ 本脚本条目是 `{ name, file, from, to }`（没有 mutate），`--apply` 走
+ *   `original.includes(from) ? replace : null`，与全量模式**同一套判据**。
+ * ⚠️ 本脚本的 from 是**裸字面量 includes/replace**（不走 `_mut-eol` 的行尾无关 `sub`）。
+ *   这是**既有形态**：本批目标文件实测全是 LF，行尾一致故成立。⚠️ 若将来某个目标
+ *   翻成 CRLF，多行锚点会静默失效 —— 届时本脚本需要改接 `sub()`（不是本轮范围）。
+ */
+const SAVE_DIR = resolve(ROOT, "gui", "scripts", "_tmp-mut-a1044");
+const argv = process.argv.slice(2);
+const mode = argv.includes("--list") ? "list"
+  : argv.includes("--restore") ? "restore"
+    : argv.includes("--apply") ? "apply"
+      : "full";
+
+if (mode === "list") {
+  for (const [i, m] of MUTATIONS.entries()) { console.log(`  ${i + 1}. [${m.file}] ${m.name}`); }
+  process.exit(0);
+}
+
+if (mode === "apply" || mode === "restore") {
+  const manifestPath = resolve(SAVE_DIR, "manifest.json");
+  if (mode === "apply") {
+    const idx = Number(argv[argv.indexOf("--apply") + 1]);
+    const m = MUTATIONS[idx - 1];
+    if (!m) { console.error(`--apply 需要条目号（1..${MUTATIONS.length}）`); process.exit(1); }
+    if (existsSync(manifestPath)) {
+      console.error("上一轮的变异还没还原（manifest 还在）—— 先跑 --restore，否则会把变异后的源码当基线。");
+      process.exit(1);
+    }
+    const path = resolve(ROOT, m.file);
+    if (!existsSync(path)) { console.error(`快照里没有 ${m.file}`); process.exit(1); }
+    const src = readFileSync(path, "utf8");
+    mkdirSync(SAVE_DIR, { recursive: true });
+    writeFileSync(resolve(SAVE_DIR, "orig.txt"), src);
+    if (!src.includes(m.from)) {
+      console.error(`锚点未命中：${m.name}`);
+      rmSync(SAVE_DIR, { recursive: true, force: true });
+      process.exit(1);
+    }
+    const next = src.replace(m.from, m.to);
+    if (next === src) {
+      console.error(`变异无效果（改了等于没改）：${m.name}`);
+      rmSync(SAVE_DIR, { recursive: true, force: true });
+      process.exit(1);
+    }
+    writeFileSync(path, next);
+    writeFileSync(manifestPath, JSON.stringify({
+      index: idx, name: m.name, file: m.file,
+      sha256: createHash("sha256").update(src).digest("hex"),
+    }, null, 2));
+    console.log(`已变异 M${idx}：${m.name}`);
+    process.exit(0);
+  }
+  if (!existsSync(manifestPath)) { console.log("没有待还原的变异（manifest 不存在）—— 无需操作。"); process.exit(0); }
+  const man = JSON.parse(readFileSync(manifestPath, "utf8"));
+  writeFileSync(resolve(ROOT, man.file), readFileSync(resolve(SAVE_DIR, "orig.txt")));
+  const now = createHash("sha256").update(readFileSync(resolve(ROOT, man.file))).digest("hex");
+  rmSync(SAVE_DIR, { recursive: true, force: true });
+  if (now !== man.sha256) {
+    console.error(`❌ 还原校验失败：${man.file}\n   期望 ${man.sha256}\n   实际 ${now}`);
+    process.exit(1);
+  }
+  console.log(`已逐字节还原 ${man.file}（sha256 一致）`);
+  process.exit(0);
+}
 
 function main() {
   const snap = snapshot(FILES);

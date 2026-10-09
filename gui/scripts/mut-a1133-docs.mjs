@@ -122,7 +122,17 @@ const MUTATIONS = [
   {
     name: "12 docView：excel 的列字母行当数据（表头丢失，用户看到第一行是 A|B）",
     file: F_VIEW,
-    mutate: (t) => sub(t, "if (cur.header.length === 0 && cur.rows.length === 0 && line.split(CELL_SEP).every((c) => COL_LETTERS_RE.test(c.trim()))) {\n      cur.header = cells;                    // 列字母行 = 表头（不进数据）\n      continue;\n    }", ""),
+    /* ⚠️ 原锚里 `cur.header = cells;` 后面那段尾部注释（`列字母行 = 表头（不进数据）`）
+       已被 2026-10-05 的注释剥离抹掉 ⇒ 该行现为「代码 + 20 个尾随空格」，整块不再逐字相符。
+       ⇒ 用**剥离后的真实字节**重建同一块（保持四行整块删除，变异语义不变：
+         整条 if 去掉 ⇒ 列字母行走 cur.rows 当数据行）。
+       ⚠️ **不可只锚前两行**：实测那样删掉会留下 `continue;` 与多出的 `}`，得到的是
+       **语法错误**而不是这条变异要复现的缺陷 —— 那属于"变异体比目标缺陷更粗暴"，
+         测试会红，但红的原因不是我们想证明的那件事。 */
+    mutate: (t) => sub(t,
+      "if (cur.header.length === 0 && cur.rows.length === 0 && line.split(CELL_SEP).every((c) => COL_LETTERS_RE.test(c.trim()))) {\n      cur.header = cells;                    \n      continue;\n    }",
+      "",
+    ),
   },
   {
     name: "13 docView：分页标记认不出来（pptx 所有页粘成一块，页边界这个唯一结构丢了）",

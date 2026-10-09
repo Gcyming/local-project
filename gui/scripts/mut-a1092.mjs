@@ -99,10 +99,17 @@ const MUTATIONS = [
   {
     name: "5 手填解析器抛错不再兜住（一个坏解析器炸掉所有上游请求）",
     file: F_LIMITER,
+    /* ⚠️ 剥离态下的锚点纪律（2026-10-05 全仓注释剥离后重打）：**不锚注释行**。
+       原锚点是「catch{ + 行内注释 + manual = null; }」的四行多行锚，剥离后注释变成一行空行
+       ⇒ 多行锚必然断裂。⇒ 只锚 `manual = null;` 这一行代码 ——
+       它正是「抛错降级为没有手填」这条纪律的落点（守卫 a1092-guards B3 判的就是
+       「解析器抛错时 resolve 仍落到 declared」）。
+       ⚠️ 替换体刻意**自足**（不引用 `e`）：源码写的是 `} catch {`（**无绑定**），
+       只换那一行的话引用 `e` 会得到「编译得过、运行即ReferenceError」的畸形变异体。 */
     mutate: (t) => sub(
       t,
-      "    } catch {\n      // 手填解析器抛错绝不拖垮请求（与 observe 同一纪律）——降级为\"没有手填\"\n      manual = null;\n    }",
-      "    } catch (e) {\n      throw e; // 变异：不再兜住\n    }",
+      "      manual = null;",
+      "      throw new Error(\"手填解析器抛错\");",
     ),
   },
   {
@@ -119,10 +126,14 @@ const MUTATIONS = [
   {
     name: "7 AUMID 不再提前声明（任务栏拿不到安装版快捷方式的图标）",
     file: F_MAIN,
+    /* ⚠️ 剥离态下的锚点纪律（2026-10-05 全仓注释剥离后重打）：**不锚注释行**。
+       原锚点跨了「AUMID 声明 + 空行 + 一行块注释（单实例锁）」，剥离后注释变成空行 ⇒ 断裂。
+       ⇒ 缩成**单行代码锚**（`app.setAppUserModelId(APP_AUMID);`）——
+       守卫 a1092-guards G1 判的就是这一行必须在源码里，语义逐字不变。 */
     mutate: (t) => sub(
       t,
-      "  app.setAppUserModelId(APP_AUMID);\n\n  // 单实例锁",
-      "  // 变异：AUMID 声明被删\n\n  // 单实例锁",
+      "  app.setAppUserModelId(APP_AUMID);",
+      "  // 变异：AUMID 声明被删",
     ),
   },
   {

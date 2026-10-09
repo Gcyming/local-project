@@ -21,6 +21,7 @@
  * | 6 | detectApiFormat 探测撤掉 identityHeaders | 探测请求匿名（指纹自相矛盾） | a1195-ua-probes ①+③ |
  * | 7 | FETCH_RETRY_ATTEMPTS 3 → 10 | 叠加分析失效（重审） | a1195-bounds ② |
  * | 8 | rateLimitGateOpen 恒开 | 无闸门也排队（压测误伤） | a1195-gate-live ②③ |
+ * | 9 | 删 loopback 短路 | 本机流量又经代理 ⇒ 连接失败被翻译成 502 | chromiumfetch-bounds ③④ |
  *
  * ⚠️ `name` 开头数字必须 == 数组位置序号（check-mut-anchors.mjs 逐条核对）。
  * ⚠️ 锚必须是**唯一多行长锚**（A-1194 事故：首匹配恢复改错位置 ⇒ 唯一性 = 硬要求）。
@@ -130,6 +131,16 @@ const MUTATIONS = [
       t,
       "    return getSharedRpmLimiter().resolve(identity.key, identity.model).rpm !== null;",
       "    return true;",
+    ),
+  },
+  /* ── 2026-10-08：loopback 不走系统代理（providers.ts 的 resolveSystemProxy 短路）── */
+  {
+    name: "9 删 loopback 短路（本机流量又经代理 ⇒ 连接失败被翻译成 502）",
+    file: F_PROVIDERS,
+    mutate: (t) => sub(
+      t,
+      "  if (isLoopbackTarget(targetUrl)) { return null; }",
+      "  /* loopback 短路被删 */",
     ),
   },
 ];

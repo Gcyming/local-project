@@ -215,7 +215,11 @@ const MUTATIONS = [
   {
     name: "23 sidebarSearch：失败也缓存交付信息（一次抖动 = 永久打不开）",
     file: F_SIDEBAR,
-    mutate: (t) => sub(t, "  deliverPromise = p.then((d) => {\n    if (d.error) { deliverPromise = null; }   // 失败不留缓存 ⇒ 下次重试\n    return d;\n  });",
+    /* ⚠️ 原锚中间那行是「代码 + 行尾注释 + 尾随空格」，注释已被 2026-10-05 剥离
+       ⇒ 字节变成 `    if (d.error) { deliverPromise = null; }` + 3 个尾随空格。
+       ⇒ 用剥离后的真实字节重建同一块（语义不变：失败时不再清缓存 ⇒ 一次抖动永久打不开）。
+       顺带说明：这块只有 1 处命中（实测），不唯一问题只出在 a1132 那类「两条路径同形」的场景。 */
+    mutate: (t) => sub(t, "  deliverPromise = p.then((d) => {\n    if (d.error) { deliverPromise = null; }   \n    return d;\n  });",
       "  deliverPromise = p.then((d) => {\n    return d;\n  });"),
   },
 

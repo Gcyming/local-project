@@ -53,36 +53,55 @@ const TARGETS = [F_NAV, F_RSB, F_BRIDGE];
 
 const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1106b");
 
-/* ── 锚点常量（唯一出处那一行；改动时同步这里） ───────────────────────────── */
-/** 挂 `.catch` 的那一整块 —— 变 1/2 共用（内联到每个变异里以免 sub 跨块失配） */
-const CATCH_BLOCK = [
-  "  if (p && typeof (p as Promise<void>).catch === \"function\") {",
-  "    void (p as Promise<void>).catch((e: unknown) => {",
-  "      /* -3 = 被下一次导航顶掉，属正常；其余真失败由 did-fail-load 上错误页（唯一可见通道）。 */",
-  "      if (isBenignAbort(Number((e as { errno?: number } | null | undefined)?.errno))) { return; }",
-  "    });",
-  "  }",
-].join("\n");
-
-/* ⚠️ RightSidebar 里 `safeLoadURL(wv, next);` 出现**两次** ⇒ 同族锚点必须带上一行上下文。 */
-const RSB_SITE_FORCENAV = [
-  "      if (cur === next) { return; }",
-  "      /* A-1106b：换成唯一安全出口 —— 旧写法 `wv.loadURL(next)` 的异步 reject 接不住，",
-  "         Electron 会把它当未捕获异常打印（调试面板反复刷 GUEST_VIEW_MANAGER_CALL / ERR_ABORTED）。 */",
-  "      safeLoadURL(wv, next);",
-].join("\n");
-const RSB_SITE_SAFETYNET = [
-  "        if (cur && cur !== \"about:blank\") { return; }",
-  "        /* A-1106b：安全网每 300ms 会重发 —— 若不接住 reject，-3 会被漏成「反复刷屏」的主产地 */",
-  "        safeLoadURL(wv, next);",
-].join("\n");
+/* ── 锚点常量（唯一出处那一行；改动时同步这里） ───────────────────────────────
+ * ⚠️⚠️ 2026-10-08：**重打**（原写法是 `[…].join("\n")`，且已**漂移**）。
+ *
+ * ① 为什么原来是「未核验」：`check-mut-anchors.mjs` 的 `constMap` 只认四种形态
+ *    （单/双引号字面量、`+` 拼接、`path.join`、对象映射表）—— `[…].join("\n")`
+ *    不在其列 ⇒ 第 1/3/4/6 条的 `from` 解析不出来 ⇒ 报「未核验」。
+ *    按铁律「没人核验 = 没有保护」，那四条的保护强度是 0，且**比「未命中」更隐蔽**
+ *    （未命中会响，未核验是静默的 —— `_run-mut-one.mjs` 里它们显示为「⚠️解析不了」，
+ *    意味着这四条**从未被运行验证过**）。
+ *
+ * ② 为什么必须**重打**而不是只换写法（这一条比①更重要）：实测这三个旧常量的
+ *    文本**在当前源码里一处都不命中**（`命中 = 0`）——
+ *    `webviewNav.ts` 与 `RightSidebar.tsx` 里那几行注释已被剥离（HEAD 上就已如此，
+ *    不是本轮改动），于是旧 `from` 描述的是**已经不存在的源码形状**。
+ *    ⇒ 这是「锚点漂移」的真缺陷（C类）：不重打的话，即使把写法改成可核验形态，
+ *      核验器也会立刻报「未命中」—— 那正是它该报的。
+ *
+ * ③ 现在的形态：四条各是**模块级单个双引号字面量**，逐字节抄自当前源码，
+ *    各自在目标文件里**唯一命中**（已实测 1/1/1/1）。
+ *    ⚠️ 必须是**单个**字面量，**不许用 `+` 拼接**：拼接形态会让 `constMap`
+ *      落到「常量字面量解析失败」⇒ 又变回未核验（实测）。
+ *    ⚠️ 常量里那几行**只剩空行的注释残留**（`\n      \n` 之类）是源码原样，
+ *      **不要顺手"整理"** —— 整理会让它变成「未命中」，症状读起来像"源码漂移了"
+ *      （假警报指向错误对象）。
+ *    ⚠️ 核验器与运行期（`_run-mut-one.mjs` 的常量表）读**同一份**常量，
+ *      不会出现「核验器说命中、运行期说未命中」的两边打架。
+ *
+ * 变异语义**完全没变**：仍是删掉 `.catch` 那块 / 换成裸 `wv.loadURL(next)` /
+ * 去掉同步 try-catch。 */
+/** 挂 `.catch` 的那一整块 —— 变 1/2 共用。 */
+const A1106B_CATCH_BLOCK = "  if (p && typeof (p as Promise<void>).catch === \"function\") {\n    void (p as Promise<void>).catch((e: unknown) => {\n      \n      if (isBenignAbort(Number((e as { errno?: number } | null | undefined)?.errno))) { return; }\n    });\n  }";
+/** 同步 try/catch（第 6 条要把它压成一行 `const p = wv.loadURL(url)`）。 */
+const A1106B_SYNC_TRY = "  let p: unknown;\n  try {\n    p = wv.loadURL(url);\n  } catch {\n    return; \n  }";
+/** ⚠️ RightSidebar 里 `safeLoadURL(wv, next);` 出现**两次** ⇒ 同族锚点必须带上下文。
+ *  这两条靠 `navAutoLoadAllowed` 的**第一个参数**（`"url-change"` vs `"net"`）区分。 */
+const A1106B_RSB_FORCENAV = "      if (cur === next) { return; }\n      \n      if (!navAutoLoadAllowed(navFailBookRef.current, next, \"url-change\", wvAttachedRef.current)) { return; }\n      \n\n      safeLoadURL(wv, next);";
+const A1106B_RSB_SAFETYNET = "        if (cur && cur !== \"about:blank\") { return; }\n        \n\n\n        if (!navAutoLoadAllowed(navFailBookRef.current, next, \"net\", wvAttachedRef.current)) { return; }\n        \n        safeLoadURL(wv, next);";
+/* ⚠️ 旧名（CATCH_BLOCK / RSB_SITE_FORCENAV / RSB_SITE_SAFETYNET）已随上面的重打一并**删除**：
+   它们是「未核验 + 已漂移」的双重身份，留着只会让人以为还有条目在用它们。 */
 
 const MUTATIONS = [
   /* ── ① 安全出口本身 ─────────────────────────────────────────────── */
   {
     name: "1 安全出口不挂 .catch（reject 照旧逃逸 —— 本模块存在的全部意义被拿掉）",
     file: F_NAV,
-    mutate: (t) => sub(t, CATCH_BLOCK, "  /* 变异：直接丢弃，不接 reject */\n  void p;"),
+    /* ⚠️ 2026-10-08：锚点重打为当前源码形状 + 补显式的 from 字段（见文件头「锚点常量」注释）。 */
+    from: A1106B_CATCH_BLOCK,
+    to: "  /* 变异：直接丢弃，不接 reject */\n  void p;",
+    mutate: (t) => sub(t, A1106B_CATCH_BLOCK, "  /* 变异：直接丢弃，不接 reject */\n  void p;"),
   },
   {
     name: "2 安全出口退化成空操作（任何输入都直接 return）",
@@ -97,7 +116,11 @@ const MUTATIONS = [
   {
     name: "3 RightSidebar 的 forceNav 回退成裸 loadURL（异步 reject 重新逃逸）",
     file: F_RSB,
-    mutate: (t) => sub(t, RSB_SITE_FORCENAV, [
+    /* ⚠️ 2026-10-08：锚点重打 + 补显式的 from 字段（见文件头「锚点常量」注释）。
+       语义不变：`safeLoadURL(wv, next);` → 裸 `wv.loadURL(next);`。 */
+    from: A1106B_RSB_FORCENAV,
+    to: "      if (cur === next) { return; }\n      wv.loadURL(next);",
+    mutate: (t) => sub(t, A1106B_RSB_FORCENAV, [
       "      if (cur === next) { return; }",
       "      wv.loadURL(next);",
     ].join("\n")),
@@ -105,7 +128,10 @@ const MUTATIONS = [
   {
     name: "4 RightSidebar 的 300ms 安全网回退成裸 loadURL（「反复刷屏」的主产地）",
     file: F_RSB,
-    mutate: (t) => sub(t, RSB_SITE_SAFETYNET, [
+    /* ⚠️ 2026-10-08：锚点重打 + 补显式的 from 字段（见文件头「锚点常量」注释）。 */
+    from: A1106B_RSB_SAFETYNET,
+    to: "        if (cur && cur !== \"about:blank\") { return; }\n        wv.loadURL(next);",
+    mutate: (t) => sub(t, A1106B_RSB_SAFETYNET, [
       "        if (cur && cur !== \"about:blank\") { return; }",
       "        wv.loadURL(next);",
     ].join("\n")),
@@ -123,12 +149,15 @@ const MUTATIONS = [
   {
     name: "6 去掉同步 try/catch（未 attach 的同步抛会打穿调用方）",
     file: F_NAV,
+    /* ⚠️ 2026-10-08：锚点提成字面量常量 + 补显式的 from 字段（见文件头「锚点常量」注释）。 */
+    from: A1106B_SYNC_TRY,
+    to: "  const p: unknown = wv.loadURL(url);",
     mutate: (t) => sub(t, [
       "  let p: unknown;",
       "  try {",
       "    p = wv.loadURL(url);",
       "  } catch {",
-      "    return; // 未 attach 的**同步**抛：由 did-attach / 安全网兜底重试",
+      "    return; ",
       "  }",
     ].join("\n"), "  const p: unknown = wv.loadURL(url);"),
   },

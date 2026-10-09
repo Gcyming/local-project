@@ -36,7 +36,10 @@ const CHAT_PANEL = path.join(ROOT, "gui", "src", "renderer", "pages", "ChatPanel
 const CAP_STREAM = "              windowCap: await resolveSessionWindowCap(agentId, session.model).catch(() => undefined),\n";
 const CAP_RETRY_HEAD =
   "            sessionId: payload.sessionId,\n" +
-  "            // A-933：权威窗口上限（Agent.max_context 或本次模型 context_window），右栏与环同源\n";
+  /* ⚠️ A-1197 收尾（2026-10-08）：这一行是**注释剥离的残留** —— 原来的「A-933 注释行」被
+     2026-10-05 的全仓注释剥离变成了「12 空格空行」。**按现场字节保留**：顺手清理会让本锚点
+     命中 0 次（A-1090 同款教训：清空格会静默打断锚点）。 */
+  "            \n";
 const CAP_RETRY = CAP_RETRY_HEAD + "            windowCap: await resolveSessionWindowCap(agentId, session.model).catch(() => undefined),\n";
 /* A-1084：windowCap 多了第二个载体 —— **引擎请求**（保险门 `planEngineSend` 靠它判"发不发"）。
    两条请求路径各一处：stream 用 `agent.model_choice`（本轮要用的模型），retry 查注册表拿同一个。

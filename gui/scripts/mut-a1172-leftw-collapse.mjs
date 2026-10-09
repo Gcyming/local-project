@@ -52,8 +52,37 @@ const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1172");
 
 /* 正确形态（两处逐字相同，只在缩进上不同 —— 这正是 M3/M4 区分两处产地的依据）。 */
 const SLOT_ARG = '${Math.round(sidebarOpenRef.current ? sidebarWidthRef.current : 0)}px';
-const WRITE_SYNC = '      rightWrapperRef.current?.style.setProperty("--left-w", `' + SLOT_ARG + '`);';
-const WRITE_FRAME = '          rightWrapperRef.current?.style.setProperty("--left-w", `' + SLOT_ARG + '`);';
+/* ⚠️⚠️ 2026-10-08：M2/M3/M4 的三对锚点改成**模块级单个双引号字面量**。
+ *
+ * ① 为什么原来是「未核验」：`WRITE_SYNC` / `WRITE_FRAME` 原先是
+ *    `'…' + SLOT_ARG + '…'` 的**拼接**形态，而 `SLOT_ARG` 本身**含 `${…}` 插值**
+ *    ⇒ `check-mut-anchors.mjs` 的 `constMap` 走 `readConcat` 时要求每段都是
+ *    **纯字面量**，插值段解析不出来 ⇒ `from` 解析失败 ⇒ 报「未核验」。
+ *    按铁律「没人核验 = 没有保护」，M2/M3/M4 三条的保护强度是 0，
+ *    且比「未命中」更隐蔽（未命中会响，未核验是静默的）。
+ *
+ * ② 顺带修掉一个**真缺陷**：`WRITE_SYNC`（6 空格缩进）在 `App.tsx` 里**命中 2 次** ——
+ *    另一处是 10 缩进的 `WRITE_FRAME` 那一行，它**包含**前者（子串）。
+ *    ⇒ `sub` 只改第一处（恰好是本条目标，方向对），但核验器只能报「不唯一」
+ *      ⇒ 又是一条没人核验的守卫。⇒ 现在给两处各带一段**上文/下文**收窄到唯一
+ *      （已实测：两个新锚点各命中 1 次）。
+ *
+ * ③ 变异语义**完全没变**：仍是把两处（或其中一处）改成写本帧实测宽 / 裸展开宽。
+ *    ⚠️ 六个常量各自是**单个**字面量、**不许 `+` 拼接**（拼接 ⇒ constMap 解析失败
+ *      ⇒ 又变未核验，实测）。它们都逐字节取自当前源码，改源码形状时必须重新抄。
+ *    ⚠️ `${…}` 在**双引号**字面量里不是插值（那是模板字面量的语法），
+ *      所以这些锚点不需要转义 `$`，也不会被模板规则吃掉。 */
+/** RO `sync` 处的写入（**带下文** `const ro = new ResizeObserver(sync);` 收窄到唯一）。 */
+const A1172_WRITE_SYNC = "      rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(sidebarOpenRef.current ? sidebarWidthRef.current : 0)}px`);\n    };\n    const ro = new ResizeObserver(sync);";
+/** 左栏动画 `onFrame` 处的写入（**带下文** 收尾两行，本就唯一）。 */
+const A1172_WRITE_FRAME = "          rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(sidebarOpenRef.current ? sidebarWidthRef.current : 0)}px`);\n        }\n      },";
+/* M2 的两个目标：两处都改写**本帧实测宽**（RO 用 `el`、动画 onFrame 用 `node` ——
+   两处实测对象不同，所以不能用一个 subAll）。 */
+const A1172_SYNC_MEASURED = "      rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(el.getBoundingClientRect().width)}px`);\n    };\n    const ro = new ResizeObserver(sync);";
+const A1172_FRAME_MEASURED = "          rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(node.getBoundingClientRect().width)}px`);\n        }\n      },";
+/* M3 / M4 的目标：各自那一个产地改回**裸展开宽**。 */
+const A1172_SYNC_BARE = "      rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(sidebarWidthRef.current)}px`);\n    };\n    const ro = new ResizeObserver(sync);";
+const A1172_FRAME_BARE = "          rightWrapperRef.current?.style.setProperty(\"--left-w\", `${Math.round(sidebarWidthRef.current)}px`);\n        }\n      },";
 const BARE_ARG = '${Math.round(sidebarWidthRef.current)}px';
 
 const MUTATIONS = [
@@ -70,26 +99,31 @@ const MUTATIONS = [
   {
     name: "M2 两处都改成写本帧实测宽（逐帧闭环 ⇒ 六处方向反转）",
     file: F_APP,
-    /* 两处的实测表达式不同（RO 用 `el`、动画 onFrame 用 `node`）⇒ 不能用同一个 subAll。 */
+    /* ⚠️ 2026-10-08：两侧改成字面量常量 + 补显式的 from 字段（见上方常量区注释）。
+       两处的实测表达式不同（RO 用 `el`、动画 onFrame 用 `node`）⇒ 仍是两次 sub，不能用 subAll。 */
+    from: A1172_WRITE_SYNC,
+    to: A1172_SYNC_MEASURED,
     mutate: (t) => {
-      let x = sub(t, WRITE_SYNC,
-        '      rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(el.getBoundingClientRect().width)}px`);');
-      x = sub(x, WRITE_FRAME,
-        '          rightWrapperRef.current?.style.setProperty("--left-w", `${Math.round(node.getBoundingClientRect().width)}px`);');
+      let x = sub(t, A1172_WRITE_SYNC, A1172_SYNC_MEASURED);
+      x = sub(x, A1172_WRITE_FRAME, A1172_FRAME_MEASURED);
       return x;
     },
   },
   {
     name: "M3 只改 RO `sync` 那处 → 裸展开宽（产地只剩 1 处正确）",
     file: F_APP,
-    mutate: (t) => sub(t, WRITE_SYNC,
-      '      rightWrapperRef.current?.style.setProperty("--left-w", `' + BARE_ARG + '`);'),
+    /* ⚠️ 2026-10-08：同 M2（字面量常量 + 显式的 from 字段）。 */
+    from: A1172_WRITE_SYNC,
+    to: A1172_SYNC_BARE,
+    mutate: (t) => sub(t, A1172_WRITE_SYNC, A1172_SYNC_BARE),
   },
   {
     name: "M4 只改左栏动画 onFrame 那处 → 裸展开宽（产地只剩 1 处正确）",
     file: F_APP,
-    mutate: (t) => sub(t, WRITE_FRAME,
-      '          rightWrapperRef.current?.style.setProperty("--left-w", `' + BARE_ARG + '`);'),
+    /* ⚠️ 2026-10-08：同 M2（字面量常量 + 显式的 from 字段）。 */
+    from: A1172_WRITE_FRAME,
+    to: A1172_FRAME_BARE,
+    mutate: (t) => sub(t, A1172_WRITE_FRAME, A1172_FRAME_BARE),
   },
   {
     name: "M5 唤出路径（`handleToggleFloat`）不再写 `--left-w`（少一条产地）",

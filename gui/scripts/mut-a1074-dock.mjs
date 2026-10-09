@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 /* `sub` = 行尾无关的替换（共享模块，不要在本脚本另写一份）—— 见 `_mut-eol.mjs`。 */
-import { sub, nlOf, eolProblems, reportEolProblems, selfTestEolDetector, installRestoreOnSignal } from "./_mut-eol.mjs";
+import { sub, nlOf, moveAfter, moveBefore, eolProblems, reportEolProblems, selfTestEolDetector, installRestoreOnSignal } from "./_mut-eol.mjs";
 
 // ⚠️ 不能用 `new URL(...).pathname`：项目根含空格，pathname 会把空格编码成 %20 → ENOENT。
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -41,34 +41,9 @@ const SUB = "gui/src/renderer/pages/SubAgentExpandButton.tsx";
 const CSS = "gui/src/renderer/index.css";
 const TARGETS = [MODULE, PANEL, SUB, CSS];
 
-/** 把 `[start, end)` 那段搬到 `afterMarker` 之后 —— 只有「搬位置」类变异需要它。
- *  `sub` 只认字面量，几十行 JSX 逐字写进锚点不现实（且一改缩进就失效）。
- *  ⚠️ 锚点必须能唯一命中；命中不了就原样返回（主流程按「未命中」报错）。 */
-function moveAfter(text, startMarker, endMarker, afterMarker) {
-  const p = text.indexOf(startMarker);
-  const e = text.indexOf(endMarker);
-  if (p < 0 || e < 0 || p >= e) { return text; }
-  const block = text.slice(p, e);
-  const rest = text.slice(0, p) + text.slice(e);
-  const at = rest.indexOf(afterMarker);
-  if (at < 0) { return text; }
-  const cut = at + afterMarker.length;
-  return rest.slice(0, cut) + nlOf(text) + block + rest.slice(cut);
-}
-
-/** 把 `[start, end)`（**含 endMarker 本身**）搬到 `beforeMarker` 之前 —— 「把某块塞到前面/包起来」类变异用它。
- *  ⚠️ 与 `moveAfter` 同规矩：锚点必须唯一，命中不了就原样返回（主流程按「未命中」报错）。 */
-function moveBefore(text, startMarker, endMarker, beforeMarker) {
-  const p = text.indexOf(startMarker);
-  const e = text.indexOf(endMarker);
-  if (p < 0 || e < 0 || p >= e) { return text; }
-  const cut = e + endMarker.length;
-  const block = text.slice(p, cut);
-  const rest = text.slice(0, p) + text.slice(cut);
-  const at = rest.indexOf(beforeMarker);
-  if (at < 0) { return text; }
-  return rest.slice(0, at) + block + nlOf(text) + rest.slice(at);
-}
+/* ⚠️ 2026-10-08：「搬位置」两个 helper 已**提炼到 `_mut-eol.mjs` 共享**（原先本文件与 a1069
+   各有一份逐字相同的本地实现）——共享后 `_run-mut-one.mjs` 用**同一份**，无行为分叉；
+   本脚本改为 import（见上方 import 行）。锚点规矩不变：唯一命中，否则原样返回（主流程报「未命中」）。 */
 
 const MUTATIONS = [  // ── A 纯判据（floatDock.ts）────────────────────────────────────────────────
   {
@@ -232,6 +207,9 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
   {
     name: "B20 坞被排到监测栏**下面**（A-1077 用户更正的位置 —— 排回去就是把更正撤了）",
     file: PANEL,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 运行期走 moveAfter（三段锚搬位置），核验器认不出该指令，
+       原先报「未核验 = 没人核验」。from 取它的 startMarker（实测在 ChatPanel.tsx 里唯一命中 1 次）。 */
+    from: '<div className="float-dock">',
     /* ⚠️ afterMarker 必须落在**被搬走的那一段之外**：坞现在排在监测栏上面，
        所以 [坞, textarea) 里**包着**监测栏 —— 用监测栏当插入点会被一起搬走（实测 未命中）。
        改锚到输入框**之后**的工具行（落点自然就在监测栏下面）。 */
@@ -260,12 +238,18 @@ const MUTATIONS = [  // ── A 纯判据（floatDock.ts）──────�
   {
     name: "B21 输入框那个圆角框被挪到坞**之前**（坞被框起来 ⇒ absolute 面板被 overflow:hidden 裁掉，展开什么都看不见）",
     file: PANEL,
+    /* ⚠️ 2026-10-08：补 from（纯核验锚）—— 理由同 B20（运行期走 moveAfter）。 */
+    from: '<div className="float-dock">',
     /* 模型化「坞被放进框里」：把 `.glass-input` 的**开标签**搬到坞之前，
        于是那个框从坞的上方就开始（坞落进框内）。判据是两者在源码里的**先后**。 */
+    /* ⚠️ 2026-10-08（A-1197 收尾续）：`end` 锚原写 `onDrop={handleDropImages}>` —— 现场已是
+       **`handleDropFiles`**（改名未同步），单条运行验证**首次真跑**就抓到「锚点未命中」。
+       这与"核验器全绿"不矛盾：核验器只验 `from`（纯核验锚），运行期三锚由**真跑**负责
+       （本条目此前从未被真跑过）。 */
     mutate: (t) => moveBefore(
       t,
       '<div className="glass-input" style={{',
-      'onDrop={handleDropImages}>',
+      'onDrop={handleDropFiles}>',
       '{/* A-1078',
     ),
   },

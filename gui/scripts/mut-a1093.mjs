@@ -56,9 +56,33 @@ const TARGETS = [F_MARKER, F_BUILTIN, F_LOOP, F_PRODUCTS, F_THINK];
 
 const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1093");
 
-/** 正则的两种形态在源码里的字面写法（`|` 前是 `*` 或 `+`）—— 供多条变异复用 */
-const RE_STAR = "[A-Za-z0-9+/=]*";
-const RE_PLUS = "[A-Za-z0-9+/=]+";
+/* ── ③④⑤⑩ 的锚点常量（2026-10-08 补：把「`from` 藏在 `mutate:` 闭包里」改成可静态核验）──
+ *
+ * 这四条原先把锚点写成 `` sub(t, `…${RE_STAR}…`, `…${RE_PLUS}…`) `` —— **模板字面量 + 插值**。
+ * `check-mut-anchors.mjs` 的 `constMap` 对含 `${…}` 的锚点**故意拒登记**
+ * （插值求不出静态值，硬放过去会拿一个"看着像"的串去数命中数 ⇒ 假绿），
+ * 于是这四条**一条都没被数过** ⇒ 报「未核验」。按铁律「没人核验 = 没有保护」，
+ * 那四条守卫的保护强度是 0，且比「未命中」更隐蔽（未命中至少会响）。
+ *
+ * ⇒ 改成把两种形态（`*` / `+`）各自写成**模块级单个双引号字面量**，条目补显式的 from 与 to 字段：核验器的 `constMap` 与运行期（`_run-mut-one.mjs` 的常量表）
+ *   读的是**同一份常量**，不会出现「核验器说命中、运行期说未命中」的两边打架。
+ *
+ * ⚠️⚠️ 每条必须各自是**单个**字面量，**不许用 `+` 拼接**（实测）：
+ *   拼接形态会让 `constMap` 落到「常量字面量解析失败」⇒ `from` 解析不出来 ⇒ 又变未核验。
+ * ⚠️ 四条常量都是**逐字节抄自当前源码**的连续片段，且各自在目标文件里**唯一命中**
+ *   （已实测：#3 命中 1、#5 命中 1、#10 命中 1；#4 原锚点命中 **2** —— 那是
+ *   `parseDiffStat` 与 `parseDiffFull` 两个函数的公共前缀，已补足 `const oldLines`
+ *   那一行收窄到唯一）。改源码形状时必须重新抄，否则这里报「未命中」—— 那正是它该报的。
+ * ⚠️ 变异语义**完全没变**：仍是把正字符类里的 `*` 换成 `+`（`RE_STAR` → `RE_PLUS`）。
+ *   `RE_STAR` / `RE_PLUS` 两个常量**已无人引用**，保留会让人误以为还有条目在用插值形态。 */
+const A1093_MARKER_RE = "export const DIFF_MARKER_RE = /\\[__slime_diff__\\]([A-Za-z0-9+/=]*)\\|([A-Za-z0-9+/=]*)\\[\\/__slime_diff__\\]/;";
+const A1093_MARKER_RE_PLUS = "export const DIFF_MARKER_RE = /\\[__slime_diff__\\]([A-Za-z0-9+/=]+)\\|([A-Za-z0-9+/=]+)\\[\\/__slime_diff__\\]/;";
+const A1093_PARSE_STAT = "  const m = /\\[__slime_diff__\\]([A-Za-z0-9+/=]*)\\|([A-Za-z0-9+/=]*)\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);\n  const newTxt = b64ToText(m[2]);\n  if (!oldTxt && !newTxt) { return null; }\n  const oldLines = new Set(oldTxt.split(\"\\n\"));";
+const A1093_PARSE_STAT_PLUS = "  const m = /\\[__slime_diff__\\]([A-Za-z0-9+/=]+)\\|([A-Za-z0-9+/=]+)\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);\n  const newTxt = b64ToText(m[2]);\n  if (!oldTxt && !newTxt) { return null; }\n  const oldLines = new Set(oldTxt.split(\"\\n\"));";
+const A1093_PARSE_FULL = "  const m = /\\[__slime_diff__\\]([A-Za-z0-9+/=]*)\\|([A-Za-z0-9+/=]*)\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);\n  const newTxt = b64ToText(m[2]);\n  if (!oldTxt && !newTxt) { return null; }\n  if (oldTxt.length + newTxt.length > maxChars) { return null; }";
+const A1093_PARSE_FULL_PLUS = "  const m = /\\[__slime_diff__\\]([A-Za-z0-9+/=]+)\\|([A-Za-z0-9+/=]+)\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);\n  const newTxt = b64ToText(m[2]);\n  if (!oldTxt && !newTxt) { return null; }\n  if (oldTxt.length + newTxt.length > maxChars) { return null; }";
+const A1093_TRACE_MARKER_RE = "const TRACE_MARKER_RE = /\\[__slime_diff__\\][A-Za-z0-9+/=]*\\|[A-Za-z0-9+/=]*\\[\\/__slime_diff__\\]|\\[__slime_diff_trimmed__\\]/;";
+const A1093_TRACE_MARKER_RE_PLUS = "const TRACE_MARKER_RE = /\\[__slime_diff__\\][A-Za-z0-9+/=]+\\|[A-Za-z0-9+/=]+\\[\\/__slime_diff__\\]|\\[__slime_diff_trimmed__\\]/;";
 
 const MUTATIONS = [
   /* ── ① 判据：`||` 退回 `&&`（本轮的核心）───────────────────────── */
@@ -85,29 +109,33 @@ const MUTATIONS = [
   {
     name: "3 core 侧 DIFF_MARKER_RE 退回 `+`（新建文件 base64 为空 ⇒ 标记匹配不上）",
     file: F_MARKER,
-    mutate: (t) => sub(
-      t,
-      `export const DIFF_MARKER_RE = /\\[__slime_diff__\\](${RE_STAR})\\|(${RE_STAR})\\[\\/__slime_diff__\\]/;`,
-      `export const DIFF_MARKER_RE = /\\[__slime_diff__\\](${RE_PLUS})\\|(${RE_PLUS})\\[\\/__slime_diff__\\]/;`,
-    ),
+    /* ⚠️ 2026-10-08：锚点从「模板字面量 + `${RE_STAR}` 插值」改成**字面量常量**（见文件头）。
+       语义不变：`RE_STAR` 形态 → `RE_PLUS` 形态（正字符类里 `*` → `+`）。 */
+    from: A1093_MARKER_RE,
+    to: A1093_MARKER_RE_PLUS,
+    mutate: (t) => sub(t, A1093_MARKER_RE, A1093_MARKER_RE_PLUS),
   },
   {
     name: "4 渲染层 parseDiffStat 副本退回 `+`（与 core 漂离 ⇒ 徽标算不出）",
     file: F_PRODUCTS,
-    mutate: (t) => sub(
-      t,
-      `  const m = /\\[__slime_diff__\\](${RE_STAR})\\|(${RE_STAR})\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);`,
-      `  const m = /\\[__slime_diff__\\](${RE_PLUS})\\|(${RE_PLUS})\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);`,
-    ),
+    /* ⚠️ 2026-10-08：锚点提成模块级字面量常量（见文件头）。
+       ⚠️⚠️ 锚点比原写法**多带了一行** `const oldLines = new Set(oldTxt.split("\n"));`：
+         只带公共前缀（`exec` + `if (!m)` + `oldTxt`/`newTxt` + `if (!oldTxt && !newTxt)`）时
+         它在 `chatProducts.ts` 里**命中 2 次**（`parseDiffStat` 与 `parseDiffFull` 两个函数同开头）——
+         而 `sub` 只改**第一处**，也就是改到了 `parseDiffStat`（本条的目标，方向对），
+         但核验器会报「不唯一」⇒ 又是一条**没人核验**的守卫。补足那一行后**唯一命中**。 */
+    from: A1093_PARSE_STAT,
+    to: A1093_PARSE_STAT_PLUS,
+    mutate: (t) => sub(t, A1093_PARSE_STAT, A1093_PARSE_STAT_PLUS),
   },
   {
     name: "5 渲染层 parseDiffFull 副本退回 `+`（展开的红绿 diff 块对新建文件消失）",
     file: F_PRODUCTS,
-    mutate: (t) => sub(
-      t,
-      `  const m = /\\[__slime_diff__\\](${RE_STAR})\\|(${RE_STAR})\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);\n  const newTxt = b64ToText(m[2]);\n  if (!oldTxt && !newTxt) { return null; }\n  if (oldTxt.length + newTxt.length > maxChars) { return null; }`,
-      `  const m = /\\[__slime_diff__\\](${RE_PLUS})\\|(${RE_PLUS})\\[\\/__slime_diff__\\]/.exec(result);\n  if (!m) { return null; }\n  const oldTxt = b64ToText(m[1]);\n  const newTxt = b64ToText(m[2]);\n  if (!oldTxt && !newTxt) { return null; }\n  if (oldTxt.length + newTxt.length > maxChars) { return null; }`,
-    ),
+    /* ⚠️ 2026-10-08：锚点提成模块级字面量常量（见文件头）；补足 `maxChars` 那一行
+       以与 `parseDiffStat` 区分（实测唯一命中）。语义不变：`*` → `+`。 */
+    from: A1093_PARSE_FULL,
+    to: A1093_PARSE_FULL_PLUS,
+    mutate: (t) => sub(t, A1093_PARSE_FULL, A1093_PARSE_FULL_PLUS),
   },
 
   /* ── ③ 构造器：未改动短路被删 ─────────────────────────────────── */
@@ -156,11 +184,10 @@ const MUTATIONS = [
   {
     name: "10 留痕剥离正则退回 `+`（新建文件标记漏剥 ⇒ 整段 base64 漏进界面）",
     file: F_THINK,
-    mutate: (t) => sub(
-      t,
-      `const TRACE_MARKER_RE = /\\[__slime_diff__\\]${RE_STAR}\\|${RE_STAR}\\[\\/__slime_diff__\\]|\\[__slime_diff_trimmed__\\]/;`,
-      `const TRACE_MARKER_RE = /\\[__slime_diff__\\]${RE_PLUS}\\|${RE_PLUS}\\[\\/__slime_diff__\\]|\\[__slime_diff_trimmed__\\]/;`,
-    ),
+    /* ⚠️ 2026-10-08：锚点提成模块级字面量常量（见文件头）。语义不变：`*` → `+`。 */
+    from: A1093_TRACE_MARKER_RE,
+    to: A1093_TRACE_MARKER_RE_PLUS,
+    mutate: (t) => sub(t, A1093_TRACE_MARKER_RE, A1093_TRACE_MARKER_RE_PLUS),
   },
 ];
 

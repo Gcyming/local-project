@@ -38,6 +38,12 @@ const TARGETS = [F_MAIN, F_TOOLS];
 
 const SAVE_DIR = join(ROOT, "gui", "scripts", "_tmp-mut-a1095b");
 
+/* ⚠️ **锚点重打（2026-10-08）**：`TOOLFACE_GUARD` 的第二行原本带**行尾注释**
+   「内置工具 + skill 入口全保留」。2026-10-05 全仓注释剥离把该注释替换成**空行**
+   ⇒ 这条三行锚必然断裂，核验器报「未命中」= 这条守卫**已经失去保护**。
+   ⇒ 招 1（去注释）：锚点只保留**两行纯代码**，实测命中唯一 = 1
+   （`if (!name.startsWith("mcp_")) {` 在本文件只出现 1 次；另有一处 `mcp_` 模板串，
+   形态不同，不会误伤）。 */
 /* ── 锚点（多行用**拼接字面量**：`check-mut-anchors.mjs` 的 constMap 能解析，
  *    写成 `subLines(...)` 会被判「锚点写法未识别」= 未核验 = 没人核验）。 ─────────── */
 const WIRE_LINE = "      setSubagentManager(subagents);";
@@ -54,7 +60,7 @@ const ELSE_WARN =
   "        \"[scheduler] data/schedules.json 不是数组且无运行态快照 —— 跳过定时唤醒装配\"";
 const TOOLFACE_GUARD =
   "    if (!name.startsWith(\"mcp_\")) {\n"
-  + "      return true; // 内置工具 + skill 入口全保留\n"
+  + "      return true;\n"
   + "    }";
 
 const MUTATIONS = [

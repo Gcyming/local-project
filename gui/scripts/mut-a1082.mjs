@@ -155,15 +155,29 @@ const MUTATIONS = [
   {
     name: "11 保险门退回 canShrink:true（引擎以为「还能压」⇒ 永远返回 ok ⇒ 闸门形同虚设）",
     file: LOOP,
-    mutate: (t) => sub(t, "    canShrink: false, // 引擎层不压缩", "    canShrink: true, // 引擎层不压缩"),
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点带**行尾注释** `// 引擎层不压缩`。
+       2026-10-05 全仓注释剥离把注释替换成**空行**（行尾留一个空格）⇒ 锚点断裂，
+       核验器报「未命中」= 这条守卫**已经失去保护**。
+       ⇒ 招 1（去注释）+ 招 2（补上下文求唯一）：单行 `canShrink: false,` 实测全文件命中 **1 次**
+       （另有 `canShrink?: boolean;` 与 `canShrink` 变量，但都不是这个形态）⇒ 单行已唯一。
+       为抗「剥离残留的行尾空格」这类抖动，锚点**不含行尾空格**（止于逗号）。 */
+    mutate: (t) => sub(t, "    cap,\n    canShrink: false,", "    cap,\n    canShrink: true,"),
   },
   {
     name: "12 **流式**路径的闸门被摘（只剩 chat ⇒ 主链路（走 stream）完全没有保护）",
     file: ENGINE,
+    /* ⚠️ **锚点重打（2026-10-08）**：原锚点末行是注释「标记的用途见 chat() 处同名注释」。
+       2026-10-05 全仓注释剥离把它变成**空行**（行尾留一个空格）⇒锚点断裂，
+       核验器报「未命中」= 这条守卫**已经失去保护**。
+       ⇒ 招 2：锚点改成「guard 三行 + 剥离残留的那一个空行 + **流式路径独有的 yield 行**」。
+       ⚠️ 为什么必须夹 yield 行才算重打成功：`const guard = …` / `if (!guard.allow) {` /
+       `this.logger.warn(…)` 这三行在 **chat() 与 stream() 两条路径上各有一份**（实测命中 **2** 次）
+       ⇒ 只锚它们会报「不唯一（可能改错对象）」，而这条变异要打的正是**流式**那一条。
+       yield 行是流式独有的（chat 路径对应的是 `const blocked = …`），实测命中 **1** 次。 */
     mutate: (t) => sub(
       t,
-      "    const guard = this.guardSend(opts, messages, tools);\n    if (!guard.allow) {\n      this.logger.warn(`[engine] 上下文保险门拦截（未发送）: ${guard.reason}`);\n      // 标记的用途见 chat() 处同名注释",
-      "    const guard: { allow: boolean; reason: string } = { allow: true, reason: \"（变异）\" };\n    if (!guard.allow) {\n      this.logger.warn(`[engine] 上下文保险门拦截（未发送）: ${guard.reason}`);\n      // 标记的用途见 chat() 处同名注释",
+      "    const guard = this.guardSend(opts, messages, tools);\n    if (!guard.allow) {\n      this.logger.warn(`[engine] 上下文保险门拦截（未发送）: ${guard.reason}`);\n      \n      yield { type: \"error\", message: `${LOCAL_PREFLIGHT_MARKER}\\n⚠️ 本次请求**未发送** —— 上下文装不下该模型的窗口。\\n\\n${guard.reason}` };\n",
+      "    const guard: { allow: boolean; reason: string } = { allow: true, reason: \"（变异）\" };\n    if (!guard.allow) {\n      this.logger.warn(`[engine] 上下文保险门拦截（未发送）: ${guard.reason}`);\n      \n      yield { type: \"error\", message: `${LOCAL_PREFLIGHT_MARKER}\\n⚠️ 本次请求**未发送** —— 上下文装不下该模型的窗口。\\n\\n${guard.reason}` };\n",
     ),
   },
   {

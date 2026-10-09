@@ -126,9 +126,12 @@ const MUTATIONS = [
   {
     name: "6 未知额度不再放行（抛错/丢请求 ⇒ 用户看到「什么都没发生」）",
     file: F_LIMITER,
+    /* ⚠️ 剥离态下的锚点纪律（2026-10-05 全仓注释剥离后重打）：**不锚注释行**。
+       原锚点把行尾注释（// 未知 → 放行（不发明阈值））一起抄了进来，剥离后它变成尾随空白
+       ⇒ `includes` 落空、整条失效。⇒ 只锚那一行**代码**，语义逐字不变。 */
     mutate: (t) => sub(
       t,
-      "      if (rpm === null) { return { waitedMs: waited, source }; }   // 未知 → 放行（不发明阈值）",
+      "      if (rpm === null) { return { waitedMs: waited, source }; }",
       "      if (rpm === null) { throw new Error(\"unknown rpm\"); }",
     ),
   },

@@ -17,6 +17,11 @@ import path from "node:path";
 const ROOT = "D:/pilot project";
 const INDEX = path.join(ROOT, "gui", "src", "main", "index.ts");
 const MODEL_SERVER = path.join(ROOT, "core-ts", "src", "model_server.ts");
+/* ⚠️ 探针文件原来在 ⑬ 里写成 `file: path.join(ROOT, …)` **内联表达式** ⇒
+   `check-mut-anchors.mjs` 的 `file:` 解析只认「常量名 / 字面量 / 常量表」，认不出内联调用
+   ⇒ 该条落进「未核验（目标文件写法未识别）」= 没人核验 = 没有保护（实测：本条从未被核验过）。
+   ⇒ 抽成常量后核验器能解析它，与其余条目同一口径。 */
+const PROBE = path.join(ROOT, "gui", "src", "main", "localServerProbe.ts");
 
 const sha = (p) => createHash("sha1").update(fs.readFileSync(p)).digest("hex");
 
@@ -62,29 +67,38 @@ const variants = [
     to: "        port: Number(this.embedCfg.port ?? this.chatCfg.port_start ?? 0),",
   },
 
-  /* ── ② 进程所有权 ───────────────────────────────────── */
+  /* ── ②进程所有权 ───────────────────────────────────── */
+  /* ⚠️ 剥离态下的锚点纪律（2026-10-05 全仓注释剥离后重打）：**不锚注释行**。
+     ⑦⑧⑨⑪ 原先共用同一行块注释（心智中枢：记忆存储 + BGE 嵌入…）作锚点，
+     剥离后它变成空行 ⇒ 四条一起断裂。⇒ 改为**各自锚一段唯一的代码**，
+     语义不变：都是「在 GUI 主进程里引入第二个 llama-server 生命周期产地」。 */
   {
     name: "⑦ GUI 主进程自己 spawn llama-server（出现第二个起点，启动/回收开始分叉）",
     file: INDEX,
-    from: "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
+    from: "function embeddingBaseUrl(): string {",
     to: 'function __rogueSpawn(): void { spawn("llama-server.exe", ["-c", "8192"]); }\n'
-      + "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
+      + "function embeddingBaseUrl(): string {",
   },
   {
     name: "⑧ GUI 主进程自己 taskkill（进程树回收跑到运行时外面）",
     file: INDEX,
-    from: "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
-    to: 'function __rogueKill(pid: number): void { execFileSync("taskkill", ["/T", "/F", "/PID", String(pid)]); }\n'
-      + "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
+    from: "function embeddingBaseUrl(): string {",
+    to: 'function __rogueKill(pid: number): void { execFile("taskkill", ["/T", "/F", "/PID", String(pid)], () => {}); }\n'
+      + "function embeddingBaseUrl(): string {",
   },
 
   /* ── ③ PID ──────────────────────────────────────────── */
   {
     name: "⑨ GUI 主进程用 pidForPort 反查 PID（旁路运行时的私有状态）",
     file: INDEX,
-    from: "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
-    to: "function __roguePidLookup(port: number): number | null { return pidForPort(port); }\n"
-      + "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
+    /* ⚠️ 变异体连**导入一起改**：pidForPort 是 model_server 的**模块级导出**（不是静态方法），
+       只插函数不补导入会得到一段**编译不过**的 TS —— 而本项目的变异体是"下一个人顺手写回去"
+       的可信退化形态，不该是无法编译的噪声。 */
+    from: 'import { basePortFor, getModelServer, ModelServerManager, setModelServer } from "../../../core-ts/src/model_server.js";',
+    to: 'import { basePortFor, getModelServer, ModelServerManager, setModelServer, pidForPort } from "../../../core-ts/src/model_server.js";\n'
+      + "function __roguePidLookup(port: number): number | null {\n"
+      + "  return pidForPort(port);\n"
+      + "}",
   },
   {
     name: "⑩ PID 字段不再是私有（外部可以随意改写进程身份）",
@@ -97,9 +111,9 @@ const variants = [
   {
     name: "⑪ GUI 主进程直接读注册表文件（绕过 readRegistry，又多一个 JSON 解析口径）",
     file: INDEX,
-    from: "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
-    to: 'function __rogueRegistry(): string { return readFileSync(join(PROJECT_ROOT, "data", "model_servers.json"), "utf8"); }\n'
-      + "// ── 心智中枢：记忆存储 + BGE 嵌入（向量工具开关接线） ───────",
+    from: 'const PLUGINS_ROOT = join(PROJECT_ROOT, "config", "plugins");',
+    to: 'const PLUGINS_ROOT = join(PROJECT_ROOT, "config", "plugins");\n'
+      + 'function __rogueRegistry(): string { return readFileSync(join(PROJECT_ROOT, "data", "model_servers.json"), "utf8"); }',
   },
   {
     name: "⑫ 注册表路径被解析两次（两份路径可以各自漂移）",
@@ -110,7 +124,7 @@ const variants = [
   },
   {
     name: "⑬ GUI 侧不再走静态 readRegistry（自己找注册表）",
-    file: path.join(ROOT, "gui", "src", "main", "localServerProbe.ts"),
+    file: PROBE,
     from: "    const reg = ModelServerManager.readRegistry();",
     to: '    const reg = JSON.parse(readFileSync("data/model_servers.json", "utf8")) as Record<string, Record<string, unknown>>;',
   },

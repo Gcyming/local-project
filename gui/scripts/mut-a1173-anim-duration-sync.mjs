@@ -258,8 +258,8 @@ const MUTATIONS = [
     file: F_APP,
     mutate: (t) => sub(
       t,
-      "    const onCancel = (): void => {\n      leftDraggingRef.current = false; // A-1177：与起点那处成对（铁律 11）\n      endChatFreeze();\n      document.removeEventListener('pointermove', onMove);",
-      "    const onCancel = (): void => {\n      endChatFreeze();\n      document.removeEventListener('pointermove', onMove);",
+      "    const onCancel = (): void => {\n      leftDraggingRef.current = false;",
+      "    const onCancel = (): void => {",
     ),
   },
 
