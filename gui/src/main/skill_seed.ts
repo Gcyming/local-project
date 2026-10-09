@@ -23,8 +23,8 @@ import { join } from "node:path";
 const SEED_MANIFEST = ".seed-manifest.json";
 
 
-function readSeedManifest(skillsDir: string): string[] {
-  const p = join(skillsDir, SEED_MANIFEST);
+function readSeedManifest(targetDir: string): string[] {
+  const p = join(targetDir, SEED_MANIFEST);
   if (!existsSync(p)) { return []; }
   try {
     const parsed: unknown = JSON.parse(readFileSync(p, "utf8"));
@@ -34,9 +34,9 @@ function readSeedManifest(skillsDir: string): string[] {
   }
 }
 
-function writeSeedManifest(skillsDir: string, names: string[]): void {
+function writeSeedManifest(targetDir: string, names: string[]): void {
   try {
-    writeFileSync(join(skillsDir, SEED_MANIFEST), `${JSON.stringify([...names].sort(), null, 2)}\n`, "utf8");
+    writeFileSync(join(targetDir, SEED_MANIFEST), `${JSON.stringify([...names].sort(), null, 2)}\n`, "utf8");
   } catch {
     
   }
@@ -75,16 +75,16 @@ function subdirsOf(base: string): string[] {
 
 
 
-export function seedDefaultSkills(seedDir: string, skillsDir: string): string[] {
+export function seedDefaultDirs(seedDir: string, targetDir: string): string[] {
   const names = subdirsOf(seedDir);
   if (names.length === 0) { return []; }
-  const known = new Set(readSeedManifest(skillsDir));
+  const known = new Set(readSeedManifest(targetDir));
   const seeded: string[] = [];
   try {
-    mkdirSync(skillsDir, { recursive: true });
+    mkdirSync(targetDir, { recursive: true });
     for (const name of names) {
       if (known.has(name)) { continue; }
-      const target = join(skillsDir, name);
+      const target = join(targetDir, name);
       
       if (existsSync(target)) { continue; }
       cpSync(join(seedDir, name), target, { recursive: true });
@@ -94,6 +94,6 @@ export function seedDefaultSkills(seedDir: string, skillsDir: string): string[] 
   } catch {
     return seeded;
   }
-  if (seeded.length > 0) { writeSeedManifest(skillsDir, [...known]); }
+  if (seeded.length > 0) { writeSeedManifest(targetDir, [...known]); }
   return seeded;
 }

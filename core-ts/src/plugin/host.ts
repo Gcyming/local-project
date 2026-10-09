@@ -1,7 +1,7 @@
 import { ContributionScope } from "./scope.js";
 import type { DisposeReport } from "./scope.js";
 import type { PluginManifest } from "./manifest.js";
-import { describePluginSettings, describePluginUi, describePluginScripts } from "./contributes.js";
+import { describePluginSettings, describePluginUi, describePluginScripts, describePluginTheme } from "./contributes.js";
 import { describeMode } from "./mode.js";
 
 export type PluginStatus = "loaded" | "disabled" | "failed";
@@ -34,6 +34,9 @@ export interface PluginHostOptions {
   /** A-1197 · B5（L4a page）：登记扩展**自有页面**（按需起 127.0.0.1 静态服务；
    *  dispose 负责 stop —— 服务泄漏的兜底，见设计 §4.1「失控时怎么兜」）。 */
   registerPage?: (manifest: PluginManifest) => PluginContributionHandle[];
+  /** A-1198 · 主题贡献点（皮肤）：登记**声明式设计令牌**（主进程侧维护主题汇总表）。
+   *  纯数据、无副作用 —— 撤销 = 按插件名精确移除（渲染层按 `plugins_changed` 重算并回落默认）。 */
+  registerTheme?: (manifest: PluginManifest) => PluginContributionHandle[];
   /** A-1197 · B3（L4c）第二层：**装载时查一次**模式声明的工具名（由**有工具表**的装配侧注入）。
    *  返回该清单里「不存在于当前工具表」的工具名；非空 ⇒ 该插件 `failed`（不给
    *  「配了但不生效」的假自由度，设计 §4.3）。运行前每阶段还会重查（执行侧）。 */
@@ -57,6 +60,7 @@ export class PluginHost {
   private registerUi: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerScripts: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private registerPage: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
+  private registerTheme: ((manifest: PluginManifest) => PluginContributionHandle[]) | null;
   private checkModeTools: ((manifest: PluginManifest) => string[]) | null;
   private unloadable: (manifest: PluginManifest) => boolean;
 
@@ -66,6 +70,7 @@ export class PluginHost {
     this.registerUi = opts.registerUi ?? null;
     this.registerScripts = opts.registerScripts ?? null;
     this.registerPage = opts.registerPage ?? null;
+    this.registerTheme = opts.registerTheme ?? null;
     this.checkModeTools = opts.checkModeTools ?? null;
     this.unloadable = opts.unloadable ?? ((m) => m.origin !== "builtin");
   }
@@ -324,6 +329,13 @@ export class PluginHost {
     if (pageDecl !== undefined) {
       const wiring = this.contribute(scope, this.registerPage, manifest);
       contributions.push(`page:${wiring === WIRING_PENDING ? WIRING_PENDING : pageDecl.kind}`);
+    }
+    /* A-1198 · 主题贡献点（皮肤）：走 `contribute`（进 scope —— 卸载/停用即从主题表移除，
+       渲染层回落默认皮肤；纯数据无副作用，撤销句柄只做「按插件名精确移除」）。 */
+    const themeDecl = manifest.contributes?.theme;
+    if (themeDecl !== undefined) {
+      const wiring = this.contribute(scope, this.registerTheme, manifest);
+      contributions.push(`theme:${wiring === WIRING_PENDING ? WIRING_PENDING : describePluginTheme(themeDecl)}`);
     }
     entry.record.contributions = contributions;
   }

@@ -76,6 +76,10 @@
       "to": "template/skills"
     },
     {
+      "from": "template/plugins",
+      "to": "template/plugins"
+    },
+    {
       "from": "../slime_cli.py",
       "to": "slime_cli.py"
     },

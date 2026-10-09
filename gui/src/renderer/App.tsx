@@ -16,6 +16,7 @@ import { SIDEBAR_OPEN_EVENT } from "./pages/Markdown.js";
 import type { DownloadProgressInfo, BootStatus } from "../shared/ipc.js";
 import { ChevronIcon, EditIcon, MenuIcon, PlusIcon, SettingsIcon, SidebarLeftIcon, SidebarRightIcon } from "./components/Icon.js";
 import { ThemeDialogHost } from "./components/ThemeDialog.js";
+import { PluginThemeHost } from "./components/PluginThemeHost.js";
 
 import OperationFocusOverlay from "./components/OperationFocusOverlay.js";
 
@@ -2347,6 +2348,10 @@ export default function App(): JSX.Element {
       {
 }
       <ThemeDialogHost />
+
+      {/* A-1198：扩展皮肤宿主（渲染 null）——把插件声明的设计令牌落到全局 CSS 变量；
+          停用/卸载即自动回落默认（「可开可关、卸下即恢复」的落点）。 */}
+      <PluginThemeHost />
 
       {
 }

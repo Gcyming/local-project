@@ -57,8 +57,10 @@ const MUTATIONS = [
   {
     name: "M6 把播种挪出打包分支（回归：开发模式播种会遮蔽「打包版空库」故障）",
     file: F_BOOT,
-    from: `  bootstrapToml(slimeRoot);\n  bootstrapSkills(slimeRoot);\n} else {`,
-    to: `  bootstrapToml(slimeRoot);\n} else {`,
+    /* ⚠️ 2026-10-09 锚点重打（A-1198）：示例扩展播种 bootstrapPlugins() 插在 bootstrapSkills 之后，
+       原锚第三行漂移。变异意图不变：把技能播种从打包分支摘掉。 */
+    from: `  bootstrapSkills(slimeRoot);\n  bootstrapPlugins();\n} else {`,
+    to: `  bootstrapPlugins();\n} else {`,
   },
   {
     name: "M7 extraFiles 漏掉种子目录 → 安装包里没有默认技能",

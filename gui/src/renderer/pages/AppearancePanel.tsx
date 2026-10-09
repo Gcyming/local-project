@@ -21,6 +21,10 @@ import TopicRail, { type RailEntry } from "./TopicRail.js";
 import {
   loadRailParams, saveRailParams, defaultRailParams, type RailMode, type RailParams,
 } from "./railParams.js";
+import {
+  getCachedPluginThemes, getPluginThemeSelection, setPluginThemeSelection, subscribePluginTheme,
+  type AvailablePluginTheme,
+} from "../pluginTheme.js";
 
 type TabId = "chat" | "md";
 
@@ -101,6 +105,17 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
   const mode = (TABS.find((t) => t.id === tab) ?? TABS[0]).mode;
   const [params, setParams] = React.useState<RailParams>(() => loadRailParams("wave"));
   const demoScrollRef = React.useRef<HTMLDivElement | null>(null);
+
+  /* A-1198：扩展皮肤（插件提供）—— 订阅 pluginTheme 缓存（宿主组件负责拉数据与落值）。 */
+  const [pluginThemes, setPluginThemes] = React.useState<AvailablePluginTheme[]>(getCachedPluginThemes());
+  const [pluginSkin, setPluginSkin] = React.useState<string>(getPluginThemeSelection());
+  React.useEffect(() => {
+    const off = subscribePluginTheme(() => {
+      setPluginThemes(getCachedPluginThemes());
+      setPluginSkin(getPluginThemeSelection());
+    });
+    return off;
+  }, []);
 
   
   React.useEffect(() => { setParams(loadRailParams(mode)); }, [mode]);
@@ -233,6 +248,69 @@ export default function AppearancePanel({ theme = "beta", onThemeChange }: Props
               );
             })}
           </div>
+        </div>
+
+        {/* A-1198：扩展皮肤 —— 由插件 `contributes.theme` 声明的白名单设计令牌（配色/字体族/圆角）。
+            可开可关：停用或卸载该插件后，这里消失并自动回落到默认（「精装/武装」口径的落点）。 */}
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>扩展皮肤</div>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {pluginThemes.length > 0 ? `${pluginThemes.length} 套可用` : "无扩展提供"}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button
+              onClick={() => setPluginThemeSelection("")}
+              title="不叠加任何扩展皮肤，跟随上方内置主题"
+              style={{
+                flex: "0 1 190px", textAlign: "left", cursor: "pointer",
+                padding: "9px 12px", borderRadius: 12,
+                border: `1.5px solid ${pluginSkin === "" ? "var(--accent)" : "var(--border)"}`,
+                background: pluginSkin === "" ? "var(--accent-soft)" : "var(--bg-input)",
+              }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: pluginSkin === "" ? "var(--accent-hover)" : "var(--text)" }}>
+                  默认（跟随上方主题）
+                </span>
+                {pluginSkin === "" && <span style={{ fontSize: 11, color: "var(--accent-hover)", marginLeft: "auto" }}>使用中</span>}
+              </div>
+            </button>
+            {pluginThemes.map((t) => {
+              const active = pluginSkin === t.plugin;
+              const swatch = [t.tokens.accent, t.tokens.bg, t.tokens.text].filter((c): c is string => typeof c === "string");
+              return (
+                <button
+                  key={t.plugin}
+                  onClick={() => setPluginThemeSelection(t.plugin)}
+                  title={`由扩展「${t.plugin}」提供；停用该扩展即自动回落默认`}
+                  style={{
+                    flex: "0 1 190px", textAlign: "left", cursor: "pointer",
+                    padding: "9px 12px", borderRadius: 12,
+                    border: `1.5px solid ${active ? "var(--accent)" : "var(--border)"}`,
+                    background: active ? "var(--accent-soft)" : "var(--bg-input)",
+                  }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    {swatch.length > 0 && (
+                      <span style={{ display: "inline-flex", gap: 4 }}>
+                        {swatch.map((c, i) => (
+                          <span key={`${c}-${i}`} style={{ width: 14, height: 14, borderRadius: "50%", background: c, border: "1px solid rgba(255,255,255,0.15)" }} />
+                        ))}
+                      </span>
+                    )}
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: active ? "var(--accent-hover)" : "var(--text)" }}>{t.name}</span>
+                    {active && <span style={{ fontSize: 11, color: "var(--accent-hover)", marginLeft: "auto" }}>使用中</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>来自扩展：{t.plugin}</div>
+                </button>
+              );
+            })}
+          </div>
+          {pluginThemes.length === 0 && (
+            <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 6 }}>
+              还没有扩展提供皮肤 —— 去「扩展」页点「安装示例扩展」，装好后这里会出现示例皮肤（随时可切回默认）。
+            </div>
+          )}
         </div>
 
         {}

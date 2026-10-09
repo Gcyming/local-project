@@ -760,6 +760,29 @@ export default function PluginsPanel(props: Props): JSX.Element {
     }
   }, []);
 
+  /* A-1198：安装官方示例扩展（活教材）—— 已存在则不覆盖（先卸载并删除再装）。 */
+  const doInstallExample = React.useCallback(async (): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.pluginsInstallExample) {
+      showNotice(false, "当前环境不支持安装示例扩展");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await a.extras.pluginsInstallExample();
+      if (res?.ok) {
+        showNotice(true, "示例扩展 hello-slime 已安装（出现在下方列表；拨片可随时停用/卸载）");
+        await refresh();
+      } else {
+        showNotice(false, res?.error ? `安装示例扩展失败：${String(res.error)}` : "安装示例扩展失败");
+      }
+    } catch (e) {
+      showNotice(false, `安装示例扩展失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [refresh]);
+
   const doReload = React.useCallback(async (): Promise<void> => {
     const a = api.current;
     if (!a?.extras?.pluginsReload) {
@@ -842,6 +865,10 @@ export default function PluginsPanel(props: Props): JSX.Element {
         <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
           disabled={loading}
           onClick={() => { setLoading(true); void refresh(); }}>刷新</button>
+        <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
+          disabled={loading}
+          onClick={() => { void doInstallExample(); }}
+          title="从随包模板安装官方示例扩展（hello-slime）—— 把扩展的全部贡献类型演示一遍；已安装则不覆盖">安装示例扩展</button>
         <button className="btn" style={{ fontSize: 11.5, padding: "4px 10px" }}
           disabled={loading}
           onClick={() => { void doReload(); }}>重新装载</button>

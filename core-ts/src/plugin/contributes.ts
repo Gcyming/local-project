@@ -106,6 +106,9 @@ export interface PluginContributes {
   scripts?: PluginScriptDecl[];
   /** A-1197 · B5（L4a page）：扩展**自有页面**（toolbar_item 点击时打开；经 127.0.0.1 静态服务）。 */
   page?: PluginPageDecl;
+  /** A-1198 · 主题贡献点（皮肤）：声明一组**白名单设计令牌**，宿主校验后应用到全局 CSS 变量 ——
+   *  可开可关（卸载/停用即恢复默认），且**没有任何扩展 CSS 进入宿主样式表**（红线不变，见下方节注）。 */
+  theme?: PluginThemeDecl;
 }
 
 /* ── A-1197 · B4（T1 脚本信任）──────────────────────────────────────────────
@@ -158,7 +161,7 @@ const ALLOWED_DECL_FIELDS: readonly string[] = [
 ];
 
 /** `contributes` 顶层允许出现的字段。 */
-const ALLOWED_CONTRIBUTES_FIELDS: readonly string[] = ["settings", "ui", "scripts", "page"];
+const ALLOWED_CONTRIBUTES_FIELDS: readonly string[] = ["settings", "ui", "scripts", "page", "theme"];
 
 /** 单条 UI 槽位声明允许出现的全部字段（出现表外的键即拒绝）。 */
 const ALLOWED_UI_FIELDS: readonly string[] = ["slot", "id", "title", "label", "icon", "order", "refresh", "when"];
@@ -514,6 +517,10 @@ export function parsePluginContributes(raw: unknown): { ok: true; contributes: P
     const parsed = parsePluginPage(raw.page);
     if (!parsed.ok) { errors.push(...parsed.errors); } else { out.page = parsed.page; }
   }
+  if (raw.theme !== undefined) {
+    const parsed = parsePluginTheme(raw.theme);
+    if (!parsed.ok) { errors.push(...parsed.errors); } else { out.theme = parsed.theme; }
+  }
   /* 交叉校验（B5）：`toolbar_item` 的唯一用途就是「打开本插件的 page」——
      有它却没 page ⇒ 点了没东西可开（假按钮）。fail-closed：整份拒。 */
   if ((out.ui ?? []).some((u) => u.slot === "toolbar_item") && out.page === undefined) {
@@ -779,4 +786,167 @@ export function describePluginUi(ui: PluginUiContribution[] | undefined): string
 /** 声明项的摘要（给 `PluginRecord.contributions` 计数用，不含任何取值）。 */
 export function describePluginSettings(settings: PluginSettingDecl[] | undefined): string {
   return `${settings?.length ?? 0}项`;
+}
+
+/* ── A-1198 · 主题贡献点（theme）：声明式「皮肤」───────────────────────────────
+ * 用户口径：扩展是「外部武装 / 精装」——可开可关、不改程序本身。主题是这套口径在**外观**上的
+ * 延伸：插件只**声明一组白名单设计令牌**（design tokens），由宿主校验后应用到全局 CSS 变量；
+ * **没有任何扩展 CSS / JSX 进入宿主样式表**（红线不变 —— 设计 §4.4 说「扩展不能贡献 CSS」，
+ * 本机制是「宿主渲染器 + 声明」在颜色维度上的等价物：宿主负责落值，插件只报期望）。
+ *
+ * 令牌是**白名单**且值形态受限（颜色只收 hex、字体与圆角只收枚举）：
+ * 拿不到任意 CSS 值，就顺手拿不到「用样式做坏事」的面（外联 url()、表达式、@import 皆不可能）。
+ */
+
+/** 色彩令牌 → CSS 变量的**单一产地**（渲染层按它落值；守卫按它核对 index.css 里的真变量名）。 */
+export const PLUGIN_THEME_COLOR_VARS = {
+  accent: "--accent",
+  accentHover: "--accent-hover",
+  accentSoft: "--accent-soft",
+  bg: "--bg",
+  bgSecondary: "--bg-secondary",
+  bgCard: "--bg-card",
+  bgInput: "--bg-input",
+  bgHover: "--bg-hover",
+  border: "--border",
+  text: "--text",
+  textSecondary: "--text-secondary",
+  textMuted: "--text-muted",
+} as const;
+
+export type PluginThemeColorToken = keyof typeof PLUGIN_THEME_COLOR_VARS;
+
+/** 字体族令牌（枚举 ⇒ 预置字体栈；不收任意字符串 —— 不收就是最强的注入防护）。 */
+export const PLUGIN_THEME_FONT_STACKS = {
+  system: "\"Microsoft YaHei\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+  serif: "Georgia, \"Times New Roman\", \"Songti SC\", \"SimSun\", serif",
+  mono: "Consolas, \"Cascadia Mono\", \"Cascadia Code\", Menlo, monospace",
+} as const;
+
+export type PluginThemeFontToken = keyof typeof PLUGIN_THEME_FONT_STACKS;
+
+/** 圆角令牌（枚举 ⇒ 预置尺度；覆盖 `--radius-*` 四个变量）。 */
+export const PLUGIN_THEME_RADIUS_SCALES = {
+  default: { lg: "12px", md: "10px", sm: "6px", bubble: "16px" },
+  round: { lg: "16px", md: "14px", sm: "10px", bubble: "20px" },
+  sharp: { lg: "6px", md: "5px", sm: "3px", bubble: "8px" },
+} as const;
+
+export type PluginThemeRadiusToken = keyof typeof PLUGIN_THEME_RADIUS_SCALES;
+
+/** 令牌集：色彩（hex）+ `font` / `radius`（枚举）。 */
+export type PluginThemeTokens = Partial<Record<PluginThemeColorToken, string>> & {
+  font?: PluginThemeFontToken;
+  radius?: PluginThemeRadiusToken;
+};
+
+export interface PluginThemeDecl {
+  /** 皮肤展示名（「外观」页的可选项）。 */
+  name: string;
+  tokens: PluginThemeTokens;
+}
+
+export const MAX_THEME_NAME = 24;
+
+/** 颜色令牌的合法形态：只收 `#RRGGBB` / `#RRGGBBAA`。 */
+export const PLUGIN_THEME_HEX_RE = /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/;
+
+const ALLOWED_THEME_FIELDS: readonly string[] = ["name", "tokens"];
+
+const THEME_TOKEN_KEYS: readonly string[] = [...Object.keys(PLUGIN_THEME_COLOR_VARS), "font", "radius"];
+
+/**
+ * 解析 `contributes.theme`（单对象）。fail-closed 全量校验：
+ * 未知字段 / name 缺失或超长 / tokens 非对象或空 / 未知令牌键 / 颜色非 hex / 枚举越界 —— 一律拒。
+ */
+export function parsePluginTheme(raw: unknown): { ok: true; theme: PluginThemeDecl } | { ok: false; errors: string[] } {
+  if (!isPlainObject(raw)) {
+    return { ok: false, errors: ["contributes.theme 必须是对象"] };
+  }
+  const errors: string[] = [];
+  for (const field of Object.keys(raw)) {
+    if (!ALLOWED_THEME_FIELDS.includes(field)) {
+      errors.push(`contributes.theme 含未知字段：${field}（允许的字段：${ALLOWED_THEME_FIELDS.join("、")}）`);
+    }
+  }
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (!name) {
+    errors.push("contributes.theme.name 缺失或为空（皮肤要有展示名）");
+  } else if (name.length > MAX_THEME_NAME) {
+    errors.push(`contributes.theme.name 过长（${name.length} > ${MAX_THEME_NAME}）`);
+  }
+
+  let tokens: PluginThemeTokens | undefined;
+  if (!isPlainObject(raw.tokens)) {
+    errors.push("contributes.theme.tokens 必须是对象（至少 1 个令牌）");
+  } else {
+    const t: Record<string, string> = {};
+    const keys = Object.keys(raw.tokens);
+    if (keys.length === 0) {
+      errors.push("contributes.theme.tokens 不得为空对象（不声明就别写 theme）");
+    }
+    for (const key of keys) {
+      const value = raw.tokens[key];
+      if (!THEME_TOKEN_KEYS.includes(key)) {
+        errors.push(`contributes.theme.tokens 含未知令牌：${key}（允许：${THEME_TOKEN_KEYS.join("、")}）`);
+        continue;
+      }
+      if (key === "font" || key === "radius") {
+        const allowed: readonly string[] = key === "font"
+          ? Object.keys(PLUGIN_THEME_FONT_STACKS)
+          : Object.keys(PLUGIN_THEME_RADIUS_SCALES);
+        if (typeof value !== "string" || !allowed.includes(value)) {
+          errors.push(`contributes.theme.tokens.${key} 必须是枚举值 ${allowed.join(" / ")}（收到：${JSON.stringify(value)}）`);
+          continue;
+        }
+        t[key] = value;
+        continue;
+      }
+      /* 颜色令牌：只收 hex（不收 rgb()/var()/命名色/url() —— 白名单外一律拒）。 */
+      if (typeof value !== "string" || !PLUGIN_THEME_HEX_RE.test(value)) {
+        errors.push(`contributes.theme.tokens.${key} 必须是 #RRGGBB 或 #RRGGBBAA 十六进制色（收到：${JSON.stringify(value)}）`);
+        continue;
+      }
+      t[key] = value;
+    }
+    if (Object.keys(t).length > 0) {
+      tokens = t as PluginThemeTokens;
+    }
+  }
+  if (errors.length > 0 || tokens === undefined) {
+    return { ok: false, errors: errors.length > 0 ? errors : ["contributes.theme.tokens 解析为空"] };
+  }
+  return { ok: true, theme: { name, tokens } };
+}
+
+/**
+ * 把声明展开成「CSS 变量 → 值」的落值计划（**纯函数**，单一产地）：
+ * 渲染层照此 `setProperty`，守卫照此核对「令牌 ↔ 真变量」。枚举令牌在这里展开成预置值。
+ */
+export function themeTokenAssignments(theme: PluginThemeDecl): Array<{ variable: string; value: string }> {
+  const out: Array<{ variable: string; value: string }> = [];
+  for (const [token, value] of Object.entries(theme.tokens)) {
+    if (token === "font") {
+      out.push({ variable: "--font-ui", value: PLUGIN_THEME_FONT_STACKS[value as PluginThemeFontToken] });
+      continue;
+    }
+    if (token === "radius") {
+      const scale = PLUGIN_THEME_RADIUS_SCALES[value as PluginThemeRadiusToken];
+      out.push(
+        { variable: "--radius-lg", value: scale.lg },
+        { variable: "--radius-md", value: scale.md },
+        { variable: "--radius-sm", value: scale.sm },
+        { variable: "--radius-bubble", value: scale.bubble },
+      );
+      continue;
+    }
+    out.push({ variable: PLUGIN_THEME_COLOR_VARS[token as PluginThemeColorToken], value: String(value) });
+  }
+  return out;
+}
+
+/** 主题声明的摘要（给 `PluginRecord.contributions` 计数用）。 */
+export function describePluginTheme(theme: PluginThemeDecl | undefined): string {
+  if (!theme) { return "0"; }
+  return `${theme.name}（${Object.keys(theme.tokens).length} 令牌）`;
 }

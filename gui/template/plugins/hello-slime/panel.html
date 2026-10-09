@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hello-slime · 示例面板</title>
+  <style>
+    /* 这块页面的每一个像素都由扩展自己决定 —— 这是「外部武装」在视觉上的最大自由度。
+       边界：它活在自己 127.0.0.1 的静态服务 + 沙箱 iframe 里，碰不到宿主的 DOM/CSS。 */
+    :root {
+      --accent: #2dd4bf;
+      --accent-soft: #2dd4bf22;
+      --bg: #07120f;
+      --card: #0d1f1c;
+      --line: #1d4a44;
+      --text: #e7f6f3;
+      --dim: #9fd0c8;
+      --muted: #6d9a93;
+    }
+    [data-skin="dusk"] {
+      --accent: #a78bfa; --accent-soft: #a78bfa22; --bg: #0d0a1a; --card: #171128;
+      --line: #3b2f63; --text: #f1ecff; --dim: #c4b5fd; --muted: #8b7fb8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+      font-family: "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+      padding: 18px; transition: background .25s ease;
+    }
+    .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+    .head h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+    .head .clock { margin-left: auto; font-size: 12px; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .sub { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    }
+    .card h2 { font-size: 12.5px; margin: 0 0 8px; color: var(--accent); font-weight: 600; letter-spacing: .4px; }
+    .card p, .card li { font-size: 12px; color: var(--dim); line-height: 1.7; margin: 0; }
+    .card ul { margin: 0; padding-left: 16px; }
+    .swatches { display: flex; gap: 6px; margin-top: 8px; }
+    .swatches i { width: 22px; height: 22px; border-radius: 6px; border: 1px solid #ffffff22; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    button {
+      font: inherit; font-size: 12px; color: var(--text); background: var(--accent-soft);
+      border: 1px solid var(--line); border-radius: 9px; padding: 6px 12px; cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    code { font-family: Consolas, Menlo, monospace; font-size: 11.5px; color: var(--accent); }
+    .mono { font-family: Consolas, Menlo, monospace; font-size: 11.5px; color: var(--muted); word-break: break-all; }
+    .foot { margin-top: 12px; font-size: 11px; color: var(--muted); line-height: 1.7; }
+    .full { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <h1>hello-slime · 示例面板</h1>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+  <div class="sub">官方示例扩展的自有页面：HTML / CSS / JS 全部由扩展自己写 —— 这就是「完全自定义外观」的形态。</div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>一、这块面板里，扩展能做主的部分</h2>
+      <ul>
+        <li>任意布局、配色、字体、动效 —— 就像你现在看到的</li>
+        <li>可以跑自己的 JS：右上角时钟每秒走动</li>
+        <li>可以 fetch 同服务的资源（点下面的按钮试试读 plugin.json）</li>
+      </ul>
+      <div class="row">
+        <button id="skinBtn">切换本页配色</button>
+        <button id="fetchBtn">读取 plugin.json</button>
+      </div>
+      <div class="mono" id="fetchOut" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>二、它碰不到的部分（结构性边界）</h2>
+      <ul>
+        <li>宿主 DOM / 宿主样式表：沙箱 iframe 跨源隔离，摸不到</li>
+        <li>slime 的主题：想让<b>整个应用</b>换装，走 <code>contributes.theme</code>（本扩展就带了一套「示例·暮色青」）</li>
+        <li>任意文件：页面只从 127.0.0.1 静态服务读本扩展目录内的文件</li>
+      </ul>
+      <div class="swatches">
+        <i style="background:#2dd4bf"></i><i style="background:#0c1f1d"></i>
+        <i style="background:#e7f6f3"></i><i style="background:#a78bfa"></i>
+      </div>
+    </div>
+
+    <div class="card full">
+      <h2>三、可开可关（「武装」口径）</h2>
+      <p>
+        关掉 hello-slime 的拨片：这块面板、输入栏按钮、状态行条目、示例皮肤、示例模式**全部消失**，
+        安静得像没来过；重新打开，它们原样回来。<b>不修改 slime 程序本身</b>，删掉并删除目录即彻底移除。
+        页面的关闭按钮在右栏标签上 —— 关掉后再点输入栏「打开示例面板」可再次打开。
+      </p>
+    </div>
+  </div>
+
+  <div class="foot">
+    页面地址由宿主按需起 127.0.0.1 静态服务提供（绝不用 file://）；本页不加载任何外部资源，离线可用。
+  </div>
+
+  <script>
+    (function () {
+      var clockEl = document.getElementById("clock");
+      function tick() {
+        clockEl.textContent = new Date().toLocaleTimeString();
+      }
+      tick();
+      setInterval(tick, 1000);
+
+      var skinBtn = document.getElementById("skinBtn");
+      skinBtn.addEventListener("click", function () {
+        var cur = document.documentElement.getAttribute("data-skin");
+        document.documentElement.setAttribute("data-skin", cur === "dusk" ? "teal" : "dusk");
+      });
+
+      var out = document.getElementById("fetchOut");
+      document.getElementById("fetchBtn").addEventListener("click", function () {
+        out.textContent = "读取中…";
+        fetch("./plugin.json")
+          .then(function (r) { return r.json(); })
+          .then(function (j) { out.textContent = "OK：" + j.name + " v" + j.version + "（同服务 fetch 可用）"; })
+          .catch(function (e) { out.textContent = "读取失败：" + e.message; });
+      });
+    })();
+  </script>
+</body>
+</html>

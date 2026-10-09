@@ -124,7 +124,7 @@ export function parsePluginManifest(raw: unknown): ParsePluginManifestResult {
     const parsedContributes = parsePluginContributes(contributesRaw);
     if (!parsedContributes.ok) {
       errors.push(...parsedContributes.errors);
-    } else if (parsedContributes.contributes.settings !== undefined || parsedContributes.contributes.ui !== undefined || parsedContributes.contributes.scripts !== undefined || parsedContributes.contributes.page !== undefined) {
+    } else if (parsedContributes.contributes.settings !== undefined || parsedContributes.contributes.ui !== undefined || parsedContributes.contributes.scripts !== undefined || parsedContributes.contributes.page !== undefined || parsedContributes.contributes.theme !== undefined) {
       contributes = parsedContributes.contributes;
     }
   }

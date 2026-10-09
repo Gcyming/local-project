@@ -236,13 +236,13 @@ describe("A-1197⑤ B1「设置贡献点」必须被写进创造模式导引（�
   });
 
   it("K 与 provides 的关系必须说清（provides 无 UI / contributes.* 带宿主 UI 或装配工具）", () => {
-    /* A-1198 同步（B2–B6 落地后）：contributes 从「只有 settings」扩到四类
+    /* A-1198 同步（B2–B6 落地后）：contributes 从「只有 settings」扩到五类（+ 主题皮肤 theme）
        （settings / ui / scripts / page）—— 判据随之泛化，但
        「provides 与 contributes 是两回事」这条**语义一字不动**。 */
     expect(GUIDE).toContain("`provides` 是无 UI 的资产贡献");
     expect(GUIDE).toContain("`contributes.*` 是**由宿主渲染成 UI 或装配成工具**的贡献点");
     // 四类都必须点名（少一类 = 那一类的能力对 Agent 等于不存在）
-    for (const c of ["`settings`", "`ui`", "`scripts`", "`page`"]) {
+    for (const c of ["`settings`", "`ui`", "`scripts`", "`page`", "`theme`"]) {
       expect(GUIDE, `contributes 四类漏了 ${c}`).toContain(c);
     }
   });

@@ -117,6 +117,8 @@ export const IPC_CHANNELS = {
   plugins_trust_set: "slime:plugins:trustSet",
   /** A-1197 · B5（L4a page）：打开扩展自有页面（按需起 127.0.0.1 静态服务，返回 url）。 */
   plugins_page_open: "slime:plugins:pageOpen",
+  /** A-1198：安装官方示例扩展（从随包 template/plugins 复制到 config/plugins；已存在则拒绝覆盖）。 */
+  plugins_install_example: "slime:plugins:installExample",
   
   plugins_changed: "slime:plugins:changed",
   chat_suggest: "slime:chat:suggest",
@@ -621,8 +623,18 @@ export interface PluginUiSlotDTO {
   conflict?: boolean;
 }
 
+/** A-1198 · 主题贡献点（皮肤）：一条已接线的主题声明（渲染层按它落 CSS 变量；卸载即消失）。 */
+export interface PluginThemeDTO {
+  plugin: string;
+  name: string;
+  /** 白名单设计令牌（解析已 fail-closed 校验；渲染层只需落值，无需再验）。 */
+  tokens: import("../../../core-ts/src/plugin/contributes.js").PluginThemeTokens;
+}
+
 export interface PluginUiSnapshotDTO {
   slots: PluginUiSlotDTO[];
+  /** A-1198：可用的扩展皮肤（空数组 = 没有插件声明 theme）。 */
+  themes: PluginThemeDTO[];
   warnings: string[];
 }
 

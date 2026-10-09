@@ -9,7 +9,7 @@
  * ⇒ 用户不问，Agent 就永远不知道自己多了一整套能力（A-1196 截图场景的直接复发）。
  *
  * ## 断言分五组
- *   A. selfAwarenessGuide：**两种模式**都必须看到六项能力清单 ——
+ *   A. selfAwarenessGuide：**两种模式**都必须看到七项能力清单 ——
  *      用户口径：「默认的以及未创建的所有 Agent」都要知道自己的能力。
  *   B. creatorGuide：四类 contributes 的声明示例与规则（ui / scripts / page / mode）。
  *   C. 关键数字与实现**同源**（8 阶段 / 4000 字 / 1–500 / 30s / 256KB / 四槽位）——
@@ -55,7 +55,7 @@ const PRELOAD_SRC = read("gui/src/preload/index.ts");
 const PANEL_SRC = read("gui/src/renderer/pages/PluginsPanel.tsx");
 const IPC_SRC = read("gui/src/shared/ipc.ts");
 
-describe("A-1198-S ① 两种模式的自述都必须涵盖六项能力", () => {
+describe("A-1198-S ① 两种模式的自述都必须涵盖七项能力", () => {
   const six: Array<[string, string]> = [
     ["技能", "· 技能"],
     ["设置项", "· 设置项"],
@@ -63,6 +63,7 @@ describe("A-1198-S ① 两种模式的自述都必须涵盖六项能力", () => 
     ["脚本工具", "· 脚本工具"],
     ["自有页面", "· 自有页面"],
     ["运行模式", "· 运行模式"],
+    ["主题皮肤", "· 主题皮肤"],
   ];
   for (const [label, needle] of six) {
     it(`默认模式也知道「${label}」（否则用户不问就永远不知道）`, () => {
@@ -80,7 +81,7 @@ describe("A-1198-S ① 两种模式的自述都必须涵盖六项能力", () => 
     }
   });
 
-  it("自定义模式（custom）也拿到六项清单，且标签不许说成「默认模式」（它是另一个可选模式）", () => {
+  it("自定义模式（custom）也拿到七项清单，且标签不许说成「默认模式」（它是另一个可选模式）", () => {
     const c = selfAwarenessGuide(CUSTOM);
     expect(c).toContain("· 运行模式");
     expect(c).toContain("自定义模式");
@@ -135,7 +136,7 @@ describe("A-1198-S ① 两种模式的自述都必须涵盖六项能力", () => 
   });
 });
 
-describe("A-1198-S ② creatorGuide 必须涵盖四类 contributes（B2–B6 全落地）", () => {
+describe("A-1198-S ② creatorGuide 必须涵盖五类 contributes（B2–B6 + 主题皮肤全落地）", () => {
   it("① UI 槽位：字段名 + 四个槽位名 + toolbar_item⇔page 交叉约束", () => {
     expect(GUIDE).toContain("contributes.ui");
     for (const slot of ["settings_panel", "status_item", "chat_action", "toolbar_item"]) {

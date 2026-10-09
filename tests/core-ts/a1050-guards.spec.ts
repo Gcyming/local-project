@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { seedDefaultSkills } from "../../gui/src/main/skill_seed.js";
+import { seedDefaultDirs } from "../../gui/src/main/skill_seed.js";
 import { DEFAULT_TOOL_PROFILE } from "../../core-ts/src/services/agentTools.js";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -51,12 +51,12 @@ function skillBody(dir: string, name: string): string {
   return readFileSync(join(dir, name, "SKILL.md"), "utf8");
 }
 
-describe("A-1050 A. seedDefaultSkills 语义", () => {
+describe("A-1050 A. seedDefaultDirs 语义（原 seedDefaultSkills；A-1198 泛化改名，技能与示例扩展共用同一播种实现）", () => {
   it("首次播种：把种子目录里的技能复制进用户技能库，并返回复制名单", () => {
     makeSeedSkill("alpha", "# alpha default");
     makeSeedSkill("beta", "# beta default");
 
-    const seeded = seedDefaultSkills(seedDir, skillsDir);
+    const seeded = seedDefaultDirs(seedDir, skillsDir);
 
     expect(seeded.sort()).toEqual(["alpha", "beta"]);
     expect(skillBody(skillsDir, "alpha")).toBe("# alpha default");
@@ -71,36 +71,36 @@ describe("A-1050 A. seedDefaultSkills 语义", () => {
     mkdirSync(join(skillsDir, "alpha"), { recursive: true });
     writeFileSync(join(skillsDir, "alpha", "SKILL.md"), "# 用户自己改过的 alpha", "utf8");
 
-    const seeded = seedDefaultSkills(seedDir, skillsDir);
+    const seeded = seedDefaultDirs(seedDir, skillsDir);
     expect(seeded).toEqual(["beta"]);
     expect(skillBody(skillsDir, "alpha")).toBe("# 用户自己改过的 alpha");
     expect(skillBody(skillsDir, "beta")).toBe("# beta");
 
     
     rmSync(join(skillsDir, "alpha"), { recursive: true, force: true });
-    expect(seedDefaultSkills(seedDir, skillsDir)).toEqual(["alpha"]);
+    expect(seedDefaultDirs(seedDir, skillsDir)).toEqual(["alpha"]);
     expect(skillBody(skillsDir, "alpha")).toBe("# alpha default");
   });
 
   it("不复活：用户删掉已播种的技能后，再启动不会把它放回来", () => {
     makeSeedSkill("alpha", "# alpha default");
-    expect(seedDefaultSkills(seedDir, skillsDir)).toEqual(["alpha"]);
+    expect(seedDefaultDirs(seedDir, skillsDir)).toEqual(["alpha"]);
 
     
     rmSync(join(skillsDir, "alpha"), { recursive: true, force: true });
 
-    expect(seedDefaultSkills(seedDir, skillsDir)).toEqual([]);
+    expect(seedDefaultDirs(seedDir, skillsDir)).toEqual([]);
     expect(existsSync(join(skillsDir, "alpha"))).toBe(false);
   });
 
   it("幂等：连续两次播种，第二次没有任何新复制", () => {
     makeSeedSkill("alpha");
-    expect(seedDefaultSkills(seedDir, skillsDir)).toEqual(["alpha"]);
-    expect(seedDefaultSkills(seedDir, skillsDir)).toEqual([]);
+    expect(seedDefaultDirs(seedDir, skillsDir)).toEqual(["alpha"]);
+    expect(seedDefaultDirs(seedDir, skillsDir)).toEqual([]);
   });
 
   it("种子目录不存在 → 返回空且不抛（播种失败绝不能拦住启动）", () => {
-    expect(seedDefaultSkills(join(sandbox as string, "nope"), skillsDir)).toEqual([]);
+    expect(seedDefaultDirs(join(sandbox as string, "nope"), skillsDir)).toEqual([]);
     expect(existsSync(skillsDir)).toBe(false);
   });
 
@@ -109,7 +109,7 @@ describe("A-1050 A. seedDefaultSkills 语义", () => {
     mkdirSync(join(seedDir, ".disabled"), { recursive: true });
     writeFileSync(join(seedDir, "README.md"), "not a skill", "utf8");
 
-    expect(seedDefaultSkills(seedDir, skillsDir)).toEqual(["alpha"]);
+    expect(seedDefaultDirs(seedDir, skillsDir)).toEqual(["alpha"]);
     expect(existsSync(join(skillsDir, ".disabled"))).toBe(false);
     expect(existsSync(join(skillsDir, "README.md"))).toBe(false);
   });
@@ -119,7 +119,7 @@ describe("A-1050 A. seedDefaultSkills 语义", () => {
     mkdirSync(join(seedDir, "alpha", "scripts"), { recursive: true });
     writeFileSync(join(seedDir, "alpha", "scripts", "run.py"), "print(1)\n", "utf8");
 
-    seedDefaultSkills(seedDir, skillsDir);
+    seedDefaultDirs(seedDir, skillsDir);
     expect(existsSync(join(skillsDir, "alpha", "scripts", "run.py"))).toBe(true);
   });
 });

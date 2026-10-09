@@ -460,10 +460,11 @@ import { loadPluginsFromDisk, pluginSkillsRoot } from "../../../core-ts/src/plug
 import type { RejectedPluginDir } from "../../../core-ts/src/plugin/loader.js";
 import { markPluginDisabled, readDisabledPlugins, unmarkPluginDisabled } from "../../../core-ts/src/plugin/disabled-store.js";
 import type { PluginUiContribution } from "../../../core-ts/src/plugin/contributes.js";
+import type { PluginThemeDecl } from "../../../core-ts/src/plugin/contributes.js";
 import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
 import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
 import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
-import type { PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
+import type { PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate, Tool } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
@@ -1607,6 +1608,8 @@ async function refreshAgentSkills(): Promise<void> {
 // skills 的实际装配仍走上面的 refreshAgentSkills —— 这里只登记清单与贡献，不重复装配。
 // 登记什么、怎么撤销，全部由下面注入的钩子决定：host 本身不知道任何具体工具名。
 const PLUGINS_ROOT = join(PROJECT_ROOT, "config", "plugins");
+/* A-1198：官方示例扩展名（随包 `template/plugins/<name>` 播种/一键安装的落点 —— 名字单一产地）。 */
+const EXAMPLE_PLUGIN_NAME = "hello-slime";
 /* A-1196：插件禁用名单（持久化）—— 扩展页拨片开关「关」的记录。
    重扫/重启后按名单把对应插件装载后立即卸载（记录在、贡献撤），开关保持「关」。 */
 const PLUGINS_DISABLED_FILE = join(PROJECT_ROOT, "config", "plugins-disabled.json");
@@ -1634,6 +1637,10 @@ const pluginSkillSourceHandles = new Map<string, Promise<{ name: string; dispose
  * activate 时 registerUi 写入、dispose 时按插件名精确移除（与 pluginSkillSourceHandles 同模式）。
  * 被卸载/被禁用/rejected 的插件不在表里 ⇒ `plugins_ui` 自然回不出它们的槽位（不留幽灵）。 */
 const pluginUiDecls = new Map<string, PluginUiContribution[]>();
+
+/** A-1198 · 主题贡献点（皮肤）：已接线的主题声明（`plugins_ui` 快照的 themes 数据源）。
+ *  纯数据表 —— activate 时写入、dispose 时按插件名移除；渲染层按 `plugins_changed` 重算。 */
+const pluginThemeDecls = new Map<string, PluginThemeDecl>();
 
 /** 汇总各插件已接线的 UI 声明（`plugins_ui` handler 的唯一数据源）。
  *  冲突裁决（设计 §4.1）：同 slot 同 id 时按 order（缺省 0）再按插件名排序取第一个，
@@ -1677,7 +1684,11 @@ function pluginUiSnapshot(): PluginUiSnapshotDTO {
     || (a.order ?? 0) - (b.order ?? 0)
     || (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0)
     || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { slots: out, warnings: [] };
+  /* A-1198 · 主题（皮肤）：按插件名排序保证快照稳定（渲染层按 plugin 名持久化选择）。 */
+  const themes: PluginThemeDTO[] = [...pluginThemeDecls.entries()]
+    .map(([plugin, theme]) => ({ plugin, name: theme.name, tokens: theme.tokens }))
+    .sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0));
+  return { slots: out, themes, warnings: [] };
 }
 
 /* ── A-1197 · B4（T1 脚本信任）：扩展脚本的执行边界（设计 §5.1）──────────────
@@ -1891,6 +1902,26 @@ function createPluginHost(dirs: Map<string, string>): PluginHost {
               }
             } catch (e) {
               console.error(`[gui:plugins] 插件页面服务清理异常（${manifest.name}）：${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
+        },
+      ];
+    },
+    /* A-1198 · 主题贡献点（皮肤）：纯数据登记 —— 进 `pluginThemeDecls` 表（`plugins_ui` 快照的
+       themes 数据源）；撤销 = 按插件名精确移除（渲染层按 `plugins_changed` 重算并回落默认皮肤，
+       满足「可开可关、卸下即恢复」。「get === theme」守卫防重装时误删新表）。 */
+    registerTheme: (manifest) => {
+      const theme = manifest.contributes?.theme;
+      if (!theme) {
+        return [];
+      }
+      pluginThemeDecls.set(manifest.name, theme);
+      return [
+        {
+          label: `${manifest.name} 的皮肤（${theme.name}）`,
+          dispose: () => {
+            if (pluginThemeDecls.get(manifest.name) === theme) {
+              pluginThemeDecls.delete(manifest.name);
             }
           },
         },
@@ -5586,6 +5617,27 @@ function registerIpcHandlers(): void {
      数据源 = `pluginUiDecls`（activate 时 registerUi 写入、dispose 时移除）——
      只回「已接线」插件的槽位；跨插件冲突项已标 `conflict: true`（渲染层渲染成禁用态）。 */
   handleTrusted<void>(IPC_CHANNELS.plugins_ui, async (): Promise<PluginUiSnapshotDTO> => pluginUiSnapshot());
+
+  /* A-1198：安装官方示例扩展（活教材）—— 从随包 `template/plugins/<name>` 复制到
+     `<数据根>/config/plugins/<name>`，装完立即重扫（扩展页自己刷新）。
+     已存在 ⇒ 拒绝覆盖（先卸载并删除再装 —— 示例只是起点，用户改过的东西不能被覆盖）。 */
+  handleTrusted<void>(IPC_CHANNELS.plugins_install_example, async (): Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }> => {
+    const src = join(INSTALL_ROOT, "template", "plugins", EXAMPLE_PLUGIN_NAME);
+    const dest = join(PLUGINS_ROOT, EXAMPLE_PLUGIN_NAME);
+    if (!existsSync(src)) {
+      return { ok: false, error: `随包示例扩展缺位（检查打包配置 extraFiles: template/plugins）：${src}` };
+    }
+    if (existsSync(dest)) {
+      return { ok: false, error: `已存在同名扩展目录，不覆盖（如需重来：先卸载并删除该目录）：${dest}` };
+    }
+    try {
+      cpSync(src, dest, { recursive: true });
+    } catch (e) {
+      return { ok: false, error: `复制失败：${e instanceof Error ? e.message : String(e)}` };
+    }
+    const state = await reloadPlugins();
+    return { ok: true, snapshot: snapshotPlugins(state) };
+  });
 
   /* A-1197 · B4（T1 脚本信任）：读信任状态（按需拉；默认拒绝）。 */
   handleTrusted<{ name: string }>(IPC_CHANNELS.plugins_trust_get, async (_event, p) => {

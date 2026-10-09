@@ -275,6 +275,9 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     /* A-1197 · B5（L4a page）：打开扩展自有页面（返回要加载的 127.0.0.1 url）。 */
     pluginsPageOpen: (name: string) =>
       ipcRenderer.invoke("slime:plugins:pageOpen", { name }) as Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>,
+    /* A-1198：安装官方示例扩展（活教材）—— 已存在则不覆盖。 */
+    pluginsInstallExample: () =>
+      ipcRenderer.invoke("slime:plugins:installExample") as Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>,
   },
   runtime: {
     
@@ -1007,6 +1010,8 @@ declare global {
         pluginsTrustSet: (name: string, trusted: boolean) => Promise<{ ok: boolean; trusted?: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
         /* A-1197 · B5（L4a page）：打开扩展自有页面。 */
         pluginsPageOpen: (name: string) => Promise<{ ok: boolean; url?: string; reused?: boolean; error?: string }>;
+        /* A-1198：安装官方示例扩展。 */
+        pluginsInstallExample: () => Promise<{ ok: boolean; snapshot?: PluginSnapshotDTO; error?: string }>;
       };
       runtime: {
         list: () => Promise<{
