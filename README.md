@@ -2,7 +2,7 @@
 
 本地优先的 AI Agent 平台：Electron 桌面客户端 + TypeScript 调度核心 + Python 后端，内置 llama.cpp 本地推理。
 
-- 当前版本：**v0.0.9**（`package.json`）—— [Releases](https://github.com/Gcyming/local-project/releases)
+- 当前版本：**v0.1.0**（`package.json`）—— [Releases](https://github.com/Gcyming/local-project/releases)
 - 平台：Windows x64（安装包 / 便携版）。Linux 仅有子项目脚本，未发布二进制。
 
 ## 它解决什么

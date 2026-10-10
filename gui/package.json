@@ -1,6 +1,6 @@
 {
   "name": "slime-gui",
-  "version": "0.0.9",
+  "version": "0.1.0",
   "description": "slime Electron GUI MVP (Phase 5)",
   "author": "slime",
   "license": "Apache-2.0",

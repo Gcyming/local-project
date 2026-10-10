@@ -20,7 +20,7 @@ export const PRODUCT_NAME = "slime";
  * 产品版本。**必须与根`package.json` 的 `version` 逐字一致**，
  * 由 `tests/core-ts/product.spec.ts` 守卫断言。
  */
-export const PRODUCT_VERSION = "0.0.9";
+export const PRODUCT_VERSION = "0.1.0";
 
 /**
  * 「申请类」对外请求的诚实标识，形如 `slime/0.0.8`。
