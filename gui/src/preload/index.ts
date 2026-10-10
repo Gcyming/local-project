@@ -30,6 +30,8 @@ import type {
   UpdateStatusDTO,
   OperationFocusUI,
   DataRootInfo,
+  ModelServerOverviewDTO,
+  ModelServerTestDTO,
 } from "../shared/ipc.js";
 
 import type { SidebarOpenRequest } from "../shared/ipc.js";
@@ -452,12 +454,24 @@ contextBridge.exposeInMainWorld("slimeAPI", {
     remove: (key: string) =>
       ipcRenderer.invoke("slime:providers:remove", { key }) as Promise<{ ok: boolean; error?: string }>,
     localList: () => ipcRenderer.invoke("slime:providers:localList") as Promise<LocalModelSpec[]>,
-    localSave: (input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean }) =>
+    localSave: (input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean; thinking?: string }) =>
       ipcRenderer.invoke("slime:providers:localSave", input) as Promise<{ ok: boolean; error?: string }>,
     localRemove: (id: string) =>
       ipcRenderer.invoke("slime:providers:localRemove", { id }) as Promise<{ ok: boolean; error?: string }>,
     localScan: (dir: string) =>
       ipcRenderer.invoke("slime:providers:localScan", { dir }) as Promise<{ ok: boolean; models?: Array<{ path: string; label: string }>; error?: string }>,
+    /* A-1201：本地推理服务（llama-server）控制面 —— 状态 / 启停 / 日志 / 自检。
+       此前只有"模型增删查"，服务本身看不到也管不动（用户侧表现：无法使用）。 */
+    modelServerStatus: () =>
+      ipcRenderer.invoke("slime:modelServer:status") as Promise<ModelServerOverviewDTO>,
+    modelServerStart: (id: string) =>
+      ipcRenderer.invoke("slime:modelServer:start", { id }) as Promise<{ ok: boolean; port?: number; state?: string; error?: string }>,
+    modelServerStop: () =>
+      ipcRenderer.invoke("slime:modelServer:stop") as Promise<{ ok: boolean; error?: string }>,
+    modelServerLogs: () =>
+      ipcRenderer.invoke("slime:modelServer:logs") as Promise<{ ok: boolean; text: string; error?: string }>,
+    modelServerTest: (id: string) =>
+      ipcRenderer.invoke("slime:modelServer:test", { id }) as Promise<ModelServerTestDTO>,
     localPick: () =>
       ipcRenderer.invoke("slime:providers:localPick") as Promise<{ ok: boolean; path?: string; error?: string }>,
   },
@@ -1091,9 +1105,15 @@ declare global {
         save: (input: { key: string; api_base: string; api_key?: string; model?: string | null; api_format?: "openai" | "anthropic" | "responses" | "google" | "auto"; models?: unknown[] }) => Promise<{ ok: boolean; error?: string }>;
         remove: (key: string) => Promise<{ ok: boolean; error?: string }>;
         localList: () => Promise<LocalModelSpec[]>;
-        localSave: (input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+        localSave: (input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean; thinking?: string }) => Promise<{ ok: boolean; error?: string }>;
         localRemove: (id: string) => Promise<{ ok: boolean; error?: string }>;
         localScan: (dir: string) => Promise<{ ok: boolean; models?: Array<{ path: string; label: string }>; error?: string }>;
+        /* A-1201：本地推理服务控制面。 */
+        modelServerStatus: () => Promise<ModelServerOverviewDTO>;
+        modelServerStart: (id: string) => Promise<{ ok: boolean; port?: number; state?: string; error?: string }>;
+        modelServerStop: () => Promise<{ ok: boolean; error?: string }>;
+        modelServerLogs: () => Promise<{ ok: boolean; text: string; error?: string }>;
+        modelServerTest: (id: string) => Promise<ModelServerTestDTO>;
         localPick: () => Promise<{ ok: boolean; path?: string; error?: string }>;
       };
       config: {

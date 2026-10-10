@@ -8,7 +8,7 @@
 
 
 import React, { useState, useEffect, type JSX } from "react";
-import type { ProviderSummary, ModelSpec, ConfigOverview, ConfigFileInfo, SkillInfo, McpServerInfo, LocalModelSpec } from "../../shared/ipc.js";
+import type { ProviderSummary, ModelSpec, ConfigOverview, ConfigFileInfo, SkillInfo, McpServerInfo, LocalModelSpec, ModelServerOverviewDTO, ModelServerTestDTO } from "../../shared/ipc.js";
 import { ChevronIcon, PlusIcon, CheckIcon, CloseIcon, RefreshIcon } from "../components/Icon.js";
 import { confirmAsync } from "../dialog.js";
 import { readCollapseDurMs } from "../collapseTiming.js";
@@ -17,7 +17,9 @@ import { readCollapseDurMs } from "../collapseTiming.js";
 
 
 
-import { kInputBase, kInputToTokens, kInputTitle, tokensToKInput } from "./contextMath.js";
+import { kInputBase, kInputToTokens, kInputTitle, tokensToKInput, fmtTokens } from "./contextMath.js";
+/* A-1201：思考模式的取值与归一 —— 与主进程/引擎**同源**（core-ts 的 local_models）。 */
+import { normalizeThinkingMode, isHybridReasoningModel } from "../../../../core-ts/src/local_models.js";
 import { REASONING_PRESETS, useReasoningPreset, saveReasoningPreset, EFFORT_LABEL, THINKING_PRESETS, useThinkingPreset, saveThinkingPreset } from "../reasoning.js";
 import {
   describeTierSpec, describeCacheRateSource,
@@ -130,6 +132,8 @@ interface EditState {
   gpu_layers: string;
   max_output: string;
   vision: boolean;
+  /** A-1201：本地模型的思考模式（auto/on/off）—— 与 API 供应商的 thinking 是两回事。 */
+  localThinking: "auto" | "on" | "off";
   thinking?: boolean;
   thinking_efforts?: string[];
   
@@ -147,6 +151,7 @@ function emptyEdit(): EditState {
     mode: "api-add", key: "", name: "", api_base: "", api_key: "",
     api_format: "auto", models: [], proto: "openai", manualIds: "",
     localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false,
+    localThinking: "auto",
     rpm: "",
   };
 }
@@ -162,6 +167,63 @@ export default function ProvidersPanel(): JSX.Element {
 
   
   const [edit, setEdit] = React.useState<EditState | null>(null);
+  /* ── A-1201：本地推理服务（llama-server）的状态与控制 ────────────────────────
+     用户口径要的是「可控」：看得到状态、管得动进程、失败了能读到原话。 */
+  const [serverOverview, setServerOverview] = React.useState<ModelServerOverviewDTO | null>(null);
+  const [serverLogs, setServerLogs] = React.useState("");
+  const [logsOpen, setLogsOpen] = React.useState(false);
+  /** 正在忙的模型 id（启动 / 自检中）—— 防连点、并给按钮一个"在做事"的反馈。 */
+  const [modelBusy, setModelBusy] = React.useState<string | null>(null);
+  /** 每个模型最近一次自检结果（成功显示耗时+样本，失败显示原因）。 */
+  const [modelResults, setModelResults] = React.useState<Record<string, ModelServerTestDTO | null>>({});
+
+  const loadServerOverview = React.useCallback(async (): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.modelServerStatus) { return; }
+    try { setServerOverview(await a.extras.modelServerStatus() as ModelServerOverviewDTO); } catch { /* 保底：读不到就不显示 */ }
+  }, []);
+
+  const handleStartModel = React.useCallback(async (id: string): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.modelServerStart) { showNotice(false, "当前环境不支持启动本地服务"); return; }
+    setModelBusy(id);
+    try {
+      const r = await a.extras.modelServerStart(id) as { ok: boolean; port?: number; error?: string };
+      showNotice(r.ok, r.ok ? `已启动（端口 ${r.port}）` : `启动失败：${r.error ?? "未知原因"}`);
+      await loadServerOverview();
+    } finally { setModelBusy(null); }
+  }, [loadServerOverview]);
+
+  const handleTestModel = React.useCallback(async (id: string): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.modelServerTest) { showNotice(false, "当前环境不支持自检"); return; }
+    setModelBusy(id);
+    try {
+      const r = await a.extras.modelServerTest(id) as ModelServerTestDTO;
+      setModelResults((prev) => ({ ...prev, [id]: r }));
+      await loadServerOverview();
+    } catch (e) {
+      setModelResults((prev) => ({ ...prev, [id]: { ok: false, error: e instanceof Error ? e.message : String(e) } }));
+    } finally { setModelBusy(null); }
+  }, [loadServerOverview]);
+
+  const handleStopServer = React.useCallback(async (): Promise<void> => {
+    const a = api.current;
+    if (!a?.extras?.modelServerStop) { return; }
+    const r = await a.extras.modelServerStop() as { ok: boolean; error?: string };
+    showNotice(r.ok, r.ok ? "已停止并释放显存（下次对话会自动重新拉起）" : `停止失败：${r.error ?? "未知原因"}`);
+    await loadServerOverview();
+  }, [loadServerOverview]);
+
+  const handleShowLogs = React.useCallback(async (): Promise<void> => {
+    const a = api.current;
+    if (logsOpen) { setLogsOpen(false); return; }
+    setLogsOpen(true);
+    if (!a?.extras?.modelServerLogs) { setServerLogs("（当前环境不支持读取日志）"); return; }
+    setServerLogs("（读取中…）");
+    const r = await a.extras.modelServerLogs() as { ok: boolean; text: string; error?: string };
+    setServerLogs(r.ok ? r.text : `读取失败：${r.error ?? "未知原因"}`);
+  }, [logsOpen]);
   /** A-1197：模型列表的搜索词（只作用于**当前这个供应商**的模型清单）。
    *  聚合型供应商（OpenRouter 之类）动辄几百个模型，靠滚动找太费劲。
    *  ⚠️ 过滤只影响**渲染**，绝不能改 `edit.models` 本身 —— 写回用的是**原始索引**
@@ -267,8 +329,10 @@ export default function ProvidersPanel(): JSX.Element {
     api.current = w.slimeAPI;
     if (api.current) {
       void refreshAll();
+      /* A-1201：进页面就把推理服务的**真实状态**拉一次（不让用户先去点刷新才知道服务在不在）。 */
+      void loadServerOverview();
     }
-  }, [refreshAll]);
+  }, [refreshAll, loadServerOverview]);
 
   
   React.useEffect(() => {
@@ -314,6 +378,7 @@ export default function ProvidersPanel(): JSX.Element {
     localPath: "", localLabel: "", ctx_len: "", gpu_layers: "", max_output: "", vision: false, thinking: undefined, thinking_efforts: undefined,
       
       rpm: p.rpm !== undefined ? String(p.rpm) : "",
+          localThinking: "auto",
     });
   }
 
@@ -335,6 +400,7 @@ export default function ProvidersPanel(): JSX.Element {
        gpu_layers: m.gpu_layers !== undefined ? String(m.gpu_layers) : "",
        max_output: m.max_output ? String(m.max_output) : "",
        vision: m.vision === true,
+       localThinking: normalizeThinkingMode(m.thinking),
        
        rpm: "",
     });
@@ -516,6 +582,7 @@ export default function ProvidersPanel(): JSX.Element {
           gpu_layers: edit.gpu_layers !== "" ? Number(edit.gpu_layers) : undefined,
           max_output: edit.max_output ? Number(edit.max_output) : undefined,
           vision: edit.vision,
+          thinking: edit.localThinking,
         });
         if (res.ok) {
           showNotice(true, `已保存本地模型「${edit.name}」`);
@@ -1168,35 +1235,115 @@ export default function ProvidersPanel(): JSX.Element {
                     ))}
                   </div>
                 )}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 4 }}>
+                {/* ── A-1201：本地模型运行参数（重做）────────────────────────────
+                    用户口径：「参数调整有点简陋……又晦涩，又不简洁明了」。
+                    三处具体病灶（都改掉了）：
+                      · `上下文 ctx_len (K)` —— 用 K 作单位，用户根本不知道填的是不是 token；
+                      · `GPU 层数 auto（默认 99）` —— 99 是「全部层」的魔法数字，没人猜得到；
+                      · 没有一句说明 —— 填错了只能靠撞。
+                    现在：分组 + 每项一句人话 + 单位写全（tokens/层），并把默认值讲清楚。 */}
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", margin: "2px 0 6px" }}>
+                  运行参数
+                  <span style={{ fontWeight: 400, color: "var(--text-dim)", marginLeft: 8 }}>
+                    留空 = 用推荐值，不需要全部填
+                  </span>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 10 }}>
+                  {/* 上下文长度：单位写全是 tokens；不再用 K */}
                   <div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>上下文 ctx_len (K)</div>
-                    <input className="input-field" type="number" min={0} placeholder="auto（默认 8192）"
-                      title={kInputTitle("上下文 ctx_len", kInputBase(edit.ctx_len))}
-                      value={tokensToKInput(edit.ctx_len)}
-                      onChange={(e) => {
-                        const t = kInputToTokens(e.target.value, kInputBase(edit.ctx_len));
-                        setEdit({ ...edit, ctx_len: t == null ? "" : String(t) });
-                      }} />
+                    <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 4 }}>
+                      上下文长度 <span style={{ color: "var(--text-dim)" }}>tokens</span>
+                    </div>
+                    <input className="input-field" type="number" min={0} step={1024}
+                      placeholder="32768（推荐）"
+                      title="模型一次能记住多少内容（提问 + 回复）。越大越吃显存；显存不够时调小，例如 8192。"
+                      value={edit.ctx_len}
+                      onChange={(e) => setEdit({ ...edit, ctx_len: e.target.value })} />
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, lineHeight: 1.5 }}>
+                      {edit.ctx_len && Number(edit.ctx_len) > 0
+                        ? `即 ${fmtTokens(Number(edit.ctx_len), Number(edit.ctx_len))} —— 多轮对话超了会被截断`
+                        : "模型一次能记住多少内容。显存不够就调小（如 8192）"}
+                    </div>
+                  </div>
+
+                  {/* GPU 层数：把 99 这个魔法数字换成人话 */}
+                  <div>
+                    <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 4 }}>
+                      显存 / 显卡
+                    </div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text)", cursor: "pointer" }}>
+                      <input type="checkbox"
+                        checked={edit.gpu_layers === "99" || edit.gpu_layers === ""}
+                        onChange={(e) => setEdit({ ...edit, gpu_layers: e.target.checked ? "99" : "0" })} />
+                      全部层放显卡（最快）
+                    </label>
+                    {!(edit.gpu_layers === "99" || edit.gpu_layers === "") && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                        <span style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap" }}>只放前</span>
+                        <input className="input-field" type="number" min={0} placeholder="0" style={{ width: 90 }}
+                          value={edit.gpu_layers}
+                          onChange={(e) => setEdit({ ...edit, gpu_layers: e.target.value })} />
+                        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>层</span>
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, lineHeight: 1.5 }}>
+                      {edit.gpu_layers === "99" || edit.gpu_layers === ""
+                        ? "全部层交给显卡跑。显存不足会启动失败 —— 那时改选下面这项。"
+                        : "剩余层用 CPU 跑，慢但显存占用低。"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 思考模式：这是「小模型不出话」的开关，必须在显眼处 */}
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 4 }}>
+                    思考模式
+                    {isHybridReasoningModel(edit.name) && (
+                      <span style={{ fontSize: 10.5, marginLeft: 6, padding: "1px 6px", borderRadius: 6,
+                        background: "var(--accent-soft)", color: "var(--accent-hover)" }}>
+                        检测到推理型模型
+                      </span>
+                    )}
+                  </div>
+                  <select className="input-field" value={edit.localThinking}
+                    onChange={(e) => setEdit({ ...edit, localThinking: normalizeThinkingMode(e.target.value) })}>
+                    <option value="auto">自动（推荐）—— 保证有正文</option>
+                    <option value="off">关 —— 直接回答，最快</option>
+                    <option value="on">开 —— 先思考再回答</option>
+                  </select>
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, lineHeight: 1.5 }}>
+                    {edit.localThinking === "on"
+                      ? "模型会先把思考过程写出来再回答。小参数模型容易把输出额度耗在思考上 ⇒ 可能只看到思考、看不到答案。"
+                      : edit.localThinking === "off"
+                        ? "不要思考过程，直接给答案。最省时间，适合日常对话。"
+                        : "推理型模型（qwen3 / deepseek-r1 等）默认先思考，这里会自动帮你关掉 —— 否则小模型常常只输出思考、正文为空。"}
+                  </div>
+                </div>
+
+                {/* 最大输出：留空 = 自动。不再用 K，也不与 ctx 抢注意力 */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 4 }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 4 }}>
+                      单次最多输出 <span style={{ color: "var(--text-dim)" }}>tokens</span>
+                    </div>
+                    <input className="input-field" type="number" min={0} placeholder="留空 = 自动"
+                      title="模型一次回复最多写多少 token。留空时按模型能力自动决定。"
+                      value={edit.max_output}
+                      onChange={(e) => setEdit({ ...edit, max_output: e.target.value })} />
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, lineHeight: 1.5 }}>
+                      限制一次回复的长度。留空即可。
+                    </div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>GPU 层数</div>
-                    <input className="input-field" type="number" min={0} placeholder="auto（默认 99）" value={edit.gpu_layers}
-                      onChange={(e) => setEdit({ ...edit, gpu_layers: e.target.value })} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>最大输出 (K)</div>
-                    <input className="input-field" type="number" min={0} placeholder="auto"
-                      title={kInputTitle("最大输出", kInputBase(edit.max_output))}
-                      value={tokensToKInput(edit.max_output)}
-                      onChange={(e) => {
-                        const t = kInputToTokens(e.target.value, kInputBase(edit.max_output));
-                        setEdit({ ...edit, max_output: t == null ? "" : String(t) });
-                      }} />
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 18 }}>
-                    <input type="checkbox" checked={edit.vision} onChange={(e) => setEdit({ ...edit, vision: e.target.checked })} />
-                    <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>支持图片输入</span>
+                    <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 4 }}>图片输入</div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text)", cursor: "pointer", marginTop: 2 }}>
+                      <input type="checkbox" checked={edit.vision} onChange={(e) => setEdit({ ...edit, vision: e.target.checked })} />
+                      这个模型能看图（需模型本身是多模态）
+                    </label>
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3, lineHeight: 1.5 }}>
+                      勾了才会把图片发给它；纯文本模型勾了会出错。
+                    </div>
                   </div>
                 </div>
               </>
@@ -1433,14 +1580,116 @@ export default function ProvidersPanel(): JSX.Element {
               {m.label} · {m.path}
             </div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-              {m.ctx_len ? `ctx ${m.ctx_len} · ` : ""}{m.gpu_layers !== undefined ? `GPU ${m.gpu_layers} 层 · ` : ""}{m.max_output ? `out ${m.max_output}` : ""}
+              {m.ctx_len ? `上下文 ${m.ctx_len} · ` : ""}{m.gpu_layers !== undefined ? `GPU ${m.gpu_layers} 层 · ` : ""}
+              {m.thinking === "on" ? "思考：开" : m.thinking === "off" ? "思考：关" : "思考：自动"}
             </div>
+            {/* A-1201：模型的三个动作（启动 / 自检 / 日志）—— 用户口径要的「可控」。
+                为什么要「自检」：本地模型最常见的失败是"服务起来了但模型不说话"，
+                光看状态是绿的、实际不可用；自检**真发一次请求**并如实回报。 */}
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+              <button className="btn" style={{ padding: "2px 10px", fontSize: 11.5 }}
+                disabled={modelBusy === m.id}
+                onClick={() => void handleStartModel(m.id)}>
+                {modelBusy === m.id ? "处理中…" : "启动"}
+              </button>
+              <button className="btn primary" style={{ padding: "2px 10px", fontSize: 11.5 }}
+                disabled={modelBusy === m.id}
+                title="真发一次最小请求：能通、有正文、耗时多少 —— 一次看清楚"
+                onClick={() => void handleTestModel(m.id)}>
+                {modelBusy === m.id ? "自检中…" : "自检"}
+              </button>
+            </div>
+            {modelResults[m.id] && (
+              <div style={{
+                marginTop: 6, padding: "6px 9px", borderRadius: 7, fontSize: 11.5, lineHeight: 1.55,
+                background: modelResults[m.id]!.ok ? "var(--success-soft)" : "var(--danger-soft)",
+                color: modelResults[m.id]!.ok ? "#22c55e" : "#f87171",
+              }}>
+                {modelResults[m.id]!.ok
+                  ? `✓ 可用（${modelResults[m.id]!.ms}ms）${modelResults[m.id]!.sample ? `：${modelResults[m.id]!.sample}` : ""}`
+                  : `✗ ${modelResults[m.id]!.error}`}
+              </div>
+            )}
           </div>
         ))}
         {localModels.length === 0 && (
           <div style={{ gridColumn: "1 / -1", color: "var(--text-dim)", textAlign: "center", padding: 24, fontSize: 13 }}>
             暂无本地模型 — 点击"<PlusIcon size={11} /> 本地模型"导入 GGUF 文件（将作为 local:&lt;名称&gt; 出现在模型切换中）
           </div>
+        )}
+      </div>
+
+      {/* ── A-1201：本地推理服务（llama-server）状态与控制 ───────────────────────
+          用户口径：「下载好的 llama 服务 slime 无法使用……内嵌一个可控的 llama 服务网关」。
+          此前这一整块是**看不见**的：服务起没起、在哪个端口、为什么失败，界面上都没有。
+          现在给到「状态 + 启停 + 日志」三件套，失败时能直接读到 llama-server 的原话。 */}
+      <div style={{ marginTop: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", flex: 1 }}>
+            推理服务（llama-server）
+          </div>
+          <button className="btn" style={{ padding: "3px 10px", fontSize: 11.5 }}
+            onClick={() => void loadServerOverview()}>刷新</button>
+          <button className="btn" style={{ padding: "3px 10px", fontSize: 11.5 }}
+            title="查看 llama-server 最近的输出（启动失败 / 显存不足的第一手证据）"
+            onClick={() => void handleShowLogs()}>
+            {logsOpen ? "收起日志" : "查看日志"}
+          </button>
+          <button className="btn danger" style={{ padding: "3px 10px", fontSize: 11.5 }}
+            title="停止服务并释放显存（下次对话会自动重新拉起）"
+            onClick={() => void handleStopServer()}>
+            停止并释放显存
+          </button>
+        </div>
+
+        {serverOverview && !serverOverview.llamaBinOk && (
+          <div style={{ padding: "7px 10px", marginBottom: 8, borderRadius: 8, fontSize: 12,
+            background: "var(--danger-soft)", color: "#f87171", lineHeight: 1.6 }}>
+            未找到 llama-server 可执行文件{serverOverview.llamaBin ? `（${serverOverview.llamaBin}）` : ""} ——
+            请到「设置 → 运行环境」下载，或确认安装包完整。
+          </div>
+        )}
+
+        {serverOverview && serverOverview.items.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {serverOverview.items.map((it) => {
+              const stateText = it.state === "ready" ? "就绪" : it.state === "loading" ? "加载中" : it.state === "unloading" ? "卸载中" : "未运行";
+              const good = it.state === "ready";
+              return (
+                <div key={it.role} className="card" style={{ padding: "9px 12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 600 }}>{it.role === "chat" ? "对话模型" : "向量模型"}</span>
+                    <span style={{
+                      fontSize: 11, padding: "1px 8px", borderRadius: 7, fontWeight: 600,
+                      background: good ? "rgba(0,200,120,.15)" : "var(--bg-hover)",
+                      color: good ? "#22c55e" : "var(--text-muted)",
+                    }}>{stateText}</span>
+                    {it.external && <span style={chipStyle("var(--bg-hover)", "var(--text-muted)")}>外部实例</span>}
+                    <span style={{ flex: 1 }} />
+                    <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "Consolas, monospace" }}>
+                      {it.port ? `端口 ${it.port}` : ""}{it.pid ? ` · PID ${it.pid}` : ""}
+                      {it.vramGb !== null ? ` · 显存 ${it.vramGb.toFixed(1)}G` : ""}
+                    </span>
+                  </div>
+                  {it.model && (
+                    <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 3, wordBreak: "break-all" }}>{it.model}</div>
+                  )}
+                  {it.error && (
+                    <div style={{ fontSize: 11.5, color: "#f87171", marginTop: 4, lineHeight: 1.55 }}>{it.error}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {logsOpen && (
+          <pre style={{
+            marginTop: 8, padding: 10, borderRadius: 8, maxHeight: 220, overflow: "auto",
+            background: "var(--bg-input)", border: "1px solid var(--border)",
+            fontSize: 11, lineHeight: 1.5, color: "var(--text-secondary)",
+            fontFamily: "Consolas, monospace", whiteSpace: "pre-wrap", wordBreak: "break-all",
+          }}>{serverLogs || "（读取中…）"}</pre>
         )}
       </div>
     </div>

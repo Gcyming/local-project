@@ -47,7 +47,7 @@ import { loadSlimeMemories, type SilamAffectState, type SilamBrain, type SilamRe
 
 
 
-import { findLocalModelSpec, type LocalModelSpec } from "../local_models.js";
+import { findLocalModelSpec, localThinkingParams, type LocalModelSpec } from "../local_models.js";
 
 
 
@@ -1125,10 +1125,28 @@ export class SlimeEngine implements ChatEngine {
 
 
 
+  /**
+   * A-1201：本地模型的思考参数 —— **唯一产地**（旧实现在这里硬编码 `enable_thinking: true`，
+   * 导致小参数模型把输出预算全花在思维链上、正文为空；见 `LocalThinkingMode` 的长注释）。
+   *
+   * 决策表（`auto` 是缺省，也是"保证能出正文"的那一档）：
+   * | thinking | 模型是混合推理家族 | 下发 |
+   * |---|---|---|
+   * | `off`    | 任意 | `enable_thinking: false` |
+   * | `on`     | 任意 | `enable_thinking: true` |
+   * | `auto`   | 是   | `enable_thinking: false`（它们模板默认是开 ⇒ 必须显式关） |
+   * | `auto`   | 否   | **不下发**（非推理模型收到未知 kwarg 虽无害，但不下发更干净） |
+   */
+  private localReasoningParams(modelId: string): Record<string, unknown> {
+    /* 决策表在 `localThinkingParams`（唯一产地）—— 「服务自检」按钮用的是同一个函数，
+       两处参数永远一致（自检通过 ⇔ 真聊能通）。 */
+    return localThinkingParams(this.findLocalModel(modelId)?.thinking, modelId);
+  }
+
   private reasoningParamsForModel(modelIdRaw: string, kind: string, effortRaw: string | undefined, baseUrl: string = ""): Record<string, unknown> {
     
     if (kind === "local") {
-      return { chat_template_kwargs: { enable_thinking: true } };
+      return this.localReasoningParams(modelIdRaw);
     }
     const caps = inferModelCapabilities(modelIdRaw ?? "");
     

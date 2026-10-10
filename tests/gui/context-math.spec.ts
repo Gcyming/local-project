@@ -320,14 +320,25 @@ describe("★ 上下文监测：同一语义只许一个产地 / 一个格式化
 });
 
 describe("★ 供应商编辑器：K 栏只许一个换算产地（旧状：文案说 ×1024、代码做 ×1000）", () => {
-  it("★ 4 个 K 栏的 value / onChange / title 全部走 kInput* 族", () => {
+  it("★ K 栏的 value / onChange / title 全部走 kInput* 族", () => {
+    /* A-1201：**K 栏从 4 个减到 2 个** —— 本地模型那两个（ctx_len / max_output）改成
+       **裸 token 输入**了。理由（用户口径）：本地模型配置页「又晦涩，又不简洁明了」，
+       而 `ctx_len (K)` 正是最费解的一处 —— 用户不知道自己填的到底是不是 token。
+       ⚠️ 判据的**意图没变**：只要还有 K 栏，它就必须走 kInput* 单一产地。 */
     expect(PROVIDERS_CODE).toMatch(/value=\{tokensToKInput\(m\.context_window\)\}/);
     expect(PROVIDERS_CODE).toMatch(/value=\{tokensToKInput\(m\.max_output\)\}/);
-    expect(PROVIDERS_CODE).toMatch(/value=\{tokensToKInput\(edit\.ctx_len\)\}/);
-    expect(PROVIDERS_CODE).toMatch(/value=\{tokensToKInput\(edit\.max_output\)\}/);
     const titles = PROVIDERS_CODE.match(/title=\{kInputTitle\(/g) ?? [];
     expect(titles.length, "K 栏的悬停文案没有全部走 kInputTitle（写死例子会与实际换算式脱钩）")
-      .toBeGreaterThanOrEqual(4);
+      .toBeGreaterThanOrEqual(2);
+  });
+
+  it("★ A-1201：本地模型的参数**不再用 K**（单位直接写 tokens）", () => {
+    /* 设计意图：本地模型两个参数改成裸 token 输入 ⇒
+       ① 不能再出现 tokensToKInput(edit.xxx)（否则 K 又混回来了）；
+       ② 标签必须明说单位是 tokens。 */
+    expect(PROVIDERS_CODE).not.toMatch(/tokensToKInput\(edit\./);
+    expect(PROVIDERS_CODE).not.toMatch(/ctx_len \(K\)/);
+    expect(PROVIDERS_CODE).toMatch(/上下文长度 <span[^>]*>tokens<\/span>/);
   });
 
   it("★ 旧的 ×1000 手算绝迹（它把 524288 显示成 524、把 65536 静默改成 66000）", () => {

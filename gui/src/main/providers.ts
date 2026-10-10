@@ -24,7 +24,7 @@ import type { PriceResolver, UsagePrice } from "../../../core-ts/src/services/us
 
 
 
-import { LOCAL_MODELS_KEY, localModelSpecs, type LocalModelSpec } from "../../../core-ts/src/local_models.js";
+import { LOCAL_MODELS_KEY, localModelSpecs, normalizeThinkingMode, type LocalModelSpec } from "../../../core-ts/src/local_models.js";
 export type { LocalModelSpec };
 
 
@@ -2405,9 +2405,18 @@ function persistTable(table: ProvidersTable): { ok: boolean; error?: string } {
 }
 
 
+/** A-1201：本地模型 id 的合法字符 —— **比 API 供应商宽松一档：允许小数点**。
+ *  为什么必须放宽：模型文件的天然名字带小数点（`qwen3-1.7b-q8_0.gguf`），
+ *  用户照抄文件名就会撞上旧校验 `KEY_RE`（不含 `.`）⇒ 直接被拒。
+ *  实测证据：`qwen3-1.7b` / `qwen3.1.7b` 在旧规则下均返回「名称仅限字母/数字/中文/_/-」，
+ *  而 `qwen3-17b`（去点）才通过 —— 用户侧表现就是"加不进模型"（记档：`_local_models` 为空）。
+ *  为什么 API 供应商那边不放宽：那些 key 参与 `api:<key>:<model>` 的**冒号分段解析**，
+ *  字符集收紧是有原因的；本地模型走 `local:<id>` 整体取值，没有这个约束。 */
+const LOCAL_MODEL_ID_RE = /^[a-zA-Z0-9_.\-\u4e00-\u9fa5]{1,64}$/;
+
 function validateLocalId(id: string, table: ProvidersTable): string | null {
-  if (!KEY_RE.test(id)) {
-    return "本地模型名称仅限字母/数字/中文/_/-（1-64 字符）";
+  if (!LOCAL_MODEL_ID_RE.test(id)) {
+    return "本地模型名称仅限字母/数字/中文/_/-/.（1-64 字符）";
   }
   if (id in table && id !== LOCAL_MODELS_KEY) {
     return `「${id}」已被 API 供应商占用`;
@@ -2415,7 +2424,7 @@ function validateLocalId(id: string, table: ProvidersTable): string | null {
   return null;
 }
 
-export function saveLocalModel(input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean }): { ok: boolean; error?: string } {
+export function saveLocalModel(input: { id: string; path: string; label?: string; ctx_len?: number; gpu_layers?: number; max_output?: number; vision?: boolean; thinking?: string }): { ok: boolean; error?: string } {
   const id = (input.id ?? "").trim();
   const path = (input.path ?? "").trim();
   const table = loadTable();
@@ -2438,6 +2447,8 @@ export function saveLocalModel(input: { id: string; path: string; label?: string
       gpu_layers: typeof input.gpu_layers === "number" && input.gpu_layers >= 0 ? Math.floor(input.gpu_layers) : undefined,
       max_output: typeof input.max_output === "number" && input.max_output > 0 ? Math.floor(input.max_output) : undefined,
       vision: input.vision === true,
+      /* A-1201：思考模式。归一后落盘 ⇒ 脏值不会写进配置（读侧还会再归一次）。 */
+      thinking: normalizeThinkingMode(input.thinking),
     },
   ];
   (table as unknown as Record<string, unknown>)[LOCAL_MODELS_KEY] = next;

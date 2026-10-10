@@ -160,6 +160,14 @@ export const IPC_CHANNELS = {
   providers_local_save: "slime:providers:localSave",
   providers_local_remove: "slime:providers:localRemove",
   providers_local_scan: "slime:providers:localScan",
+  /* A-1201：本地推理服务（llama-server）的控制面 —— 状态 / 启停 / 日志 / 自检。
+     为什么要它：此前只有「增删查模型」四个通道，服务起没起、在哪个端口、为什么失败
+     全都看不到 ⇒ 出问题只能靠猜（用户侧表现就是"无法使用"）。 */
+  modelServer_status: "slime:modelServer:status",
+  modelServer_start: "slime:modelServer:start",
+  modelServer_stop: "slime:modelServer:stop",
+  modelServer_logs: "slime:modelServer:logs",
+  modelServer_test: "slime:modelServer:test",
   providers_local_pick: "slime:providers:localPick",
   
   config_overview: "slime:config:overview",
@@ -546,6 +554,51 @@ export interface ExtrasList {
 export interface PluginRejectedDTO {
   dir: string;
   errors: string[];
+}
+
+/** A-1201：本地推理服务的一行状态（对齐 core-ts 的 StatusItem，但只暴露界面要用的字段）。 */
+export interface ModelServerStatusDTO {
+  /** 角色：chat / embedding。 */
+  role: string;
+  /** 当前模型（文件名或同义词）。 */
+  model: string;
+  port: number;
+  pid: number | null;
+  /** idle / loading / ready / unloading。 */
+  state: string;
+  /** 是否由宿主常驻（embedding 常驻、chat 按需）。 */
+  persistent: boolean;
+  /** 是否外部实例（不是本进程拉起的 —— 复用别人的服务）。 */
+  external: boolean;
+  /** 显存占用（GB）；取不到 ⇒ null（**不编数字**）。 */
+  vramGb: number | null;
+  /** 真实失败原因（有则必显示，不许吞）。 */
+  error?: string;
+}
+
+/** A-1201：本地推理服务的总览（状态 + 二进制 + 配置 + 最近日志）。 */
+export interface ModelServerOverviewDTO {
+  /** llama-server 可执行文件路径与是否就位。 */
+  llamaBin: string;
+  llamaBinOk: boolean;
+  /** 聊天模型的默认启动参数（来自 slime.toml，只读展示）。 */
+  chatCtxLen: number | null;
+  chatGpuLayers: number | null;
+  chatKvType: string | null;
+  items: ModelServerStatusDTO[];
+}
+
+/** A-1201：一键自检的结果 —— 真发一次最小请求，如实回报。 */
+export interface ModelServerTestDTO {
+  ok: boolean;
+  /** 端到端耗时（ms）。 */
+  ms?: number;
+  /** 服务端口（供排查）。 */
+  port?: number;
+  /** 模型返回的正文样本（截断）。 */
+  sample?: string;
+  /** 失败原因（**必须可读**；空正文会被明确指出来）。 */
+  error?: string;
 }
 
 export interface PluginSnapshotDTO {
@@ -984,6 +1037,8 @@ export interface LocalModelSpec {
   gpu_layers?: number;
   max_output?: number;
   vision?: boolean;
+  /** A-1201：思考模式（auto/on/off）。auto = 保证出正文（详见 core-ts 的 LocalThinkingMode）。 */
+  thinking?: "auto" | "on" | "off";
 }
 
 

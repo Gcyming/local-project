@@ -42,6 +42,10 @@ const IPC_BLOCK =
   "  gpu_layers?: number;\n" +
   "  max_output?: number;\n" +
   "  vision?: boolean;\n" +
+  /* A-1201：投影多了 thinking（含它上面那行注释）—— 本块必须**逐字**跟住真实接口，
+     否则 ⑨/⑩ 两条变异的 from 锚会静默失配（锚点核验报"未命中"）。 */
+  "  /** A-1201：思考模式（auto/on/off）。auto = 保证出正文（详见 core-ts 的 LocalThinkingMode）。 */\n" +
+  "  thinking?: \"auto\" | \"on\" | \"off\";\n" +
   "}\n";
 
 const variants = [
@@ -85,7 +89,9 @@ const variants = [
        （那条「跳过本地模型伪供应商」的规则跟降级池一起搬进了 `services/fallbackPool.ts`，
        见 engine.ts 里留下的路标注释）。锚点必须跟着改，否则这条守卫**从那一刻起失去保护**
        —— 变异名字说的缺陷（engine 自己再声明一份 LocalModelSpec）就没人能复现了。 */
-    from: 'import { findLocalModelSpec, type LocalModelSpec } from "../local_models.js";',
+    /* ⚠️ 2026-10-10 锚点重打（A-1201）：engine 的导入行多了 `localThinkingParams`
+       （本地模型思考参数的单一产地）。变异意图不变：engine 自己再声明一份 LocalModelSpec。 */
+    from: 'import { findLocalModelSpec, localThinkingParams, type LocalModelSpec } from "../local_models.js";',
     to: 'import { findLocalModelSpec } from "../local_models.js";\ninterface LocalModelSpec { id: string; path: string; }',
   },
   {

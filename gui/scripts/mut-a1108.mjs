@@ -218,8 +218,10 @@ const MUTATIONS = [
     file: F_ENGINE,
     mutate: (t) => sub(
       t,
-      'import { findLocalModelSpec, type LocalModelSpec } from "../local_models.js";',
-      'import { findLocalModelSpec, LOCAL_MODELS_KEY, type LocalModelSpec } from "../local_models.js";',
+      /* ⚠️ 2026-10-10 锚点重打（A-1201）：导入行多了 localThinkingParams。
+         变异意图不变：engine 重新 import LOCAL_MODELS_KEY（第二份「跳过本地伪供应商」规则）。 */
+      'import { findLocalModelSpec, localThinkingParams, type LocalModelSpec } from "../local_models.js";',
+      'import { findLocalModelSpec, localThinkingParams, LOCAL_MODELS_KEY, type LocalModelSpec } from "../local_models.js";',
     ),
   },
   {

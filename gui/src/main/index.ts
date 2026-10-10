@@ -13,6 +13,7 @@
 import "./boot.js"; 
 import { INSTALL_ROOT, BUNDLE_ROOT, takeSeedUpgrades } from "./boot.js";
 import { seedOrUpgradeDirs, comparePluginVersions, type SeedUpgradeRecord } from "./skill_seed.js";
+import { probeLocalModel } from "../../../core-ts/src/local_model_probe.js";
 import {
   clearDataRootPointer, dataRootExists, defaultDataRoot, isCustomDataRoot,
   runtimeStateDir, writeDataRootPointer, RUNTIME_DATA_DIR,
@@ -467,7 +468,7 @@ import { PLUGIN_ASSET_SCHEME, rewritePluginAssetUrls } from "../../../core-ts/sr
 import { readPluginTrust, writePluginTrust } from "../../../core-ts/src/plugin/trust.js";
 import { SettingsService } from "../../../core-ts/src/plugin/settings-service.js";
 import { SKILL_ENTRY_TOOL_NAMES, agentSkillGuide, resolveAgentToolProfile, selfAwarenessGuide } from "../../../core-ts/src/services/agentTools.js";
-import type { PluginCssDTO, PluginExampleStatusDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO, PluginViewDTO } from "../shared/ipc.js";
+import type { ModelServerOverviewDTO, ModelServerStatusDTO, ModelServerTestDTO, PluginCssDTO, PluginExampleStatusDTO, PluginRejectedDTO, PluginSettingsDTO, PluginSettingsWriteDTO, PluginSnapshotDTO, PluginSummaryDTO, PluginThemeDTO, PluginUiSlotDTO, PluginUiSnapshotDTO, PluginViewDTO } from "../shared/ipc.js";
 import { getKnowledgeEngine } from "../../../core-ts/src/memory/knowledge.js";
 import { getRegistry, setToolCategoryGate, Tool } from "../../../core-ts/src/tools/registry.js";
 import type { GrantSwitches } from "../../../core-ts/src/tools/grant.js";
@@ -7430,6 +7431,101 @@ function registerIpcHandlers(): void {
   handleTrusted<{ dir: string }>("slime:providers:localScan", async (_event, p) => scanLocalModels(p.dir));
 
   
+  /* ── A-1201：本地推理服务（llama-server）的控制面 ─────────────────────────────
+     用户口径：「下载好的 llama 服务 slime 无法使用……内嵌一个可控的 llama 服务网关」。
+     此前只有「模型增删查」四个通道 —— 服务起没起、在哪个端口、为什么失败全看不见，
+     出问题只能靠猜（用户侧表现就是"根本无法使用"）。这里补齐「看得见 + 管得动」：
+       · status：服务状态 + llama 二进制 + 启动参数（只读展示配置，不给改）
+       · start / stop：按模型起停（复用宿主唯一的 ModelServerManager，不另起进程）
+       · logs：llama-server 最近输出（失败时的第一手证据）
+       · test：**真发一次最小请求**并如实回报（含"正文为空"这一类的明确诊断）
+     ⚠️ 五个通道**全部只读或复用既有实现**，不引入第二套进程管理。 */
+
+  const toStatusDTO = (it: {
+    role: string; model: string; port: number; pid: number | null; state: string;
+    persistent: boolean; external: boolean; error?: string;
+    vram_gb: { total_gb?: number; used_gb?: number } | null;
+  }): ModelServerStatusDTO => ({
+    role: it.role,
+    model: it.model,
+    port: it.port,
+    pid: it.pid,
+    state: it.state,
+    persistent: it.persistent,
+    external: it.external,
+    /* 显存按「已用」报（用户关心的是"吃了多少"）；取不到 ⇒ null（不编数字）。 */
+    vramGb: typeof it.vram_gb?.used_gb === "number" ? it.vram_gb.used_gb : null,
+    ...(it.error ? { error: it.error } : {}),
+  });
+
+  handleTrusted<void>(IPC_CHANNELS.modelServer_status, async (): Promise<ModelServerOverviewDTO> => {
+    await ensureServices();
+    const cfg = readModelServerConfig();
+    const chatCfg = (cfg?.chat ?? {}) as { ctx_len?: number; gpu_layers?: number; kv_type?: string };
+    const llamaBin = String(cfg?.llama_bin ?? "");
+    const mgr = getModelServer();
+    return {
+      llamaBin,
+      llamaBinOk: Boolean(llamaBin) && existsSync(llamaBin),
+      chatCtxLen: typeof chatCfg.ctx_len === "number" ? chatCfg.ctx_len : null,
+      chatGpuLayers: typeof chatCfg.gpu_layers === "number" ? chatCfg.gpu_layers : null,
+      chatKvType: typeof chatCfg.kv_type === "string" ? chatCfg.kv_type : null,
+      items: (mgr?.status() ?? []).map(toStatusDTO),
+    };
+  });
+
+  handleTrusted<{ id: string }>(IPC_CHANNELS.modelServer_start, async (_event, p): Promise<{ ok: boolean; port?: number; state?: string; error?: string }> => {
+    await ensureServices();
+    const spec = listLocalModels().find((m) => m.id === p.id);
+    if (!spec) { return { ok: false, error: `未找到本地模型「${p.id}」` }; }
+    if (!existsSync(spec.path)) { return { ok: false, error: `模型文件不存在：${spec.path}` }; }
+    const mgr = getModelServer();
+    if (!mgr) { return { ok: false, error: "本地推理服务未初始化（llama-server 未定位）" }; }
+    const r = await mgr.ensure("chat", spec.path, spec.id, { gpuLayers: spec.gpu_layers, ctxLen: spec.ctx_len });
+    return r.ok ? { ok: true, port: r.port, state: r.state } : { ok: false, error: r.error ?? "启动失败（超时或进程退出）" };
+  });
+
+  handleTrusted<void>(IPC_CHANNELS.modelServer_stop, async (): Promise<{ ok: boolean; error?: string }> => {
+    const mgr = getModelServer();
+    if (!mgr) { return { ok: false, error: "本地推理服务未初始化" }; }
+    try {
+      await mgr.shutdown();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  handleTrusted<void>(IPC_CHANNELS.modelServer_logs, async (): Promise<{ ok: boolean; text: string; error?: string }> => {
+    const mgr = getModelServer();
+    if (!mgr) { return { ok: false, text: "", error: "本地推理服务未初始化" }; }
+    /* 取"当前在跑的那个角色"的日志尾巴；一个都没跑时如实说明（不留空让人猜）。 */
+    const running = mgr.status().find((it) => it.state !== "idle");
+    if (!running) { return { ok: true, text: "（当前没有在运行的本地推理服务 —— 日志为空）" }; }
+    return { ok: true, text: mgr.outputTailOf(running.role) || "（日志为空）" };
+  });
+
+  handleTrusted<{ id: string }>(IPC_CHANNELS.modelServer_test, async (_event, p): Promise<ModelServerTestDTO> => {
+    await ensureServices();
+    const spec = listLocalModels().find((m) => m.id === p.id);
+    if (!spec) { return { ok: false, error: `未找到本地模型「${p.id}」` }; }
+    if (!existsSync(spec.path)) { return { ok: false, error: `模型文件不存在：${spec.path}` }; }
+    const mgr = getModelServer();
+    if (!mgr) { return { ok: false, error: "本地推理服务未初始化" }; }
+
+    const t0 = Date.now();
+    const started = await mgr.ensure("chat", spec.path, spec.id, { gpuLayers: spec.gpu_layers, ctxLen: spec.ctx_len });
+    if (!started.ok || !started.port) {
+      return { ok: false, ms: Date.now() - t0, error: started.error ?? "服务未能就绪（超时或进程退出）" };
+    }
+
+    /* ⚠️ 探测逻辑在 core-ts（`probeLocalModel`）—— **主进程不许自建 client**
+       （铁律见 a1106-guards D2：自建会绕过 createRouteClient 的限流器）。
+       探测内部用的思考参数与真聊**同一个函数**（`localThinkingParams`）⇒ 判据同源。 */
+    const probe = await probeLocalModel(`http://127.0.0.1:${started.port}`, spec);
+    return { ...probe, ms: Date.now() - t0, port: started.port };
+  });
+
   handleTrusted<void>("slime:providers:localPick", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
     const openOpts: Electron.OpenDialogOptions = {
       title: "选择本地模型文件（GGUF）",

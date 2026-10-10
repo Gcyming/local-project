@@ -1232,6 +1232,14 @@ export class ModelServerManager {
     return inst && inst.state === ServerState.READY ? inst.port : 0;
   }
 
+  /** A-1201：某个角色的 llama-server 最近输出（界面「查看日志」用）。
+   *  为什么要它：失败时的第一手证据就在子进程 stdout/stderr 里（加载失败 / 显存不足 /
+   *  模板错误都会打在这里）。此前它只存在主进程内存里、界面上看不到 ⇒ 出问题只能猜。
+   *  没有该角色的后端 ⇒ 空串（调用方如实显示"无日志"，**不编**）。 */
+  outputTailOf(role: string): string {
+    return this.backends[role]?.output ?? "";
+  }
+
   
 
 
